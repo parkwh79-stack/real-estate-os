@@ -101,7 +101,7 @@ class ParserAgent:
             # If dummy key is used (e.g. testing without real API), return mock parsed data
             if self.client.api_key == "dummy-key-for-test":
                 print("Warning: OPENAI_API_KEY not found. Using mock parsing.")
-                return self._get_mock_parsed_data()
+                return self._get_mock_parsed_data("OPENAI_API_KEY not configured")
 
             response = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -116,11 +116,17 @@ class ParserAgent:
             return json.loads(content)
         except Exception as e:
             print(f"Error during OpenAI extraction: {e}")
-            return self._get_mock_parsed_data()
+            return self._get_mock_parsed_data(str(e))
 
-    def _get_mock_parsed_data(self) -> dict:
+    def _get_mock_parsed_data(self, reason: str = "mock fallback") -> dict:
         """Returns mock data in case of OpenAI failure or missing key."""
         return {
+          "_meta": {
+            "parsing_source": "mock",
+            "confidence": 0.0,
+            "warning": "AI parsing did not use real source extraction.",
+            "reason": reason
+          },
           "project": {
             "name": "Parsed AI Project",
             "type": "mixed_use",

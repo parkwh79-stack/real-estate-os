@@ -17,6 +17,7 @@ from core.calculations import (
     calculate_ltv, calculate_ltc, calculate_exit_sale_rate
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk
+from agents.orchestration_agent import OrchestrationAgent
 from agents.parser_agent import ParserAgent
 from agents.report_agent import ReportAgent
 
@@ -59,13 +60,26 @@ async def handle_list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="generate_pf_report",
-            description="데이터를 바탕으로 20개 섹션의 전문 PF 심사보고서 마크다운을 생성합니다.",
+            description="데이터를 바탕으로 20개 섹션의 전문 PF 심사보고서 구조화 JSON과 마크다운을 생성합니다.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project_data": {"type": "object", "description": "사업개요, 수지, PF구조, Covenants 등이 포함된 전체 데이터 객체"},
                 },
                 "required": ["project_data"],
+            },
+        ),
+        types.Tool(
+            name="orchestrate_pf_review",
+            description="프로젝트 데이터 로드, 사업성 계산, PF 구조 계산, 리스크 평가, Phase 11 보고서 생성, 품질 점검을 하나의 실행 run으로 수행합니다.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "프로젝트 ID"},
+                    "project_data": {"type": "object", "description": "오케스트레이션에 사용할 프로젝트 전체 데이터"},
+                    "options": {"type": "object", "description": "실행 옵션"},
+                },
+                "required": ["project_id", "project_data"],
             },
         ),
         types.Tool(
@@ -143,8 +157,27 @@ async def handle_call_tool(
     elif name == "generate_pf_report":
         data = arguments["project_data"]
         agent = ReportAgent()
+        structured_report = agent.generate_structured_report(data)
         report = agent.generate_report(data)
-        return [types.TextContent(type="text", text=report)]
+        result = {
+            "template": structured_report["template"],
+            "report": structured_report,
+            "report_markdown": report,
+            "metadata": {
+                "section_count": structured_report["qualityChecks"]["actualSectionCount"],
+                "expected_section_count": structured_report["qualityChecks"]["expectedSectionCount"],
+                "complete": structured_report["qualityChecks"]["isComplete"],
+            },
+        }
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+    elif name == "orchestrate_pf_review":
+        run = OrchestrationAgent().run_pf_review(
+            arguments["project_id"],
+            arguments["project_data"],
+            arguments.get("options", {}),
+        )
+        return [types.TextContent(type="text", text=json.dumps(run, ensure_ascii=False, indent=2))]
 
     elif name == "assess_project_risk":
         items = arguments["risk_items"]

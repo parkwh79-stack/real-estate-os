@@ -12,7 +12,7 @@ REALYTICS x PLATFORM9 is a specialized platform designed for financial instituti
 - **PF Financial Engine**: Comprehensive calculations for LTV, LTC, DSCR, All-in Cost, and Waterfall simulations.
 - **Risk Assessment**: Systematic evaluation of 12+ risk categories with scoring and mitigation strategies.
 - **Automated Reporting**: Generates a 20-section industry-standard PF Review Report based on a Hana Financial Investment-style document structure.
-- **MCP Integration**: Fully compatible with Model Context Protocol for seamless LLM orchestration.
+- **MCP Integration**: MCP-compatible PF analysis tools and an MVP PF review orchestration run.
 
 ## Phase 11 Report Template
 
@@ -27,8 +27,10 @@ graph TD
     A[Web Frontend - Next.js] --> B[API Server - FastAPI]
     B --> C[Core Calculation Engine]
     B --> D[AI Agents - GPT-4o]
+    B --> G[PF Review Orchestrator]
     E[MCP Server] --> C
     E --> D
+    E --> G
     F[LLM - Claude/GPT] -- Tools Call --> E
 ```
 

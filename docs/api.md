@@ -104,3 +104,30 @@ The `phase-11-pf-review` template returns these `report.sections` keys:
 ### `GET /projects/{project_id}/reports`
 - **Description**: Retrieve previously generated reports.
 - **Response**: List of report metadata.
+
+### `POST /projects/{project_id}/orchestrations/pf-review`
+- **Description**: Run the MVP PF review orchestration workflow synchronously.
+- **Request Body**: `{ "project_data": {...}, "options": {...} }`
+- **Response**: An orchestration run with status, step outputs, artifacts, and errors.
+
+The workflow executes these steps:
+
+- `project_load`: 프로젝트 데이터 로드
+- `feasibility_calculation`: 사업성 계산
+- `pf_structure_calculation`: PF 구조 계산
+- `risk_assessment`: 리스크 평가
+- `phase11_report_generation`: Phase 11 보고서 생성
+- `quality_check`: 품질 점검
+
+### `GET /projects/{project_id}/orchestrations`
+- **Description**: List PF review orchestration runs for a project.
+- **Response**: List of run metadata.
+
+### `GET /projects/{project_id}/orchestrations/{run_id}`
+- **Description**: Retrieve a specific orchestration run including steps and artifacts.
+- **Response**: Full orchestration run payload.
+
+### `POST /projects/{project_id}/orchestrations/{run_id}/approve`
+- **Description**: Mark a completed orchestration run as approved.
+- **Request Body**: `{ "approved_by": "credit_officer", "comment": "..." }`
+- **Response**: Updated orchestration run.
