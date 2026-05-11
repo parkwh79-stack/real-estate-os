@@ -1,0 +1,136 @@
+{
+  "project": {
+    "id": "p-003",
+    "name": "Dudong LG Logistics PF",
+    "type": "logistics",
+    "status": "pf_review",
+    "warehouse_type": "mixed",
+    "total_gfa_py": 20000,
+    "leasable_area_py": 18000,
+    "tenant_name": "LG Logistics",
+    "tenant_credit_rating": "AA",
+    "lease_term_months": 60,
+    "rent_per_py": 45000,
+    "noi": 9720000000,
+    "cap_rate": 0.05,
+    "forward_sale_price": 194400000000,
+    "forward_buyer": "IGIS Asset Management",
+    "distance_to_ic_km": 2.5,
+    "distance_to_port_km": 15.0,
+    "clear_height": 10.0,
+    "dock_count": 40,
+    "ramp_available": true,
+    "floor_load": 2.5,
+    "cold_chain_spec": true,
+    "pre_sale_contract_status": "signed",
+    "review_date": "2026-05-20",
+    "financial_institution": "KB Securities"
+  },
+  "land": {
+    "address": "Changwon Jinhae-gu Dudong",
+    "pnu": "4817013300100010001",
+    "area_sqm": 30000.0
+  },
+  "regulation": {
+    "zoning": "industrial",
+    "legal_far": 400.0,
+    "legal_bcr": 80.0,
+    "applied_far": 220.0,
+    "applied_bcr": 60.0
+  },
+  "feasibility_input": {
+    "total_revenue": 194400000000,
+    "total_cost": 150000000000,
+    "land_cost": 40000000000,
+    "construction_cost": 90000000000,
+    "finance_cost": 15000000000,
+    "other_cost": 5000000000
+  },
+  "cashflow_input": {
+    "months": 24,
+    "initial_cash": 0
+  },
+  "pf_structure": [
+    {
+      "tranche": "Tranche A",
+      "amount": 100000000000,
+      "interest_rate": 0.055,
+      "fee_rate": 0.015,
+      "priority": 1,
+      "all_in_cost": 0.07
+    }
+  ],
+  "credit_enhancement": {
+    "developer_guarantee": true,
+    "contractor_guarantee": true
+  },
+  "risk_items": [
+    {
+      "category": "Market Risk",
+      "item": "Cap Rate increase",
+      "severity": 3,
+      "probability": 2
+    }
+  ],
+  "report_options": {
+    "include_ic_memo": true,
+    "format": "markdown"
+  },
+  "expected_results": {
+    "development_profit": 44400000000,
+    "profit_margin": 0.228,
+    "total_pf_amount": 100000000000
+  },
+  "developer_info": {
+    "name": "Dudong Logistics Hub AMC",
+    "credit_rating": "A-",
+    "financials": "Assets 1500억"
+  },
+  "contractor_info": {
+    "name": "HDC",
+    "credit_rating": "A+",
+    "order_backlog": "8조원",
+    "financials": "Debt Ratio 140%"
+  },
+  "schedule": {
+    "land_purchase": "2026-06",
+    "permit_approval": "2026-07",
+    "construction_start": "2026-08",
+    "completion": "2028-08"
+  },
+  "sales_schedule": {
+    "contract_deposit": 0.10,
+    "middle_payment": 0.0,
+    "balance": 0.90
+  },
+  "covenants": {
+    "claim_preservation": [
+      "선매각계약 체결 완료",
+      "마스터리스 계약 체결 완료"
+    ],
+    "discount_triggers": [],
+    "eod": [
+      "준공기한 3개월 초과",
+      "선매각계약 해제시"
+    ],
+    "drawdown_conditions": [
+      "선매입자 선순위 동의서",
+      "인허가 완료"
+    ],
+    "execution_order": [
+      "1. 조세",
+      "2. 필수사업비",
+      "3. 대출원리금",
+      "4. 공사비"
+    ],
+    "revenue_distribution": "매각대금 수령시 전액 상환"
+  },
+  "use_of_funds": [
+    {"item": "토지 잔금", "amount": 35000000000},
+    {"item": "선순위 금융비용", "amount": 7000000000},
+    {"item": "초기 공사기성", "amount": 58000000000}
+  ],
+  "land_acquisition": [
+    {"owner": "산단공사", "share": 1.0, "area_sqm": 30000.0, "mortgage": "없음"}
+  ]
+}

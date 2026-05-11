@@ -1,0 +1,44 @@
+{
+  "project": {
+    "id": "p-004",
+    "name": "Simple Land Feasibility",
+    "type": "residential",
+    "status": "land_review"
+  },
+  "land": {
+    "address": "Seoul Gangnam-gu Yeoksam-dong",
+    "pnu": "1168010100100010001",
+    "area_sqm": 1000.0
+  },
+  "regulation": {
+    "zoning": "commercial",
+    "legal_far": 800.0,
+    "legal_bcr": 60.0,
+    "applied_far": 780.0,
+    "applied_bcr": 55.0
+  },
+  "feasibility_input": {
+    "total_revenue": 50000000000,
+    "total_cost": 42000000000,
+    "land_cost": 20000000000,
+    "construction_cost": 18000000000,
+    "finance_cost": 3000000000,
+    "other_cost": 1000000000
+  },
+  "cashflow_input": {
+    "months": 12,
+    "initial_cash": 0
+  },
+  "pf_structure": [],
+  "credit_enhancement": {},
+  "risk_items": [],
+  "report_options": {
+    "include_ic_memo": false,
+    "format": "markdown"
+  },
+  "expected_results": {
+    "development_profit": 8000000000,
+    "profit_margin": 0.16,
+    "total_pf_amount": 0
+  }
+}

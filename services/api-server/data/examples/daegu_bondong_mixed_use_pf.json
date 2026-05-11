@@ -1,0 +1,144 @@
+{
+  "project": {
+    "id": "p-001",
+    "name": "Daegu Bondong Mixed-Use PF",
+    "type": "mixed_use",
+    "status": "pf_review",
+    "review_date": "2026-05-15",
+    "financial_institution": "Hana Financial Investment"
+  },
+  "land": {
+    "address": "Daegu Dalseo-gu Bondong 123-4",
+    "pnu": "2729011700100010001",
+    "area_sqm": 5000.0
+  },
+  "regulation": {
+    "zoning": "commercial",
+    "legal_far": 800.0,
+    "legal_bcr": 70.0,
+    "applied_far": 750.0,
+    "applied_bcr": 65.0
+  },
+  "feasibility_input": {
+    "total_revenue": 150000000000,
+    "total_cost": 120000000000,
+    "land_cost": 30000000000,
+    "construction_cost": 70000000000,
+    "finance_cost": 10000000000,
+    "other_cost": 10000000000
+  },
+  "cashflow_input": {
+    "months": 36,
+    "initial_cash": 0
+  },
+  "pf_structure": [
+    {
+      "tranche": "Tranche A (선순위)",
+      "amount": 50000000000,
+      "interest_rate": 0.05,
+      "fee_rate": 0.01,
+      "priority": 1,
+      "all_in_cost": 0.06
+    },
+    {
+      "tranche": "Tranche B (중순위)",
+      "amount": 15000000000,
+      "interest_rate": 0.07,
+      "fee_rate": 0.02,
+      "priority": 2,
+      "all_in_cost": 0.09
+    },
+    {
+      "tranche": "Tranche C (후순위)",
+      "amount": 5000000000,
+      "interest_rate": 0.10,
+      "fee_rate": 0.03,
+      "priority": 3,
+      "all_in_cost": 0.13
+    }
+  ],
+  "credit_enhancement": {
+    "developer_guarantee": true,
+    "contractor_guarantee": true
+  },
+  "risk_items": [
+    {
+      "category": "Sales Risk",
+      "item": "Low presale rate",
+      "severity": 4,
+      "probability": 3
+    }
+  ],
+  "report_options": {
+    "include_ic_memo": true,
+    "format": "markdown"
+  },
+  "expected_results": {
+    "development_profit": 30000000000,
+    "profit_margin": 0.20,
+    "total_pf_amount": 70000000000
+  },
+  "developer_info": {
+    "name": "Daegu Development Corp",
+    "credit_rating": "BB+",
+    "financials": "Total Assets 500억, Equity 100억"
+  },
+  "contractor_info": {
+    "name": "Shinsegae E&C",
+    "credit_rating": "A-",
+    "order_backlog": "2.5조원",
+    "financials": "Debt Ratio 200%"
+  },
+  "schedule": {
+    "land_purchase": "2026-06",
+    "permit_approval": "2026-08",
+    "construction_start": "2026-09",
+    "presale_start": "2026-10",
+    "completion": "2029-08"
+  },
+  "sales_schedule": {
+    "contract_deposit": 0.10,
+    "middle_payment": 0.60,
+    "balance": 0.30
+  },
+  "covenants": {
+    "claim_preservation": [
+      "관리형토지신탁 1순위 우선수익권",
+      "시공사 책임준공 확약",
+      "시행사 주식 근질권 설정"
+    ],
+    "discount_triggers": [
+      {"month": 6, "target_rate": 0.40, "discount": 0.05},
+      {"month": 12, "target_rate": 0.60, "discount": 0.10},
+      {"month": 18, "target_rate": 0.80, "discount": 0.15}
+    ],
+    "eod": [
+      "책임준공기한 3개월 초과",
+      "기한내 이자 미납 1개월 이상",
+      "시공사 부도"
+    ],
+    "drawdown_conditions": [
+      "인허가 완료",
+      "토지소유권 100% 확보",
+      "신탁계약 체결"
+    ],
+    "execution_order": [
+      "1. 조세공과금",
+      "2. 필수사업비",
+      "3. 대출이자",
+      "4. 대출원금(선-중-후)",
+      "5. 시공사 공사비",
+      "6. 시행사 이익"
+    ],
+    "revenue_distribution": "분양률 50% 미만시 전액 대출상환, 50% 이상시 사업비 30% 배분"
+  },
+  "use_of_funds": [
+    {"item": "기존 대출상환", "amount": 25000000000},
+    {"item": "금융비용(수수료/이자)", "amount": 8000000000},
+    {"item": "초기사업비", "amount": 2000000000},
+    {"item": "공사비(기성)", "amount": 35000000000}
+  ],
+  "land_acquisition": [
+    {"owner": "홍길동 외 2명", "share": 1.0, "area_sqm": 5000.0, "mortgage": "우리은행 100억 근저당 설정"}
+  ]
+}

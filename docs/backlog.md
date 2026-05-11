@@ -1,0 +1,30 @@
+# Product Backlog
+
+| Priority | Module | Task | Status | Notes |
+|---|---|---|---|---|
+| P0 | Core | Project CRUD | In Progress | In-memory or simple DB for MVP |
+| P0 | Calculation | Feasibility calculation | In Progress | Requires pure functions and tests |
+| P0 | Calculation | Monthly Cash Flow | In Progress | |
+| P0 | Calculation | Max Minus | In Progress | |
+| P0 | Calculation | LTV/LTC/DSCR | In Progress | |
+| P0 | Calculation | Exit Sale Rate | In Progress | |
+| P0 | Risk | Basic Risk Matrix | In Progress | |
+| P0 | Report | Markdown Report | In Progress | |
+| P1 | Export | Excel upload | Planned | |
+| P1 | Export | PDF export | Planned | |
+| P1 | Export | DOCX export | Planned | |
+| P1 | Calculation | Waterfall simulator | Planned | |
+| P1 | Calculation | Unsold LTV Matrix | Planned | |
+| P1 | Logistics | Logistics module | Planned | Special fields & formulas |
+| P1 | Report | Report template editor | Planned | |
+| P2 | Integration| External API integration | Planned | Full mapping |
+| P2 | Auth | Organization workspace | Planned | |
+| P2 | Auth | RBAC | Planned | |
+| P2 | AI | Private AI knowledge base | Planned | |
+| P2 | GIS | Advanced GIS | Planned | |
+| P2 | Review | Public sector review | Planned | |
+| P3 | Core | Full ordinance automation | Planned | |
+| P3 | Core | Scenario optimization | Planned | |
+| P3 | Dashboard| Portfolio monitoring | Planned | |
+| P3 | Deployment| Enterprise deployment | Planned | |
+| P3 | Payment | Payment system | Planned | |

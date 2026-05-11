@@ -1,0 +1,114 @@
+{
+  "project": {
+    "id": "p-002",
+    "name": "Chungmuro Lodging PF",
+    "type": "lodging",
+    "status": "pf_review",
+    "review_date": "2026-05-18",
+    "financial_institution": "Shinhan Bank"
+  },
+  "land": {
+    "address": "Seoul Jung-gu Chungmuro",
+    "pnu": "1114014400100010001",
+    "area_sqm": 2000.0
+  },
+  "regulation": {
+    "zoning": "commercial",
+    "legal_far": 600.0,
+    "legal_bcr": 60.0,
+    "applied_far": 580.0,
+    "applied_bcr": 55.0
+  },
+  "feasibility_input": {
+    "total_revenue": 80000000000,
+    "total_cost": 65000000000,
+    "land_cost": 25000000000,
+    "construction_cost": 30000000000,
+    "finance_cost": 5000000000,
+    "other_cost": 5000000000
+  },
+  "cashflow_input": {
+    "months": 24,
+    "initial_cash": 0
+  },
+  "pf_structure": [
+    {
+      "tranche": "Tranche A",
+      "amount": 30000000000,
+      "interest_rate": 0.06,
+      "fee_rate": 0.015,
+      "priority": 1,
+      "all_in_cost": 0.075
+    }
+  ],
+  "credit_enhancement": {
+    "developer_guarantee": true,
+    "contractor_guarantee": false
+  },
+  "risk_items": [
+    {
+      "category": "Permit Risk",
+      "item": "Delay in hotel permit",
+      "severity": 3,
+      "probability": 2
+    }
+  ],
+  "report_options": {
+    "include_ic_memo": true,
+    "format": "markdown"
+  },
+  "expected_results": {
+    "development_profit": 15000000000,
+    "profit_margin": 0.1875,
+    "total_pf_amount": 30000000000
+  },
+  "developer_info": {
+    "name": "Chungmuro Hospitality Partners",
+    "credit_rating": "BBB+",
+    "financials": "Total Assets 200억"
+  },
+  "contractor_info": {
+    "name": "Lotte E&C",
+    "credit_rating": "A",
+    "order_backlog": "5조원",
+    "financials": "Debt Ratio 180%"
+  },
+  "schedule": {
+    "land_purchase": "2026-07",
+    "permit_approval": "2026-10",
+    "construction_start": "2026-11",
+    "completion": "2028-11"
+  },
+  "sales_schedule": {
+    "contract_deposit": 0.0,
+    "middle_payment": 0.0,
+    "balance": 1.0
+  },
+  "covenants": {
+    "claim_preservation": [
+      "토지신탁 1순위 수익권"
+    ],
+    "discount_triggers": [],
+    "eod": [
+      "인허가 6개월 지연시 EOD"
+    ],
+    "drawdown_conditions": [
+      "인허가 접수 확인"
+    ],
+    "execution_order": [
+      "1. 조세",
+      "2. 필수사업비",
+      "3. 대출원리금",
+      "4. 공사비"
+    ],
+    "revenue_distribution": "운영수익 전액 대출원리금 우선 상환"
+  },
+  "use_of_funds": [
+    {"item": "기존 담보대출 상환", "amount": 20000000000},
+    {"item": "금융비용", "amount": 2000000000},
+    {"item": "초기 기성금", "amount": 8000000000}
+  ],
+  "land_acquisition": [
+    {"owner": "법인A", "share": 1.0, "area_sqm": 2000.0, "mortgage": "국민은행 200억"}
+  ]
+}
