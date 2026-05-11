@@ -19,6 +19,15 @@ import os
 PROJECTS_DB = {}
 project_id_counter = 1
 
+def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
 def load_fixtures():
     global project_id_counter
     examples_dir = os.path.join(os.path.dirname(__file__), "..", "data", "examples")
@@ -140,9 +149,24 @@ def assess_risk(project_id: str, input_data: Dict[str, Any]):
 
 @router.post("/{project_id}/reports/generate")
 def generate_report(project_id: str, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    source_data = deep_merge(PROJECTS_DB[project_id], input_data)
     agent = ReportAgent()
-    md_report = agent.generate_report(input_data)
-    return {"report_markdown": md_report}
+    structured_report = agent.generate_structured_report(source_data)
+    md_report = agent.generate_report(source_data)
+    return {
+        "project_id": project_id,
+        "template": structured_report["template"],
+        "report": structured_report,
+        "report_markdown": md_report,
+        "metadata": {
+            "section_count": structured_report["qualityChecks"]["actualSectionCount"],
+            "expected_section_count": structured_report["qualityChecks"]["expectedSectionCount"],
+            "complete": structured_report["qualityChecks"]["isComplete"],
+        },
+    }
 
 @router.get("/{project_id}/reports")
 def get_reports(project_id: str):

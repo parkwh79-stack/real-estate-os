@@ -51,8 +51,8 @@ def test_calculate_exit_sale_rate():
     assert calculate_exit_sale_rate(500, 100, 0) == 0.0
 
 def test_calculate_cashflow_max_minus():
-    assert calculate_cashflow_max_minus([100, -200, 50, -100]) == -100
-    assert calculate_cashflow_max_minus([-100, -200, 50, -100]) == -300
+    assert calculate_cashflow_max_minus([100, -200, 50, -100]) == -150
+    assert calculate_cashflow_max_minus([-100, -200, 50, -100]) == -350
     assert calculate_cashflow_max_minus([100, 200], initial_cash=0) == 0.0
     assert calculate_cashflow_max_minus([-100], initial_cash=50) == -50
 

@@ -15,6 +15,9 @@ Phase 11의 목표는 실제 금융기관 PF 심사보고서 구조를 기준으
   - `apps/web/app/report/_components/sections-part2.tsx`
 - 보고서 샘플 데이터: `apps/web/lib/report-data.ts`
 - 보고서 공통 프로젝트/금융 데이터: `apps/web/lib/platform-data.ts`
+- 구조화 보고서 API: `POST /projects/{project_id}/reports/generate`
+- 백엔드 보고서 생성기: `services/api-server/agents/report_agent.py`
+- 보고서 섹션 정의: `services/api-server/schemas/report.py`
 
 ## 실제 문서 기반 20개 섹션
 
@@ -47,12 +50,12 @@ Phase 11의 목표는 실제 금융기관 PF 심사보고서 구조를 기준으
 
 | Priority | 항목 | 설명 |
 |---|---|---|
-| P0 | 보고서 데이터 스키마 고정 | 각 섹션의 입력/출력 타입을 `ReportData` 계층 구조로 고정 |
+| P0 | 보고서 데이터 스키마 고정 | 20개 섹션 key와 API payload 구조 반영 완료, 프론트 공통 타입 분리 필요 |
 | P0 | 실제 문서 샘플 기반 fixture | 하나금융투자식 실제 보고서 값을 익명화하여 테스트 fixture로 저장 |
 | P0 | PDF 인쇄 레이아웃 QA | A4 기준 페이지 나눔, 표 잘림, 목차/결재란 출력 검증 |
 | P1 | DOCX Export | 금융기관 내부 공유용 Word 문서 생성 |
 | P1 | PPT/IC Memo Export | 투자심의위원회 발표용 요약 슬라이드 생성 |
-| P1 | 보고서 생성 API | `POST /api/reports/generate`를 20개 섹션 데이터 기반으로 확장 |
+| P1 | 보고서 생성 API | `POST /projects/{project_id}/reports/generate`가 20개 섹션 JSON과 Markdown 호환 출력을 반환 |
 | P1 | 보고서 템플릿 버전관리 | 금융기관별 템플릿, 문구, Covenant 기준 분리 |
 | P2 | AI 근거 추적 | 각 의견에 계산 근거, 원문 근거, 법규/약정 근거 연결 |
 | P2 | 내부 심사 기준 학습 | 금융기관별 Private AI 기준표 반영 |
@@ -62,11 +65,11 @@ Phase 11의 목표는 실제 금융기관 PF 심사보고서 구조를 기준으
 ```ts
 interface PfReviewReport {
   cover: CoverSection;
-  financeConditions: FinanceConditionsSection;
-  bondPreservation: BondPreservationSection;
-  discountTriggers: DiscountTriggerSection;
+  financialTerms: FinancialTermsSection;
+  claimPreservation: ClaimPreservationSection;
+  discountTrigger: DiscountTriggerSection;
   fundingStructure: FundingStructureSection;
-  fundUsage: FundUsageSection;
+  useOfFunds: UseOfFundsSection;
   landSecuring: LandSecuringSection;
   projectSchedule: ProjectScheduleSection;
   financialStructureDiagram: FinancialStructureSection;
@@ -76,7 +79,7 @@ interface PfReviewReport {
   borrowerAnalysis: BorrowerSection;
   contractorAnalysis: ContractorSection;
   marketAnalysis: MarketSection;
-  feasibilityAnalysis: FeasibilitySection;
+  businessFeasibility: FeasibilitySection;
   exitStrategy: ExitStrategySection;
   drawdownConditions: DrawdownConditionSection;
   eodTriggers: EodSection;
@@ -88,6 +91,7 @@ interface PfReviewReport {
 
 - 보고서 화면에 20개 섹션이 목차와 본문에 모두 노출된다.
 - 각 섹션은 실제 PF 심사보고서에서 요구하는 핵심 표 또는 체크리스트를 포함한다.
+- `POST /projects/{project_id}/reports/generate`가 20개 섹션 구조화 JSON과 `report_markdown`을 함께 반환한다.
 - `npm run check-types --workspace=web`, `npm run lint --workspace=web`, `npm run build --workspace=web`가 통과한다.
 - `/report` 페이지가 브라우저에서 정상 렌더링된다.
 - `/report` 인쇄 시 A4 기준으로 표와 섹션 제목이 과도하게 잘리지 않는다.
@@ -96,6 +100,6 @@ interface PfReviewReport {
 ## 다음 단계
 
 1. `report-data.ts`를 임시 샘플 데이터에서 명시적 타입 기반 데이터로 분리합니다.
-2. `POST /api/reports/generate` 응답을 20개 섹션 구조로 확장합니다.
+2. 프론트엔드 `/report` 화면이 백엔드 구조화 JSON을 직접 렌더링하도록 연결합니다.
 3. PDF/DOCX Export를 보고서 화면과 동일한 데이터 소스에서 생성하도록 연결합니다.
 4. 실제 샘플 문서 기준으로 표 단위 regression test를 추가합니다.

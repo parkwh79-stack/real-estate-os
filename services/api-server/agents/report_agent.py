@@ -1,8 +1,117 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
+
+from core.calculations import calculate_exit_sale_rate, calculate_ltv
+from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
 
 class ReportAgent:
     def __init__(self):
         pass
+
+    def generate_structured_report(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Builds the canonical Phase 11 20-section PF review report payload.
+        The payload is intentionally deterministic so UI, exports, and tests can share it.
+        """
+        project = input_data.get("project", {})
+        land = input_data.get("land", {})
+        feasibility = input_data.get("feasibility_input", {})
+        covenants = input_data.get("covenants", {})
+        tranches = input_data.get("pf_structure", [])
+        expected = input_data.get("expected_results", {})
+
+        total_pf = sum(t.get("amount", 0) for t in tranches)
+        total_revenue = feasibility.get("total_revenue", 0)
+        total_cost = feasibility.get("total_cost", 0)
+        finance_cost = feasibility.get("finance_cost", 0)
+        development_profit = expected.get(
+            "development_profit",
+            total_revenue - total_cost if total_revenue or total_cost else 0,
+        )
+        profit_margin = expected.get(
+            "profit_margin",
+            development_profit / total_revenue if total_revenue else 0,
+        )
+
+        sections = {
+            "cover": self._structured_cover(project),
+            "financialTerms": self._structured_financial_terms(tranches, total_pf),
+            "claimPreservation": {
+                "items": self._as_label_items(covenants.get("claim_preservation", [])),
+                "summary": "신탁, 책임준공, 보증 및 covenant를 통한 복합 채권보전 구조입니다.",
+            },
+            "discountTrigger": {
+                "triggers": [
+                    {
+                        "month": t.get("month"),
+                        "targetRate": t.get("target_rate", 0),
+                        "discountRate": t.get("discount", 0),
+                        "condition": "목표분양률 미달 시 할인분양 실행",
+                    }
+                    for t in covenants.get("discount_triggers", [])
+                ],
+            },
+            "fundingStructure": self._structured_funding(feasibility, total_pf),
+            "useOfFunds": {
+                "unit": "KRW",
+                "items": [
+                    {
+                        "item": u.get("item", "자료 미확인"),
+                        "amount": u.get("amount", 0),
+                        "amountMillion": self._million(u.get("amount", 0)),
+                    }
+                    for u in input_data.get("use_of_funds", [])
+                ],
+            },
+            "landSecuring": self._structured_land(input_data, land),
+            "projectSchedule": self._structured_schedule(input_data.get("schedule", {})),
+            "financialStructureDiagram": self._structured_diagram(input_data),
+            "salesPaymentSchedule": self._structured_sales_schedule(input_data.get("sales_schedule", {})),
+            "salesRevenueDistribution": {
+                "policy": covenants.get("revenue_distribution", "대주단 협의 기준에 따름"),
+                "waterfall": covenants.get("execution_order", []),
+            },
+            "summaryCashFlow": self._structured_cashflow(input_data, total_revenue, total_cost),
+            "borrowerAnalysis": self._structured_party(input_data.get("developer_info", {}), "시행사"),
+            "contractorAnalysis": self._structured_party(input_data.get("contractor_info", {}), "시공사"),
+            "marketAnalysis": self._structured_market(input_data),
+            "businessFeasibility": {
+                "metrics": {
+                    "ltv": calculate_ltv(total_pf, total_revenue),
+                    "exitSalesRate": calculate_exit_sale_rate(total_pf, finance_cost, total_revenue),
+                    "profitMargin": profit_margin,
+                    "developmentProfit": development_profit,
+                    "developmentProfitMillion": self._million(development_profit),
+                },
+                "summary": "LTV, Exit 분양률, 수익률을 기준으로 대출 회수 가능성을 점검합니다.",
+            },
+            "exitStrategy": self._structured_exit_strategy(input_data, covenants),
+            "drawdownConditions": {
+                "precedent": covenants.get("drawdown_conditions", []),
+                "subsequent": covenants.get("subsequent_conditions", ["분양률 및 공정률 정기 보고", "자금집행 증빙 제출"]),
+            },
+            "eodTriggers": {
+                "automatic": covenants.get("automatic_eod", []),
+                "optional": covenants.get("eod", []),
+            },
+            "fundExecutionOrder": {
+                "order": covenants.get("execution_order", []),
+                "repaymentRule": "분양수입금은 약정된 waterfall에 따라 선순위 비용, 이자, 원금, 후순위 채권 순으로 충당합니다.",
+            },
+        }
+
+        return {
+            "template": PHASE_11_TEMPLATE,
+            "title": "AI PF 심사보고서",
+            "status": "draft",
+            "unit": "KRW",
+            "displayUnit": "백만원",
+            "sectionOrder": [
+                {"index": idx + 1, "key": key, "title": title}
+                for idx, (key, title) in enumerate(PHASE_11_SECTION_ORDER)
+            ],
+            "sections": sections,
+            "qualityChecks": self._quality_checks(sections),
+        }
 
     def generate_report(self, input_data: Dict[str, Any]) -> str:
         """
@@ -33,6 +142,166 @@ class ReportAgent:
         md += self._build_fund_execution_order(covenants)
         
         return md
+
+    def _structured_cover(self, project: Dict[str, Any]) -> Dict[str, Any]:
+        name = project.get("name", "자료 미확인")
+        return {
+            "projectName": name,
+            "reviewDate": project.get("review_date", "자료 미확인"),
+            "financialInstitution": project.get("financial_institution", "자료 미확인"),
+            "reviewSummary": f"{name} 개발사업 PF 대출 건에 대한 조건, 보전, 사업성 및 회수 가능성 검토입니다.",
+        }
+
+    def _structured_financial_terms(self, tranches: List[Dict[str, Any]], total_pf: float) -> Dict[str, Any]:
+        return {
+            "totalAmount": total_pf,
+            "totalAmountMillion": self._million(total_pf),
+            "tranches": [
+                {
+                    "name": t.get("tranche", "자료 미확인"),
+                    "amount": t.get("amount", 0),
+                    "amountMillion": self._million(t.get("amount", 0)),
+                    "interestRate": t.get("interest_rate", 0),
+                    "feeRate": t.get("fee_rate", 0),
+                    "allInCost": t.get("all_in_cost", t.get("interest_rate", 0) + t.get("fee_rate", 0)),
+                    "priority": t.get("priority"),
+                }
+                for t in tranches
+            ],
+        }
+
+    def _structured_funding(self, feasibility: Dict[str, Any], total_pf: float) -> Dict[str, Any]:
+        total_revenue = feasibility.get("total_revenue", 0)
+        cash_out = [
+            ("토지비", feasibility.get("land_cost", 0)),
+            ("공사비", feasibility.get("construction_cost", 0)),
+            ("금융비용", feasibility.get("finance_cost", 0)),
+            ("기타사업비", feasibility.get("other_cost", 0)),
+        ]
+        return {
+            "cashIn": [
+                {"item": "PF 대출", "amount": total_pf, "amountMillion": self._million(total_pf)},
+                {"item": "분양수입", "amount": total_revenue, "amountMillion": self._million(total_revenue)},
+            ],
+            "cashOut": [
+                {"item": item, "amount": amount, "amountMillion": self._million(amount)}
+                for item, amount in cash_out
+            ],
+        }
+
+    def _structured_land(self, data: Dict[str, Any], land: Dict[str, Any]) -> Dict[str, Any]:
+        parcels = data.get("land_acquisition", [])
+        if not parcels and land:
+            parcels = [{
+                "owner": "자료 미확인",
+                "share": 1.0,
+                "area_sqm": land.get("area_sqm", 0),
+                "mortgage": "자료 미확인",
+            }]
+        return {
+            "address": land.get("address", "자료 미확인"),
+            "pnu": land.get("pnu", "자료 미확인"),
+            "parcels": [
+                {
+                    "owner": p.get("owner", "자료 미확인"),
+                    "share": p.get("share", 0),
+                    "areaSqm": p.get("area_sqm", 0),
+                    "mortgage": p.get("mortgage", "자료 미확인"),
+                }
+                for p in parcels
+            ],
+        }
+
+    def _structured_schedule(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
+        mapping = [
+            ("land_purchase", "토지매입"),
+            ("permit_approval", "사업인허가"),
+            ("construction_start", "착공"),
+            ("presale_start", "분양개시"),
+            ("completion", "준공"),
+        ]
+        return [
+            {"step": label, "plannedDate": schedule.get(key, "자료 미확인"), "status": "예정"}
+            for key, label in mapping
+        ]
+
+    def _structured_diagram(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        project = data.get("project", {})
+        developer = data.get("developer_info", {})
+        contractor = data.get("contractor_info", {})
+        return {
+            "borrower": developer.get("name", "시행사"),
+            "trustee": data.get("trustee", {}).get("name", "신탁사"),
+            "contractor": contractor.get("name", "시공사"),
+            "lenders": project.get("financial_institution", "대주단"),
+            "description": "차주, 신탁사, 시공사, 대주단 및 수분양자 간 자금 흐름과 책임준공/우선수익권 구조를 표시합니다.",
+        }
+
+    def _structured_sales_schedule(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return [
+            {"type": "계약금", "ratio": schedule.get("contract_deposit", 0), "timing": "계약 시"},
+            {"type": "중도금", "ratio": schedule.get("middle_payment", 0), "timing": "공정률 및 약정 회차별"},
+            {"type": "잔금", "ratio": schedule.get("balance", 0), "timing": "입주 지정기간"},
+        ]
+
+    def _structured_cashflow(self, data: Dict[str, Any], total_revenue: float, total_cost: float) -> Dict[str, Any]:
+        profit = total_revenue - total_cost
+        return {
+            "assumption": "분양률 기본 시나리오 기준 요약 현금흐름입니다.",
+            "rows": [
+                {"scenario": "기준", "cashIn": total_revenue, "cashOut": total_cost, "netCashFlow": profit},
+                {"scenario": "분양수입 10% 하락", "cashIn": total_revenue * 0.9, "cashOut": total_cost, "netCashFlow": total_revenue * 0.9 - total_cost},
+            ],
+        }
+
+    def _structured_party(self, party: Dict[str, Any], role: str) -> Dict[str, Any]:
+        return {
+            "role": role,
+            "name": party.get("name", "자료 미확인"),
+            "creditRating": party.get("credit_rating", "자료 미확인"),
+            "financials": party.get("financials", "자료 미확인"),
+            "orderBacklog": party.get("order_backlog", "자료 미확인"),
+        }
+
+    def _structured_market(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        land = data.get("land", {})
+        project = data.get("project", {})
+        return {
+            "location": land.get("address", "자료 미확인"),
+            "projectType": project.get("type", "자료 미확인"),
+            "competitors": data.get("market", {}).get("competitors", "자료 미확인"),
+            "priceReasonableness": data.get("market", {}).get("price_reasonableness", "자료 미확인"),
+            "summary": "입지, 경쟁 공급, 분양가 적정성을 기준으로 분양성을 점검합니다.",
+        }
+
+    def _structured_exit_strategy(self, data: Dict[str, Any], covenants: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "primary": "분양수입금 기반 PF 원리금 상환",
+            "fallback": [
+                "할인분양 Trigger 실행",
+                "미분양 담보대출 또는 대환",
+                "시공사 책임준공 및 기타 신용보강 활용",
+            ],
+            "discountTriggers": covenants.get("discount_triggers", []),
+        }
+
+    def _quality_checks(self, sections: Dict[str, Any]) -> Dict[str, Any]:
+        missing = []
+        for key, title in PHASE_11_SECTION_ORDER:
+            if key not in sections:
+                missing.append(title)
+        return {
+            "expectedSectionCount": len(PHASE_11_SECTION_ORDER),
+            "actualSectionCount": len(sections),
+            "missingSections": missing,
+            "isComplete": len(missing) == 0 and len(sections) == len(PHASE_11_SECTION_ORDER),
+        }
+
+    def _as_label_items(self, values: List[Any]) -> List[Dict[str, Any]]:
+        return [{"label": str(value), "status": "반영"} for value in values]
+
+    def _million(self, amount: float) -> float:
+        return round((amount or 0) / 1_000_000, 2)
 
     def _build_cover(self, project: Dict[str, Any]) -> str:
         name = project.get("name", "Unknown Project")
