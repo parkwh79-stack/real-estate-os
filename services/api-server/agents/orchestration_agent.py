@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from agents.legal_review_agent import LegalReviewAgent
+from agents.marketability_agent import MarketabilityAgent
 from agents.report_agent import ReportAgent
 from core.calculations import (
     calculate_development_profit,
@@ -50,6 +52,21 @@ class OrchestrationAgent:
             pf_structure = self._calculate_pf_structure(project_data)
             run["artifacts"]["pfStructure"] = pf_structure
             self._complete_step(run, "pf_structure_calculation", pf_structure)
+
+            marketability = MarketabilityAgent().analyze(project_data)
+            run["artifacts"]["marketabilityAnalysis"] = marketability
+            self._complete_step(run, "marketability_analysis", marketability)
+
+            legal_review = LegalReviewAgent().review(
+                project_data,
+                options.get("law_context"),
+            )
+            run["artifacts"]["legalPermitReview"] = legal_review
+            self._complete_step(run, "legal_permit_review", {
+                "status": legal_review["status"],
+                "mcp": legal_review["mcp"],
+                "requiredFollowUps": legal_review["requiredFollowUps"],
+            })
 
             risk = self._assess_risk(project_data)
             run["artifacts"]["riskAssessment"] = risk
@@ -115,13 +132,22 @@ class OrchestrationAgent:
     def _quality_check(self, run: Dict[str, Any]) -> Dict[str, Any]:
         report = run["artifacts"]["phase11Report"]["report"]
         report_quality = report["qualityChecks"]
-        required_artifacts = ["feasibility", "pfStructure", "riskAssessment", "phase11Report"]
+        required_artifacts = [
+            "feasibility",
+            "pfStructure",
+            "marketabilityAnalysis",
+            "legalPermitReview",
+            "riskAssessment",
+            "phase11Report",
+        ]
         missing_artifacts = [
             artifact for artifact in required_artifacts if artifact not in run["artifacts"]
         ]
+        legal_status = run["artifacts"]["legalPermitReview"]["status"]
         return {
-            "pass": report_quality["isComplete"] and not missing_artifacts,
+            "pass": report_quality["isComplete"] and not missing_artifacts and legal_status != "blocking_issue",
             "reportComplete": report_quality["isComplete"],
+            "legalReviewStatus": legal_status,
             "missingReportSections": report_quality["missingSections"],
             "missingArtifacts": missing_artifacts,
         }

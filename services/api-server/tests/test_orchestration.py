@@ -28,6 +28,8 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert run["status"] == "completed"
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
     assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["marketabilityAnalysis"]["applicable"] is True
+    assert run["artifacts"]["legalPermitReview"]["mcp"]["requested"] is True
     assert run["artifacts"]["phase11Report"]["report"]["qualityChecks"]["actualSectionCount"] == 20
     assert run["artifacts"]["reportRecord"]["run_id"] == run["run_id"]
 

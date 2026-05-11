@@ -11,6 +11,8 @@ from core.calculations import (
     calculate_all_in_cost, calculate_exit_sale_rate, calculate_ltv, calculate_ltc, calculate_dscr
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk
+from agents.legal_review_agent import LegalReviewAgent
+from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
 from agents.report_agent import ReportAgent
 
@@ -191,6 +193,21 @@ def assess_risk(project_id: str, input_data: Dict[str, Any]):
     overall = calculate_overall_risk(assessed)
     overall["items"] = assessed
     return overall
+
+@router.post("/{project_id}/marketability/analyze")
+def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = deep_merge(PROJECTS_DB[project_id], input_data or {})
+    return MarketabilityAgent().analyze(source_data)
+
+@router.post("/{project_id}/legal/review")
+def review_legal_and_permits(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
+    return LegalReviewAgent().review(source_data, input_data.get("law_context"))
 
 @router.post("/{project_id}/reports/generate")
 def generate_report(project_id: str, input_data: Dict[str, Any]):

@@ -47,6 +47,17 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: `{ "project_data": {...} }`
 - **Response**: Risk scores, mitigation strategies, and overall risk rating.
 
+### `POST /projects/{project_id}/marketability/analyze`
+- **Description**: Analyze saleability for saleable real estate assets such as apartments, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale projects.
+- **Request Body**: Optional project data override.
+- **Response**: Applicability, score, grade, saleability checks, and recommendations.
+
+### `POST /projects/{project_id}/legal/review`
+- **Description**: Run a preliminary Korean real estate PF legal, permit, land-rights, trust-security, and covenant review.
+- **Request Body**: `{ "project_data": {...}, "law_context": {...} }`
+- **Response**: Legal review status, check findings, Korean Law MCP connection state, references, and follow-up items.
+- **Note**: `law_context` is designed for Korean Law MCP outputs. When no MCP context is supplied, the agent returns an explicit `connected: false` caution instead of pretending to have authoritative legal sources.
+
 ### `POST /projects/{project_id}/reports/generate`
 - **Description**: Generate the PF Review Report.
 - **Request Body**: `{ "template": "phase-11-pf-review", "options": {...} }`
@@ -115,6 +126,8 @@ The workflow executes these steps:
 - `project_load`: 프로젝트 데이터 로드
 - `feasibility_calculation`: 사업성 계산
 - `pf_structure_calculation`: PF 구조 계산
+- `marketability_analysis`: 분양성 검증
+- `legal_permit_review`: 법률/인허가 예비 검토
 - `risk_assessment`: 리스크 평가
 - `phase11_report_generation`: Phase 11 보고서 생성
 - `quality_check`: 품질 점검

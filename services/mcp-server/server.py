@@ -17,6 +17,8 @@ from core.calculations import (
     calculate_ltv, calculate_ltc, calculate_exit_sale_rate
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk
+from agents.legal_review_agent import LegalReviewAgent
+from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
 from agents.parser_agent import ParserAgent
 from agents.report_agent import ReportAgent
@@ -71,7 +73,7 @@ async def handle_list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="orchestrate_pf_review",
-            description="프로젝트 데이터 로드, 사업성 계산, PF 구조 계산, 리스크 평가, Phase 11 보고서 생성, 품질 점검을 하나의 실행 run으로 수행합니다.",
+            description="프로젝트 데이터 로드, 사업성 계산, PF 구조 계산, 분양성 검증, 법률/인허가 예비 검토, 리스크 평가, Phase 11 보고서 생성, 품질 점검을 하나의 실행 run으로 수행합니다.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -80,6 +82,29 @@ async def handle_list_tools() -> List[types.Tool]:
                     "options": {"type": "object", "description": "실행 옵션"},
                 },
                 "required": ["project_id", "project_data"],
+            },
+        ),
+        types.Tool(
+            name="analyze_marketability",
+            description="아파트, 오피스텔, 지식산업센터, 주상복합 등 분양형 부동산의 분양성을 검증합니다.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_data": {"type": "object", "description": "분양성 검증 대상 프로젝트 데이터"},
+                },
+                "required": ["project_data"],
+            },
+        ),
+        types.Tool(
+            name="review_korean_real_estate_law",
+            description="국내 부동산 PF의 법률/인허가/권리관계/Covenant를 예비 검토합니다. Korean Law MCP 근거가 있으면 law_context로 전달하세요.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_data": {"type": "object", "description": "검토 대상 프로젝트 데이터"},
+                    "law_context": {"type": "object", "description": "Korean Law MCP가 반환한 법령/인허가 근거 컨텍스트"},
+                },
+                "required": ["project_data"],
             },
         ),
         types.Tool(
@@ -178,6 +203,17 @@ async def handle_call_tool(
             arguments.get("options", {}),
         )
         return [types.TextContent(type="text", text=json.dumps(run, ensure_ascii=False, indent=2))]
+
+    elif name == "analyze_marketability":
+        result = MarketabilityAgent().analyze(arguments["project_data"])
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+    elif name == "review_korean_real_estate_law":
+        result = LegalReviewAgent().review(
+            arguments["project_data"],
+            arguments.get("law_context"),
+        )
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     elif name == "assess_project_risk":
         items = arguments["risk_items"]

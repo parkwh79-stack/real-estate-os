@@ -12,6 +12,8 @@ REALYTICS x PLATFORM9 is a specialized platform designed for financial instituti
 - **PF Financial Engine**: Comprehensive calculations for LTV, LTC, DSCR, All-in Cost, and Waterfall simulations.
 - **Risk Assessment**: Systematic evaluation of 12+ risk categories with scoring and mitigation strategies.
 - **Automated Reporting**: Generates a 20-section industry-standard PF Review Report based on a Hana Financial Investment-style document structure.
+- **Marketability Agent**: Validates saleability for apartments, officetels, knowledge industry centers, mixed-use, and other pre-sale real estate assets.
+- **Legal/Permit Review Agent**: Performs preliminary Korean real estate PF legal, permit, land-rights, trust-security, and covenant checks with a Korean Law MCP context hook.
 - **MCP Integration**: MCP-compatible PF analysis tools and an MVP PF review orchestration run.
 
 ## Phase 11 Report Template
