@@ -13,7 +13,7 @@
 - Exit sale rate calculation
 - Unsold LTV basic matrix
 - PF Risk Checklist
-- PF Review Report generation (Markdown format)
+- PF Review Report generation (Phase 11 20-section Hana-style structure)
 - UI shells for PDF/Excel Export (implementation deferred)
 
 ## Excluded Features (Deferred to Post-MVP)
@@ -24,3 +24,4 @@
 - Complete commercial external API integration (production readiness)
 - Advanced RBAC (Role-Based Access Control)
 - Payment System
+- Fully audited institution-specific PF report wording and approval workflow

@@ -4,6 +4,24 @@ import {
 } from "lucide-react";
 import FileUpload from "../../components/FileUpload";
 
+interface PfTranche {
+  amount?: number;
+}
+
+interface ProjectDetailResponse {
+  project?: {
+    name?: string;
+  };
+  land?: {
+    address?: string;
+  };
+  feasibility_input?: {
+    total_revenue?: number;
+    total_cost?: number;
+  };
+  pf_structure?: PfTranche[];
+}
+
 function fmtEok(val: number) {
   const eok = val / 100_000_000;
   return `${eok.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}억`;
@@ -20,15 +38,15 @@ const steps = [
 
 export default async function ProjectDetailPage({ params }: { params: Promise<{ id: string }> | { id: string } }) {
   const resolvedParams = await params;
-  let data: any = {};
+  let data: ProjectDetailResponse = {};
   try {
     const res = await fetch(`http://127.0.0.1:8000/projects/${resolvedParams.id}`, { cache: "no-store" });
-    data = await res.json();
+    data = (await res.json()) as ProjectDetailResponse;
   } catch { /* ignore */ }
 
   const proj = data.project ?? {};
   const feas = data.feasibility_input ?? {};
-  const pfTotal = (data.pf_structure ?? []).reduce((a: number, t: any) => a + (t.amount ?? 0), 0);
+  const pfTotal = (data.pf_structure ?? []).reduce((a, t) => a + (t.amount ?? 0), 0);
   const profit = (feas.total_revenue ?? 0) - (feas.total_cost ?? 0);
 
   return (

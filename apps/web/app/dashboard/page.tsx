@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import {
   Activity, ArrowRight, Building2, Briefcase, MapPin,
 } from "lucide-react";
@@ -23,6 +24,24 @@ const typeLabel: Record<string, string> = {
   land_feasibility: "토지 사업성",
 };
 
+interface PfTranche {
+  amount?: number;
+}
+
+interface ProjectSummaryResponse {
+  project?: {
+    id?: string | number;
+    name?: string;
+    status?: string;
+    type?: string;
+    review_date?: string;
+  };
+  land?: {
+    address?: string;
+  };
+  pf_structure?: PfTranche[];
+}
+
 function fmtEok(val: number) {
   const eok = val / 100_000_000;
   return eok >= 10000
@@ -31,10 +50,10 @@ function fmtEok(val: number) {
 }
 
 export default async function DashboardPage() {
-  let projects: any[] = [];
+  let projects: ProjectSummaryResponse[] = [];
   try {
     const res = await fetch("http://127.0.0.1:8000/projects", { cache: "no-store" });
-    projects = await res.json();
+    projects = (await res.json()) as ProjectSummaryResponse[];
   } catch {
     /* API offline */
   }
@@ -43,7 +62,7 @@ export default async function DashboardPage() {
   const reviewing = projects.filter((p) => p.project?.status === "pf_review").length;
   const totalPf = projects.reduce((s, p) => {
     const pfs = p.pf_structure ?? [];
-    return s + pfs.reduce((a: number, t: any) => a + (t.amount ?? 0), 0);
+    return s + pfs.reduce((a, t) => a + (t.amount ?? 0), 0);
   }, 0);
 
   return (
@@ -80,7 +99,9 @@ export default async function DashboardPage() {
           {projects.map((p) => {
             const proj = p.project ?? {};
             const status = proj.status ?? "pf_review";
-            const pfTotal = (p.pf_structure ?? []).reduce((a: number, t: any) => a + (t.amount ?? 0), 0);
+            const pfTotal = (p.pf_structure ?? []).reduce((a, t) => a + (t.amount ?? 0), 0);
+            const projectType = proj.type;
+            const projectTypeLabel = projectType ? (typeLabel[projectType] ?? projectType) : "—";
             return (
               <Link
                 key={proj.id}
@@ -102,7 +123,7 @@ export default async function DashboardPage() {
                   </span>
                 </div>
                 <div className="mt-4 grid grid-cols-3 gap-2">
-                  <MiniStat label="유형" value={typeLabel[proj.type] ?? proj.type ?? "—"} />
+                  <MiniStat label="유형" value={projectTypeLabel} />
                   <MiniStat label="PF 금액" value={pfTotal > 0 ? fmtEok(pfTotal) : "—"} />
                   <MiniStat label="심의일" value={proj.review_date ?? "—"} />
                 </div>
@@ -118,7 +139,7 @@ export default async function DashboardPage() {
   );
 }
 
-function KpiCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub: string }) {
+function KpiCard({ icon, label, value, sub }: { icon: ReactNode; label: string; value: string; sub: string }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-center justify-between">

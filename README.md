@@ -11,8 +11,14 @@ REALYTICS x PLATFORM9 is a specialized platform designed for financial instituti
 - **AI Document Parsing**: Automatically extract financial structures and project schedules from business plans (PDF).
 - **PF Financial Engine**: Comprehensive calculations for LTV, LTC, DSCR, All-in Cost, and Waterfall simulations.
 - **Risk Assessment**: Systematic evaluation of 12+ risk categories with scoring and mitigation strategies.
-- **Automated Reporting**: Generates a 20-section industry-standard PF Review Report (Hana Financial Investment standard).
+- **Automated Reporting**: Generates a 20-section industry-standard PF Review Report based on a Hana Financial Investment-style document structure.
 - **MCP Integration**: Fully compatible with Model Context Protocol for seamless LLM orchestration.
+
+## Phase 11 Report Template
+
+The Phase 11 report workflow is documented in [`docs/product/phase-11-pf-review-report.md`](docs/product/phase-11-pf-review-report.md).
+
+It covers the full 실무형 PF 심사보고서 flow: cover page, Tr.A/B/C financial terms, bond preservation, discount-sale triggers, Cash-In/Out, land securing, project schedule, financing structure, sales proceeds distribution, summary cash flow, borrower/contractor analysis, marketability, feasibility, exit strategy, drawdown conditions, EOD, and fund execution priority.
 
 ## Architecture
 

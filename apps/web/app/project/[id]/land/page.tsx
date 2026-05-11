@@ -1,12 +1,31 @@
 import Link from "next/link";
-import { ArrowLeft, MapPin, Ruler, Building, AlertTriangle, CheckCircle2 } from "lucide-react";
+import type { ReactNode } from "react";
+import { ArrowLeft, MapPin, Ruler, Building, CheckCircle2 } from "lucide-react";
+
+interface ProjectLandResponse {
+  project?: {
+    name?: string;
+  };
+  land?: {
+    address?: string;
+    pnu?: string;
+    area_sqm?: number;
+  };
+  regulation?: {
+    zoning?: string;
+    legal_far?: number;
+    applied_far?: number;
+    legal_bcr?: number;
+    applied_bcr?: number;
+  };
+}
 
 export default async function LandAnalysisPage({ params }: { params: Promise<{ id: string }> | { id: string } }) {
   const resolvedParams = await params;
-  let data: any = {};
+  let data: ProjectLandResponse = {};
   try {
     const res = await fetch(`http://127.0.0.1:8000/projects/${resolvedParams.id}`, { cache: "no-store" });
-    data = await res.json();
+    data = (await res.json()) as ProjectLandResponse;
   } catch { /* API offline */ }
 
   const land = data.land ?? {};
@@ -79,7 +98,7 @@ export default async function LandAnalysisPage({ params }: { params: Promise<{ i
   );
 }
 
-function InfoCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+function InfoCard({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return (
     <div className="flex items-center gap-3 rounded-lg bg-slate-50 p-4 dark:bg-slate-800/70">
       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white dark:bg-slate-900">{icon}</div>

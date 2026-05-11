@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { CheckCircle2, Shield, TrendingDown, Calendar, Building2, Landmark } from "lucide-react";
+import { CheckCircle2, Shield, Calendar, Building2 } from "lucide-react";
 import {
   demoProject, formatEok, formatPercent, getMaxMinusPoint, tranches,
 } from "../../../lib/platform-data";

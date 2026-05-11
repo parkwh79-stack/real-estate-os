@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, TrendingUp, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
 import { Section, Th, Td } from "./sections-part1";
 import { formatEok, formatPercent } from "../../../lib/platform-data";
 import {

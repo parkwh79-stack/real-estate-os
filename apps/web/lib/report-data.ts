@@ -1,4 +1,4 @@
-import { demoProject, formatEok, formatPercent, tranches } from "./platform-data";
+import { demoProject } from "./platform-data";
 
 export const coverData = {
   projectName: demoProject.name,
