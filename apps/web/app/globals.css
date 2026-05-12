@@ -39,8 +39,15 @@ textarea {
 }
 
 @media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+
   body {
     background: #ffffff;
+    color: #0f172a;
+    font-size: 10pt;
   }
 
   header,
@@ -50,5 +57,51 @@ textarea {
 
   main {
     padding: 0 !important;
+  }
+
+  .report-print-page {
+    width: 186mm;
+    margin: 0 auto;
+    overflow: visible !important;
+  }
+
+  .report-body {
+    gap: 5mm !important;
+  }
+
+  .report-toc {
+    min-height: 245mm;
+  }
+
+  .report-section,
+  .approval-block {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-section {
+    margin-bottom: 5mm;
+  }
+
+  .report-table {
+    width: 100% !important;
+    table-layout: fixed;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-table thead {
+    display: table-header-group;
+  }
+
+  .report-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-table th,
+  .report-table td {
+    overflow-wrap: anywhere;
+    word-break: keep-all;
   }
 }

@@ -14,14 +14,14 @@
 | P0 | Orchestration | PF Review Run API | Done | Synchronous MVP run covers load, feasibility, PF structure, risk, Phase 11 report, quality check, approval |
 | P0 | Agent | Marketability Analysis Agent | Done | Applies to saleable assets such as apartment, officetel, knowledge industry center, mixed-use, commercial pre-sale projects |
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
-| P0 | Report | Report fixture data | Planned | Add anonymized real-document fixture for regression checks |
+| P0 | Report | Report fixture data | Done | Added anonymized Hana-style PF review fixture and regression checks |
 | P0 | Storage | Persistent project/report/run storage | In Progress | JSON state storage added; next step is SQLite/PostgreSQL |
 | P0 | Orchestration | Upload-to-run flow | Done | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run via `/upload-and-run` |
 | P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks |
 | P0 | Integration | Korean Law MCP connector | Planned | Connect real legal source retrieval into `law_context` for LegalReviewAgent |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
-| P1 | Report | PDF print layout QA | Planned | A4 pagination, table overflow, section page-break checks |
+| P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |
 | P1 | Export | Excel upload | Planned | |
 | P1 | Export | Developer feasibility Excel export | Planned | Export developer-side feasibility table, sensitivity, PF readiness |
 | P1 | Export | PDF export | Planned | |

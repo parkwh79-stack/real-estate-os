@@ -31,7 +31,7 @@ export function SectionSummaryCF() {
   return (
     <Section id="sec-12" title="XII. 요약 현금흐름표">
       <p className="mb-3 text-xs text-slate-500">단위: 억원, 분양률 가정 기반</p>
-      <table className="w-full border-collapse text-sm">
+      <table className="report-table w-full border-collapse text-sm">
         <thead>
           <tr><Th>구간</Th><Th>Cash-In</Th><Th>Cash-Out</Th><Th>Net CF</Th><Th>누적 CF</Th></tr>
         </thead>

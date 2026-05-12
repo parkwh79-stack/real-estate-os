@@ -1,0 +1,174 @@
+{
+  "fixture_meta": {
+    "source_style": "Hana Financial Investment PF review report",
+    "anonymized": true,
+    "purpose": "Phase 11 report regression fixture",
+    "currency": "KRW"
+  },
+  "project": {
+    "id": "fixture-hana-anon-001",
+    "name": "Anonymized Urban Mixed-Use PF",
+    "type": "mixed_use",
+    "review_date": "2026-05-12",
+    "financial_institution": "Anonymized Securities PF Review Team"
+  },
+  "land": {
+    "address": "Seoul, Anonymized District, Block 100",
+    "pnu": "1100010000101000000",
+    "area_sqm": 6240.5
+  },
+  "regulation": {
+    "zoning": "Commercial Area",
+    "legal_far": 800.0,
+    "legal_bcr": 60.0,
+    "applied_far": 719.2,
+    "applied_bcr": 54.8
+  },
+  "architectural_plan": {
+    "gross_floor_area_sqm": 44880.0,
+    "saleable_area_sqm": 31520.0,
+    "building_coverage_sqm": 3420.0,
+    "unit_count": 312,
+    "parking_count": 402
+  },
+  "sales_assumptions": {
+    "avg_price_per_sqm": 4750000,
+    "other_revenue": 8200000000
+  },
+  "cost_assumptions": {
+    "construction_cost_per_sqm": 1320000
+  },
+  "feasibility_input": {
+    "total_revenue": 158500000000,
+    "total_cost": 128800000000,
+    "land_cost": 35500000000,
+    "construction_cost": 59241600000,
+    "finance_cost": 10800000000,
+    "other_cost": 23258400000
+  },
+  "pf_structure": [
+    {
+      "tranche": "Tranche A Senior",
+      "amount": 72000000000,
+      "interest_rate": 0.048,
+      "fee_rate": 0.012,
+      "priority": 1,
+      "all_in_cost": 0.06
+    },
+    {
+      "tranche": "Tranche B Mezzanine",
+      "amount": 18000000000,
+      "interest_rate": 0.067,
+      "fee_rate": 0.035,
+      "priority": 2,
+      "all_in_cost": 0.102
+    },
+    {
+      "tranche": "Tranche C Junior",
+      "amount": 10000000000,
+      "interest_rate": 0.085,
+      "fee_rate": 0.06,
+      "priority": 3,
+      "all_in_cost": 0.145
+    }
+  ],
+  "use_of_funds": [
+    { "item": "Land acquisition", "amount": 35500000000 },
+    { "item": "Construction cost", "amount": 59241600000 },
+    { "item": "Finance cost reserve", "amount": 10800000000 },
+    { "item": "Permit, design, sales and contingency", "amount": 23258400000 }
+  ],
+  "land_acquisition": [
+    {
+      "owner": "Anonymized Owner A",
+      "share": 0.65,
+      "area_sqm": 4056.3,
+      "mortgage": "Existing mortgage to be released before first drawdown"
+    },
+    {
+      "owner": "Anonymized Owner B",
+      "share": 0.35,
+      "area_sqm": 2184.2,
+      "mortgage": "No registered encumbrance"
+    }
+  ],
+  "schedule": {
+    "land_purchase": "2026-06",
+    "permit_approval": "2026-09",
+    "construction_start": "2026-11",
+    "presale_start": "2027-02",
+    "completion": "2029-06"
+  },
+  "sales_schedule": {
+    "contract_deposit": 0.1,
+    "middle_payment": 0.6,
+    "balance": 0.3
+  },
+  "developer_info": {
+    "name": "Anonymized Developer Co.",
+    "credit_rating": "BBB-",
+    "financials": "Equity 22.0B, liabilities 58.0B, annual revenue 41.0B"
+  },
+  "contractor_info": {
+    "name": "Anonymized Construction Co.",
+    "credit_rating": "A-",
+    "order_backlog": "KRW 2.4T",
+    "financials": "Debt ratio 168%, current ratio 126%"
+  },
+  "trustee": {
+    "name": "Anonymized Trust Co."
+  },
+  "market": {
+    "competitors": "Three comparable mixed-use projects within 2km; average reported absorption 72% after 12 months",
+    "price_reasonableness": "Target price is 103% of nearby new supply average, supported by station access and commercial frontage"
+  },
+  "covenants": {
+    "claim_preservation": [
+      "First-priority beneficial interest under management-type land trust",
+      "Contractor responsibility completion covenant",
+      "Developer equity injection before first drawdown",
+      "Presale proceeds controlled through lender-approved account"
+    ],
+    "discount_triggers": [
+      { "month": 6, "target_rate": 0.35, "discount": 0.0 },
+      { "month": 12, "target_rate": 0.6, "discount": 0.05 },
+      { "month": 18, "target_rate": 0.8, "discount": 0.1 }
+    ],
+    "revenue_distribution": "Presale proceeds are allocated first to taxes and trust fees, then essential project costs, interest, senior principal, mezzanine principal, junior principal, and residual developer profit.",
+    "drawdown_conditions": [
+      "Loan agreement and trust agreement executed",
+      "Land title transfer and first-priority beneficial interest completed",
+      "Building permit approval completed",
+      "Contractor responsibility completion agreement submitted",
+      "Developer equity fully injected"
+    ],
+    "subsequent_conditions": [
+      "Monthly construction progress report",
+      "Quarterly presale performance report",
+      "Updated cash flow and cost-to-complete report"
+    ],
+    "automatic_eod": [
+      "Borrower bankruptcy, rehabilitation, dissolution or liquidation filing",
+      "Material attachment, provisional attachment or injunction on project land"
+    ],
+    "eod": [
+      "Interest payment overdue for five business days",
+      "LTV or presale covenant breach not cured within cure period",
+      "Contractor responsibility completion covenant breach"
+    ],
+    "execution_order": [
+      "1. Taxes and public charges",
+      "2. Trust fees and account management fees",
+      "3. PF interest",
+      "4. Essential project costs",
+      "5. Tranche A principal",
+      "6. Tranche B principal",
+      "7. Tranche C principal",
+      "8. Residual developer profit"
+    ]
+  },
+  "expected_results": {
+    "development_profit": 29700000000,
+    "profit_margin": 0.1873817035
+  }
+}

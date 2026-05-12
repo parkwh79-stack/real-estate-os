@@ -19,6 +19,9 @@ The AI connection layer now records the selected provider, runtime mode, model, 
 - Markdown compatibility output through `report_markdown`.
 - Report metadata storage in in-memory `REPORTS_DB`.
 - Report section registry in `services/api-server/schemas/report.py`.
+- Frontend report payload types in `apps/web/lib/report-types.ts`.
+- Anonymized Hana-style regression fixture in `services/api-server/data/fixtures/hana_pf_review_anonymized.json`.
+- A4 print QA controls and checklist in `docs/product/pdf-print-layout-qa.md`.
 
 ### PF Review Orchestration
 
@@ -180,7 +183,7 @@ API/MCP user linkage:
 
 Latest verification:
 
-- API tests: `26 passed`
+- API tests: `32 passed`
 - Web lint: passed
 - Web type check: passed
 - Web build: passed

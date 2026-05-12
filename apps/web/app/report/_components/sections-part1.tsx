@@ -12,7 +12,7 @@ import {
 /* ── Shared helpers ── */
 export function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
-    <section id={id} className="scroll-mt-24 print:break-inside-avoid">
+    <section id={id} className="report-section scroll-mt-24 print:break-inside-avoid">
       <h2 className="mb-4 flex items-center gap-2 border-l-4 border-slate-950 pl-3 text-lg font-black text-slate-950 dark:border-white dark:text-white">
         {title}
       </h2>
@@ -22,11 +22,11 @@ export function Section({ id, title, children }: { id: string; title: string; ch
 }
 
 export function Th({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return <th className={`border border-slate-300 bg-slate-50 p-2.5 text-center text-xs font-bold dark:border-slate-700 dark:bg-slate-900 ${className}`}>{children}</th>;
+  return <th className={`border border-slate-300 bg-slate-50 p-2.5 text-center text-xs font-bold dark:border-slate-700 dark:bg-slate-900 print:p-1.5 ${className}`}>{children}</th>;
 }
 
 export function Td({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return <td className={`border border-slate-300 p-2.5 text-center text-xs text-slate-700 dark:border-slate-700 dark:text-slate-300 ${className}`}>{children}</td>;
+  return <td className={`border border-slate-300 p-2.5 text-center text-xs text-slate-700 dark:border-slate-700 dark:text-slate-300 print:p-1.5 ${className}`}>{children}</td>;
 }
 
 /* ── I. 종합 심사 의견 ── */
@@ -80,7 +80,7 @@ export function SectionFinanceConditions() {
   return (
     <Section id="sec-2" title="II. 주요 금융조건 요약표">
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[600px] border-collapse text-sm">
+        <table className="report-table w-full min-w-[600px] border-collapse text-sm print:min-w-0">
           <thead>
             <tr>
               <Th>구분</Th>
@@ -124,7 +124,7 @@ export function SectionBondPreservation() {
 export function SectionDiscountTrigger() {
   return (
     <Section id="sec-4" title="IV. 할인분양 Trigger">
-      <table className="w-full border-collapse text-sm">
+      <table className="report-table w-full border-collapse text-sm">
         <thead>
           <tr><Th>시기</Th><Th>목표분양률</Th><Th>할인조건</Th></tr>
         </thead>
@@ -153,7 +153,7 @@ export function SectionFundingStructure() {
             <h3 className="mb-2 text-sm font-black text-slate-700 dark:text-slate-300">
               {key === "cashIn" ? "Cash-In (조달)" : "Cash-Out (집행)"}
             </h3>
-            <table className="w-full border-collapse text-sm">
+            <table className="report-table w-full border-collapse text-sm">
               <thead><tr><Th>항목</Th><Th>금액 (백만원)</Th><Th>억원 환산</Th></tr></thead>
               <tbody>
                 {fundingStructure[key].map(r => (
@@ -178,7 +178,7 @@ export function SectionFundUsage() {
   const total = items.reduce((s, r) => s + r.amount, 0);
   return (
     <Section id="sec-6" title="VI. 자금 사용 용도">
-      <table className="w-full border-collapse text-sm">
+      <table className="report-table w-full border-collapse text-sm">
         <thead><tr><Th>항목</Th><Th>금액 (백만원)</Th><Th>비중</Th></tr></thead>
         <tbody>
           {items.map(r => (
@@ -201,7 +201,7 @@ export function SectionFundUsage() {
 export function SectionLandSecuring() {
   return (
     <Section id="sec-7" title="VII. 사업부지 확보">
-      <table className="w-full border-collapse text-sm">
+      <table className="report-table w-full border-collapse text-sm">
         <thead><tr><Th>필지</Th><Th>소유자</Th><Th>지분율</Th><Th>면적</Th><Th>근저당권</Th></tr></thead>
         <tbody>
           {landSecuring.map(l => (
@@ -283,7 +283,7 @@ export function SectionSalesPayment() {
           </div>
         ))}
       </div>
-      <table className="mt-4 w-full border-collapse text-sm">
+      <table className="report-table mt-4 w-full border-collapse text-sm">
         <thead><tr><Th>구분</Th><Th>비율</Th><Th>납입 시기</Th></tr></thead>
         <tbody>
           {salesPaymentSchedule.map(s => (

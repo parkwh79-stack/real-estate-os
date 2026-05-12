@@ -1,4 +1,7 @@
 import { demoProject } from "./platform-data";
+import { phase11SectionOrder } from "./report-types";
+
+export const reportSectionOrder = phase11SectionOrder;
 
 export const coverData = {
   projectName: demoProject.name,
