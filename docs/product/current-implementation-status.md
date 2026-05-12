@@ -35,6 +35,12 @@ The current implementation is synchronous and now has file-backed JSON state sto
   - `errors`
   - `approval`
 
+Frontend:
+
+- Project detail now includes an `AI 오케스트레이션` step.
+- Route: `apps/web/app/project/[id]/orchestration/page.tsx`
+- The screen can start a PF review run, refresh run history, select a run, and inspect developer feasibility, marketability, legal/permit, report, and quality-check artifacts.
+
 ### Persistent MVP State Storage
 
 File: `services/api-server/storage.py`
@@ -160,7 +166,7 @@ Latest verification:
 - Data storage is file-backed JSON for MVP, not yet relational DB.
 - Orchestration runs are synchronous, not background jobs.
 - Generated reports and orchestration runs persist through `state.json`, but do not yet have relational querying, migrations, or multi-user isolation.
-- Frontend does not yet display orchestration run detail, agent artifacts, or approval status.
+- Frontend displays orchestration run detail and agent artifacts; approval action UI is not yet implemented.
 - Korean Law MCP is only represented as a pluggable `law_context` hook.
 - ParserAgent still requires a real `OPENAI_API_KEY` for real document extraction; otherwise it returns explicit mock metadata.
 
@@ -169,7 +175,7 @@ Latest verification:
 ### P0
 
 - Replace JSON state storage with SQLite or PostgreSQL.
-- Add frontend orchestration run dashboard.
+- Add approval action UI to the frontend orchestration run dashboard.
 - Add upload-to-orchestration flow: PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run.
 - Add persistent report versioning.
 - Add Korean Law MCP connector integration once the tool is available.

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import {
-  ArrowLeft, MapPin, BarChart3, Wallet, Layers, ShieldCheck, FileText, Upload,
+  ArrowLeft, MapPin, BarChart3, Wallet, Layers, ShieldCheck, FileText, Upload, GitBranch,
 } from "lucide-react";
 import FileUpload from "../../components/FileUpload";
 
@@ -33,6 +33,7 @@ const steps = [
   { href: "cashflow", label: "Cash Flow", icon: Wallet, desc: "월별 CF, Max Minus" },
   { href: "pf-structure", label: "PF 구조", icon: Layers, desc: "Tranche, LTV, LTC" },
   { href: "risk", label: "리스크 평가", icon: ShieldCheck, desc: "위험요인, 심사 점수" },
+  { href: "orchestration", label: "AI 오케스트레이션", icon: GitBranch, desc: "Agent 실행, 산출물, 승인 흐름" },
   { href: "report", label: "심사 보고서", icon: FileText, desc: "PF 보고서 생성" },
 ];
 

@@ -17,7 +17,7 @@
 | P0 | Report | Report fixture data | Planned | Add anonymized real-document fixture for regression checks |
 | P0 | Storage | Persistent project/report/run storage | In Progress | JSON state storage added; next step is SQLite/PostgreSQL |
 | P0 | Orchestration | Upload-to-run flow | Planned | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run |
-| P0 | Frontend | Orchestration run dashboard | Planned | Show run steps, artifacts, quality checks, approval status |
+| P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks |
 | P0 | Integration | Korean Law MCP connector | Planned | Connect real legal source retrieval into `law_context` for LegalReviewAgent |
 | P1 | Report | PDF print layout QA | Planned | A4 pagination, table overflow, section page-break checks |
 | P1 | Export | Excel upload | Planned | |
