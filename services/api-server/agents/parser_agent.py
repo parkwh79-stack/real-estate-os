@@ -50,6 +50,20 @@ class ParserAgent:
             "applied_far": 0.0,
             "applied_bcr": 0.0
           },
+          "architectural_plan": {
+            "gross_floor_area_sqm": 0.0,
+            "saleable_area_sqm": 0.0,
+            "building_coverage_sqm": 0.0,
+            "unit_count": 0,
+            "parking_count": 0
+          },
+          "sales_assumptions": {
+            "avg_price_per_sqm": 0,
+            "other_revenue": 0
+          },
+          "cost_assumptions": {
+            "construction_cost_per_sqm": 0
+          },
           "feasibility_input": {
             "total_revenue": 0,
             "total_cost": 0,
@@ -136,6 +150,24 @@ class ParserAgent:
           "land": {
             "address": "Mock Address 123",
             "area_sqm": 10000.0
+          },
+          "regulation": {
+            "applied_far": 700.0,
+            "applied_bcr": 60.0
+          },
+          "architectural_plan": {
+            "gross_floor_area_sqm": 70000.0,
+            "saleable_area_sqm": 50400.0,
+            "building_coverage_sqm": 6000.0,
+            "unit_count": 500,
+            "parking_count": 650
+          },
+          "sales_assumptions": {
+            "avg_price_per_sqm": 3968254,
+            "other_revenue": 0
+          },
+          "cost_assumptions": {
+            "construction_cost_per_sqm": 1142857
           },
           "feasibility_input": {
             "total_revenue": 200000000000,

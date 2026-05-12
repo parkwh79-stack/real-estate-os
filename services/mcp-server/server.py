@@ -17,6 +17,7 @@ from core.calculations import (
     calculate_ltv, calculate_ltc, calculate_exit_sale_rate
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk
+from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
@@ -73,7 +74,7 @@ async def handle_list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="orchestrate_pf_review",
-            description="프로젝트 데이터 로드, 사업성 계산, PF 구조 계산, 분양성 검증, 법률/인허가 예비 검토, 리스크 평가, Phase 11 보고서 생성, 품질 점검을 하나의 실행 run으로 수행합니다.",
+            description="프로젝트 데이터 로드, 디벨로퍼 사업수지분석, 사업성 계산, PF 구조 계산, 분양성 검증, 법률/인허가 예비 검토, 리스크 평가, Phase 11 보고서 생성, 품질 점검을 하나의 실행 run으로 수행합니다.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -82,6 +83,17 @@ async def handle_list_tools() -> List[types.Tool]:
                     "options": {"type": "object", "description": "실행 옵션"},
                 },
                 "required": ["project_id", "project_data"],
+            },
+        ),
+        types.Tool(
+            name="analyze_development_feasibility",
+            description="사업계획서/건축 기본계획에서 추출된 데이터를 바탕으로 디벨로퍼 관점 사업수지와 PF 심사용 조달 가능성을 분석합니다.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_data": {"type": "object", "description": "토지, 건축계획, 분양가정, 비용가정, PF 구조가 포함된 프로젝트 데이터"},
+                },
+                "required": ["project_data"],
             },
         ),
         types.Tool(
@@ -203,6 +215,10 @@ async def handle_call_tool(
             arguments.get("options", {}),
         )
         return [types.TextContent(type="text", text=json.dumps(run, ensure_ascii=False, indent=2))]
+
+    elif name == "analyze_development_feasibility":
+        result = DevelopmentFeasibilityAgent().analyze(arguments["project_data"])
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     elif name == "analyze_marketability":
         result = MarketabilityAgent().analyze(arguments["project_data"])

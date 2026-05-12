@@ -32,6 +32,11 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: `{ "land": {...}, "regulation": {...}, ... }`
 - **Response**: Feasibility results (Total revenue, costs, dev profit, margins).
 
+### `POST /projects/{project_id}/development-feasibility/analyze`
+- **Description**: Analyze developer-side project feasibility from business plan or architectural plan data.
+- **Request Body**: Optional override containing `architectural_plan`, `sales_assumptions`, `cost_assumptions`, `feasibility_input`, and `pf_structure`.
+- **Response**: Architectural program, revenue, costs, developer returns, PF readiness, sensitivity, and data quality.
+
 ### `POST /projects/{project_id}/cashflow/calculate`
 - **Description**: Trigger monthly cash flow calculation.
 - **Request Body**: `{ "revenue_schedule": [...], "cost_schedule": [...] }`
@@ -124,6 +129,7 @@ The `phase-11-pf-review` template returns these `report.sections` keys:
 The workflow executes these steps:
 
 - `project_load`: 프로젝트 데이터 로드
+- `development_feasibility_analysis`: 디벨로퍼 사업수지분석
 - `feasibility_calculation`: 사업성 계산
 - `pf_structure_calculation`: PF 구조 계산
 - `marketability_analysis`: 분양성 검증

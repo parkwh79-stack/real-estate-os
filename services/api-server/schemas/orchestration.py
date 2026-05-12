@@ -2,6 +2,7 @@ PF_REVIEW_WORKFLOW = "pf-review"
 
 PF_REVIEW_STEPS = [
     ("project_load", "프로젝트 데이터 로드"),
+    ("development_feasibility_analysis", "디벨로퍼 사업수지분석"),
     ("feasibility_calculation", "사업성 계산"),
     ("pf_structure_calculation", "PF 구조 계산"),
     ("marketability_analysis", "분양성 검증"),

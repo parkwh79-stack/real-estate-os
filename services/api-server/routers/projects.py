@@ -11,10 +11,12 @@ from core.calculations import (
     calculate_all_in_cost, calculate_exit_sale_rate, calculate_ltv, calculate_ltc, calculate_dscr
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk
+from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
 from agents.report_agent import ReportAgent
+from storage import load_state, save_state
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -25,6 +27,9 @@ PROJECTS_DB = {}
 ORCHESTRATIONS_DB = {}
 REPORTS_DB = {}
 project_id_counter = 1
+
+def persist_state() -> None:
+    save_state(PROJECTS_DB, REPORTS_DB, ORCHESTRATIONS_DB, project_id_counter)
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(base)
@@ -61,6 +66,7 @@ def save_report_record(
         "report_markdown": report_markdown,
     }
     REPORTS_DB.setdefault(project_id, []).append(record)
+    persist_state()
     return record
 
 def report_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -77,6 +83,14 @@ def report_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
 
 def load_fixtures():
     global project_id_counter
+    state = load_state()
+    if state:
+        PROJECTS_DB.update(state["projects"])
+        REPORTS_DB.update(state["reports"])
+        ORCHESTRATIONS_DB.update(state["orchestrations"])
+        project_id_counter = state["project_id_counter"]
+        return
+
     examples_dir = os.path.join(os.path.dirname(__file__), "..", "data", "examples")
     if os.path.exists(examples_dir):
         for filename in os.listdir(examples_dir):
@@ -87,6 +101,7 @@ def load_fixtures():
                     data["project"]["id"] = pid
                     PROJECTS_DB[pid] = data
                     project_id_counter += 1
+        persist_state()
 
 load_fixtures()
 
@@ -101,6 +116,7 @@ def create_project(project_data: Dict[str, Any]):
     project_data["id"] = pid
     PROJECTS_DB[pid] = project_data
     project_id_counter += 1
+    persist_state()
     return project_data
 
 @router.get("/{project_id}")
@@ -114,6 +130,7 @@ def update_project(project_id: str, project_data: Dict[str, Any]):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     PROJECTS_DB[project_id].update(project_data)
+    persist_state()
     return PROJECTS_DB[project_id]
 
 @router.post("/{project_id}/upload")
@@ -138,6 +155,7 @@ async def upload_business_plan(project_id: str, file: UploadFile = File(...)):
         
         # Deep merge could be better, but update works for MVP top-level keys
         PROJECTS_DB[project_id].update(parsed_data)
+        persist_state()
         
         return PROJECTS_DB[project_id]
     finally:
@@ -158,6 +176,13 @@ def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
         "profit_margin": margin
     }
     return result
+
+@router.post("/{project_id}/development-feasibility/analyze")
+def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = deep_merge(PROJECTS_DB[project_id], input_data or {})
+    return DevelopmentFeasibilityAgent().analyze(source_data)
 
 @router.post("/{project_id}/cashflow/calculate")
 def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
@@ -247,6 +272,7 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
         input_data.get("options", {}),
     )
     ORCHESTRATIONS_DB.setdefault(project_id, {})[run["run_id"]] = run
+    persist_state()
 
     if "phase11Report" in run["artifacts"]:
         report_artifact = run["artifacts"]["phase11Report"]
@@ -257,6 +283,7 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
             run["run_id"],
         )
         run["artifacts"]["reportRecord"] = report_metadata(report_record)
+        persist_state()
 
     return run
 
@@ -309,4 +336,5 @@ def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict
         "approved_by": input_data.get("approved_by", "system"),
         "comment": input_data.get("comment", ""),
     }
+    persist_state()
     return run

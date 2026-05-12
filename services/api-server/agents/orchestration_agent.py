@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.report_agent import ReportAgent
@@ -43,6 +44,16 @@ class OrchestrationAgent:
             self._complete_step(run, "project_load", {
                 "project": project_data.get("project", {}),
                 "source": "PROJECTS_DB",
+            })
+
+            developer_feasibility = DevelopmentFeasibilityAgent().analyze(project_data)
+            run["artifacts"]["developerFeasibility"] = developer_feasibility
+            self._complete_step(run, "development_feasibility_analysis", {
+                "summary": developer_feasibility["summary"],
+                "profitMargin": developer_feasibility["developerReturns"]["profitMargin"],
+                "profitOnCost": developer_feasibility["developerReturns"]["profitOnCost"],
+                "pfStatus": developer_feasibility["pfReadiness"]["status"],
+                "confidence": developer_feasibility["dataQuality"]["confidence"],
             })
 
             feasibility = self._calculate_feasibility(project_data)
@@ -133,6 +144,7 @@ class OrchestrationAgent:
         report = run["artifacts"]["phase11Report"]["report"]
         report_quality = report["qualityChecks"]
         required_artifacts = [
+            "developerFeasibility",
             "feasibility",
             "pfStructure",
             "marketabilityAnalysis",
