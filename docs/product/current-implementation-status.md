@@ -117,11 +117,14 @@ Purpose:
 
 - Preliminary Korean real estate PF legal and permit review.
 - Checks zoning/FAR/BCR, permit schedule, land rights, trust/security, covenants, EOD, and execution order.
-- Includes a Korean Law MCP context hook through `law_context`.
+- Includes a Korean Law MCP sidecar context hook through normalized `law_context`.
+- Adds `realytics-law-context-v1` normalization for Korean Law MCP outputs.
+- Provides a query-plan generator so Claude Desktop can call Korean Law MCP before REALYTICS legal review.
 
 Important:
 
-- A real Korean Law MCP tool is not currently available in the execution environment.
+- Korean Law MCP is intentionally not vendored into this repository.
+- The recommended deployment is a sidecar MCP server plus REALYTICS adapter.
 - The agent does not pretend to have authoritative legal sources when `law_context` is missing.
 - It returns `connected: false` and caution findings when no MCP legal context is supplied.
 
@@ -132,6 +135,11 @@ API:
 MCP:
 
 - `review_korean_real_estate_law`
+- `get_korean_law_mcp_query_plan`
+
+Docs:
+
+- `docs/integrations/korean-law-mcp.md`
 
 ### Parser Agent Improvements
 
@@ -194,7 +202,7 @@ Latest verification:
 - Orchestration runs are synchronous, not background jobs.
 - Generated reports and orchestration runs persist through `state.json`, but do not yet have relational querying, migrations, or multi-user isolation.
 - Frontend displays orchestration run detail and agent artifacts; approval action UI is not yet implemented.
-- Korean Law MCP is only represented as a pluggable `law_context` hook.
+- Korean Law MCP sidecar is represented through query planning and normalized `law_context`; direct automated MCP client calls are not yet built into the API server.
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 
@@ -205,7 +213,7 @@ Latest verification:
 - Replace JSON state storage with SQLite or PostgreSQL.
 - Add approval action UI to the frontend orchestration run dashboard.
 - Add persistent report versioning.
-- Add Korean Law MCP connector integration once the tool is available.
+- Optionally add direct API-server MCP client automation for Korean Law MCP sidecar calls.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
 
 ### P1

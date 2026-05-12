@@ -18,7 +18,7 @@
 | P0 | Storage | Persistent project/report/run storage | In Progress | JSON state storage added; next step is SQLite/PostgreSQL |
 | P0 | Orchestration | Upload-to-run flow | Done | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run via `/upload-and-run` |
 | P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks |
-| P0 | Integration | Korean Law MCP connector | Planned | Connect real legal source retrieval into `law_context` for LegalReviewAgent |
+| P0 | Integration | Korean Law MCP connector | In Progress | Sidecar integration guide, query plan tool, and `realytics-law-context-v1` adapter added; direct MCP client automation remains optional |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
 | P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |

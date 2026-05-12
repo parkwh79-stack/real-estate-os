@@ -19,6 +19,7 @@ from core.calculations import (
 from core.risk_assessment import assess_risk_item, calculate_overall_risk
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.ai_connection import resolve_ai_context
+from agents.korean_law_context import build_korean_law_mcp_query_plan
 from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
@@ -152,8 +153,19 @@ async def handle_list_tools() -> List[types.Tool]:
             },
         ),
         types.Tool(
+            name="get_korean_law_mcp_query_plan",
+            description="REALYTICS 프로젝트 데이터에 맞춰 Korean Law MCP sidecar에서 조회해야 할 법령/판례/인허가 쿼리 계획을 반환합니다.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_data": {"type": "object", "description": "법령 조회 계획을 만들 프로젝트 데이터"},
+                },
+                "required": ["project_data"],
+            },
+        ),
+        types.Tool(
             name="review_korean_real_estate_law",
-            description="국내 부동산 PF의 법률/인허가/권리관계/Covenant를 예비 검토합니다. Korean Law MCP 근거가 있으면 law_context로 전달하세요.",
+            description="국내 부동산 PF의 법률/인허가/권리관계/Covenant를 예비 검토합니다. Korean Law MCP sidecar 조회 결과를 law_context로 전달하세요.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -290,6 +302,18 @@ async def handle_call_tool(
 
     elif name == "analyze_marketability":
         result = MarketabilityAgent().analyze(arguments["project_data"])
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+    elif name == "get_korean_law_mcp_query_plan":
+        result = {
+            "source": "realytics-korean-law-adapter",
+            "sidecar": "chrisryugj/korean-law-mcp",
+            "queries": build_korean_law_mcp_query_plan(arguments["project_data"]),
+            "next_step": (
+                "Call the korean-law MCP sidecar with these queries, then pass the collected "
+                "results into review_korean_real_estate_law as law_context."
+            ),
+        }
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     elif name == "review_korean_real_estate_law":

@@ -36,6 +36,66 @@ def test_legal_review_agent_flags_missing_korean_law_mcp_context():
     assert result["mcp"]["connected"] is False
     assert any(check["key"] == "korean_law_mcp" for check in result["checks"])
     assert result["disclaimer"]
+    assert result["recommendedMcpQueries"]
+
+
+def test_legal_review_agent_normalizes_korean_law_mcp_context():
+    law_context = {
+        "source": "korean-law-mcp",
+        "tool_results": [
+            {
+                "tool": "search_law",
+                "result": {
+                    "laws": [
+                        {
+                            "법령명한글": "건축법",
+                            "조문번호": "제11조",
+                            "시행일자": "20260512",
+                            "summary": "건축허가 관련 조문",
+                        }
+                    ]
+                },
+            },
+            {
+                "tool": "verify_citations",
+                "result": {
+                    "references": [
+                        {
+                            "title": "국토의 계획 및 이용에 관한 법률",
+                            "article": "제76조",
+                            "verified": True,
+                        }
+                    ],
+                    "citationVerification": {"status": "passed", "checkedCount": 2},
+                },
+            },
+        ],
+    }
+
+    result = LegalReviewAgent().review(load_example("daegu_bondong_mixed_use_pf.json"), law_context)
+
+    assert result["mcp"]["connected"] is True
+    assert result["mcp"]["adapter"] == "realytics-law-context-v1"
+    assert len(result["lawReferences"]) == 2
+    assert any(reference["lawName"] == "건축법" for reference in result["lawReferences"])
+    assert result["citationVerification"]["status"] == "passed"
+    assert any(check["key"] == "korean_law_mcp" and check["severity"] == "clear" for check in result["checks"])
+
+
+def test_legal_review_agent_blocks_on_citation_failures():
+    law_context = {
+        "source": "korean-law-mcp",
+        "references": [{"title": "형법", "article": "제9999조"}],
+        "citationVerification": {
+            "status": "failed",
+            "failures": ["형법 제9999조 does not exist"],
+        },
+    }
+
+    result = LegalReviewAgent().review(load_example("daegu_bondong_mixed_use_pf.json"), law_context)
+
+    assert result["status"] == "blocking_issue"
+    assert any(check["key"] == "korean_law_mcp" and check["severity"] == "blocking" for check in result["checks"])
 
 
 def test_marketability_and_legal_review_endpoints():

@@ -80,7 +80,8 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Run a preliminary Korean real estate PF legal, permit, land-rights, trust-security, and covenant review.
 - **Request Body**: `{ "project_data": {...}, "law_context": {...} }`
 - **Response**: Legal review status, check findings, Korean Law MCP connection state, references, and follow-up items.
-- **Note**: `law_context` is designed for Korean Law MCP outputs. When no MCP context is supplied, the agent returns an explicit `connected: false` caution instead of pretending to have authoritative legal sources.
+- **Note**: `law_context` is designed for Korean Law MCP sidecar outputs and is normalized into `realytics-law-context-v1`. When no MCP context is supplied, the agent returns an explicit `connected: false` caution instead of pretending to have authoritative legal sources.
+- **Integration Guide**: See `docs/integrations/korean-law-mcp.md`.
 
 ### `POST /projects/{project_id}/reports/generate`
 - **Description**: Generate the PF Review Report.
