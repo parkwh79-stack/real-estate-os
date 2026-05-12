@@ -28,16 +28,16 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Response**: The updated project object.
 
 ### `POST /projects/{project_id}/upload`
-- **Description**: Upload a PDF business plan and extract project data with the configured AI provider.
+- **Description**: Upload a PDF business plan and extract project data with the configured server-side AI provider.
 - **Headers**: Optional `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER` (`openai`, `anthropic`, or `claude_desktop`).
 - **Request Body**: Multipart form with `file`.
-- **Response**: Updated project object with parser `_meta.ai_connection`.
+- **Response**: Updated project object with parser `_meta.ai_connection`. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
 
 ### `POST /projects/{project_id}/ai/connection/resolve`
 - **Description**: Resolve the active AI provider, model, runtime mode, and linked user ID without calling an external model.
 - **Request Body**: `{ "user_id": "user-123", "ai_context": { "provider": "claude_desktop" } }`
 - **Response**: `{ "project_id": "...", "ai_connection": {...}, "note": "..." }`
-- **Note**: Claude Desktop hosts MCP tool calls. Direct Claude extraction inside the API or MCP server requires `ANTHROPIC_API_KEY`; otherwise the server records `runtime_provider: claude_desktop_host` and returns explicit fallback metadata for AI parsing.
+- **Note**: Claude Desktop hosts MCP tool calls. In `claude_desktop` mode the server records `runtime_provider: mcp_host_llm` and returns extracted text plus instructions for the host LLM. Direct Claude extraction inside the API or MCP server requires `ai_provider=anthropic` and `ANTHROPIC_API_KEY`.
 
 ### `POST /projects/{project_id}/feasibility/calculate`
 - **Description**: Trigger feasibility calculation.

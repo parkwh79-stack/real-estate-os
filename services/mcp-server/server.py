@@ -38,7 +38,7 @@ def _ai_schema_properties() -> Dict[str, Any]:
         },
         "ai_provider": {
             "type": "string",
-            "description": "AI provider hint: claude_desktop, anthropic, or openai.",
+            "description": "AI provider hint: claude_desktop for host LLM mode, anthropic for direct Claude API, or openai.",
         },
         "ai_context": {
             "type": "object",
@@ -208,8 +208,10 @@ async def handle_call_tool(
         result = {
             "ai_connection": _build_mcp_ai_context(arguments),
             "note": (
-                "Claude Desktop is the MCP host LLM. Internal document parsing uses the "
-                "Anthropic API only when ANTHROPIC_API_KEY is configured."
+                "Claude Desktop is the MCP host LLM. In claude_desktop mode the server "
+                "returns extracted text and instructions for Claude to transform. Use "
+                "ai_provider=anthropic with ANTHROPIC_API_KEY only when the server itself "
+                "must perform direct model extraction."
             ),
         }
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
@@ -243,6 +245,11 @@ async def handle_call_tool(
         agent = ParserAgent(ai_context)
         text = agent.parse_document(path)
         data = agent.extract_project_data(text, ai_context)
+        if data.get("_meta", {}).get("parsing_source") == "host_llm_required":
+            data["next_step"] = (
+                "Claude Desktop should now read host_llm_extraction.document_text and "
+                "produce project_data JSON, then call orchestrate_pf_review with that JSON."
+            )
         return [types.TextContent(type="text", text=json.dumps(data, ensure_ascii=False, indent=2))]
 
     elif name == "generate_pf_report":

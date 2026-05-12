@@ -142,13 +142,13 @@ Added extraction hints for:
 - `sales_assumptions`
 - `cost_assumptions`
 
-Mock fallback now includes `_meta.parsing_source = "mock"` and `_meta.ai_connection` so downstream reports can identify non-real parsed data and the user/provider context.
+Mock fallback now includes `_meta.parsing_source = "mock"` and `_meta.ai_connection` so downstream reports can identify non-real server-side parsed data and the user/provider context.
 
 Supported AI connection modes:
 
 - `openai`: direct OpenAI API extraction when `OPENAI_API_KEY` is configured.
 - `anthropic`: direct Claude API extraction when `ANTHROPIC_API_KEY` is configured.
-- `claude_desktop`: Claude Desktop hosts MCP tool calls; direct internal parser extraction still requires `ANTHROPIC_API_KEY`.
+- `claude_desktop`: Claude Desktop hosts MCP tool calls. The server returns `host_llm_extraction` with PDF text and extraction instructions for Claude Desktop to complete.
 
 API/MCP user linkage:
 
@@ -185,8 +185,8 @@ Latest verification:
 - Generated reports and orchestration runs persist through `state.json`, but do not yet have relational querying, migrations, or multi-user isolation.
 - Frontend displays orchestration run detail and agent artifacts; approval action UI is not yet implemented.
 - Korean Law MCP is only represented as a pluggable `law_context` hook.
-- ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real document extraction; otherwise it returns explicit mock metadata.
-- Claude Desktop's local host model cannot be invoked from inside the MCP server process; for internal parser calls use `ANTHROPIC_API_KEY`, while Claude Desktop remains the tool-calling host.
+- ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
+- Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 
 ## Next Work
 

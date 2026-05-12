@@ -29,7 +29,30 @@ class ParserAgent:
         if len(text) > max_chars:
             text = text[:max_chars]
 
-        prompt = """
+        prompt = self.build_extraction_prompt(text)
+        context = resolve_ai_context(ai_context or self.ai_context)
+        if context["runtime_provider"] == "mcp_host_llm":
+            return self._get_host_llm_extraction_request(text, prompt, context)
+
+        result = self.ai.extract_json(
+            prompt,
+            system="You are a precise data extraction assistant. Output only JSON.",
+            ai_context=context,
+        )
+        if result.data is not None:
+            result.data["_meta"] = {
+                **result.data.get("_meta", {}),
+                "parsing_source": "ai",
+                "confidence": 0.75,
+                "ai_connection": result.meta,
+            }
+            return result.data
+
+        print(f"Warning: AI extraction fallback used. {result.error}")
+        return self._get_mock_parsed_data(result.error or "AI extraction unavailable", result.meta)
+
+    def build_extraction_prompt(self, text: str) -> str:
+        return """
         You are a Real Estate PF (Project Financing) expert. Your task is to extract structured information from the following business plan text.
         Output ONLY valid JSON matching the following structure. Do not include any markdown formatting (like ```json).
 
@@ -113,23 +136,34 @@ class ParserAgent:
         ---
         """ + text + "\n---"
 
-        context = resolve_ai_context(ai_context or self.ai_context)
-        result = self.ai.extract_json(
-            prompt,
-            system="You are a precise data extraction assistant. Output only JSON.",
-            ai_context=context,
-        )
-        if result.data is not None:
-            result.data["_meta"] = {
-                **result.data.get("_meta", {}),
-                "parsing_source": "ai",
-                "confidence": 0.75,
-                "ai_connection": result.meta,
-            }
-            return result.data
-
-        print(f"Warning: AI extraction fallback used. {result.error}")
-        return self._get_mock_parsed_data(result.error or "AI extraction unavailable", result.meta)
+    def _get_host_llm_extraction_request(
+        self,
+        text: str,
+        prompt: str,
+        ai_context: Dict[str, Any],
+    ) -> dict:
+        extraction_instructions = prompt.rsplit("Business Plan Text:", 1)[0].strip()
+        return {
+            "_meta": {
+                "parsing_source": "host_llm_required",
+                "confidence": None,
+                "warning": (
+                    "Claude Desktop is the MCP host LLM. The MCP server extracted PDF text "
+                    "and is returning instructions for the host LLM to perform the JSON extraction."
+                ),
+                "ai_connection": ai_context,
+            },
+            "host_llm_extraction": {
+                "instruction": (
+                    "Use your Claude Desktop host LLM reasoning to extract project_data JSON "
+                    "from document_text according to extraction_prompt. After extraction, call "
+                    "orchestrate_pf_review or generate_pf_report with that project_data."
+                ),
+                "expected_output": "project_data_json",
+                "document_text": text,
+                "extraction_prompt": extraction_instructions,
+            },
+        }
 
     def _get_mock_parsed_data(
         self,

@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict
 
 
-CLAUDE_ALIASES = {"anthropic", "claude", "claude_api", "claude-desktop", "claude_desktop"}
+CLAUDE_API_ALIASES = {"anthropic", "claude", "claude_api"}
+CLAUDE_DESKTOP_ALIASES = {"claude-desktop", "claude_desktop", "mcp_host", "host_llm"}
 OPENAI_ALIASES = {"openai", "chatgpt", "gpt"}
 SECRET_KEYS = {"api_key", "apikey", "token", "secret", "password"}
 
@@ -44,9 +45,9 @@ def resolve_ai_context(
     provider = str(provider).strip().lower()
     if provider in OPENAI_ALIASES:
         provider = "openai"
-    elif provider in {"claude-desktop", "claude_desktop"}:
+    elif provider in CLAUDE_DESKTOP_ALIASES:
         provider = "claude_desktop"
-    elif provider in CLAUDE_ALIASES:
+    elif provider in CLAUDE_API_ALIASES:
         provider = "anthropic"
 
     resolved_user_id = (
@@ -63,11 +64,16 @@ def resolve_ai_context(
         direct_model_call = bool(os.environ.get("OPENAI_API_KEY"))
         requires_api_key = None if direct_model_call else "OPENAI_API_KEY"
         runtime_provider = "openai"
-    elif provider in {"anthropic", "claude_desktop"}:
+    elif provider == "anthropic":
         model = requested.get("model") or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-latest"
         direct_model_call = bool(os.environ.get("ANTHROPIC_API_KEY"))
         requires_api_key = None if direct_model_call else "ANTHROPIC_API_KEY"
-        runtime_provider = "anthropic" if direct_model_call else "claude_desktop_host"
+        runtime_provider = "anthropic"
+    elif provider == "claude_desktop":
+        model = requested.get("model") or os.environ.get("CLAUDE_DESKTOP_MODEL") or "claude-desktop-host"
+        direct_model_call = False
+        requires_api_key = None
+        runtime_provider = "mcp_host_llm"
     else:
         model = requested.get("model") or "unknown"
         direct_model_call = False
@@ -82,6 +88,8 @@ def resolve_ai_context(
         "user_id": str(resolved_user_id),
         "direct_model_call": direct_model_call,
         "requires_api_key": requires_api_key,
+        "server_side_extraction": provider in {"openai", "anthropic"} and direct_model_call,
+        "host_llm_available": provider == "claude_desktop",
     }
 
 
@@ -98,8 +106,17 @@ class AIConnection:
 
         if provider == "openai":
             return self._extract_with_openai(prompt, system, context)
-        if provider in {"anthropic", "claude_desktop"}:
+        if provider == "anthropic":
             return self._extract_with_anthropic(prompt, system, context)
+        if provider == "claude_desktop":
+            return AIExtractionResult(
+                data=None,
+                meta=context,
+                error=(
+                    "Claude Desktop is the MCP host LLM. The server cannot call the "
+                    "Claude Desktop UI model internally; return a host_llm_extraction request instead."
+                ),
+            )
 
         return AIExtractionResult(
             data=None,

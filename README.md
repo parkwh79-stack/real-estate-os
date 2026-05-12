@@ -78,7 +78,7 @@ To use this with Claude Desktop or other MCP-compatible clients:
 }
 ```
 
-Claude Desktop is the MCP host LLM: Claude decides when to call the REALYTICS tools. If a tool must perform internal AI extraction from a PDF, configure `ANTHROPIC_API_KEY` to use Claude through the Anthropic API. Without that key, the parser returns explicit mock metadata instead of pretending extraction was real. Every MCP run can attach `user_id` via `MCP_USER_ID`, the `user_id` tool argument, or `ai_context.user_id`.
+Claude Desktop is the MCP host LLM: Claude decides when to call the REALYTICS tools and can transform tool results into structured project data. In `REALYTICS_AI_PROVIDER=claude_desktop` mode, the MCP server extracts PDF text and returns a `host_llm_extraction` request for Claude Desktop to complete. Configure `ANTHROPIC_API_KEY` only when the server itself must call Claude through the Anthropic API without relying on the Claude Desktop host. Every MCP run can attach `user_id` via `MCP_USER_ID`, the `user_id` tool argument, or `ai_context.user_id`.
 
 ## Documentation
 
