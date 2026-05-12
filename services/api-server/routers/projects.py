@@ -70,6 +70,48 @@ def save_report_record(
     persist_state()
     return record
 
+def save_orchestration_run(project_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
+    ORCHESTRATIONS_DB.setdefault(project_id, {})[run["run_id"]] = run
+    persist_state()
+
+    if "phase11Report" in run["artifacts"]:
+        report_artifact = run["artifacts"]["phase11Report"]
+        report_record = save_report_record(
+            project_id,
+            report_artifact["report"],
+            report_artifact["report_markdown"],
+            run["run_id"],
+        )
+        run["artifacts"]["reportRecord"] = report_metadata(report_record)
+        persist_state()
+
+    return run
+
+def apply_parsed_project_data(project_id: str, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
+    if "project" not in parsed_data:
+        parsed_data["project"] = {}
+    parsed_data["project"]["id"] = project_id
+    PROJECTS_DB[project_id].update(parsed_data)
+    persist_state()
+    return PROJECTS_DB[project_id]
+
+async def parse_uploaded_business_plan(
+    file: UploadFile,
+    ai_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        agent = ParserAgent(ai_context)
+        text = agent.parse_document(tmp_path)
+        return agent.extract_project_data(text, ai_context)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
 def report_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "report_id": record["report_id"],
@@ -143,37 +185,67 @@ async def upload_business_plan(
 ):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-        
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
-        
-    try:
-        ai_context = resolve_ai_context(
-            {
-                "user_id": x_realytics_user_id,
-                "provider": x_realytics_ai_provider,
-                "host": "api",
-            },
-        )
-        agent = ParserAgent(ai_context)
-        text = agent.parse_document(tmp_path)
-        parsed_data = agent.extract_project_data(text, ai_context)
-        
-        # Ensure project ID is retained
-        if "project" not in parsed_data:
-            parsed_data["project"] = {}
-        parsed_data["project"]["id"] = project_id
-        
-        # Deep merge could be better, but update works for MVP top-level keys
-        PROJECTS_DB[project_id].update(parsed_data)
-        persist_state()
-        
-        return PROJECTS_DB[project_id]
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+
+    ai_context = resolve_ai_context(
+        {
+            "user_id": x_realytics_user_id,
+            "provider": x_realytics_ai_provider,
+            "host": "api",
+        },
+    )
+    parsed_data = await parse_uploaded_business_plan(file, ai_context)
+    if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
+        return {
+            "project_id": project_id,
+            "status": "host_llm_required",
+            "upload": parsed_data,
+        }
+
+    return apply_parsed_project_data(project_id, parsed_data)
+
+@router.post("/{project_id}/upload-and-run")
+async def upload_business_plan_and_run_pf_review(
+    project_id: str,
+    file: UploadFile = File(...),
+    x_realytics_user_id: str | None = Header(default=None),
+    x_realytics_ai_provider: str | None = Header(default=None),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    ai_context = resolve_ai_context(
+        {
+            "user_id": x_realytics_user_id or "web",
+            "provider": x_realytics_ai_provider,
+            "host": "api",
+        },
+    )
+    parsed_data = await parse_uploaded_business_plan(file, ai_context)
+    if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
+        return {
+            "project_id": project_id,
+            "status": "host_llm_required",
+            "upload": parsed_data,
+            "message": "Host LLM extraction is required before PF review orchestration can run.",
+        }
+
+    project_data = apply_parsed_project_data(project_id, parsed_data)
+    run = OrchestrationAgent().run_pf_review(
+        project_id,
+        project_data,
+        {
+            "requested_by": ai_context["user_id"],
+            "user_id": ai_context["user_id"],
+            "ai_context": ai_context,
+            "source": "upload-and-run",
+        },
+    )
+    return {
+        "project_id": project_id,
+        "status": "completed",
+        "project": project_data,
+        "run": save_orchestration_run(project_id, run),
+    }
 
 @router.post("/{project_id}/ai/connection/resolve")
 def resolve_project_ai_connection(project_id: str, input_data: Dict[str, Any] | None = None):
@@ -302,21 +374,7 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
         source_data,
         input_data.get("options", {}),
     )
-    ORCHESTRATIONS_DB.setdefault(project_id, {})[run["run_id"]] = run
-    persist_state()
-
-    if "phase11Report" in run["artifacts"]:
-        report_artifact = run["artifacts"]["phase11Report"]
-        report_record = save_report_record(
-            project_id,
-            report_artifact["report"],
-            report_artifact["report_markdown"],
-            run["run_id"],
-        )
-        run["artifacts"]["reportRecord"] = report_metadata(report_record)
-        persist_state()
-
-    return run
+    return save_orchestration_run(project_id, run)
 
 @router.get("/{project_id}/orchestrations")
 def list_project_orchestrations(project_id: str):

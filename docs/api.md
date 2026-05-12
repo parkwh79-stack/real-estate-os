@@ -33,6 +33,13 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: Multipart form with `file`.
 - **Response**: Updated project object with parser `_meta.ai_connection`. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
 
+### `POST /projects/{project_id}/upload-and-run`
+- **Description**: Upload a PDF business plan, parse/update the project, then immediately run PF review orchestration and save the generated report.
+- **Headers**: Optional `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER`.
+- **Request Body**: Multipart form with `file`.
+- **Response**: `{ "status": "completed", "project": {...}, "run": {...} }`.
+- **Note**: In `claude_desktop` mode this endpoint returns `status: host_llm_required` until Claude Desktop converts the extracted text into project JSON.
+
 ### `POST /projects/{project_id}/ai/connection/resolve`
 - **Description**: Resolve the active AI provider, model, runtime mode, and linked user ID without calling an external model.
 - **Request Body**: `{ "user_id": "user-123", "ai_context": { "provider": "claude_desktop" } }`

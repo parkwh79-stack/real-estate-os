@@ -16,7 +16,7 @@
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
 | P0 | Report | Report fixture data | Planned | Add anonymized real-document fixture for regression checks |
 | P0 | Storage | Persistent project/report/run storage | In Progress | JSON state storage added; next step is SQLite/PostgreSQL |
-| P0 | Orchestration | Upload-to-run flow | Planned | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run |
+| P0 | Orchestration | Upload-to-run flow | Done | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run via `/upload-and-run` |
 | P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks |
 | P0 | Integration | Korean Law MCP connector | Planned | Connect real legal source retrieval into `law_context` for LegalReviewAgent |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |

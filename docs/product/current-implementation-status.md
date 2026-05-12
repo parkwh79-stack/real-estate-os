@@ -157,6 +157,13 @@ API/MCP user linkage:
 - MCP tools accept `user_id`, `ai_provider`, and `ai_context`.
 - MCP environment can set `MCP_USER_ID` and `REALYTICS_AI_PROVIDER=claude_desktop`.
 
+### Upload-to-Run Flow
+
+- API: `POST /projects/{project_id}/upload-and-run`
+- Frontend: project detail file upload panel now supports both "document analysis" and "analyze then run PF review".
+- The endpoint parses the uploaded business plan/basic architectural plan, updates the project, runs PF review orchestration, persists the run, and saves the Phase 11 report artifact.
+- In `claude_desktop` mode it returns `host_llm_required` instead of pretending the server can call the Claude Desktop host model.
+
 ## Current Orchestration Steps
 
 1. `project_load`: 프로젝트 데이터 로드
@@ -194,7 +201,6 @@ Latest verification:
 
 - Replace JSON state storage with SQLite or PostgreSQL.
 - Add approval action UI to the frontend orchestration run dashboard.
-- Add upload-to-orchestration flow: PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run.
 - Add persistent report versioning.
 - Add Korean Law MCP connector integration once the tool is available.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.

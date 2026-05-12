@@ -57,3 +57,36 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
 
     summaries = client.get(f"/projects/{project_id}/orchestrations").json()
     assert any(item["run_id"] == run["run_id"] and item["status"] == "approved" for item in summaries)
+
+
+def test_upload_and_run_creates_orchestration(monkeypatch):
+    monkeypatch.delenv("REALYTICS_AI_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Upload Run Test", "type": "mixed_use"},
+            "feasibility_input": {
+                "total_revenue": 120_000_000_000,
+                "total_cost": 95_000_000_000,
+                "finance_cost": 5_000_000_000,
+            },
+            "pf_structure": [{"tranche": "Tranche A", "amount": 65_000_000_000}],
+            "risk_items": [],
+        },
+    ).json()
+    project_id = created["id"]
+
+    res = client.post(
+        f"/projects/{project_id}/upload-and-run",
+        files={"file": ("business-plan.pdf", b"not-a-real-pdf", "application/pdf")},
+        headers={"X-REALYTICS-USER-ID": "upload-test"},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "completed"
+    assert body["run"]["status"] == "completed"
+    assert body["run"]["user_id"] == "upload-test"
+    assert body["run"]["artifacts"]["reportRecord"]["run_id"] == body["run"]["run_id"]
