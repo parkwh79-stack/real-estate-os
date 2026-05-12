@@ -1,14 +1,17 @@
-import os
+from typing import Any, Dict
+
 import fitz  # PyMuPDF
-import json
-from openai import OpenAI
+
+from agents.ai_connection import AIConnection, resolve_ai_context
+
 
 class ParserAgent:
-    def __init__(self):
-        self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "dummy-key-for-test"))
+    def __init__(self, ai_context: Dict[str, Any] | None = None):
+        self.ai_context = resolve_ai_context(ai_context)
+        self.ai = AIConnection()
 
     def parse_document(self, file_path: str) -> str:
-        """Extracts text from a PDF document."""
+        """Extract text from a PDF document."""
         text = ""
         try:
             doc = fitz.open(file_path)
@@ -20,10 +23,9 @@ class ParserAgent:
             return ""
         return text
 
-    def extract_project_data(self, text: str) -> dict:
-        """Uses OpenAI to extract structured project data from the raw text."""
-        # Truncate text if it's too long for the context window
-        max_chars = 30000 
+    def extract_project_data(self, text: str, ai_context: Dict[str, Any] | None = None) -> dict:
+        """Use the configured AI provider to extract structured project data from raw text."""
+        max_chars = 30000
         if len(text) > max_chars:
             text = text[:max_chars]
 
@@ -111,35 +113,38 @@ class ParserAgent:
         ---
         """ + text + "\n---"
 
-        try:
-            # If dummy key is used (e.g. testing without real API), return mock parsed data
-            if self.client.api_key == "dummy-key-for-test":
-                print("Warning: OPENAI_API_KEY not found. Using mock parsing.")
-                return self._get_mock_parsed_data("OPENAI_API_KEY not configured")
+        context = resolve_ai_context(ai_context or self.ai_context)
+        result = self.ai.extract_json(
+            prompt,
+            system="You are a precise data extraction assistant. Output only JSON.",
+            ai_context=context,
+        )
+        if result.data is not None:
+            result.data["_meta"] = {
+                **result.data.get("_meta", {}),
+                "parsing_source": "ai",
+                "confidence": 0.75,
+                "ai_connection": result.meta,
+            }
+            return result.data
 
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a precise data extraction assistant. Output only JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                response_format={"type": "json_object"}
-            )
-            content = response.choices[0].message.content
-            return json.loads(content)
-        except Exception as e:
-            print(f"Error during OpenAI extraction: {e}")
-            return self._get_mock_parsed_data(str(e))
+        print(f"Warning: AI extraction fallback used. {result.error}")
+        return self._get_mock_parsed_data(result.error or "AI extraction unavailable", result.meta)
 
-    def _get_mock_parsed_data(self, reason: str = "mock fallback") -> dict:
-        """Returns mock data in case of OpenAI failure or missing key."""
+    def _get_mock_parsed_data(
+        self,
+        reason: str = "mock fallback",
+        ai_context: Dict[str, Any] | None = None,
+    ) -> dict:
+        """Return explicit mock data when real AI extraction is unavailable."""
+        resolved_context = resolve_ai_context(ai_context or self.ai_context)
         return {
           "_meta": {
             "parsing_source": "mock",
             "confidence": 0.0,
             "warning": "AI parsing did not use real source extraction.",
-            "reason": reason
+            "reason": reason,
+            "ai_connection": resolved_context,
           },
           "project": {
             "name": "Parsed AI Project",
@@ -203,9 +208,9 @@ class ParserAgent:
             "completion": "2029-09"
           },
           "covenants": {
-            "claim_preservation": ["신탁 1순위"],
-            "eod": ["책임준공 미이행"],
-            "drawdown_conditions": ["인허가 완료"],
-            "execution_order": ["1. 조세", "2. 필수사업비"]
+            "claim_preservation": ["Trust first-priority beneficial interest"],
+            "eod": ["Failure to satisfy responsibility completion obligation"],
+            "drawdown_conditions": ["Permit approval completed"],
+            "execution_order": ["1. Taxes", "2. Essential project costs"]
           }
         }

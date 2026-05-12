@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 from uuid import uuid4
 
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
+from agents.ai_connection import resolve_ai_context, safe_ai_context
 from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.report_agent import ReportAgent
@@ -25,6 +26,11 @@ class OrchestrationAgent:
         options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         options = options or {}
+        ai_connection = resolve_ai_context(
+            options.get("ai_context"),
+            user_id=options.get("user_id") or options.get("requested_by"),
+            host=options.get("host") or "api",
+        )
         now = self._now()
         run = {
             "run_id": str(uuid4()),
@@ -33,7 +39,9 @@ class OrchestrationAgent:
             "status": "running",
             "started_at": now,
             "completed_at": None,
-            "options": options,
+            "user_id": ai_connection["user_id"],
+            "ai_connection": ai_connection,
+            "options": self._sanitize_options(options),
             "steps": [],
             "artifacts": {},
             "errors": [],
@@ -174,6 +182,12 @@ class OrchestrationAgent:
             "completed_at": self._now(),
             "output": output,
         })
+
+    def _sanitize_options(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        sanitized = dict(options)
+        if isinstance(sanitized.get("ai_context"), dict):
+            sanitized["ai_context"] = safe_ai_context(sanitized["ai_context"])
+        return sanitized
 
     def _step_title(self, key: str) -> str:
         titles = dict(PF_REVIEW_STEPS)

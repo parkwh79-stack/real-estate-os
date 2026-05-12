@@ -8,6 +8,8 @@ The platform now has an MVP-level PF review orchestration flow that can serve bo
 
 The current implementation is synchronous and now has file-backed JSON state storage for projects, reports, and orchestration runs. The agent boundaries, API endpoints, MCP tools, tests, and documentation have been structured so the system can later move to SQLite/PostgreSQL, async jobs, and UI-based run monitoring.
 
+The AI connection layer now records the selected provider, runtime mode, model, host, and linked `user_id` for API uploads, MCP document parsing, and orchestration runs.
+
 ## Implemented
 
 ### Phase 11 PF Review Report
@@ -132,13 +134,28 @@ MCP:
 
 File: `services/api-server/agents/parser_agent.py`
 
+Supporting file: `services/api-server/agents/ai_connection.py`
+
 Added extraction hints for:
 
 - `architectural_plan`
 - `sales_assumptions`
 - `cost_assumptions`
 
-Mock fallback now includes `_meta.parsing_source = "mock"` so downstream reports can identify non-real parsed data.
+Mock fallback now includes `_meta.parsing_source = "mock"` and `_meta.ai_connection` so downstream reports can identify non-real parsed data and the user/provider context.
+
+Supported AI connection modes:
+
+- `openai`: direct OpenAI API extraction when `OPENAI_API_KEY` is configured.
+- `anthropic`: direct Claude API extraction when `ANTHROPIC_API_KEY` is configured.
+- `claude_desktop`: Claude Desktop hosts MCP tool calls; direct internal parser extraction still requires `ANTHROPIC_API_KEY`.
+
+API/MCP user linkage:
+
+- API upload accepts `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER`.
+- API connection check: `POST /projects/{project_id}/ai/connection/resolve`.
+- MCP tools accept `user_id`, `ai_provider`, and `ai_context`.
+- MCP environment can set `MCP_USER_ID` and `REALYTICS_AI_PROVIDER=claude_desktop`.
 
 ## Current Orchestration Steps
 
@@ -168,7 +185,8 @@ Latest verification:
 - Generated reports and orchestration runs persist through `state.json`, but do not yet have relational querying, migrations, or multi-user isolation.
 - Frontend displays orchestration run detail and agent artifacts; approval action UI is not yet implemented.
 - Korean Law MCP is only represented as a pluggable `law_context` hook.
-- ParserAgent still requires a real `OPENAI_API_KEY` for real document extraction; otherwise it returns explicit mock metadata.
+- ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real document extraction; otherwise it returns explicit mock metadata.
+- Claude Desktop's local host model cannot be invoked from inside the MCP server process; for internal parser calls use `ANTHROPIC_API_KEY`, while Claude Desktop remains the tool-calling host.
 
 ## Next Work
 
@@ -179,6 +197,7 @@ Latest verification:
 - Add upload-to-orchestration flow: PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run.
 - Add persistent report versioning.
 - Add Korean Law MCP connector integration once the tool is available.
+- Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
 
 ### P1
 

@@ -18,6 +18,7 @@ from core.calculations import (
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
+from agents.ai_connection import resolve_ai_context
 from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
@@ -28,6 +29,44 @@ load_dotenv()
 
 server = Server("realytics-pf-mcp")
 
+
+def _ai_schema_properties() -> Dict[str, Any]:
+    return {
+        "user_id": {
+            "type": "string",
+            "description": "End-user identifier to attach to AI/MCP runs and audit metadata.",
+        },
+        "ai_provider": {
+            "type": "string",
+            "description": "AI provider hint: claude_desktop, anthropic, or openai.",
+        },
+        "ai_context": {
+            "type": "object",
+            "description": "Optional AI connection context with provider, model, host, and user_id.",
+        },
+    }
+
+
+def _with_ai_schema(properties: Dict[str, Any]) -> Dict[str, Any]:
+    return {**properties, **_ai_schema_properties()}
+
+
+def _build_mcp_ai_context(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    context = dict(arguments.get("ai_context") or {})
+    if arguments.get("user_id"):
+        context["user_id"] = arguments["user_id"]
+    if arguments.get("ai_provider"):
+        context["provider"] = arguments["ai_provider"]
+    context.setdefault("provider", os.environ.get("REALYTICS_AI_PROVIDER", "claude_desktop"))
+    context.setdefault("host", "claude_desktop")
+    context.setdefault(
+        "user_id",
+        os.environ.get("MCP_USER_ID")
+        or os.environ.get("REALYTICS_USER_ID")
+        or "claude-desktop-user",
+    )
+    return resolve_ai_context(context, host="claude_desktop")
+
 @server.list_tools()
 async def handle_list_tools() -> List[types.Tool]:
     """List available tools for PF analysis."""
@@ -37,11 +76,11 @@ async def handle_list_tools() -> List[types.Tool]:
             description="PF 수지분석 기초 지표(LTV, LTC, Profit, Exit Sale Rate)를 계산합니다.",
             inputSchema={
                 "type": "object",
-                "properties": {
+                "properties": _with_ai_schema({
                     "total_revenue": {"type": "number", "description": "총 분양 수입 (원)"},
                     "total_cost": {"type": "number", "description": "총 사업비 (원)"},
                     "pf_amount": {"type": "number", "description": "총 PF 조달 금액 (원)"},
-                },
+                }),
                 "required": ["total_revenue", "total_cost", "pf_amount"],
             },
         ),
@@ -51,13 +90,18 @@ async def handle_list_tools() -> List[types.Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
+            name="resolve_ai_connection",
+            description="Resolve the active AI provider, Claude Desktop MCP host mode, model, and linked user_id for audit metadata.",
+            inputSchema={"type": "object", "properties": _ai_schema_properties()},
+        ),
+        types.Tool(
             name="analyze_business_plan",
             description="PDF 사업계획서에서 PF 관련 핵심 데이터를 추출합니다.",
             inputSchema={
                 "type": "object",
-                "properties": {
+                "properties": _with_ai_schema({
                     "file_path": {"type": "string", "description": "분석할 PDF 파일 경로"},
-                },
+                }),
                 "required": ["file_path"],
             },
         ),
@@ -77,11 +121,11 @@ async def handle_list_tools() -> List[types.Tool]:
             description="프로젝트 데이터 로드, 디벨로퍼 사업수지분석, 사업성 계산, PF 구조 계산, 분양성 검증, 법률/인허가 예비 검토, 리스크 평가, Phase 11 보고서 생성, 품질 점검을 하나의 실행 run으로 수행합니다.",
             inputSchema={
                 "type": "object",
-                "properties": {
+                "properties": _with_ai_schema({
                     "project_id": {"type": "string", "description": "프로젝트 ID"},
                     "project_data": {"type": "object", "description": "오케스트레이션에 사용할 프로젝트 전체 데이터"},
                     "options": {"type": "object", "description": "실행 옵션"},
-                },
+                }),
                 "required": ["project_id", "project_data"],
             },
         ),
@@ -158,8 +202,17 @@ async def handle_call_tool(
         except Exception as e:
             return [types.TextContent(type="text", text=f"Error loading sample: {str(e)}")]
 
-    if not arguments:
-        raise ValueError("Arguments are required")
+    arguments = arguments or {}
+
+    if name == "resolve_ai_connection":
+        result = {
+            "ai_connection": _build_mcp_ai_context(arguments),
+            "note": (
+                "Claude Desktop is the MCP host LLM. Internal document parsing uses the "
+                "Anthropic API only when ANTHROPIC_API_KEY is configured."
+            ),
+        }
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     if name == "calculate_pf_metrics":
         rev = arguments["total_revenue"]
@@ -186,9 +239,10 @@ async def handle_call_tool(
         if not os.path.exists(path):
             return [types.TextContent(type="text", text=f"Error: File not found at {path}")]
             
-        agent = ParserAgent()
+        ai_context = _build_mcp_ai_context(arguments)
+        agent = ParserAgent(ai_context)
         text = agent.parse_document(path)
-        data = agent.extract_project_data(text)
+        data = agent.extract_project_data(text, ai_context)
         return [types.TextContent(type="text", text=json.dumps(data, ensure_ascii=False, indent=2))]
 
     elif name == "generate_pf_report":
@@ -209,10 +263,17 @@ async def handle_call_tool(
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     elif name == "orchestrate_pf_review":
+        ai_context = _build_mcp_ai_context(arguments)
+        options = {
+            **arguments.get("options", {}),
+            "ai_context": ai_context,
+            "user_id": ai_context["user_id"],
+            "host": "claude_desktop",
+        }
         run = OrchestrationAgent().run_pf_review(
             arguments["project_id"],
             arguments["project_data"],
-            arguments.get("options", {}),
+            options,
         )
         return [types.TextContent(type="text", text=json.dumps(run, ensure_ascii=False, indent=2))]
 

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile
+from fastapi import APIRouter, HTTPException, File, UploadFile, Header
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import tempfile
 import os
 from uuid import uuid4
+from agents.ai_connection import resolve_ai_context
 from agents.parser_agent import ParserAgent
 
 from core.calculations import (
@@ -134,7 +135,12 @@ def update_project(project_id: str, project_data: Dict[str, Any]):
     return PROJECTS_DB[project_id]
 
 @router.post("/{project_id}/upload")
-async def upload_business_plan(project_id: str, file: UploadFile = File(...)):
+async def upload_business_plan(
+    project_id: str,
+    file: UploadFile = File(...),
+    x_realytics_user_id: str | None = Header(default=None),
+    x_realytics_ai_provider: str | None = Header(default=None),
+):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
         
@@ -144,9 +150,16 @@ async def upload_business_plan(project_id: str, file: UploadFile = File(...)):
         tmp_path = tmp.name
         
     try:
-        agent = ParserAgent()
+        ai_context = resolve_ai_context(
+            {
+                "user_id": x_realytics_user_id,
+                "provider": x_realytics_ai_provider,
+                "host": "api",
+            },
+        )
+        agent = ParserAgent(ai_context)
         text = agent.parse_document(tmp_path)
-        parsed_data = agent.extract_project_data(text)
+        parsed_data = agent.extract_project_data(text, ai_context)
         
         # Ensure project ID is retained
         if "project" not in parsed_data:
@@ -161,6 +174,24 @@ async def upload_business_plan(project_id: str, file: UploadFile = File(...)):
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+@router.post("/{project_id}/ai/connection/resolve")
+def resolve_project_ai_connection(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    return {
+        "project_id": project_id,
+        "ai_connection": resolve_ai_context(
+            input_data.get("ai_context", input_data),
+            user_id=input_data.get("user_id"),
+            host=input_data.get("host") or "api",
+        ),
+        "note": (
+            "Claude Desktop hosts MCP tool calls. Direct Claude extraction inside the API "
+            "requires ANTHROPIC_API_KEY."
+        ),
+    }
 
 @router.post("/{project_id}/feasibility/calculate")
 def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):

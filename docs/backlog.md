@@ -19,6 +19,8 @@
 | P0 | Orchestration | Upload-to-run flow | Planned | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run |
 | P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks |
 | P0 | Integration | Korean Law MCP connector | Planned | Connect real legal source retrieval into `law_context` for LegalReviewAgent |
+| P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context now records provider, host mode, model, and linked `user_id`; Anthropic API key enables direct Claude extraction |
+| P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
 | P1 | Report | PDF print layout QA | Planned | A4 pagination, table overflow, section page-break checks |
 | P1 | Export | Excel upload | Planned | |
 | P1 | Export | Developer feasibility Excel export | Planned | Export developer-side feasibility table, sensitivity, PF readiness |

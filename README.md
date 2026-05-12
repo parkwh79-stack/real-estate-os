@@ -8,7 +8,7 @@ REALYTICS x PLATFORM9 is a specialized platform designed for financial instituti
 
 ## Core Features
 
-- **AI Document Parsing**: Automatically extract financial structures and project schedules from business plans (PDF).
+- **AI Document Parsing**: Automatically extract financial structures and project schedules from business plans (PDF), with provider-aware OpenAI/Claude metadata.
 - **Development Feasibility Agent**: Converts business plans and basic architectural plans into developer-side feasibility, PF readiness, and sensitivity analysis.
 - **PF Financial Engine**: Comprehensive calculations for LTV, LTC, DSCR, All-in Cost, and Waterfall simulations.
 - **Risk Assessment**: Systematic evaluation of 12+ risk categories with scoring and mitigation strategies.
@@ -32,12 +32,12 @@ Current implementation status and next work are tracked in [`docs/product/curren
 graph TD
     A[Web Frontend - Next.js] --> B[API Server - FastAPI]
     B --> C[Core Calculation Engine]
-    B --> D[AI Agents - GPT-4o]
+    B --> D[AI Agents - OpenAI or Claude API]
     B --> G[PF Review Orchestrator]
     E[MCP Server] --> C
     E --> D
     E --> G
-    F[LLM - Claude/GPT] -- Tools Call --> E
+    F[LLM Host - Claude Desktop/GPT Client] -- Tools Call --> E
 ```
 
 ## Getting Started
@@ -67,13 +67,18 @@ To use this with Claude Desktop or other MCP-compatible clients:
       "command": "python",
       "args": ["C:/Users/User/Documents/real estate os/realytics-platform9-monorepo/services/mcp-server/server.py"],
       "env": {
-        "OPENAI_API_KEY": "your-key-here",
+        "REALYTICS_AI_PROVIDER": "claude_desktop",
+        "MCP_USER_ID": "your-realytics-user-id",
+        "ANTHROPIC_API_KEY": "optional-for-direct-claude-api-parsing",
+        "OPENAI_API_KEY": "optional-openai-fallback-key",
         "PYTHONPATH": "C:/Users/User/Documents/real estate os/realytics-platform9-monorepo/services/api-server"
       }
     }
   }
 }
 ```
+
+Claude Desktop is the MCP host LLM: Claude decides when to call the REALYTICS tools. If a tool must perform internal AI extraction from a PDF, configure `ANTHROPIC_API_KEY` to use Claude through the Anthropic API. Without that key, the parser returns explicit mock metadata instead of pretending extraction was real. Every MCP run can attach `user_id` via `MCP_USER_ID`, the `user_id` tool argument, or `ai_context.user_id`.
 
 ## Documentation
 

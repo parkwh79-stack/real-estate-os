@@ -26,6 +26,8 @@ def test_pf_review_orchestration_completes_and_saves_report():
     run = res.json()
     assert run["workflow"] == PF_REVIEW_WORKFLOW
     assert run["status"] == "completed"
+    assert run["user_id"] == "pytest"
+    assert run["ai_connection"]["user_id"] == "pytest"
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
     assert run["artifacts"]["qualityCheck"]["pass"] is True
     assert run["artifacts"]["developerFeasibility"]["analysisType"] == "developer_and_pf_feasibility"

@@ -27,6 +27,18 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: Partial or full project object.
 - **Response**: The updated project object.
 
+### `POST /projects/{project_id}/upload`
+- **Description**: Upload a PDF business plan and extract project data with the configured AI provider.
+- **Headers**: Optional `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER` (`openai`, `anthropic`, or `claude_desktop`).
+- **Request Body**: Multipart form with `file`.
+- **Response**: Updated project object with parser `_meta.ai_connection`.
+
+### `POST /projects/{project_id}/ai/connection/resolve`
+- **Description**: Resolve the active AI provider, model, runtime mode, and linked user ID without calling an external model.
+- **Request Body**: `{ "user_id": "user-123", "ai_context": { "provider": "claude_desktop" } }`
+- **Response**: `{ "project_id": "...", "ai_connection": {...}, "note": "..." }`
+- **Note**: Claude Desktop hosts MCP tool calls. Direct Claude extraction inside the API or MCP server requires `ANTHROPIC_API_KEY`; otherwise the server records `runtime_provider: claude_desktop_host` and returns explicit fallback metadata for AI parsing.
+
 ### `POST /projects/{project_id}/feasibility/calculate`
 - **Description**: Trigger feasibility calculation.
 - **Request Body**: `{ "land": {...}, "regulation": {...}, ... }`
@@ -123,7 +135,7 @@ The `phase-11-pf-review` template returns these `report.sections` keys:
 
 ### `POST /projects/{project_id}/orchestrations/pf-review`
 - **Description**: Run the MVP PF review orchestration workflow synchronously.
-- **Request Body**: `{ "project_data": {...}, "options": {...} }`
+- **Request Body**: `{ "project_data": {...}, "options": { "user_id": "user-123", "ai_context": { "provider": "claude_desktop" } } }`
 - **Response**: An orchestration run with status, step outputs, artifacts, and errors.
 
 The workflow executes these steps:

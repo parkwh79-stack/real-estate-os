@@ -17,4 +17,4 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 - **Frontend**: Next.js (React)
 - **Backend**: FastAPI (Python)
 - **Data/Storage**: TBD (PostgreSQL for RDBMS, Redis for cache)
-- **AI/Agents**: OpenAI-based custom Agent ecosystem
+- **AI/Agents**: Provider-aware custom Agent ecosystem supporting OpenAI, Anthropic Claude API, and Claude Desktop MCP host metadata
