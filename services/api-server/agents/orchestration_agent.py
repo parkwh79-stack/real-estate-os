@@ -8,13 +8,11 @@ from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.report_agent import ReportAgent
 from core.calculations import (
+    calculate_pf_metrics,
     calculate_development_profit,
-    calculate_exit_sale_rate,
-    calculate_ltc,
-    calculate_ltv,
     calculate_profit_margin,
 )
-from core.risk_assessment import assess_risk_item, calculate_overall_risk
+from core.risk_assessment import build_basic_risk_matrix
 from schemas.orchestration import PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 
 
@@ -131,22 +129,22 @@ class OrchestrationAgent:
     def _calculate_pf_structure(self, data: Dict[str, Any]) -> Dict[str, Any]:
         feasibility = data.get("feasibility_input", {})
         tranches = data.get("pf_structure", [])
-        total_pf = sum(t.get("amount", 0) for t in tranches)
-        total_revenue = feasibility.get("total_revenue", 0)
-        total_cost = feasibility.get("total_cost", 0)
-        finance_cost = feasibility.get("finance_cost", 0)
+        result = calculate_pf_metrics({
+            "tranches": tranches,
+            "total_revenue": feasibility.get("total_revenue", 0),
+            "total_cost": feasibility.get("total_cost", 0),
+            "finance_cost": feasibility.get("finance_cost", 0),
+        })
         return {
-            "total_pf_amount": total_pf,
-            "ltv": calculate_ltv(total_pf, total_revenue),
-            "ltc": calculate_ltc(total_pf, total_cost),
-            "exit_sale_rate": calculate_exit_sale_rate(total_pf, finance_cost, total_revenue),
+            **result,
+            "ltv": result["metrics"]["ltv"]["value"],
+            "ltc": result["metrics"]["ltc"]["value"],
+            "exit_sale_rate": result["metrics"]["exit_sale_rate"]["value"],
             "tranche_count": len(tranches),
         }
 
     def _assess_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        assessed_items = [assess_risk_item(item) for item in data.get("risk_items", [])]
-        overall = calculate_overall_risk(assessed_items)
-        return {"overall": overall, "items": assessed_items}
+        return build_basic_risk_matrix(data)
 
     def _quality_check(self, run: Dict[str, Any]) -> Dict[str, Any]:
         report = run["artifacts"]["phase11Report"]["report"]

@@ -64,6 +64,34 @@ Environment override:
 
 - `REALYTICS_STATE_FILE`
 
+### Calculation and Risk Engine
+
+Files:
+
+- `services/api-server/core/calculations.py`
+- `services/api-server/core/risk_assessment.py`
+
+Implemented P0 calculation outputs:
+
+- Monthly cash-flow builder from either net cashflows or cash-in/cash-out schedules.
+- Max Minus details including amount, month, period, funding gap, cumulative CF, and ending cash.
+- PF metrics bundle for LTV, LTC, DSCR, and exit sale rate.
+- Tranche-level all-in cost, annual interest, fee amount, and priority ordering.
+- Status bands for credit review thresholds.
+
+Implemented P0 risk outputs:
+
+- Basic real estate PF risk matrix.
+- Category rows across land, permit, developer, contractor, trust, market, sales, construction cost, financing, exit, legal, and public sector risk.
+- Top risks, 5x5 heatmap cells, recommendations, and missing-category indicators.
+- Default inferred risk items when no explicit `risk_items` are provided.
+
+APIs:
+
+- `POST /projects/{project_id}/cashflow/calculate`
+- `POST /projects/{project_id}/pf/structure`
+- `POST /projects/{project_id}/risk/assess`
+
 ### Development Feasibility Agent
 
 File: `services/api-server/agents/development_feasibility_agent.py`
@@ -190,7 +218,7 @@ API/MCP user linkage:
 
 Latest verification baseline:
 
-- API tests: `36 passed`
+- API tests: `41 passed`
 - Web lint: passed
 - Web type check: passed
 - Web build: passed
@@ -225,7 +253,7 @@ Latest verification baseline:
 - Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.
 - Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
 - Convert synchronous orchestration into async queue-based jobs.
-- Harden calculation engines for monthly cash flow, max minus, LTV/LTC/DSCR, exit sale rate, waterfall, and unsold LTV matrix.
+- Add UI/API scenario workflow for waterfall and unsold LTV matrix.
 
 ### P2
 
@@ -236,4 +264,4 @@ Latest verification baseline:
 
 ## Git Note
 
-Latest committed implementation baseline: `6af8cc1 Add Korean Law MCP sidecar adapter`.
+Latest committed implementation baseline before this work: `8e2758a Add orchestration approval UI`.

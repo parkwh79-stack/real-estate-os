@@ -18,6 +18,8 @@ Updated: 2026-05-13
 - Korean legal/permit review agent with Korean Law MCP sidecar context adapter.
 - PF review orchestration API and frontend run dashboard.
 - Frontend approval action UI for completed orchestration runs.
+- P0 calculation engine for monthly cash flow, Max Minus, LTV/LTC/DSCR, and exit sale rate.
+- P0 basic PF risk matrix with category rows, heatmap, top risks, and recommendations.
 - File-backed MVP persistence for projects, reports, and orchestration runs.
 - A4 print layout QA checklist.
 
@@ -48,7 +50,7 @@ Updated: 2026-05-13
 2. Add anonymized parser regression fixtures from real business plan/basic architectural plan samples.
 3. Add standalone UI pages for development feasibility, marketability, legal review, and orchestration artifacts.
 4. Convert synchronous orchestration into queue-based background jobs.
-5. Harden calculation engines for monthly cash flow, max minus, LTV/LTC/DSCR, exit sale rate, waterfall, and unsold LTV matrix.
+5. Add UI/API scenario workflow for waterfall and unsold LTV matrix.
 
 ## Product Risk Notes
 

@@ -9,9 +9,10 @@ from agents.parser_agent import ParserAgent
 
 from core.calculations import (
     calculate_development_profit, calculate_profit_margin, calculate_cashflow_max_minus,
-    calculate_all_in_cost, calculate_exit_sale_rate, calculate_ltv, calculate_ltc, calculate_dscr
+    calculate_all_in_cost, calculate_exit_sale_rate, calculate_ltv, calculate_ltc, calculate_dscr,
+    build_monthly_cash_flow, calculate_pf_metrics
 )
-from core.risk_assessment import assess_risk_item, calculate_overall_risk
+from core.risk_assessment import assess_risk_item, calculate_overall_risk, build_basic_risk_matrix
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
@@ -289,38 +290,47 @@ def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] 
 
 @router.post("/{project_id}/cashflow/calculate")
 def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
-    # Simplified mock implementation
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
     cfs = input_data.get("cashflows", [])
     max_minus = calculate_cashflow_max_minus(cfs)
-    return {"max_minus": max_minus, "cashflows": cfs}
+    result = build_monthly_cash_flow(input_data)
+    result["cashflows"] = cfs
+    result["legacy_max_minus"] = max_minus
+    return result
 
 @router.post("/{project_id}/pf/structure")
 def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
-    tranches = input_data.get("tranches", [])
-    total_pf = sum(t.get("amount", 0) for t in tranches)
-    
-    # Mock totals
-    total_rev = input_data.get("total_revenue", 0)
-    total_cost = input_data.get("total_cost", 0)
-    
-    ltv = calculate_ltv(total_pf, total_rev)
-    ltc = calculate_ltc(total_pf, total_cost)
-    exit_rate = calculate_exit_sale_rate(total_pf, 0, total_rev) # Simplified
-    
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project = PROJECTS_DB[project_id]
+    feasibility = project.get("feasibility_input", {})
+    source_data = {
+        "tranches": input_data.get("tranches", project.get("pf_structure", [])),
+        "total_revenue": input_data.get("total_revenue", feasibility.get("total_revenue", 0)),
+        "total_cost": input_data.get("total_cost", feasibility.get("total_cost", 0)),
+        "finance_cost": input_data.get("finance_cost", feasibility.get("finance_cost", 0)),
+        "other_priority_costs": input_data.get("other_priority_costs", input_data.get("finance_cost", feasibility.get("finance_cost", 0))),
+        "net_operating_income": input_data.get("net_operating_income", input_data.get("noi", 0)),
+        "debt_service": input_data.get("debt_service", 0),
+    }
+    result = calculate_pf_metrics(source_data)
     return {
-        "total_pf_amount": total_pf,
-        "ltv": ltv,
-        "ltc": ltc,
-        "exit_sale_rate": exit_rate
+        **result,
+        "ltv": result["metrics"]["ltv"]["value"],
+        "ltc": result["metrics"]["ltc"]["value"],
+        "dscr": result["metrics"]["dscr"]["value"],
+        "exit_sale_rate": result["metrics"]["exit_sale_rate"]["value"],
     }
 
 @router.post("/{project_id}/risk/assess")
 def assess_risk(project_id: str, input_data: Dict[str, Any]):
-    raw_items = input_data.get("risk_items", [])
-    assessed = [assess_risk_item(item) for item in raw_items]
-    overall = calculate_overall_risk(assessed)
-    overall["items"] = assessed
-    return overall
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
+    raw_items = input_data.get("risk_items", source_data.get("risk_items", []))
+    return build_basic_risk_matrix(source_data, raw_items)
 
 @router.post("/{project_id}/marketability/analyze")
 def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = None):

@@ -58,18 +58,18 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 
 ### `POST /projects/{project_id}/cashflow/calculate`
 - **Description**: Trigger monthly cash flow calculation.
-- **Request Body**: `{ "revenue_schedule": [...], "cost_schedule": [...] }`
-- **Response**: Monthly CF arrays and Max Minus value.
+- **Request Body**: `{ "revenue_schedule": [...], "cost_schedule": [...] }` or `{ "cashflows": [...] }`.
+- **Response**: Normalized monthly rows, net CF, cumulative CF, Max Minus amount/month/period, funding gap, ending cash, and status.
 
 ### `POST /projects/{project_id}/pf/structure`
 - **Description**: Configure and calculate PF structure.
-- **Request Body**: `{ "tranches": [...] }`
-- **Response**: LTV, LTC, DSCR, All-in-cost per tranche.
+- **Request Body**: `{ "tranches": [...], "total_revenue": 0, "total_cost": 0, "net_operating_income": 0, "debt_service": 0 }`
+- **Response**: Total PF amount, tranche-level all-in cost, annual interest, fees, LTV, LTC, DSCR, exit sale rate, status bands, and credit summary.
 
 ### `POST /projects/{project_id}/risk/assess`
 - **Description**: Evaluate project risks.
-- **Request Body**: `{ "project_data": {...} }`
-- **Response**: Risk scores, mitigation strategies, and overall risk rating.
+- **Request Body**: `{ "project_data": {...}, "risk_items": [...] }`. If `risk_items` is omitted, the API infers baseline project risks from land, permit, PF, feasibility, and covenant data.
+- **Response**: Basic PF risk matrix, category rows, assessed items, top risks, 5x5 heatmap, recommendations, missing categories, and overall risk rating.
 
 ### `POST /projects/{project_id}/marketability/analyze`
 - **Description**: Analyze saleability for saleable real estate assets such as apartments, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale projects.

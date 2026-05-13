@@ -57,6 +57,154 @@ def calculate_cashflow_max_minus(cashflows: List[float], initial_cash: float = 0
             max_minus = cumulative
     return max_minus
 
+def calculate_cashflow_max_minus_details(cashflows: List[float], initial_cash: float = 0.0) -> Dict[str, Any]:
+    cumulative = initial_cash
+    min_balance = min(0.0, cumulative)
+    min_index = 0 if cumulative < 0 else None
+    cumulative_values = []
+
+    for index, cf in enumerate(cashflows, start=1):
+        cumulative += cf
+        cumulative_values.append(cumulative)
+        if cumulative < min_balance:
+            min_balance = cumulative
+            min_index = index
+
+    return {
+        "max_minus": min_balance,
+        "max_minus_month": min_index,
+        "ending_cash": cumulative,
+        "cumulative_cashflows": cumulative_values,
+    }
+
+def build_monthly_cash_flow(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Builds a normalized monthly cash-flow table and Max Minus summary.
+
+    Supported inputs:
+    - {"cashflows": [net, net, ...]}
+    - {"revenue_schedule": [...], "cost_schedule": [...]}
+    - {"cash_in": [...], "cash_out": [...]}
+    Each schedule item can be a number or a dict with amount/value and month/period.
+    """
+    initial_cash = float(input_data.get("initial_cash", 0.0))
+    net_cashflows = input_data.get("cashflows")
+    if isinstance(net_cashflows, list):
+        rows = []
+        cumulative = initial_cash
+        for index, value in enumerate(net_cashflows, start=1):
+            net = _to_float(value)
+            cash_in = max(net, 0.0)
+            cash_out = abs(min(net, 0.0))
+            cumulative += net
+            rows.append({
+                "month": index,
+                "period": f"M{index}",
+                "cash_in": cash_in,
+                "cash_out": cash_out,
+                "net_cashflow": net,
+                "cumulative_cashflow": cumulative,
+            })
+        details = calculate_cashflow_max_minus_details([row["net_cashflow"] for row in rows], initial_cash)
+        return _cashflow_summary(rows, details, initial_cash)
+
+    revenue_schedule = (
+        input_data.get("revenue_schedule")
+        or input_data.get("cash_in")
+        or input_data.get("cashIn")
+        or []
+    )
+    cost_schedule = (
+        input_data.get("cost_schedule")
+        or input_data.get("cash_out")
+        or input_data.get("cashOut")
+        or []
+    )
+    cash_in_series = _schedule_to_series(revenue_schedule)
+    cash_out_series = _schedule_to_series(cost_schedule)
+    months = max(len(cash_in_series), len(cash_out_series), int(input_data.get("months", 0) or 0))
+
+    rows = []
+    cumulative = initial_cash
+    for index in range(months):
+        in_item = cash_in_series[index] if index < len(cash_in_series) else {}
+        out_item = cash_out_series[index] if index < len(cash_out_series) else {}
+        cash_in = in_item.get("amount", 0.0)
+        cash_out = out_item.get("amount", 0.0)
+        period = in_item.get("period") or out_item.get("period") or f"M{index + 1}"
+        net = cash_in - cash_out
+        cumulative += net
+        rows.append({
+            "month": index + 1,
+            "period": period,
+            "cash_in": cash_in,
+            "cash_out": cash_out,
+            "net_cashflow": net,
+            "cumulative_cashflow": cumulative,
+        })
+
+    details = calculate_cashflow_max_minus_details([row["net_cashflow"] for row in rows], initial_cash)
+    return _cashflow_summary(rows, details, initial_cash)
+
+def calculate_pf_metrics(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    tranches = input_data.get("tranches", [])
+    total_pf = float(input_data.get("pf_amount", 0.0) or 0.0)
+    if tranches:
+        total_pf = sum(_to_float(tranche.get("amount", 0.0)) for tranche in tranches)
+
+    total_revenue = _to_float(input_data.get("total_revenue", 0.0))
+    total_cost = _to_float(input_data.get("total_cost", 0.0))
+    other_priority_costs = _to_float(input_data.get("other_priority_costs", input_data.get("finance_cost", 0.0)))
+    noi = _to_float(input_data.get("net_operating_income", input_data.get("noi", 0.0)))
+    debt_service = _to_float(input_data.get("debt_service", 0.0))
+
+    tranche_results = []
+    annual_debt_service = 0.0
+    fee_total = 0.0
+    for tranche in sorted(tranches, key=lambda item: item.get("priority", 99)):
+        amount = _to_float(tranche.get("amount", 0.0))
+        interest_rate = _to_float(tranche.get("interest_rate", tranche.get("rate", 0.0)))
+        fee_rate = _to_float(tranche.get("fee_rate", 0.0))
+        interest_amount = amount * interest_rate
+        fee_amount = amount * fee_rate
+        annual_debt_service += interest_amount
+        fee_total += fee_amount
+        tranche_results.append({
+            "tranche": tranche.get("tranche", tranche.get("name", "Unknown")),
+            "priority": tranche.get("priority"),
+            "amount": amount,
+            "interest_rate": interest_rate,
+            "fee_rate": fee_rate,
+            "all_in_cost": calculate_all_in_cost(amount, interest_rate, fee_rate),
+            "annual_interest": interest_amount,
+            "fee_amount": fee_amount,
+        })
+
+    effective_debt_service = debt_service or annual_debt_service
+    ltv = calculate_ltv(total_pf, total_revenue)
+    ltc = calculate_ltc(total_pf, total_cost)
+    dscr = calculate_dscr(noi, effective_debt_service)
+    exit_sale_rate = calculate_exit_sale_rate(total_pf, other_priority_costs, total_revenue)
+
+    return {
+        "total_pf_amount": total_pf,
+        "total_revenue": total_revenue,
+        "total_cost": total_cost,
+        "other_priority_costs": other_priority_costs,
+        "annual_debt_service": effective_debt_service,
+        "fee_total": fee_total,
+        "metrics": {
+            "ltv": {"value": ltv, "status": _lower_is_better_status(ltv, 0.60, 0.75, 0.90)},
+            "ltc": {"value": ltc, "status": _lower_is_better_status(ltc, 0.70, 0.85, 1.00)},
+            "dscr": {"value": dscr, "status": _higher_is_better_status(dscr, 1.30, 1.10, 1.00)},
+            "exit_sale_rate": {
+                "value": exit_sale_rate,
+                "status": _lower_is_better_status(exit_sale_rate, 0.60, 0.75, 0.90),
+            },
+        },
+        "tranches": tranche_results,
+        "summary": _pf_metric_summary(ltv, ltc, dscr, exit_sale_rate),
+    }
+
 def simulate_waterfall(cash_available: float, tranches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Simulates a simple waterfall payment to tranches based on priority."""
     remaining_cash = cash_available
@@ -110,3 +258,78 @@ def calculate_tranche_recovery(tranche_amount: float, total_recovery_pool: float
         return 0.0
     recovery_rate = available_for_tranche / tranche_amount
     return min(1.0, recovery_rate)
+
+def _schedule_to_series(schedule: List[Any]) -> List[Dict[str, Any]]:
+    series = []
+    for index, item in enumerate(schedule, start=1):
+        if isinstance(item, dict):
+            amount = _to_float(
+                item.get("amount", item.get("value", item.get("cashflow", item.get("cash_flow", 0.0))))
+            )
+            period = item.get("period") or item.get("month") or f"M{index}"
+        else:
+            amount = _to_float(item)
+            period = f"M{index}"
+        series.append({"period": str(period), "amount": amount})
+    return series
+
+def _cashflow_summary(rows: List[Dict[str, Any]], details: Dict[str, Any], initial_cash: float) -> Dict[str, Any]:
+    max_minus_month = details["max_minus_month"]
+    max_minus_period = None
+    if max_minus_month and 1 <= max_minus_month <= len(rows):
+        max_minus_period = rows[max_minus_month - 1]["period"]
+
+    return {
+        "initial_cash": initial_cash,
+        "period_count": len(rows),
+        "rows": rows,
+        "net_cashflows": [row["net_cashflow"] for row in rows],
+        "cumulative_cashflows": details["cumulative_cashflows"],
+        "total_cash_in": sum(row["cash_in"] for row in rows),
+        "total_cash_out": sum(row["cash_out"] for row in rows),
+        "ending_cash": details["ending_cash"],
+        "max_minus": details["max_minus"],
+        "max_minus_month": max_minus_month,
+        "max_minus_period": max_minus_period,
+        "funding_gap": abs(details["max_minus"]),
+        "status": "funding_required" if details["max_minus"] < 0 else "self_funding",
+    }
+
+def _to_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def _lower_is_better_status(value: float, safe: float, caution: float, high: float) -> str:
+    if value <= safe:
+        return "safe"
+    if value <= caution:
+        return "caution"
+    if value <= high:
+        return "high"
+    return "critical"
+
+def _higher_is_better_status(value: float, safe: float, caution: float, high: float) -> str:
+    if value >= safe:
+        return "safe"
+    if value >= caution:
+        return "caution"
+    if value >= high:
+        return "high"
+    return "critical"
+
+def _pf_metric_summary(ltv: float, ltc: float, dscr: float, exit_sale_rate: float) -> str:
+    statuses = [
+        _lower_is_better_status(ltv, 0.60, 0.75, 0.90),
+        _lower_is_better_status(ltc, 0.70, 0.85, 1.00),
+        _higher_is_better_status(dscr, 1.30, 1.10, 1.00),
+        _lower_is_better_status(exit_sale_rate, 0.60, 0.75, 0.90),
+    ]
+    if "critical" in statuses:
+        return "PF metrics include critical thresholds requiring restructuring or additional equity."
+    if "high" in statuses:
+        return "PF metrics are bankable only with mitigation, covenants, or pricing adjustment."
+    if "caution" in statuses:
+        return "PF metrics are generally workable but require credit review attention."
+    return "PF metrics are within conservative review thresholds."

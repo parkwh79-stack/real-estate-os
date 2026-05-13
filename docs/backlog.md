@@ -6,11 +6,11 @@ Updated: 2026-05-13
 |---|---|---|---|---|
 | P0 | Core | Project CRUD | In Progress | In-memory or simple DB for MVP |
 | P0 | Calculation | Feasibility calculation | In Progress | Requires pure functions and tests |
-| P0 | Calculation | Monthly Cash Flow | In Progress | |
-| P0 | Calculation | Max Minus | In Progress | |
-| P0 | Calculation | LTV/LTC/DSCR | In Progress | |
-| P0 | Calculation | Exit Sale Rate | In Progress | |
-| P0 | Risk | Basic Risk Matrix | In Progress | |
+| P0 | Calculation | Monthly Cash Flow | Done | Structured monthly CF builder supports net cashflows or cash-in/cash-out schedules |
+| P0 | Calculation | Max Minus | Done | Returns max minus amount, month, period, funding gap, cumulative CF, and ending cash |
+| P0 | Calculation | LTV/LTC/DSCR | Done | PF metrics return values, status bands, tranche all-in cost, debt service, and summary |
+| P0 | Calculation | Exit Sale Rate | Done | Exit sale rate included in PF metrics with credit status thresholds |
+| P0 | Risk | Basic Risk Matrix | Done | Risk matrix returns category rows, top risks, heatmap, recommendations, and inferred default project risks |
 | P0 | Agent | Development Feasibility Agent | Done | Parses business/basic architectural plan fields into developer-side feasibility, PF readiness, and sensitivity outputs |
 | P0 | Report | Phase 11 PF Review Report | In Progress | 20-section Hana-style PF review report implemented in web UI and structured API; export hardening remains |
 | P0 | Orchestration | PF Review Run API | Done | Synchronous MVP run covers load, feasibility, PF structure, risk, Phase 11 report, quality check, approval |
@@ -31,8 +31,8 @@ Updated: 2026-05-13
 | P1 | Export | Developer feasibility Excel export | Planned | Export developer-side feasibility table, sensitivity, PF readiness |
 | P1 | Export | PDF export | Planned | |
 | P1 | Export | DOCX export | Planned | |
-| P1 | Calculation | Waterfall simulator | Planned | |
-| P1 | Calculation | Unsold LTV Matrix | Planned | |
+| P1 | Calculation | Waterfall simulator | In Progress | Pure function exists; UI/API scenario workflow still pending |
+| P1 | Calculation | Unsold LTV Matrix | In Progress | Pure function exists; scenario matrix UI/API still pending |
 | P1 | Logistics | Logistics module | Planned | Special fields & formulas |
 | P1 | Report | Report template editor | Planned | |
 | P1 | QA | Parser regression fixtures | Planned | Anonymized business plan/basic architectural plan documents for parser QA |
