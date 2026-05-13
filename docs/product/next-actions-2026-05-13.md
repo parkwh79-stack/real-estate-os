@@ -17,30 +17,27 @@ Updated: 2026-05-13
 - Marketability agent for saleable assets.
 - Korean legal/permit review agent with Korean Law MCP sidecar context adapter.
 - PF review orchestration API and frontend run dashboard.
+- Frontend approval action UI for completed orchestration runs.
 - File-backed MVP persistence for projects, reports, and orchestration runs.
 - A4 print layout QA checklist.
 
 ## P0 Next Actions
 
-1. Add frontend approval action UI.
-   - Existing API: `POST /projects/{project_id}/orchestrations/{run_id}/approve`.
-   - Needed UI: reviewer input, comment input, submit button, approved-state refresh, disabled state after approval.
-
-2. Build structured report export.
+1. Build structured report export.
    - PDF export should use the existing 20-section structured payload.
    - DOCX export can follow after PDF layout is stable.
    - Store export metadata with report version/history.
 
-3. Replace JSON runtime state with relational persistence.
+2. Replace JSON runtime state with relational persistence.
    - Start with SQLite for local reliability.
    - Keep a clean migration path to PostgreSQL.
    - Model projects, reports, orchestrations, users, and export artifacts.
 
-4. Add parser provenance per extracted field.
+3. Add parser provenance per extracted field.
    - Capture source document, page number if available, extraction mode, confidence, and original text span.
    - Surface provenance in report QA and legal/credit review.
 
-5. Decide Korean Law MCP automation depth.
+4. Decide Korean Law MCP automation depth.
    - Current recommended path: Claude Desktop sidecar calls Korean Law MCP, then passes `law_context` to REALYTICS.
    - Optional future path: API server acts as MCP client and calls Korean Law MCP automatically.
    - Do not vendor/copy the external Korean Law MCP package into this repo unless a long-term maintenance decision changes.

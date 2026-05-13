@@ -43,8 +43,8 @@ Frontend:
 
 - Project detail includes an `AI orchestration` step.
 - Route: `apps/web/app/project/[id]/orchestration/page.tsx`
-- The screen can start a PF review run, refresh run history, select a run, and inspect developer feasibility, marketability, legal/permit, report, and quality-check artifacts.
-- Approval API exists, but the frontend approval action UI is still a P0 next task.
+- The screen can start a PF review run, refresh run history, select a run, and inspect developer feasibility, marketability, legal/permit, report, quality-check artifacts, and approval state.
+- The screen can approve completed runs through the existing approve API with reviewer/comment input and immediate state refresh.
 
 ### Persistent MVP State Storage
 
@@ -201,7 +201,7 @@ Latest verification baseline:
 - Data storage is file-backed JSON for MVP, not yet relational DB.
 - Orchestration runs are synchronous, not background jobs.
 - Generated reports and orchestration runs persist through `state.json`, but do not yet have relational querying, migrations, or multi-user isolation.
-- Frontend displays orchestration run detail and agent artifacts; approval action UI is not yet implemented.
+- Frontend displays orchestration run detail, agent artifacts, and approval actions; deeper approval audit trails are not yet modeled beyond the run approval record.
 - Korean Law MCP sidecar is represented through query planning and normalized `law_context`; direct automated MCP client calls are not yet built into the API server.
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
@@ -212,7 +212,6 @@ Latest verification baseline:
 
 ### P0
 
-- Add approval action UI to the frontend orchestration run dashboard using the existing approve API.
 - Add PDF/DOCX export from the structured Phase 11 report data.
 - Add persistent report versioning and export history.
 - Replace JSON state storage with SQLite or PostgreSQL.

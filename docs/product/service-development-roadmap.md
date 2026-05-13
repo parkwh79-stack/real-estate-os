@@ -23,8 +23,7 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 
 ## Immediate Execution Order
 
-1. Frontend approval action UI for orchestration runs.
-2. Structured Phase 11 report export pipeline: PDF first, then DOCX.
-3. SQLite/PostgreSQL persistence with project/report/run/user tables.
-4. Parser provenance per extracted field for uploaded business plan and basic architectural plan documents.
-5. Decision point for Korean Law MCP: keep Claude Desktop-mediated sidecar flow or add optional API-server MCP client automation.
+1. Structured Phase 11 report export pipeline: PDF first, then DOCX.
+2. SQLite/PostgreSQL persistence with project/report/run/user tables.
+3. Parser provenance per extracted field for uploaded business plan and basic architectural plan documents.
+4. Decision point for Korean Law MCP: keep Claude Desktop-mediated sidecar flow or add optional API-server MCP client automation.

@@ -12,6 +12,7 @@ import {
   Play,
   RefreshCw,
   ShieldCheck,
+  UserCheck,
 } from "lucide-react";
 
 interface RunSummary {
@@ -126,9 +127,20 @@ export default function ProjectOrchestrationPage() {
   const [selectedRun, setSelectedRun] = useState<OrchestrationRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [approvedBy, setApprovedBy] = useState("credit_officer");
+  const [approvalComment, setApprovalComment] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const loadRuns = useCallback(async () => {
+  const loadRunDetail = useCallback(async (runId: string) => {
+    const detailRes = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${runId}`, {
+      cache: "no-store",
+    });
+    if (!detailRes.ok) throw new Error("선택한 run 상세 정보를 불러오지 못했습니다.");
+    return (await detailRes.json()) as OrchestrationRun;
+  }, [projectId]);
+
+  const loadRuns = useCallback(async (preferredRunId?: string) => {
     setError(null);
     const [projectRes, runsRes] = await Promise.all([
       fetch(`${apiBase}/projects/${projectId}`, { cache: "no-store" }),
@@ -143,19 +155,12 @@ export default function ProjectOrchestrationPage() {
     setProject(projectData);
     setRuns(runData);
 
-    if (runData.length > 0) {
-      const latest = [...runData].sort((a, b) => b.started_at.localeCompare(a.started_at))[0];
-      if (!latest) return;
-      const detailRes = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${latest.run_id}`, {
-        cache: "no-store",
-      });
-      if (detailRes.ok) {
-        setSelectedRun((await detailRes.json()) as OrchestrationRun);
-      }
-    } else {
-      setSelectedRun(null);
-    }
-  }, [projectId]);
+    const targetRun = preferredRunId
+      ? runData.find((run) => run.run_id === preferredRunId)
+      : [...runData].sort((a, b) => b.started_at.localeCompare(a.started_at))[0];
+
+    setSelectedRun(targetRun ? await loadRunDetail(targetRun.run_id) : null);
+  }, [loadRunDetail, projectId]);
 
   useEffect(() => {
     let active = true;
@@ -184,13 +189,46 @@ export default function ProjectOrchestrationPage() {
       if (!res.ok) throw new Error("오케스트레이션 실행에 실패했습니다.");
       const run = (await res.json()) as OrchestrationRun;
       setSelectedRun(run);
-      await loadRuns();
+      await loadRuns(run.run_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "오케스트레이션 실행에 실패했습니다.");
     } finally {
       setStarting(false);
     }
   };
+
+  const approveRun = async () => {
+    if (!selectedRun) return;
+    setApproving(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${selectedRun.run_id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          approved_by: approvedBy.trim() || "credit_officer",
+          comment: approvalComment.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(body.detail ?? "승인 처리에 실패했습니다.");
+      }
+      const approvedRun = (await res.json()) as OrchestrationRun;
+      setSelectedRun(approvedRun);
+      setRuns((prev) => prev.map((run) => (
+        run.run_id === approvedRun.run_id
+          ? { ...run, status: approvedRun.status, approval: approvedRun.approval }
+          : run
+      )));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "승인 처리에 실패했습니다.");
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const canApprove = selectedRun?.status === "completed" || selectedRun?.status === "completed_with_warnings";
 
   const qualityTone = useMemo(() => {
     if (!selectedRun?.artifacts.qualityCheck) return "text-slate-500";
@@ -206,13 +244,13 @@ export default function ProjectOrchestrationPage() {
             AI 오케스트레이션
           </h2>
           <p className="mt-1 text-sm text-slate-500">
-            {project.project?.name ?? "프로젝트"}의 Agent 실행, 산출물, 품질 점검을 확인합니다.
+            {project.project?.name ?? "프로젝트"}의 agent 실행, 산출물, 품질 점검, 승인 상태를 확인합니다.
           </p>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => void loadRuns()}
+            onClick={() => void loadRuns(selectedRun?.run_id)}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
           >
             <RefreshCw className="h-4 w-4" />
@@ -263,10 +301,7 @@ export default function ProjectOrchestrationPage() {
                     key={run.run_id}
                     type="button"
                     onClick={async () => {
-                      const res = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${run.run_id}`, {
-                        cache: "no-store",
-                      });
-                      if (res.ok) setSelectedRun((await res.json()) as OrchestrationRun);
+                      setSelectedRun(await loadRunDetail(run.run_id));
                     }}
                     className={`w-full rounded-lg border p-4 text-left transition-colors ${
                       selectedRun?.run_id === run.run_id
@@ -299,9 +334,21 @@ export default function ProjectOrchestrationPage() {
                     <div className="mt-4 grid gap-3 md:grid-cols-3">
                       <Mini label="시작" value={fmtDate(selectedRun.started_at)} />
                       <Mini label="완료" value={fmtDate(selectedRun.completed_at)} />
-                      <Mini label="승인" value={selectedRun.approval ? selectedRun.approval.approved_by : "-"} />
+                      <Mini label="승인자" value={selectedRun.approval ? selectedRun.approval.approved_by : "-"} />
                     </div>
                   </section>
+
+                  <ApprovalPanel
+                    approval={selectedRun.approval}
+                    canApprove={canApprove}
+                    status={selectedRun.status}
+                    approvedBy={approvedBy}
+                    approvalComment={approvalComment}
+                    approving={approving}
+                    onApprovedByChange={setApprovedBy}
+                    onApprovalCommentChange={setApprovalComment}
+                    onApprove={() => void approveRun()}
+                  />
 
                   <section className="grid gap-4 lg:grid-cols-3">
                     <ArtifactPanel
@@ -363,6 +410,87 @@ export default function ProjectOrchestrationPage() {
         </>
       )}
     </div>
+  );
+}
+
+function ApprovalPanel({
+  approval,
+  canApprove,
+  status,
+  approvedBy,
+  approvalComment,
+  approving,
+  onApprovedByChange,
+  onApprovalCommentChange,
+  onApprove,
+}: {
+  approval: RunSummary["approval"];
+  canApprove: boolean;
+  status: string;
+  approvedBy: string;
+  approvalComment: string;
+  approving: boolean;
+  onApprovedByChange: (value: string) => void;
+  onApprovalCommentChange: (value: string) => void;
+  onApprove: () => void;
+}) {
+  if (approval) {
+    return (
+      <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-5 shadow-sm dark:border-emerald-900 dark:bg-emerald-950/20">
+        <div className="flex items-center gap-2">
+          <UserCheck className="h-5 w-5 text-emerald-700 dark:text-emerald-300" />
+          <h3 className="font-bold text-emerald-900 dark:text-emerald-200">승인 완료</h3>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <Mini label="승인자" value={approval.approved_by} />
+          <Mini label="승인 시각" value={fmtDate(approval.approved_at)} />
+          <Mini label="의견" value={approval.comment || "-"} />
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex items-center gap-2">
+        <UserCheck className="h-5 w-5 text-slate-700 dark:text-slate-200" />
+        <h3 className="font-bold text-slate-950 dark:text-white">심사 승인</h3>
+      </div>
+      {!canApprove ? (
+        <p className="mt-3 text-sm text-slate-500">
+          현재 상태가 `{status}`이므로 완료된 run만 승인할 수 있습니다.
+        </p>
+      ) : (
+        <div className="mt-4 grid gap-3 lg:grid-cols-[220px_1fr_auto]">
+          <label className="block">
+            <span className="text-xs font-semibold text-slate-500">승인자</span>
+            <input
+              value={approvedBy}
+              onChange={(event) => onApprovedByChange(event.target.value)}
+              className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-900 outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-semibold text-slate-500">승인 의견</span>
+            <input
+              value={approvalComment}
+              onChange={(event) => onApprovalCommentChange(event.target.value)}
+              placeholder="예: 품질 점검 및 심사 보고서 확인"
+              className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={onApprove}
+            disabled={approving}
+            className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {approving ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserCheck className="h-4 w-4" />}
+            승인
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
 
