@@ -1,12 +1,14 @@
 # Korean Law MCP Integration
 
-Updated: 2026-05-12
+Updated: 2026-05-13
 
 ## Decision
 
 REALYTICS should not vendor or copy `chrisryugj/korean-law-mcp` into this repository.
 
 Use it as a sidecar MCP server and keep a small REALYTICS adapter that normalizes Korean Law MCP results into `law_context`.
+
+P0 status: complete for sidecar mode. REALYTICS provides the query-plan MCP tool, normalized `realytics-law-context-v1` adapter, citation-verification handling, and legal-review agent integration. Direct API-server MCP client automation remains optional future hardening.
 
 ## Why Sidecar
 
@@ -64,10 +66,10 @@ Add it beside the REALYTICS MCP server in Claude Desktop:
     "references": [
       {
         "type": "law",
-        "title": "건축법",
-        "lawName": "건축법",
-        "article": "제11조",
-        "summary": "건축허가 근거 조문"
+        "title": "Building Act",
+        "lawName": "Building Act",
+        "article": "Article 11",
+        "summary": "Permit basis for building works"
       }
     ],
     "citationVerification": {
@@ -88,17 +90,17 @@ REALYTICS normalizes incoming data to:
   "version": "realytics-law-context-v1",
   "source": "korean-law-mcp",
   "connected": true,
-  "retrievedAt": "2026-05-12T00:00:00Z",
+  "retrievedAt": "2026-05-13T00:00:00Z",
   "references": [
     {
       "type": "law",
-      "title": "건축법",
-      "citation": "제11조",
-      "lawName": "건축법",
-      "article": "제11조",
-      "effectiveDate": "20260512",
+      "title": "Building Act",
+      "citation": "Article 11",
+      "lawName": "Building Act",
+      "article": "Article 11",
+      "effectiveDate": "20260513",
       "url": "",
-      "summary": "건축허가 관련 조문",
+      "summary": "Permit-related legal reference",
       "verified": true,
       "rawTool": "search_law"
     }
@@ -117,3 +119,4 @@ REALYTICS normalizes incoming data to:
 - `LAW_OC` is the Korean Law MCP/Law.go.kr API credential. Do not store it in Git.
 - REALYTICS does not issue final legal opinions. Legal and permit findings remain preliminary review outputs.
 - If `citationVerification.failures` is non-empty, REALYTICS marks the legal review as `blocking_issue`.
+- Direct API-server MCP client automation can be added later if Claude Desktop-mediated sidecar operation is not sufficient.

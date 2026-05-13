@@ -1,0 +1,325 @@
+{
+  "version": "realytics-feasibility-study-v2",
+  "project_id": "sample-fs-v2",
+  "project_name": "Sample Mixed-use Development",
+  "asset_type": "mixed_use",
+  "currency": "KRW",
+  "site": {
+    "address": "Anonymized district, Seoul",
+    "land_area_sqm": {
+      "key": "land_area_sqm",
+      "label": "Land Area",
+      "value": 5200,
+      "unit": "SQM",
+      "excel": {
+        "sheet_name": "01_Assumptions",
+        "cell": "C8",
+        "named_range": "fs_land_area_sqm"
+      },
+      "formula": {
+        "formula_type": "input",
+        "depends_on": [],
+        "editable": true,
+        "locked_in_template": false
+      },
+      "provenance": {
+        "source_document": "sample_business_plan.pdf",
+        "source_type": "pdf",
+        "page": 3,
+        "raw_text": "Land area: 5,200 sqm",
+        "confidence": 0.9
+      }
+    },
+    "zoning": "Commercial",
+    "legal_far": {
+      "key": "legal_far",
+      "label": "Legal FAR",
+      "value": 600,
+      "unit": "PERCENT",
+      "excel": {
+        "sheet_name": "01_Assumptions",
+        "cell": "C10",
+        "named_range": "fs_legal_far"
+      }
+    },
+    "legal_bcr": {
+      "key": "legal_bcr",
+      "label": "Legal BCR",
+      "value": 60,
+      "unit": "PERCENT",
+      "excel": {
+        "sheet_name": "01_Assumptions",
+        "cell": "C11",
+        "named_range": "fs_legal_bcr"
+      }
+    }
+  },
+  "program": {
+    "gross_floor_area_sqm": {
+      "key": "gross_floor_area_sqm",
+      "label": "Gross Floor Area",
+      "value": 31200,
+      "unit": "SQM",
+      "excel": {
+        "sheet_name": "01_Assumptions",
+        "cell": "C15",
+        "named_range": "fs_gross_floor_area_sqm"
+      },
+      "formula": {
+        "formula": "=fs_land_area_sqm*fs_legal_far/100",
+        "formula_type": "excel_formula",
+        "depends_on": [
+          "site.land_area_sqm.value",
+          "site.legal_far.value"
+        ],
+        "editable": false,
+        "locked_in_template": true
+      }
+    },
+    "saleable_area_sqm": {
+      "key": "saleable_area_sqm",
+      "label": "Saleable Area",
+      "value": 22464,
+      "unit": "SQM",
+      "excel": {
+        "sheet_name": "01_Assumptions",
+        "cell": "C16",
+        "named_range": "fs_saleable_area_sqm"
+      },
+      "formula": {
+        "formula": "=fs_gross_floor_area_sqm*72%",
+        "formula_type": "excel_formula",
+        "depends_on": [
+          "program.gross_floor_area_sqm.value"
+        ],
+        "editable": false,
+        "locked_in_template": true
+      }
+    }
+  },
+  "product_mix": [
+    {
+      "key": "apt_84",
+      "asset_type": "apartment",
+      "product_name": "Apartment 84",
+      "unit_count": 180,
+      "exclusive_area_sqm": 84,
+      "saleable_area_sqm": 112,
+      "avg_sale_price_per_sqm": 13000000,
+      "revenue": 262080000000,
+      "excel_row_id": "PM-001"
+    },
+    {
+      "key": "retail",
+      "asset_type": "commercial",
+      "product_name": "Retail",
+      "unit_count": 20,
+      "saleable_area_sqm": 120,
+      "avg_sale_price_per_sqm": 16000000,
+      "revenue": 38400000000,
+      "excel_row_id": "PM-002"
+    }
+  ],
+  "revenue_items": [
+    {
+      "key": "sales_revenue",
+      "label": "Sales Revenue",
+      "category": "sales_revenue",
+      "amount": 300480000000,
+      "unit": "KRW",
+      "excel": {
+        "sheet_name": "07_Summary",
+        "named_range": "fs_total_revenue"
+      },
+      "formula": {
+        "formula": "=SUM(tbl_product_mix[revenue])",
+        "formula_type": "excel_formula",
+        "depends_on": [
+          "product_mix"
+        ],
+        "editable": false,
+        "locked_in_template": true
+      }
+    }
+  ],
+  "cost_items": [
+    {
+      "key": "land_cost",
+      "label": "Land Cost",
+      "category": "land",
+      "amount": 95000000000,
+      "unit": "KRW"
+    },
+    {
+      "key": "construction_cost",
+      "label": "Construction Cost",
+      "category": "construction",
+      "amount": 118000000000,
+      "quantity": 31200,
+      "unit_price": 3782051.2821,
+      "unit": "KRW"
+    },
+    {
+      "key": "finance_cost",
+      "label": "Finance Cost",
+      "category": "finance_cost",
+      "amount": 18000000000,
+      "unit": "KRW"
+    },
+    {
+      "key": "indirect_cost",
+      "label": "Indirect and Other Cost",
+      "category": "other",
+      "amount": 27000000000,
+      "unit": "KRW"
+    }
+  ],
+  "financing": [
+    {
+      "tranche_id": "tr_a",
+      "name": "Senior PF",
+      "priority": "senior",
+      "amount": 130000000000,
+      "interest_rate": 0.07,
+      "fee_rate": 0.01,
+      "term_months": 30,
+      "repayment_source": "Sales proceeds",
+      "excel_row_id": "FIN-001"
+    },
+    {
+      "tranche_id": "equity",
+      "name": "Developer Equity",
+      "priority": "equity",
+      "amount": 128000000000,
+      "term_months": 30,
+      "excel_row_id": "FIN-002"
+    }
+  ],
+  "schedule": [
+    {
+      "key": "construction_start",
+      "label": "Construction Start",
+      "planned_date": "2026-09-01",
+      "month_index": 1
+    },
+    {
+      "key": "completion",
+      "label": "Completion",
+      "planned_date": "2029-02-28",
+      "month_index": 30
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "base",
+      "label": "Base",
+      "sales_price_factor": 1,
+      "construction_cost_factor": 1,
+      "interest_rate_addition": 0,
+      "sales_rate": 1,
+      "delay_months": 0
+    },
+    {
+      "scenario_id": "downside",
+      "label": "Sales -10%, Cost +5%",
+      "sales_price_factor": 0.9,
+      "construction_cost_factor": 1.05,
+      "interest_rate_addition": 0.01,
+      "sales_rate": 0.85,
+      "delay_months": 6
+    }
+  ],
+  "workbook": {
+    "workbook_version": "realytics-fs-xlsx-v1",
+    "template_name": "REALYTICS_Feasibility_Study_Template",
+    "formula_policy": "preserve_excel_formulas",
+    "unit_scale": "KRW_MILLION",
+    "sheets": [
+      {
+        "sheet_name": "00_Control",
+        "role": "cover",
+        "required": true
+      },
+      {
+        "sheet_name": "01_Assumptions",
+        "role": "inputs",
+        "required": true
+      },
+      {
+        "sheet_name": "02_ProductMix",
+        "role": "product_mix",
+        "required": true
+      },
+      {
+        "sheet_name": "03_Costs",
+        "role": "costs",
+        "required": true
+      },
+      {
+        "sheet_name": "04_Financing",
+        "role": "financing",
+        "required": true
+      },
+      {
+        "sheet_name": "05_MonthlyCF",
+        "role": "monthly_cf",
+        "required": true
+      },
+      {
+        "sheet_name": "06_Sensitivity",
+        "role": "sensitivity",
+        "required": true
+      },
+      {
+        "sheet_name": "07_Summary",
+        "role": "summary",
+        "required": true
+      },
+      {
+        "sheet_name": "99_Checks",
+        "role": "checks",
+        "required": true
+      },
+      {
+        "sheet_name": "_ExportMap",
+        "role": "export_map",
+        "required": true
+      }
+    ],
+    "named_ranges": {
+      "project_name": "fs_project_name",
+      "asset_type": "fs_asset_type",
+      "site.land_area_sqm.value": "fs_land_area_sqm",
+      "site.legal_far.value": "fs_legal_far",
+      "site.legal_bcr.value": "fs_legal_bcr",
+      "program.gross_floor_area_sqm.value": "fs_gross_floor_area_sqm",
+      "program.saleable_area_sqm.value": "fs_saleable_area_sqm",
+      "metrics.total_revenue": "fs_total_revenue",
+      "metrics.total_cost": "fs_total_cost",
+      "metrics.development_profit": "fs_development_profit",
+      "metrics.profit_margin": "fs_profit_margin",
+      "metrics.profit_on_cost": "fs_profit_on_cost",
+      "metrics.break_even_sale_rate": "fs_break_even_sale_rate",
+      "metrics.max_minus": "fs_max_minus",
+      "metrics.ltv": "fs_ltv",
+      "metrics.ltc": "fs_ltc",
+      "metrics.exit_sale_rate": "fs_exit_sale_rate"
+    }
+  },
+  "metrics": {
+    "total_revenue": 300480000000,
+    "total_cost": 258000000000,
+    "development_profit": 42480000000,
+    "profit_margin": 0.141374,
+    "profit_on_cost": 0.164651,
+    "break_even_sale_rate": 0.858626,
+    "required_equity": 128000000000,
+    "max_minus": -128000000000,
+    "ltv": 0.43264,
+    "ltc": 0.503876,
+    "exit_sale_rate": 0.492545
+  },
+  "raw_import": {
+    "source": "schema_fixture"
+  }
+}

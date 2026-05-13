@@ -121,11 +121,13 @@ APIs:
 ### Development Feasibility Agent
 
 File: `services/api-server/agents/development_feasibility_agent.py`
+Schema: `services/api-server/schemas/feasibility_study.py`
 
 Purpose:
 
 - Parse business plan/basic architectural plan fields into developer-side feasibility.
 - Support both developer usage and PF review usage.
+- Provide a migration path to `realytics-feasibility-study-v2`, the canonical schema for Excel import/export and later automatic calculation.
 
 Outputs:
 
@@ -136,6 +138,13 @@ Outputs:
 - PF readiness
 - Sensitivity analysis
 - Data quality warnings
+
+Feasibility Study v2 schema:
+
+- Backend Pydantic schema added for site, program, product mix, revenue items, cost items, financing, schedule, scenarios, workbook mapping, provenance, formulas, and metrics.
+- Frontend TypeScript mirror added in `apps/web/lib/feasibility-study-types.ts`.
+- Fixture added in `services/api-server/data/fixtures/feasibility_study_v2_schema_example.json`.
+- Workbook template contract added as `realytics-fs-xlsx-v1`, with named ranges, repeated Excel tables, formula preservation, import provenance, and checks-sheet requirements.
 
 API:
 
@@ -179,6 +188,7 @@ Important:
 
 - Korean Law MCP is intentionally not vendored into this repository.
 - The recommended deployment is a sidecar MCP server plus REALYTICS adapter.
+- The P0 connector scope is complete for sidecar mode: query planning, normalized `realytics-law-context-v1`, citation-verification handling, and legal-review integration are implemented.
 - The agent does not pretend to have authoritative legal sources when `law_context` is missing.
 - It returns `connected: false` and caution findings when no MCP legal context is supplied.
 
@@ -256,7 +266,7 @@ Latest verification baseline:
 - Orchestration runs are synchronous, not background jobs.
 - Generated reports and orchestration runs persist through SQLite tables, but do not yet have rich relational querying, migrations, or multi-user isolation.
 - Frontend displays orchestration run detail, agent artifacts, and approval actions; deeper approval audit trails are not yet modeled beyond the run approval record.
-- Korean Law MCP sidecar is represented through query planning and normalized `law_context`; direct automated MCP client calls are not yet built into the API server.
+- Korean Law MCP sidecar integration is complete for P0. Direct API-server MCP client automation is optional future hardening, not a blocker for the current connector.
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 - Source-level provenance per parsed field is not yet persisted.
@@ -268,16 +278,17 @@ Latest verification baseline:
 
 - Add PDF/DOCX binary renderers from the structured Phase 11 report export pipeline.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
-- Decide whether Korean Law MCP remains Claude Desktop-mediated only or gets optional API-server-side MCP client automation.
 - Add parser provenance per extracted field so report values can be traced back to uploaded documents.
 
 ### P1
 
 - Add Excel-style developer feasibility export.
+- Generate/import the `realytics-fs-xlsx-v1` feasibility workbook with formulas preserved.
 - Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.
 - Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
 - Convert synchronous orchestration into async queue-based jobs.
 - Add UI/API scenario workflow for waterfall and unsold LTV matrix.
+- Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
 
 ### P2
 
@@ -288,4 +299,4 @@ Latest verification baseline:
 
 ## Git Note
 
-Latest committed implementation baseline before this work: `40b83d9 Harden Phase 11 report exports`.
+Latest committed implementation baseline before this work: `d9e0c0f Add SQLite runtime storage`.

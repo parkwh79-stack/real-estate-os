@@ -17,6 +17,7 @@ Updated: 2026-05-13
 - Developer feasibility agent.
 - Marketability agent for saleable assets.
 - Korean legal/permit review agent with Korean Law MCP sidecar context adapter.
+- Korean Law MCP connector P0 scope: sidecar guide, query-plan MCP tool, normalized `realytics-law-context-v1`, citation-verification handling, and legal-review integration.
 - PF review orchestration API and frontend run dashboard.
 - Frontend approval action UI for completed orchestration runs.
 - Project CRUD baseline with create, list, get, update, delete, metadata, and cleanup of related MVP report/run records.
@@ -25,6 +26,7 @@ Updated: 2026-05-13
 - P0 basic PF risk matrix with category rows, heatmap, top risks, and recommendations.
 - SQLite-backed MVP persistence for projects, reports, and orchestration runs, with legacy JSON fallback/migration.
 - A4 print layout QA checklist.
+- Feasibility Study v2 schema and `realytics-fs-xlsx-v1` Excel workbook mapping for formula-preserving import/export.
 
 ## P0 Next Actions
 
@@ -41,18 +43,16 @@ Updated: 2026-05-13
    - Capture source document, page number if available, extraction mode, confidence, and original text span.
    - Surface provenance in report QA and legal/credit review.
 
-4. Decide Korean Law MCP automation depth.
-   - Current recommended path: Claude Desktop sidecar calls Korean Law MCP, then passes `law_context` to REALYTICS.
-   - Optional future path: API server acts as MCP client and calls Korean Law MCP automatically.
-   - Do not vendor/copy the external Korean Law MCP package into this repo unless a long-term maintenance decision changes.
-
 ## P1 Next Actions
 
 1. Add Excel export for developer feasibility and cash flow outputs.
+   - First target: generate a blank `realytics-fs-xlsx-v1` workbook from `FeasibilityStudyV2`.
+   - Preserve formulas in derived cells and use named ranges/tables for import/export.
 2. Add anonymized parser regression fixtures from real business plan/basic architectural plan samples.
 3. Add standalone UI pages for development feasibility, marketability, legal review, and orchestration artifacts.
 4. Convert synchronous orchestration into queue-based background jobs.
 5. Add UI/API scenario workflow for waterfall and unsold LTV matrix.
+6. Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
 
 ## Product Risk Notes
 

@@ -27,14 +27,19 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 2. Auth/session storage with user, tenant, and audit tables.
 3. Parser provenance per extracted field for uploaded business plan and basic architectural plan documents.
 4. PostgreSQL migration path for multi-user production.
-5. Decision point for Korean Law MCP: keep Claude Desktop-mediated sidecar flow or add optional API-server MCP client automation.
 
 ## Completed P0 Engine Baseline
 
 - Project CRUD.
 - Feasibility calculation.
+- Feasibility Study v2 schema and formula-preserving Excel workbook mapping.
 - Monthly cash flow and Max Minus.
 - LTV, LTC, DSCR, and exit sale rate.
 - Basic real estate PF risk matrix.
 - Phase 11 report generation, version metadata, and Markdown/JSON/HTML export artifacts.
 - SQLite-backed project/report/orchestration runtime persistence.
+- Korean Law MCP sidecar connector with query plan MCP tool, normalized law context adapter, citation verification handling, and legal-review integration.
+
+## Optional Hardening
+
+- API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
