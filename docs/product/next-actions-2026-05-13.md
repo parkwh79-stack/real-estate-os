@@ -18,6 +18,8 @@ Updated: 2026-05-13
 - Korean legal/permit review agent with Korean Law MCP sidecar context adapter.
 - PF review orchestration API and frontend run dashboard.
 - Frontend approval action UI for completed orchestration runs.
+- Project CRUD baseline with create, list, get, update, delete, metadata, and cleanup of related MVP report/run records.
+- Feasibility calculation baseline with pure metrics and API integration.
 - P0 calculation engine for monthly cash flow, Max Minus, LTV/LTC/DSCR, and exit sale rate.
 - P0 basic PF risk matrix with category rows, heatmap, top risks, and recommendations.
 - File-backed MVP persistence for projects, reports, and orchestration runs.

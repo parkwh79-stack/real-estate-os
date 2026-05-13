@@ -15,8 +15,8 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 
 ### `POST /projects`
 - **Description**: Create a new project.
-- **Request Body**: `{ "name": "Project Name", "type": "Mixed Use", ... }`
-- **Response**: The created project object.
+- **Request Body**: `{ "project": { "name": "Project Name", "type": "mixed_use" }, "feasibility_input": {...} }`
+- **Response**: The created project record with `project.id`, default `project.status`, and `_meta.created_at` / `_meta.updated_at`.
 
 ### `GET /projects/{project_id}`
 - **Description**: Retrieve details of a specific project.
@@ -26,6 +26,10 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Update project details.
 - **Request Body**: Partial or full project object.
 - **Response**: The updated project object.
+
+### `DELETE /projects/{project_id}`
+- **Description**: Delete a project and remove associated MVP report/orchestration runtime records.
+- **Response**: `{ "deleted": true, "project_id": "...", "project": {...} }`
 
 ### `POST /projects/{project_id}/upload`
 - **Description**: Upload a PDF business plan and extract project data with the configured server-side AI provider.
@@ -48,8 +52,8 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 
 ### `POST /projects/{project_id}/feasibility/calculate`
 - **Description**: Trigger feasibility calculation.
-- **Request Body**: `{ "land": {...}, "regulation": {...}, ... }`
-- **Response**: Feasibility results (Total revenue, costs, dev profit, margins).
+- **Request Body**: Optional override for `feasibility_input`, such as `{ "total_revenue": 0, "total_cost": 0 }` or component values like `sales_revenue`, `other_revenue`, `land_cost`, `construction_cost`, `finance_cost`, and `other_cost`.
+- **Response**: Total revenue, total cost, development profit, profit margin, profit-on-cost, cost ratio, break-even revenue, surplus to break-even, and feasibility status.
 
 ### `POST /projects/{project_id}/development-feasibility/analyze`
 - **Description**: Analyze developer-side project feasibility from business plan or architectural plan data.

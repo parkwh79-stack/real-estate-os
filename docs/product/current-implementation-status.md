@@ -12,6 +12,22 @@ The AI connection layer records provider, runtime mode, model, host, and linked 
 
 ## Implemented
 
+### Project CRUD
+
+API:
+
+- `GET /projects/`
+- `POST /projects/`
+- `GET /projects/{project_id}`
+- `PUT /projects/{project_id}`
+- `DELETE /projects/{project_id}`
+
+Capabilities:
+
+- JSON-backed MVP create, list, get, update, and delete.
+- Project records are normalized into a `project` envelope with `project.id`, default `project.status`, and `_meta.created_at` / `_meta.updated_at`.
+- Delete removes associated MVP report and orchestration runtime records.
+
 ### Phase 11 PF Review Report
 
 - 20-section Hana-style PF review report structure.
@@ -73,6 +89,8 @@ Files:
 
 Implemented P0 calculation outputs:
 
+- Feasibility metrics from totals or revenue/cost components.
+- Development profit, profit margin, profit-on-cost, cost ratio, break-even revenue, surplus to break-even, and feasibility status.
 - Monthly cash-flow builder from either net cashflows or cash-in/cash-out schedules.
 - Max Minus details including amount, month, period, funding gap, cumulative CF, and ending cash.
 - PF metrics bundle for LTV, LTC, DSCR, and exit sale rate.
@@ -88,6 +106,7 @@ Implemented P0 risk outputs:
 
 APIs:
 
+- `POST /projects/{project_id}/feasibility/calculate`
 - `POST /projects/{project_id}/cashflow/calculate`
 - `POST /projects/{project_id}/pf/structure`
 - `POST /projects/{project_id}/risk/assess`
@@ -218,7 +237,7 @@ API/MCP user linkage:
 
 Latest verification baseline:
 
-- API tests: `41 passed`
+- API tests: `48 passed`
 - Web lint: passed
 - Web type check: passed
 - Web build: passed
@@ -264,4 +283,4 @@ Latest verification baseline:
 
 ## Git Note
 
-Latest committed implementation baseline before this work: `8e2758a Add orchestration approval UI`.
+Latest committed implementation baseline before this work: `808ffe7 Complete P0 calculation and risk engines`.

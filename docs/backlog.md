@@ -4,8 +4,8 @@ Updated: 2026-05-13
 
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
-| P0 | Core | Project CRUD | In Progress | In-memory or simple DB for MVP |
-| P0 | Calculation | Feasibility calculation | In Progress | Requires pure functions and tests |
+| P0 | Core | Project CRUD | Done | JSON-backed MVP CRUD supports create, list, get, update, delete, metadata, and related report/run cleanup |
+| P0 | Calculation | Feasibility calculation | Done | Pure feasibility metrics and API return revenue, cost, profit, margin, profit-on-cost, break-even, and status |
 | P0 | Calculation | Monthly Cash Flow | Done | Structured monthly CF builder supports net cashflows or cash-in/cash-out schedules |
 | P0 | Calculation | Max Minus | Done | Returns max minus amount, month, period, funding gap, cumulative CF, and ending cash |
 | P0 | Calculation | LTV/LTC/DSCR | Done | PF metrics return values, status bands, tranche all-in cost, debt service, and summary |

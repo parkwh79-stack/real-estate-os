@@ -10,7 +10,7 @@ from agents.parser_agent import ParserAgent
 from core.calculations import (
     calculate_development_profit, calculate_profit_margin, calculate_cashflow_max_minus,
     calculate_all_in_cost, calculate_exit_sale_rate, calculate_ltv, calculate_ltc, calculate_dscr,
-    build_monthly_cash_flow, calculate_pf_metrics
+    build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk, build_basic_risk_matrix
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
@@ -32,6 +32,26 @@ project_id_counter = 1
 
 def persist_state() -> None:
     save_state(PROJECTS_DB, REPORTS_DB, ORCHESTRATIONS_DB, project_id_counter)
+
+def normalize_project_record(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    now = now_iso()
+    record = dict(project_data)
+    project = dict(record.get("project", {}))
+    if not project:
+        project = {
+            key: record.pop(key)
+            for key in list(record.keys())
+            if key in {"name", "type", "status", "review_date"}
+        }
+    project["id"] = project_id
+    project.setdefault("name", record.get("name", f"Project {project_id}"))
+    project.setdefault("status", "draft")
+    record["project"] = project
+    record["id"] = project_id
+    record.setdefault("_meta", {})
+    record["_meta"].setdefault("created_at", now)
+    record["_meta"]["updated_at"] = now
+    return record
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(base)
@@ -157,11 +177,10 @@ def get_projects():
 def create_project(project_data: Dict[str, Any]):
     global project_id_counter
     pid = str(project_id_counter)
-    project_data["id"] = pid
-    PROJECTS_DB[pid] = project_data
+    PROJECTS_DB[pid] = normalize_project_record(pid, project_data)
     project_id_counter += 1
     persist_state()
-    return project_data
+    return PROJECTS_DB[pid]
 
 @router.get("/{project_id}")
 def get_project(project_id: str):
@@ -173,9 +192,26 @@ def get_project(project_id: str):
 def update_project(project_id: str, project_data: Dict[str, Any]):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    PROJECTS_DB[project_id].update(project_data)
+    PROJECTS_DB[project_id] = normalize_project_record(
+        project_id,
+        deep_merge(PROJECTS_DB[project_id], project_data),
+    )
     persist_state()
     return PROJECTS_DB[project_id]
+
+@router.delete("/{project_id}")
+def delete_project(project_id: str):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    deleted = PROJECTS_DB.pop(project_id)
+    REPORTS_DB.pop(project_id, None)
+    ORCHESTRATIONS_DB.pop(project_id, None)
+    persist_state()
+    return {
+        "deleted": True,
+        "project_id": project_id,
+        "project": deleted.get("project", {}),
+    }
 
 @router.post("/{project_id}/upload")
 async def upload_business_plan(
@@ -268,18 +304,11 @@ def resolve_project_ai_connection(project_id: str, input_data: Dict[str, Any] | 
 
 @router.post("/{project_id}/feasibility/calculate")
 def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
-    # Extracted from standard fixture structure `feasibility_input`
-    rev = input_data.get("total_revenue", 0)
-    cost = input_data.get("total_cost", 0)
-    
-    profit = calculate_development_profit(rev, cost)
-    margin = calculate_profit_margin(profit, rev)
-    
-    result = {
-        "development_profit": profit,
-        "profit_margin": margin
-    }
-    return result
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_feasibility = PROJECTS_DB[project_id].get("feasibility_input", {})
+    source_data = deep_merge(project_feasibility, input_data or {})
+    return calculate_feasibility_metrics(source_data)
 
 @router.post("/{project_id}/development-feasibility/analyze")
 def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] | None = None):

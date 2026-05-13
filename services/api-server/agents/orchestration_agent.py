@@ -8,9 +8,8 @@ from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.report_agent import ReportAgent
 from core.calculations import (
+    calculate_feasibility_metrics,
     calculate_pf_metrics,
-    calculate_development_profit,
-    calculate_profit_margin,
 )
 from core.risk_assessment import build_basic_risk_matrix
 from schemas.orchestration import PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
@@ -115,16 +114,7 @@ class OrchestrationAgent:
         return run
 
     def _calculate_feasibility(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        feasibility = data.get("feasibility_input", {})
-        total_revenue = feasibility.get("total_revenue", 0)
-        total_cost = feasibility.get("total_cost", 0)
-        development_profit = calculate_development_profit(total_revenue, total_cost)
-        return {
-            "total_revenue": total_revenue,
-            "total_cost": total_cost,
-            "development_profit": development_profit,
-            "profit_margin": calculate_profit_margin(development_profit, total_revenue),
-        }
+        return calculate_feasibility_metrics(data.get("feasibility_input", {}))
 
     def _calculate_pf_structure(self, data: Dict[str, Any]) -> Dict[str, Any]:
         feasibility = data.get("feasibility_input", {})

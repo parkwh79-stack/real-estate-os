@@ -20,6 +20,53 @@ def calculate_profit_margin(development_profit: float, total_revenue: float) -> 
         return 0.0
     return development_profit / total_revenue
 
+def calculate_profit_on_cost(development_profit: float, total_cost: float) -> float:
+    if total_cost <= 0:
+        return 0.0
+    return development_profit / total_cost
+
+def calculate_feasibility_metrics(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    sales_revenue = _to_float(input_data.get("sales_revenue", 0.0))
+    other_revenue = _to_float(input_data.get("other_revenue", 0.0))
+    total_revenue = _to_float(input_data.get("total_revenue", 0.0))
+    if total_revenue <= 0:
+        total_revenue = calculate_total_revenue(sales_revenue, other_revenue)
+
+    land_cost = _to_float(input_data.get("land_cost", 0.0))
+    construction_cost = _to_float(input_data.get("construction_cost", 0.0))
+    finance_cost = _to_float(input_data.get("finance_cost", 0.0))
+    other_cost = _to_float(input_data.get("other_cost", 0.0))
+    total_cost = _to_float(input_data.get("total_cost", 0.0))
+    if total_cost <= 0:
+        total_cost = calculate_total_cost(land_cost, construction_cost, finance_cost, other_cost)
+
+    development_profit = calculate_development_profit(total_revenue, total_cost)
+    profit_margin = calculate_profit_margin(development_profit, total_revenue)
+    profit_on_cost = calculate_profit_on_cost(development_profit, total_cost)
+    cost_ratio = total_cost / total_revenue if total_revenue > 0 else 0.0
+    break_even_revenue = total_cost
+    revenue_surplus_to_break_even = total_revenue - break_even_revenue
+
+    return {
+        "total_revenue": total_revenue,
+        "total_cost": total_cost,
+        "development_profit": development_profit,
+        "profit_margin": profit_margin,
+        "profit_on_cost": profit_on_cost,
+        "cost_ratio": cost_ratio,
+        "break_even_revenue": break_even_revenue,
+        "revenue_surplus_to_break_even": revenue_surplus_to_break_even,
+        "status": _feasibility_status(profit_margin, profit_on_cost),
+        "inputs": {
+            "sales_revenue": sales_revenue,
+            "other_revenue": other_revenue,
+            "land_cost": land_cost,
+            "construction_cost": construction_cost,
+            "finance_cost": finance_cost,
+            "other_cost": other_cost,
+        },
+    }
+
 def calculate_ltv(pf_amount: float, total_revenue: float) -> float:
     if total_revenue <= 0:
         return 0.0
@@ -333,3 +380,14 @@ def _pf_metric_summary(ltv: float, ltc: float, dscr: float, exit_sale_rate: floa
     if "caution" in statuses:
         return "PF metrics are generally workable but require credit review attention."
     return "PF metrics are within conservative review thresholds."
+
+def _feasibility_status(profit_margin: float, profit_on_cost: float) -> str:
+    if profit_margin < 0 or profit_on_cost < 0:
+        return "loss"
+    if profit_margin >= 0.18 and profit_on_cost >= 0.22:
+        return "strong"
+    if profit_margin >= 0.12 and profit_on_cost >= 0.15:
+        return "bankable"
+    if profit_margin >= 0.07 and profit_on_cost >= 0.10:
+        return "thin"
+    return "weak"

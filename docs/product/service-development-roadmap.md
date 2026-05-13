@@ -30,6 +30,8 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 
 ## Completed P0 Engine Baseline
 
+- Project CRUD.
+- Feasibility calculation.
 - Monthly cash flow and Max Minus.
 - LTV, LTC, DSCR, and exit sale rate.
 - Basic real estate PF risk matrix.

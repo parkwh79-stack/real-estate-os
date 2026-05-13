@@ -5,7 +5,7 @@ from core.calculations import (
     calculate_ltc, calculate_dscr, calculate_all_in_cost, calculate_exit_sale_rate,
     calculate_cashflow_max_minus, simulate_waterfall, calculate_unsold_ltv,
     calculate_tranche_recovery, calculate_cashflow_max_minus_details,
-    build_monthly_cash_flow, calculate_pf_metrics
+    build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics
 )
 from core.risk_assessment import build_basic_risk_matrix
 
@@ -31,6 +31,31 @@ def test_calculate_development_profit():
 def test_calculate_profit_margin():
     assert calculate_profit_margin(200, 1000) == 0.2
     assert calculate_profit_margin(200, 0) == 0.0
+
+def test_calculate_feasibility_metrics_from_totals():
+    result = calculate_feasibility_metrics({
+        "total_revenue": 1200,
+        "total_cost": 900,
+    })
+    assert result["development_profit"] == 300
+    assert result["profit_margin"] == 0.25
+    assert result["profit_on_cost"] == pytest.approx(0.3333333333)
+    assert result["break_even_revenue"] == 900
+    assert result["status"] == "strong"
+
+def test_calculate_feasibility_metrics_from_components():
+    result = calculate_feasibility_metrics({
+        "sales_revenue": 1000,
+        "other_revenue": 50,
+        "land_cost": 250,
+        "construction_cost": 500,
+        "finance_cost": 80,
+        "other_cost": 70,
+    })
+    assert result["total_revenue"] == 1050
+    assert result["total_cost"] == 900
+    assert result["development_profit"] == 150
+    assert result["status"] in {"bankable", "thin", "weak", "strong"}
 
 def test_calculate_ltv():
     assert calculate_ltv(500, 1000) == 0.5
