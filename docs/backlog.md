@@ -1,5 +1,7 @@
 # Product Backlog
 
+Updated: 2026-05-13
+
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
 | P0 | Core | Project CRUD | In Progress | In-memory or simple DB for MVP |
@@ -18,9 +20,12 @@
 | P0 | Storage | Persistent project/report/run storage | In Progress | JSON state storage added; next step is SQLite/PostgreSQL |
 | P0 | Orchestration | Upload-to-run flow | Done | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run via `/upload-and-run` |
 | P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks |
+| P0 | Frontend | Orchestration approval action UI | Next | Wire existing approve API into run dashboard with reviewer/comment input and approved state refresh |
 | P0 | Integration | Korean Law MCP connector | In Progress | Sidecar integration guide, query plan tool, and `realytics-law-context-v1` adapter added; direct MCP client automation remains optional |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
+| P0 | Report | Structured report export pipeline | Next | Generate PDF/DOCX from Phase 11 structured sections and retain export history |
+| P0 | Parser | Source provenance per parsed field | Next | Persist page/source/confidence metadata for uploaded business plan/basic architectural plan fields |
 | P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |
 | P1 | Export | Excel upload | Planned | |
 | P1 | Export | Developer feasibility Excel export | Planned | Export developer-side feasibility table, sensitivity, PF readiness |

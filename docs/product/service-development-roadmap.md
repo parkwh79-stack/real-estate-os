@@ -1,5 +1,7 @@
 # Service Development Roadmap
 
+Updated: 2026-05-13
+
 | Phase | Description | Key Deliverables | Status | Priority |
 |---|---|---|---|---|
 | **Phase 1: MVP** | Core project management and calculation engines. | Feasibility calculation, Basic risk review, Project CRUD. | In Progress | P0 |
@@ -18,3 +20,11 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 - **Backend**: FastAPI (Python)
 - **Data/Storage**: TBD (PostgreSQL for RDBMS, Redis for cache)
 - **AI/Agents**: Provider-aware custom Agent ecosystem supporting OpenAI, Anthropic Claude API, and Claude Desktop MCP host metadata
+
+## Immediate Execution Order
+
+1. Frontend approval action UI for orchestration runs.
+2. Structured Phase 11 report export pipeline: PDF first, then DOCX.
+3. SQLite/PostgreSQL persistence with project/report/run/user tables.
+4. Parser provenance per extracted field for uploaded business plan and basic architectural plan documents.
+5. Decision point for Korean Law MCP: keep Claude Desktop-mediated sidecar flow or add optional API-server MCP client automation.

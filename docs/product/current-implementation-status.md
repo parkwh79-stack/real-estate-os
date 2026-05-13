@@ -1,14 +1,14 @@
 # REALYTICS x PLATFORM9 Current Implementation Status
 
-Updated: 2026-05-12
+Updated: 2026-05-13
 
 ## Summary
 
-The platform now has an MVP-level PF review orchestration flow that can serve both financial institution PF review and real estate developer feasibility review.
+The platform has an MVP-level PF review orchestration flow that can serve both financial institution PF review and real estate developer feasibility review.
 
-The current implementation is synchronous and now has file-backed JSON state storage for projects, reports, and orchestration runs. The agent boundaries, API endpoints, MCP tools, tests, and documentation have been structured so the system can later move to SQLite/PostgreSQL, async jobs, and UI-based run monitoring.
+The current implementation is synchronous and uses file-backed JSON state storage for projects, reports, and orchestration runs. Agent boundaries, API endpoints, MCP tools, tests, and documentation are now structured so the system can later move to SQLite/PostgreSQL, async jobs, and stronger UI-based monitoring.
 
-The AI connection layer now records the selected provider, runtime mode, model, host, and linked `user_id` for API uploads, MCP document parsing, and orchestration runs.
+The AI connection layer records provider, runtime mode, model, host, and linked `user_id` for API uploads, MCP document parsing, and orchestration runs.
 
 ## Implemented
 
@@ -17,7 +17,6 @@ The AI connection layer now records the selected provider, runtime mode, model, 
 - 20-section Hana-style PF review report structure.
 - Structured API response for `POST /projects/{project_id}/reports/generate`.
 - Markdown compatibility output through `report_markdown`.
-- Report metadata storage in in-memory `REPORTS_DB`.
 - Report section registry in `services/api-server/schemas/report.py`.
 - Frontend report payload types in `apps/web/lib/report-types.ts`.
 - Anonymized Hana-style regression fixture in `services/api-server/data/fixtures/hana_pf_review_anonymized.json`.
@@ -42,9 +41,10 @@ The AI connection layer now records the selected provider, runtime mode, model, 
 
 Frontend:
 
-- Project detail now includes an `AI 오케스트레이션` step.
+- Project detail includes an `AI orchestration` step.
 - Route: `apps/web/app/project/[id]/orchestration/page.tsx`
 - The screen can start a PF review run, refresh run history, select a run, and inspect developer feasibility, marketability, legal/permit, report, and quality-check artifacts.
+- Approval API exists, but the frontend approval action UI is still a P0 next task.
 
 ### Persistent MVP State Storage
 
@@ -141,19 +141,18 @@ Docs:
 
 - `docs/integrations/korean-law-mcp.md`
 
-### Parser Agent Improvements
+### Parser Agent and AI Connection
 
-File: `services/api-server/agents/parser_agent.py`
+Files:
 
-Supporting file: `services/api-server/agents/ai_connection.py`
+- `services/api-server/agents/parser_agent.py`
+- `services/api-server/agents/ai_connection.py`
 
-Added extraction hints for:
+Supported extraction hints:
 
 - `architectural_plan`
 - `sales_assumptions`
 - `cost_assumptions`
-
-Mock fallback now includes `_meta.parsing_source = "mock"` and `_meta.ai_connection` so downstream reports can identify non-real server-side parsed data and the user/provider context.
 
 Supported AI connection modes:
 
@@ -171,30 +170,31 @@ API/MCP user linkage:
 ### Upload-to-Run Flow
 
 - API: `POST /projects/{project_id}/upload-and-run`
-- Frontend: project detail file upload panel now supports both "document analysis" and "analyze then run PF review".
+- Frontend: project detail file upload panel supports both document analysis and analyze-then-run PF review.
 - The endpoint parses the uploaded business plan/basic architectural plan, updates the project, runs PF review orchestration, persists the run, and saves the Phase 11 report artifact.
 - In `claude_desktop` mode it returns `host_llm_required` instead of pretending the server can call the Claude Desktop host model.
 
 ## Current Orchestration Steps
 
-1. `project_load`: 프로젝트 데이터 로드
-2. `development_feasibility_analysis`: 디벨로퍼 사업수지분석
-3. `feasibility_calculation`: 사업성 계산
-4. `pf_structure_calculation`: PF 구조 계산
-5. `marketability_analysis`: 분양성 검증
-6. `legal_permit_review`: 법률/인허가 예비 검토
-7. `risk_assessment`: 리스크 평가
-8. `phase11_report_generation`: Phase 11 보고서 생성
-9. `quality_check`: 품질 점검
+1. `project_load`: Load project data.
+2. `development_feasibility_analysis`: Analyze developer-side feasibility from business/basic architectural plan fields.
+3. `feasibility_calculation`: Run core feasibility calculations.
+4. `pf_structure_calculation`: Calculate PF tranche and loan structure metrics.
+5. `marketability_analysis`: Validate marketability for saleable real estate assets.
+6. `legal_permit_review`: Run preliminary legal, permit, land-rights, trust-security, and covenant checks.
+7. `risk_assessment`: Produce a basic risk matrix.
+8. `phase11_report_generation`: Generate the Phase 11 PF review report artifact.
+9. `quality_check`: Check required artifacts and report completeness.
 
 ## Verification
 
-Latest verification:
+Latest verification baseline:
 
-- API tests: `32 passed`
+- API tests: `36 passed`
 - Web lint: passed
 - Web type check: passed
 - Web build: passed
+- Local dev servers: stopped as of 2026-05-13 after the user requested shutdown.
 
 ## Current Limitations
 
@@ -205,31 +205,36 @@ Latest verification:
 - Korean Law MCP sidecar is represented through query planning and normalized `law_context`; direct automated MCP client calls are not yet built into the API server.
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
+- Source-level provenance per parsed field is not yet persisted.
+- PDF/DOCX/Excel exports are not yet implemented from the structured report data.
 
 ## Next Work
 
 ### P0
 
+- Add approval action UI to the frontend orchestration run dashboard using the existing approve API.
+- Add PDF/DOCX export from the structured Phase 11 report data.
+- Add persistent report versioning and export history.
 - Replace JSON state storage with SQLite or PostgreSQL.
-- Add approval action UI to the frontend orchestration run dashboard.
-- Add persistent report versioning.
-- Optionally add direct API-server MCP client automation for Korean Law MCP sidecar calls.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
+- Decide whether Korean Law MCP remains Claude Desktop-mediated only or gets optional API-server-side MCP client automation.
+- Add parser provenance per extracted field so report values can be traced back to uploaded documents.
 
 ### P1
 
-- Add PDF/DOCX export from the structured Phase 11 report data.
-- Add Excel-style developer feasibility table export.
-- Add real anonymized business plan fixtures for parser and feasibility regression tests.
-- Add UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
+- Add Excel-style developer feasibility export.
+- Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.
+- Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
+- Convert synchronous orchestration into async queue-based jobs.
+- Harden calculation engines for monthly cash flow, max minus, LTV/LTC/DSCR, exit sale rate, waterfall, and unsold LTV matrix.
 
 ### P2
 
-- Convert synchronous orchestration into async queue-based jobs.
 - Add user/organization workspace and RBAC.
-- Add source citation/provenance per parsed field.
+- Add source citation/provenance views in the frontend.
 - Add private institution-specific credit policy rules.
+- Add deployment pipeline for staging and production.
 
 ## Git Note
 
-The latest source changes are present in the workspace. Git staging/commit may still require elevated permission in this local environment. Python `__pycache__` artifacts generated by tests should be excluded before the next commit.
+Latest committed implementation baseline: `6af8cc1 Add Korean Law MCP sidecar adapter`.
