@@ -255,6 +255,18 @@ Checks:
 5. Add API calculation parity checks against Excel outputs.
 6. Connect the imported `FeasibilityStudyV2` object to Development Feasibility Agent v2.
 
+## Validation First Rule
+
+Before the Feasibility Study Agent accepts any Excel workbook as an authoritative number source, run the workbook validation process in [`feasibility-workbook-validation.md`](feasibility-workbook-validation.md).
+
+Minimum gates:
+
+- Required workbook sheets are present.
+- Key financial cells are mapped and extracted with formula provenance.
+- Revenue, cost, profit, and external summary reconciliations pass.
+- Formula scan reports no unresolved `#REF!` in authoritative cells.
+- Direct v2 import is available through `fs_*` named ranges/tables, or a known legacy adapter is selected.
+
 ## Open Decisions
 
 - Whether the first workbook generator should live in the Next.js API route using `exceljs`, or in the Python API using `openpyxl`/`xlsxwriter`.

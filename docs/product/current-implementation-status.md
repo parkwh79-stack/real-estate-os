@@ -145,6 +145,7 @@ Feasibility Study v2 schema:
 - Frontend TypeScript mirror added in `apps/web/lib/feasibility-study-types.ts`.
 - Fixture added in `services/api-server/data/fixtures/feasibility_study_v2_schema_example.json`.
 - Workbook template contract added as `realytics-fs-xlsx-v1`, with named ranges, repeated Excel tables, formula preservation, import provenance, and checks-sheet requirements.
+- Sample-informed workbook validator added in `services/api-server/agents/feasibility_workbook_validator.py` to scan required sheets, key cells, formula errors, reconciliations, and direct-v2 import readiness before accepting Excel outputs.
 
 API:
 
@@ -284,6 +285,7 @@ Latest verification baseline:
 
 - Add Excel-style developer feasibility export.
 - Generate/import the `realytics-fs-xlsx-v1` feasibility workbook with formulas preserved.
+- Add legacy adapter for the Bonri-style Korean workbook cell map so existing 사업수지 files can import into `FeasibilityStudyV2`.
 - Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.
 - Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
 - Convert synchronous orchestration into async queue-based jobs.

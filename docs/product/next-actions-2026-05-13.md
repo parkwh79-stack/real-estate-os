@@ -27,6 +27,7 @@ Updated: 2026-05-13
 - SQLite-backed MVP persistence for projects, reports, and orchestration runs, with legacy JSON fallback/migration.
 - A4 print layout QA checklist.
 - Feasibility Study v2 schema and `realytics-fs-xlsx-v1` Excel workbook mapping for formula-preserving import/export.
+- Feasibility workbook validation gate informed by the Bonri mixed-use PF workbook sample.
 
 ## P0 Next Actions
 
@@ -48,6 +49,7 @@ Updated: 2026-05-13
 1. Add Excel export for developer feasibility and cash flow outputs.
    - First target: generate a blank `realytics-fs-xlsx-v1` workbook from `FeasibilityStudyV2`.
    - Preserve formulas in derived cells and use named ranges/tables for import/export.
+   - Keep the workbook validator as a required pre-import gate.
 2. Add anonymized parser regression fixtures from real business plan/basic architectural plan samples.
 3. Add standalone UI pages for development feasibility, marketability, legal review, and orchestration artifacts.
 4. Convert synchronous orchestration into queue-based background jobs.
