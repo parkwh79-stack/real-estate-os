@@ -16,7 +16,7 @@ REALYTICS x PLATFORM9 is a specialized platform designed for financial instituti
 - **Marketability Agent**: Validates saleability for apartments, officetels, knowledge industry centers, mixed-use, and other pre-sale real estate assets.
 - **Legal/Permit Review Agent**: Performs preliminary Korean real estate PF legal, permit, land-rights, trust-security, and covenant checks with a Korean Law MCP context hook.
 - **MCP Integration**: MCP-compatible PF analysis tools and an MVP PF review orchestration run.
-- **Persistent MVP State**: File-backed JSON storage for projects, reports, and orchestration runs, with a path override via `REALYTICS_STATE_FILE`.
+- **Persistent MVP State**: SQLite-backed storage for projects, reports, and orchestration runs, with legacy JSON fallback and path overrides via `REALYTICS_SQLITE_FILE` / `REALYTICS_STATE_FILE`.
 
 ## Phase 11 Report Template
 

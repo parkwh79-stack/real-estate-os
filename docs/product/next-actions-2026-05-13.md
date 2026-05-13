@@ -23,7 +23,7 @@ Updated: 2026-05-13
 - Feasibility calculation baseline with pure metrics and API integration.
 - P0 calculation engine for monthly cash flow, Max Minus, LTV/LTC/DSCR, and exit sale rate.
 - P0 basic PF risk matrix with category rows, heatmap, top risks, and recommendations.
-- File-backed MVP persistence for projects, reports, and orchestration runs.
+- SQLite-backed MVP persistence for projects, reports, and orchestration runs, with legacy JSON fallback/migration.
 - A4 print layout QA checklist.
 
 ## P0 Next Actions
@@ -33,10 +33,9 @@ Updated: 2026-05-13
    - PDF export should render from the same 20-section structured payload.
    - DOCX export can follow after PDF layout is stable.
 
-2. Replace JSON runtime state with relational persistence.
-   - Start with SQLite for local reliability.
-   - Keep a clean migration path to PostgreSQL.
-   - Model projects, reports, orchestrations, users, and export artifacts.
+2. Add first-class auth/session storage.
+   - Replace env/header-only user ID linkage with user, session, tenant, and audit tables.
+   - Keep a clean migration path from SQLite to PostgreSQL.
 
 3. Add parser provenance per extracted field.
    - Capture source document, page number if available, extraction mode, confidence, and original text span.
@@ -59,7 +58,7 @@ Updated: 2026-05-13
 
 - The system is useful for MVP demos and internal workflow validation.
 - It is not yet production-ready for multi-user financial institution deployment.
-- The biggest blockers are persistence, auth/session, export, provenance, and async orchestration.
+- The biggest blockers are auth/session, export, provenance, PostgreSQL migration, and async orchestration.
 - Legal outputs remain preliminary unless Korean Law MCP evidence and legal counsel review are attached.
 
 ## Documentation Rule

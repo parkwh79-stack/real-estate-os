@@ -18,15 +18,16 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 
 - **Frontend**: Next.js (React)
 - **Backend**: FastAPI (Python)
-- **Data/Storage**: TBD (PostgreSQL for RDBMS, Redis for cache)
+- **Data/Storage**: SQLite for MVP runtime persistence; PostgreSQL target for multi-user production
 - **AI/Agents**: Provider-aware custom Agent ecosystem supporting OpenAI, Anthropic Claude API, and Claude Desktop MCP host metadata
 
 ## Immediate Execution Order
 
 1. PDF/DOCX binary renderers for the structured Phase 11 report export pipeline.
-2. SQLite/PostgreSQL persistence with project/report/run/user tables.
+2. Auth/session storage with user, tenant, and audit tables.
 3. Parser provenance per extracted field for uploaded business plan and basic architectural plan documents.
-4. Decision point for Korean Law MCP: keep Claude Desktop-mediated sidecar flow or add optional API-server MCP client automation.
+4. PostgreSQL migration path for multi-user production.
+5. Decision point for Korean Law MCP: keep Claude Desktop-mediated sidecar flow or add optional API-server MCP client automation.
 
 ## Completed P0 Engine Baseline
 
@@ -36,3 +37,4 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 - LTV, LTC, DSCR, and exit sale rate.
 - Basic real estate PF risk matrix.
 - Phase 11 report generation, version metadata, and Markdown/JSON/HTML export artifacts.
+- SQLite-backed project/report/orchestration runtime persistence.

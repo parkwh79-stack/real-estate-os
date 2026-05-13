@@ -6,7 +6,7 @@ Updated: 2026-05-13
 
 The platform has an MVP-level PF review orchestration flow that can serve both financial institution PF review and real estate developer feasibility review.
 
-The current implementation is synchronous and uses file-backed JSON state storage for projects, reports, and orchestration runs. Agent boundaries, API endpoints, MCP tools, tests, and documentation are now structured so the system can later move to SQLite/PostgreSQL, async jobs, and stronger UI-based monitoring.
+The current implementation is synchronous and uses SQLite-backed state storage for projects, reports, and orchestration runs. Agent boundaries, API endpoints, MCP tools, tests, and documentation are now structured so the system can later move to PostgreSQL, async jobs, and stronger UI-based monitoring.
 
 The AI connection layer records provider, runtime mode, model, host, and linked `user_id` for API uploads, MCP document parsing, and orchestration runs.
 
@@ -71,16 +71,20 @@ File: `services/api-server/storage.py`
 
 Purpose:
 
-- Persist `PROJECTS_DB`, `REPORTS_DB`, and `ORCHESTRATIONS_DB` to JSON state.
+- Persist `PROJECTS_DB`, `REPORTS_DB`, and `ORCHESTRATIONS_DB` to SQLite by default.
 - Restore state at API startup before falling back to bundled fixtures.
+- Keep separate SQLite tables for projects, reports, orchestrations, and metadata.
+- Preserve legacy JSON state support for tests, explicit override, and first-run migration.
 - Keep runtime state out of Git through `services/api-server/data/runtime/.gitignore`.
 
-Default state path:
+Default SQLite state path:
 
-- `services/api-server/data/runtime/state.json`
+- `services/api-server/data/runtime/realytics.sqlite3`
 
-Environment override:
+Environment overrides:
 
+- `REALYTICS_STORAGE_BACKEND=sqlite|json`
+- `REALYTICS_SQLITE_FILE`
 - `REALYTICS_STATE_FILE`
 
 ### Calculation and Risk Engine
@@ -240,7 +244,7 @@ API/MCP user linkage:
 
 Latest verification baseline:
 
-- API tests: `50 passed`
+- API tests: `52 passed`
 - Web lint: passed
 - Web type check: passed
 - Web build: passed
@@ -248,9 +252,9 @@ Latest verification baseline:
 
 ## Current Limitations
 
-- Data storage is file-backed JSON for MVP, not yet relational DB.
+- Data storage is SQLite-backed for MVP. PostgreSQL migration, indexing strategy, and multi-tenant isolation are not yet implemented.
 - Orchestration runs are synchronous, not background jobs.
-- Generated reports and orchestration runs persist through `state.json`, but do not yet have relational querying, migrations, or multi-user isolation.
+- Generated reports and orchestration runs persist through SQLite tables, but do not yet have rich relational querying, migrations, or multi-user isolation.
 - Frontend displays orchestration run detail, agent artifacts, and approval actions; deeper approval audit trails are not yet modeled beyond the run approval record.
 - Korean Law MCP sidecar is represented through query planning and normalized `law_context`; direct automated MCP client calls are not yet built into the API server.
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
@@ -263,7 +267,6 @@ Latest verification baseline:
 ### P0
 
 - Add PDF/DOCX binary renderers from the structured Phase 11 report export pipeline.
-- Replace JSON state storage with SQLite or PostgreSQL.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
 - Decide whether Korean Law MCP remains Claude Desktop-mediated only or gets optional API-server-side MCP client automation.
 - Add parser provenance per extracted field so report values can be traced back to uploaded documents.
@@ -285,4 +288,4 @@ Latest verification baseline:
 
 ## Git Note
 
-Latest committed implementation baseline before this work: `808ffe7 Complete P0 calculation and risk engines`.
+Latest committed implementation baseline before this work: `40b83d9 Harden Phase 11 report exports`.
