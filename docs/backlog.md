@@ -12,7 +12,7 @@ Updated: 2026-05-13
 | P0 | Calculation | Exit Sale Rate | Done | Exit sale rate included in PF metrics with credit status thresholds |
 | P0 | Risk | Basic Risk Matrix | Done | Risk matrix returns category rows, top risks, heatmap, recommendations, and inferred default project risks |
 | P0 | Agent | Development Feasibility Agent | Done | Parses business/basic architectural plan fields into developer-side feasibility, PF readiness, and sensitivity outputs |
-| P0 | Report | Phase 11 PF Review Report | In Progress | 20-section Hana-style PF review report implemented in web UI and structured API; export hardening remains |
+| P0 | Report | Phase 11 PF Review Report | Done | 20-section Hana-style PF review report implemented in web UI, structured API, saved report versions, and markdown/json/html export artifacts |
 | P0 | Orchestration | PF Review Run API | Done | Synchronous MVP run covers load, feasibility, PF structure, risk, Phase 11 report, quality check, approval |
 | P0 | Agent | Marketability Analysis Agent | Done | Applies to saleable assets such as apartment, officetel, knowledge industry center, mixed-use, commercial pre-sale projects |
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
@@ -24,7 +24,7 @@ Updated: 2026-05-13
 | P0 | Integration | Korean Law MCP connector | In Progress | Sidecar integration guide, query plan tool, and `realytics-law-context-v1` adapter added; direct MCP client automation remains optional |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
-| P0 | Report | Structured report export pipeline | Next | Generate PDF/DOCX from Phase 11 structured sections and retain export history |
+| P0 | Report | Structured report export pipeline | In Progress | Markdown/JSON/print-ready HTML export history added; PDF/DOCX binary renderers remain next |
 | P0 | Parser | Source provenance per parsed field | Next | Persist page/source/confidence metadata for uploaded business plan/basic architectural plan fields |
 | P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |
 | P1 | Export | Excel upload | Planned | |

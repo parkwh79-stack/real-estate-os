@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile, Header
+from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Response
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import tempfile
@@ -18,6 +18,7 @@ from agents.legal_review_agent import LegalReviewAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
 from agents.report_agent import ReportAgent
+from agents.report_export_agent import ReportExportAgent
 from storage import load_state, save_state
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -71,10 +72,12 @@ def save_report_record(
     report_markdown: str,
     run_id: str | None = None,
 ) -> Dict[str, Any]:
+    version = len(REPORTS_DB.get(project_id, [])) + 1
     record = {
         "report_id": str(uuid4()),
         "project_id": project_id,
         "run_id": run_id,
+        "version": version,
         "template": structured_report["template"],
         "title": structured_report.get("title", "AI PF 심사보고서"),
         "status": structured_report.get("status", "draft"),
@@ -86,6 +89,7 @@ def save_report_record(
         },
         "report": structured_report,
         "report_markdown": report_markdown,
+        "exports": [],
     }
     REPORTS_DB.setdefault(project_id, []).append(record)
     persist_state()
@@ -138,12 +142,38 @@ def report_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
         "report_id": record["report_id"],
         "project_id": record["project_id"],
         "run_id": record.get("run_id"),
+        "version": record.get("version", 1),
         "template": record["template"],
         "title": record["title"],
         "status": record["status"],
         "created_at": record["created_at"],
         "metadata": record["metadata"],
+        "export_count": len(record.get("exports", [])),
+        "latest_exported_at": record.get("exports", [{}])[-1].get("created_at") if record.get("exports") else None,
     }
+
+def export_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in record.items()
+        if key != "content"
+    }
+
+def find_report_record(project_id: str, report_id: str) -> Dict[str, Any]:
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    for record in REPORTS_DB.get(project_id, []):
+        if record.get("report_id") == report_id:
+            record.setdefault("exports", [])
+            record.setdefault("version", 1)
+            return record
+    raise HTTPException(status_code=404, detail="Report not found")
+
+def find_report_export(report_record: Dict[str, Any], export_id: str) -> Dict[str, Any]:
+    for record in report_record.get("exports", []):
+        if record.get("export_id") == export_id:
+            return record
+    raise HTTPException(status_code=404, detail="Report export not found")
 
 def load_fixtures():
     global project_id_counter
@@ -389,6 +419,7 @@ def generate_report(project_id: str, input_data: Dict[str, Any]):
     return {
         "project_id": project_id,
         "report_id": report_record["report_id"],
+        "version": report_record["version"],
         "template": structured_report["template"],
         "report": structured_report,
         "report_markdown": md_report,
@@ -400,6 +431,55 @@ def get_reports(project_id: str):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     return [report_metadata(record) for record in REPORTS_DB.get(project_id, [])]
+
+@router.get("/{project_id}/reports/{report_id}")
+def get_report(project_id: str, report_id: str):
+    record = find_report_record(project_id, report_id)
+    return {
+        **report_metadata(record),
+        "report": record.get("report"),
+        "report_markdown": record.get("report_markdown"),
+        "exports": [export_metadata(export) for export in record.get("exports", [])],
+    }
+
+@router.post("/{project_id}/reports/{report_id}/exports")
+def create_report_export(project_id: str, report_id: str, input_data: Dict[str, Any] | None = None):
+    record = find_report_record(project_id, report_id)
+    input_data = input_data or {}
+    export_format = input_data.get("format", "markdown")
+    try:
+        rendered = ReportExportAgent().export(record, export_format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    export_record = {
+        "export_id": str(uuid4()),
+        "report_id": report_id,
+        "project_id": project_id,
+        "version": record.get("version", 1),
+        "created_at": now_iso(),
+        **rendered,
+    }
+    record.setdefault("exports", []).append(export_record)
+    persist_state()
+    return export_metadata(export_record)
+
+@router.get("/{project_id}/reports/{report_id}/exports")
+def list_report_exports(project_id: str, report_id: str):
+    record = find_report_record(project_id, report_id)
+    return [export_metadata(export) for export in record.get("exports", [])]
+
+@router.get("/{project_id}/reports/{report_id}/exports/{export_id}/download")
+def download_report_export(project_id: str, report_id: str, export_id: str):
+    record = find_report_record(project_id, report_id)
+    export_record = find_report_export(record, export_id)
+    return Response(
+        content=export_record.get("content", ""),
+        media_type=export_record.get("content_type", "text/plain; charset=utf-8"),
+        headers={
+            "Content-Disposition": f'attachment; filename="{export_record.get("file_name", "report-export.txt")}"'
+        },
+    )
 
 @router.post("/{project_id}/orchestrations/pf-review")
 def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | None = None):

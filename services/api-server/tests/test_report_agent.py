@@ -78,3 +78,67 @@ def test_generate_report_endpoint_returns_markdown_and_structured_report():
     assert body["metadata"]["section_count"] == 20
     assert "report_markdown" in body
     assert body["report"]["sections"]["discountTrigger"]["triggers"]
+    assert body["version"] >= 1
+
+
+def test_report_export_endpoints_create_history_and_download_artifacts():
+    client = TestClient(app)
+    projects = client.get("/projects/").json()
+    project_id = next(
+        item["project"]["id"]
+        for item in projects
+        if item.get("covenants", {}).get("discount_triggers")
+    )
+    report = client.post(
+        f"/projects/{project_id}/reports/generate",
+        json={"template": PHASE_11_TEMPLATE},
+    ).json()
+    report_id = report["report_id"]
+
+    markdown_export = client.post(
+        f"/projects/{project_id}/reports/{report_id}/exports",
+        json={"format": "markdown"},
+    )
+    assert markdown_export.status_code == 200
+    markdown_body = markdown_export.json()
+    assert markdown_body["format"] == "markdown"
+    assert markdown_body["file_name"].endswith(".md")
+    assert markdown_body["byte_size"] > 0
+    assert "content" not in markdown_body
+
+    html_export = client.post(
+        f"/projects/{project_id}/reports/{report_id}/exports",
+        json={"format": "html"},
+    ).json()
+    assert html_export["format"] == "html"
+    assert html_export["file_name"].endswith(".html")
+
+    exports = client.get(f"/projects/{project_id}/reports/{report_id}/exports").json()
+    assert len(exports) >= 2
+
+    detail = client.get(f"/projects/{project_id}/reports/{report_id}").json()
+    assert detail["export_count"] >= 2
+    assert detail["latest_exported_at"]
+
+    download = client.get(
+        f"/projects/{project_id}/reports/{report_id}/exports/{html_export['export_id']}/download"
+    )
+    assert download.status_code == 200
+    assert "text/html" in download.headers["content-type"]
+    assert "<!doctype html>" in download.text
+
+
+def test_report_export_rejects_unsupported_format():
+    client = TestClient(app)
+    projects = client.get("/projects/").json()
+    project_id = projects[0]["project"]["id"]
+    report = client.post(
+        f"/projects/{project_id}/reports/generate",
+        json={"template": PHASE_11_TEMPLATE},
+    ).json()
+
+    res = client.post(
+        f"/projects/{project_id}/reports/{report['report_id']}/exports",
+        json={"format": "pdf"},
+    )
+    assert res.status_code == 400

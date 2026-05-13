@@ -33,6 +33,9 @@ Capabilities:
 - 20-section Hana-style PF review report structure.
 - Structured API response for `POST /projects/{project_id}/reports/generate`.
 - Markdown compatibility output through `report_markdown`.
+- Saved report version numbers and export history metadata.
+- Export artifact creation for `markdown`, `json`, and print-ready `html`.
+- Download endpoint for previously created report export artifacts.
 - Report section registry in `services/api-server/schemas/report.py`.
 - Frontend report payload types in `apps/web/lib/report-types.ts`.
 - Anonymized Hana-style regression fixture in `services/api-server/data/fixtures/hana_pf_review_anonymized.json`.
@@ -237,7 +240,7 @@ API/MCP user linkage:
 
 Latest verification baseline:
 
-- API tests: `48 passed`
+- API tests: `50 passed`
 - Web lint: passed
 - Web type check: passed
 - Web build: passed
@@ -253,14 +256,13 @@ Latest verification baseline:
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 - Source-level provenance per parsed field is not yet persisted.
-- PDF/DOCX/Excel exports are not yet implemented from the structured report data.
+- Markdown, JSON, and print-ready HTML report exports are implemented. PDF/DOCX binary renderers are not yet implemented from the structured report data.
 
 ## Next Work
 
 ### P0
 
-- Add PDF/DOCX export from the structured Phase 11 report data.
-- Add persistent report versioning and export history.
+- Add PDF/DOCX binary renderers from the structured Phase 11 report export pipeline.
 - Replace JSON state storage with SQLite or PostgreSQL.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
 - Decide whether Korean Law MCP remains Claude Desktop-mediated only or gets optional API-server-side MCP client automation.

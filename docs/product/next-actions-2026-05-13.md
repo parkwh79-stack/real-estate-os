@@ -12,6 +12,7 @@ Updated: 2026-05-13
 
 - Phase 11 Hana-style PF review report structure.
 - Structured report API and frontend report view.
+- Report version metadata and export artifacts for Markdown, JSON, and print-ready HTML.
 - Upload-to-run flow for business plan/basic architectural plan documents.
 - Developer feasibility agent.
 - Marketability agent for saleable assets.
@@ -27,10 +28,10 @@ Updated: 2026-05-13
 
 ## P0 Next Actions
 
-1. Build structured report export.
-   - PDF export should use the existing 20-section structured payload.
+1. Add PDF/DOCX binary renderers to the structured report export pipeline.
+   - Existing export history supports Markdown, JSON, and print-ready HTML.
+   - PDF export should render from the same 20-section structured payload.
    - DOCX export can follow after PDF layout is stable.
-   - Store export metadata with report version/history.
 
 2. Replace JSON runtime state with relational persistence.
    - Start with SQLite for local reliability.

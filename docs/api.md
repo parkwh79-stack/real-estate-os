@@ -90,7 +90,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/reports/generate`
 - **Description**: Generate the PF Review Report.
 - **Request Body**: `{ "template": "phase-11-pf-review", "options": {...} }`
-- **Response**: Structured 20-section PF review report data plus Markdown compatibility output.
+- **Response**: Structured 20-section PF review report data plus Markdown compatibility output, report ID, and report version.
 
 ```json
 {
@@ -143,7 +143,24 @@ The `phase-11-pf-review` template returns these `report.sections` keys:
 
 ### `GET /projects/{project_id}/reports`
 - **Description**: Retrieve previously generated reports.
-- **Response**: List of report metadata.
+- **Response**: List of report metadata, including version and export history summary.
+
+### `GET /projects/{project_id}/reports/{report_id}`
+- **Description**: Retrieve a generated report with structured payload, Markdown output, and export metadata.
+- **Response**: Report metadata, `report`, `report_markdown`, and `exports`.
+
+### `POST /projects/{project_id}/reports/{report_id}/exports`
+- **Description**: Create an export artifact from a saved Phase 11 report.
+- **Request Body**: `{ "format": "markdown" }`, `{ "format": "json" }`, or `{ "format": "html" }`.
+- **Response**: Export metadata including `export_id`, `file_name`, `content_type`, `byte_size`, and `sha256`. Export content is stored for download but omitted from metadata responses.
+
+### `GET /projects/{project_id}/reports/{report_id}/exports`
+- **Description**: List export artifacts for a saved report.
+- **Response**: Export metadata list.
+
+### `GET /projects/{project_id}/reports/{report_id}/exports/{export_id}/download`
+- **Description**: Download a previously created report export artifact.
+- **Response**: File response with the export content and content disposition header.
 
 ### `POST /projects/{project_id}/orchestrations/pf-review`
 - **Description**: Run the MVP PF review orchestration workflow synchronously.

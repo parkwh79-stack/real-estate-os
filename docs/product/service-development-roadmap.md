@@ -8,7 +8,7 @@ Updated: 2026-05-13
 | **Phase 2: Beta** | Export functions, logistics modules, report templates. | PDF/DOCX Export, Logistics logic, Waterfall simulator. | Planned | P1 |
 | **Phase 3: Enterprise** | External APIs, RBAC, workspaces. | API integrations, Org structure, Advanced GIS. | Planned | P2 |
 | **Phase 4: Optimization** | Automation, portfolio management, optimizations. | Full ordinance auto-check, AI portfolio monitoring. | Planned | P3 |
-| **Phase 11: PF Report Overhaul** | Real-document-based PF review report. | 20-section Hana-style report, structured report data, PDF/DOCX readiness. | In Progress | P0 |
+| **Phase 11: PF Report Overhaul** | Real-document-based PF review report. | 20-section Hana-style report, structured report data, saved versions, export history, PDF/DOCX readiness. | Done | P0 |
 
 ## Phase 11 Scope
 
@@ -23,7 +23,7 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 
 ## Immediate Execution Order
 
-1. Structured Phase 11 report export pipeline: PDF first, then DOCX.
+1. PDF/DOCX binary renderers for the structured Phase 11 report export pipeline.
 2. SQLite/PostgreSQL persistence with project/report/run/user tables.
 3. Parser provenance per extracted field for uploaded business plan and basic architectural plan documents.
 4. Decision point for Korean Law MCP: keep Claude Desktop-mediated sidecar flow or add optional API-server MCP client automation.
@@ -35,3 +35,4 @@ Phase 11 upgrades the PF review report from a generic Markdown/summary report in
 - Monthly cash flow and Max Minus.
 - LTV, LTC, DSCR, and exit sale rate.
 - Basic real estate PF risk matrix.
+- Phase 11 report generation, version metadata, and Markdown/JSON/HTML export artifacts.
