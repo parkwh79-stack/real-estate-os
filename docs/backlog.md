@@ -24,6 +24,7 @@ Updated: 2026-05-14
 | P0 | Orchestration | Upload-to-run flow | Done | PDF business plan/basic architectural plan upload -> parse -> developer feasibility -> PF review run via `/upload-and-run` |
 | P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks, and approval state |
 | P0 | Frontend | Orchestration approval action UI | Done | Existing approve API wired into run dashboard with reviewer/comment input, submit button, approved-state refresh, and disabled state after approval |
+| P0 | Frontend | Land and risk review detail views | Done | Project land page split into review sections; project risk page shows all 20 PF risk management controls with API-assessed grade/score where available |
 | P0 | Integration | Korean Law MCP connector | Done | Sidecar integration guide, query plan MCP tool, `realytics-law-context-v1` adapter, citation verification handling, and legal-review integration completed; direct API-server MCP client automation is optional future hardening |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |

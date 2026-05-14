@@ -188,6 +188,7 @@ Important:
 - The reviewed sample returns import-level `needs_review` because parcel-level purchase amount and owner-level individual amount totals do not fully reconcile, even though area and total contract amount reconcile.
 - The PF summary remains `needs_enrichment` because PNU, official price, and registry evidence coverage are all 0%.
 - Land ledger imports must not become `ready_for_legal_review` or `ready_for_pf_review` until import totals reconcile, PNU confidence passes, official price has base year/source, registry evidence is attached, security redaction passes, and PF output mapping is complete.
+- Web project land page now presents land review as separate sections: basic land data, source/import metadata, acquisition status, zoning/building limits, import consistency, evidence readiness, parcel review, and PF review summary.
 
 Supported land ledger lifecycle statuses:
 
@@ -205,6 +206,12 @@ Supported land ledger lifecycle statuses:
 - `legal_review_in_progress`
 - `legal_review_completed`
 - `ready_for_pf_review`
+
+### Web Risk Management View
+
+- Project risk page now calls the risk assessment API and displays the standard 20 PF risk management controls individually.
+- Each control shows category, responsible owner, required evidence, API-assessed grade/score when available, and mitigation text when supplied.
+- The page also shows overall risk grade, category-level matrix rows, top risks, and recommendations.
 
 ### Marketability Analysis Agent
 
