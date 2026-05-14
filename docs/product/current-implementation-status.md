@@ -225,6 +225,8 @@ Purpose:
 - Current implementation is MVP-level: it checks applicability and returns basic score/grade from location, competition, pricing, payment schedule, discount trigger, and exit resilience.
 - Marketability Agent v2 roadmap is now documented in `docs/product/marketability-agent-roadmap.md`.
 - Next P0 work is product-type classification, comparable data workflow, pricing judgement, exit sale rate calculation, marketability score v2, and report paragraph generation.
+- 2026-05-14 update: the agent response is now v2-compatible and includes `analysisType`, product type classification, classification confidence, applicability reason, data status, missing required data, source metadata, Exit sale rate scenarios, and report paragraph skeletons.
+- Serviced residence is treated as applicable when it is a strata-sale/presale asset; operating hotel/lodging remains non-saleable and should be handled by a separate operating asset Agent.
 
 API:
 

@@ -17,16 +17,47 @@ def test_marketability_agent_applies_to_saleable_mixed_use_project():
     result = MarketabilityAgent().analyze(load_example("daegu_bondong_mixed_use_pf.json"))
 
     assert result["applicable"] is True
+    assert result["analysisType"] == "marketability_analysis_v2"
+    assert result["productType"] == "mixed_use_residential"
     assert result["assetClass"] == "주상복합"
     assert result["score"] is not None
     assert result["checks"]
+    assert result["exitSaleRate"]["base"] > 0
+    assert result["reportParagraphs"]["businessFeasibility"]
+    assert "market_data_source_metadata" in result["missingRequiredData"]
 
 
 def test_marketability_agent_skips_non_saleable_logistics_project():
     result = MarketabilityAgent().analyze(load_example("dudong_lg_logistics_pf.json"))
 
     assert result["applicable"] is False
+    assert result["productType"] == "non_saleable"
     assert result["grade"] == "N/A"
+
+
+def test_marketability_agent_treats_presale_serviced_residence_as_applicable():
+    result = MarketabilityAgent().analyze({
+        "project": {"type": "serviced_residence"},
+        "land": {"address": "서울특별시 중구 인현동"},
+        "feasibility_input": {"total_revenue": 100_000_000_000},
+        "pf_structure": [{"amount": 55_000_000_000, "priority": 1}],
+        "sales_schedule": {"contract_deposit": 0.1, "middle_payment": 0.6, "balance": 0.3},
+        "market": {
+            "price_reasonableness": "인근 생숙 및 오피스텔 비교 필요",
+            "data_sources": [{
+                "sourceName": "manual comparable fixture",
+                "sourceType": "manual_upload",
+                "sourceUrlOrEvidenceId": "fixture-market-001",
+                "baseDate": "2026-05-14",
+                "confidence": 0.7,
+            }],
+        },
+    })
+
+    assert result["applicable"] is True
+    assert result["productType"] == "serviced_residence"
+    assert result["assetClass"] == "생활형숙박시설"
+    assert result["dataSources"][0]["sourceName"] == "manual comparable fixture"
 
 
 def test_legal_review_agent_flags_missing_korean_law_mcp_context():
