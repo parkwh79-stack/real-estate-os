@@ -60,6 +60,12 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: Optional override containing `architectural_plan`, `sales_assumptions`, `cost_assumptions`, `feasibility_input`, and `pf_structure`.
 - **Response**: Architectural program, revenue, costs, developer returns, PF readiness, sensitivity, and data quality.
 
+### `POST /projects/{project_id}/land-ledger/analyze`
+- **Description**: Upload and analyze a legacy Korean land ledger `.xls` file.
+- **Request Body**: Multipart file upload.
+- **Response**: Parcel list, owner/payment records, total area, total contract amount, validation status, missing PNU/official-land-price indicators, and enrichment plan.
+- **Note**: The current endpoint parses the ledger but does not yet resolve PNU or fetch official land prices automatically.
+
 ### `POST /projects/{project_id}/cashflow/calculate`
 - **Description**: Trigger monthly cash flow calculation.
 - **Request Body**: `{ "revenue_schedule": [...], "cost_schedule": [...] }` or `{ "cashflows": [...] }`.

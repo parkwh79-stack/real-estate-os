@@ -14,6 +14,7 @@ Updated: 2026-05-13
 | P0 | Agent | Development Feasibility Agent | Done | Parses business/basic architectural plan fields into developer-side feasibility, PF readiness, and sensitivity outputs |
 | P0 | Schema | Feasibility Study v2 schema | Done | Added canonical `realytics-feasibility-study-v2` backend schema, frontend type mirror, fixture, and Excel workbook mapping strategy |
 | P0 | QA | Feasibility workbook validation | Done | Added sample-informed Excel validation gate for required sheets, key cells, formula errors, reconciliations, and v2 import readiness |
+| P0 | Agent | Land Ledger Import Agent | Done | Parses legacy Bonri-style `.xls` land ledgers into parcel, owner, payment, area, amount, Land Ledger QA v1, workflow status, PF mapping, validation, and enrichment-plan outputs |
 | P0 | Report | Phase 11 PF Review Report | Done | 20-section Hana-style PF review report implemented in web UI, structured API, saved report versions, and markdown/json/html export artifacts |
 | P0 | Orchestration | PF Review Run API | Done | Synchronous MVP run covers load, feasibility, PF structure, risk, Phase 11 report, quality check, approval |
 | P0 | Agent | Marketability Analysis Agent | Done | Applies to saleable assets such as apartment, officetel, knowledge industry center, mixed-use, commercial pre-sale projects |
@@ -28,6 +29,7 @@ Updated: 2026-05-13
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
 | P0 | Report | Structured report export pipeline | In Progress | Markdown/JSON/print-ready HTML export history added; PDF/DOCX binary renderers remain next |
 | P0 | Parser | Source provenance per parsed field | Next | Persist page/source/confidence metadata for uploaded business plan/basic architectural plan fields |
+| P0 | Integration | Batch PNU and official land price enrichment | Planned | Resolve PNU from dong/lot, fetch cadastral characteristics, official land price, and registry/encumbrance evidence for imported parcels |
 | P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |
 | P1 | Export | Excel upload | In Progress | Feasibility Study v2 schema and workbook mapping designed; next step is XLSX template import validator |
 | P1 | Export | Developer feasibility Excel export | In Progress | Export should generate formula-preserving `realytics-fs-xlsx-v1` workbook with assumptions, product mix, costs, financing, monthly CF, sensitivity, summary, and checks |

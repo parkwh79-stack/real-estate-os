@@ -155,6 +155,30 @@ MCP:
 
 - `analyze_development_feasibility`
 
+### Land Ledger Import Agent
+
+File: `services/api-server/agents/land_ledger_agent.py`
+
+Purpose:
+
+- Parse legacy Korean land acquisition ledgers such as the Bonri `.xls` 토지조서.
+- Extract parcel rows, owner/payment records, land category, official area, purchase amounts, contract dates, payment deadlines, and remarks.
+- Mask sensitive account numbers after import.
+- Detect missing PNU and official land price data.
+- Build Land Ledger QA v1 checks for source reconciliation, parcel consistency, ownership share, payment schedule, PNU confidence, official land price base year, registry evidence, special parcel exceptions, security redaction, and PF output mapping.
+- Return parcel workflow status, standardized issues, PF review mapping, and an enrichment plan for PNU resolution, cadastral characteristics, official land price, and registry/encumbrance verification.
+
+API:
+
+- `POST /projects/{project_id}/land-ledger/analyze`
+
+Important:
+
+- The reviewed sample contains 9 parcels, 22 owner/payment records, 4,691.9 sqm, and KRW 41.374 billion total contract amount.
+- The sample does not contain PNU or official land price, so the correct status is `needs_enrichment`.
+- The existing frontend PNU lookup is single-PNU and land-use focused; backend batch PNU and official land price enrichment is still required.
+- Land ledger imports must not become `ready_for_pf_review` until PNU, official price, registry evidence, security redaction, and PF output mapping pass.
+
 ### Marketability Analysis Agent
 
 File: `services/api-server/agents/marketability_agent.py`
@@ -286,6 +310,7 @@ Latest verification baseline:
 - Add Excel-style developer feasibility export.
 - Generate/import the `realytics-fs-xlsx-v1` feasibility workbook with formulas preserved.
 - Add legacy adapter for the Bonri-style Korean workbook cell map so existing 사업수지 files can import into `FeasibilityStudyV2`.
+- Add backend batch PNU and official land price enrichment for imported land ledger parcels.
 - Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.
 - Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
 - Convert synchronous orchestration into async queue-based jobs.

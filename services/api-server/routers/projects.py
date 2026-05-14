@@ -15,6 +15,7 @@ from core.calculations import (
 from core.risk_assessment import assess_risk_item, calculate_overall_risk, build_basic_risk_matrix
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.legal_review_agent import LegalReviewAgent
+from agents.land_ledger_agent import LandLedgerAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.orchestration_agent import OrchestrationAgent
 from agents.report_agent import ReportAgent
@@ -133,6 +134,19 @@ async def parse_uploaded_business_plan(
         agent = ParserAgent(ai_context)
         text = agent.parse_document(tmp_path)
         return agent.extract_project_data(text, ai_context)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+async def parse_uploaded_land_ledger(file: UploadFile) -> Dict[str, Any]:
+    suffix = os.path.splitext(file.filename or "")[1] or ".xls"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        return LandLedgerAgent().analyze_xls(tmp_path)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -269,6 +283,20 @@ async def upload_business_plan(
         }
 
     return apply_parsed_project_data(project_id, parsed_data)
+
+@router.post("/{project_id}/land-ledger/analyze")
+async def analyze_land_ledger_upload(
+    project_id: str,
+    file: UploadFile = File(...),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    ledger = await parse_uploaded_land_ledger(file)
+    return {
+        "project_id": project_id,
+        "landLedger": ledger,
+        "note": "PNU and official land price enrichment require external connectors after ledger import.",
+    }
 
 @router.post("/{project_id}/upload-and-run")
 async def upload_business_plan_and_run_pf_review(

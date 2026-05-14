@@ -28,6 +28,7 @@ Updated: 2026-05-13
 - A4 print layout QA checklist.
 - Feasibility Study v2 schema and `realytics-fs-xlsx-v1` Excel workbook mapping for formula-preserving import/export.
 - Feasibility workbook validation gate informed by the Bonri mixed-use PF workbook sample.
+- Land Ledger Import Agent for the Bonri `.xls` 토지조서 sample, including parcel/owner/payment parsing, Land Ledger QA v1, workflow status, PF mapping, and missing PNU/official-price enrichment plan.
 
 ## P0 Next Actions
 
@@ -55,6 +56,7 @@ Updated: 2026-05-13
 4. Convert synchronous orchestration into queue-based background jobs.
 5. Add UI/API scenario workflow for waterfall and unsold LTV matrix.
 6. Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
+7. Add backend batch PNU resolver and official land price connector for imported land ledger parcels.
 
 ## Product Risk Notes
 
