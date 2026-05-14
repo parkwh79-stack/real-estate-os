@@ -18,11 +18,12 @@ Updated: 2026-05-14
 | P0 | Report | Phase 11 PF Review Report | Done | 20-section Hana-style PF review report implemented in web UI, structured API, saved report versions, and markdown/json/html export artifacts |
 | P0 | Orchestration | PF Review Run API | Done | Synchronous MVP run covers load, feasibility, PF structure, risk, Phase 11 report, quality check, approval |
 | P0 | Agent | Marketability Analysis Agent MVP | Done | Applies to saleable assets and returns basic location, competition, pricing, payment schedule, discount trigger, and exit resilience checks |
-| P0 | Agent | Marketability Agent v2 product classifier | In Progress | Classifies apartment, officetel, knowledge industry center, mixed-use, commercial presale, serviced residence, and non-saleable asset types with confidence |
-| P0 | Agent | Marketability comparable data workflow | Planned | Collect nearby transaction/presale comparables through fixtures/connectors and preserve source metadata |
-| P0 | Agent | Marketability pricing judgement | Planned | Compare proposed sale price against similar cases and judge high/reasonable/low pricing |
+| P0 | Agent | Marketability Agent v2 product classifier | Done | Classifies apartment, officetel, knowledge industry center, mixed-use, commercial presale, serviced residence, and non-saleable asset types with confidence |
+| P0 | Agent | Marketability product mix normalizer | Done | Normalizes product mix, units, exclusive/contract area, price per py, total revenue, exclusive ratio, and evidence IDs |
+| P0 | Agent | Marketability comparable data workflow | In Progress | Manual comparable/transaction/presale/listing fixture adapter and source metadata are implemented; licensed/public external adapters remain next |
+| P0 | Agent | Marketability pricing judgement | Done | Compares proposed sale price against adjusted comparable median and returns price band, premium, percentile, judgement, and pricing comment |
 | P0 | Agent | Marketability exit sale rate | In Progress | Calculates base, 5/10/15/20% discount, and tranche-level exit sale rate skeleton for PF review |
-| P0 | Agent | Marketability score v2 | In Progress | MVP score now returns v2-compatible data status, missing data, source metadata, and report paragraph skeleton; weighted product-specific model remains next |
+| P0 | Agent | Marketability score v2 | In Progress | Weighted baseline now scores location, demand, supply, pricing, product, absorption, and PF Exit; product-specific scoring weights remain next |
 | P0 | Report | Marketability report paragraph generator | In Progress | Generates initial Phase 11 market analysis, business feasibility, exit strategy, discount trigger, unsold risk, recommendation, and lender risk memo text |
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
 | P0 | Report | Report fixture data | Done | Added anonymized Hana-style PF review fixture and regression checks |

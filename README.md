@@ -17,7 +17,7 @@ The repository currently includes:
 - AI connection layer for OpenAI API, Anthropic API, and Claude Desktop host-LLM mode.
 - Phase 11 Hana-style PF review report with 20 sections.
 - Land Ledger Import Agent with validation lifecycle and PF summary.
-- Marketability Analysis Agent v2-compatible response shape and roadmap.
+- Marketability Analysis Agent v2 baseline with product mix normalization, comparable pricing, Exit sale rate, absorption, discount trigger, and risk flags.
 - Korean Law MCP sidecar integration design and legal-review adapter.
 
 ## Main Capabilities
@@ -141,17 +141,16 @@ Current implementation:
 - Handles apartment, officetel, mixed-use residential, commercial retail, knowledge industry center, section office, serviced residence, and other strata-sale assets.
 - Keeps logistics, operating hotel/lodging, rental office, data center, rental housing, senior housing, and healthcare as non-saleable or separate-Agent assets.
 - Treats serviced residence as applicable when it is a strata-sale/presale asset.
-- Returns applicability reason, classification confidence, data status, missing required data, data sources, basic score/grade, Exit sale rate scenarios, and report paragraph skeletons.
+- Normalizes product mix, sale price assumptions, total revenue, exclusive ratio, and evidence IDs.
+- Ingests manual comparable, transaction, presale, and listing fixture data with source metadata.
+- Returns price band, comparable median premium, pricing judgement, data status, missing required data, basic score/grade, Exit sale rate scenarios, absorption forecast, discount triggers, unsold recovery, risk flags, and report paragraph skeletons.
 
 Roadmap:
 
-- Product mix normalization
-- Comparable transaction and presale fixture/adapters
-- Comparable price band
-- Premium/discount judgement
-- Absorption forecast
-- Discount trigger proposal
-- Unsold recovery model
+- Public/partner comparable data adapters
+- Product-specific comparable adjustment logic
+- Evidence persistence for market cases
+- Absorption back-testing
 - Product-specific scoring model
 - Frontend Marketability Review page
 - Phase 11 report paragraph integration
@@ -426,7 +425,7 @@ Note: the current bundled Python runtime in the latest local session did not inc
 - SQLite is used for MVP persistence; PostgreSQL migration is future work.
 - PDF/DOCX binary exports from structured reports are not yet implemented.
 - Land ledger enrichment still needs backend batch PNU, official land price, cadastral, registry, and evidence connectors.
-- Marketability Agent still needs real comparable data adapters, product-specific scoring, absorption forecasting, and a dedicated frontend review page.
+- Marketability Agent still needs real public/partner comparable data adapters, product-specific scoring weights, stronger absorption/back-testing, and a dedicated frontend review page.
 - Korean Law MCP is designed as a sidecar/context adapter, not a vendored dependency.
 - Private partner data sources such as Hogangnono, Zigbang, KB, or Real Estate Planet require official API, licensing, or partnership before connector use.
 

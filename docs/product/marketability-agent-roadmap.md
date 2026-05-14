@@ -580,18 +580,18 @@ Agent는 특정 데이터 소스가 실패해도 중단되지 않아야 합니�
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| P0-1 | Product type classifier and schema | In Progress |
-| P0-2 | Applicability checker | In Progress |
-| P0-3 | Product mix normalizer | Planned |
-| P0-4 | Comparable case fixture and adapter | Planned |
-| P0-5 | Pricing comparison pure functions and tests | Planned |
+| P0-1 | Product type classifier and schema | Done |
+| P0-2 | Applicability checker | Done |
+| P0-3 | Product mix normalizer | Done |
+| P0-4 | Comparable case fixture and adapter | In Progress |
+| P0-5 | Pricing comparison pure functions and tests | Done |
 | P0-6 | Exit sale rate integration | In Progress |
 | P0-7 | Discount scenario analyzer | In Progress |
 | P0-8 | Marketability score v2 | In Progress |
 | P0-9 | Evidence metadata schema | In Progress |
 | P0-10 | Report paragraph generator | In Progress |
 | P1-1 | Subscription / unsold-stat connector interface | Planned |
-| P1-2 | Absorption model baseline | Planned |
+| P1-2 | Absorption model baseline | In Progress |
 | P1-3 | Map-based comparable supply view | Planned |
 | P1-4 | Product-specific scoring engine | Planned |
 | P1-5 | Unsold recovery model | Planned |
@@ -613,7 +613,11 @@ Agent는 특정 데이터 소스가 실패해도 중단되지 않아야 합니�
   - discount trigger
   - exit resilience
 - Produces score, grade, summary, recommendations.
-- Produces product type classification, confidence, data status, missing data list, source metadata list, Exit sale rate skeleton, and report paragraph skeleton.
+- Produces product type classification, confidence, data status, missing data list, source metadata list, Exit sale rate scenarios, and report paragraph skeleton.
+- Normalizes product mix from explicit product assumptions or feasibility revenue/saleable-area fallback.
+- Ingests manual comparable, transaction, presale, and listing fixture arrays from `market`.
+- Normalizes comparable prices with simple distance/product-type adjustments and returns price band, median premium, percentile, and pricing judgement.
+- Generates baseline absorption forecast, discount trigger table, unsold recovery estimate, and lender-facing risk flags.
 - Is connected to API and PF review orchestration.
 
 ### 13.2 Missing for Practical Review
@@ -636,17 +640,17 @@ Agent는 특정 데이터 소스가 실패해도 중단되지 않아야 합니�
 
 ### 14.1 Functional Criteria
 
-- [ ] Agent can classify product type with confidence score.
-- [ ] Agent can determine whether project is saleable.
-- [ ] Agent can normalize product mix and proposed price.
-- [ ] Agent can ingest at least manual comparable fixtures.
-- [ ] Agent can calculate comparable price band.
-- [ ] Agent can judge proposed price adequacy.
-- [ ] Agent can calculate base Exit sale rate.
-- [ ] Agent can calculate 5%, 10%, 15% discount scenarios.
-- [ ] Agent can produce marketability score and grade.
-- [ ] Agent can generate PF review paragraphs.
-- [ ] Agent can list missing data and data limitations.
+- [x] Agent can classify product type with confidence score.
+- [x] Agent can determine whether project is saleable.
+- [x] Agent can normalize product mix and proposed price.
+- [x] Agent can ingest at least manual comparable fixtures.
+- [x] Agent can calculate comparable price band.
+- [x] Agent can judge proposed price adequacy.
+- [x] Agent can calculate base Exit sale rate.
+- [x] Agent can calculate 5%, 10%, 15% discount scenarios.
+- [x] Agent can produce marketability score and grade.
+- [x] Agent can generate PF review paragraphs.
+- [x] Agent can list missing data and data limitations.
 
 ### 14.2 Evidence Criteria
 

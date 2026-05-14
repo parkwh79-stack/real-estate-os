@@ -222,10 +222,10 @@ Purpose:
 - Applies only to saleable real estate assets.
 - Handles apartments, residential projects, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale assets.
 - Skips non-saleable asset classes such as logistics and lodging.
-- Current implementation is MVP-level: it checks applicability and returns basic score/grade from location, competition, pricing, payment schedule, discount trigger, and exit resilience.
+- Current implementation is v2 baseline: it checks applicability, classifies product type, normalizes product mix, ingests manual comparable fixtures, compares proposed price against adjusted comparable median, estimates absorption, proposes discount triggers, estimates unsold recovery, and returns weighted score/grade.
 - Marketability Agent v2 roadmap is now documented in `docs/product/marketability-agent-roadmap.md`.
-- Next P0 work is product-type classification, comparable data workflow, pricing judgement, exit sale rate calculation, marketability score v2, and report paragraph generation.
-- 2026-05-14 update: the agent response is now v2-compatible and includes `analysisType`, product type classification, classification confidence, applicability reason, data status, missing required data, source metadata, Exit sale rate scenarios, and report paragraph skeletons.
+- Next P0 work is hardening evidence persistence, product-specific scoring weights, external public/partner market-data adapters, and a dedicated frontend Marketability Review page.
+- 2026-05-14 update: the agent response is now v2-compatible and includes `analysisType`, product type classification, classification confidence, applicability reason, data status, missing required data, source metadata, normalized product mix, normalized comparables, price band, pricing judgement, Exit sale rate scenarios, absorption forecast, discount triggers, unsold recovery, risk flags, and report paragraph skeletons.
 - Serviced residence is treated as applicable when it is a strata-sale/presale asset; operating hotel/lodging remains non-saleable and should be handled by a separate operating asset Agent.
 
 API:

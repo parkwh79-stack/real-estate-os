@@ -19,7 +19,7 @@ def test_marketability_agent_applies_to_saleable_mixed_use_project():
     assert result["applicable"] is True
     assert result["analysisType"] == "marketability_analysis_v2"
     assert result["productType"] == "mixed_use_residential"
-    assert result["assetClass"] == "주상복합"
+    assert result["assetClass"] == "Mixed-use Residential"
     assert result["score"] is not None
     assert result["checks"]
     assert result["exitSaleRate"]["base"] > 0
@@ -56,8 +56,77 @@ def test_marketability_agent_treats_presale_serviced_residence_as_applicable():
 
     assert result["applicable"] is True
     assert result["productType"] == "serviced_residence"
-    assert result["assetClass"] == "생활형숙박시설"
+    assert result["assetClass"] == "Serviced Residence"
     assert result["dataSources"][0]["sourceName"] == "manual comparable fixture"
+
+
+def test_marketability_agent_normalizes_product_mix_and_pricing_comparables():
+    result = MarketabilityAgent().analyze({
+        "project": {"type": "officetel"},
+        "land": {"address": "Seoul Jung-gu sample site"},
+        "product_mix": [
+            {
+                "type": "A",
+                "exclusiveAreaPy": 12,
+                "contractAreaPy": 20,
+                "units": 100,
+                "pricePerPy": 36_000_000,
+                "evidenceIds": ["product-mix-001"],
+            }
+        ],
+        "feasibility_input": {"total_revenue": 72_000_000_000},
+        "pf_structure": [
+            {"name": "Tr.A", "amount": 35_000_000_000, "priority": 1},
+            {"name": "Tr.B", "amount": 10_000_000_000, "priority": 2},
+        ],
+        "sales_schedule": {"contract_deposit": 0.1, "middle_payment": 0.6, "balance": 0.3},
+        "market": {
+            "demandLevel": "moderate",
+            "upcomingSupplyUnits": 500,
+            "comparables": [
+                {
+                    "caseId": "COMP-001",
+                    "name": "Nearby Officetel A",
+                    "productType": "officetel_residential",
+                    "distanceM": 200,
+                    "pricePerPy": 30_000_000,
+                    "sourceName": "manual fixture",
+                    "sourceUrlOrEvidenceId": "market-comp-001",
+                    "baseDate": "2026-05-14",
+                    "confidence": 0.8,
+                },
+                {
+                    "caseId": "COMP-002",
+                    "name": "Nearby Officetel B",
+                    "productType": "officetel_residential",
+                    "distanceM": 400,
+                    "pricePerPy": 31_000_000,
+                    "sourceName": "manual fixture",
+                    "sourceUrlOrEvidenceId": "market-comp-002",
+                    "baseDate": "2026-05-14",
+                    "confidence": 0.8,
+                },
+                {
+                    "caseId": "COMP-003",
+                    "name": "Nearby Officetel C",
+                    "productType": "officetel_residential",
+                    "distanceM": 600,
+                    "pricePerPy": 32_000_000,
+                    "sourceName": "manual fixture",
+                    "sourceUrlOrEvidenceId": "market-comp-003",
+                    "baseDate": "2026-05-14",
+                    "confidence": 0.8,
+                },
+            ],
+        },
+    })
+
+    assert result["productType"] == "officetel_residential"
+    assert result["productMix"][0]["totalRevenue"] == 72_000_000_000
+    assert len(result["normalizedComparables"]) == 3
+    assert result["pricing"]["judgement"] == "high"
+    assert "PRICE_PREMIUM_HIGH" in result["riskFlags"]
+    assert result["reportParagraphs"]["pricingAnalysis"]
 
 
 def test_legal_review_agent_flags_missing_korean_law_mcp_context():
