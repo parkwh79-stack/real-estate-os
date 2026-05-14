@@ -32,6 +32,13 @@ Updated: 2026-05-14
 
 ## P0 Next Actions
 
+0. Marketability Agent v2 design and implementation.
+   - Preserve the current MVP agent as the first orchestration-compatible baseline.
+   - Add product-type classification for apartment, officetel, knowledge industry center, mixed-use, commercial presale, and non-saleable assets.
+   - Add comparable transaction/presale fixture and connector workflow with source metadata.
+   - Add pricing judgement, exit sale rate, weighted marketability score v2, and report paragraph generation.
+   - Track detailed roadmap in `docs/product/marketability-agent-roadmap.md`.
+
 0. Add persistent land ledger import workflow.
    - The current analyzer now validates source-vs-parsed totals, lot normalization, parcel integrity, land acquisition status, PF summary, and account masking.
    - Next implementation should persist import records, parsed ledger versions, approval state, evidence attachments, and enrichment job status.

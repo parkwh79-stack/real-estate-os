@@ -222,6 +222,9 @@ Purpose:
 - Applies only to saleable real estate assets.
 - Handles apartments, residential projects, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale assets.
 - Skips non-saleable asset classes such as logistics and lodging.
+- Current implementation is MVP-level: it checks applicability and returns basic score/grade from location, competition, pricing, payment schedule, discount trigger, and exit resilience.
+- Marketability Agent v2 roadmap is now documented in `docs/product/marketability-agent-roadmap.md`.
+- Next P0 work is product-type classification, comparable data workflow, pricing judgement, exit sale rate calculation, marketability score v2, and report paragraph generation.
 
 API:
 

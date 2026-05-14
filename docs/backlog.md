@@ -17,7 +17,13 @@ Updated: 2026-05-14
 | P0 | Agent | Land Ledger Import Agent | Done | Parses legacy Bonri-style `.xls` land ledgers into parcel, owner, payment, area, amount, import consistency validation, lot normalization, lifecycle status, land acquisition status, PF summary, QA gates, PF mapping, and enrichment-plan outputs |
 | P0 | Report | Phase 11 PF Review Report | Done | 20-section Hana-style PF review report implemented in web UI, structured API, saved report versions, and markdown/json/html export artifacts |
 | P0 | Orchestration | PF Review Run API | Done | Synchronous MVP run covers load, feasibility, PF structure, risk, Phase 11 report, quality check, approval |
-| P0 | Agent | Marketability Analysis Agent | Done | Applies to saleable assets such as apartment, officetel, knowledge industry center, mixed-use, commercial pre-sale projects |
+| P0 | Agent | Marketability Analysis Agent MVP | Done | Applies to saleable assets and returns basic location, competition, pricing, payment schedule, discount trigger, and exit resilience checks |
+| P0 | Agent | Marketability Agent v2 product classifier | Next | Classify apartment, officetel, knowledge industry center, mixed-use, commercial presale, and non-saleable asset types with confidence |
+| P0 | Agent | Marketability comparable data workflow | Planned | Collect nearby transaction/presale comparables through fixtures/connectors and preserve source metadata |
+| P0 | Agent | Marketability pricing judgement | Planned | Compare proposed sale price against similar cases and judge high/reasonable/low pricing |
+| P0 | Agent | Marketability exit sale rate | Planned | Calculate repayment exit sale rate and discounted/stress exit sale rate for PF review |
+| P0 | Agent | Marketability score v2 | Planned | Weighted score based on product type, location, comparable pricing, sales schedule, triggers, and exit resilience |
+| P0 | Report | Marketability report paragraph generator | Planned | Generate Phase 11 market analysis, business feasibility, exit strategy, and lender risk memo text |
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
 | P0 | Report | Report fixture data | Done | Added anonymized Hana-style PF review fixture and regression checks |
 | P0 | Storage | Persistent project/report/run storage | Done | SQLite-backed storage added for projects, reports, and orchestration runs; legacy JSON fallback/migration retained |
@@ -42,7 +48,13 @@ Updated: 2026-05-14
 | P1 | Report | Report template editor | Planned | |
 | P1 | QA | Parser regression fixtures | Planned | Anonymized business plan/basic architectural plan documents for parser QA |
 | P1 | API | 20-section report generation API | Done | `/reports/generate` returns structured Phase 11 sections plus Markdown compatibility output |
+| P1 | Agent | Marketability subscription and unsold stats | Planned | Collect subscription competition, contract rate, unsold inventory, and local supply statistics |
+| P1 | Agent | Marketability absorption model | Planned | Predict monthly absorption using comparable cases, supply, price, and product type |
+| P1 | Agent | Marketability discount trigger proposal | Planned | Suggest target sales rate and discount trigger table from score and exit resilience |
+| P1 | Frontend | Marketability map view | Planned | Visualize comparable supply and presale cases by radius, product type, and price band |
 | P2 | Integration| External API integration | Planned | Full mapping |
+| P2 | Integration | Marketability partner data | Future | Hogangnono, Zigbang, Real Estate Planet, or other licensed partner-data connectors |
+| P2 | AI | Marketability ML/RAG | Future | Sales-rate prediction ML, similar PF review case RAG, feasibility Excel linkage, and lender risk memo generation |
 | P2 | Auth | Organization workspace | Planned | |
 | P2 | Auth | RBAC | Planned | |
 | P2 | AI | Private AI knowledge base | Planned | |
