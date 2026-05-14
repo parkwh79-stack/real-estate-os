@@ -15,7 +15,7 @@ Its core question is:
 
 The Agent is not a simple price lookup tool. It combines product type, product mix, proposed sale price, comparable transactions, presale cases, supply competition, absorption assumptions, PF repayment structure, discount-sale scenarios, and lender risk flags.
 
-The current implementation is a v2 baseline. It produces a structured response, normalizes product mix, accepts manual comparable fixtures, calculates pricing judgement, estimates Exit sale rate, proposes discount triggers, generates risk flags, and creates PF review report paragraphs.
+The current implementation is a v2 baseline. It produces a structured response, normalizes product mix, accepts manual comparable fixtures, reconciles uploaded document market evidence, calculates pricing judgement, estimates Exit sale rate, proposes discount triggers, generates risk flags, and creates PF review report paragraphs.
 
 ## 2. Position in REALYTICS
 
@@ -93,6 +93,8 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Applicability check | Decide whether the Agent applies to the project | Done |
 | Product mix normalization | Normalize type, units, exclusive area, contract area, sale price, total revenue, exclusive ratio, and evidence IDs | Done |
 | Manual comparable fixture adapter | Accept manual comparable, transaction, presale, and listing arrays in the `market` payload | In Progress |
+| Document-derived market evidence parser | Ask ParserAgent to extract product mix, sale price, comparables, rent comparables, rental assumptions, and source metadata from uploaded documents | In Progress |
+| Market evidence reconciliation | Use Market Evidence Agent to reconcile document-derived sale price, rent, product mix revenue, feasibility revenue, and comparable evidence before Marketability scoring | In Progress |
 | Comparable normalization | Apply simple distance and product-type adjustment to comparable price per py | Done |
 | Pricing comparison | Calculate comparable min, median, max, premium, percentile, judgement, and pricing comment | Done |
 | Exit sale rate | Calculate base, 5%, 10%, 15%, and 20% discount scenarios plus tranche-level sale-rate thresholds | In Progress |
@@ -135,6 +137,7 @@ project / business plan input
     -> classify saleable product type
     -> check Marketability Agent applicability
     -> normalize product mix and proposed sale price
+    -> reconcile uploaded document market evidence
     -> define market area by radius and administrative boundary
     -> collect transaction, presale, listing, rent, subscription, and unsold data
     -> normalize comparable prices
@@ -654,6 +657,9 @@ Implemented baseline:
 - Non-saleable asset exclusion
 - Product mix normalization
 - Manual comparable fixture ingestion
+- Uploaded document market evidence extraction prompt
+- Market Evidence Agent reconciliation before marketability scoring
+- Agent-to-agent messages from Market Evidence Agent to Orchestration, Marketability, and Feasibility agents
 - Comparable price normalization
 - Comparable price band and premium calculation
 - Pricing judgement
@@ -676,6 +682,7 @@ Still missing for practical production review:
 | Licensed partner data adapters | Needed for broader market data if rights are secured |
 | Product-specific adjustment model | Avoids applying apartment logic to retail or KIC assets |
 | Persistent evidence model | Required for auditability and PF review defensibility |
+| Document evidence storage | Required to retain original uploaded evidence, page/section references, and parser version |
 | Subscription and unsold data | Required for apartment and residential presale review |
 | Rent-yield model | Required for officetel, retail, KIC, and section office pricing |
 | Absorption back-testing | Required to improve forecast reliability |

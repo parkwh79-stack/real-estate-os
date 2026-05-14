@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from agents.legal_review_agent import LegalReviewAgent
+from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.marketability_agent import MarketabilityAgent
 from main import app
 
@@ -127,6 +128,71 @@ def test_marketability_agent_normalizes_product_mix_and_pricing_comparables():
     assert result["pricing"]["judgement"] == "high"
     assert "PRICE_PREMIUM_HIGH" in result["riskFlags"]
     assert result["reportParagraphs"]["pricingAnalysis"]
+
+
+def test_market_evidence_agent_reconciles_uploaded_document_market_values():
+    project_data = {
+        "project": {"type": "officetel"},
+        "sales_assumptions": {"avg_price_per_sqm": 9_075_000},
+        "feasibility_input": {"total_revenue": 72_000_000_000},
+        "document_market_evidence": {
+            "productMix": [
+                {
+                    "type": "A",
+                    "productType": "officetel_residential",
+                    "exclusiveAreaPy": 12,
+                    "contractAreaPy": 20,
+                    "units": 100,
+                    "pricePerPy": 36_000_000,
+                    "totalRevenue": 72_000_000_000,
+                    "evidenceIds": ["doc-p12-table3"],
+                }
+            ],
+            "comparables": [
+                {
+                    "caseId": "DOC-COMP-001",
+                    "name": "Document Comparable A",
+                    "productType": "officetel_residential",
+                    "distanceM": 250,
+                    "pricePerPy": 30_000_000,
+                    "sourceName": "uploaded business plan",
+                    "sourceType": "manual_upload",
+                    "sourceUrlOrEvidenceId": "doc-p20",
+                    "baseDate": "2026-05-14",
+                    "confidence": 0.75,
+                }
+            ],
+            "rentComparables": [
+                {
+                    "caseId": "DOC-RENT-001",
+                    "name": "Rent Comparable A",
+                    "monthlyRentPerPy": 120_000,
+                    "sourceUrlOrEvidenceId": "doc-p21",
+                }
+            ],
+        },
+        "market": {
+            "rentalAssumptions": {"monthlyRentPerPy": 122_000},
+        },
+    }
+
+    evidence = MarketEvidenceAgent().review(project_data)
+
+    assert evidence["status"] == "needs_review"
+    assert evidence["marketPayloadPatch"]["product_mix"][0]["type"] == "A"
+    assert evidence["evidenceSummary"]["saleComparableCount"] == 1
+    assert any(issue["code"] == "DOCUMENT_COMPARABLE_PRICE_PREMIUM" for issue in evidence["issues"])
+
+    marketability_input = {
+        **project_data,
+        **evidence["marketPayloadPatch"],
+        "pf_structure": [{"amount": 35_000_000_000, "priority": 1}],
+        "sales_schedule": {"contract_deposit": 0.1},
+        "marketEvidenceReview": evidence,
+    }
+    result = MarketabilityAgent().analyze(marketability_input)
+
+    assert "MARKET_EVIDENCE_NEEDS_REVIEW" in result["riskFlags"]
 
 
 def test_legal_review_agent_flags_missing_korean_law_mcp_context():

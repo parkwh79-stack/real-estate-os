@@ -222,10 +222,11 @@ Purpose:
 - Applies only to saleable real estate assets.
 - Handles apartments, residential projects, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale assets.
 - Skips non-saleable asset classes such as logistics and lodging.
-- Current implementation is v2 baseline: it checks applicability, classifies product type, normalizes product mix, ingests manual comparable fixtures, compares proposed price against adjusted comparable median, estimates absorption, proposes discount triggers, estimates unsold recovery, and returns weighted score/grade.
+- Current implementation is v2 baseline: it checks applicability, classifies product type, normalizes product mix, ingests manual comparable fixtures, reconciles uploaded document market evidence, compares proposed price against adjusted comparable median, estimates absorption, proposes discount triggers, estimates unsold recovery, and returns weighted score/grade.
 - Marketability Agent v2 roadmap is now documented in `docs/product/marketability-agent-roadmap.md`.
-- Next P0 work is hardening evidence persistence, product-specific scoring weights, external public/partner market-data adapters, and a dedicated frontend Marketability Review page.
+- Next P0 work is hardening document evidence persistence, product-specific scoring weights, external public/partner market-data adapters, and a dedicated frontend Marketability Review page.
 - 2026-05-14 update: the agent response is now v2-compatible and includes `analysisType`, product type classification, classification confidence, applicability reason, data status, missing required data, source metadata, normalized product mix, normalized comparables, price band, pricing judgement, Exit sale rate scenarios, absorption forecast, discount triggers, unsold recovery, risk flags, and report paragraph skeletons.
+- 2026-05-14 update: `MarketEvidenceAgent` now reconciles uploaded document-derived market evidence before Marketability scoring and sends messages to the Orchestration, Marketability, and Feasibility agents.
 - Serviced residence is treated as applicable when it is a strata-sale/presale asset; operating hotel/lodging remains non-saleable and should be handled by a separate operating asset Agent.
 
 API:
@@ -308,11 +309,12 @@ API/MCP user linkage:
 2. `development_feasibility_analysis`: Analyze developer-side feasibility from business/basic architectural plan fields.
 3. `feasibility_calculation`: Run core feasibility calculations.
 4. `pf_structure_calculation`: Calculate PF tranche and loan structure metrics.
-5. `marketability_analysis`: Validate marketability for saleable real estate assets.
-6. `legal_permit_review`: Run preliminary legal, permit, land-rights, trust-security, and covenant checks.
-7. `risk_assessment`: Produce a basic risk matrix.
-8. `phase11_report_generation`: Generate the Phase 11 PF review report artifact.
-9. `quality_check`: Check required artifacts and report completeness.
+5. `market_evidence_reconciliation`: Reconcile uploaded document-derived market evidence before Marketability scoring.
+6. `marketability_analysis`: Validate marketability for saleable real estate assets.
+7. `legal_permit_review`: Run preliminary legal, permit, land-rights, trust-security, and covenant checks.
+8. `risk_assessment`: Produce a basic risk matrix.
+9. `phase11_report_generation`: Generate the Phase 11 PF review report artifact.
+10. `quality_check`: Check required artifacts and report completeness.
 
 ## Verification
 

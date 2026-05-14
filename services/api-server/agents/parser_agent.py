@@ -84,7 +84,70 @@ class ParserAgent:
           },
           "sales_assumptions": {
             "avg_price_per_sqm": 0,
-            "other_revenue": 0
+            "other_revenue": 0,
+            "product_mix": [
+              {
+                "type": "Unit Type",
+                "productType": "apartment|officetel_residential|officetel_office|mixed_use_residential|commercial_retail|knowledge_industry_center|section_office|serviced_residence|other_saleable",
+                "exclusiveAreaPy": 0,
+                "contractAreaPy": 0,
+                "units": 0,
+                "pricePerPy": 0,
+                "totalRevenue": 0,
+                "evidenceIds": ["source-page-or-document-id"]
+              }
+            ]
+          },
+          "market": {
+            "proposedPricePerPy": 0,
+            "demandLevel": "strong|moderate|weak|unknown",
+            "upcomingSupplyUnits": 0,
+            "comparables": [
+              {
+                "caseId": "COMP-001",
+                "name": "Comparable Project Name",
+                "productType": "apartment|officetel_residential|commercial_retail|knowledge_industry_center|serviced_residence|other_saleable",
+                "distanceM": 0,
+                "pricePerPy": 0,
+                "sourceName": "Document or data source name",
+                "sourceType": "manual_upload|public_api|partner_api|internal_db|web|estimate",
+                "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
+                "baseDate": "YYYY-MM-DD",
+                "confidence": 0.0
+              }
+            ],
+            "rentComparables": [
+              {
+                "caseId": "RENT-001",
+                "name": "Rent Comparable Name",
+                "productType": "officetel_residential|commercial_retail|knowledge_industry_center|section_office|serviced_residence",
+                "distanceM": 0,
+                "monthlyRentPerPy": 0,
+                "sourceName": "Document or data source name",
+                "sourceType": "manual_upload|public_api|partner_api|internal_db|web|estimate",
+                "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
+                "baseDate": "YYYY-MM-DD",
+                "confidence": 0.0
+              }
+            ],
+            "rentalAssumptions": {
+              "monthlyRentPerPy": 0,
+              "requiredYield": 0.0,
+              "sourceUrlOrEvidenceId": "document-page-or-evidence-id"
+            },
+            "data_sources": [
+              {
+                "sourceName": "Source name",
+                "sourceType": "manual_upload|public_api|partner_api|internal_db|web|estimate",
+                "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
+                "baseDate": "YYYY-MM-DD",
+                "licenseOrUsageNote": "Usage note",
+                "confidence": 0.0
+              }
+            ]
+          },
+          "document_market_evidence": {
+            "extractionNote": "Market, sale price, rent, and comparable data extracted from uploaded documents. Include only values found in the document; do not invent market evidence."
           },
           "cost_assumptions": {
             "construction_cost_per_sqm": 0

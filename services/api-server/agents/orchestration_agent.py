@@ -5,6 +5,7 @@ from uuid import uuid4
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.ai_connection import resolve_ai_context, safe_ai_context
 from agents.legal_review_agent import LegalReviewAgent
+from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.report_agent import ReportAgent
 from core.calculations import (
@@ -69,7 +70,25 @@ class OrchestrationAgent:
             run["artifacts"]["pfStructure"] = pf_structure
             self._complete_step(run, "pf_structure_calculation", pf_structure)
 
-            marketability = MarketabilityAgent().analyze(project_data)
+            market_evidence = MarketEvidenceAgent().review(
+                project_data,
+                developer_feasibility,
+                feasibility,
+            )
+            run["artifacts"]["marketEvidenceReview"] = market_evidence
+            self._complete_step(run, "market_evidence_reconciliation", {
+                "status": market_evidence["status"],
+                "evidenceSummary": market_evidence["evidenceSummary"],
+                "issueCount": len(market_evidence["issues"]),
+                "agentMessages": market_evidence["agentMessages"],
+            })
+
+            marketability_input = self._deep_merge(
+                project_data,
+                market_evidence.get("marketPayloadPatch", {}),
+            )
+            marketability_input["marketEvidenceReview"] = market_evidence
+            marketability = MarketabilityAgent().analyze(marketability_input)
             run["artifacts"]["marketabilityAnalysis"] = marketability
             self._complete_step(run, "marketability_analysis", marketability)
 
@@ -143,6 +162,7 @@ class OrchestrationAgent:
             "developerFeasibility",
             "feasibility",
             "pfStructure",
+            "marketEvidenceReview",
             "marketabilityAnalysis",
             "legalPermitReview",
             "riskAssessment",
@@ -170,6 +190,15 @@ class OrchestrationAgent:
             "completed_at": self._now(),
             "output": output,
         })
+
+    def _deep_merge(self, base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(base)
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
 
     def _sanitize_options(self, options: Dict[str, Any]) -> Dict[str, Any]:
         sanitized = dict(options)

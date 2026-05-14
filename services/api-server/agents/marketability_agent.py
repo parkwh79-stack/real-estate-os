@@ -124,6 +124,7 @@ class MarketabilityAgent:
         checks = self._score_marketability(pricing, demand, supply, product_mix, absorption, exit_sale_rate)
         score = round(sum(check["weightedScore"] for check in checks), 1)
         risk_flags = self._risk_flags(pricing, supply, demand, product_mix, exit_sale_rate, normalized_comparables)
+        risk_flags.extend(self._market_evidence_risk_flags(project_data.get("marketEvidenceReview")))
 
         return {
             "analysisType": "marketability_analysis_v2",
@@ -633,6 +634,16 @@ class MarketabilityAgent:
             flags.append("LOW_EXCLUSIVE_RATIO")
         return flags
 
+    def _market_evidence_risk_flags(self, market_evidence: Dict[str, Any] | None) -> List[str]:
+        if not market_evidence:
+            return []
+        status = market_evidence.get("status")
+        if status in {"needs_review", "blocking_issue"}:
+            return ["MARKET_EVIDENCE_NEEDS_REVIEW"]
+        if status == "needs_evidence":
+            return ["MARKET_EVIDENCE_MISSING"]
+        return []
+
     def _missing_required_data(
         self,
         data: Dict[str, Any],
@@ -709,6 +720,10 @@ class MarketabilityAgent:
             recommendations.append("Review sale price adjustment, unit-level pricing, or buyer financing conditions.")
         if "EXIT_RATE_HIGH" in risk_flags:
             recommendations.append("Consider reducing junior exposure, increasing equity, or tightening discount-sale triggers.")
+        if "MARKET_EVIDENCE_NEEDS_REVIEW" in risk_flags:
+            recommendations.append("Resolve document-derived market evidence reconciliation issues before approving pricing or absorption assumptions.")
+        if "MARKET_EVIDENCE_MISSING" in risk_flags:
+            recommendations.append("Attach uploaded document evidence or manual comparable fixtures before treating marketability as final.")
         return recommendations or ["Attach comparable evidence, absorption assumptions, and target-sales-rate triggers to the PF review memo."]
 
     def _report_paragraphs(
