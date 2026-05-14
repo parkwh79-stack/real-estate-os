@@ -8,12 +8,36 @@ import xlrd
 
 
 SHARE_PATTERN = re.compile(r"\((\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)\)")
+LAND_LEDGER_AGENT_VERSION = "land-ledger-agent-v1.1"
+SQM_TO_PY = 0.3025
+DEFAULT_PNU_CONFIDENCE_THRESHOLD = 0.85
+CURRENT_OFFICIAL_PRICE_BASE_YEAR = 2026
+SUPPORTED_WORKFLOW_STATUSES = [
+    "uploaded",
+    "parsed",
+    "parse_failed",
+    "parsed_with_warnings",
+    "needs_review",
+    "needs_enrichment",
+    "enrichment_in_progress",
+    "enrichment_failed",
+    "enriched",
+    "needs_legal_evidence",
+    "ready_for_legal_review",
+    "legal_review_in_progress",
+    "legal_review_completed",
+    "ready_for_pf_review",
+]
 
 
 class LandLedgerAgent:
     """Parse Korean land acquisition ledgers into structured parcel data."""
 
-    def analyze_xls(self, workbook_path: str | Path) -> Dict[str, Any]:
+    def analyze_xls(
+        self,
+        workbook_path: str | Path,
+        source_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         workbook_path = Path(workbook_path)
         book = xlrd.open_workbook(str(workbook_path))
         sheet = book.sheet_by_index(0)
@@ -21,7 +45,12 @@ class LandLedgerAgent:
             [sheet.cell_value(row_index, column_index) for column_index in range(sheet.ncols)]
             for row_index in range(sheet.nrows)
         ]
-        return self.analyze_rows(rows, sheet_name=sheet.name, source_file=workbook_path.name)
+        return self.analyze_rows(
+            rows,
+            sheet_name=sheet.name,
+            source_file=(source_info or {}).get("original_file_name") or workbook_path.name,
+            source_info=source_info,
+        )
 
     def analyze_rows(
         self,
@@ -29,10 +58,12 @@ class LandLedgerAgent:
         *,
         sheet_name: str = "land_ledger",
         source_file: Optional[str] = None,
+        source_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         data_rows = rows[4:]
         parcels: List[Dict[str, Any]] = []
         current: Optional[Dict[str, Any]] = None
+        source_totals = _extract_source_totals(rows)
 
         for row_index, row in enumerate(data_rows, start=5):
             if _is_total_row(row):
@@ -50,7 +81,15 @@ class LandLedgerAgent:
             if owner:
                 current["owners"].append(self._owner_record(row, row_index))
 
+        lot_key_counts: Dict[str, int] = {}
         for parcel in parcels:
+            lot_key = _parcel_lot_key(parcel)
+            if lot_key:
+                lot_key_counts[lot_key] = lot_key_counts.get(lot_key, 0) + 1
+
+        for parcel in parcels:
+            lot_key = _parcel_lot_key(parcel)
+            parcel["duplicateLotImported"] = bool(lot_key and lot_key_counts.get(lot_key, 0) > 1)
             self._finalize_parcel(parcel)
             parcel["qa"] = self._parcel_qa(parcel)
             parcel["issues"] = self._parcel_issues(parcel)
@@ -58,21 +97,33 @@ class LandLedgerAgent:
             parcel["pfReviewMapping"] = self._pf_review_mapping(parcel)
 
         summary = self._summary(parcels)
+        import_consistency = self._validate_import_consistency(parcels, summary, source_totals)
+        validation = self._validation(parcels, summary, source_totals)
+        import_metadata = self._import_metadata(rows, sheet_name, source_file, source_info)
+        import_metadata["validationStatus"] = validation["status"]
         return {
             "analysisType": "land_ledger_import",
             "profile": "legacy-bonri-land-ledger-v1",
+            "parserVersion": LAND_LEDGER_AGENT_VERSION,
             "sourceFile": source_file,
+            "importMetadata": import_metadata,
             "sheetName": sheet_name,
+            "sourceTotals": source_totals,
             "summary": summary,
             "parcels": parcels,
-            "validation": self._validation(parcels, summary),
+            "validation": validation,
+            "importConsistency": import_consistency,
+            "landAcquisitionStatus": self._calculate_land_acquisition_status(parcels, summary),
+            "pfSummary": self._generate_land_acquisition_pf_summary(parcels, summary),
             "qaProcess": self._qa_process(parcels),
             "enrichmentPlan": self._enrichment_plan(),
+            "supportedWorkflowStatuses": SUPPORTED_WORKFLOW_STATUSES,
         }
 
     def _new_parcel(self, row: List[Any], sequence: int, row_index: int) -> Dict[str, Any]:
         dong = _clean_text(_cell(row, 1))
         lot_number = _clean_text(_cell(row, 2))
+        lot_parts = _parse_lot_number(lot_number)
         land_category = _clean_text(_cell(row, 3))
         area_sqm = _to_float(_cell(row, 4))
         area_py = _to_float(_cell(row, 5))
@@ -81,15 +132,28 @@ class LandLedgerAgent:
             "sequence": sequence,
             "dong": dong,
             "lotNumber": lot_number,
+            "rawLotNumber": lot_number,
+            "isMountain": lot_parts["isMountain"],
+            "mainLotNo": lot_parts["mainLotNo"],
+            "subLotNo": lot_parts["subLotNo"],
+            "normalizedLotNumber": lot_parts["normalizedLotNumber"],
             "addressFragment": " ".join(part for part in [dong, lot_number] if part),
             "pnu": None,
+            "resolvedPnu": None,
+            "resolvedLegalAddress": None,
+            "pnuMatchMethod": None,
+            "pnuCandidateCount": None,
+            "pnuResolverWarning": None,
             "pnuResolveConfidence": None,
             "landCategory": land_category,
+            "standardLandCategoryCode": _standard_land_category_code(land_category),
             "areaSqm": area_sqm,
             "areaPy": area_py,
             "officialLandPricePerSqm": None,
             "officialLandPriceBaseYear": None,
             "officialLandPriceBaseDate": None,
+            "officialTotalLandValue": None,
+            "officialLandPriceSource": None,
             "registryEvidence": None,
             "totalContractAmount": total_contract_amount,
             "contractDate": _clean_text(_cell(row, 16)),
@@ -97,6 +161,7 @@ class LandLedgerAgent:
             "balanceDueDate": _clean_text(_cell(row, 18)),
             "remarks": _clean_text(_cell(row, 19)),
             "owners": [],
+            "evidence": [],
             "source": {
                 "row": row_index,
                 "sheet": "legacy-bonri-land-ledger-v1",
@@ -110,6 +175,34 @@ class LandLedgerAgent:
                     "totalContractAmount": _cell(row, 8),
                 },
             },
+        }
+
+    def _import_metadata(
+        self,
+        rows: List[List[Any]],
+        sheet_name: str,
+        source_file: Optional[str],
+        source_info: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        source_info = source_info or {}
+        return {
+            "importId": source_info.get("import_id"),
+            "projectId": source_info.get("project_id"),
+            "originalFileName": source_info.get("original_file_name") or source_file,
+            "originalFileHash": source_info.get("original_file_hash"),
+            "uploadedBy": source_info.get("uploaded_by"),
+            "uploadedAt": source_info.get("uploaded_at"),
+            "parserVersion": LAND_LEDGER_AGENT_VERSION,
+            "sheetName": sheet_name,
+            "rowCount": len(rows),
+            "columnCount": max((len(row) for row in rows), default=0),
+            "parseStatus": "parsed",
+            "validationStatus": "pending",
+            "ledgerVersion": source_info.get("ledger_version", 1),
+            "previousLedgerVersion": source_info.get("previous_ledger_version"),
+            "changeReason": source_info.get("change_reason"),
+            "changedBy": source_info.get("changed_by"),
+            "changedAt": source_info.get("changed_at"),
         }
 
     def _owner_record(self, row: List[Any], row_index: int) -> Dict[str, Any]:
@@ -143,6 +236,13 @@ class LandLedgerAgent:
                     "balancePayment": _cell(row, 12),
                 },
             },
+            "security": {
+                "accountNumberStored": False,
+                "accountNumberEncrypted": None,
+                "accountNumberMasked": _mask_account(_clean_text(_cell(row, 15))),
+                "rawAccountRetained": False,
+                "auditRequiredForRawAccess": True,
+            },
         }
 
     def _finalize_parcel(self, parcel: Dict[str, Any]) -> None:
@@ -151,8 +251,12 @@ class LandLedgerAgent:
         if len(owners) == 1 and owners[0]["share"] is None:
             owners[0]["share"] = 1.0
             share_sum = 1.0
+        for owner in owners:
+            owner["paymentStatus"] = _payment_status(owner)
         parcel["ownerCount"] = len(owners)
         parcel["knownShareSum"] = share_sum if share_sum else None
+        parcel["paymentSummary"] = _payment_summary(owners)
+        parcel["paymentStatus"] = _parcel_payment_status(parcel["paymentSummary"])
         parcel["missingFields"] = [
             field
             for field, value in [
@@ -169,6 +273,9 @@ class LandLedgerAgent:
 
     def _parcel_qa(self, parcel: Dict[str, Any]) -> Dict[str, Any]:
         source_reconciled = bool(parcel.get("source", {}).get("row")) and bool(parcel.get("addressFragment"))
+        lot_number_valid = bool(parcel.get("mainLotNo"))
+        duplicate_lot_imported = bool(parcel.get("duplicateLotImported"))
+        land_category_mapped = bool(parcel.get("standardLandCategoryCode"))
         parcel_valid = bool(parcel.get("dong") and parcel.get("lotNumber") and parcel.get("landCategory")) and (
             (parcel.get("areaSqm") or 0) > 0
         )
@@ -176,7 +283,10 @@ class LandLedgerAgent:
         ownership_valid = _ownership_valid(parcel)
         payment_schedule_valid = _payment_schedule_valid(parcel)
         pnu_resolved = bool(parcel.get("pnu"))
+        pnu_confidence = parcel.get("pnuResolveConfidence")
+        pnu_confident = pnu_confidence is None or pnu_confidence >= DEFAULT_PNU_CONFIDENCE_THRESHOLD
         official_price_attached = bool(parcel.get("officialLandPricePerSqm"))
+        official_price_current = _official_price_current(parcel)
         registry_evidence_attached = bool(parcel.get("registryEvidence"))
         special_exception = _special_parcel_exception(parcel)
         security_redacted = all(
@@ -190,17 +300,24 @@ class LandLedgerAgent:
             and ownership_valid
             and payment_schedule_valid
             and pnu_resolved
+            and pnu_confident
             and official_price_attached
+            and official_price_current
             and registry_evidence_attached
             and security_redacted
         )
         return {
             "sourceReconciled": source_reconciled,
-            "parcelUnitConsistent": parcel_valid and area_consistent,
+            "lotNumberValid": lot_number_valid,
+            "duplicateLotImported": duplicate_lot_imported,
+            "landCategoryMapped": land_category_mapped,
+            "parcelUnitConsistent": parcel_valid and area_consistent and lot_number_valid and land_category_mapped and not duplicate_lot_imported,
             "ownershipShareValid": ownership_valid,
             "paymentScheduleValid": payment_schedule_valid,
             "pnuResolveConfidence": parcel.get("pnuResolveConfidence"),
+            "pnuConfidenceAcceptable": bool(pnu_resolved and pnu_confident),
             "officialPriceBaseYear": parcel.get("officialLandPriceBaseYear"),
+            "officialPriceCurrent": official_price_current,
             "registryEvidenceStatus": "attached" if registry_evidence_attached else "missing",
             "specialParcelException": special_exception,
             "securityRedactionStatus": "redacted" if security_redacted else "raw_sensitive_data_present",
@@ -214,6 +331,12 @@ class LandLedgerAgent:
             issues.append(_issue("source_not_reconciled", "blocking", "source", "Original row and parsed parcel values could not be reconciled."))
         if not qa["parcelUnitConsistent"]:
             issues.append(_issue("parcel_unit_inconsistent", "blocking", "parcel", "Parcel dong, lot number, land category, area, or sqm/py conversion is inconsistent."))
+        if not qa["lotNumberValid"]:
+            issues.append(_issue("invalid_lot_number", "blocking", "lotNumber", "Lot number could not be normalized into main/sub lot numbers."))
+        if qa["duplicateLotImported"]:
+            issues.append(_issue("duplicate_lot_number", "blocking", "lotNumber", "The same dong/lot number was imported more than once."))
+        if not qa["landCategoryMapped"]:
+            issues.append(_issue("unmapped_land_category", "caution", "landCategory", "Land category could not be mapped to a standard Korean land category code."))
         if not qa["ownershipShareValid"]:
             issues.append(_issue("ownership_share_incomplete", "caution", "ownership", "Owner share data is incomplete or does not sum to 100%."))
         if not qa["paymentScheduleValid"]:
@@ -224,6 +347,8 @@ class LandLedgerAgent:
             issues.append(_issue("low_pnu_confidence", "caution", "pnu", "PNU resolution confidence is below the review threshold."))
         if not parcel.get("officialLandPricePerSqm"):
             issues.append(_issue("missing_official_land_price", "caution", "official_price", "Official land price is missing and must be fetched by base year."))
+        elif not qa["officialPriceCurrent"]:
+            issues.append(_issue("outdated_official_land_price", "caution", "official_price", "Official land price exists but base year is outdated or missing."))
         if not parcel.get("registryEvidence"):
             issues.append(_issue("missing_registry_evidence", "blocking_for_pf_review", "registry", "Registry and encumbrance evidence is missing."))
         if qa["specialParcelException"]:
@@ -235,19 +360,23 @@ class LandLedgerAgent:
     def _parcel_workflow_status(self, parcel: Dict[str, Any]) -> str:
         qa = parcel["qa"]
         if not qa["sourceReconciled"]:
-            return "imported"
+            return "uploaded"
         if not qa["parcelUnitConsistent"]:
-            return "parsed"
+            return "parsed_with_warnings"
         if not qa["ownershipShareValid"]:
-            return "parcel_validated"
+            return "needs_review"
         if not qa["paymentScheduleValid"]:
-            return "ownership_validated"
+            return "needs_review"
+        if parcel.get("pnu") and not qa["pnuConfidenceAcceptable"]:
+            return "needs_review"
         if not parcel.get("pnu"):
-            return "needs_pnu_resolution"
+            return "needs_enrichment"
         if not parcel.get("officialLandPricePerSqm"):
-            return "needs_official_price"
+            return "needs_enrichment"
+        if not qa["officialPriceCurrent"]:
+            return "needs_enrichment"
         if not parcel.get("registryEvidence"):
-            return "needs_registry_evidence"
+            return "needs_legal_evidence"
         if qa["pfOutputReady"]:
             return "ready_for_pf_review"
         return "enriched"
@@ -268,6 +397,9 @@ class LandLedgerAgent:
                     for owner in parcel.get("owners", [])
                 ],
                 "mortgage": parcel.get("registryEvidence", {}).get("mortgage") if parcel.get("registryEvidence") else None,
+                "officialLandPricePerSqm": parcel.get("officialLandPricePerSqm"),
+                "officialLandPriceBaseYear": parcel.get("officialLandPriceBaseYear"),
+                "paymentStatus": parcel.get("paymentStatus"),
                 "status": parcel.get("workflowStatus"),
             },
             "legalPermitReview": {
@@ -290,12 +422,21 @@ class LandLedgerAgent:
         for parcel in parcels:
             status = parcel.get("workflowStatus", "unknown")
             status_counts[status] = status_counts.get(status, 0) + 1
+        owner_records = [owner for parcel in parcels for owner in parcel.get("owners", [])]
+        payment_totals = {
+            "individualContractAmountTotal": sum(owner.get("individualContractAmount") or 0 for owner in owner_records),
+            "depositPaidTotal": sum(owner.get("depositPaid") or 0 for owner in owner_records),
+            "depositUnpaidTotal": sum(owner.get("depositUnpaid") or 0 for owner in owner_records),
+            "interimPaymentTotal": sum(owner.get("interimPayment") or 0 for owner in owner_records),
+            "balancePaymentTotal": sum(owner.get("balancePayment") or 0 for owner in owner_records),
+        }
         return {
             "parcelCount": len(parcels),
             "ownerRecordCount": sum(len(parcel["owners"]) for parcel in parcels),
             "totalAreaSqm": sum(parcel.get("areaSqm") or 0 for parcel in parcels),
             "totalAreaPy": sum(parcel.get("areaPy") or 0 for parcel in parcels),
             "totalContractAmount": sum(parcel.get("totalContractAmount") or 0 for parcel in parcels),
+            "paymentTotals": payment_totals,
             "missingPnuCount": sum(1 for parcel in parcels if not parcel.get("pnu")),
             "missingOfficialLandPriceCount": sum(1 for parcel in parcels if not parcel.get("officialLandPricePerSqm")),
             "registryEvidenceMissingCount": sum(1 for parcel in parcels if not parcel.get("registryEvidence")),
@@ -303,8 +444,50 @@ class LandLedgerAgent:
             "workflowStatusCounts": status_counts,
         }
 
-    def _validation(self, parcels: List[Dict[str, Any]], summary: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate_import_consistency(
+        self,
+        parcels: List[Dict[str, Any]],
+        summary: Dict[str, Any],
+        source_totals: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        checks = []
+        if source_totals.get("totalAreaSqm") is not None:
+            checks.append(_numeric_check("total_area_sqm", summary["totalAreaSqm"], source_totals["totalAreaSqm"], 0.1))
+        if source_totals.get("totalAreaPy") is not None:
+            checks.append(_numeric_check("total_area_py", summary["totalAreaPy"], source_totals["totalAreaPy"], 0.1))
+        if source_totals.get("totalContractAmount") is not None:
+            checks.append(_numeric_check("total_contract_amount", summary["totalContractAmount"], source_totals["totalContractAmount"], 1.0))
+        payment_totals = summary["paymentTotals"]
+        for key in ["depositPaidTotal", "depositUnpaidTotal", "interimPaymentTotal", "balancePaymentTotal"]:
+            if source_totals.get(key) is not None:
+                checks.append(_numeric_check(key, payment_totals[key], source_totals[key], 1.0))
+        parcel_amount_sum = sum(parcel.get("totalContractAmount") or 0 for parcel in parcels)
+        individual_amount_sum = payment_totals["individualContractAmountTotal"]
+        if individual_amount_sum:
+            checks.append(_numeric_check("parcel_amount_sum_vs_owner_amount_sum", parcel_amount_sum, individual_amount_sum, 1.0))
+
+        failed = [check for check in checks if not check["passed"]]
+        return {
+            "status": "needs_review" if failed else "passed",
+            "checks": checks,
+            "failedChecks": failed,
+        }
+
+    def _validation(
+        self,
+        parcels: List[Dict[str, Any]],
+        summary: Dict[str, Any],
+        source_totals: Dict[str, Any],
+    ) -> Dict[str, Any]:
         issues = []
+        import_consistency = self._validate_import_consistency(parcels, summary, source_totals)
+        for check in import_consistency["failedChecks"]:
+            issues.append(_issue(
+                "import_consistency_failed",
+                "blocking",
+                check["name"],
+                f"Parsed value {check['parsedValue']} does not match source total {check['sourceValue']}.",
+            ))
         if summary["missingPnuCount"]:
             issues.append(_issue(
                 "missing_pnu",
@@ -323,10 +506,84 @@ class LandLedgerAgent:
             issues.extend(parcel.get("issues", []))
         severity_rank = {"blocking": 3, "blocking_for_enrichment": 3, "blocking_for_pf_review": 3, "caution": 2, "info": 1}
         highest = max((severity_rank.get(issue["severity"], 0) for issue in issues), default=0)
+        lifecycle_status = "ready_for_pf_review"
+        if import_consistency["status"] == "needs_review" or any(issue["severity"] == "blocking" for issue in issues):
+            lifecycle_status = "needs_review"
+        elif summary["missingPnuCount"] or summary["missingOfficialLandPriceCount"]:
+            lifecycle_status = "needs_enrichment"
+        elif summary["registryEvidenceMissingCount"]:
+            lifecycle_status = "needs_legal_evidence"
         return {
-            "status": "needs_enrichment" if issues else "ready_for_pf_review",
+            "status": lifecycle_status,
             "highestSeverity": highest,
             "issues": issues,
+        }
+
+    def _calculate_land_acquisition_status(
+        self,
+        parcels: List[Dict[str, Any]],
+        summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        contracted = [parcel for parcel in parcels if parcel.get("totalContractAmount") or parcel.get("owners")]
+        deposit_paid = [
+            parcel for parcel in parcels
+            if (parcel.get("paymentSummary", {}).get("depositPaidTotal") or 0) > 0
+            or (parcel.get("paymentSummary", {}).get("depositUnpaidTotal") or 0) > 0
+        ]
+        balance_paid = [
+            parcel for parcel in parcels
+            if parcel.get("paymentStatus") == "fully_paid"
+        ]
+        public_land = [
+            parcel for parcel in parcels
+            if parcel.get("qa", {}).get("specialParcelException") == "public_land"
+        ]
+        return {
+            "totalRequiredParcels": len(parcels),
+            "contractedParcels": len(contracted),
+            "paidDepositParcels": len(deposit_paid),
+            "balancePaidParcels": len(balance_paid),
+            "ownershipTransferredParcels": sum(1 for parcel in parcels if (parcel.get("registryEvidence") or {}).get("ownerMatchStatus") == "matched"),
+            "trustedParcels": sum(1 for parcel in parcels if (parcel.get("registryEvidence") or {}).get("trustRegistrationExists")),
+            "missingParcels": max(0, len(parcels) - len(contracted)),
+            "privateLandArea": summary["totalAreaSqm"] - sum(parcel.get("areaSqm") or 0 for parcel in public_land),
+            "publicLandArea": sum(parcel.get("areaSqm") or 0 for parcel in public_land),
+            "acquisitionAreaRatio": len(contracted) / len(parcels) if parcels else 0,
+            "acquisitionAmountRatio": (
+                sum(parcel.get("totalContractAmount") or 0 for parcel in contracted) / summary["totalContractAmount"]
+                if summary["totalContractAmount"] else 0
+            ),
+            "publicLandDetected": bool(public_land),
+            "publicLandPurchaseStatus": "public_land_purchase_required" if public_land else "not_applicable",
+        }
+
+    def _generate_land_acquisition_pf_summary(
+        self,
+        parcels: List[Dict[str, Any]],
+        summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        pnu_ratio = 1 - (summary["missingPnuCount"] / summary["parcelCount"]) if summary["parcelCount"] else 0
+        official_price_ratio = 1 - (summary["missingOfficialLandPriceCount"] / summary["parcelCount"]) if summary["parcelCount"] else 0
+        registry_ratio = 1 - (summary["registryEvidenceMissingCount"] / summary["parcelCount"]) if summary["parcelCount"] else 0
+        balance_due_amount = sum(parcel.get("paymentSummary", {}).get("balancePaymentTotal") or 0 for parcel in parcels)
+        deposit_paid_parcels = sum(1 for parcel in parcels if (parcel.get("paymentSummary", {}).get("depositPaidTotal") or 0) > 0)
+        return {
+            "totalParcels": summary["parcelCount"],
+            "totalAreaSqm": summary["totalAreaSqm"],
+            "totalPurchaseAmount": summary["totalContractAmount"],
+            "pnuCoverageRatio": pnu_ratio,
+            "officialLandPriceCoverageRatio": official_price_ratio,
+            "registryEvidenceCoverageRatio": registry_ratio,
+            "depositPaidParcelRatio": deposit_paid_parcels / summary["parcelCount"] if summary["parcelCount"] else 0,
+            "balanceDueAmount": balance_due_amount,
+            "ownershipTransferredParcels": sum(1 for parcel in parcels if (parcel.get("registryEvidence") or {}).get("ownerMatchStatus") == "matched"),
+            "restrictionReviewRequiredParcels": summary["registryEvidenceMissingCount"],
+            "status": "needs_enrichment" if pnu_ratio < 1 or official_price_ratio < 1 else "needs_legal_evidence" if registry_ratio < 1 else "ready_for_pf_review",
+            "reviewMemo": (
+                "This land ledger can support preliminary parcel, owner, area, purchase amount, and payment schedule review, "
+                "but it cannot be used as final legal-review or PF-approval evidence until PNU, official land price, "
+                "cadastral characteristics, and registry/encumbrance evidence are attached."
+            ),
         }
 
     def _qa_process(self, parcels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -403,6 +660,44 @@ def _is_total_row(row: List[Any]) -> bool:
     return first.startswith("\ud569")
 
 
+def _extract_source_totals(rows: List[List[Any]]) -> Dict[str, Any]:
+    total_row = next((row for row in rows if _is_total_row(row)), None)
+    if not total_row:
+        return {
+            "present": False,
+            "totalAreaSqm": None,
+            "totalAreaPy": None,
+            "totalContractAmount": None,
+            "depositPaidTotal": None,
+            "depositUnpaidTotal": None,
+            "interimPaymentTotal": None,
+            "balancePaymentTotal": None,
+        }
+    return {
+        "present": True,
+        "rowLabel": _cell(total_row, 0),
+        "totalAreaSqm": _to_float(_cell(total_row, 4)),
+        "totalAreaPy": _to_float(_cell(total_row, 5)),
+        "totalContractAmount": _to_float(_cell(total_row, 8)),
+        "depositPaidTotal": _to_float(_cell(total_row, 9)),
+        "depositUnpaidTotal": _to_float(_cell(total_row, 10)),
+        "interimPaymentTotal": _to_float(_cell(total_row, 11)),
+        "balancePaymentTotal": _to_float(_cell(total_row, 12)),
+    }
+
+
+def _numeric_check(name: str, parsed_value: float, source_value: float, tolerance: float) -> Dict[str, Any]:
+    diff = parsed_value - source_value
+    return {
+        "name": name,
+        "parsedValue": parsed_value,
+        "sourceValue": source_value,
+        "diff": diff,
+        "tolerance": tolerance,
+        "passed": abs(diff) <= tolerance,
+    }
+
+
 def _to_float(value: Any) -> Optional[float]:
     if value in ("", None):
         return None
@@ -420,6 +715,74 @@ def _to_int(value: Any) -> Optional[int]:
     if numeric is None:
         return None
     return int(numeric)
+
+
+def _parse_lot_number(lot_number: Optional[str]) -> Dict[str, Any]:
+    text = str(lot_number or "").strip()
+    text = text.replace("\ubc88\uc9c0", "").strip()
+    match = re.search(r"(\uc0b0)?\s*(\d+)(?:-(\d+))?", text)
+    if not match:
+        return {
+            "isMountain": False,
+            "mainLotNo": None,
+            "subLotNo": None,
+            "normalizedLotNumber": None,
+        }
+    is_mountain = bool(match.group(1))
+    main = int(match.group(2))
+    sub = int(match.group(3)) if match.group(3) else 0
+    prefix = "\uc0b0" if is_mountain else ""
+    normalized = f"{prefix}{main}" + (f"-{sub}" if sub else "")
+    return {
+        "isMountain": is_mountain,
+        "mainLotNo": main,
+        "subLotNo": sub,
+        "normalizedLotNumber": normalized,
+    }
+
+
+def _parcel_lot_key(parcel: Dict[str, Any]) -> Optional[str]:
+    normalized = parcel.get("normalizedLotNumber")
+    if not normalized:
+        return None
+    dong = parcel.get("dong") or ""
+    return f"{dong}|{normalized}"
+
+
+def _standard_land_category_code(land_category: Optional[str]) -> Optional[str]:
+    if not land_category:
+        return None
+    mapping = {
+        "\uc804": "01",
+        "\ub2f5": "02",
+        "\uacfc\uc218\uc6d0": "03",
+        "\ubaa9\uc7a5\uc6a9\uc9c0": "04",
+        "\uc784\uc57c": "05",
+        "\uad11\ucc9c\uc9c0": "06",
+        "\uc5fc\uc804": "07",
+        "\ub300": "08",
+        "\uacf5\uc7a5\uc6a9\uc9c0": "09",
+        "\ud559\uad50\uc6a9\uc9c0": "10",
+        "\uc8fc\ucc28\uc7a5": "11",
+        "\uc8fc\uc720\uc18c\uc6a9\uc9c0": "12",
+        "\ucc3d\uace0\uc6a9\uc9c0": "13",
+        "\ub3c4\ub85c": "14",
+        "\ucca0\ub3c4\uc6a9\uc9c0": "15",
+        "\uc81c\ubc29": "16",
+        "\ud558\ucc9c": "17",
+        "\uad6c\uac70": "18",
+        "\uc720\uc9c0": "19",
+        "\uc591\uc5b4\uc7a5": "20",
+        "\uc218\ub3c4\uc6a9\uc9c0": "21",
+        "\uacf5\uc6d0": "22",
+        "\uccb4\uc721\uc6a9\uc9c0": "23",
+        "\uc720\uc6d0\uc9c0": "24",
+        "\uc885\uad50\uc6a9\uc9c0": "25",
+        "\uc0ac\uc801\uc9c0": "26",
+        "\ubb18\uc9c0": "27",
+        "\uc7a1\uc885\uc9c0": "28",
+    }
+    return mapping.get(str(land_category).strip())
 
 
 def _clean_text(value: Any) -> Optional[str]:
@@ -468,7 +831,16 @@ def _mask_account(account_number: Optional[str]) -> Optional[str]:
 def _area_consistent(area_sqm: Optional[float], area_py: Optional[float]) -> bool:
     if area_sqm is None or area_py is None:
         return False
-    return abs(area_py - area_sqm * 0.3025) <= 0.5
+    return abs(area_py - area_sqm * SQM_TO_PY) <= 0.5
+
+
+def _official_price_current(parcel: Dict[str, Any]) -> bool:
+    if not parcel.get("officialLandPricePerSqm"):
+        return False
+    base_year = parcel.get("officialLandPriceBaseYear")
+    if not base_year:
+        return False
+    return int(base_year) >= CURRENT_OFFICIAL_PRICE_BASE_YEAR - 1
 
 
 def _ownership_valid(parcel: Dict[str, Any]) -> bool:
@@ -502,6 +874,51 @@ def _payment_schedule_valid(parcel: Dict[str, Any]) -> bool:
         if payments and abs(payments - amount) > 1:
             return False
     return True
+
+
+def _payment_summary(owners: List[Dict[str, Any]]) -> Dict[str, float]:
+    return {
+        "individualContractAmountTotal": sum(owner.get("individualContractAmount") or 0 for owner in owners),
+        "depositPaidTotal": sum(owner.get("depositPaid") or 0 for owner in owners),
+        "depositUnpaidTotal": sum(owner.get("depositUnpaid") or 0 for owner in owners),
+        "interimPaymentTotal": sum(owner.get("interimPayment") or 0 for owner in owners),
+        "balancePaymentTotal": sum(owner.get("balancePayment") or 0 for owner in owners),
+    }
+
+
+def _payment_status(owner: Dict[str, Any]) -> str:
+    amount = owner.get("individualContractAmount") or 0
+    paid = sum(owner.get(key) or 0 for key in ["depositPaid", "depositUnpaid", "interimPayment", "balancePayment"])
+    if not amount:
+        return "payment_not_started"
+    if paid >= amount - 1:
+        return "fully_paid"
+    if (owner.get("balancePayment") or 0) > 0:
+        return "balance_due"
+    if (owner.get("interimPayment") or 0) > 0:
+        return "interim_paid"
+    if (owner.get("depositPaid") or 0) > 0 or (owner.get("depositUnpaid") or 0) > 0:
+        return "deposit_paid"
+    return "payment_not_started"
+
+
+def _parcel_payment_status(payment_summary: Dict[str, float]) -> str:
+    amount = payment_summary.get("individualContractAmountTotal") or 0
+    paid = sum(
+        payment_summary.get(key) or 0
+        for key in ["depositPaidTotal", "depositUnpaidTotal", "interimPaymentTotal", "balancePaymentTotal"]
+    )
+    if not amount:
+        return "payment_not_started"
+    if paid >= amount - 1:
+        return "fully_paid"
+    if (payment_summary.get("balancePaymentTotal") or 0) > 0:
+        return "balance_due"
+    if (payment_summary.get("interimPaymentTotal") or 0) > 0:
+        return "interim_paid"
+    if (payment_summary.get("depositPaidTotal") or 0) > 0 or (payment_summary.get("depositUnpaidTotal") or 0) > 0:
+        return "deposit_paid"
+    return "payment_not_started"
 
 
 def _special_parcel_exception(parcel: Dict[str, Any]) -> Optional[str]:

@@ -63,8 +63,8 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/land-ledger/analyze`
 - **Description**: Upload and analyze a legacy Korean land ledger `.xls` file.
 - **Request Body**: Multipart file upload.
-- **Response**: Parcel list, owner/payment records, total area, total contract amount, validation status, missing PNU/official-land-price indicators, and enrichment plan.
-- **Note**: The current endpoint parses the ledger but does not yet resolve PNU or fetch official land prices automatically.
+- **Response**: Import metadata, source totals, parcel list, owner/payment records, total area, total contract amount, validation status, import consistency checks, land acquisition status, PF summary, missing PNU/official-land-price indicators, registry evidence readiness, and enrichment plan.
+- **Note**: The current endpoint parses and validates the ledger but does not yet resolve PNU, fetch official land prices, or attach registry evidence automatically. If original workbook totals and parsed totals fail reconciliation, the response status is `needs_review` even when the file parses successfully.
 
 ### `POST /projects/{project_id}/cashflow/calculate`
 - **Description**: Trigger monthly cash flow calculation.

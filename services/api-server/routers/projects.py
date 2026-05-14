@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone
 import tempfile
 import os
+import hashlib
 from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
 from agents.parser_agent import ParserAgent
@@ -140,13 +141,29 @@ async def parse_uploaded_business_plan(
 
 async def parse_uploaded_land_ledger(file: UploadFile) -> Dict[str, Any]:
     suffix = os.path.splitext(file.filename or "")[1] or ".xls"
+    uploaded_at = now_iso()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
+    original_file_hash = hashlib.sha256(content).hexdigest()
 
     try:
-        return LandLedgerAgent().analyze_xls(tmp_path)
+        return LandLedgerAgent().analyze_xls(
+            tmp_path,
+            {
+                "import_id": str(uuid4()),
+                "original_file_name": file.filename,
+                "original_file_hash": original_file_hash,
+                "uploaded_at": uploaded_at,
+            },
+        ) | {
+            "upload": {
+                "originalFileName": file.filename,
+                "originalFileHash": original_file_hash,
+                "uploadedAt": uploaded_at,
+            }
+        }
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)

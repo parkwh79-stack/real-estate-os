@@ -1,6 +1,6 @@
 # REALYTICS x PLATFORM9 Current Implementation Status
 
-Updated: 2026-05-13
+Updated: 2026-05-14
 
 ## Summary
 
@@ -179,6 +179,33 @@ Important:
 - The existing frontend PNU lookup is single-PNU and land-use focused; backend batch PNU and official land price enrichment is still required.
 - Land ledger imports must not become `ready_for_pf_review` until PNU, official price, registry evidence, security redaction, and PF output mapping pass.
 
+2026-05-14 update:
+
+- The agent now preserves import metadata including original file name/hash, parser version, row/column counts, ledger version, and validation status.
+- The agent now normalizes Korean lot numbers into raw lot, mountain flag, main lot number, sub lot number, and normalized lot number.
+- The agent now validates original-vs-parsed consistency before treating the import as usable.
+- The agent now returns land acquisition status and a PF review summary in addition to parcel QA and enrichment planning.
+- The reviewed sample returns import-level `needs_review` because parcel-level purchase amount and owner-level individual amount totals do not fully reconcile, even though area and total contract amount reconcile.
+- The PF summary remains `needs_enrichment` because PNU, official price, and registry evidence coverage are all 0%.
+- Land ledger imports must not become `ready_for_legal_review` or `ready_for_pf_review` until import totals reconcile, PNU confidence passes, official price has base year/source, registry evidence is attached, security redaction passes, and PF output mapping is complete.
+
+Supported land ledger lifecycle statuses:
+
+- `uploaded`
+- `parsed`
+- `parse_failed`
+- `parsed_with_warnings`
+- `needs_review`
+- `needs_enrichment`
+- `enrichment_in_progress`
+- `enrichment_failed`
+- `enriched`
+- `needs_legal_evidence`
+- `ready_for_legal_review`
+- `legal_review_in_progress`
+- `legal_review_completed`
+- `ready_for_pf_review`
+
 ### Marketability Analysis Agent
 
 File: `services/api-server/agents/marketability_agent.py`
@@ -279,7 +306,9 @@ API/MCP user linkage:
 
 Latest verification baseline:
 
-- API tests: `52 passed`
+- Land Ledger targeted test: `1 passed`
+- Real sample land ledger validation: executed against `01.본리동토지조서.xls`; status `needs_review`, PF summary `needs_enrichment`
+- API tests: `60 passed`
 - Web lint: passed
 - Web type check: passed
 - Web build: passed
@@ -310,7 +339,7 @@ Latest verification baseline:
 - Add Excel-style developer feasibility export.
 - Generate/import the `realytics-fs-xlsx-v1` feasibility workbook with formulas preserved.
 - Add legacy adapter for the Bonri-style Korean workbook cell map so existing 사업수지 files can import into `FeasibilityStudyV2`.
-- Add backend batch PNU and official land price enrichment for imported land ledger parcels.
+- Add persistent land ledger import records, approval workflow, evidence tables, and backend batch PNU/official price/registry enrichment for imported land ledger parcels.
 - Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.
 - Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
 - Convert synchronous orchestration into async queue-based jobs.

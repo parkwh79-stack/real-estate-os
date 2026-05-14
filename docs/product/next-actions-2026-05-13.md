@@ -1,6 +1,6 @@
 # Next Actions Audit
 
-Updated: 2026-05-13
+Updated: 2026-05-14
 
 ## Current Runtime State
 
@@ -31,6 +31,11 @@ Updated: 2026-05-13
 - Land Ledger Import Agent for the Bonri `.xls` 토지조서 sample, including parcel/owner/payment parsing, Land Ledger QA v1, workflow status, PF mapping, and missing PNU/official-price enrichment plan.
 
 ## P0 Next Actions
+
+0. Add persistent land ledger import workflow.
+   - The current analyzer now validates source-vs-parsed totals, lot normalization, parcel integrity, land acquisition status, PF summary, and account masking.
+   - Next implementation should persist import records, parsed ledger versions, approval state, evidence attachments, and enrichment job status.
+   - Backend batch PNU resolution, official land price base-year/source lookup, and registry evidence workflow should run after the import is reviewed.
 
 1. Add PDF/DOCX binary renderers to the structured report export pipeline.
    - Existing export history supports Markdown, JSON, and print-ready HTML.
