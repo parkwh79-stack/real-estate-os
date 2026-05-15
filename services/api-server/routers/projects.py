@@ -488,6 +488,39 @@ def list_project_market_evidence(project_id: str, run_id: str | None = None):
         ),
     )
 
+@router.post("/{project_id}/market-evidence/review")
+def review_project_market_evidence(project_id: str, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    record_key = input_data.get("record_key") or input_data.get("recordKey")
+    if not record_key:
+        raise HTTPException(status_code=400, detail="record_key is required")
+
+    record = MARKET_EVIDENCE_DB.get(project_id, {}).get(record_key)
+    if not record:
+        raise HTTPException(status_code=404, detail="Market evidence record not found")
+
+    review_status = input_data.get("review_status") or input_data.get("reviewStatus")
+    allowed_statuses = {"pending_review", "approved", "rejected", "needs_revision", "auto_validated"}
+    if review_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"review_status must be one of {sorted(allowed_statuses)}")
+
+    reviewed_at = now_iso()
+    review_entry = {
+        "reviewStatus": review_status,
+        "reviewedAt": reviewed_at,
+        "reviewedBy": input_data.get("reviewed_by") or input_data.get("reviewedBy") or "system",
+        "reviewComment": input_data.get("comment", ""),
+    }
+    record["reviewStatus"] = review_status
+    record["reviewedAt"] = reviewed_at
+    record["reviewedBy"] = review_entry["reviewedBy"]
+    record["reviewComment"] = review_entry["reviewComment"]
+    record.setdefault("reviewHistory", []).append(review_entry)
+    persist_state()
+    return record
+
 @router.post("/{project_id}/legal/review")
 def review_legal_and_permits(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:

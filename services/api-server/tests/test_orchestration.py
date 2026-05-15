@@ -143,3 +143,17 @@ def test_pf_review_persists_market_evidence_records():
     assert len(records) == 2
     assert {record["evidenceType"] for record in records} == {"product_mix", "sale_comparable"}
     assert all(record["runId"] == run["run_id"] for record in records)
+
+    reviewed = client.post(
+        f"/projects/{project_id}/market-evidence/review",
+        json={
+            "record_key": records[0]["recordKey"],
+            "review_status": "approved",
+            "reviewed_by": "market_analyst",
+            "comment": "Comparable evidence accepted.",
+        },
+    ).json()
+
+    assert reviewed["reviewStatus"] == "approved"
+    assert reviewed["reviewedBy"] == "market_analyst"
+    assert reviewed["reviewHistory"][-1]["reviewComment"] == "Comparable evidence accepted."

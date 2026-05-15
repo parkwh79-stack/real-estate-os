@@ -91,6 +91,11 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Query Parameters**: Optional `run_id` to filter records by orchestration run.
 - **Response**: Evidence records with evidence ID, evidence type, source metadata, extracted fields, related validation checks, validation status, review status, project ID, and run ID.
 
+### `POST /projects/{project_id}/market-evidence/review`
+- **Description**: Update analyst review status for a persisted market evidence record.
+- **Request Body**: `{ "record_key": "run-id:evidence-id", "review_status": "approved|rejected|needs_revision|pending_review|auto_validated", "reviewed_by": "market_analyst", "comment": "Review memo" }`
+- **Response**: Updated evidence record with review status, reviewer, review timestamp, comment, and review history.
+
 ### `POST /projects/{project_id}/legal/review`
 - **Description**: Run a preliminary Korean real estate PF legal, permit, land-rights, trust-security, and covenant review.
 - **Request Body**: `{ "project_data": {...}, "law_context": {...} }`

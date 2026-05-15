@@ -97,6 +97,7 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Market evidence reconciliation | Use Market Evidence Agent to reconcile document-derived sale price, rent, product mix revenue, feasibility revenue, and comparable evidence before Marketability scoring | In Progress |
 | Evidence record output | Emit normalized evidence records for product mix, sale comparables, and rent comparables with source IDs, extracted fields, related checks, and validation status | Done |
 | Evidence record persistence | Persist market evidence records to JSON/SQLite state and expose them through project-level API | Done |
+| Evidence review API/UI | Allow analysts to approve, reject, or request revision for persisted market evidence records | Done |
 | Comparable normalization | Apply simple distance and product-type adjustment to comparable price per py | Done |
 | Pricing comparison | Calculate comparable min, median, max, premium, percentile, judgement, and pricing comment | Done |
 | Exit sale rate | Calculate base, 5%, 10%, 15%, and 20% discount scenarios plus tranche-level sale-rate thresholds | In Progress |
@@ -664,6 +665,7 @@ Implemented baseline:
 - Normalized evidence records for product mix, sale comparable, and rent comparable evidence
 - Persistent market evidence index in JSON/SQLite state
 - Project-level market evidence API
+- Analyst review workflow for persisted market evidence records
 - Agent-to-agent messages from Market Evidence Agent to Orchestration, Marketability, and Feasibility agents
 - Comparable price normalization
 - Comparable price band and premium calculation
@@ -686,7 +688,6 @@ Still missing for practical production review:
 | Official public transaction adapter | Needed for real comparable evidence |
 | Licensed partner data adapters | Needed for broader market data if rights are secured |
 | Product-specific adjustment model | Avoids applying apartment logic to retail or KIC assets |
-| Evidence approval workflow | Required for analyst sign-off before pricing, rent, or absorption assumptions become final |
 | Original document archive | Required to retain original uploaded evidence, page/section references, parser version, and file hash |
 | Subscription and unsold data | Required for apartment and residential presale review |
 | Rent-yield model | Required for officetel, retail, KIC, and section office pricing |
