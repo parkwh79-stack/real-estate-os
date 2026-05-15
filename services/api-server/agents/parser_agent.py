@@ -5,6 +5,9 @@ import fitz  # PyMuPDF
 from agents.ai_connection import AIConnection, resolve_ai_context
 
 
+PARSER_AGENT_VERSION = "realytics-parser-v2.1"
+
+
 class ParserAgent:
     def __init__(self, ai_context: Dict[str, Any] | None = None):
         self.ai_context = resolve_ai_context(ai_context)

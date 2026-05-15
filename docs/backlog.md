@@ -24,6 +24,7 @@ Updated: 2026-05-14
 | P0 | Agent | Marketability document evidence reconciliation | In Progress | Parser prompt extracts market evidence from uploaded documents; Market Evidence Agent reconciles sale price, rent, product mix revenue, feasibility revenue, and comparable evidence before Marketability scoring |
 | P0 | Agent | Marketability evidence records | Done | Market Evidence Agent emits normalized records for product mix, sale comparables, and rent comparables; records are persisted to JSON/SQLite state and exposed through the market-evidence API |
 | P0 | Frontend | Marketability evidence review UI | Done | Orchestration page now shows persisted market evidence records and supports approve, reject, and needs-revision actions through the review API |
+| P0 | Parser | Uploaded document provenance | Done | Business plan upload now stores original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, and source document metadata for market evidence records |
 | P0 | Agent | Marketability pricing judgement | Done | Compares proposed sale price against adjusted comparable median and returns price band, premium, percentile, judgement, and pricing comment |
 | P0 | Agent | Marketability exit sale rate | In Progress | Calculates base, 5/10/15/20% discount, and tranche-level exit sale rate skeleton for PF review |
 | P0 | Agent | Marketability score v2 | In Progress | Weighted baseline now scores location, demand, supply, pricing, product, absorption, and PF Exit; product-specific scoring weights remain next |

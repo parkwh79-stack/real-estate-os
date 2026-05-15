@@ -90,6 +90,9 @@ def test_upload_and_run_creates_orchestration(monkeypatch):
     assert body["run"]["status"] == "completed"
     assert body["run"]["user_id"] == "upload-test"
     assert body["run"]["artifacts"]["reportRecord"]["run_id"] == body["run"]["run_id"]
+    assert body["project"]["_meta"]["upload"]["originalFileName"] == "business-plan.pdf"
+    assert body["project"]["_meta"]["upload"]["originalFileHash"]
+    assert body["project"]["_meta"]["parser_version"] == "realytics-parser-v2.1"
 
 
 def test_pf_review_persists_market_evidence_records():
@@ -107,6 +110,11 @@ def test_pf_review_persists_market_evidence_records():
             "pf_structure": [{"tranche": "Tranche A", "amount": 35_000_000_000, "priority": 1}],
             "sales_schedule": {"contract_deposit": 0.1},
             "document_market_evidence": {
+                "sourceDocument": {
+                    "originalFileName": "market-study.pdf",
+                    "originalFileHash": "hash-market-study",
+                    "parserVersion": "realytics-parser-v2.1",
+                },
                 "productMix": [
                     {
                         "type": "A",
@@ -143,6 +151,7 @@ def test_pf_review_persists_market_evidence_records():
     assert len(records) == 2
     assert {record["evidenceType"] for record in records} == {"product_mix", "sale_comparable"}
     assert all(record["runId"] == run["run_id"] for record in records)
+    assert all(record["sourceDocument"]["originalFileHash"] == "hash-market-study" for record in records)
 
     reviewed = client.post(
         f"/projects/{project_id}/market-evidence/review",

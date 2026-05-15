@@ -256,6 +256,7 @@ class MarketEvidenceAgent:
                 },
                 "relatedCheckKeys": ["product_mix_revenue_vs_feasibility"],
                 "validationStatus": check_status.get("product_mix_revenue_vs_feasibility", "not_checked"),
+                "sourceDocument": _source_document(data),
             })
 
         for index, item in enumerate(_comparables(data)):
@@ -277,6 +278,7 @@ class MarketEvidenceAgent:
                 },
                 "relatedCheckKeys": ["proposed_price_vs_document_comparables"],
                 "validationStatus": check_status.get("proposed_price_vs_document_comparables", "not_checked"),
+                "sourceDocument": item.get("sourceDocument") or _source_document(data),
             })
 
         rent_comparables = data.get("market", {}).get("rentComparables") or data.get("market", {}).get("rent_comparables") or []
@@ -299,6 +301,7 @@ class MarketEvidenceAgent:
                 },
                 "relatedCheckKeys": ["estimated_rent_vs_document_comparables"],
                 "validationStatus": check_status.get("estimated_rent_vs_document_comparables", "not_checked"),
+                "sourceDocument": item.get("sourceDocument") or _source_document(data),
             })
 
         return records
@@ -420,3 +423,20 @@ def _variance(parsed_value: Optional[float], source_value: Optional[float]) -> O
 def _camelize(value: str) -> str:
     parts = value.split("_")
     return parts[0] + "".join(part.capitalize() for part in parts[1:])
+
+
+def _source_document(data: Dict[str, Any]) -> Dict[str, Any]:
+    document_evidence = (
+        data.get("document_market_evidence")
+        or data.get("documentMarketEvidence")
+        or data.get("market_evidence")
+        or data.get("marketEvidence")
+        or {}
+    )
+    if isinstance(document_evidence, dict) and isinstance(document_evidence.get("sourceDocument"), dict):
+        return document_evidence["sourceDocument"]
+    source_documents = data.get("source_documents") or data.get("sourceDocuments") or []
+    if source_documents:
+        return source_documents[0]
+    upload = data.get("_meta", {}).get("upload")
+    return upload if isinstance(upload, dict) else {}

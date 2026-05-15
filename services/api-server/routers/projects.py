@@ -6,7 +6,7 @@ import os
 import hashlib
 from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
-from agents.parser_agent import ParserAgent
+from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
 
 from core.calculations import (
     calculate_development_profit, calculate_profit_margin, calculate_cashflow_max_minus,
@@ -157,11 +157,33 @@ async def parse_uploaded_business_plan(
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
+    uploaded_at = now_iso()
+    original_file_hash = hashlib.sha256(content).hexdigest()
+    upload_meta = {
+        "originalFileName": file.filename,
+        "originalFileHash": original_file_hash,
+        "contentType": file.content_type,
+        "fileSizeBytes": len(content),
+        "uploadedAt": uploaded_at,
+        "parserVersion": PARSER_AGENT_VERSION,
+    }
 
     try:
         agent = ParserAgent(ai_context)
         text = agent.parse_document(tmp_path)
-        return agent.extract_project_data(text, ai_context)
+        parsed_data = agent.extract_project_data(text, ai_context)
+        parsed_data.setdefault("_meta", {})
+        parsed_data["_meta"]["upload"] = upload_meta
+        parsed_data["_meta"]["parser_version"] = PARSER_AGENT_VERSION
+        parsed_data.setdefault("source_documents", [])
+        parsed_data["source_documents"].append(upload_meta)
+
+        document_market_evidence = parsed_data.get("document_market_evidence")
+        if isinstance(document_market_evidence, dict):
+            document_market_evidence.setdefault("sourceDocument", upload_meta)
+            document_market_evidence.setdefault("parserVersion", PARSER_AGENT_VERSION)
+
+        return parsed_data
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)

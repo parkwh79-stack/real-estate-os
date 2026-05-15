@@ -147,6 +147,7 @@ Current implementation:
 - Emits normalized evidence records for product mix, sale comparables, and rent comparables.
 - Persists market evidence records in JSON/SQLite runtime state and exposes them through `GET /projects/{project_id}/market-evidence`.
 - Supports analyst review of market evidence through `POST /projects/{project_id}/market-evidence/review` and the orchestration UI.
+- Links market evidence records to uploaded document provenance metadata, including file name, SHA-256 hash, file size, content type, upload timestamp, and parser version.
 - Returns price band, comparable median premium, pricing judgement, data status, missing required data, basic score/grade, Exit sale rate scenarios, absorption forecast, discount triggers, unsold recovery, risk flags, and report paragraph skeletons.
 
 Roadmap:
