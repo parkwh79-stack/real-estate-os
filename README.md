@@ -144,6 +144,7 @@ Current implementation:
 - Normalizes product mix, sale price assumptions, total revenue, exclusive ratio, and evidence IDs.
 - Ingests manual comparable, transaction, presale, and listing fixture data with source metadata.
 - Reconciles uploaded document-derived market evidence through `MarketEvidenceAgent` before Marketability scoring.
+- Emits normalized evidence records for product mix, sale comparables, and rent comparables.
 - Returns price band, comparable median premium, pricing judgement, data status, missing required data, basic score/grade, Exit sale rate scenarios, absorption forecast, discount triggers, unsold recovery, risk flags, and report paragraph skeletons.
 
 Roadmap:

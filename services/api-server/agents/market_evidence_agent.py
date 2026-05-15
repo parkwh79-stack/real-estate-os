@@ -23,7 +23,9 @@ class MarketEvidenceAgent:
         merged = self._deep_merge(project_data, market_payload_patch)
         pricing_checks = self._validate_sale_price(merged)
         rent_checks = self._validate_rent(merged)
+        evidence_records = self._evidence_records(merged, pricing_checks, rent_checks)
         evidence_summary = self._evidence_summary(merged)
+        evidence_summary["evidenceRecordCount"] = len(evidence_records)
         issues = [issue for check in pricing_checks + rent_checks for issue in check.get("issues", [])]
         status = self._status(issues, evidence_summary)
 
@@ -35,6 +37,7 @@ class MarketEvidenceAgent:
             "evidenceSummary": evidence_summary,
             "pricingChecks": pricing_checks,
             "rentChecks": rent_checks,
+            "evidenceRecords": evidence_records,
             "issues": issues,
             "agentMessages": self._agent_messages(status, issues, evidence_summary),
             "developerFeasibilityReference": self._developer_reference(developer_feasibility),
@@ -220,6 +223,85 @@ class MarketEvidenceAgent:
                 or data.get("marketEvidence")
             ),
         }
+
+    def _evidence_records(
+        self,
+        data: Dict[str, Any],
+        pricing_checks: List[Dict[str, Any]],
+        rent_checks: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        check_status = {
+            check["key"]: check["status"]
+            for check in pricing_checks + rent_checks
+        }
+
+        for index, item in enumerate(_product_mix(data)):
+            evidence_ids = item.get("evidenceIds") or item.get("evidence_ids") or []
+            records.append({
+                "evidenceId": evidence_ids[0] if evidence_ids else f"product-mix-{index + 1:03d}",
+                "evidenceType": "product_mix",
+                "sourceName": item.get("sourceName") or "uploaded document",
+                "sourceType": item.get("sourceType") or "manual_upload",
+                "sourceUrlOrEvidenceId": evidence_ids[0] if evidence_ids else item.get("sourceUrlOrEvidenceId"),
+                "baseDate": item.get("baseDate"),
+                "confidence": item.get("confidence", 0.6),
+                "extractedFields": {
+                    "type": item.get("type"),
+                    "productType": item.get("productType"),
+                    "units": item.get("units"),
+                    "contractAreaPy": item.get("contractAreaPy") or item.get("contract_area_py"),
+                    "pricePerPy": item.get("pricePerPy") or item.get("price_per_py"),
+                    "totalRevenue": item.get("totalRevenue") or item.get("total_revenue"),
+                },
+                "relatedCheckKeys": ["product_mix_revenue_vs_feasibility"],
+                "validationStatus": check_status.get("product_mix_revenue_vs_feasibility", "not_checked"),
+            })
+
+        for index, item in enumerate(_comparables(data)):
+            evidence_id = item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url") or f"sale-comp-{index + 1:03d}"
+            records.append({
+                "evidenceId": evidence_id,
+                "evidenceType": "sale_comparable",
+                "sourceName": item.get("sourceName") or item.get("source") or "uploaded document",
+                "sourceType": item.get("sourceType") or "manual_upload",
+                "sourceUrlOrEvidenceId": evidence_id,
+                "baseDate": item.get("baseDate") or item.get("transactionDate") or item.get("saleDate"),
+                "confidence": item.get("confidence", 0.6),
+                "extractedFields": {
+                    "caseId": item.get("caseId"),
+                    "name": item.get("name"),
+                    "productType": item.get("productType"),
+                    "distanceM": item.get("distanceM") or item.get("distance_m"),
+                    "pricePerPy": item.get("pricePerPy") or item.get("price_per_py") or item.get("rawPricePerPy"),
+                },
+                "relatedCheckKeys": ["proposed_price_vs_document_comparables"],
+                "validationStatus": check_status.get("proposed_price_vs_document_comparables", "not_checked"),
+            })
+
+        rent_comparables = data.get("market", {}).get("rentComparables") or data.get("market", {}).get("rent_comparables") or []
+        for index, item in enumerate(rent_comparables):
+            evidence_id = item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url") or f"rent-comp-{index + 1:03d}"
+            records.append({
+                "evidenceId": evidence_id,
+                "evidenceType": "rent_comparable",
+                "sourceName": item.get("sourceName") or item.get("source") or "uploaded document",
+                "sourceType": item.get("sourceType") or "manual_upload",
+                "sourceUrlOrEvidenceId": evidence_id,
+                "baseDate": item.get("baseDate") or item.get("leaseDate"),
+                "confidence": item.get("confidence", 0.6),
+                "extractedFields": {
+                    "caseId": item.get("caseId"),
+                    "name": item.get("name"),
+                    "productType": item.get("productType"),
+                    "distanceM": item.get("distanceM") or item.get("distance_m"),
+                    "monthlyRentPerPy": item.get("monthlyRentPerPy") or item.get("monthly_rent_per_py") or item.get("rentPerPy"),
+                },
+                "relatedCheckKeys": ["estimated_rent_vs_document_comparables"],
+                "validationStatus": check_status.get("estimated_rent_vs_document_comparables", "not_checked"),
+            })
+
+        return records
 
     def _status(self, issues: List[Dict[str, Any]], evidence_summary: Dict[str, Any]) -> str:
         if any(issue.get("severity") == "blocking" for issue in issues):

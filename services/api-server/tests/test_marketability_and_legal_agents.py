@@ -181,6 +181,12 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     assert evidence["status"] == "needs_review"
     assert evidence["marketPayloadPatch"]["product_mix"][0]["type"] == "A"
     assert evidence["evidenceSummary"]["saleComparableCount"] == 1
+    assert evidence["evidenceSummary"]["evidenceRecordCount"] == 3
+    assert {record["evidenceType"] for record in evidence["evidenceRecords"]} == {
+        "product_mix",
+        "sale_comparable",
+        "rent_comparable",
+    }
     assert any(issue["code"] == "DOCUMENT_COMPARABLE_PRICE_PREMIUM" for issue in evidence["issues"])
 
     marketability_input = {
