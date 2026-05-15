@@ -25,6 +25,7 @@ Updated: 2026-05-14
 | P0 | Agent | Marketability evidence records | Done | Market Evidence Agent emits normalized records for product mix, sale comparables, and rent comparables; records are persisted to JSON/SQLite state and exposed through the market-evidence API |
 | P0 | Frontend | Marketability evidence review UI | Done | Orchestration page now shows persisted market evidence records and supports approve, reject, and needs-revision actions through the review API |
 | P0 | Parser | Uploaded document provenance | Done | Business plan upload now stores original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, and source document metadata for market evidence records |
+| P0 | Parser | Original uploaded document archive | Done | Business plan upload now stores the original file under runtime upload archive storage and exposes source document list/download APIs for audit review |
 | P0 | Agent | Marketability pricing judgement | Done | Compares proposed sale price against adjusted comparable median and returns price band, premium, percentile, judgement, and pricing comment |
 | P0 | Agent | Marketability exit sale rate | In Progress | Calculates base, 5/10/15/20% discount, and tranche-level exit sale rate skeleton for PF review |
 | P0 | Agent | Marketability score v2 | In Progress | Weighted baseline now scores location, demand, supply, pricing, product, absorption, and PF Exit; product-specific scoring weights remain next |
@@ -40,7 +41,7 @@ Updated: 2026-05-14
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
 | P0 | Report | Structured report export pipeline | In Progress | Markdown/JSON/print-ready HTML export history added; PDF/DOCX binary renderers remain next |
-| P0 | Parser | Source provenance per parsed field | Next | Persist page/source/confidence metadata for uploaded business plan/basic architectural plan fields |
+| P0 | Parser | Source provenance per parsed field | Next | Persist page/table/row/source/confidence metadata for uploaded business plan/basic architectural plan fields |
 | P0 | Integration | Batch PNU and official land price enrichment | Planned | Next after validation layer: resolve PNU with confidence score, fetch cadastral characteristics, official land price with base year/source, and registry/encumbrance evidence for imported parcels |
 | P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |
 | P1 | Export | Excel upload | In Progress | Feasibility Study v2 schema and workbook mapping designed; next step is XLSX template import validator |

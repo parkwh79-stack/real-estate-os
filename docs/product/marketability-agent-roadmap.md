@@ -99,6 +99,7 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Evidence record persistence | Persist market evidence records to JSON/SQLite state and expose them through project-level API | Done |
 | Evidence review API/UI | Allow analysts to approve, reject, or request revision for persisted market evidence records | Done |
 | Uploaded document provenance | Attach original file name, SHA-256 hash, file size, content type, upload timestamp, and parser version to parsed project data and market evidence records | Done |
+| Original document binary archive | Preserve the uploaded source document in runtime storage and expose source document list/download APIs | Done |
 | Comparable normalization | Apply simple distance and product-type adjustment to comparable price per py | Done |
 | Pricing comparison | Calculate comparable min, median, max, premium, percentile, judgement, and pricing comment | Done |
 | Exit sale rate | Calculate base, 5%, 10%, 15%, and 20% discount scenarios plus tranche-level sale-rate thresholds | In Progress |
@@ -668,6 +669,7 @@ Implemented baseline:
 - Project-level market evidence API
 - Analyst review workflow for persisted market evidence records
 - Uploaded document provenance metadata on parsed project data and market evidence records
+- Original uploaded source document archive with project-level list/download API
 - Agent-to-agent messages from Market Evidence Agent to Orchestration, Marketability, and Feasibility agents
 - Comparable price normalization
 - Comparable price band and premium calculation
@@ -690,7 +692,6 @@ Still missing for practical production review:
 | Official public transaction adapter | Needed for real comparable evidence |
 | Licensed partner data adapters | Needed for broader market data if rights are secured |
 | Product-specific adjustment model | Avoids applying apartment logic to retail or KIC assets |
-| Original document binary archive | Required to retain the uploaded file itself, not only metadata and hash |
 | Page-level evidence locator | Required to map each extracted value to document page, table, and row references |
 | Subscription and unsold data | Required for apartment and residential presale review |
 | Rent-yield model | Required for officetel, retail, KIC, and section office pricing |

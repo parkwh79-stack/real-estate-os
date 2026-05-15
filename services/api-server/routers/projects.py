@@ -1,9 +1,13 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Response
+from fastapi.responses import FileResponse
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import tempfile
 import os
+import shutil
 import hashlib
+import string
+from pathlib import Path
 from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
 from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
@@ -27,6 +31,9 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 import json
 import os
+
+API_SERVER_ROOT = Path(__file__).resolve().parents[1]
+UPLOAD_ARCHIVE_ROOT = API_SERVER_ROOT / "data" / "runtime" / "uploads"
 
 PROJECTS_DB = {}
 ORCHESTRATIONS_DB = {}
@@ -68,6 +75,76 @@ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def safe_upload_suffix(filename: str | None) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    if not suffix or len(suffix) > 12:
+        return ".bin"
+    return suffix
+
+def is_valid_archive_id(value: str | None) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in string.hexdigits for char in value)
+    )
+
+def project_upload_archive_dir(project_id: str) -> Path:
+    archive_root = UPLOAD_ARCHIVE_ROOT.resolve()
+    archive_dir = (archive_root / str(project_id)).resolve()
+    if archive_root not in archive_dir.parents:
+        raise HTTPException(status_code=400, detail="Invalid project archive path")
+    return archive_dir
+
+def archive_uploaded_document(
+    project_id: str,
+    content: bytes,
+    original_file_name: str | None,
+    content_type: str | None,
+) -> Dict[str, Any]:
+    archive_id = hashlib.sha256(content).hexdigest()
+    suffix = safe_upload_suffix(original_file_name)
+    project_archive_dir = project_upload_archive_dir(project_id)
+    project_archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = project_archive_dir / f"{archive_id}{suffix}"
+    if not archive_path.exists():
+        archive_path.write_bytes(content)
+
+    return {
+        "archiveId": archive_id,
+        "archiveStored": True,
+        "archivePath": str(archive_path.relative_to(API_SERVER_ROOT)).replace("\\", "/"),
+        "downloadUrl": f"/projects/{project_id}/source-documents/{archive_id}/download",
+        "contentType": content_type,
+    }
+
+def project_source_documents(project_id: str) -> List[Dict[str, Any]]:
+    project = PROJECTS_DB.get(project_id, {})
+    documents = list(project.get("source_documents") or [])
+    upload_meta = project.get("_meta", {}).get("upload")
+    if isinstance(upload_meta, dict):
+        upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
+        already_listed = any(
+            (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
+            for document in documents
+        )
+        if not already_listed:
+            documents.append(upload_meta)
+    return documents
+
+def save_source_document_metadata(project_id: str, upload_meta: Dict[str, Any]) -> None:
+    project = PROJECTS_DB[project_id]
+    project.setdefault("_meta", {})
+    project["_meta"]["upload"] = upload_meta
+    documents = project.setdefault("source_documents", [])
+    upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
+    already_listed = any(
+        (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
+        for document in documents
+    )
+    if not already_listed:
+        documents.append(upload_meta)
+    persist_state()
 
 def save_report_record(
     project_id: str,
@@ -150,6 +227,7 @@ def apply_parsed_project_data(project_id: str, parsed_data: Dict[str, Any]) -> D
     return PROJECTS_DB[project_id]
 
 async def parse_uploaded_business_plan(
+    project_id: str,
     file: UploadFile,
     ai_context: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -159,6 +237,7 @@ async def parse_uploaded_business_plan(
         tmp_path = tmp.name
     uploaded_at = now_iso()
     original_file_hash = hashlib.sha256(content).hexdigest()
+    archive_meta = archive_uploaded_document(project_id, content, file.filename, file.content_type)
     upload_meta = {
         "originalFileName": file.filename,
         "originalFileHash": original_file_hash,
@@ -166,6 +245,7 @@ async def parse_uploaded_business_plan(
         "fileSizeBytes": len(content),
         "uploadedAt": uploaded_at,
         "parserVersion": PARSER_AGENT_VERSION,
+        **archive_meta,
     }
 
     try:
@@ -318,6 +398,9 @@ def delete_project(project_id: str):
     REPORTS_DB.pop(project_id, None)
     ORCHESTRATIONS_DB.pop(project_id, None)
     MARKET_EVIDENCE_DB.pop(project_id, None)
+    project_archive_dir = project_upload_archive_dir(project_id)
+    if project_archive_dir.exists():
+        shutil.rmtree(project_archive_dir)
     persist_state()
     return {
         "deleted": True,
@@ -342,8 +425,11 @@ async def upload_business_plan(
             "host": "api",
         },
     )
-    parsed_data = await parse_uploaded_business_plan(file, ai_context)
+    parsed_data = await parse_uploaded_business_plan(project_id, file, ai_context)
     if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
+        upload_meta = parsed_data.get("_meta", {}).get("upload")
+        if isinstance(upload_meta, dict):
+            save_source_document_metadata(project_id, upload_meta)
         return {
             "project_id": project_id,
             "status": "host_llm_required",
@@ -383,8 +469,11 @@ async def upload_business_plan_and_run_pf_review(
             "host": "api",
         },
     )
-    parsed_data = await parse_uploaded_business_plan(file, ai_context)
+    parsed_data = await parse_uploaded_business_plan(project_id, file, ai_context)
     if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
+        upload_meta = parsed_data.get("_meta", {}).get("upload")
+        if isinstance(upload_meta, dict):
+            save_source_document_metadata(project_id, upload_meta)
         return {
             "project_id": project_id,
             "status": "host_llm_required",
@@ -493,6 +582,43 @@ def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = N
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = deep_merge(PROJECTS_DB[project_id], input_data or {})
     return MarketabilityAgent().analyze(source_data)
+
+@router.get("/{project_id}/source-documents")
+def list_project_source_documents(project_id: str):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project_source_documents(project_id)
+
+@router.get("/{project_id}/source-documents/{archive_id}/download")
+def download_project_source_document(project_id: str, archive_id: str):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not is_valid_archive_id(archive_id):
+        raise HTTPException(status_code=404, detail="Source document not found")
+
+    document = next(
+        (
+            item
+            for item in project_source_documents(project_id)
+            if (item.get("archiveId") or item.get("originalFileHash")) == archive_id
+        ),
+        None,
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Source document not found")
+
+    archive_path = (
+        project_upload_archive_dir(project_id)
+        / f"{archive_id}{safe_upload_suffix(document.get('originalFileName'))}"
+    )
+    if not archive_path.exists():
+        raise HTTPException(status_code=404, detail="Archived source document file not found")
+
+    return FileResponse(
+        archive_path,
+        media_type=document.get("contentType") or "application/octet-stream",
+        filename=document.get("originalFileName") or f"{archive_id}{archive_path.suffix}",
+    )
 
 @router.get("/{project_id}/market-evidence")
 def list_project_market_evidence(project_id: str, run_id: str | None = None):

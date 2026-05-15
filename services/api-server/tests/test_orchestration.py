@@ -92,7 +92,21 @@ def test_upload_and_run_creates_orchestration(monkeypatch):
     assert body["run"]["artifacts"]["reportRecord"]["run_id"] == body["run"]["run_id"]
     assert body["project"]["_meta"]["upload"]["originalFileName"] == "business-plan.pdf"
     assert body["project"]["_meta"]["upload"]["originalFileHash"]
+    assert body["project"]["_meta"]["upload"]["archiveStored"] is True
+    assert body["project"]["_meta"]["upload"]["archiveId"] == body["project"]["_meta"]["upload"]["originalFileHash"]
+    assert body["project"]["_meta"]["upload"]["downloadUrl"].endswith("/download")
     assert body["project"]["_meta"]["parser_version"] == "realytics-parser-v2.1"
+
+    source_documents = client.get(f"/projects/{project_id}/source-documents").json()
+    assert len(source_documents) == 1
+    assert source_documents[0]["archiveId"] == body["project"]["_meta"]["upload"]["archiveId"]
+
+    downloaded = client.get(source_documents[0]["downloadUrl"])
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"not-a-real-pdf"
+
+    deleted = client.delete(f"/projects/{project_id}")
+    assert deleted.status_code == 200
 
 
 def test_pf_review_persists_market_evidence_records():

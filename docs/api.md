@@ -28,21 +28,30 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Response**: The updated project object.
 
 ### `DELETE /projects/{project_id}`
-- **Description**: Delete a project and remove associated MVP report/orchestration runtime records.
+- **Description**: Delete a project and remove associated MVP report/orchestration/runtime source document archive records.
 - **Response**: `{ "deleted": true, "project_id": "...", "project": {...} }`
 
 ### `POST /projects/{project_id}/upload`
 - **Description**: Upload a PDF business plan and extract project data with the configured server-side AI provider.
 - **Headers**: Optional `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER` (`openai`, `anthropic`, or `claude_desktop`).
 - **Request Body**: Multipart form with `file`.
-- **Response**: Updated project object with parser `_meta.ai_connection` and `_meta.upload` provenance. Upload provenance includes original file name, SHA-256 hash, content type, file size, upload timestamp, and parser version. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
+- **Response**: Updated project object with parser `_meta.ai_connection` and `_meta.upload` provenance. Upload provenance includes original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, archive ID, archive path, and source document download URL. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
 
 ### `POST /projects/{project_id}/upload-and-run`
 - **Description**: Upload a PDF business plan, parse/update the project, then immediately run PF review orchestration and save the generated report.
 - **Headers**: Optional `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER`.
 - **Request Body**: Multipart form with `file`.
-- **Response**: `{ "status": "completed", "project": {...}, "run": {...} }`. Uploaded document provenance is stored in `_meta.upload` and propagated into market evidence records when document-derived market evidence is extracted.
+- **Response**: `{ "status": "completed", "project": {...}, "run": {...} }`. Uploaded document provenance and archive metadata are stored in `_meta.upload` and propagated into market evidence records when document-derived market evidence is extracted.
 - **Note**: In `claude_desktop` mode this endpoint returns `status: host_llm_required` until Claude Desktop converts the extracted text into project JSON.
+
+### `GET /projects/{project_id}/source-documents`
+- **Description**: List uploaded source documents attached to the project.
+- **Response**: Source document metadata including original file name, SHA-256 hash, archive ID, file size, content type, upload timestamp, parser version, archive path, and download URL.
+
+### `GET /projects/{project_id}/source-documents/{archive_id}/download`
+- **Description**: Download the archived original source document for audit review.
+- **Response**: Original uploaded file as an attachment.
+- **Note**: The download is only available when the archive ID is listed on the project source document metadata.
 
 ### `POST /projects/{project_id}/ai/connection/resolve`
 - **Description**: Resolve the active AI provider, model, runtime mode, and linked user ID without calling an external model.
