@@ -90,3 +90,56 @@ def test_upload_and_run_creates_orchestration(monkeypatch):
     assert body["run"]["status"] == "completed"
     assert body["run"]["user_id"] == "upload-test"
     assert body["run"]["artifacts"]["reportRecord"]["run_id"] == body["run"]["run_id"]
+
+
+def test_pf_review_persists_market_evidence_records():
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Market Evidence Storage Test", "type": "officetel"},
+            "sales_assumptions": {"avg_price_per_sqm": 9_075_000},
+            "feasibility_input": {
+                "total_revenue": 72_000_000_000,
+                "total_cost": 58_000_000_000,
+                "finance_cost": 3_000_000_000,
+            },
+            "pf_structure": [{"tranche": "Tranche A", "amount": 35_000_000_000, "priority": 1}],
+            "sales_schedule": {"contract_deposit": 0.1},
+            "document_market_evidence": {
+                "productMix": [
+                    {
+                        "type": "A",
+                        "productType": "officetel_residential",
+                        "exclusiveAreaPy": 12,
+                        "contractAreaPy": 20,
+                        "units": 100,
+                        "pricePerPy": 36_000_000,
+                        "totalRevenue": 72_000_000_000,
+                        "evidenceIds": ["doc-p12-table3"],
+                    }
+                ],
+                "comparables": [
+                    {
+                        "caseId": "DOC-COMP-001",
+                        "name": "Document Comparable A",
+                        "productType": "officetel_residential",
+                        "distanceM": 250,
+                        "pricePerPy": 30_000_000,
+                        "sourceName": "uploaded business plan",
+                        "sourceUrlOrEvidenceId": "doc-p20",
+                        "baseDate": "2026-05-15",
+                    }
+                ],
+            },
+        },
+    ).json()
+    project_id = created["project"]["id"]
+
+    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    records = client.get(f"/projects/{project_id}/market-evidence", params={"run_id": run["run_id"]}).json()
+
+    assert run["artifacts"]["marketEvidenceReview"]["evidenceSummary"]["evidenceRecordCount"] == 2
+    assert len(records) == 2
+    assert {record["evidenceType"] for record in records} == {"product_mix", "sale_comparable"}
+    assert all(record["runId"] == run["run_id"] for record in records)

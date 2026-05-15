@@ -145,6 +145,7 @@ Current implementation:
 - Ingests manual comparable, transaction, presale, and listing fixture data with source metadata.
 - Reconciles uploaded document-derived market evidence through `MarketEvidenceAgent` before Marketability scoring.
 - Emits normalized evidence records for product mix, sale comparables, and rent comparables.
+- Persists market evidence records in JSON/SQLite runtime state and exposes them through `GET /projects/{project_id}/market-evidence`.
 - Returns price band, comparable median premium, pricing judgement, data status, missing required data, basic score/grade, Exit sale rate scenarios, absorption forecast, discount triggers, unsold recovery, risk flags, and report paragraph skeletons.
 
 Roadmap:
@@ -165,6 +166,7 @@ Key files:
 API:
 
 - `POST /projects/{project_id}/marketability/analyze`
+- `GET /projects/{project_id}/market-evidence`
 
 ### 6. Korean Legal / Permit Review Agent
 

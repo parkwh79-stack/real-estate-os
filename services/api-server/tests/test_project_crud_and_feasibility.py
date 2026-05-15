@@ -38,12 +38,14 @@ def test_project_crud_create_update_delete_cascades_runtime_records(monkeypatch)
 
     projects.REPORTS_DB[project_id] = [{"report_id": "r-1"}]
     projects.ORCHESTRATIONS_DB[project_id] = {"run-1": {"status": "completed"}}
+    projects.MARKET_EVIDENCE_DB[project_id] = {"run-1:ev-1": {"evidenceId": "ev-1"}}
     deleted = client.delete(f"/projects/{project_id}")
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] is True
     assert project_id not in projects.PROJECTS_DB
     assert project_id not in projects.REPORTS_DB
     assert project_id not in projects.ORCHESTRATIONS_DB
+    assert project_id not in projects.MARKET_EVIDENCE_DB
     assert client.get(f"/projects/{project_id}").status_code == 404
 
 

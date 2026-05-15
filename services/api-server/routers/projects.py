@@ -31,10 +31,11 @@ import os
 PROJECTS_DB = {}
 ORCHESTRATIONS_DB = {}
 REPORTS_DB = {}
+MARKET_EVIDENCE_DB = {}
 project_id_counter = 1
 
 def persist_state() -> None:
-    save_state(PROJECTS_DB, REPORTS_DB, ORCHESTRATIONS_DB, project_id_counter)
+    save_state(PROJECTS_DB, REPORTS_DB, ORCHESTRATIONS_DB, project_id_counter, MARKET_EVIDENCE_DB)
 
 def normalize_project_record(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
     now = now_iso()
@@ -99,6 +100,7 @@ def save_report_record(
 
 def save_orchestration_run(project_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
     ORCHESTRATIONS_DB.setdefault(project_id, {})[run["run_id"]] = run
+    save_market_evidence_records(project_id, run)
     persist_state()
 
     if "phase11Report" in run["artifacts"]:
@@ -113,6 +115,31 @@ def save_orchestration_run(project_id: str, run: Dict[str, Any]) -> Dict[str, An
         persist_state()
 
     return run
+
+def save_market_evidence_records(project_id: str, run: Dict[str, Any]) -> None:
+    evidence_records = (
+        run.get("artifacts", {})
+        .get("marketEvidenceReview", {})
+        .get("evidenceRecords", [])
+    )
+    if not evidence_records:
+        return
+
+    created_at = now_iso()
+    stored = MARKET_EVIDENCE_DB.setdefault(project_id, {})
+    for index, record in enumerate(evidence_records):
+        evidence_id = record.get("evidenceId") or f"market-evidence-{index + 1:03d}"
+        record_key = f"{run['run_id']}:{evidence_id}"
+        validation_status = record.get("validationStatus", "not_checked")
+        stored[record_key] = {
+            **record,
+            "recordKey": record_key,
+            "projectId": project_id,
+            "runId": run["run_id"],
+            "workflow": run.get("workflow"),
+            "createdAt": created_at,
+            "reviewStatus": "pending_review" if validation_status != "pass" else "auto_validated",
+        }
 
 def apply_parsed_project_data(project_id: str, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
     if "project" not in parsed_data:
@@ -213,6 +240,7 @@ def load_fixtures():
         PROJECTS_DB.update(state["projects"])
         REPORTS_DB.update(state["reports"])
         ORCHESTRATIONS_DB.update(state["orchestrations"])
+        MARKET_EVIDENCE_DB.update(state.get("market_evidence", {}))
         project_id_counter = state["project_id_counter"]
         return
 
@@ -267,6 +295,7 @@ def delete_project(project_id: str):
     deleted = PROJECTS_DB.pop(project_id)
     REPORTS_DB.pop(project_id, None)
     ORCHESTRATIONS_DB.pop(project_id, None)
+    MARKET_EVIDENCE_DB.pop(project_id, None)
     persist_state()
     return {
         "deleted": True,
@@ -442,6 +471,22 @@ def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = N
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = deep_merge(PROJECTS_DB[project_id], input_data or {})
     return MarketabilityAgent().analyze(source_data)
+
+@router.get("/{project_id}/market-evidence")
+def list_project_market_evidence(project_id: str, run_id: str | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    records = list(MARKET_EVIDENCE_DB.get(project_id, {}).values())
+    if run_id:
+        records = [record for record in records if record.get("runId") == run_id]
+    return sorted(
+        records,
+        key=lambda item: (
+            item.get("createdAt") or "",
+            item.get("evidenceType") or "",
+            item.get("evidenceId") or "",
+        ),
+    )
 
 @router.post("/{project_id}/legal/review")
 def review_legal_and_permits(project_id: str, input_data: Dict[str, Any] | None = None):

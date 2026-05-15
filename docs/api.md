@@ -86,6 +86,11 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: Optional project data override.
 - **Response**: Applicability, score, grade, saleability checks, and recommendations.
 
+### `GET /projects/{project_id}/market-evidence`
+- **Description**: List persisted market evidence records extracted or reconciled during orchestration.
+- **Query Parameters**: Optional `run_id` to filter records by orchestration run.
+- **Response**: Evidence records with evidence ID, evidence type, source metadata, extracted fields, related validation checks, validation status, review status, project ID, and run ID.
+
 ### `POST /projects/{project_id}/legal/review`
 - **Description**: Run a preliminary Korean real estate PF legal, permit, land-rights, trust-security, and covenant review.
 - **Request Body**: `{ "project_data": {...}, "law_context": {...} }`

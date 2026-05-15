@@ -95,7 +95,8 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Manual comparable fixture adapter | Accept manual comparable, transaction, presale, and listing arrays in the `market` payload | In Progress |
 | Document-derived market evidence parser | Ask ParserAgent to extract product mix, sale price, comparables, rent comparables, rental assumptions, and source metadata from uploaded documents | In Progress |
 | Market evidence reconciliation | Use Market Evidence Agent to reconcile document-derived sale price, rent, product mix revenue, feasibility revenue, and comparable evidence before Marketability scoring | In Progress |
-| Evidence record output | Emit normalized evidence records for product mix, sale comparables, and rent comparables with source IDs, extracted fields, related checks, and validation status | In Progress |
+| Evidence record output | Emit normalized evidence records for product mix, sale comparables, and rent comparables with source IDs, extracted fields, related checks, and validation status | Done |
+| Evidence record persistence | Persist market evidence records to JSON/SQLite state and expose them through project-level API | Done |
 | Comparable normalization | Apply simple distance and product-type adjustment to comparable price per py | Done |
 | Pricing comparison | Calculate comparable min, median, max, premium, percentile, judgement, and pricing comment | Done |
 | Exit sale rate | Calculate base, 5%, 10%, 15%, and 20% discount scenarios plus tranche-level sale-rate thresholds | In Progress |
@@ -661,6 +662,8 @@ Implemented baseline:
 - Uploaded document market evidence extraction prompt
 - Market Evidence Agent reconciliation before marketability scoring
 - Normalized evidence records for product mix, sale comparable, and rent comparable evidence
+- Persistent market evidence index in JSON/SQLite state
+- Project-level market evidence API
 - Agent-to-agent messages from Market Evidence Agent to Orchestration, Marketability, and Feasibility agents
 - Comparable price normalization
 - Comparable price band and premium calculation
@@ -683,9 +686,8 @@ Still missing for practical production review:
 | Official public transaction adapter | Needed for real comparable evidence |
 | Licensed partner data adapters | Needed for broader market data if rights are secured |
 | Product-specific adjustment model | Avoids applying apartment logic to retail or KIC assets |
-| Persistent evidence model | Required for auditability and PF review defensibility |
-| Document evidence storage | Required to retain original uploaded evidence, page/section references, and parser version |
 | Evidence approval workflow | Required for analyst sign-off before pricing, rent, or absorption assumptions become final |
+| Original document archive | Required to retain original uploaded evidence, page/section references, parser version, and file hash |
 | Subscription and unsold data | Required for apartment and residential presale review |
 | Rent-yield model | Required for officetel, retail, KIC, and section office pricing |
 | Absorption back-testing | Required to improve forecast reliability |
