@@ -5,7 +5,7 @@ import fitz  # PyMuPDF
 from agents.ai_connection import AIConnection, resolve_ai_context
 
 
-PARSER_AGENT_VERSION = "realytics-parser-v2.3"
+PARSER_AGENT_VERSION = "realytics-parser-v2.4"
 
 
 class ParserAgent:
@@ -287,8 +287,32 @@ class ParserAgent:
             "eod": ["EOD 1", "EOD 2"],
             "drawdown_conditions": ["Cond 1", "Cond 2"],
             "execution_order": ["1. Item", "2. Item"]
+          },
+          "source_locators": {
+            "project.name": {
+              "pageNumber": 0,
+              "table": "Table name or index",
+              "row": "Row label or index",
+              "column": "Column label",
+              "fieldName": "project.name",
+              "textExcerpt": "Short source excerpt",
+              "confidence": 0.0
+            },
+            "land.address": {},
+            "land.area_sqm": {},
+            "regulation.applied_far": {},
+            "architectural_plan.gross_floor_area_sqm": {},
+            "sales_assumptions.avg_price_per_sqm": {},
+            "feasibility_input.total_revenue": {},
+            "pf_structure[0].amount": {},
+            "schedule.completion": {},
+            "covenants.drawdown_conditions": {}
           }
         }
+
+        Source locator rule:
+        - For every extracted project, land, regulation, architectural, sales, cost, feasibility, PF, schedule, covenant, and market field, include pageNumber, table, row, column, fieldName, textExcerpt, and confidence whenever the source text supports it.
+        - If a value is inferred and no document location exists, leave the locator empty and keep confidence conservative.
 
         Business Plan Text:
         ---

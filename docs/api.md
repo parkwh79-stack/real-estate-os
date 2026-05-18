@@ -98,7 +98,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `GET /projects/{project_id}/market-evidence`
 - **Description**: List persisted market evidence records extracted or reconciled during orchestration.
 - **Query Parameters**: Optional `run_id` to filter records by orchestration run.
-- **Response**: Evidence records with evidence ID, evidence type, source metadata, source metadata status/missing fields, source locator, extracted fields, related validation checks, validation status, review status, project ID, and run ID. `sourceLocator` can include page number, table, row, column, field name, text excerpt, and confidence.
+- **Response**: Evidence records with evidence ID, evidence type, source metadata, source metadata status/missing fields, record-level source locator, field-level source locators, locator coverage, extracted fields, related validation checks, validation status, review status, project ID, and run ID. `sourceLocator` and `fieldSourceLocators` can include page number, table, row, column, field name, text excerpt, and confidence.
 
 ### `POST /projects/{project_id}/market-evidence/review`
 - **Description**: Update analyst review status for a persisted market evidence record.

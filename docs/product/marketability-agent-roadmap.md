@@ -637,18 +637,18 @@ The Agent should not fail just because one source is unavailable. It must clearl
 | P0-1 | Product type classifier and schema | Done |
 | P0-2 | Applicability checker | Done |
 | P0-3 | Product mix normalizer | Done |
-| P0-4 | Comparable case fixture and adapter | In Progress |
+| P0-4 | Comparable case fixture and adapter | Done |
 | P0-5 | Pricing comparison pure functions and tests | Done |
-| P0-6 | Exit sale rate integration | In Progress |
-| P0-7 | Discount scenario analyzer | In Progress |
-| P0-8 | Marketability score v2 | In Progress |
-| P0-9 | Evidence metadata schema | In Progress |
-| P0-10 | Report paragraph generator | In Progress |
+| P0-6 | Exit sale rate integration | Done |
+| P0-7 | Discount scenario analyzer | Done |
+| P0-8 | Marketability score v2 | Done |
+| P0-9 | Evidence metadata schema | Done |
+| P0-10 | Report paragraph generator | Done |
 | P1-1 | Subscription / unsold-stat connector interface | Planned |
-| P1-2 | Absorption model baseline | In Progress |
+| P1-2 | Absorption model baseline | Done |
 | P1-3 | Map-based comparable supply view | Planned |
-| P1-4 | Product-specific scoring engine | Planned |
-| P1-5 | Unsold recovery model | Planned |
+| P1-4 | Product-specific scoring engine | Done |
+| P1-5 | Unsold recovery model | Done |
 | P2-1 | Partner-data connector strategy | Future |
 | P2-2 | Similar PF review RAG | Future |
 | P2-3 | Lender risk memo generator | Future |
@@ -672,6 +672,7 @@ Implemented baseline:
 - Uploaded document provenance metadata on parsed project data and market evidence records
 - Original uploaded source document archive with project-level list/download API
 - Market evidence sourceLocator metadata with page/table/row/column/field/excerpt/confidence
+- Field-level locator coverage for market evidence records, including extracted field coverage status and inferred page/table/row locators from evidence IDs
 - Agent-to-agent messages from Market Evidence Agent to Orchestration, Marketability, and Feasibility agents
 - Comparable price normalization
 - Comparable price band and premium calculation
@@ -694,7 +695,7 @@ Still missing for practical production review:
 | Official public transaction adapter | Needed for real comparable evidence |
 | Licensed partner data adapters | Needed for broader market data if rights are secured |
 | Product-specific adjustment model | Avoids applying apartment logic to retail or KIC assets |
-| Full parser-field evidence locator coverage | Required to map all extracted project, land, cost, schedule, PF, and covenant values to document page, table, and row references |
+| Full non-market parser-field evidence locator coverage | Required to map extracted project, land, cost, schedule, PF, and covenant values to document page, table, and row references |
 | Subscription and unsold data | Required for apartment and residential presale review |
 | Rent-yield model | Required for officetel, retail, KIC, and section office pricing |
 | Absorption back-testing | Required to improve forecast reliability |

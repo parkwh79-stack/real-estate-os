@@ -233,10 +233,11 @@ Purpose:
 - 2026-05-15 update: uploaded business plan parsing now records original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, and source document metadata that flows into market evidence records.
 - 2026-05-15 update: uploaded source documents are now archived in runtime storage and can be listed/downloaded through project source document APIs for audit review.
 - 2026-05-18 update: ParserAgent `realytics-parser-v2.2` introduced extracted PDF page markers, and market evidence records now persist `sourceLocator` metadata with page, table, row, column, field name, text excerpt, and confidence where available.
-- 2026-05-18 update: ParserAgent `realytics-parser-v2.3` now asks for a full `document_market_evidence` payload, upload parsing hydrates document evidence from extracted market/product-mix fields, and MarketabilityAgent normalizes manual, transaction, presale, and listing comparable arrays with category/source/price-basis metadata.
+- 2026-05-18 update: ParserAgent `realytics-parser-v2.4` now asks for a full `document_market_evidence` payload and top-level source locator map, upload parsing hydrates document evidence from extracted market/product-mix fields, and MarketabilityAgent normalizes manual, transaction, presale, and listing comparable arrays with category/source/price-basis metadata.
 - 2026-05-18 update: MarketabilityAgent now produces structured Exit sale rate discount scenarios, tranche sale-rate thresholds, absorption base/downside/stress coverage, trigger reasons, product-type unsold recovery scenarios, unsold LTV, and tranche recovery.
 - 2026-05-18 update: MarketabilityAgent now returns product-specific `marketability_score_v2` breakdowns, lender risk flag details, and report paragraphs generated from pricing, demand, supply, Exit, absorption, trigger, and unsold recovery outputs.
 - 2026-05-18 update: Marketability source metadata now preserves source name/type/evidence ID/collected date/base date/license note/confidence plus complete/partial status and missing-field summaries across normalized comparables and market evidence records.
+- 2026-05-18 update: MarketEvidenceAgent now adds field-level `fieldSourceLocators`, record `locatorCoverage`, and summary `fieldLocatorCoverage` for product mix, sale comparable, and rent comparable evidence, including page/table/row inference from evidence IDs.
 - Serviced residence is treated as applicable when it is a strata-sale/presale asset; operating hotel/lodging remains non-saleable and should be handled by a separate operating asset Agent.
 
 API:
@@ -361,7 +362,7 @@ Latest verification baseline:
 
 - Add PDF/DOCX binary renderers from the structured Phase 11 report export pipeline.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
-- Add parser provenance per extracted field so report values can be traced back to uploaded documents.
+- Extend parser provenance from market evidence fields to non-market extracted fields so land, regulation, cost, schedule, PF, and covenant values can be traced back to uploaded documents.
 
 ### P1
 

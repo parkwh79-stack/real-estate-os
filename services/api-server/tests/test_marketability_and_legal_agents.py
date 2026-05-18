@@ -310,6 +310,8 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     assert evidence["evidenceSummary"]["sourceMetadataPartialCount"] >= 1
     assert evidence["evidenceSummary"]["sourceLocatorCount"] == 3
     assert evidence["evidenceSummary"]["hasPageLevelLocators"] is True
+    assert evidence["evidenceSummary"]["fieldLocatorCoverage"]["status"] == "complete"
+    assert evidence["evidenceSummary"]["fieldLocatorCoverage"]["coveredFieldCount"] > 0
     assert {record["evidenceType"] for record in evidence["evidenceRecords"]} == {
         "product_mix",
         "sale_comparable",
@@ -317,6 +319,8 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     }
     assert all(record["sourceLocator"]["pageNumber"] for record in evidence["evidenceRecords"])
     assert evidence["evidenceRecords"][0]["sourceLocator"]["textExcerpt"] == "A type price per py 36,000,000"
+    assert evidence["evidenceRecords"][0]["fieldSourceLocators"]["pricePerPy"]["pageNumber"] == 12
+    assert evidence["evidenceRecords"][1]["fieldSourceLocators"]["pricePerPy"]["fieldName"] == "pricePerPy"
     assert evidence["evidenceRecords"][1]["sourceMetadata"]["metadataStatus"] == "complete"
     assert any(issue["code"] == "DOCUMENT_COMPARABLE_PRICE_PREMIUM" for issue in evidence["issues"])
 
@@ -378,6 +382,43 @@ def test_market_evidence_agent_merges_document_and_existing_market_payloads():
     assert len(evidence["marketPayloadPatch"]["market"]["transactionComparables"]) == 1
     assert evidence["evidenceSummary"]["saleComparableCount"] == 3
     assert len([record for record in evidence["evidenceRecords"] if record["evidenceType"] == "sale_comparable"]) == 3
+
+
+def test_market_evidence_agent_adds_field_locator_coverage_from_evidence_ids():
+    project_data = {
+        "project": {"type": "officetel"},
+        "feasibility_input": {"total_revenue": 6_000_000_000},
+        "document_market_evidence": {
+            "productMix": [
+                {
+                    "type": "A",
+                    "contractAreaPy": 20,
+                    "units": 10,
+                    "pricePerPy": 30_000_000,
+                    "totalRevenue": 6_000_000_000,
+                    "evidenceIds": ["doc-p10-table1-row2"],
+                }
+            ],
+            "comparables": [
+                {
+                    "caseId": "DOC-COMP-002",
+                    "name": "Document Comparable B",
+                    "pricePerPy": 29_000_000,
+                    "sourceUrlOrEvidenceId": "doc-p11-table2-row3",
+                }
+            ],
+        },
+    }
+
+    evidence = MarketEvidenceAgent().review(project_data)
+    product_record = next(record for record in evidence["evidenceRecords"] if record["evidenceType"] == "product_mix")
+    comparable_record = next(record for record in evidence["evidenceRecords"] if record["evidenceType"] == "sale_comparable")
+
+    assert product_record["locatorCoverage"]["status"] == "complete"
+    assert product_record["fieldSourceLocators"]["pricePerPy"]["pageNumber"] == 10
+    assert product_record["fieldSourceLocators"]["pricePerPy"]["locatorStatus"] == "record_level"
+    assert comparable_record["fieldSourceLocators"]["pricePerPy"]["pageNumber"] == 11
+    assert evidence["evidenceSummary"]["fieldLocatorCoverage"]["status"] == "complete"
 
 
 def test_legal_review_agent_flags_missing_korean_law_mcp_context():

@@ -27,6 +27,7 @@ class MarketEvidenceAgent:
         evidence_records = self._evidence_records(merged, pricing_checks, rent_checks)
         evidence_summary = self._evidence_summary(merged)
         evidence_summary["evidenceRecordCount"] = len(evidence_records)
+        evidence_summary["fieldLocatorCoverage"] = _field_locator_coverage(evidence_records)
         issues = [issue for check in pricing_checks + rent_checks for issue in check.get("issues", [])]
         status = self._status(issues, evidence_summary)
 
@@ -254,6 +255,15 @@ class MarketEvidenceAgent:
         for index, item in enumerate(_product_mix(data)):
             evidence_id = _primary_evidence_id(item)
             source_metadata = _source_metadata(item, evidence_id, "product_mix")
+            extracted_fields = {
+                "type": item.get("type"),
+                "productType": item.get("productType"),
+                "units": item.get("units"),
+                "contractAreaPy": item.get("contractAreaPy") or item.get("contract_area_py"),
+                "pricePerPy": item.get("pricePerPy") or item.get("price_per_py"),
+                "totalRevenue": item.get("totalRevenue") or item.get("total_revenue"),
+            }
+            field_locators = _field_source_locators(item, extracted_fields, evidence_id)
             records.append({
                 "evidenceId": evidence_id or f"product-mix-{index + 1:03d}",
                 "evidenceType": "product_mix",
@@ -264,14 +274,9 @@ class MarketEvidenceAgent:
                 "confidence": item.get("confidence", 0.6),
                 "sourceMetadata": source_metadata,
                 "sourceLocator": _source_locator(item, evidence_id),
-                "extractedFields": {
-                    "type": item.get("type"),
-                    "productType": item.get("productType"),
-                    "units": item.get("units"),
-                    "contractAreaPy": item.get("contractAreaPy") or item.get("contract_area_py"),
-                    "pricePerPy": item.get("pricePerPy") or item.get("price_per_py"),
-                    "totalRevenue": item.get("totalRevenue") or item.get("total_revenue"),
-                },
+                "extractedFields": extracted_fields,
+                "fieldSourceLocators": field_locators,
+                "locatorCoverage": _record_locator_coverage(extracted_fields, field_locators),
                 "relatedCheckKeys": ["product_mix_revenue_vs_feasibility"],
                 "validationStatus": check_status.get("product_mix_revenue_vs_feasibility", "not_checked"),
                 "sourceDocument": _source_document(data),
@@ -280,6 +285,14 @@ class MarketEvidenceAgent:
         for index, item in enumerate(_comparables(data)):
             evidence_id = item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url") or f"sale-comp-{index + 1:03d}"
             source_metadata = _source_metadata(item, evidence_id, item.get("comparableCategory") or _comparable_category(item))
+            extracted_fields = {
+                "caseId": item.get("caseId"),
+                "name": item.get("name"),
+                "productType": item.get("productType"),
+                "distanceM": item.get("distanceM") or item.get("distance_m"),
+                "pricePerPy": item.get("pricePerPy") or item.get("price_per_py") or item.get("rawPricePerPy"),
+            }
+            field_locators = _field_source_locators(item, extracted_fields, evidence_id)
             records.append({
                 "evidenceId": evidence_id,
                 "evidenceType": "sale_comparable",
@@ -291,13 +304,9 @@ class MarketEvidenceAgent:
                 "confidence": item.get("confidence", 0.6),
                 "sourceMetadata": source_metadata,
                 "sourceLocator": _source_locator(item, evidence_id),
-                "extractedFields": {
-                    "caseId": item.get("caseId"),
-                    "name": item.get("name"),
-                    "productType": item.get("productType"),
-                    "distanceM": item.get("distanceM") or item.get("distance_m"),
-                    "pricePerPy": item.get("pricePerPy") or item.get("price_per_py") or item.get("rawPricePerPy"),
-                },
+                "extractedFields": extracted_fields,
+                "fieldSourceLocators": field_locators,
+                "locatorCoverage": _record_locator_coverage(extracted_fields, field_locators),
                 "relatedCheckKeys": ["proposed_price_vs_document_comparables"],
                 "validationStatus": check_status.get("proposed_price_vs_document_comparables", "not_checked"),
                 "sourceDocument": item.get("sourceDocument") or _source_document(data),
@@ -307,6 +316,14 @@ class MarketEvidenceAgent:
         for index, item in enumerate(rent_comparables):
             evidence_id = item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url") or f"rent-comp-{index + 1:03d}"
             source_metadata = _source_metadata(item, evidence_id, "rent_comparable")
+            extracted_fields = {
+                "caseId": item.get("caseId"),
+                "name": item.get("name"),
+                "productType": item.get("productType"),
+                "distanceM": item.get("distanceM") or item.get("distance_m"),
+                "monthlyRentPerPy": item.get("monthlyRentPerPy") or item.get("monthly_rent_per_py") or item.get("rentPerPy"),
+            }
+            field_locators = _field_source_locators(item, extracted_fields, evidence_id)
             records.append({
                 "evidenceId": evidence_id,
                 "evidenceType": "rent_comparable",
@@ -317,13 +334,9 @@ class MarketEvidenceAgent:
                 "confidence": item.get("confidence", 0.6),
                 "sourceMetadata": source_metadata,
                 "sourceLocator": _source_locator(item, evidence_id),
-                "extractedFields": {
-                    "caseId": item.get("caseId"),
-                    "name": item.get("name"),
-                    "productType": item.get("productType"),
-                    "distanceM": item.get("distanceM") or item.get("distance_m"),
-                    "monthlyRentPerPy": item.get("monthlyRentPerPy") or item.get("monthly_rent_per_py") or item.get("rentPerPy"),
-                },
+                "extractedFields": extracted_fields,
+                "fieldSourceLocators": field_locators,
+                "locatorCoverage": _record_locator_coverage(extracted_fields, field_locators),
                 "relatedCheckKeys": ["estimated_rent_vs_document_comparables"],
                 "validationStatus": check_status.get("estimated_rent_vs_document_comparables", "not_checked"),
                 "sourceDocument": item.get("sourceDocument") or _source_document(data),
@@ -556,6 +569,101 @@ def _source_locator(item: Dict[str, Any], evidence_id: str | None = None) -> Dic
     if inferred:
         return inferred
     return {}
+
+
+def _field_source_locators(
+    item: Dict[str, Any],
+    extracted_fields: Dict[str, Any],
+    evidence_id: str | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    field_locators: Dict[str, Dict[str, Any]] = {}
+    raw_field_locators = (
+        item.get("fieldSourceLocators")
+        or item.get("field_source_locators")
+        or item.get("fieldLocators")
+        or item.get("field_locators")
+        or {}
+    )
+    base_locator = _source_locator(item, evidence_id)
+    for field_name, field_value in extracted_fields.items():
+        if field_value in (None, ""):
+            continue
+        raw_locator = raw_field_locators.get(field_name) if isinstance(raw_field_locators, dict) else None
+        if isinstance(raw_locator, dict):
+            locator = _source_locator({"sourceLocator": raw_locator, "confidence": item.get("confidence")}, evidence_id)
+            locator.setdefault("fieldName", field_name)
+            locator.setdefault("locatorStatus", "explicit")
+            field_locators[field_name] = locator
+            continue
+        if base_locator:
+            locator = dict(base_locator)
+            locator.setdefault("fieldName", field_name)
+            locator.setdefault("locatorStatus", "record_level")
+            if "textExcerpt" not in locator:
+                locator["textExcerpt"] = _field_excerpt(item, field_name, field_value)
+            field_locators[field_name] = locator
+    return field_locators
+
+
+def _record_locator_coverage(
+    extracted_fields: Dict[str, Any],
+    field_locators: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    required_fields = [
+        field_name
+        for field_name, field_value in extracted_fields.items()
+        if field_value not in (None, "")
+    ]
+    covered_fields = [
+        field_name
+        for field_name in required_fields
+        if field_name in field_locators and field_locators[field_name]
+    ]
+    missing_fields = [field_name for field_name in required_fields if field_name not in covered_fields]
+    ratio = len(covered_fields) / len(required_fields) if required_fields else 1
+    if ratio == 1:
+        status = "complete"
+    elif covered_fields:
+        status = "partial"
+    else:
+        status = "missing"
+    return {
+        "status": status,
+        "coveredFieldCount": len(covered_fields),
+        "requiredFieldCount": len(required_fields),
+        "coverageRatio": round(ratio, 4),
+        "missingFields": missing_fields,
+    }
+
+
+def _field_locator_coverage(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    required = 0
+    covered = 0
+    missing_by_type: Dict[str, int] = {}
+    for record in records:
+        coverage = record.get("locatorCoverage") or {}
+        required += int(coverage.get("requiredFieldCount") or 0)
+        covered += int(coverage.get("coveredFieldCount") or 0)
+        missing_count = len(coverage.get("missingFields") or [])
+        if missing_count:
+            evidence_type = record.get("evidenceType") or "unknown"
+            missing_by_type[evidence_type] = missing_by_type.get(evidence_type, 0) + missing_count
+    ratio = covered / required if required else 1
+    return {
+        "status": "complete" if ratio == 1 else "partial" if covered else "missing",
+        "coveredFieldCount": covered,
+        "requiredFieldCount": required,
+        "coverageRatio": round(ratio, 4),
+        "missingFieldCountByEvidenceType": missing_by_type,
+    }
+
+
+def _field_excerpt(item: Dict[str, Any], field_name: str, field_value: Any) -> str:
+    excerpt = item.get("textExcerpt") or item.get("excerpt") or item.get("sourceText")
+    if excerpt:
+        return str(excerpt)[:240]
+    label = item.get("name") or item.get("caseId") or item.get("type") or "document evidence"
+    return f"{label} {field_name}: {field_value}"
 
 
 def _primary_evidence_id(item: Dict[str, Any]) -> str | None:

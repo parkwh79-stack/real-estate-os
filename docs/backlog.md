@@ -33,6 +33,7 @@ Updated: 2026-05-14
 | P0 | Agent | Marketability lender risk flags | Done | Generates lender-side risk flag details for pricing, evidence, supply, demand, absorption, Exit pressure, unsold LTV, and tranche recovery weakness |
 | P0 | Report | Marketability report paragraph generator | Done | Generates market analysis, pricing, business feasibility, exit strategy, discount trigger, unsold risk, recommendation, and lender risk memo text from score/risk/Exit outputs |
 | P0 | Agent | Marketability source metadata | Done | Preserves source name/type/evidence ID/collected date/base date/license note/confidence with complete/partial metadata status and missing-field summary |
+| P0 | Parser | Market evidence field locator coverage | Done | Market evidence records now expose fieldSourceLocators and locatorCoverage for extracted product mix, sale comparable, and rent comparable fields, with page/table/row inference from evidence IDs |
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
 | P0 | Report | Report fixture data | Done | Added anonymized Hana-style PF review fixture and regression checks |
 | P0 | Storage | Persistent project/report/run storage | Done | SQLite-backed storage added for projects, reports, and orchestration runs; legacy JSON fallback/migration retained |
@@ -44,7 +45,7 @@ Updated: 2026-05-14
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
 | P0 | Report | Structured report export pipeline | In Progress | Markdown/JSON/print-ready HTML export history added; PDF/DOCX binary renderers remain next |
-| P0 | Parser | Source provenance per parsed field | In Progress | Market evidence records now persist sourceLocator metadata with page/table/row/column/field/excerpt/confidence; next step is locator coverage for all parser fields |
+| P0 | Parser | Source provenance per parsed field | In Progress | Market evidence field-level locator coverage is implemented; next step is locator coverage for non-market parser fields such as land, regulation, cost, schedule, PF, and covenants |
 | P0 | Integration | Batch PNU and official land price enrichment | Planned | Next after validation layer: resolve PNU with confidence score, fetch cadastral characteristics, official land price with base year/source, and registry/encumbrance evidence for imported parcels |
 | P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |
 | P1 | Export | Excel upload | In Progress | Feasibility Study v2 schema and workbook mapping designed; next step is XLSX template import validator |
