@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from statistics import median
 from typing import Any, Dict, List, Optional
 
@@ -205,6 +206,11 @@ class MarketEvidenceAgent:
         comparables = _comparables(data)
         rent_comparables = data.get("market", {}).get("rentComparables") or data.get("market", {}).get("rent_comparables") or []
         sources = data.get("market", {}).get("data_sources") or data.get("market", {}).get("dataSources") or []
+        source_locator_count = sum(
+            1
+            for item in _product_mix(data) + comparables + rent_comparables + sources
+            if _source_locator(item, _primary_evidence_id(item))
+        )
         source_ids = [
             item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url")
             for item in comparables + rent_comparables + sources
@@ -216,6 +222,8 @@ class MarketEvidenceAgent:
             "rentComparableCount": len(rent_comparables),
             "sourceMetadataCount": len(sources),
             "evidenceIdCount": len(set(source_ids)),
+            "sourceLocatorCount": source_locator_count,
+            "hasPageLevelLocators": source_locator_count > 0,
             "hasDocumentMarketEvidence": bool(
                 data.get("document_market_evidence")
                 or data.get("documentMarketEvidence")
@@ -237,15 +245,16 @@ class MarketEvidenceAgent:
         }
 
         for index, item in enumerate(_product_mix(data)):
-            evidence_ids = item.get("evidenceIds") or item.get("evidence_ids") or []
+            evidence_id = _primary_evidence_id(item)
             records.append({
-                "evidenceId": evidence_ids[0] if evidence_ids else f"product-mix-{index + 1:03d}",
+                "evidenceId": evidence_id or f"product-mix-{index + 1:03d}",
                 "evidenceType": "product_mix",
                 "sourceName": item.get("sourceName") or "uploaded document",
                 "sourceType": item.get("sourceType") or "manual_upload",
-                "sourceUrlOrEvidenceId": evidence_ids[0] if evidence_ids else item.get("sourceUrlOrEvidenceId"),
+                "sourceUrlOrEvidenceId": evidence_id,
                 "baseDate": item.get("baseDate"),
                 "confidence": item.get("confidence", 0.6),
+                "sourceLocator": _source_locator(item, evidence_id),
                 "extractedFields": {
                     "type": item.get("type"),
                     "productType": item.get("productType"),
@@ -269,6 +278,7 @@ class MarketEvidenceAgent:
                 "sourceUrlOrEvidenceId": evidence_id,
                 "baseDate": item.get("baseDate") or item.get("transactionDate") or item.get("saleDate"),
                 "confidence": item.get("confidence", 0.6),
+                "sourceLocator": _source_locator(item, evidence_id),
                 "extractedFields": {
                     "caseId": item.get("caseId"),
                     "name": item.get("name"),
@@ -292,6 +302,7 @@ class MarketEvidenceAgent:
                 "sourceUrlOrEvidenceId": evidence_id,
                 "baseDate": item.get("baseDate") or item.get("leaseDate"),
                 "confidence": item.get("confidence", 0.6),
+                "sourceLocator": _source_locator(item, evidence_id),
                 "extractedFields": {
                     "caseId": item.get("caseId"),
                     "name": item.get("name"),
@@ -414,6 +425,15 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
+def _to_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
+
+
 def _variance(parsed_value: Optional[float], source_value: Optional[float]) -> Optional[float]:
     if parsed_value is None or source_value in (None, 0):
         return None
@@ -423,6 +443,68 @@ def _variance(parsed_value: Optional[float], source_value: Optional[float]) -> O
 def _camelize(value: str) -> str:
     parts = value.split("_")
     return parts[0] + "".join(part.capitalize() for part in parts[1:])
+
+
+def _source_locator(item: Dict[str, Any], evidence_id: str | None = None) -> Dict[str, Any]:
+    raw_locator = (
+        item.get("sourceLocator")
+        or item.get("source_locator")
+        or item.get("locator")
+        or item.get("evidenceLocator")
+        or item.get("evidence_locator")
+    )
+    if isinstance(raw_locator, list):
+        raw_locator = raw_locator[0] if raw_locator else {}
+    if isinstance(raw_locator, dict):
+        normalized = {
+            "evidenceId": raw_locator.get("evidenceId") or raw_locator.get("evidence_id") or evidence_id,
+            "pageNumber": _to_int(
+                raw_locator.get("pageNumber")
+                or raw_locator.get("page")
+                or raw_locator.get("page_no")
+                or raw_locator.get("pageNo")
+            ),
+            "table": raw_locator.get("table") or raw_locator.get("tableName") or raw_locator.get("tableIndex"),
+            "row": raw_locator.get("row") or raw_locator.get("rowLabel") or raw_locator.get("rowIndex"),
+            "column": raw_locator.get("column") or raw_locator.get("columnLabel") or raw_locator.get("columnIndex"),
+            "fieldName": raw_locator.get("fieldName") or raw_locator.get("field") or raw_locator.get("field_name"),
+            "textExcerpt": raw_locator.get("textExcerpt") or raw_locator.get("excerpt") or raw_locator.get("sourceText"),
+            "confidence": _to_float(raw_locator.get("confidence")),
+        }
+        if normalized["confidence"] is None:
+            normalized["confidence"] = _to_float(item.get("confidence"))
+        return {key: value for key, value in normalized.items() if value not in (None, "")}
+
+    inferred = _infer_locator_from_evidence_id(evidence_id)
+    if inferred:
+        return inferred
+    return {}
+
+
+def _primary_evidence_id(item: Dict[str, Any]) -> str | None:
+    evidence_ids = item.get("evidenceIds") or item.get("evidence_ids") or []
+    if isinstance(evidence_ids, list) and evidence_ids:
+        return evidence_ids[0]
+    if isinstance(evidence_ids, str):
+        return evidence_ids
+    return item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url")
+
+
+def _infer_locator_from_evidence_id(evidence_id: str | None) -> Dict[str, Any]:
+    if not evidence_id:
+        return {}
+    value = str(evidence_id)
+    page_match = re.search(r"(?:^|[-_\s])p(?:age)?[-_\s]?(\d+)", value, flags=re.IGNORECASE)
+    table_match = re.search(r"(?:^|[-_\s])table[-_\s]?(\d+)", value, flags=re.IGNORECASE)
+    row_match = re.search(r"(?:^|[-_\s])row[-_\s]?(\d+)", value, flags=re.IGNORECASE)
+    locator = {"evidenceId": value}
+    if page_match:
+        locator["pageNumber"] = int(page_match.group(1))
+    if table_match:
+        locator["table"] = f"table-{table_match.group(1)}"
+    if row_match:
+        locator["row"] = f"row-{row_match.group(1)}"
+    return locator if len(locator) > 1 else {}
 
 
 def _source_document(data: Dict[str, Any]) -> Dict[str, Any]:

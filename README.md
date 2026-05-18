@@ -149,13 +149,14 @@ Current implementation:
 - Supports analyst review of market evidence through `POST /projects/{project_id}/market-evidence/review` and the orchestration UI.
 - Links market evidence records to uploaded document provenance metadata, including file name, SHA-256 hash, file size, content type, upload timestamp, and parser version.
 - Archives the original uploaded source document under runtime storage and exposes source document list/download APIs for audit review.
+- Preserves market evidence `sourceLocator` metadata with page, table, row, column, field, source excerpt, and confidence when extracted from uploaded documents.
 - Returns price band, comparable median premium, pricing judgement, data status, missing required data, basic score/grade, Exit sale rate scenarios, absorption forecast, discount triggers, unsold recovery, risk flags, and report paragraph skeletons.
 
 Roadmap:
 
 - Public/partner comparable data adapters
 - Product-specific comparable adjustment logic
-- Page/table/row-level evidence locators for extracted values
+- Full parser-field evidence locator coverage beyond market evidence records
 - Absorption back-testing
 - Product-specific scoring model
 - Frontend Marketability Review page
@@ -436,7 +437,7 @@ Note: the current bundled Python runtime in the latest local session did not inc
 - SQLite is used for MVP persistence; PostgreSQL migration is future work.
 - PDF/DOCX binary exports from structured reports are not yet implemented.
 - Land ledger enrichment still needs backend batch PNU, official land price, cadastral, registry, and evidence connectors.
-- Marketability Agent still needs page-level evidence locators, real public/partner comparable data adapters, product-specific scoring weights, stronger absorption/back-testing, and a dedicated frontend review page.
+- Marketability Agent still needs full parser-field evidence locator coverage, real public/partner comparable data adapters, product-specific scoring weights, stronger absorption/back-testing, and a dedicated frontend review page.
 - Korean Law MCP is designed as a sidecar/context adapter, not a vendored dependency.
 - Private partner data sources such as Hogangnono, Zigbang, KB, or Real Estate Planet require official API, licensing, or partnership before connector use.
 

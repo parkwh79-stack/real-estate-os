@@ -146,6 +146,15 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
                     "pricePerPy": 36_000_000,
                     "totalRevenue": 72_000_000_000,
                     "evidenceIds": ["doc-p12-table3"],
+                    "sourceLocator": {
+                        "pageNumber": 12,
+                        "table": "sales price table",
+                        "row": "A",
+                        "column": "price per py",
+                        "fieldName": "pricePerPy",
+                        "textExcerpt": "A type price per py 36,000,000",
+                        "confidence": 0.82,
+                    },
                 }
             ],
             "comparables": [
@@ -157,9 +166,16 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
                     "pricePerPy": 30_000_000,
                     "sourceName": "uploaded business plan",
                     "sourceType": "manual_upload",
-                    "sourceUrlOrEvidenceId": "doc-p20",
+                    "sourceUrlOrEvidenceId": "doc-p20-table1-row2",
                     "baseDate": "2026-05-14",
                     "confidence": 0.75,
+                    "sourceLocator": {
+                        "page": 20,
+                        "tableIndex": 1,
+                        "rowIndex": 2,
+                        "field": "pricePerPy",
+                        "excerpt": "Document Comparable A 30,000,000 per py",
+                    },
                 }
             ],
             "rentComparables": [
@@ -167,7 +183,7 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
                     "caseId": "DOC-RENT-001",
                     "name": "Rent Comparable A",
                     "monthlyRentPerPy": 120_000,
-                    "sourceUrlOrEvidenceId": "doc-p21",
+                    "sourceUrlOrEvidenceId": "doc-p21-table2-row1",
                 }
             ],
         },
@@ -182,11 +198,15 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     assert evidence["marketPayloadPatch"]["product_mix"][0]["type"] == "A"
     assert evidence["evidenceSummary"]["saleComparableCount"] == 1
     assert evidence["evidenceSummary"]["evidenceRecordCount"] == 3
+    assert evidence["evidenceSummary"]["sourceLocatorCount"] == 3
+    assert evidence["evidenceSummary"]["hasPageLevelLocators"] is True
     assert {record["evidenceType"] for record in evidence["evidenceRecords"]} == {
         "product_mix",
         "sale_comparable",
         "rent_comparable",
     }
+    assert all(record["sourceLocator"]["pageNumber"] for record in evidence["evidenceRecords"])
+    assert evidence["evidenceRecords"][0]["sourceLocator"]["textExcerpt"] == "A type price per py 36,000,000"
     assert any(issue["code"] == "DOCUMENT_COMPARABLE_PRICE_PREMIUM" for issue in evidence["issues"])
 
     marketability_input = {

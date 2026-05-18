@@ -5,7 +5,7 @@ import fitz  # PyMuPDF
 from agents.ai_connection import AIConnection, resolve_ai_context
 
 
-PARSER_AGENT_VERSION = "realytics-parser-v2.1"
+PARSER_AGENT_VERSION = "realytics-parser-v2.2"
 
 
 class ParserAgent:
@@ -18,7 +18,8 @@ class ParserAgent:
         text = ""
         try:
             doc = fitz.open(file_path)
-            for page in doc:
+            for page_index, page in enumerate(doc, start=1):
+                text += f"\n\n--- PAGE {page_index} ---\n"
                 text += page.get_text()
             doc.close()
         except Exception as e:
@@ -97,7 +98,16 @@ class ParserAgent:
                 "units": 0,
                 "pricePerPy": 0,
                 "totalRevenue": 0,
-                "evidenceIds": ["source-page-or-document-id"]
+                "evidenceIds": ["source-page-or-document-id"],
+                "sourceLocator": {
+                  "pageNumber": 0,
+                  "table": "Table name or index",
+                  "row": "Row label or index",
+                  "column": "Column label",
+                  "fieldName": "pricePerPy|totalRevenue|units|contractAreaPy",
+                  "textExcerpt": "Short source excerpt",
+                  "confidence": 0.0
+                }
               }
             ]
           },
@@ -116,7 +126,16 @@ class ParserAgent:
                 "sourceType": "manual_upload|public_api|partner_api|internal_db|web|estimate",
                 "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
                 "baseDate": "YYYY-MM-DD",
-                "confidence": 0.0
+                "confidence": 0.0,
+                "sourceLocator": {
+                  "pageNumber": 0,
+                  "table": "Table name or index",
+                  "row": "Row label or index",
+                  "column": "Column label",
+                  "fieldName": "pricePerPy",
+                  "textExcerpt": "Short source excerpt",
+                  "confidence": 0.0
+                }
               }
             ],
             "rentComparables": [
@@ -130,13 +149,31 @@ class ParserAgent:
                 "sourceType": "manual_upload|public_api|partner_api|internal_db|web|estimate",
                 "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
                 "baseDate": "YYYY-MM-DD",
-                "confidence": 0.0
+                "confidence": 0.0,
+                "sourceLocator": {
+                  "pageNumber": 0,
+                  "table": "Table name or index",
+                  "row": "Row label or index",
+                  "column": "Column label",
+                  "fieldName": "monthlyRentPerPy",
+                  "textExcerpt": "Short source excerpt",
+                  "confidence": 0.0
+                }
               }
             ],
             "rentalAssumptions": {
               "monthlyRentPerPy": 0,
               "requiredYield": 0.0,
-              "sourceUrlOrEvidenceId": "document-page-or-evidence-id"
+              "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
+              "sourceLocator": {
+                "pageNumber": 0,
+                "table": "Table name or index",
+                "row": "Row label or index",
+                "column": "Column label",
+                "fieldName": "monthlyRentPerPy|requiredYield",
+                "textExcerpt": "Short source excerpt",
+                "confidence": 0.0
+              }
             },
             "data_sources": [
               {
@@ -145,12 +182,22 @@ class ParserAgent:
                 "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
                 "baseDate": "YYYY-MM-DD",
                 "licenseOrUsageNote": "Usage note",
-                "confidence": 0.0
+                "confidence": 0.0,
+                "sourceLocator": {
+                  "pageNumber": 0,
+                  "table": "Table name or index",
+                  "row": "Row label or index",
+                  "column": "Column label",
+                  "fieldName": "sourceName|baseDate|licenseOrUsageNote",
+                  "textExcerpt": "Short source excerpt",
+                  "confidence": 0.0
+                }
               }
             ]
           },
           "document_market_evidence": {
-            "extractionNote": "Market, sale price, rent, and comparable data extracted from uploaded documents. Include only values found in the document; do not invent market evidence."
+            "extractionNote": "Market, sale price, rent, and comparable data extracted from uploaded documents. Include only values found in the document; do not invent market evidence.",
+            "sourceLocatorPolicy": "Use the PAGE markers in the document text and include pageNumber, table, row, column, fieldName, short textExcerpt, and confidence whenever a value is extracted from a document table or paragraph."
           },
           "cost_assumptions": {
             "construction_cost_per_sqm": 0
