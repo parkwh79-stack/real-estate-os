@@ -175,7 +175,7 @@ Current implementation exists at the pure-function level.
 | Single-point unsold LTV | Implemented as pure function |
 | Tranche recovery helper | Implemented as pure function |
 | Full Cash Flow Agent schema | Not implemented |
-| Development Feasibility to FeasibilityStudyV2 mapper | Not implemented |
+| Development Feasibility to FeasibilityStudyV2 draft mapper | Implemented |
 | FeasibilityStudyV2 to CashFlowRunRequest mapper | Not implemented |
 | PF draw schedule | Not implemented |
 | Sales collection schedule by product | Not implemented |
@@ -716,6 +716,11 @@ Required tests:
 - Add mapping diagnostics and data-quality warnings.
 - Add fixture-based tests using `services/api-server/data/fixtures/feasibility_study_v2_schema_example.json`.
 - Add a fixture showing Development Feasibility Agent output mapped into the canonical schema.
+
+Status:
+
+- `DevelopmentFeasibilityAgent` now emits `feasibilityStudyV2Draft`, a schema-valid draft for `realytics-feasibility-study-v2`.
+- Remaining Sprint 1 work is the `FeasibilityStudyV2 -> CashFlowRunRequest` mapper and related fixtures.
 
 ### Sprint 2: Pure Calculation Wrappers
 

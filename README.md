@@ -86,6 +86,7 @@ Implemented:
 - Sensitivity analysis
 - Data quality warnings
 - `realytics-feasibility-study-v2` backend schema
+- `feasibilityStudyV2Draft` output from Development Feasibility Agent
 - Frontend TypeScript schema mirror
 - Excel workbook mapping strategy for formula-preserving import/export
 - Feasibility workbook validator for required sheets, formulas, key cells, and reconciliation checks

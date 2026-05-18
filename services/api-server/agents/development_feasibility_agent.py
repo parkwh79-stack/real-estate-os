@@ -8,6 +8,7 @@ from core.calculations import (
     calculate_profit_margin,
     sqm_to_py,
 )
+from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION
 
 
 class DevelopmentFeasibilityAgent:
@@ -31,6 +32,15 @@ class DevelopmentFeasibilityAgent:
         pf["requiresCashFlowScenario"] = engine_readiness["requiresCashFlowScenario"]
         pf["requiresUnsoldLtvMatrix"] = engine_readiness["requiresUnsoldLtvMatrix"]
         pf["requiresWaterfallAnalysis"] = engine_readiness["requiresWaterfallAnalysis"]
+        feasibility_v2_draft = self._feasibility_study_v2_draft(
+            project_data,
+            program,
+            revenue,
+            costs,
+            returns,
+            pf,
+            sensitivity,
+        )
 
         return {
             "analysisType": "developer_and_pf_feasibility",
@@ -43,7 +53,8 @@ class DevelopmentFeasibilityAgent:
             "pfReadiness": pf,
             "sensitivity": sensitivity,
             "downstreamEngineReadiness": engine_readiness,
-            "feasibilityStudyV2Integration": self._feasibility_study_v2_integration(project_data),
+            "feasibilityStudyV2Integration": self._feasibility_study_v2_integration(project_data, feasibility_v2_draft),
+            "feasibilityStudyV2Draft": feasibility_v2_draft,
             "dataQuality": quality,
         }
 
@@ -278,18 +289,219 @@ class DevelopmentFeasibilityAgent:
             "blockingFields": list(dict.fromkeys(blockers + quality["missingFields"])),
         }
 
-    def _feasibility_study_v2_integration(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _feasibility_study_v2_integration(
+        self,
+        project_data: Dict[str, Any],
+        draft: Dict[str, Any],
+    ) -> Dict[str, Any]:
         return {
-            "canonicalSchema": "realytics-feasibility-study-v2",
-            "workbookContract": "realytics-fs-xlsx-v1",
+            "canonicalSchema": FEASIBILITY_STUDY_SCHEMA_VERSION,
+            "workbookContract": FEASIBILITY_WORKBOOK_VERSION,
             "sourceSchemaPath": "services/api-server/schemas/feasibility_study.py",
-            "mapperStatus": "planned",
+            "mapperStatus": "draft_available",
             "requiredMappers": [
-                "DevelopmentFeasibilityAgent output -> FeasibilityStudyV2",
+                "DevelopmentFeasibilityAgent output -> FeasibilityStudyV2 draft",
                 "FeasibilityStudyV2 -> CashFlowRunRequest",
             ],
+            "draftFieldCounts": {
+                "revenueItems": len(draft.get("revenue_items", [])),
+                "costItems": len(draft.get("cost_items", [])),
+                "financing": len(draft.get("financing", [])),
+                "schedule": len(draft.get("schedule", [])),
+                "scenarios": len(draft.get("scenarios", [])),
+            },
             "inputAlreadyCanonical": project_data.get("version") == "realytics-feasibility-study-v2",
         }
+
+    def _feasibility_study_v2_draft(
+        self,
+        project_data: Dict[str, Any],
+        program: Dict[str, Any],
+        revenue: Dict[str, Any],
+        costs: Dict[str, Any],
+        returns: Dict[str, Any],
+        pf: Dict[str, Any],
+        sensitivity: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        project = project_data.get("project", {})
+        land = project_data.get("land", {})
+        regulation = project_data.get("regulation", {})
+        schedule = project_data.get("schedule", {})
+        return {
+            "version": FEASIBILITY_STUDY_SCHEMA_VERSION,
+            "project_id": project.get("id"),
+            "project_name": project.get("name"),
+            "asset_type": self._asset_type(project.get("type")),
+            "currency": "KRW",
+            "site": {
+                "address": land.get("address"),
+                "land_area_sqm": self._value("land_area_sqm", "Land area", program["landAreaSqm"], "SQM"),
+                "zoning": regulation.get("zoning"),
+                "legal_far": self._value("legal_far", "Legal FAR", regulation.get("legal_far"), "PERCENT"),
+                "legal_bcr": self._value("legal_bcr", "Legal BCR", regulation.get("legal_bcr"), "PERCENT"),
+            },
+            "program": {
+                "gross_floor_area_sqm": self._value("gross_floor_area_sqm", "Gross floor area", program["grossFloorAreaSqm"], "SQM"),
+                "saleable_area_sqm": self._value("saleable_area_sqm", "Saleable area", program["saleableAreaSqm"], "SQM"),
+                "unit_count": self._value(
+                    "unit_count",
+                    "Unit count",
+                    project_data.get("architectural_plan", {}).get("unit_count"),
+                    "COUNT",
+                ),
+                "parking_count": self._value(
+                    "parking_count",
+                    "Parking count",
+                    project_data.get("architectural_plan", {}).get("parking_count"),
+                    "COUNT",
+                ),
+            },
+            "product_mix": self._product_mix_v2(project_data, revenue),
+            "revenue_items": [
+                self._line_item("sales_revenue", "Sales revenue", "sales", revenue["salesRevenue"]),
+                self._line_item("other_revenue", "Other revenue", "other_revenue", revenue["otherRevenue"]),
+            ],
+            "cost_items": [
+                self._line_item("land_cost", "Land cost", "land", costs["landCost"]),
+                self._line_item("construction_cost", "Construction cost", "construction", costs["constructionCost"]),
+                self._line_item("finance_cost", "Finance cost", "finance", costs["financeCost"]),
+                self._line_item("other_cost", "Other cost", "other", costs["otherCost"]),
+            ],
+            "financing": self._financing_v2(project_data.get("pf_structure", [])),
+            "schedule": self._schedule_v2(schedule),
+            "scenarios": self._scenarios_v2(sensitivity),
+            "metrics": {
+                "total_revenue": revenue["totalRevenue"],
+                "total_cost": costs["totalCost"],
+                "development_profit": returns["developmentProfit"],
+                "profit_margin": returns["profitMargin"],
+                "profit_on_cost": returns["profitOnCost"],
+                "break_even_sale_rate": returns["breakEvenSaleRate"],
+                "required_equity": pf["requiredEquity"],
+                "ltv": pf["ltvByRevenue"],
+                "ltc": pf["ltcByCost"],
+                "exit_sale_rate": pf["exitSaleRate"],
+            },
+            "raw_import": {
+                "source": "development_feasibility_agent",
+                "sourceAnalysisType": "developer_and_pf_feasibility",
+                "note": "Draft mapping for FeasibilityStudyV2; workbook cell provenance is added by the workbook adapter.",
+            },
+        }
+
+    def _product_mix_v2(self, project_data: Dict[str, Any], revenue: Dict[str, Any]) -> List[Dict[str, Any]]:
+        product_mix = project_data.get("product_mix") or project_data.get("productMix") or []
+        if not product_mix:
+            return []
+        rows = []
+        for index, item in enumerate(product_mix, start=1):
+            contract_area_py = item.get("contractAreaPy") or item.get("contract_area_py")
+            rows.append({
+                "key": item.get("key") or item.get("type") or f"product-{index}",
+                "asset_type": self._asset_type(item.get("productType") or item.get("asset_type") or item.get("type")),
+                "product_name": item.get("product_name") or item.get("type") or f"Product {index}",
+                "unit_count": item.get("units") or item.get("unit_count"),
+                "exclusive_area_sqm": self._py_to_sqm_or_none(item.get("exclusiveAreaPy") or item.get("exclusive_area_py")),
+                "contract_area_sqm": self._py_to_sqm_or_none(contract_area_py),
+                "avg_sale_price_per_py": item.get("pricePerPy") or item.get("price_per_py") or item.get("pricePerContractPy"),
+                "revenue": item.get("totalRevenue") or item.get("total_revenue"),
+                "excel_row_id": item.get("excel_row_id"),
+            })
+        return rows
+
+    def _financing_v2(self, pf_structure: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows = []
+        for index, tranche in enumerate(pf_structure, start=1):
+            rows.append({
+                "tranche_id": tranche.get("tranche_id") or tranche.get("tranche") or tranche.get("name") or f"tranche-{index}",
+                "name": tranche.get("name") or tranche.get("tranche") or f"Tranche {index}",
+                "priority": self._priority_label(tranche, index),
+                "amount": tranche.get("amount"),
+                "interest_rate": tranche.get("interest_rate") or tranche.get("interestRate"),
+                "fee_rate": tranche.get("fee_rate") or tranche.get("feeRate"),
+                "term_months": tranche.get("term_months") or tranche.get("maturityMonths"),
+                "repayment_source": tranche.get("repayment_source") or "sales_proceeds",
+            })
+        return rows
+
+    def _schedule_v2(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
+        labels = {
+            "land_purchase": "Land purchase",
+            "permit_approval": "Permit approval",
+            "construction_start": "Construction start",
+            "presale_start": "Presale start",
+            "completion": "Completion",
+            "loan_maturity": "Loan maturity",
+        }
+        return [
+            {"key": key, "label": labels.get(key, key), "planned_date": value}
+            for key, value in schedule.items()
+            if value
+        ]
+
+    def _scenarios_v2(self, sensitivity: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows = []
+        for row in sensitivity:
+            scenario = row.get("scenario", "scenario")
+            rows.append({
+                "scenario_id": scenario,
+                "label": scenario.replace("_", " ").title(),
+                "sales_price_factor": row.get("totalRevenue", 0) / sensitivity[0].get("totalRevenue", 1) if sensitivity and sensitivity[0].get("totalRevenue") else 1.0,
+                "construction_cost_factor": 1.0,
+                "interest_rate_addition": 0.0,
+            })
+        return rows
+
+    def _line_item(self, key: str, label: str, category: str, amount: Any) -> Dict[str, Any]:
+        return {
+            "key": key,
+            "label": label,
+            "category": category,
+            "amount": amount or 0,
+            "unit": "KRW",
+        }
+
+    def _value(self, key: str, label: str, value: Any, unit: str) -> Dict[str, Any]:
+        return {
+            "key": key,
+            "label": label,
+            "value": value or 0,
+            "unit": unit,
+        }
+
+    def _asset_type(self, raw_type: Any) -> str:
+        value = str(raw_type or "").lower()
+        if value in {"mixed_use", "mixed_use_residential"}:
+            return "mixed_use"
+        if "officetel" in value:
+            return "officetel"
+        if "apartment" in value or value == "residential":
+            return "apartment"
+        if "knowledge" in value:
+            return "knowledge_industry_center"
+        if "commercial" in value or "retail" in value:
+            return "commercial"
+        if "logistics" in value:
+            return "logistics"
+        if "lodging" in value or "serviced" in value:
+            return "lodging"
+        return "other"
+
+    def _priority_label(self, tranche: Dict[str, Any], index: int) -> str:
+        value = str(tranche.get("priority") or tranche.get("name") or tranche.get("tranche") or "").lower()
+        tranche_name = str(tranche.get("name") or tranche.get("tranche") or "").lower()
+        if value in {"1", "senior"} or "senior" in tranche_name or "tr.a" in tranche_name or "tranche a" in tranche_name:
+            return "senior"
+        if value in {"2", "middle", "mezzanine"} or "mezz" in tranche_name or "middle" in tranche_name or "tr.b" in tranche_name or "tranche b" in tranche_name:
+            return "middle"
+        if value in {"3", "junior"} or "junior" in tranche_name or "tr.c" in tranche_name or "tranche c" in tranche_name:
+            return "junior"
+        return "other" if index > 3 else ["senior", "middle", "junior"][index - 1]
+
+    def _py_to_sqm_or_none(self, value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        return float(value) / 0.3025
 
     def _summary(self, returns: Dict[str, Any], pf: Dict[str, Any], quality: Dict[str, Any]) -> str:
         margin = returns["profitMargin"]

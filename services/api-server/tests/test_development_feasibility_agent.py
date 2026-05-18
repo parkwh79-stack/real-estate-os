@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from main import app
+from schemas.feasibility_study import FeasibilityStudyV2
 
 
 def load_example():
@@ -32,7 +33,11 @@ def test_development_feasibility_agent_builds_developer_and_pf_metrics():
         "CashFlowEngine",
         "CalculationScenarioEngine",
     ]
-    assert result["feasibilityStudyV2Integration"]["mapperStatus"] == "planned"
+    assert result["feasibilityStudyV2Integration"]["mapperStatus"] == "draft_available"
+    assert result["feasibilityStudyV2Draft"]["version"] == "realytics-feasibility-study-v2"
+    assert result["feasibilityStudyV2Draft"]["metrics"]["total_revenue"] == 150_000_000_000
+    assert result["feasibilityStudyV2Draft"]["financing"][0]["priority"] == "senior"
+    assert FeasibilityStudyV2.model_validate(result["feasibilityStudyV2Draft"]).metrics.development_profit == 30_000_000_000
     assert result["sensitivity"]
 
 
