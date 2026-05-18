@@ -5,7 +5,7 @@ import fitz  # PyMuPDF
 from agents.ai_connection import AIConnection, resolve_ai_context
 
 
-PARSER_AGENT_VERSION = "realytics-parser-v2.2"
+PARSER_AGENT_VERSION = "realytics-parser-v2.3"
 
 
 class ParserAgent:
@@ -197,7 +197,52 @@ class ParserAgent:
           },
           "document_market_evidence": {
             "extractionNote": "Market, sale price, rent, and comparable data extracted from uploaded documents. Include only values found in the document; do not invent market evidence.",
-            "sourceLocatorPolicy": "Use the PAGE markers in the document text and include pageNumber, table, row, column, fieldName, short textExcerpt, and confidence whenever a value is extracted from a document table or paragraph."
+            "sourceLocatorPolicy": "Use the PAGE markers in the document text and include pageNumber, table, row, column, fieldName, short textExcerpt, and confidence whenever a value is extracted from a document table or paragraph.",
+            "proposedPricePerPy": 0,
+            "demandLevel": "strong|moderate|weak|unknown",
+            "upcomingSupplyUnits": 0,
+            "productMix": [
+              {
+                "type": "Unit Type",
+                "productType": "apartment|officetel_residential|officetel_office|mixed_use_residential|commercial_retail|knowledge_industry_center|section_office|serviced_residence|other_saleable",
+                "exclusiveAreaPy": 0,
+                "contractAreaPy": 0,
+                "units": 0,
+                "pricePerPy": 0,
+                "totalRevenue": 0,
+                "evidenceIds": ["document-page-or-evidence-id"],
+                "sourceLocator": {
+                  "pageNumber": 0,
+                  "table": "Table name or index",
+                  "row": "Row label or index",
+                  "column": "Column label",
+                  "fieldName": "pricePerPy|totalRevenue|units|contractAreaPy",
+                  "textExcerpt": "Short source excerpt",
+                  "confidence": 0.0
+                }
+              }
+            ],
+            "comparables": [],
+            "manualComparables": [],
+            "transactionComparables": [],
+            "presaleComparables": [],
+            "listingComparables": [],
+            "rentComparables": [],
+            "rentalAssumptions": {
+              "monthlyRentPerPy": 0,
+              "requiredYield": 0.0,
+              "sourceUrlOrEvidenceId": "document-page-or-evidence-id",
+              "sourceLocator": {
+                "pageNumber": 0,
+                "table": "Table name or index",
+                "row": "Row label or index",
+                "column": "Column label",
+                "fieldName": "monthlyRentPerPy|requiredYield",
+                "textExcerpt": "Short source excerpt",
+                "confidence": 0.0
+              }
+            },
+            "data_sources": []
           },
           "cost_assumptions": {
             "construction_cost_per_sqm": 0

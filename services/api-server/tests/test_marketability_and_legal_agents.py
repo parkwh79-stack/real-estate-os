@@ -130,6 +130,42 @@ def test_marketability_agent_normalizes_product_mix_and_pricing_comparables():
     assert result["reportParagraphs"]["pricingAnalysis"]
 
 
+def test_marketability_agent_accepts_manual_transaction_presale_and_listing_arrays():
+    result = MarketabilityAgent().analyze({
+        "project": {"type": "mixed_use"},
+        "product_mix": [
+            {
+                "type": "A",
+                "contractAreaPy": 30,
+                "units": 10,
+                "pricePerPy": 32_000_000,
+            }
+        ],
+        "feasibility_input": {"total_revenue": 9_600_000_000},
+        "pf_structure": [{"amount": 5_000_000_000, "priority": 1}],
+        "sales_schedule": {"contract_deposit": 0.1},
+        "market": {
+            "comparables": [{"name": "Manual A", "pricePerPy": 30_000_000, "sourceUrlOrEvidenceId": "manual-1"}],
+            "transactionComparables": [{"name": "Tx A", "pricePerSqm": 9_200_000, "sourceUrlOrEvidenceId": "tx-1"}],
+            "presaleComparables": [{"name": "Presale A", "presalePricePerPy": 31_000_000, "sourceUrlOrEvidenceId": "presale-1"}],
+            "listingComparables": [{"name": "Listing A", "listingPricePerPy": 33_000_000, "sourceUrlOrEvidenceId": "listing-1"}],
+        },
+    })
+
+    assert result["comparableSummary"]["totalCount"] == 4
+    assert result["comparableSummary"]["hasManualComparable"] is True
+    assert result["comparableSummary"]["hasTransactionComparable"] is True
+    assert result["comparableSummary"]["hasPresaleComparable"] is True
+    assert result["comparableSummary"]["hasListingComparable"] is True
+    assert {item["comparableCategory"] for item in result["normalizedComparables"]} == {
+        "manual_comparable",
+        "transaction",
+        "presale",
+        "listing",
+    }
+    assert any(item["priceBasis"] == "price_per_sqm_converted" for item in result["normalizedComparables"])
+
+
 def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     project_data = {
         "project": {"type": "officetel"},
@@ -219,6 +255,54 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     result = MarketabilityAgent().analyze(marketability_input)
 
     assert "MARKET_EVIDENCE_NEEDS_REVIEW" in result["riskFlags"]
+
+
+def test_market_evidence_agent_merges_document_and_existing_market_payloads():
+    project_data = {
+        "project": {"type": "officetel"},
+        "product_mix": [
+            {
+                "type": "A",
+                "contractAreaPy": 20,
+                "units": 100,
+                "pricePerPy": 30_000_000,
+                "totalRevenue": 60_000_000_000,
+            }
+        ],
+        "feasibility_input": {"total_revenue": 60_000_000_000},
+        "market": {
+            "comparables": [
+                {
+                    "caseId": "MANUAL-001",
+                    "pricePerPy": 29_000_000,
+                    "sourceUrlOrEvidenceId": "manual-001",
+                }
+            ],
+        },
+        "document_market_evidence": {
+            "comparables": [
+                {
+                    "caseId": "DOC-001",
+                    "pricePerPy": 30_000_000,
+                    "sourceUrlOrEvidenceId": "doc-p10-table1-row1",
+                }
+            ],
+            "transactionComparables": [
+                {
+                    "caseId": "TX-001",
+                    "pricePerPy": 31_000_000,
+                    "sourceUrlOrEvidenceId": "tx-001",
+                }
+            ],
+        },
+    }
+
+    evidence = MarketEvidenceAgent().review(project_data)
+
+    assert len(evidence["marketPayloadPatch"]["market"]["comparables"]) == 2
+    assert len(evidence["marketPayloadPatch"]["market"]["transactionComparables"]) == 1
+    assert evidence["evidenceSummary"]["saleComparableCount"] == 3
+    assert len([record for record in evidence["evidenceRecords"] if record["evidenceType"] == "sale_comparable"]) == 3
 
 
 def test_legal_review_agent_flags_missing_korean_law_mcp_context():

@@ -142,8 +142,9 @@ Current implementation:
 - Keeps logistics, operating hotel/lodging, rental office, data center, rental housing, senior housing, and healthcare as non-saleable or separate-Agent assets.
 - Treats serviced residence as applicable when it is a strata-sale/presale asset.
 - Normalizes product mix, sale price assumptions, total revenue, exclusive ratio, and evidence IDs.
-- Ingests manual comparable, transaction, presale, and listing fixture data with source metadata.
+- Ingests manual comparable, transaction, presale, and listing fixture data with category, source type, price-basis, source metadata, and converted price-unit normalization.
 - Reconciles uploaded document-derived market evidence through `MarketEvidenceAgent` before Marketability scoring.
+- Merges document-derived market evidence with existing manual market payloads without overwriting analyst-supplied comparables.
 - Emits normalized evidence records for product mix, sale comparables, and rent comparables.
 - Persists market evidence records in JSON/SQLite runtime state and exposes them through `GET /projects/{project_id}/market-evidence`.
 - Supports analyst review of market evidence through `POST /projects/{project_id}/market-evidence/review` and the orchestration UI.

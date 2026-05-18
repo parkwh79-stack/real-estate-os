@@ -105,6 +105,7 @@ class MarketabilityAgent:
                 "dataSources": self._data_sources(project_data),
                 "comparables": [],
                 "normalizedComparables": [],
+                "comparableSummary": _comparable_summary([]),
             }
 
         product_type = classification["productType"]
@@ -159,6 +160,7 @@ class MarketabilityAgent:
             "dataSources": data_sources,
             "comparables": comparables,
             "normalizedComparables": normalized_comparables,
+            "comparableSummary": _comparable_summary(normalized_comparables),
         }
 
     def _classify_product_type(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -308,27 +310,47 @@ class MarketabilityAgent:
     def _collect_market_comparables(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         market = data.get("market", {})
         candidates = []
-        for key, source_type in [
-            ("comparables", "manual_upload"),
-            ("transactionComparables", "public_api"),
-            ("transaction_comparables", "public_api"),
-            ("presaleComparables", "manual_upload"),
-            ("presale_comparables", "manual_upload"),
-            ("listingComparables", "partner_api"),
-            ("listing_comparables", "partner_api"),
+        for key, source_type, category in [
+            ("comparables", "manual_upload", "manual_comparable"),
+            ("manualComparables", "manual_upload", "manual_comparable"),
+            ("manual_comparables", "manual_upload", "manual_comparable"),
+            ("transactionComparables", "public_api", "transaction"),
+            ("transaction_comparables", "public_api", "transaction"),
+            ("presaleComparables", "manual_upload", "presale"),
+            ("presale_comparables", "manual_upload", "presale"),
+            ("listingComparables", "partner_api", "listing"),
+            ("listing_comparables", "partner_api", "listing"),
         ]:
             for item in market.get(key, []) or []:
                 enriched = dict(item)
                 enriched.setdefault("sourceType", source_type)
+                enriched.setdefault("comparableCategory", category)
+                enriched.setdefault("marketPayloadKey", key)
                 candidates.append(enriched)
         return candidates
 
     def _normalize_comparables(self, comparables: List[Dict[str, Any]], product_type: str) -> List[Dict[str, Any]]:
         normalized = []
         for index, item in enumerate(comparables):
-            raw_price = _to_float(item.get("pricePerPy") or item.get("price_per_py") or item.get("rawPricePerPy"))
+            raw_price = _to_float(
+                item.get("pricePerPy")
+                or item.get("price_per_py")
+                or item.get("rawPricePerPy")
+                or item.get("salePricePerPy")
+                or item.get("sale_price_per_py")
+                or item.get("listingPricePerPy")
+                or item.get("listing_price_per_py")
+                or item.get("presalePricePerPy")
+                or item.get("presale_price_per_py")
+            )
+            price_per_sqm = _to_float(item.get("pricePerSqm") or item.get("price_per_sqm"))
+            if raw_price is None and price_per_sqm:
+                raw_price = price_per_sqm * 3.305785
             total_price = _to_float(item.get("totalPrice") or item.get("total_price"))
             area_py = _to_float(item.get("contractAreaPy") or item.get("areaPy") or item.get("area_py"))
+            area_sqm = _to_float(item.get("contractAreaSqm") or item.get("areaSqm") or item.get("area_sqm"))
+            if not area_py and area_sqm:
+                area_py = area_sqm / 3.305785
             if raw_price is None and total_price and area_py:
                 raw_price = total_price / area_py
             if raw_price is None:
@@ -350,8 +372,13 @@ class MarketabilityAgent:
                 "similarityScore": round(similarity, 2),
                 "sourceName": item.get("sourceName") or item.get("source") or "manual comparable",
                 "sourceType": item.get("sourceType") or "manual_upload",
+                "comparableCategory": item.get("comparableCategory") or "manual_comparable",
+                "marketPayloadKey": item.get("marketPayloadKey"),
+                "priceBasis": item.get("priceBasis") or ("price_per_sqm_converted" if price_per_sqm else "price_per_py"),
                 "sourceUrlOrEvidenceId": item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url"),
                 "baseDate": item.get("baseDate") or item.get("transactionDate") or item.get("saleDate"),
+                "confidence": item.get("confidence", 0.5),
+                "sourceLocator": item.get("sourceLocator") or item.get("source_locator") or {},
                 "adjustmentReason": [
                     "same product type" if same_product else "product type adjustment",
                     f"distance adjustment based on {int(distance)}m",
@@ -861,9 +888,30 @@ def _normalize_source(source: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "sourceName": source.get("sourceName") or source.get("name") or source.get("source") or "unknown",
         "sourceType": source.get("sourceType") or source.get("type") or "manual_upload",
+        "comparableCategory": source.get("comparableCategory"),
         "sourceUrlOrEvidenceId": source.get("sourceUrlOrEvidenceId") or source.get("url") or source.get("evidence_id") or source.get("evidenceId"),
         "collectedAt": source.get("collectedAt"),
         "baseDate": source.get("baseDate") or source.get("transactionDate") or source.get("saleDate"),
         "licenseOrUsageNote": source.get("licenseOrUsageNote"),
         "confidence": source.get("confidence", 0.5),
+        "sourceLocator": source.get("sourceLocator") or source.get("source_locator") or {},
+    }
+
+
+def _comparable_summary(comparables: List[Dict[str, Any]]) -> Dict[str, Any]:
+    by_category: Dict[str, int] = {}
+    by_source_type: Dict[str, int] = {}
+    for item in comparables:
+        category = item.get("comparableCategory") or "unknown"
+        source_type = item.get("sourceType") or "unknown"
+        by_category[category] = by_category.get(category, 0) + 1
+        by_source_type[source_type] = by_source_type.get(source_type, 0) + 1
+    return {
+        "totalCount": len(comparables),
+        "byCategory": by_category,
+        "bySourceType": by_source_type,
+        "hasManualComparable": by_category.get("manual_comparable", 0) > 0,
+        "hasTransactionComparable": by_category.get("transaction", 0) > 0,
+        "hasPresaleComparable": by_category.get("presale", 0) > 0,
+        "hasListingComparable": by_category.get("listing", 0) > 0,
     }

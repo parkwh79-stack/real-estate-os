@@ -92,9 +92,9 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Product type classification | Classify apartment, officetel, KIC, mixed-use, retail, section office, serviced residence, and non-saleable assets | Done |
 | Applicability check | Decide whether the Agent applies to the project | Done |
 | Product mix normalization | Normalize type, units, exclusive area, contract area, sale price, total revenue, exclusive ratio, and evidence IDs | Done |
-| Manual comparable fixture adapter | Accept manual comparable, transaction, presale, and listing arrays in the `market` payload | In Progress |
-| Document-derived market evidence parser | Ask ParserAgent to extract product mix, sale price, comparables, rent comparables, rental assumptions, and source metadata from uploaded documents | In Progress |
-| Market evidence reconciliation | Use Market Evidence Agent to reconcile document-derived sale price, rent, product mix revenue, feasibility revenue, and comparable evidence before Marketability scoring | In Progress |
+| Manual comparable fixture adapter | Accept manual comparable, transaction, presale, and listing arrays in the `market` payload with category, source type, price-basis, and source metadata normalization | Done |
+| Document-derived market evidence parser | Ask ParserAgent to extract product mix, sale price, comparables, rent comparables, rental assumptions, source metadata, and source locators from uploaded documents | Done |
+| Market evidence reconciliation | Use Market Evidence Agent to merge document-derived and existing market evidence, reconcile sale price, rent, product mix revenue, feasibility revenue, and comparable evidence before Marketability scoring | Done |
 | Evidence record output | Emit normalized evidence records for product mix, sale comparables, and rent comparables with source IDs, extracted fields, related checks, and validation status | Done |
 | Evidence record persistence | Persist market evidence records to JSON/SQLite state and expose them through project-level API | Done |
 | Evidence review API/UI | Allow analysts to approve, reject, or request revision for persisted market evidence records | Done |

@@ -56,17 +56,18 @@ class MarketEvidenceAgent:
         patch: Dict[str, Any] = {}
         market_patch: Dict[str, Any] = {}
 
-        for key in [
-            "comparables",
-            "transactionComparables",
-            "presaleComparables",
-            "listingComparables",
-            "rentComparables",
-            "data_sources",
+        for key, aliases in [
+            ("comparables", ["comparables"]),
+            ("manualComparables", ["manualComparables", "manual_comparables"]),
+            ("transactionComparables", ["transactionComparables", "transaction_comparables"]),
+            ("presaleComparables", ["presaleComparables", "presale_comparables"]),
+            ("listingComparables", ["listingComparables", "listing_comparables"]),
+            ("rentComparables", ["rentComparables", "rent_comparables"]),
+            ("data_sources", ["data_sources", "dataSources"]),
         ]:
-            value = document_evidence.get(key) or document_evidence.get(_camelize(key))
+            value = next((document_evidence.get(alias) for alias in aliases if document_evidence.get(alias)), None)
             if value:
-                market_patch[key] = value
+                market_patch[key] = _merge_evidence_lists(data.get("market", {}).get(key), value)
 
         if document_evidence.get("proposedPricePerPy"):
             market_patch["proposedPricePerPy"] = document_evidence["proposedPricePerPy"]
@@ -79,7 +80,7 @@ class MarketEvidenceAgent:
         if product_mix and not data.get("product_mix") and not data.get("productMix"):
             patch["product_mix"] = product_mix
         if market_patch:
-            patch["market"] = self._deep_merge(data.get("market", {}), market_patch)
+            patch["market"] = self._deep_merge_market(data.get("market", {}), market_patch)
         return patch
 
     def _validate_sale_price(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -275,6 +276,7 @@ class MarketEvidenceAgent:
                 "evidenceType": "sale_comparable",
                 "sourceName": item.get("sourceName") or item.get("source") or "uploaded document",
                 "sourceType": item.get("sourceType") or "manual_upload",
+                "comparableCategory": item.get("comparableCategory") or _comparable_category(item),
                 "sourceUrlOrEvidenceId": evidence_id,
                 "baseDate": item.get("baseDate") or item.get("transactionDate") or item.get("saleDate"),
                 "confidence": item.get("confidence", 0.6),
@@ -377,6 +379,17 @@ class MarketEvidenceAgent:
                 result[key] = value
         return result
 
+    def _deep_merge_market(self, base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(base)
+        for key, value in patch.items():
+            if isinstance(value, list):
+                result[key] = _merge_evidence_lists(result.get(key), value)
+            elif isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
 
 def _product_mix(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return (
@@ -391,8 +404,23 @@ def _product_mix(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _comparables(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     market = data.get("market", {})
     result = []
-    for key in ["comparables", "transactionComparables", "transaction_comparables", "presaleComparables", "presale_comparables", "listingComparables", "listing_comparables"]:
-        result.extend(market.get(key) or [])
+    for key in [
+        "comparables",
+        "manualComparables",
+        "manual_comparables",
+        "transactionComparables",
+        "transaction_comparables",
+        "presaleComparables",
+        "presale_comparables",
+        "listingComparables",
+        "listing_comparables",
+    ]:
+        for item in market.get(key) or []:
+            enriched = dict(item)
+            category = _comparable_category(enriched, key)
+            enriched.setdefault("comparableCategory", category)
+            enriched.setdefault("sourceType", _default_source_type(category))
+            result.append(enriched)
     return result
 
 
@@ -440,11 +468,6 @@ def _variance(parsed_value: Optional[float], source_value: Optional[float]) -> O
     return (parsed_value - source_value) / source_value
 
 
-def _camelize(value: str) -> str:
-    parts = value.split("_")
-    return parts[0] + "".join(part.capitalize() for part in parts[1:])
-
-
 def _source_locator(item: Dict[str, Any], evidence_id: str | None = None) -> Dict[str, Any]:
     raw_locator = (
         item.get("sourceLocator")
@@ -488,6 +511,48 @@ def _primary_evidence_id(item: Dict[str, Any]) -> str | None:
     if isinstance(evidence_ids, str):
         return evidence_ids
     return item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url")
+
+
+def _comparable_category(item: Dict[str, Any], source_key: str | None = None) -> str:
+    if item.get("comparableCategory"):
+        return item["comparableCategory"]
+    key = source_key or item.get("marketPayloadKey") or ""
+    if "transaction" in key:
+        return "transaction"
+    if "presale" in key:
+        return "presale"
+    if "listing" in key:
+        return "listing"
+    return "manual_comparable"
+
+
+def _default_source_type(category: str) -> str:
+    if category == "transaction":
+        return "public_api"
+    if category == "listing":
+        return "partner_api"
+    return "manual_upload"
+
+
+def _merge_evidence_lists(existing: Any, incoming: Any) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for source in [existing or [], incoming or []]:
+        for item in source if isinstance(source, list) else []:
+            if not isinstance(item, dict):
+                continue
+            key = (
+                item.get("sourceUrlOrEvidenceId")
+                or item.get("evidenceId")
+                or item.get("caseId")
+                or item.get("name")
+                or str(item)
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(dict(item))
+    return merged
 
 
 def _infer_locator_from_evidence_id(evidence_id: str | None) -> Dict[str, Any]:

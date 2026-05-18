@@ -146,6 +146,56 @@ def save_source_document_metadata(project_id: str, upload_meta: Dict[str, Any]) 
         documents.append(upload_meta)
     persist_state()
 
+def attach_document_market_evidence_metadata(
+    parsed_data: Dict[str, Any],
+    upload_meta: Dict[str, Any],
+) -> None:
+    document_market_evidence = parsed_data.get("document_market_evidence")
+    if not isinstance(document_market_evidence, dict):
+        document_market_evidence = {}
+        parsed_data["document_market_evidence"] = document_market_evidence
+
+    document_market_evidence.setdefault("sourceDocument", upload_meta)
+    document_market_evidence.setdefault("parserVersion", PARSER_AGENT_VERSION)
+
+    sales_assumptions = parsed_data.get("sales_assumptions", {})
+    product_mix = (
+        document_market_evidence.get("productMix")
+        or document_market_evidence.get("product_mix")
+        or parsed_data.get("product_mix")
+        or parsed_data.get("productMix")
+        or sales_assumptions.get("product_mix")
+        or sales_assumptions.get("productMix")
+    )
+    if product_mix and not document_market_evidence.get("productMix"):
+        document_market_evidence["productMix"] = product_mix
+
+    market = parsed_data.get("market", {})
+    if isinstance(market, dict):
+        for key in [
+            "comparables",
+            "manualComparables",
+            "manual_comparables",
+            "transactionComparables",
+            "transaction_comparables",
+            "presaleComparables",
+            "presale_comparables",
+            "listingComparables",
+            "listing_comparables",
+            "rentComparables",
+            "rent_comparables",
+            "rentalAssumptions",
+            "rental_assumptions",
+            "data_sources",
+            "dataSources",
+        ]:
+            if market.get(key) and not document_market_evidence.get(key):
+                document_market_evidence[key] = market[key]
+
+        for key in ["proposedPricePerPy", "demandLevel", "upcomingSupplyUnits"]:
+            if market.get(key) and not document_market_evidence.get(key):
+                document_market_evidence[key] = market[key]
+
 def save_report_record(
     project_id: str,
     structured_report: Dict[str, Any],
@@ -258,10 +308,7 @@ async def parse_uploaded_business_plan(
         parsed_data.setdefault("source_documents", [])
         parsed_data["source_documents"].append(upload_meta)
 
-        document_market_evidence = parsed_data.get("document_market_evidence")
-        if isinstance(document_market_evidence, dict):
-            document_market_evidence.setdefault("sourceDocument", upload_meta)
-            document_market_evidence.setdefault("parserVersion", PARSER_AGENT_VERSION)
+        attach_document_market_evidence_metadata(parsed_data, upload_meta)
 
         return parsed_data
     finally:
