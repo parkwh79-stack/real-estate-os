@@ -103,10 +103,10 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Page/table/row evidence locator | Preserve sourceLocator metadata for market evidence records, including page, table, row, column, field, excerpt, and confidence | Done |
 | Comparable normalization | Apply simple distance and product-type adjustment to comparable price per py | Done |
 | Pricing comparison | Calculate comparable min, median, max, premium, percentile, judgement, and pricing comment | Done |
-| Exit sale rate | Calculate base, 5%, 10%, 15%, and 20% discount scenarios plus tranche-level sale-rate thresholds | In Progress |
-| Discount trigger proposal | Produce default trigger table for 3 months, 6 months, 12 months, and completion | In Progress |
-| Absorption baseline | Estimate simple completion sale rate from pricing, demand, supply, and Exit pressure | In Progress |
-| Unsold recovery baseline | Apply product-type haircut to estimate unsold recovery value and unsold LTV | In Progress |
+| Exit sale rate | Calculate base, 5%, 10%, 15%, and 20% discount scenarios plus tranche-level sale-rate thresholds | Done |
+| Discount trigger proposal | Produce default trigger table for 3 months, 6 months, 12 months, and completion with trigger type and reason | Done |
+| Absorption baseline | Estimate simple completion sale rate from pricing, demand, supply, and Exit pressure with base/downside/stress coverage checks | Done |
+| Unsold recovery baseline | Apply product-type haircut to estimate unsold recovery value, unsold LTV, recovery scenarios, and tranche recovery | Done |
 | Marketability score v2 | Score location, demand, supply, pricing, product, absorption, and PF Exit | In Progress |
 | Risk flags | Generate lender-side flags such as price premium, no comparable data, exit rate high, and supply overhang | In Progress |
 | Report paragraphs | Generate market analysis, pricing, business feasibility, exit, discount trigger, unsold risk, risk memo, and recommendation paragraphs | In Progress |

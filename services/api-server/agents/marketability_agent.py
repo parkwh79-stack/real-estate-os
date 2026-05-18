@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from statistics import median
 from typing import Any, Dict, List, Optional
 
@@ -475,19 +476,38 @@ class MarketabilityAgent:
         exit_sale_rate: Dict[str, Any],
     ) -> Dict[str, Any]:
         base = 0.72
+        factors = [{"factor": "base", "impact": 0.0, "rateAfterImpact": base}]
         if pricing.get("judgement") in {"high", "excessive"}:
             base -= 0.12
+            factors.append({"factor": "pricing_pressure", "impact": -0.12, "rateAfterImpact": round(base, 3)})
         elif pricing.get("judgement") in {"reasonable", "underpriced"}:
             base += 0.08
+            factors.append({"factor": "pricing_support", "impact": 0.08, "rateAfterImpact": round(base, 3)})
         if supply.get("competitionLevel") == "high":
             base -= 0.10
+            factors.append({"factor": "high_supply_competition", "impact": -0.10, "rateAfterImpact": round(base, 3)})
         elif supply.get("competitionLevel") == "low":
             base += 0.05
+            factors.append({"factor": "low_supply_competition", "impact": 0.05, "rateAfterImpact": round(base, 3)})
         if demand.get("demandLevel") == "strong":
             base += 0.08
+            factors.append({"factor": "strong_demand", "impact": 0.08, "rateAfterImpact": round(base, 3)})
         elif demand.get("demandLevel") == "unknown":
             base -= 0.07
+            factors.append({"factor": "unknown_demand_evidence", "impact": -0.07, "rateAfterImpact": round(base, 3)})
+
+        if exit_sale_rate.get("base", 0) >= 0.75:
+            base -= 0.06
+            factors.append({"factor": "high_exit_sale_rate_pressure", "impact": -0.06, "rateAfterImpact": round(base, 3)})
+        elif exit_sale_rate.get("base", 0) <= 0.55 and exit_sale_rate.get("base", 0) > 0:
+            base += 0.03
+            factors.append({"factor": "low_exit_sale_rate_pressure", "impact": 0.03, "rateAfterImpact": round(base, 3)})
+
         completion = max(0.35, min(0.95, base))
+        downside_completion = max(0, completion - 0.15)
+        stress_completion = max(0, completion - 0.28)
+        required_exit = exit_sale_rate.get("base", 0)
+        discount10_exit = exit_sale_rate.get("discount10", 0)
         return {
             "threeMonths": round(completion * 0.30, 2),
             "sixMonths": round(completion * 0.52, 2),
@@ -495,30 +515,86 @@ class MarketabilityAgent:
             "completion": round(completion, 2),
             "baseCase": {
                 "completionSalesRate": round(completion, 2),
-                "exitCoverage": completion >= exit_sale_rate.get("base", 0),
+                "exitCoverage": completion >= required_exit,
+                "surplusToBaseExit": round(completion - required_exit, 4),
             },
-            "downsideCase": {"completionSalesRate": round(max(0, completion - 0.15), 2)},
-            "stressCase": {"completionSalesRate": round(max(0, completion - 0.28), 2)},
+            "downsideCase": {
+                "completionSalesRate": round(downside_completion, 2),
+                "exitCoverage": downside_completion >= required_exit,
+                "surplusToBaseExit": round(downside_completion - required_exit, 4),
+            },
+            "stressCase": {
+                "completionSalesRate": round(stress_completion, 2),
+                "exitCoverage": stress_completion >= required_exit,
+                "surplusToBaseExit": round(stress_completion - required_exit, 4),
+            },
+            "monthlyAbsorption": [
+                {"month": 3, "targetSalesRate": round(completion * 0.30, 2)},
+                {"month": 6, "targetSalesRate": round(completion * 0.52, 2)},
+                {"month": 12, "targetSalesRate": round(completion * 0.78, 2)},
+                {"month": "completion", "targetSalesRate": round(completion, 2)},
+            ],
+            "exitPressure": {
+                "baseExitSaleRate": required_exit,
+                "discount10ExitSaleRate": discount10_exit,
+                "baseCaseCushion": round(completion - required_exit, 4),
+                "discount10Cushion": round(completion - discount10_exit, 4),
+                "pressureLevel": "high" if completion < discount10_exit else "moderate" if completion < required_exit + 0.1 else "low",
+            },
+            "drivers": factors,
             "comment": "Baseline absorption uses price competitiveness, demand evidence, competition, and exit-sale-rate pressure.",
         }
 
     def _exit_sale_rate(self, data: Dict[str, Any]) -> Dict[str, Any]:
         feasibility = data.get("feasibility_input", {})
         total_revenue = feasibility.get("total_revenue", 0) or 0
-        total_pf = sum(tranche.get("amount", 0) or 0 for tranche in data.get("pf_structure", []))
+        tranches = data.get("pf_structure", [])
+        total_pf = sum(tranche.get("amount", 0) or 0 for tranche in tranches)
         required_repayment = data.get("required_repayment_amount") or data.get("requiredRepaymentAmount") or total_pf
 
         def rate(discount: float) -> float:
             adjusted_revenue = total_revenue * (1 - discount)
             return required_repayment / adjusted_revenue if adjusted_revenue else 0
 
-        sorted_tranches = sorted(data.get("pf_structure", []), key=lambda item: item.get("priority", 999))
+        def tranche_rate(amount: float, discount: float = 0) -> float:
+            adjusted_revenue = total_revenue * (1 - discount)
+            return amount / adjusted_revenue if adjusted_revenue else 0
+
+        discount_rates = [0, 0.05, 0.10, 0.15, 0.20]
+        discount_scenarios = [
+            {
+                "discountRate": discount,
+                "adjustedSalesRevenue": total_revenue * (1 - discount),
+                "requiredRepaymentAmount": required_repayment,
+                "exitSaleRate": rate(discount),
+                "feasibleAt100PctSales": rate(discount) <= 1,
+            }
+            for discount in discount_rates
+        ]
+
+        sorted_tranches = sorted(tranches, key=lambda item: item.get("priority", 999))
         cumulative = 0
         tranche_rates: Dict[str, float] = {}
+        tranche_thresholds = []
         tranche_names = ["senior", "mezzanine", "junior"]
-        for index, tranche in enumerate(sorted_tranches[:3]):
+        for index, tranche in enumerate(sorted_tranches):
             cumulative += tranche.get("amount", 0) or 0
-            tranche_rates[tranche_names[index]] = cumulative / total_revenue if total_revenue else 0
+            fallback_label = tranche_names[index] if index < len(tranche_names) else f"tranche_{index + 1}"
+            label = tranche.get("name") or tranche.get("tranche") or fallback_label
+            mapped_name = tranche_names[index] if index < len(tranche_names) else str(label)
+            threshold = tranche_rate(cumulative)
+            if index < len(tranche_names):
+                tranche_rates[mapped_name] = threshold
+            tranche_thresholds.append({
+                "tranche": label,
+                "mappedName": mapped_name,
+                "priority": tranche.get("priority", index + 1),
+                "amount": tranche.get("amount", 0) or 0,
+                "cumulativeAmount": cumulative,
+                "baseExitSaleRate": threshold,
+                "discount10ExitSaleRate": tranche_rate(cumulative, 0.10),
+                "discount20ExitSaleRate": tranche_rate(cumulative, 0.20),
+            })
 
         return {
             "base": rate(0),
@@ -526,6 +602,12 @@ class MarketabilityAgent:
             "discount10": rate(0.10),
             "discount15": rate(0.15),
             "stress": rate(0.20),
+            "discount20": rate(0.20),
+            "totalSalesRevenue": total_revenue,
+            "requiredRepaymentAmount": required_repayment,
+            "totalPfAmount": total_pf,
+            "discountScenarios": discount_scenarios,
+            "trancheThresholds": tranche_thresholds,
             "trancheExitSaleRate": {
                 "senior": tranche_rates.get("senior", 0),
                 "mezzanine": tranche_rates.get("mezzanine", 0),
@@ -547,15 +629,47 @@ class MarketabilityAgent:
                     "targetSalesRate": item.get("target_rate"),
                     "discountRate": item.get("discount"),
                     "action": "Contracted discount-sale trigger",
+                    "triggerType": "contracted",
+                    "reason": "Existing covenant trigger supplied in project data.",
                 }
                 for item in existing
             ]
         completion_target = max(0.8, exit_sale_rate.get("discount10", 0), absorption.get("completion", 0))
+        six_month_target = max(0.40, min(0.55, exit_sale_rate.get("base", 0) * 0.65))
+        twelve_month_target = max(0.60, min(0.75, exit_sale_rate.get("base", 0) * 0.95))
         return [
-            {"time": "3 months", "targetSalesRate": 0.25, "discountRate": 0, "action": "Strengthen marketing and buyer incentives"},
-            {"time": "6 months", "targetSalesRate": 0.40, "discountRate": 0.05, "action": "Review indirect discount up to 5%"},
-            {"time": "12 months", "targetSalesRate": 0.60, "discountRate": 0.10, "action": "Review direct discount up to 10%"},
-            {"time": "Completion", "targetSalesRate": round(completion_target, 2), "discountRate": 0.15, "action": "Review bulk sale, refinancing, or rental conversion"},
+            {
+                "time": "3 months",
+                "targetSalesRate": 0.25,
+                "discountRate": 0,
+                "action": "Strengthen marketing and buyer incentives",
+                "triggerType": "monitoring",
+                "reason": "Early sales velocity check before price discount.",
+            },
+            {
+                "time": "6 months",
+                "targetSalesRate": round(six_month_target, 2),
+                "discountRate": 0.05,
+                "action": "Review indirect discount up to 5%",
+                "triggerType": "soft_discount",
+                "reason": "Target should keep project on path toward base exit sale rate.",
+            },
+            {
+                "time": "12 months",
+                "targetSalesRate": round(twelve_month_target, 2),
+                "discountRate": 0.10,
+                "action": "Review direct discount up to 10%",
+                "triggerType": "direct_discount",
+                "reason": "Target should preserve repayment cushion before completion.",
+            },
+            {
+                "time": "Completion",
+                "targetSalesRate": _ceil_ratio(completion_target),
+                "discountRate": 0.15,
+                "action": "Review bulk sale, refinancing, or rental conversion",
+                "triggerType": "exit_protection",
+                "reason": "Completion target is the greater of 80%, 10% discount exit rate, and forecast completion sales rate.",
+            },
         ]
 
     def _analyze_unsold_recovery(
@@ -565,19 +679,42 @@ class MarketabilityAgent:
         pricing: Dict[str, Any],
     ) -> Dict[str, Any]:
         total_revenue = data.get("feasibility_input", {}).get("total_revenue", 0) or 0
-        haircut = 0.18 if product_type in {"commercial_retail", "serviced_residence"} else 0.12
+        haircut = _unsold_haircut(product_type)
         unsold_value = total_revenue * (1 - haircut)
         total_pf = sum(tranche.get("amount", 0) or 0 for tranche in data.get("pf_structure", []))
         unsold_ltv = total_pf / unsold_value if unsold_value else 0
         judgement = "acceptable_for_senior" if unsold_ltv <= 0.75 else "weak_for_mezzanine"
         if pricing.get("judgement") in {"high", "excessive"}:
             judgement = "weak_for_mezzanine"
+        scenarios = [
+            {
+                "scenario": "base_unsold_recovery",
+                "haircut": haircut,
+                "recoveryValue": unsold_value,
+                "unsoldLTV": unsold_ltv,
+            },
+            {
+                "scenario": "downside_unsold_recovery",
+                "haircut": min(0.75, haircut + 0.10),
+                "recoveryValue": total_revenue * (1 - min(0.75, haircut + 0.10)),
+                "unsoldLTV": total_pf / (total_revenue * (1 - min(0.75, haircut + 0.10))) if total_revenue else 0,
+            },
+            {
+                "scenario": "stress_unsold_recovery",
+                "haircut": min(0.85, haircut + 0.20),
+                "recoveryValue": total_revenue * (1 - min(0.85, haircut + 0.20)),
+                "unsoldLTV": total_pf / (total_revenue * (1 - min(0.85, haircut + 0.20))) if total_revenue else 0,
+            },
+        ]
         return {
             "baseUnsoldValue": total_revenue,
             "discountedUnsoldValue": unsold_value,
+            "haircut": haircut,
             "unsoldLTV": unsold_ltv,
             "recoveryJudgement": judgement,
-            "comment": "Unsold recovery applies a product-type haircut to total sale revenue.",
+            "recoveryScenarios": scenarios,
+            "trancheRecovery": _tranche_recovery(data.get("pf_structure", []), unsold_value),
+            "comment": "Unsold recovery applies a product-type haircut to total sale revenue and compares recovery value with tranche exposure.",
         }
 
     def _score_marketability(
@@ -866,6 +1003,11 @@ def _ratio_score(value: float, low: float, high: float) -> float:
     return 50 + (value - low) / (high - low) * 35
 
 
+def _ceil_ratio(value: float, digits: int = 2) -> float:
+    multiplier = 10 ** digits
+    return math.ceil(value * multiplier) / multiplier
+
+
 def _finding_for_score(score: float) -> str:
     if score >= 85:
         return "strong"
@@ -896,6 +1038,40 @@ def _normalize_source(source: Dict[str, Any]) -> Dict[str, Any]:
         "confidence": source.get("confidence", 0.5),
         "sourceLocator": source.get("sourceLocator") or source.get("source_locator") or {},
     }
+
+
+def _unsold_haircut(product_type: str) -> float:
+    haircuts = {
+        "apartment": 0.10,
+        "urban_residential": 0.12,
+        "mixed_use_residential": 0.12,
+        "officetel_residential": 0.15,
+        "officetel_office": 0.16,
+        "section_office": 0.18,
+        "knowledge_industry_center": 0.20,
+        "commercial_retail": 0.25,
+        "serviced_residence": 0.28,
+        "other_saleable": 0.18,
+    }
+    return haircuts.get(product_type, 0.18)
+
+
+def _tranche_recovery(tranches: List[Dict[str, Any]], recovery_value: float) -> List[Dict[str, Any]]:
+    remaining = recovery_value
+    rows = []
+    for index, tranche in enumerate(sorted(tranches, key=lambda item: item.get("priority", 999))):
+        amount = tranche.get("amount", 0) or 0
+        recovered = min(amount, max(remaining, 0))
+        remaining -= recovered
+        rows.append({
+            "tranche": tranche.get("name") or tranche.get("tranche") or f"tranche_{index + 1}",
+            "priority": tranche.get("priority", index + 1),
+            "amount": amount,
+            "recoveredAmount": recovered,
+            "recoveryRatio": recovered / amount if amount else 0,
+            "shortfall": max(amount - recovered, 0),
+        })
+    return rows
 
 
 def _comparable_summary(comparables: List[Dict[str, Any]]) -> Dict[str, Any]:

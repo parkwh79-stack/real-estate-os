@@ -128,6 +128,13 @@ def test_marketability_agent_normalizes_product_mix_and_pricing_comparables():
     assert result["pricing"]["judgement"] == "high"
     assert "PRICE_PREMIUM_HIGH" in result["riskFlags"]
     assert result["reportParagraphs"]["pricingAnalysis"]
+    assert result["exitSaleRate"]["discount20"] == result["exitSaleRate"]["stress"]
+    assert len(result["exitSaleRate"]["discountScenarios"]) == 5
+    assert len(result["exitSaleRate"]["trancheThresholds"]) == 2
+    assert result["absorptionForecast"]["exitPressure"]["pressureLevel"] in {"low", "moderate", "high"}
+    assert result["discountTrigger"][1]["triggerType"] == "soft_discount"
+    assert result["unsoldRecovery"]["haircut"] == 0.15
+    assert result["unsoldRecovery"]["trancheRecovery"][0]["recoveryRatio"] == 1
 
 
 def test_marketability_agent_accepts_manual_transaction_presale_and_listing_arrays():
@@ -164,6 +171,46 @@ def test_marketability_agent_accepts_manual_transaction_presale_and_listing_arra
         "listing",
     }
     assert any(item["priceBasis"] == "price_per_sqm_converted" for item in result["normalizedComparables"])
+
+
+def test_marketability_agent_calculates_exit_absorption_trigger_and_unsold_recovery():
+    result = MarketabilityAgent().analyze({
+        "project": {"type": "commercial"},
+        "product_mix": [
+            {
+                "type": "retail",
+                "contractAreaPy": 100,
+                "units": 10,
+                "pricePerPy": 25_000_000,
+            }
+        ],
+        "feasibility_input": {"total_revenue": 25_000_000_000},
+        "pf_structure": [
+            {"tranche": "Senior", "amount": 12_000_000_000, "priority": 1},
+            {"tranche": "Mezz", "amount": 5_000_000_000, "priority": 2},
+            {"tranche": "Junior", "amount": 2_000_000_000, "priority": 3},
+        ],
+        "sales_schedule": {"contract_deposit": 0.1},
+        "market": {
+            "demandLevel": "weak",
+            "upcomingSupplyUnits": 1200,
+            "comparables": [
+                {"name": "Retail A", "pricePerPy": 24_000_000, "sourceUrlOrEvidenceId": "retail-a"},
+                {"name": "Retail B", "pricePerPy": 23_000_000, "sourceUrlOrEvidenceId": "retail-b"},
+            ],
+        },
+    })
+
+    assert result["exitSaleRate"]["base"] == 0.76
+    assert round(result["exitSaleRate"]["discount10"], 4) == 0.8444
+    assert result["exitSaleRate"]["trancheExitSaleRate"]["senior"] == 0.48
+    assert result["exitSaleRate"]["trancheThresholds"][2]["mappedName"] == "junior"
+    assert result["absorptionForecast"]["baseCase"]["exitCoverage"] is False
+    assert result["absorptionForecast"]["exitPressure"]["pressureLevel"] == "high"
+    assert result["discountTrigger"][-1]["targetSalesRate"] >= result["exitSaleRate"]["discount10"]
+    assert result["unsoldRecovery"]["haircut"] == 0.25
+    assert result["unsoldRecovery"]["recoveryScenarios"][2]["scenario"] == "stress_unsold_recovery"
+    assert result["unsoldRecovery"]["trancheRecovery"][1]["recoveryRatio"] <= 1
 
 
 def test_market_evidence_agent_reconciles_uploaded_document_market_values():
