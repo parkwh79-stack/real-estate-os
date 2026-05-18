@@ -327,6 +327,37 @@ Recommended product type codes:
 | `logistics` | Logistics center |
 | `other_saleable` | Other strata-sale asset |
 
+### 6.3.1 Asset Calculation Profiles
+
+Cash Flow calculations must be asset-type aware. The mapper from `FeasibilityStudyV2` to `CashFlowRunRequest` should not apply one generic collection, recovery, or LTV rule to every asset.
+
+Default calculation profiles:
+
+| Asset Type | Revenue Mode | Default Collection | Recovery Haircut | LTV Risk Threshold |
+|---|---|---|---:|---:|
+| `apartment` | `presale` | `10-60-30` | 0.10 | 0.85 |
+| `officetel` | `presale_or_rent_yield_check` | `10-60-30` | 0.20 | 0.80 |
+| `commercial` | `presale_and_rent_cap_check` | `10-50-40` | 0.30 | 0.75 |
+| `knowledge_industry_center` | `presale_and_lease_demand_check` | `10-50-40` | 0.25 | 0.75 |
+| `mixed_use` | `mixed_presale_by_component` | `asset_component_schedule` | 0.20 | 0.80 |
+| `logistics` | `lease_forward_sale_refinancing` | `forward_sale_closing` | 0.15 | 0.70 |
+| `lodging` | `serviced_residence_presale_or_operation` | `10-50-40` | 0.35 | 0.75 |
+| `other` | `manual_review` | `manual` | 0.25 | 0.80 |
+
+Implementation rule:
+
+```text
+FeasibilityStudyV2.product_mix
+    -> normalize asset_type
+    -> group by asset_type
+    -> apply asset calculation profile
+    -> generate revenue mode and collection schedule
+    -> attach recovery haircut and LTV threshold
+    -> create CashFlowRunRequest.productMix
+```
+
+The Development Feasibility Agent stores the first `assetCalculationProfiles` draft in `feasibilityStudyV2Draft.raw_import`. The future `FeasibilityStudyV2 -> CashFlowRunRequest` mapper should consume that profile or regenerate it deterministically from `product_mix.asset_type`.
+
 ### 6.4 Sales Collection Schedule
 
 ```json

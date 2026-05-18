@@ -11,6 +11,58 @@ from core.calculations import (
 from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION
 
 
+ASSET_CALCULATION_PROFILES = {
+    "apartment": {
+        "revenueMode": "presale",
+        "defaultCollection": "10-60-30",
+        "recoveryHaircut": 0.10,
+        "ltvRiskThreshold": 0.85,
+    },
+    "officetel": {
+        "revenueMode": "presale_or_rent_yield_check",
+        "defaultCollection": "10-60-30",
+        "recoveryHaircut": 0.20,
+        "ltvRiskThreshold": 0.80,
+    },
+    "commercial": {
+        "revenueMode": "presale_and_rent_cap_check",
+        "defaultCollection": "10-50-40",
+        "recoveryHaircut": 0.30,
+        "ltvRiskThreshold": 0.75,
+    },
+    "knowledge_industry_center": {
+        "revenueMode": "presale_and_lease_demand_check",
+        "defaultCollection": "10-50-40",
+        "recoveryHaircut": 0.25,
+        "ltvRiskThreshold": 0.75,
+    },
+    "mixed_use": {
+        "revenueMode": "mixed_presale_by_component",
+        "defaultCollection": "asset_component_schedule",
+        "recoveryHaircut": 0.20,
+        "ltvRiskThreshold": 0.80,
+    },
+    "logistics": {
+        "revenueMode": "lease_forward_sale_refinancing",
+        "defaultCollection": "forward_sale_closing",
+        "recoveryHaircut": 0.15,
+        "ltvRiskThreshold": 0.70,
+    },
+    "lodging": {
+        "revenueMode": "serviced_residence_presale_or_operation",
+        "defaultCollection": "10-50-40",
+        "recoveryHaircut": 0.35,
+        "ltvRiskThreshold": 0.75,
+    },
+    "other": {
+        "revenueMode": "manual_review",
+        "defaultCollection": "manual",
+        "recoveryHaircut": 0.25,
+        "ltvRiskThreshold": 0.80,
+    },
+}
+
+
 class DevelopmentFeasibilityAgent:
     def analyze(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
         land = project_data.get("land", {})
@@ -32,6 +84,7 @@ class DevelopmentFeasibilityAgent:
         pf["requiresCashFlowScenario"] = engine_readiness["requiresCashFlowScenario"]
         pf["requiresUnsoldLtvMatrix"] = engine_readiness["requiresUnsoldLtvMatrix"]
         pf["requiresWaterfallAnalysis"] = engine_readiness["requiresWaterfallAnalysis"]
+        asset_profile_summary = self._asset_profile_summary(project_data)
         feasibility_v2_draft = self._feasibility_study_v2_draft(
             project_data,
             program,
@@ -40,6 +93,7 @@ class DevelopmentFeasibilityAgent:
             returns,
             pf,
             sensitivity,
+            asset_profile_summary,
         )
 
         return {
@@ -53,6 +107,7 @@ class DevelopmentFeasibilityAgent:
             "pfReadiness": pf,
             "sensitivity": sensitivity,
             "downstreamEngineReadiness": engine_readiness,
+            "assetCalculationProfiles": asset_profile_summary,
             "feasibilityStudyV2Integration": self._feasibility_study_v2_integration(project_data, feasibility_v2_draft),
             "feasibilityStudyV2Draft": feasibility_v2_draft,
             "dataQuality": quality,
@@ -322,6 +377,7 @@ class DevelopmentFeasibilityAgent:
         returns: Dict[str, Any],
         pf: Dict[str, Any],
         sensitivity: List[Dict[str, Any]],
+        asset_profile_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
         project = project_data.get("project", {})
         land = project_data.get("land", {})
@@ -386,6 +442,7 @@ class DevelopmentFeasibilityAgent:
                 "source": "development_feasibility_agent",
                 "sourceAnalysisType": "developer_and_pf_feasibility",
                 "note": "Draft mapping for FeasibilityStudyV2; workbook cell provenance is added by the workbook adapter.",
+                "assetCalculationProfiles": asset_profile_summary,
             },
         }
 
@@ -408,6 +465,29 @@ class DevelopmentFeasibilityAgent:
                 "excel_row_id": item.get("excel_row_id"),
             })
         return rows
+
+    def _asset_profile_summary(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
+        product_mix = project_data.get("product_mix") or project_data.get("productMix") or []
+        if product_mix:
+            asset_types = [
+                self._asset_type(item.get("productType") or item.get("asset_type") or item.get("type"))
+                for item in product_mix
+            ]
+        else:
+            asset_types = [self._asset_type(project_data.get("project", {}).get("type"))]
+        asset_types = list(dict.fromkeys(asset_types))
+        return {
+            "profileVersion": "asset-calculation-profile-v1",
+            "assetTypes": asset_types,
+            "profiles": {
+                asset_type: ASSET_CALCULATION_PROFILES.get(asset_type, ASSET_CALCULATION_PROFILES["other"])
+                for asset_type in asset_types
+            },
+            "mappingRule": (
+                "FeasibilityStudyV2 -> CashFlowRunRequest must apply revenue mode, default collection schedule, "
+                "recovery haircut, and LTV risk threshold by asset type."
+            ),
+        }
 
     def _financing_v2(self, pf_structure: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows = []
