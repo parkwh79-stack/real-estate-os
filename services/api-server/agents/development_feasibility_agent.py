@@ -25,9 +25,16 @@ class DevelopmentFeasibilityAgent:
         pf = self._pf_readiness(revenue, costs, pf_structure)
         sensitivity = self._sensitivity(revenue, costs)
         quality = self._data_quality(project_data, program, revenue, costs)
+        engine_readiness = self._downstream_engine_readiness(project_data, revenue, costs, pf_structure, quality)
+        pf["isPfReviewReady"] = pf["status"] == "ready" and not quality["missingFields"]
+        pf["requiredMissingFields"] = quality["missingFields"]
+        pf["requiresCashFlowScenario"] = engine_readiness["requiresCashFlowScenario"]
+        pf["requiresUnsoldLtvMatrix"] = engine_readiness["requiresUnsoldLtvMatrix"]
+        pf["requiresWaterfallAnalysis"] = engine_readiness["requiresWaterfallAnalysis"]
 
         return {
             "analysisType": "developer_and_pf_feasibility",
+            "agentRole": "development_feasibility_orchestrator",
             "summary": self._summary(returns, pf, quality),
             "architecturalProgram": program,
             "revenue": revenue,
@@ -35,6 +42,8 @@ class DevelopmentFeasibilityAgent:
             "developerReturns": returns,
             "pfReadiness": pf,
             "sensitivity": sensitivity,
+            "downstreamEngineReadiness": engine_readiness,
+            "feasibilityStudyV2Integration": self._feasibility_study_v2_integration(project_data),
             "dataQuality": quality,
         }
 
@@ -151,7 +160,13 @@ class DevelopmentFeasibilityAgent:
             "totalPfAmount": total_pf,
             "ltvByRevenue": calculate_ltv(total_pf, total_revenue),
             "ltcByCost": calculate_ltc(total_pf, total_cost),
+            "equityRatio": max(0, total_cost - total_pf) / total_cost if total_cost else 0,
+            "landCostRatio": costs["costRatio"]["land"],
+            "constructionCostRatio": costs["costRatio"]["construction"],
+            "financialCostRatio": costs["costRatio"]["finance"],
+            "developerProfitMargin": (total_revenue - total_cost) / total_revenue if total_revenue else 0,
             "exitSaleRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue),
+            "estimatedExitSalesRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue),
             "requiredEquity": max(0, total_cost - total_pf),
             "recommendedPfLimit": recommended_pf_limit,
             "headroomToRecommendedLimit": recommended_pf_limit - total_pf,
@@ -205,6 +220,75 @@ class DevelopmentFeasibilityAgent:
             "confidence": max(0.2, 1 - len(missing) * 0.15),
             "source": project_data.get("_meta", {}).get("parsing_source", "project_data"),
             "warnings": [f"{field} 자료 보강 필요" for field in missing],
+        }
+
+    def _downstream_engine_readiness(
+        self,
+        project_data: Dict[str, Any],
+        revenue: Dict[str, Any],
+        costs: Dict[str, Any],
+        pf_structure: List[Dict[str, Any]],
+        quality: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        has_revenue = revenue["totalRevenue"] > 0
+        has_cost = costs["totalCost"] > 0
+        has_pf = bool(pf_structure)
+        has_schedule = bool(
+            project_data.get("cashflow_input")
+            or project_data.get("schedule")
+            or project_data.get("sales_schedule")
+            or project_data.get("salesCollectionSchedule")
+        )
+        has_sales_or_product_mix = bool(
+            project_data.get("product_mix")
+            or project_data.get("productMix")
+            or project_data.get("sales_assumptions")
+            or revenue["salesRevenue"] > 0
+        )
+        blockers = []
+        if not has_revenue:
+            blockers.append("total_revenue")
+        if not has_cost:
+            blockers.append("total_cost")
+        if not has_schedule:
+            blockers.append("schedule_or_cashflow_input")
+        if not has_pf:
+            blockers.append("pf_structure")
+
+        return {
+            "role": "delegate_to_specialized_engines",
+            "canonicalPath": [
+                "DevelopmentFeasibilityAgent",
+                "FeasibilityStudyV2",
+                "CashFlowRunRequest",
+                "CashFlowEngine",
+                "CalculationScenarioEngine",
+            ],
+            "canRunCashFlow": has_revenue and has_cost and has_schedule,
+            "canRunPfScenarios": has_pf and has_revenue,
+            "canRunUnsoldLtvMatrix": has_pf and has_revenue and has_sales_or_product_mix,
+            "requiresCashFlowScenario": has_revenue and has_cost,
+            "requiresWaterfallAnalysis": has_pf,
+            "requiresUnsoldLtvMatrix": has_pf and has_sales_or_product_mix,
+            "delegationPolicy": (
+                "DevelopmentFeasibilityAgent assesses feasibility and readiness; "
+                "monthly cash flow, waterfall, unsold LTV, and tranche recovery are delegated "
+                "to Cash Flow Engine and Calculation Scenario Engine."
+            ),
+            "blockingFields": list(dict.fromkeys(blockers + quality["missingFields"])),
+        }
+
+    def _feasibility_study_v2_integration(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "canonicalSchema": "realytics-feasibility-study-v2",
+            "workbookContract": "realytics-fs-xlsx-v1",
+            "sourceSchemaPath": "services/api-server/schemas/feasibility_study.py",
+            "mapperStatus": "planned",
+            "requiredMappers": [
+                "DevelopmentFeasibilityAgent output -> FeasibilityStudyV2",
+                "FeasibilityStudyV2 -> CashFlowRunRequest",
+            ],
+            "inputAlreadyCanonical": project_data.get("version") == "realytics-feasibility-study-v2",
         }
 
     def _summary(self, returns: Dict[str, Any], pf: Dict[str, Any], quality: Dict[str, Any]) -> str:

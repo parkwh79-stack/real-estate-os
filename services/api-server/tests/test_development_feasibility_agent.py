@@ -20,6 +20,19 @@ def test_development_feasibility_agent_builds_developer_and_pf_metrics():
     assert result["costs"]["totalCost"] == 120_000_000_000
     assert result["developerReturns"]["developmentProfit"] == 30_000_000_000
     assert result["pfReadiness"]["totalPfAmount"] == 70_000_000_000
+    assert result["agentRole"] == "development_feasibility_orchestrator"
+    assert result["pfReadiness"]["isPfReviewReady"] is True
+    assert result["pfReadiness"]["requiresCashFlowScenario"] is True
+    assert result["pfReadiness"]["requiresWaterfallAnalysis"] is True
+    assert result["pfReadiness"]["requiresUnsoldLtvMatrix"] is True
+    assert result["downstreamEngineReadiness"]["canonicalPath"] == [
+        "DevelopmentFeasibilityAgent",
+        "FeasibilityStudyV2",
+        "CashFlowRunRequest",
+        "CashFlowEngine",
+        "CalculationScenarioEngine",
+    ]
+    assert result["feasibilityStudyV2Integration"]["mapperStatus"] == "planned"
     assert result["sensitivity"]
 
 
@@ -37,3 +50,4 @@ def test_development_feasibility_endpoint_returns_analysis():
     body = res.json()
     assert body["developerReturns"]["profitMargin"] == 0.2
     assert body["pfReadiness"]["ltvByRevenue"] == 70_000_000_000 / 150_000_000_000
+    assert body["downstreamEngineReadiness"]["canRunCashFlow"] is True

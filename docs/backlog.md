@@ -12,6 +12,7 @@ Updated: 2026-05-14
 | P0 | Calculation | Exit Sale Rate | Done | Exit sale rate included in PF metrics with credit status thresholds |
 | P0 | Risk | Basic Risk Matrix | Done | Risk matrix returns category rows, top risks, heatmap, recommendations, and inferred default project risks |
 | P0 | Agent | Development Feasibility Agent | Done | Parses business/basic architectural plan fields into developer-side feasibility, PF readiness, and sensitivity outputs |
+| P0 | Agent | Development Feasibility downstream readiness | Done | Agent now returns feasibility orchestrator role, PF readiness ratios, required missing fields, Cash Flow / Waterfall / Unsold LTV delegation flags, and FeasibilityStudyV2 integration status |
 | P0 | Schema | Feasibility Study v2 schema | Done | Added canonical `realytics-feasibility-study-v2` backend schema, frontend type mirror, fixture, and Excel workbook mapping strategy |
 | P0 | QA | Feasibility workbook validation | Done | Added sample-informed Excel validation gate for required sheets, key cells, formula errors, reconciliations, and v2 import readiness |
 | P0 | Agent | Land Ledger Import Agent | Done | Parses legacy Bonri-style `.xls` land ledgers into parcel, owner, payment, area, amount, import consistency validation, lot normalization, lifecycle status, land acquisition status, PF summary, QA gates, PF mapping, and enrichment-plan outputs |

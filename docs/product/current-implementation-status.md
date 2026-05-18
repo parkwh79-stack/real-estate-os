@@ -136,6 +136,8 @@ Outputs:
 - Cost breakdown
 - Developer returns
 - PF readiness
+- Downstream engine readiness for Cash Flow, Waterfall, Unsold LTV, and Scenario Engine delegation
+- FeasibilityStudyV2 integration status and required mapper path
 - Sensitivity analysis
 - Data quality warnings
 
@@ -154,6 +156,12 @@ API:
 MCP:
 
 - `analyze_development_feasibility`
+
+2026-05-18 update:
+
+- Development Feasibility Agent now explicitly identifies itself as the `development_feasibility_orchestrator`.
+- `pfReadiness` includes `isPfReviewReady`, `requiredMissingFields`, `equityRatio`, cost ratios, `developerProfitMargin`, `estimatedExitSalesRate`, and delegation flags for Cash Flow, Waterfall, and Unsold LTV analysis.
+- The agent does not directly perform Cash Flow / Waterfall / Unsold LTV calculations; it returns `downstreamEngineReadiness` and `feasibilityStudyV2Integration` so specialized engines can be called later.
 
 ### Land Ledger Import Agent
 

@@ -82,6 +82,7 @@ Implemented:
 - Cost breakdown
 - Developer return metrics
 - PF readiness
+- Downstream readiness flags for Cash Flow, Waterfall, Unsold LTV, and Scenario Engine delegation
 - Sensitivity analysis
 - Data quality warnings
 - `realytics-feasibility-study-v2` backend schema
