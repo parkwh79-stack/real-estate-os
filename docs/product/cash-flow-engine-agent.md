@@ -13,6 +13,8 @@ It is not just a monthly cash-flow calculator. It should connect:
 
 ```text
 Business feasibility
+    -> Development Feasibility Agent
+    -> FeasibilityStudyV2 canonical schema
     -> Monthly cash flow
     -> Max Minus
     -> PF draw schedule
@@ -27,6 +29,32 @@ Business feasibility
 ```
 
 The engine should remain deterministic, auditable, and source-metadata aware.
+
+## 1.1 Required Upstream Integration
+
+The Cash Flow Engine must be integrated with the Development Feasibility Agent and the `realytics-feasibility-study-v2` schema.
+
+The default production path should be:
+
+```text
+Business plan / basic architectural plan / feasibility workbook
+    -> Development Feasibility Agent
+    -> FeasibilityStudyV2
+    -> CashFlowRunRequest
+    -> Cash Flow Engine
+    -> Calculation Scenario Engine
+    -> Marketability Agent / Risk Matrix / Phase 11 PF Review Report
+```
+
+The Cash Flow Engine may accept standalone manual inputs for testing or analyst override, but the canonical workflow should treat `FeasibilityStudyV2` as the source-of-truth input schema.
+
+Implementation rule:
+
+1. Do not duplicate feasibility input definitions when the value already exists in `FeasibilityStudyV2`.
+2. Add a mapper from `DevelopmentFeasibilityAgent` output to `FeasibilityStudyV2`.
+3. Add a mapper from `FeasibilityStudyV2` to `CashFlowRunRequest`.
+4. Preserve workbook formulas, provenance, and source metadata when moving values into the Cash Flow Engine.
+5. Return data-quality warnings when the feasibility schema does not contain enough information to generate monthly cash flow.
 
 ## 2. Position in REALYTICS and PLATFORM9
 
@@ -57,6 +85,7 @@ The proposed Cash Flow schema is broadly compatible with the current codebase, b
 
 | Existing Object | Current Location | Fit |
 |---|---|---|
+| `DevelopmentFeasibilityAgent` | `services/api-server/agents/development_feasibility_agent.py` | Upstream parser/analyzer that extracts architectural program, revenue, cost, PF readiness, and sensitivity outputs before schema normalization |
 | `FeasibilityStudyV2` | `services/api-server/schemas/feasibility_study.py` | Source schema for site, program, product mix, revenue, cost, financing, schedule, scenarios, workbook mapping, and provenance |
 | `build_monthly_cash_flow` | `services/api-server/core/calculations.py` | Simple monthly cash-flow builder; should become a lower-level function |
 | `calculate_cashflow_max_minus_details` | `services/api-server/core/calculations.py` | Max Minus basis; should feed cash-flow result summary |
@@ -84,6 +113,54 @@ Recommended layers:
 
 This split keeps the codebase easier to test and prevents UI/API payloads from becoming brittle.
 
+### 3.3 Required Mapping Path
+
+The first implementation should focus on mapping, not UI.
+
+```text
+DevelopmentFeasibilityAgent output
+    -> FeasibilityStudyV2
+        -> CashFlowRunRequest
+            -> MonthlyCashFlowResult
+            -> ScenarioRecoveryResult
+```
+
+### 3.4 Field Mapping
+
+| FeasibilityStudyV2 Field | Cash Flow Field | Notes |
+|---|---|---|
+| `project_id`, `project_name`, `asset_type` | `project.projectId`, `project.projectName`, `project.buildingUse` | Preserve canonical project identity |
+| `site.address`, `site.land_area_sqm`, `site.zoning` | `project.location`, `project.landAreaSqm`, `project.useDistrict` | Use provenance if imported from PDF or workbook |
+| `program.gross_floor_area_sqm`, `program.saleable_area_sqm` | `project.grossFloorAreaSqm`, product area defaults | Used for project summary and area checks |
+| `product_mix` | `productMix` | Normalize unit count, area, sale price, total revenue, asset type, and recovery haircut |
+| `revenue_items` | `sourcesAndUses.revenue` | Classify sales, lease deposit, forward sale, refinancing, and other revenue |
+| `cost_items` | `sourcesAndUses.cost` and monthly cost schedule | Classify land, construction, indirect, marketing, tax, trust, finance, contingency, and other costs |
+| `financing` | `pfStructure` and `sourcesAndUses.funding` | Map senior/middle/junior/equity/bridge tranches and terms |
+| `schedule` | `project.constructionStartDate`, `project.completionDate`, `project.loanMaturityDate`, month index | Used to build monthly rows |
+| `scenarios` | `salesRateScenario` and `CashFlowScenarioSet` | Map base/downside/upside factors and delay assumptions |
+| `metrics` | Cash Flow summary seed | Existing max minus / LTV / exit sale rate can be used as reconciliation checks |
+| `raw_import`, `provenance`, `workbook` | `sourceMetadata` and data quality checks | Preserve audit trail and formula policy |
+
+### 3.5 Mapper Outputs
+
+The mapper should return both a payload and diagnostics.
+
+```json
+{
+  "mappingType": "feasibility_v2_to_cash_flow_v1",
+  "status": "mapped_with_warnings",
+  "cashFlowRunRequest": {},
+  "mappingWarnings": [
+    {
+      "code": "MISSING_MONTHLY_COST_SCHEDULE",
+      "severity": "warning",
+      "message": "Cost items exist but monthly cost phasing is missing."
+    }
+  ],
+  "sourceMetadata": {}
+}
+```
+
 ## 4. Current Implementation
 
 Current implementation exists at the pure-function level.
@@ -98,6 +175,8 @@ Current implementation exists at the pure-function level.
 | Single-point unsold LTV | Implemented as pure function |
 | Tranche recovery helper | Implemented as pure function |
 | Full Cash Flow Agent schema | Not implemented |
+| Development Feasibility to FeasibilityStudyV2 mapper | Not implemented |
+| FeasibilityStudyV2 to CashFlowRunRequest mapper | Not implemented |
 | PF draw schedule | Not implemented |
 | Sales collection schedule by product | Not implemented |
 | Operating / repayment account allocation | Not implemented |
@@ -632,8 +711,11 @@ Required tests:
   - `WaterfallResult`
   - `UnsoldLtvMatrix`
   - `CashFlowReportFragments`
-- Add schema mapping from `FeasibilityStudyV2`.
-- Add fixture payloads.
+- Add mapper from `DevelopmentFeasibilityAgent` output to `FeasibilityStudyV2`.
+- Add mapper from `FeasibilityStudyV2` to `CashFlowRunRequest`.
+- Add mapping diagnostics and data-quality warnings.
+- Add fixture-based tests using `services/api-server/data/fixtures/feasibility_study_v2_schema_example.json`.
+- Add a fixture showing Development Feasibility Agent output mapped into the canonical schema.
 
 ### Sprint 2: Pure Calculation Wrappers
 

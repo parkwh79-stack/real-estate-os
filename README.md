@@ -65,6 +65,16 @@ APIs:
 
 The Development Feasibility Agent parses business plans and basic architectural plans into developer-side feasibility outputs.
 
+Its canonical downstream path is:
+
+```text
+Development Feasibility Agent
+  -> realytics-feasibility-study-v2
+  -> CashFlowRunRequest
+  -> Cash Flow Engine
+  -> Calculation Scenario Engine / PF Review Report
+```
+
 Implemented:
 
 - Architectural program

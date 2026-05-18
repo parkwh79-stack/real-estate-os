@@ -357,6 +357,7 @@ Latest verification baseline:
 - Markdown, JSON, and print-ready HTML report exports are implemented. PDF/DOCX binary renderers are not yet implemented from the structured report data.
 - Calculation Scenario Engine design is documented in `docs/product/calculation-scenario-engine.md`; existing waterfall and unsold LTV pure functions remain implemented, while API/UI scenario workflows are still pending.
 - Cash Flow Engine / Cash Flow Agent design is documented in `docs/product/cash-flow-engine-agent.md`; it aligns FeasibilityStudyV2 with monthly cash flow, Max Minus, PF draw, sales collection, account allocation, waterfall, Exit sale rate, unsold LTV, risk flags, API, UI, and report fragments.
+- Cash Flow Engine must use the required upstream path `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest` so Excel import/export, workbook formulas, provenance, and PF review outputs share one canonical feasibility source.
 
 ## Next Work
 
@@ -377,7 +378,7 @@ Latest verification baseline:
 - Convert synchronous orchestration into async queue-based jobs.
 - Add UI/API scenario workflow for waterfall and unsold LTV matrix.
 - Implement Calculation Scenario Engine Sprint 1: schema and pure wrappers for waterfall scenarios, unsold LTV matrix, and tranche recovery matrix.
-- Implement Cash Flow Engine Sprint 1: schema alignment, fixture payloads, and mapping from FeasibilityStudyV2 to CashFlowRunRequest.
+- Implement Cash Flow Engine Sprint 1: schema alignment, fixture payloads, mapping from `DevelopmentFeasibilityAgent` output to `FeasibilityStudyV2`, and mapping from `FeasibilityStudyV2` to `CashFlowRunRequest`.
 - Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
 
 ### P2
