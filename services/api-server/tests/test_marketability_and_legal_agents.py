@@ -153,7 +153,17 @@ def test_marketability_agent_accepts_manual_transaction_presale_and_listing_arra
         "sales_schedule": {"contract_deposit": 0.1},
         "market": {
             "comparables": [{"name": "Manual A", "pricePerPy": 30_000_000, "sourceUrlOrEvidenceId": "manual-1"}],
-            "transactionComparables": [{"name": "Tx A", "pricePerSqm": 9_200_000, "sourceUrlOrEvidenceId": "tx-1"}],
+            "transactionComparables": [{
+                "name": "Tx A",
+                "pricePerSqm": 9_200_000,
+                "sourceUrlOrEvidenceId": "tx-1",
+                "sourceName": "MOLIT",
+                "sourceType": "public_api",
+                "collectedAt": "2026-05-18T00:00:00Z",
+                "baseDate": "2026-05-01",
+                "licenseOrUsageNote": "Official public API",
+                "confidence": 0.92,
+            }],
             "presaleComparables": [{"name": "Presale A", "presalePricePerPy": 31_000_000, "sourceUrlOrEvidenceId": "presale-1"}],
             "listingComparables": [{"name": "Listing A", "listingPricePerPy": 33_000_000, "sourceUrlOrEvidenceId": "listing-1"}],
         },
@@ -171,6 +181,11 @@ def test_marketability_agent_accepts_manual_transaction_presale_and_listing_arra
         "listing",
     }
     assert any(item["priceBasis"] == "price_per_sqm_converted" for item in result["normalizedComparables"])
+    tx_case = next(item for item in result["normalizedComparables"] if item["comparableCategory"] == "transaction")
+    assert tx_case["sourceMetadata"]["metadataStatus"] == "complete"
+    assert result["sourceMetadataSummary"]["completeSourceCount"] == 1
+    assert result["sourceMetadataSummary"]["partialSourceCount"] == 3
+    assert "licenseOrUsageNote" in result["sourceMetadataSummary"]["missingFieldCounts"]
 
 
 def test_marketability_agent_calculates_exit_absorption_trigger_and_unsold_recovery():
@@ -259,6 +274,8 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
                     "sourceType": "manual_upload",
                     "sourceUrlOrEvidenceId": "doc-p20-table1-row2",
                     "baseDate": "2026-05-14",
+                    "collectedAt": "2026-05-18T00:00:00Z",
+                    "licenseOrUsageNote": "Uploaded business plan evidence",
                     "confidence": 0.75,
                     "sourceLocator": {
                         "page": 20,
@@ -289,6 +306,8 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     assert evidence["marketPayloadPatch"]["product_mix"][0]["type"] == "A"
     assert evidence["evidenceSummary"]["saleComparableCount"] == 1
     assert evidence["evidenceSummary"]["evidenceRecordCount"] == 3
+    assert evidence["evidenceSummary"]["sourceMetadataCompleteCount"] >= 1
+    assert evidence["evidenceSummary"]["sourceMetadataPartialCount"] >= 1
     assert evidence["evidenceSummary"]["sourceLocatorCount"] == 3
     assert evidence["evidenceSummary"]["hasPageLevelLocators"] is True
     assert {record["evidenceType"] for record in evidence["evidenceRecords"]} == {
@@ -298,6 +317,7 @@ def test_market_evidence_agent_reconciles_uploaded_document_market_values():
     }
     assert all(record["sourceLocator"]["pageNumber"] for record in evidence["evidenceRecords"])
     assert evidence["evidenceRecords"][0]["sourceLocator"]["textExcerpt"] == "A type price per py 36,000,000"
+    assert evidence["evidenceRecords"][1]["sourceMetadata"]["metadataStatus"] == "complete"
     assert any(issue["code"] == "DOCUMENT_COMPARABLE_PRICE_PREMIUM" for issue in evidence["issues"])
 
     marketability_input = {

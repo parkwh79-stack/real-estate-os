@@ -207,6 +207,10 @@ class MarketEvidenceAgent:
         comparables = _comparables(data)
         rent_comparables = data.get("market", {}).get("rentComparables") or data.get("market", {}).get("rent_comparables") or []
         sources = data.get("market", {}).get("data_sources") or data.get("market", {}).get("dataSources") or []
+        normalized_sources = [
+            _source_metadata(item)
+            for item in _product_mix(data) + comparables + rent_comparables + sources
+        ]
         source_locator_count = sum(
             1
             for item in _product_mix(data) + comparables + rent_comparables + sources
@@ -222,6 +226,8 @@ class MarketEvidenceAgent:
             "saleComparableCount": len(comparables),
             "rentComparableCount": len(rent_comparables),
             "sourceMetadataCount": len(sources),
+            "sourceMetadataCompleteCount": len([source for source in normalized_sources if source.get("metadataStatus") == "complete"]),
+            "sourceMetadataPartialCount": len([source for source in normalized_sources if source.get("metadataStatus") == "partial"]),
             "evidenceIdCount": len(set(source_ids)),
             "sourceLocatorCount": source_locator_count,
             "hasPageLevelLocators": source_locator_count > 0,
@@ -247,6 +253,7 @@ class MarketEvidenceAgent:
 
         for index, item in enumerate(_product_mix(data)):
             evidence_id = _primary_evidence_id(item)
+            source_metadata = _source_metadata(item, evidence_id, "product_mix")
             records.append({
                 "evidenceId": evidence_id or f"product-mix-{index + 1:03d}",
                 "evidenceType": "product_mix",
@@ -255,6 +262,7 @@ class MarketEvidenceAgent:
                 "sourceUrlOrEvidenceId": evidence_id,
                 "baseDate": item.get("baseDate"),
                 "confidence": item.get("confidence", 0.6),
+                "sourceMetadata": source_metadata,
                 "sourceLocator": _source_locator(item, evidence_id),
                 "extractedFields": {
                     "type": item.get("type"),
@@ -271,6 +279,7 @@ class MarketEvidenceAgent:
 
         for index, item in enumerate(_comparables(data)):
             evidence_id = item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url") or f"sale-comp-{index + 1:03d}"
+            source_metadata = _source_metadata(item, evidence_id, item.get("comparableCategory") or _comparable_category(item))
             records.append({
                 "evidenceId": evidence_id,
                 "evidenceType": "sale_comparable",
@@ -280,6 +289,7 @@ class MarketEvidenceAgent:
                 "sourceUrlOrEvidenceId": evidence_id,
                 "baseDate": item.get("baseDate") or item.get("transactionDate") or item.get("saleDate"),
                 "confidence": item.get("confidence", 0.6),
+                "sourceMetadata": source_metadata,
                 "sourceLocator": _source_locator(item, evidence_id),
                 "extractedFields": {
                     "caseId": item.get("caseId"),
@@ -296,6 +306,7 @@ class MarketEvidenceAgent:
         rent_comparables = data.get("market", {}).get("rentComparables") or data.get("market", {}).get("rent_comparables") or []
         for index, item in enumerate(rent_comparables):
             evidence_id = item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url") or f"rent-comp-{index + 1:03d}"
+            source_metadata = _source_metadata(item, evidence_id, "rent_comparable")
             records.append({
                 "evidenceId": evidence_id,
                 "evidenceType": "rent_comparable",
@@ -304,6 +315,7 @@ class MarketEvidenceAgent:
                 "sourceUrlOrEvidenceId": evidence_id,
                 "baseDate": item.get("baseDate") or item.get("leaseDate"),
                 "confidence": item.get("confidence", 0.6),
+                "sourceMetadata": source_metadata,
                 "sourceLocator": _source_locator(item, evidence_id),
                 "extractedFields": {
                     "caseId": item.get("caseId"),
@@ -460,6 +472,48 @@ def _to_int(value: Any) -> Optional[int]:
         return int(float(str(value).replace(",", "")))
     except (TypeError, ValueError):
         return None
+
+
+def _source_metadata(
+    item: Dict[str, Any],
+    evidence_id: str | None = None,
+    category: str | None = None,
+) -> Dict[str, Any]:
+    source_name = item.get("sourceName") or item.get("source") or item.get("name") or "uploaded document"
+    source_type = item.get("sourceType") or _default_source_type(category or _comparable_category(item))
+    source_url_or_evidence_id = evidence_id or item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url")
+    collected_at = item.get("collectedAt") or item.get("collected_at") or item.get("fetchedAt") or item.get("uploadedAt")
+    base_date = item.get("baseDate") or item.get("base_date") or item.get("transactionDate") or item.get("saleDate") or item.get("leaseDate")
+    license_note = item.get("licenseOrUsageNote") or item.get("license_or_usage_note") or item.get("usageNote")
+    confidence = _to_float(item.get("confidence"))
+    missing = []
+    if not source_name:
+        missing.append("sourceName")
+    if not source_type:
+        missing.append("sourceType")
+    if not source_url_or_evidence_id:
+        missing.append("sourceUrlOrEvidenceId")
+    if not collected_at:
+        missing.append("collectedAt")
+    if not base_date:
+        missing.append("baseDate")
+    if not license_note:
+        missing.append("licenseOrUsageNote")
+    if confidence is None:
+        missing.append("confidence")
+        confidence = 0.6
+    return {
+        "sourceName": source_name,
+        "sourceType": source_type,
+        "comparableCategory": category,
+        "sourceUrlOrEvidenceId": source_url_or_evidence_id,
+        "collectedAt": collected_at,
+        "baseDate": base_date,
+        "licenseOrUsageNote": license_note,
+        "confidence": confidence,
+        "metadataStatus": "complete" if not missing else "partial",
+        "missingSourceMetadata": missing,
+    }
 
 
 def _variance(parsed_value: Optional[float], source_value: Optional[float]) -> Optional[float]:

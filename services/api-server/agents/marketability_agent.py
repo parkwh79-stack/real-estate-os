@@ -106,6 +106,7 @@ class MarketabilityAgent:
                 "recommendations": [],
                 "reportParagraphs": self._empty_report_paragraphs(),
                 "dataSources": self._data_sources(project_data),
+                "sourceMetadataSummary": _source_metadata_summary(self._data_sources(project_data)),
                 "comparables": [],
                 "normalizedComparables": [],
                 "comparableSummary": _comparable_summary([]),
@@ -125,6 +126,7 @@ class MarketabilityAgent:
         unsold_recovery = self._analyze_unsold_recovery(project_data, product_type, pricing)
         missing_required_data = self._missing_required_data(project_data, product_mix, normalized_comparables, pricing)
         data_sources = self._data_sources(project_data)
+        source_metadata_summary = _source_metadata_summary(data_sources)
         checks = self._score_marketability(product_type, pricing, demand, supply, product_mix, absorption, exit_sale_rate)
         score = round(sum(check["weightedScore"] for check in checks), 1)
         risk_flag_details = self._risk_flag_details(
@@ -189,6 +191,7 @@ class MarketabilityAgent:
                 data_sources,
             ),
             "dataSources": data_sources,
+            "sourceMetadataSummary": source_metadata_summary,
             "comparables": comparables,
             "normalizedComparables": normalized_comparables,
             "comparableSummary": _comparable_summary(normalized_comparables),
@@ -387,6 +390,7 @@ class MarketabilityAgent:
             if raw_price is None:
                 continue
 
+            source_metadata = _normalize_source(item)
             distance = _to_float(item.get("distanceM") or item.get("distance_m")) or 9999
             same_product = (item.get("productType") or product_type) == product_type
             distance_factor = 1 + min(distance, 3000) / 100000
@@ -410,6 +414,7 @@ class MarketabilityAgent:
                 "baseDate": item.get("baseDate") or item.get("transactionDate") or item.get("saleDate"),
                 "confidence": item.get("confidence", 0.5),
                 "sourceLocator": item.get("sourceLocator") or item.get("source_locator") or {},
+                "sourceMetadata": source_metadata,
                 "adjustmentReason": [
                     "same product type" if same_product else "product type adjustment",
                     f"distance adjustment based on {int(distance)}m",
@@ -913,7 +918,8 @@ class MarketabilityAgent:
         return missing
 
     def _data_sources(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        sources = data.get("market", {}).get("data_sources") or data.get("dataSources") or []
+        market = data.get("market", {})
+        sources = market.get("data_sources") or market.get("dataSources") or data.get("dataSources") or []
         normalized = [_normalize_source(source) for source in sources]
         for case in self._collect_market_comparables(data):
             source = _normalize_source(case)
@@ -1165,16 +1171,65 @@ def _risk_level(score: float) -> str:
 
 
 def _normalize_source(source: Dict[str, Any]) -> Dict[str, Any]:
+    source_name = source.get("sourceName") or source.get("name") or source.get("source") or "unknown"
+    source_type = source.get("sourceType") or source.get("type") or "manual_upload"
+    source_url_or_evidence_id = (
+        source.get("sourceUrlOrEvidenceId")
+        or source.get("url")
+        or source.get("evidence_id")
+        or source.get("evidenceId")
+    )
+    collected_at = source.get("collectedAt") or source.get("collected_at") or source.get("fetchedAt") or source.get("uploadedAt")
+    base_date = source.get("baseDate") or source.get("base_date") or source.get("transactionDate") or source.get("saleDate")
+    license_note = source.get("licenseOrUsageNote") or source.get("license_or_usage_note") or source.get("usageNote")
+    confidence = _to_float(source.get("confidence"))
+    missing = []
+    if source_name == "unknown":
+        missing.append("sourceName")
+    if not source_type:
+        missing.append("sourceType")
+    if not source_url_or_evidence_id:
+        missing.append("sourceUrlOrEvidenceId")
+    if not collected_at:
+        missing.append("collectedAt")
+    if not base_date:
+        missing.append("baseDate")
+    if not license_note:
+        missing.append("licenseOrUsageNote")
+    if confidence is None:
+        missing.append("confidence")
+        confidence = 0.5
     return {
-        "sourceName": source.get("sourceName") or source.get("name") or source.get("source") or "unknown",
-        "sourceType": source.get("sourceType") or source.get("type") or "manual_upload",
+        "sourceName": source_name,
+        "sourceType": source_type,
         "comparableCategory": source.get("comparableCategory"),
-        "sourceUrlOrEvidenceId": source.get("sourceUrlOrEvidenceId") or source.get("url") or source.get("evidence_id") or source.get("evidenceId"),
-        "collectedAt": source.get("collectedAt"),
-        "baseDate": source.get("baseDate") or source.get("transactionDate") or source.get("saleDate"),
-        "licenseOrUsageNote": source.get("licenseOrUsageNote"),
-        "confidence": source.get("confidence", 0.5),
+        "sourceUrlOrEvidenceId": source_url_or_evidence_id,
+        "collectedAt": collected_at,
+        "baseDate": base_date,
+        "licenseOrUsageNote": license_note,
+        "confidence": confidence,
+        "metadataStatus": "complete" if not missing else "partial",
+        "missingSourceMetadata": missing,
         "sourceLocator": source.get("sourceLocator") or source.get("source_locator") or {},
+    }
+
+
+def _source_metadata_summary(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    missing_counts: Dict[str, int] = {}
+    by_source_type: Dict[str, int] = {}
+    for source in sources:
+        source_type = source.get("sourceType") or "unknown"
+        by_source_type[source_type] = by_source_type.get(source_type, 0) + 1
+        for field in source.get("missingSourceMetadata", []):
+            missing_counts[field] = missing_counts.get(field, 0) + 1
+    complete_count = len([source for source in sources if source.get("metadataStatus") == "complete"])
+    return {
+        "totalSourceCount": len(sources),
+        "completeSourceCount": complete_count,
+        "partialSourceCount": len(sources) - complete_count,
+        "metadataCompletenessRatio": complete_count / len(sources) if sources else 0,
+        "missingFieldCounts": missing_counts,
+        "bySourceType": by_source_type,
     }
 
 

@@ -32,6 +32,7 @@ Updated: 2026-05-14
 | P0 | Agent | Marketability score v2 | Done | Scores location, demand, supply, pricing, product, absorption, and PF Exit with product-specific weight profiles and score breakdown |
 | P0 | Agent | Marketability lender risk flags | Done | Generates lender-side risk flag details for pricing, evidence, supply, demand, absorption, Exit pressure, unsold LTV, and tranche recovery weakness |
 | P0 | Report | Marketability report paragraph generator | Done | Generates market analysis, pricing, business feasibility, exit strategy, discount trigger, unsold risk, recommendation, and lender risk memo text from score/risk/Exit outputs |
+| P0 | Agent | Marketability source metadata | Done | Preserves source name/type/evidence ID/collected date/base date/license note/confidence with complete/partial metadata status and missing-field summary |
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
 | P0 | Report | Report fixture data | Done | Added anonymized Hana-style PF review fixture and regression checks |
 | P0 | Storage | Persistent project/report/run storage | Done | SQLite-backed storage added for projects, reports, and orchestration runs; legacy JSON fallback/migration retained |

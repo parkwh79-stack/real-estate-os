@@ -110,7 +110,7 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Marketability score v2 | Score location, demand, supply, pricing, product, absorption, and PF Exit with product-specific weight profiles and score breakdown | Done |
 | Risk flags | Generate lender-side flags such as price premium, no comparable data, exit rate high, supply overhang, weak demand, absorption gap, and unsold recovery weakness | Done |
 | Report paragraphs | Generate market analysis, pricing, business feasibility, exit, discount trigger, unsold risk, risk memo, and recommendation paragraphs from scoring, Exit, absorption, trigger, and unsold outputs | Done |
-| Source metadata | Preserve source name, source type, evidence ID or URL, collected date, base date, license note, and confidence | In Progress |
+| Source metadata | Preserve source name, source type, evidence ID or URL, collected date, base date, license note, confidence, metadata status, and missing metadata fields | Done |
 
 ### 5.2 P1 - Next Step
 
