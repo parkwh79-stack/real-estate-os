@@ -211,6 +211,14 @@ def test_marketability_agent_calculates_exit_absorption_trigger_and_unsold_recov
     assert result["unsoldRecovery"]["haircut"] == 0.25
     assert result["unsoldRecovery"]["recoveryScenarios"][2]["scenario"] == "stress_unsold_recovery"
     assert result["unsoldRecovery"]["trancheRecovery"][1]["recoveryRatio"] <= 1
+    assert result["scoreBreakdown"]["model"] == "marketability_score_v2"
+    assert result["scoreBreakdown"]["weightProfile"]["pfExit"] == 13
+    assert "WEAK_DEMAND" in result["riskFlags"]
+    assert "ABSORPTION_BELOW_EXIT" in result["riskFlags"]
+    assert "UNSOLD_LTV_HIGH" in result["riskFlags"]
+    assert any(flag["code"] == "MEZZ_RECOVERY_WEAK" for flag in result["riskFlagDetails"])
+    assert "Forecast completion sales rate" in result["reportParagraphs"]["businessFeasibility"]
+    assert "Unsold LTV" in result["reportParagraphs"]["unsoldRisk"]
 
 
 def test_market_evidence_agent_reconciles_uploaded_document_market_values():

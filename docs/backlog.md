@@ -29,8 +29,9 @@ Updated: 2026-05-14
 | P0 | Agent | Marketability pricing judgement | Done | Compares proposed sale price against adjusted comparable median and returns price band, premium, percentile, judgement, and pricing comment |
 | P0 | Agent | Marketability exit sale rate | Done | Calculates base, 5/10/15/20% discount scenarios, tranche-level thresholds, and repayment feasibility flags for PF review |
 | P0 | Agent | Marketability discount/absorption/unsold baseline | Done | Produces trigger table with reasons, base/downside/stress absorption coverage, product-type unsold recovery scenarios, unsold LTV, and tranche recovery |
-| P0 | Agent | Marketability score v2 | In Progress | Weighted baseline now scores location, demand, supply, pricing, product, absorption, and PF Exit; product-specific scoring weights remain next |
-| P0 | Report | Marketability report paragraph generator | In Progress | Generates initial Phase 11 market analysis, business feasibility, exit strategy, discount trigger, unsold risk, recommendation, and lender risk memo text |
+| P0 | Agent | Marketability score v2 | Done | Scores location, demand, supply, pricing, product, absorption, and PF Exit with product-specific weight profiles and score breakdown |
+| P0 | Agent | Marketability lender risk flags | Done | Generates lender-side risk flag details for pricing, evidence, supply, demand, absorption, Exit pressure, unsold LTV, and tranche recovery weakness |
+| P0 | Report | Marketability report paragraph generator | Done | Generates market analysis, pricing, business feasibility, exit strategy, discount trigger, unsold risk, recommendation, and lender risk memo text from score/risk/Exit outputs |
 | P0 | Agent | Korean Legal/Permit Review Agent | Done | Preliminary legal, permit, land-rights, trust-security, covenant review with Korean Law MCP context hook |
 | P0 | Report | Report fixture data | Done | Added anonymized Hana-style PF review fixture and regression checks |
 | P0 | Storage | Persistent project/report/run storage | Done | SQLite-backed storage added for projects, reports, and orchestration runs; legacy JSON fallback/migration retained |

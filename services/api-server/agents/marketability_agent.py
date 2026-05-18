@@ -98,9 +98,11 @@ class MarketabilityAgent:
                 "unsoldRecovery": {},
                 "score": None,
                 "grade": "N/A",
+                "scoreBreakdown": {},
                 "summary": "Marketability review skipped because the asset is outside the saleable-asset scope.",
                 "checks": [],
                 "riskFlags": [],
+                "riskFlagDetails": [],
                 "recommendations": [],
                 "reportParagraphs": self._empty_report_paragraphs(),
                 "dataSources": self._data_sources(project_data),
@@ -123,10 +125,25 @@ class MarketabilityAgent:
         unsold_recovery = self._analyze_unsold_recovery(project_data, product_type, pricing)
         missing_required_data = self._missing_required_data(project_data, product_mix, normalized_comparables, pricing)
         data_sources = self._data_sources(project_data)
-        checks = self._score_marketability(pricing, demand, supply, product_mix, absorption, exit_sale_rate)
+        checks = self._score_marketability(product_type, pricing, demand, supply, product_mix, absorption, exit_sale_rate)
         score = round(sum(check["weightedScore"] for check in checks), 1)
-        risk_flags = self._risk_flags(pricing, supply, demand, product_mix, exit_sale_rate, normalized_comparables)
+        risk_flag_details = self._risk_flag_details(
+            pricing,
+            supply,
+            demand,
+            product_mix,
+            absorption,
+            exit_sale_rate,
+            unsold_recovery,
+            normalized_comparables,
+        )
+        risk_flags = [flag["code"] for flag in risk_flag_details]
         risk_flags.extend(self._market_evidence_risk_flags(project_data.get("marketEvidenceReview")))
+        risk_flags = list(dict.fromkeys(risk_flags))
+        risk_flag_details = _merge_risk_flag_details(
+            risk_flag_details,
+            self._market_evidence_risk_flag_details(project_data.get("marketEvidenceReview")),
+        )
 
         return {
             "analysisType": "marketability_analysis_v2",
@@ -153,11 +170,24 @@ class MarketabilityAgent:
             "unsoldRecovery": unsold_recovery,
             "score": score,
             "grade": self._grade(score),
+            "scoreBreakdown": self._score_breakdown(product_type, checks),
             "summary": self._summary(score),
             "checks": checks,
             "riskFlags": risk_flags,
+            "riskFlagDetails": risk_flag_details,
             "recommendations": self._recommendations(checks, missing_required_data, risk_flags),
-            "reportParagraphs": self._report_paragraphs(score, pricing, supply, exit_sale_rate, risk_flags, data_sources),
+            "reportParagraphs": self._report_paragraphs(
+                score,
+                pricing,
+                demand,
+                supply,
+                absorption,
+                exit_sale_rate,
+                discount_trigger,
+                unsold_recovery,
+                risk_flags,
+                data_sources,
+            ),
             "dataSources": data_sources,
             "comparables": comparables,
             "normalizedComparables": normalized_comparables,
@@ -719,6 +749,7 @@ class MarketabilityAgent:
 
     def _score_marketability(
         self,
+        product_type: str,
         pricing: Dict[str, Any],
         demand: Dict[str, Any],
         supply: Dict[str, Any],
@@ -735,15 +766,7 @@ class MarketabilityAgent:
             "absorption": _ratio_score(absorption.get("completion", 0), 0.55, 0.85),
             "pfExit": 85 if exit_sale_rate.get("base", 1) <= 0.6 else 70 if exit_sale_rate.get("base", 1) <= 0.75 else 50,
         }
-        weights = {
-            "location": 20,
-            "demand": 15,
-            "supply": 15,
-            "pricing": 20,
-            "product": 10,
-            "absorption": 10,
-            "pfExit": 10,
-        }
+        weights = _score_weights(product_type)
         titles = {
             "location": "Location Competitiveness",
             "demand": "Demand Base",
@@ -764,10 +787,20 @@ class MarketabilityAgent:
                 "grade": self._grade(scores[key]),
                 "finding": _finding_for_score(scores[key]),
                 "riskLevel": _risk_level(scores[key]),
-                "evidenceIds": [],
+                "evidenceIds": _score_evidence_ids(key, pricing, supply),
             }
             for key in weights
         ]
+
+    def _score_breakdown(self, product_type: str, checks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "model": "marketability_score_v2",
+            "productType": product_type,
+            "weightProfile": _score_weights(product_type),
+            "totalWeightedScore": round(sum(check["weightedScore"] for check in checks), 1),
+            "grade": self._grade(round(sum(check["weightedScore"] for check in checks), 1)),
+            "components": checks,
+        }
 
     def _risk_flags(
         self,
@@ -798,6 +831,47 @@ class MarketabilityAgent:
             flags.append("LOW_EXCLUSIVE_RATIO")
         return flags
 
+    def _risk_flag_details(
+        self,
+        pricing: Dict[str, Any],
+        supply: Dict[str, Any],
+        demand: Dict[str, Any],
+        product_mix: List[Dict[str, Any]],
+        absorption: Dict[str, Any],
+        exit_sale_rate: Dict[str, Any],
+        unsold_recovery: Dict[str, Any],
+        comparables: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        details: List[Dict[str, Any]] = []
+        premium = pricing.get("premiumToMedian")
+        if premium is None or not comparables:
+            details.append(_risk_detail("NO_COMPARABLE_DATA", "high", "Comparable transaction or presale data is missing.", "pricing"))
+        elif premium >= 0.20:
+            details.append(_risk_detail("PRICE_PREMIUM_EXCESSIVE", "high", f"Proposed price is {premium:.1%} above comparable median.", "pricing"))
+        elif premium >= 0.10:
+            details.append(_risk_detail("PRICE_PREMIUM_HIGH", "medium", f"Proposed price is {premium:.1%} above comparable median.", "pricing"))
+        if supply.get("competitionLevel") == "high":
+            details.append(_risk_detail("SUPPLY_OVERHANG", "high", "Competition or upcoming supply is high.", "supply"))
+        if demand.get("demandLevel") == "unknown":
+            details.append(_risk_detail("DEMAND_EVIDENCE_MISSING", "medium", "Demand evidence is missing or unclear.", "demand"))
+        elif demand.get("demandLevel") == "weak":
+            details.append(_risk_detail("WEAK_DEMAND", "high", "Demand level is weak.", "demand"))
+        if exit_sale_rate.get("base", 0) >= 0.70:
+            details.append(_risk_detail("EXIT_RATE_HIGH", "high", f"Base Exit sale rate is {exit_sale_rate.get('base', 0):.1%}.", "pf_exit"))
+        if exit_sale_rate.get("discount10", 0) >= 0.70:
+            details.append(_risk_detail("DISCOUNT_REQUIRED", "medium", f"10% discount Exit sale rate is {exit_sale_rate.get('discount10', 0):.1%}.", "pf_exit"))
+        if absorption.get("baseCase", {}).get("exitCoverage") is False:
+            details.append(_risk_detail("ABSORPTION_BELOW_EXIT", "high", "Forecast completion sales rate does not cover base Exit sale rate.", "absorption"))
+        if absorption.get("exitPressure", {}).get("pressureLevel") == "high":
+            details.append(_risk_detail("EXIT_PRESSURE_HIGH", "high", "Exit pressure is high after absorption and discount sensitivity.", "absorption"))
+        if unsold_recovery.get("unsoldLTV", 0) >= 0.85:
+            details.append(_risk_detail("UNSOLD_LTV_HIGH", "high", f"Unsold LTV is {unsold_recovery.get('unsoldLTV', 0):.1%}.", "unsold_recovery"))
+        if unsold_recovery.get("recoveryJudgement") == "weak_for_mezzanine":
+            details.append(_risk_detail("MEZZ_RECOVERY_WEAK", "medium", "Unsold recovery is weak for mezzanine or junior exposure.", "unsold_recovery"))
+        if any((item.get("exclusiveRatio") or 1) < 0.55 for item in product_mix):
+            details.append(_risk_detail("LOW_EXCLUSIVE_RATIO", "medium", "One or more product types have low exclusive ratio.", "product"))
+        return _dedupe_risk_details(details)
+
     def _market_evidence_risk_flags(self, market_evidence: Dict[str, Any] | None) -> List[str]:
         if not market_evidence:
             return []
@@ -806,6 +880,16 @@ class MarketabilityAgent:
             return ["MARKET_EVIDENCE_NEEDS_REVIEW"]
         if status == "needs_evidence":
             return ["MARKET_EVIDENCE_MISSING"]
+        return []
+
+    def _market_evidence_risk_flag_details(self, market_evidence: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+        if not market_evidence:
+            return []
+        status = market_evidence.get("status")
+        if status in {"needs_review", "blocking_issue"}:
+            return [_risk_detail("MARKET_EVIDENCE_NEEDS_REVIEW", "medium", "Document-derived market evidence has unresolved reconciliation issues.", "market_evidence")]
+        if status == "needs_evidence":
+            return [_risk_detail("MARKET_EVIDENCE_MISSING", "medium", "Market evidence is missing before final marketability review.", "market_evidence")]
         return []
 
     def _missing_required_data(
@@ -894,8 +978,12 @@ class MarketabilityAgent:
         self,
         score: float,
         pricing: Dict[str, Any],
+        demand: Dict[str, Any],
         supply: Dict[str, Any],
+        absorption: Dict[str, Any],
         exit_sale_rate: Dict[str, Any],
+        discount_trigger: List[Dict[str, Any]],
+        unsold_recovery: Dict[str, Any],
         risk_flags: List[str],
         data_sources: List[Dict[str, Any]],
     ) -> Dict[str, str]:
@@ -903,13 +991,36 @@ class MarketabilityAgent:
         source_note = "Market source metadata is attached." if data_sources else "Primary transaction/presale sources are not attached and further verification is required."
         pricing_comment = pricing.get("pricingComment") or "Comparable evidence is required to judge proposed sale price."
         risk_comment = ", ".join(risk_flags) if risk_flags else "no material risk flag"
+        completion_rate = absorption.get("completion", 0)
+        pressure = absorption.get("exitPressure", {}).get("pressureLevel", "unknown")
+        completion_trigger = discount_trigger[-1] if discount_trigger else {}
+        unsold_ltv = unsold_recovery.get("unsoldLTV", 0)
+        recovery_judgement = unsold_recovery.get("recoveryJudgement", "not reviewed")
         return {
-            "marketAnalysis": f"The project receives a preliminary marketability grade of {grade}. Competition is assessed as {supply.get('competitionLevel', 'unknown')}. {source_note}",
+            "marketAnalysis": (
+                f"The project receives a preliminary marketability grade of {grade} with score {score}. "
+                f"Demand is assessed as {demand.get('demandLevel', 'unknown')} and competition is assessed as "
+                f"{supply.get('competitionLevel', 'unknown')}. {source_note}"
+            ),
             "pricingAnalysis": pricing_comment,
-            "businessFeasibility": f"Base exit sale rate is {exit_sale_rate['base']:.2%}; under a 10% discount scenario it rises to {exit_sale_rate['discount10']:.2%}.",
-            "exitStrategy": "Target sales-rate covenants and discount-sale triggers should be linked to PF repayment waterfall controls.",
-            "discountTrigger": "Recommended trigger checkpoints are 3 months, 6 months, 12 months, and completion.",
-            "unsoldRisk": "Unsold recovery should be reviewed separately for senior and mezzanine tranche recoverability.",
+            "businessFeasibility": (
+                f"Base Exit sale rate is {exit_sale_rate['base']:.2%}; under a 10% discount scenario it rises to "
+                f"{exit_sale_rate['discount10']:.2%}. Forecast completion sales rate is {completion_rate:.2%}, "
+                f"with {pressure} Exit pressure."
+            ),
+            "exitStrategy": (
+                "Target sales-rate covenants and discount-sale triggers should be linked to PF repayment waterfall controls. "
+                f"Tranche threshold count is {len(exit_sale_rate.get('trancheThresholds', []))}."
+            ),
+            "discountTrigger": (
+                f"Recommended trigger checkpoints are 3 months, 6 months, 12 months, and completion. "
+                f"Completion target sales rate is {completion_trigger.get('targetSalesRate', 0):.2%} with "
+                f"{completion_trigger.get('triggerType', 'exit protection')} action."
+            ),
+            "unsoldRisk": (
+                f"Unsold recovery applies a product-type haircut of {unsold_recovery.get('haircut', 0):.2%}. "
+                f"Unsold LTV is {unsold_ltv:.2%}, and recovery judgement is {recovery_judgement}."
+            ),
             "riskMemo": f"Lender-side risk flags: {risk_comment}.",
             "recommendation": self._summary(score),
         }
@@ -986,6 +1097,33 @@ def _pricing_score(pricing: Dict[str, Any]) -> float:
     return scores.get(pricing.get("judgement"), 55)
 
 
+def _score_weights(product_type: str) -> Dict[str, int]:
+    profiles = {
+        "apartment": {"location": 20, "demand": 15, "supply": 15, "pricing": 20, "product": 10, "absorption": 10, "pfExit": 10},
+        "urban_residential": {"location": 18, "demand": 16, "supply": 14, "pricing": 20, "product": 12, "absorption": 10, "pfExit": 10},
+        "mixed_use_residential": {"location": 18, "demand": 15, "supply": 14, "pricing": 20, "product": 12, "absorption": 11, "pfExit": 10},
+        "officetel_residential": {"location": 18, "demand": 15, "supply": 15, "pricing": 18, "product": 12, "absorption": 12, "pfExit": 10},
+        "officetel_office": {"location": 18, "demand": 14, "supply": 15, "pricing": 18, "product": 12, "absorption": 12, "pfExit": 11},
+        "commercial_retail": {"location": 18, "demand": 14, "supply": 13, "pricing": 20, "product": 12, "absorption": 10, "pfExit": 13},
+        "knowledge_industry_center": {"location": 18, "demand": 15, "supply": 16, "pricing": 18, "product": 11, "absorption": 10, "pfExit": 12},
+        "section_office": {"location": 18, "demand": 14, "supply": 15, "pricing": 19, "product": 11, "absorption": 11, "pfExit": 12},
+        "serviced_residence": {"location": 18, "demand": 13, "supply": 12, "pricing": 18, "product": 13, "absorption": 11, "pfExit": 15},
+    }
+    return profiles.get(product_type, {"location": 20, "demand": 15, "supply": 15, "pricing": 20, "product": 10, "absorption": 10, "pfExit": 10})
+
+
+def _score_evidence_ids(key: str, pricing: Dict[str, Any], supply: Dict[str, Any]) -> List[str]:
+    if key == "pricing":
+        return [item for item in pricing.get("evidenceIds", []) if item]
+    if key == "supply":
+        return [
+            item.get("sourceUrlOrEvidenceId")
+            for item in supply.get("keyCompetitors", [])
+            if item.get("sourceUrlOrEvidenceId")
+        ]
+    return []
+
+
 def _product_score(product_mix: List[Dict[str, Any]]) -> float:
     if not product_mix:
         return 55
@@ -1038,6 +1176,33 @@ def _normalize_source(source: Dict[str, Any]) -> Dict[str, Any]:
         "confidence": source.get("confidence", 0.5),
         "sourceLocator": source.get("sourceLocator") or source.get("source_locator") or {},
     }
+
+
+def _risk_detail(code: str, severity: str, message: str, category: str) -> Dict[str, Any]:
+    return {
+        "code": code,
+        "severity": severity,
+        "category": category,
+        "message": message,
+    }
+
+
+def _dedupe_risk_details(details: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for item in details:
+        deduped[item["code"]] = item
+    severity_order = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    return sorted(
+        deduped.values(),
+        key=lambda item: (severity_order.get(item.get("severity", "info"), 3), item.get("code", "")),
+    )
+
+
+def _merge_risk_flag_details(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    for group in groups:
+        merged.extend(group or [])
+    return _dedupe_risk_details(merged)
 
 
 def _unsold_haircut(product_type: str) -> float:

@@ -151,7 +151,7 @@ Current implementation:
 - Links market evidence records to uploaded document provenance metadata, including file name, SHA-256 hash, file size, content type, upload timestamp, and parser version.
 - Archives the original uploaded source document under runtime storage and exposes source document list/download APIs for audit review.
 - Preserves market evidence `sourceLocator` metadata with page, table, row, column, field, source excerpt, and confidence when extracted from uploaded documents.
-- Returns price band, comparable median premium, pricing judgement, data status, missing required data, basic score/grade, Exit sale rate discount scenarios, tranche thresholds, absorption coverage, discount triggers with reasons, unsold recovery scenarios, tranche recovery, risk flags, and report paragraph skeletons.
+- Returns price band, comparable median premium, pricing judgement, data status, missing required data, product-specific score breakdown, grade, Exit sale rate discount scenarios, tranche thresholds, absorption coverage, discount triggers with reasons, unsold recovery scenarios, tranche recovery, lender risk flag details, and report paragraphs.
 
 Roadmap:
 

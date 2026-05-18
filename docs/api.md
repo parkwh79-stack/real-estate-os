@@ -93,7 +93,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/marketability/analyze`
 - **Description**: Analyze saleability for saleable real estate assets such as apartments, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale projects.
 - **Request Body**: Optional project data override. `market` can include `comparables`, `manualComparables`, `transactionComparables`, `presaleComparables`, `listingComparables`, and `rentComparables`.
-- **Response**: Applicability, score, grade, comparable summary, normalized comparables, pricing judgement, Exit sale rate discount scenarios, tranche thresholds, absorption forecast, discount triggers, unsold recovery scenarios, saleability checks, source metadata, risk flags, and recommendations.
+- **Response**: Applicability, score, grade, score breakdown, comparable summary, normalized comparables, pricing judgement, Exit sale rate discount scenarios, tranche thresholds, absorption forecast, discount triggers, unsold recovery scenarios, saleability checks, source metadata, risk flags, risk flag details, report paragraphs, and recommendations.
 
 ### `GET /projects/{project_id}/market-evidence`
 - **Description**: List persisted market evidence records extracted or reconciled during orchestration.

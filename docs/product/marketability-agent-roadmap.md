@@ -107,9 +107,9 @@ The Agent applies to assets where individual unit sales or strata sales are a ma
 | Discount trigger proposal | Produce default trigger table for 3 months, 6 months, 12 months, and completion with trigger type and reason | Done |
 | Absorption baseline | Estimate simple completion sale rate from pricing, demand, supply, and Exit pressure with base/downside/stress coverage checks | Done |
 | Unsold recovery baseline | Apply product-type haircut to estimate unsold recovery value, unsold LTV, recovery scenarios, and tranche recovery | Done |
-| Marketability score v2 | Score location, demand, supply, pricing, product, absorption, and PF Exit | In Progress |
-| Risk flags | Generate lender-side flags such as price premium, no comparable data, exit rate high, and supply overhang | In Progress |
-| Report paragraphs | Generate market analysis, pricing, business feasibility, exit, discount trigger, unsold risk, risk memo, and recommendation paragraphs | In Progress |
+| Marketability score v2 | Score location, demand, supply, pricing, product, absorption, and PF Exit with product-specific weight profiles and score breakdown | Done |
+| Risk flags | Generate lender-side flags such as price premium, no comparable data, exit rate high, supply overhang, weak demand, absorption gap, and unsold recovery weakness | Done |
+| Report paragraphs | Generate market analysis, pricing, business feasibility, exit, discount trigger, unsold risk, risk memo, and recommendation paragraphs from scoring, Exit, absorption, trigger, and unsold outputs | Done |
 | Source metadata | Preserve source name, source type, evidence ID or URL, collected date, base date, license note, and confidence | In Progress |
 
 ### 5.2 P1 - Next Step
