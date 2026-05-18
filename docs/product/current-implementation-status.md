@@ -355,6 +355,7 @@ Latest verification baseline:
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 - Source-level provenance per parsed field is not yet persisted.
 - Markdown, JSON, and print-ready HTML report exports are implemented. PDF/DOCX binary renderers are not yet implemented from the structured report data.
+- Calculation Scenario Engine design is documented in `docs/product/calculation-scenario-engine.md`; existing waterfall and unsold LTV pure functions remain implemented, while API/UI scenario workflows are still pending.
 
 ## Next Work
 
@@ -374,6 +375,7 @@ Latest verification baseline:
 - Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
 - Convert synchronous orchestration into async queue-based jobs.
 - Add UI/API scenario workflow for waterfall and unsold LTV matrix.
+- Implement Calculation Scenario Engine Sprint 1: schema and pure wrappers for waterfall scenarios, unsold LTV matrix, and tranche recovery matrix.
 - Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
 
 ### P2

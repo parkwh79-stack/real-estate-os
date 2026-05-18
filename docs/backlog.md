@@ -52,8 +52,9 @@ Updated: 2026-05-14
 | P1 | Export | Developer feasibility Excel export | In Progress | Export should generate formula-preserving `realytics-fs-xlsx-v1` workbook with assumptions, product mix, costs, financing, monthly CF, sensitivity, summary, and checks |
 | P1 | Export | PDF export | Planned | |
 | P1 | Export | DOCX export | Planned | |
-| P1 | Calculation | Waterfall simulator | In Progress | Pure function exists; UI/API scenario workflow still pending |
-| P1 | Calculation | Unsold LTV Matrix | In Progress | Pure function exists; scenario matrix UI/API still pending |
+| P1 | Calculation | Calculation Scenario Engine design | Done | Added roadmap and schema for waterfall, unsold LTV matrix, tranche recovery, API workflow, UI review, persistence, and report mapping |
+| P1 | Calculation | Waterfall simulator | In Progress | Pure function exists; scenario engine schema is designed; next step is API scenario wrapper and persistence |
+| P1 | Calculation | Unsold LTV Matrix | In Progress | Pure function exists; scenario engine schema is designed; next step is matrix builder, API workflow, and UI heatmap |
 | P1 | Logistics | Logistics module | Planned | Special fields & formulas |
 | P1 | Report | Report template editor | Planned | |
 | P1 | QA | Parser regression fixtures | Planned | Anonymized business plan/basic architectural plan documents for parser QA |

@@ -414,6 +414,7 @@ Notes:
 - Phase 11 PF review report: [`docs/product/phase-11-pf-review-report.md`](docs/product/phase-11-pf-review-report.md)
 - Land ledger import/enrichment: [`docs/product/land-ledger-import-and-enrichment.md`](docs/product/land-ledger-import-and-enrichment.md)
 - Marketability Agent roadmap: [`docs/product/marketability-agent-roadmap.md`](docs/product/marketability-agent-roadmap.md)
+- Calculation Scenario Engine roadmap: [`docs/product/calculation-scenario-engine.md`](docs/product/calculation-scenario-engine.md)
 - Feasibility workbook validation: [`docs/product/feasibility-workbook-validation.md`](docs/product/feasibility-workbook-validation.md)
 - Korean Law MCP integration: [`docs/integrations/korean-law-mcp.md`](docs/integrations/korean-law-mcp.md)
 - API documentation: [`docs/api.md`](docs/api.md)
