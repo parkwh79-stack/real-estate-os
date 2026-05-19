@@ -12,6 +12,8 @@ The AI connection layer records provider, runtime mode, model, host, and linked 
 
 The application layer now includes baseline `use_cases` modules so API endpoints, MCP tools, future background jobs, and future UI-triggered actions can reuse the same workflow functions instead of duplicating agent orchestration in routers.
 
+The persistence boundary now includes baseline repository wrappers for reports, market evidence, and orchestration runs. These wrappers sit above the current SQLite/JSON-backed runtime stores and are used by the report, evidence, orchestration, and approval use cases.
+
 ## Implemented
 
 ### Project CRUD
@@ -58,6 +60,28 @@ Purpose:
 - Keep routers thin.
 - Allow API, MCP, batch jobs, and future UI actions to share the same application workflows.
 - Prepare the codebase for async job execution and repository-based persistence.
+
+### Repository Layer
+
+Files:
+
+- `services/api-server/db/repositories/report_repository.py`
+- `services/api-server/db/repositories/market_evidence_repository.py`
+- `services/api-server/db/repositories/orchestration_repository.py`
+
+Implemented baseline:
+
+- Report repository creates report records, lists report metadata, fetches saved reports, saves exports, and returns export metadata.
+- Market evidence repository lists, fetches, stores, and sorts market evidence records.
+- Orchestration repository saves PF review runs, persists related market evidence, creates report records for Phase 11 artifacts, lists run metadata, and fetches runs.
+- Report generation/export, evidence review, PF review save, and orchestration approval use cases now call repositories instead of manipulating router-local store logic directly.
+
+Remaining:
+
+- Project CRUD repository.
+- Source document archive repository.
+- Runtime upload archive repository.
+- Async job state repository.
 
 ### Phase 11 PF Review Report
 
@@ -383,6 +407,7 @@ Latest verification baseline:
 - Cash Flow Engine direct smoke: passed against `daegu_bondong_mixed_use_pf.json`; generated 36 monthly rows and 10 PF draw rows with `funding_gap_covered` status.
 - Python compile check: passed for Cash Flow Engine, mapper, Development Feasibility Agent, project router, and targeted test file.
 - Expanded use-case smoke: passed for marketability, legal review, report generation/export, evidence review, and orchestration approval use cases.
+- Repository use-case smoke: passed for report create/export, market evidence add/list/review, orchestration save, and orchestration approval using in-memory repository stores.
 
 - Land Ledger targeted test: `1 passed`
 - Real sample land ledger validation: executed against `01.본리동토지조서.xls`; status `needs_review`, PF summary `needs_enrichment`

@@ -13,11 +13,15 @@ from agents.ai_connection import resolve_ai_context
 from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
 
 from core.calculations import (
-    calculate_development_profit, calculate_profit_margin, calculate_cashflow_max_minus,
-    calculate_all_in_cost, calculate_exit_sale_rate, calculate_ltv, calculate_ltc, calculate_dscr,
-    build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics
+    calculate_cashflow_max_minus,
+    build_monthly_cash_flow,
+    calculate_pf_metrics,
+    calculate_feasibility_metrics,
 )
-from core.risk_assessment import assess_risk_item, calculate_overall_risk, build_basic_risk_matrix
+from core.risk_assessment import build_basic_risk_matrix
+from db.repositories.market_evidence_repository import MarketEvidenceRepository
+from db.repositories.orchestration_repository import OrchestrationRepository
+from db.repositories.report_repository import ReportRepository
 from storage import load_state, save_state
 from use_cases.cash_flow import run_cash_flow_use_case
 from use_cases.common import deep_merge
@@ -26,9 +30,9 @@ from use_cases.evidence_review import list_market_evidence_use_case, review_mark
 from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
-from use_cases.orchestration_approval import approve_orchestration_run_use_case
-from use_cases.pf_review import run_pf_review_use_case
-from use_cases.report_generation import export_report_use_case, generate_pf_report_use_case
+from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case
+from use_cases.pf_review import run_and_save_pf_review_use_case
+from use_cases.report_generation import export_saved_report_use_case, generate_and_save_pf_report_use_case
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -46,6 +50,20 @@ project_id_counter = 1
 
 def persist_state() -> None:
     save_state(PROJECTS_DB, REPORTS_DB, ORCHESTRATIONS_DB, project_id_counter, MARKET_EVIDENCE_DB)
+
+def report_repository() -> ReportRepository:
+    return ReportRepository(REPORTS_DB, persist_state)
+
+def market_evidence_repository() -> MarketEvidenceRepository:
+    return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state)
+
+def orchestration_repository() -> OrchestrationRepository:
+    return OrchestrationRepository(
+        ORCHESTRATIONS_DB,
+        report_repository(),
+        market_evidence_repository(),
+        persist_state,
+    )
 
 def normalize_project_record(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
     now = now_iso()
@@ -190,78 +208,6 @@ def attach_document_market_evidence_metadata(
             if market.get(key) and not document_market_evidence.get(key):
                 document_market_evidence[key] = market[key]
 
-def save_report_record(
-    project_id: str,
-    structured_report: Dict[str, Any],
-    report_markdown: str,
-    run_id: str | None = None,
-) -> Dict[str, Any]:
-    version = len(REPORTS_DB.get(project_id, [])) + 1
-    record = {
-        "report_id": str(uuid4()),
-        "project_id": project_id,
-        "run_id": run_id,
-        "version": version,
-        "template": structured_report["template"],
-        "title": structured_report.get("title", "AI PF 심사보고서"),
-        "status": structured_report.get("status", "draft"),
-        "created_at": now_iso(),
-        "metadata": {
-            "section_count": structured_report["qualityChecks"]["actualSectionCount"],
-            "expected_section_count": structured_report["qualityChecks"]["expectedSectionCount"],
-            "complete": structured_report["qualityChecks"]["isComplete"],
-        },
-        "report": structured_report,
-        "report_markdown": report_markdown,
-        "exports": [],
-    }
-    REPORTS_DB.setdefault(project_id, []).append(record)
-    persist_state()
-    return record
-
-def save_orchestration_run(project_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
-    ORCHESTRATIONS_DB.setdefault(project_id, {})[run["run_id"]] = run
-    save_market_evidence_records(project_id, run)
-    persist_state()
-
-    if "phase11Report" in run["artifacts"]:
-        report_artifact = run["artifacts"]["phase11Report"]
-        report_record = save_report_record(
-            project_id,
-            report_artifact["report"],
-            report_artifact["report_markdown"],
-            run["run_id"],
-        )
-        run["artifacts"]["reportRecord"] = report_metadata(report_record)
-        persist_state()
-
-    return run
-
-def save_market_evidence_records(project_id: str, run: Dict[str, Any]) -> None:
-    evidence_records = (
-        run.get("artifacts", {})
-        .get("marketEvidenceReview", {})
-        .get("evidenceRecords", [])
-    )
-    if not evidence_records:
-        return
-
-    created_at = now_iso()
-    stored = MARKET_EVIDENCE_DB.setdefault(project_id, {})
-    for index, record in enumerate(evidence_records):
-        evidence_id = record.get("evidenceId") or f"market-evidence-{index + 1:03d}"
-        record_key = f"{run['run_id']}:{evidence_id}"
-        validation_status = record.get("validationStatus", "not_checked")
-        stored[record_key] = {
-            **record,
-            "recordKey": record_key,
-            "projectId": project_id,
-            "runId": run["run_id"],
-            "workflow": run.get("workflow"),
-            "createdAt": created_at,
-            "reviewStatus": "pending_review" if validation_status != "pass" else "auto_validated",
-        }
-
 def apply_parsed_project_data(project_id: str, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
     if "project" not in parsed_data:
         parsed_data["project"] = {}
@@ -337,44 +283,6 @@ async def parse_uploaded_land_ledger(file: UploadFile) -> Dict[str, Any]:
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
-def report_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "report_id": record["report_id"],
-        "project_id": record["project_id"],
-        "run_id": record.get("run_id"),
-        "version": record.get("version", 1),
-        "template": record["template"],
-        "title": record["title"],
-        "status": record["status"],
-        "created_at": record["created_at"],
-        "metadata": record["metadata"],
-        "export_count": len(record.get("exports", [])),
-        "latest_exported_at": record.get("exports", [{}])[-1].get("created_at") if record.get("exports") else None,
-    }
-
-def export_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: value
-        for key, value in record.items()
-        if key != "content"
-    }
-
-def find_report_record(project_id: str, report_id: str) -> Dict[str, Any]:
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    for record in REPORTS_DB.get(project_id, []):
-        if record.get("report_id") == report_id:
-            record.setdefault("exports", [])
-            record.setdefault("version", 1)
-            return record
-    raise HTTPException(status_code=404, detail="Report not found")
-
-def find_report_export(report_record: Dict[str, Any], export_id: str) -> Dict[str, Any]:
-    for record in report_record.get("exports", []):
-        if record.get("export_id") == export_id:
-            return record
-    raise HTTPException(status_code=404, detail="Report export not found")
 
 def load_fixtures():
     global project_id_counter
@@ -523,7 +431,8 @@ async def upload_business_plan_and_run_pf_review(
         }
 
     project_data = apply_parsed_project_data(project_id, parsed_data)
-    run = run_pf_review_use_case(
+    run = run_and_save_pf_review_use_case(
+        orchestration_repository(),
         project_id,
         project_data,
         {
@@ -537,7 +446,7 @@ async def upload_business_plan_and_run_pf_review(
         "project_id": project_id,
         "status": "completed",
         "project": project_data,
-        "run": save_orchestration_run(project_id, run),
+        "run": run,
     }
 
 @router.post("/{project_id}/ai/connection/resolve")
@@ -669,27 +578,21 @@ def download_project_source_document(project_id: str, archive_id: str):
 def list_project_market_evidence(project_id: str, run_id: str | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    return list_market_evidence_use_case(MARKET_EVIDENCE_DB.get(project_id, {}).values(), run_id)
+    return list_market_evidence_use_case(market_evidence_repository(), project_id, run_id)
 
 @router.post("/{project_id}/market-evidence/review")
 def review_project_market_evidence(project_id: str, input_data: Dict[str, Any]):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    record_key = input_data.get("record_key") or input_data.get("recordKey")
-    if not record_key:
-        raise HTTPException(status_code=400, detail="record_key is required")
-
-    record = MARKET_EVIDENCE_DB.get(project_id, {}).get(record_key)
-    if not record:
-        raise HTTPException(status_code=404, detail="Market evidence record not found")
-
     try:
-        review_market_evidence_use_case(record, input_data, now_iso())
+        return review_market_evidence_use_case(market_evidence_repository(), input_data, now_iso(), project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    persist_state()
-    return record
 
 @router.post("/{project_id}/legal/review")
 def review_legal_and_permits(project_id: str, input_data: Dict[str, Any] | None = None):
@@ -702,10 +605,10 @@ def generate_report(project_id: str, input_data: Dict[str, Any]):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    generated = generate_pf_report_use_case(PROJECTS_DB[project_id], input_data)
-    structured_report = generated["structuredReport"]
-    md_report = generated["reportMarkdown"]
-    report_record = save_report_record(project_id, structured_report, md_report)
+    result = generate_and_save_pf_report_use_case(report_repository(), project_id, PROJECTS_DB[project_id], input_data)
+    structured_report = result["generated"]["structuredReport"]
+    md_report = result["generated"]["reportMarkdown"]
+    report_record = result["reportRecord"]
     return {
         "project_id": project_id,
         "report_id": report_record["report_id"],
@@ -720,48 +623,54 @@ def generate_report(project_id: str, input_data: Dict[str, Any]):
 def get_reports(project_id: str):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    return [report_metadata(record) for record in REPORTS_DB.get(project_id, [])]
+    return report_repository().list_metadata(project_id)
 
 @router.get("/{project_id}/reports/{report_id}")
 def get_report(project_id: str, report_id: str):
-    record = find_report_record(project_id, report_id)
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    repo = report_repository()
+    record = repo.get(project_id, report_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Report not found")
     return {
-        **report_metadata(record),
+        **repo.metadata(record),
         "report": record.get("report"),
         "report_markdown": record.get("report_markdown"),
-        "exports": [export_metadata(export) for export in record.get("exports", [])],
+        "exports": [repo.export_metadata(export) for export in record.get("exports", [])],
     }
 
 @router.post("/{project_id}/reports/{report_id}/exports")
 def create_report_export(project_id: str, report_id: str, input_data: Dict[str, Any] | None = None):
-    record = find_report_record(project_id, report_id)
-    input_data = input_data or {}
     try:
-        rendered = export_report_use_case(record, input_data)
+        export_record = export_saved_report_use_case(report_repository(), project_id, report_id, input_data)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    export_record = {
-        "export_id": str(uuid4()),
-        "report_id": report_id,
-        "project_id": project_id,
-        "version": record.get("version", 1),
-        "created_at": now_iso(),
-        **rendered,
-    }
-    record.setdefault("exports", []).append(export_record)
-    persist_state()
-    return export_metadata(export_record)
+    return report_repository().export_metadata(export_record)
 
 @router.get("/{project_id}/reports/{report_id}/exports")
 def list_report_exports(project_id: str, report_id: str):
-    record = find_report_record(project_id, report_id)
-    return [export_metadata(export) for export in record.get("exports", [])]
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    repo = report_repository()
+    record = repo.get(project_id, report_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return [repo.export_metadata(export) for export in record.get("exports", [])]
 
 @router.get("/{project_id}/reports/{report_id}/exports/{export_id}/download")
 def download_report_export(project_id: str, report_id: str, export_id: str):
-    record = find_report_record(project_id, report_id)
-    export_record = find_report_export(record, export_id)
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    repo = report_repository()
+    record = repo.get(project_id, report_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Report not found")
+    export_record = repo.get_export(record, export_id)
+    if not export_record:
+        raise HTTPException(status_code=404, detail="Report export not found")
     return Response(
         content=export_record.get("content", ""),
         media_type=export_record.get("content_type", "text/plain; charset=utf-8"),
@@ -777,40 +686,26 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
 
     input_data = input_data or {}
     source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
-    run = run_pf_review_use_case(
+    return run_and_save_pf_review_use_case(
+        orchestration_repository(),
         project_id,
         source_data,
         input_data.get("options", {}),
     )
-    return save_orchestration_run(project_id, run)
 
 @router.get("/{project_id}/orchestrations")
 def list_project_orchestrations(project_id: str):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    runs = ORCHESTRATIONS_DB.get(project_id, {}).values()
-    return [
-        {
-            "run_id": run["run_id"],
-            "project_id": run["project_id"],
-            "workflow": run["workflow"],
-            "status": run["status"],
-            "started_at": run["started_at"],
-            "completed_at": run["completed_at"],
-            "step_count": len(run["steps"]),
-            "errors": run["errors"],
-            "approval": run.get("approval"),
-        }
-        for run in runs
-    ]
+    return orchestration_repository().list_metadata(project_id)
 
 @router.get("/{project_id}/orchestrations/{run_id}")
 def get_project_orchestration(project_id: str, run_id: str):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    run = ORCHESTRATIONS_DB.get(project_id, {}).get(run_id)
+    run = orchestration_repository().get(project_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Orchestration run not found")
     return run
@@ -820,15 +715,9 @@ def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    run = ORCHESTRATIONS_DB.get(project_id, {}).get(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Orchestration run not found")
-    if run["status"] not in {"completed", "completed_with_warnings"}:
-        raise HTTPException(status_code=409, detail="Only completed runs can be approved")
-
     try:
-        approve_orchestration_run_use_case(run, input_data, now_iso())
+        return approve_orchestration_run_by_id_use_case(orchestration_repository(), project_id, run_id, input_data, now_iso())
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    persist_state()
-    return run
