@@ -29,6 +29,7 @@ realytics-platform9-monorepo/
 |       |-- routers/
 |       |-- schemas/
 |       |-- tests/
+|       |-- use_cases/
 |       |-- main.py
 |       `-- storage.py
 |
@@ -53,6 +54,7 @@ Important current implementation locations:
 |---|---|---|
 | Web app | `apps/web` | Next.js app with dashboard, project, land, risk, orchestration, report, feasibility, finance, and cash-flow screens |
 | API routes | `services/api-server/routers` | Main project API router is currently concentrated in `projects.py` |
+| Use cases | `services/api-server/use_cases` | Application workflow layer shared by API, MCP tools, and future background jobs |
 | Agents | `services/api-server/agents` | Development feasibility, cash flow, marketability, land ledger, legal, parser, orchestration, and report agents |
 | Calculations | `services/api-server/core` | Pure calculation functions, logistics helpers, and risk assessment |
 | Schemas | `services/api-server/schemas` | Feasibility Study v2, report, orchestration, and Valuemap schemas |
@@ -76,6 +78,7 @@ realytics-ai-lab/
 |
 |-- services/
 |   `-- api-server/
+|       |-- use_cases/
 |       |-- agents/
 |       |-- schemas/
 |       |-- calculators/
@@ -110,6 +113,7 @@ This target is directionally correct, but it should be reached through compatibi
 | `apps/web/components` | Exists | Keep |
 | `apps/web/lib` | Exists | Keep; later move shared API contracts to package |
 | `services/api-server/agents` | Exists | Keep, but gradually split large agents into domain modules |
+| `services/api-server/use_cases` | Exists as baseline | Expand this as the application workflow layer for API, MCP, batch jobs, and UI-triggered actions |
 | `services/api-server/schemas` | Exists | Expand schema coverage for project, parcel, regulation, cashflow, PF, and DB DTOs |
 | `services/api-server/calculators` | Missing | Add wrappers that re-export stable functions from `core` before moving implementation |
 | `services/api-server/integrations` | Missing | Add sidecar/client adapters for VWorld, MOLEG/Korean Law MCP, Valuemap, and public data |
@@ -132,10 +136,62 @@ This target is directionally correct, but it should be reached through compatibi
 6. Keep runtime data, uploaded documents, and SQLite files out of Git.
 7. Keep calculation code deterministic and auditable.
 8. Keep agent orchestration separate from pure calculation functions.
+9. Keep API, MCP, batch jobs, and future UI actions behind the same use-case functions.
 
-## 6. Migration Plan
+## 6. Application Layer Design
 
-### Phase A: Documentation Alignment
+The preferred dependency direction is:
+
+```text
+Router / MCP Tool / Batch Job / UI Action
+  -> Use Case
+     -> Agent
+     -> Calculator
+     -> Integration Adapter
+     -> Repository
+        -> Schema / Domain Model
+```
+
+The anti-pattern to avoid is:
+
+```text
+Router
+  -> direct Agent orchestration
+  -> direct DB persistence
+  -> direct external API calls
+  -> direct numerical calculations
+```
+
+Use cases should be small, explicit functions that can be called from multiple runtimes:
+
+| Runtime | Should Call |
+|---|---|
+| FastAPI endpoint | `use_cases.*` |
+| MCP tool | `use_cases.*` |
+| Background worker | `use_cases.*` |
+| Scheduled job | `use_cases.*` |
+| Future admin action | `use_cases.*` |
+
+Current baseline use cases:
+
+| Use Case | File | Responsibility |
+|---|---|---|
+| Development feasibility analysis | `services/api-server/use_cases/development_feasibility.py` | Merge project state with overrides and call Development Feasibility Agent |
+| Cash Flow Engine run | `services/api-server/use_cases/cash_flow.py` | Accept direct CashFlowRunRequest or derive one from Development Feasibility Agent output |
+| PF review orchestration | `services/api-server/use_cases/pf_review.py` | Run the PF review workflow without binding it to FastAPI |
+
+Use-case rules:
+
+1. A use case may call multiple agents or calculators.
+2. A use case should not depend on FastAPI request/response objects.
+3. A use case should receive plain dictionaries or typed schemas and return plain dictionaries or typed results.
+4. A use case may call repositories, but routers should not.
+5. A use case should own workflow branching such as direct `CashFlowRunRequest` vs feasibility-derived request.
+6. A use case should be deterministic where possible and preserve source metadata.
+
+## 7. Migration Plan
+
+### Phase A: Documentation and Application Layer Alignment
 
 Status: In progress.
 
@@ -144,12 +200,37 @@ Deliverables:
 - `docs/architecture.md`
 - README link to architecture document
 - Backlog item for structure migration
+- `services/api-server/use_cases` baseline workflow layer
 - Future docs:
   - `docs/feasibility_schema.md`
   - `docs/pf_cashflow_logic.md`
   - `docs/agent_design.md`
 
-### Phase B: Calculator Package Wrappers
+### Phase B: Use Case Expansion
+
+Goal:
+
+Move workflow assembly out of `routers/projects.py` before deeper folder migration.
+
+Planned use cases:
+
+```text
+services/api-server/use_cases/
+|-- development_feasibility.py
+|-- cash_flow.py
+|-- pf_review.py
+|-- land_ledger_import.py
+|-- marketability_review.py
+|-- legal_review.py
+|-- report_generation.py
+`-- evidence_review.py
+```
+
+Migration rule:
+
+Routers should validate project existence, parse request payloads, call use cases, and save returned results if needed. They should not directly coordinate agents, calculators, or external integrations.
+
+### Phase C: Calculator Package Wrappers
 
 Goal:
 
@@ -176,7 +257,7 @@ from core.calculations import calculate_feasibility_metrics
 
 After wrappers are stable, routers and agents can gradually import from `calculators`.
 
-### Phase C: Reports Package Wrappers
+### Phase D: Reports Package Wrappers
 
 Goal:
 
@@ -199,7 +280,7 @@ Initial mapping:
 | `ic_memo_generator.py` | Phase 11 report fragments and future lender memo generator |
 | `feasibility_report_generator.py` | Development Feasibility Agent outputs |
 
-### Phase D: Integrations Package
+### Phase E: Integrations Package
 
 Goal:
 
@@ -225,7 +306,7 @@ Current related code:
 | `agents/korean_law_context.py` | Keep normalization, add MCP client wrapper if direct client automation is needed |
 | `docs/integrations/korean-law-mcp.md` | Keep sidecar deployment guide |
 
-### Phase E: DB Package
+### Phase F: DB Package
 
 Goal:
 
@@ -249,7 +330,7 @@ Migration rule:
 
 First create `db/repository.py` wrappers around `load_state` and `save_state`. Only later move implementation.
 
-### Phase F: Shared Packages
+### Phase G: Shared Packages
 
 Goal:
 
@@ -271,39 +352,42 @@ Recommended contents:
 
 Do this after backend schema stabilizes, especially Feasibility Study v2, Cash Flow Run Request, Marketability Analysis v2, Land Ledger Import v1, and Phase 11 Report v1.
 
-## 7. Agent Boundary Model
+## 8. Agent Boundary Model
 
 Current agent boundaries should remain conceptually stable:
 
 ```text
 Parser Agent
-  -> Development Feasibility Agent
-     -> FeasibilityStudyV2
-     -> CashFlowRunRequest
-     -> Cash Flow Engine
-     -> Calculation Scenario Engine
-  -> Market Evidence Agent
-     -> Marketability Agent
-  -> Land Ledger Agent
-  -> Legal / Permit Review Agent
-  -> Risk Assessment
-  -> Phase 11 Report Agent
+  -> Use Case Layer
+     -> Development Feasibility Agent
+        -> FeasibilityStudyV2
+        -> CashFlowRunRequest
+        -> Cash Flow Engine
+        -> Calculation Scenario Engine
+     -> Market Evidence Agent
+        -> Marketability Agent
+     -> Land Ledger Agent
+     -> Legal / Permit Review Agent
+     -> Risk Assessment
+     -> Phase 11 Report Agent
 ```
 
 Important rule:
 
 Development Feasibility Agent is an orchestrator for feasibility readiness. It should not directly own every calculation. Cash Flow, Waterfall, Unsold LTV, and Tranche Recovery should remain specialized engines.
 
-## 8. Immediate Next Steps
+## 9. Immediate Next Steps
 
 Recommended next coding sequence:
 
-1. Add `services/api-server/calculators` wrappers.
-2. Update a small number of tests to import calculators directly.
-3. Keep old `core` imports working.
-4. Add `docs/pf_cashflow_logic.md` from the Cash Flow Engine and Calculation Scenario Engine docs.
-5. Add `docs/agent_design.md` from the current agent boundaries.
-6. Add `services/api-server/reports` wrappers.
-7. Add `services/api-server/db` repository wrappers.
+1. Expand `services/api-server/use_cases` for land ledger import, marketability, legal review, report generation, and evidence review.
+2. Thin `routers/projects.py` by moving workflow assembly into use cases.
+3. Add `services/api-server/calculators` wrappers.
+4. Update a small number of tests to import calculators directly.
+5. Keep old `core` imports working.
+6. Add `docs/pf_cashflow_logic.md` from the Cash Flow Engine and Calculation Scenario Engine docs.
+7. Add `docs/agent_design.md` from the current agent boundaries.
+8. Add `services/api-server/reports` wrappers.
+9. Add `services/api-server/db` repository wrappers.
 
-The safest first code move is the calculator wrapper package because it is low risk and directly matches the target architecture.
+The safest first code move is the use-case layer because it creates a shared application boundary before deeper package migration.

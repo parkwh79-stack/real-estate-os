@@ -10,6 +10,8 @@ The current implementation is synchronous and uses SQLite-backed state storage f
 
 The AI connection layer records provider, runtime mode, model, host, and linked `user_id` for API uploads, MCP document parsing, and orchestration runs.
 
+The application layer now includes baseline `use_cases` modules so API endpoints, MCP tools, future background jobs, and future UI-triggered actions can reuse the same workflow functions instead of duplicating agent orchestration in routers.
+
 ## Implemented
 
 ### Project CRUD
@@ -27,6 +29,28 @@ Capabilities:
 - JSON-backed MVP create, list, get, update, and delete.
 - Project records are normalized into a `project` envelope with `project.id`, default `project.status`, and `_meta.created_at` / `_meta.updated_at`.
 - Delete removes associated MVP report and orchestration runtime records.
+
+### Application Use Cases
+
+Files:
+
+- `services/api-server/use_cases/common.py`
+- `services/api-server/use_cases/development_feasibility.py`
+- `services/api-server/use_cases/cash_flow.py`
+- `services/api-server/use_cases/pf_review.py`
+
+Implemented baseline:
+
+- Development feasibility use case merges project state with request overrides and calls Development Feasibility Agent.
+- Cash Flow use case accepts a direct `CashFlowRunRequest` or derives one through the canonical Development Feasibility path.
+- PF review use case runs the orchestration workflow without coupling it to FastAPI.
+- `routers/projects.py` now delegates development feasibility, cash-flow run, upload-and-run PF review, and PF review orchestration to use-case functions.
+
+Purpose:
+
+- Keep routers thin.
+- Allow API, MCP, batch jobs, and future UI actions to share the same application workflows.
+- Prepare the codebase for async job execution and repository-based persistence.
 
 ### Phase 11 PF Review Report
 

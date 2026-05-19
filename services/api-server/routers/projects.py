@@ -18,15 +18,16 @@ from core.calculations import (
     build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk, build_basic_risk_matrix
-from agents.cash_flow_engine import run_cash_flow_engine
-from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.land_ledger_agent import LandLedgerAgent
 from agents.marketability_agent import MarketabilityAgent
-from agents.orchestration_agent import OrchestrationAgent
 from agents.report_agent import ReportAgent
 from agents.report_export_agent import ReportExportAgent
 from storage import load_state, save_state
+from use_cases.cash_flow import run_cash_flow_use_case
+from use_cases.common import deep_merge
+from use_cases.development_feasibility import analyze_development_feasibility_use_case
+from use_cases.pf_review import run_pf_review_use_case
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -64,15 +65,6 @@ def normalize_project_record(project_id: str, project_data: Dict[str, Any]) -> D
     record["_meta"].setdefault("created_at", now)
     record["_meta"]["updated_at"] = now
     return record
-
-def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -530,7 +522,7 @@ async def upload_business_plan_and_run_pf_review(
         }
 
     project_data = apply_parsed_project_data(project_id, parsed_data)
-    run = OrchestrationAgent().run_pf_review(
+    run = run_pf_review_use_case(
         project_id,
         project_data,
         {
@@ -577,8 +569,7 @@ def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
 def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    source_data = deep_merge(PROJECTS_DB[project_id], input_data or {})
-    return DevelopmentFeasibilityAgent().analyze(source_data)
+    return analyze_development_feasibility_use_case(PROJECTS_DB[project_id], input_data)
 
 @router.post("/{project_id}/cashflow/calculate")
 def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
@@ -595,17 +586,7 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
 def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    input_data = input_data or {}
-    if input_data.get("requestType") == "cash_flow_run_request_v1":
-        request = input_data
-    elif input_data.get("cashFlowRunRequest", {}).get("requestType") == "cash_flow_run_request_v1":
-        request = input_data["cashFlowRunRequest"]
-    elif input_data.get("cashFlowRunRequestDraft", {}).get("requestType") == "cash_flow_run_request_v1":
-        request = input_data["cashFlowRunRequestDraft"]
-    else:
-        source_data = deep_merge(PROJECTS_DB[project_id], input_data)
-        request = DevelopmentFeasibilityAgent().analyze(source_data)["cashFlowRunRequestDraft"]
-    return run_cash_flow_engine(request)
+    return run_cash_flow_use_case(PROJECTS_DB[project_id], input_data)
 
 @router.post("/{project_id}/pf/structure")
 def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
@@ -823,7 +804,7 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
 
     input_data = input_data or {}
     source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
-    run = OrchestrationAgent().run_pf_review(
+    run = run_pf_review_use_case(
         project_id,
         source_data,
         input_data.get("options", {}),
