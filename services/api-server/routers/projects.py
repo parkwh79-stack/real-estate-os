@@ -18,6 +18,7 @@ from core.calculations import (
     build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk, build_basic_risk_matrix
+from agents.cash_flow_engine import run_cash_flow_engine
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.land_ledger_agent import LandLedgerAgent
@@ -589,6 +590,22 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
     result["cashflows"] = cfs
     result["legacy_max_minus"] = max_minus
     return result
+
+@router.post("/{project_id}/cash-flow/run")
+def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    if input_data.get("requestType") == "cash_flow_run_request_v1":
+        request = input_data
+    elif input_data.get("cashFlowRunRequest", {}).get("requestType") == "cash_flow_run_request_v1":
+        request = input_data["cashFlowRunRequest"]
+    elif input_data.get("cashFlowRunRequestDraft", {}).get("requestType") == "cash_flow_run_request_v1":
+        request = input_data["cashFlowRunRequestDraft"]
+    else:
+        source_data = deep_merge(PROJECTS_DB[project_id], input_data)
+        request = DevelopmentFeasibilityAgent().analyze(source_data)["cashFlowRunRequestDraft"]
+    return run_cash_flow_engine(request)
 
 @router.post("/{project_id}/pf/structure")
 def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):

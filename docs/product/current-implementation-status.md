@@ -1,6 +1,6 @@
 # REALYTICS x PLATFORM9 Current Implementation Status
 
-Updated: 2026-05-14
+Updated: 2026-05-19
 
 ## Summary
 
@@ -165,6 +165,8 @@ MCP:
 - The agent now emits `feasibilityStudyV2Draft`, a schema-valid `realytics-feasibility-study-v2` draft containing site, program, revenue items, cost items, financing, schedule, scenarios, metrics, and raw import metadata.
 - The draft now includes deterministic `assetCalculationProfiles` in `raw_import` so the future `FeasibilityStudyV2 -> CashFlowRunRequest` mapper can apply asset-specific revenue mode, collection schedule, recovery haircut, and LTV threshold.
 - `agents/cash_flow_mapper.py` now converts `FeasibilityStudyV2` drafts into asset-aware `cashFlowRunRequestDraft` payloads with sources/uses, product mix profiles, PF structure, schedule, scenario set, diagnostics, and source metadata.
+- `agents/cash_flow_engine.py` now consumes `cashFlowRunRequestDraft` and returns a baseline `cashFlowRunResult` with product-based sales collection, operating/repayment reserve account allocation, tranche-aware PF draw schedule, monthly cash flow, Max Minus, risk flags, and report fragments.
+- API endpoint `POST /projects/{project_id}/cash-flow/run` runs the same engine from a direct `CashFlowRunRequest`, nested request payload, or Development Feasibility Agent-derived draft.
 
 ### Land Ledger Import Agent
 
@@ -347,6 +349,9 @@ API/MCP user linkage:
 
 Latest verification baseline:
 
+- Cash Flow Engine direct smoke: passed against `daegu_bondong_mixed_use_pf.json`; generated 36 monthly rows and 10 PF draw rows with `funding_gap_covered` status.
+- Python compile check: passed for Cash Flow Engine, mapper, Development Feasibility Agent, project router, and targeted test file.
+
 - Land Ledger targeted test: `1 passed`
 - Real sample land ledger validation: executed against `01.본리동토지조서.xls`; status `needs_review`, PF summary `needs_enrichment`
 - API tests: `60 passed`
@@ -354,6 +359,7 @@ Latest verification baseline:
 - Web type check: passed
 - Web build: passed
 - Local dev servers: stopped as of 2026-05-13 after the user requested shutdown.
+- Current bundled Python runtime does not include `pytest` or `fastapi`, so the latest endpoint pytest run and FastAPI TestClient smoke could not be executed in this session.
 
 ## Current Limitations
 
@@ -368,7 +374,8 @@ Latest verification baseline:
 - Markdown, JSON, and print-ready HTML report exports are implemented. PDF/DOCX binary renderers are not yet implemented from the structured report data.
 - Calculation Scenario Engine design is documented in `docs/product/calculation-scenario-engine.md`; existing waterfall and unsold LTV pure functions remain implemented, while API/UI scenario workflows are still pending.
 - Cash Flow Engine / Cash Flow Agent design is documented in `docs/product/cash-flow-engine-agent.md`; it aligns FeasibilityStudyV2 with monthly cash flow, Max Minus, PF draw, sales collection, account allocation, waterfall, Exit sale rate, unsold LTV, risk flags, API, UI, and report fragments.
-- Cash Flow Engine must use the required upstream path `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest` so Excel import/export, workbook formulas, provenance, and PF review outputs share one canonical feasibility source.
+- Baseline Cash Flow Engine run is implemented through the required upstream path `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest -> Cash Flow Engine`, so Excel import/export, workbook formulas, provenance, and PF review outputs share one canonical feasibility source.
+- Advanced scenario persistence, waterfall API workflow, unsold LTV matrix workflow, and frontend Cash Flow Review UI remain pending.
 
 ## Next Work
 
@@ -389,7 +396,7 @@ Latest verification baseline:
 - Convert synchronous orchestration into async queue-based jobs.
 - Add UI/API scenario workflow for waterfall and unsold LTV matrix.
 - Implement Calculation Scenario Engine Sprint 1: schema and pure wrappers for waterfall scenarios, unsold LTV matrix, and tranche recovery matrix.
-- Implement Cash Flow Engine run logic that consumes `CashFlowRunRequest` and generates monthly cash flow, PF draw schedule, account allocation, Max Minus, risk flags, and report fragments.
+- Implement Cash Flow Engine advanced scenario workflow: saved latest runs, best/base/downside/stress/recovery scenarios, waterfall, unsold LTV matrix, and Cash Flow Review UI.
 - Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
 
 ### P2

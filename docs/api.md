@@ -67,7 +67,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/development-feasibility/analyze`
 - **Description**: Analyze developer-side project feasibility from business plan or architectural plan data.
 - **Request Body**: Optional override containing `architectural_plan`, `sales_assumptions`, `cost_assumptions`, `feasibility_input`, and `pf_structure`.
-- **Response**: Architectural program, revenue, costs, developer returns, PF readiness, downstream engine readiness, asset calculation profiles, FeasibilityStudyV2 integration status, a schema-valid `feasibilityStudyV2Draft`, asset-aware `cashFlowRunRequestDraft`, sensitivity, and data quality. The agent acts as the feasibility orchestrator and delegates monthly cash flow, waterfall, unsold LTV, and tranche recovery to Cash Flow / Calculation Scenario engines when those workflows are implemented.
+- **Response**: Architectural program, revenue, costs, developer returns, PF readiness, downstream engine readiness, asset calculation profiles, FeasibilityStudyV2 integration status, a schema-valid `feasibilityStudyV2Draft`, asset-aware `cashFlowRunRequestDraft`, baseline `cashFlowRunResult`, sensitivity, and data quality. The agent acts as the feasibility orchestrator and delegates monthly cash flow to Cash Flow Engine while Waterfall, Unsold LTV, and tranche recovery remain Calculation Scenario Engine workflows.
 
 ### `POST /projects/{project_id}/land-ledger/analyze`
 - **Description**: Upload and analyze a legacy Korean land ledger `.xls` file.
@@ -79,6 +79,12 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Trigger monthly cash flow calculation.
 - **Request Body**: `{ "revenue_schedule": [...], "cost_schedule": [...] }` or `{ "cashflows": [...] }`.
 - **Response**: Normalized monthly rows, net CF, cumulative CF, Max Minus amount/month/period, funding gap, ending cash, and status.
+
+### `POST /projects/{project_id}/cash-flow/run`
+- **Description**: Run the baseline Cash Flow Engine through the canonical feasibility path.
+- **Request Body**: Optional `CashFlowRunRequest` directly, `{ "cashFlowRunRequest": {...} }`, `{ "cashFlowRunRequestDraft": {...} }`, or project-data overrides that can be analyzed by Development Feasibility Agent.
+- **Response**: `realytics_cash_flow_engine_v1` result with summary, product-based sales collection schedule, operating/repayment reserve account allocation, tranche-aware PF draw schedule, monthly cash-flow rows, Max Minus, risk flags, report fragments, and source metadata.
+- **Canonical path**: `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest -> Cash Flow Engine`.
 
 ### `POST /projects/{project_id}/pf/structure`
 - **Description**: Configure and calculate PF structure.

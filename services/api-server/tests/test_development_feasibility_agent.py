@@ -43,6 +43,9 @@ def test_development_feasibility_agent_builds_developer_and_pf_metrics():
     assert result["cashFlowRunRequestDraft"]["productMix"][0]["type"] == "mixed_use"
     assert result["cashFlowRunRequestDraft"]["productMix"][0]["revenueMode"] == "mixed_presale_by_component"
     assert result["cashFlowRunRequestDraft"]["pfStructure"][0]["repaymentPriority"] == 1
+    assert result["cashFlowRunResult"]["analysisType"] == "realytics_cash_flow_engine_v1"
+    assert result["cashFlowRunResult"]["summary"]["requiredPfLimit"] > 0
+    assert result["cashFlowRunResult"]["pfDrawSchedule"]
     assert FeasibilityStudyV2.model_validate(result["feasibilityStudyV2Draft"]).metrics.development_profit == 30_000_000_000
     assert result["sensitivity"]
 
@@ -62,3 +65,21 @@ def test_development_feasibility_endpoint_returns_analysis():
     assert body["developerReturns"]["profitMargin"] == 0.2
     assert body["pfReadiness"]["ltvByRevenue"] == 70_000_000_000 / 150_000_000_000
     assert body["downstreamEngineReadiness"]["canRunCashFlow"] is True
+
+
+def test_cash_flow_run_endpoint_uses_development_feasibility_request_draft():
+    client = TestClient(app)
+    project_id = next(
+        item["project"]["id"]
+        for item in client.get("/projects/").json()
+        if item["project"]["name"] == "Daegu Bondong Mixed-Use PF"
+    )
+
+    res = client.post(f"/projects/{project_id}/cash-flow/run", json={})
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["analysisType"] == "realytics_cash_flow_engine_v1"
+    assert body["summary"]["pfLimit"] == 70_000_000_000
+    assert body["monthlyCashFlow"]
+    assert body["reportFragments"]["cashFlowSummary"]

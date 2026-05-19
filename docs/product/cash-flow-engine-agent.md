@@ -177,12 +177,13 @@ Current implementation exists at the pure-function level.
 | Full Cash Flow Agent schema | Not implemented |
 | Development Feasibility to FeasibilityStudyV2 draft mapper | Implemented |
 | FeasibilityStudyV2 to CashFlowRunRequest draft mapper | Implemented |
-| PF draw schedule | Not implemented |
-| Sales collection schedule by product | Not implemented |
-| Operating / repayment account allocation | Not implemented |
-| Cash Flow API workflow | Not implemented |
+| Baseline Cash Flow Engine run | Implemented |
+| PF draw schedule | Implemented as tranche-aware baseline draw schedule |
+| Sales collection schedule by product | Implemented with asset profile default schedules |
+| Operating / repayment account allocation | Implemented as baseline 75/25 pre-completion split and post-completion sweep |
+| Cash Flow API workflow | Implemented for `POST /projects/{project_id}/cash-flow/run` |
 | Cash Flow Review UI | Not implemented |
-| Report fragment generator | Not implemented |
+| Report fragment generator | Implemented as baseline text fragments |
 
 ## 5. Development Goal
 
@@ -752,7 +753,8 @@ Status:
 
 - `DevelopmentFeasibilityAgent` now emits `feasibilityStudyV2Draft`, a schema-valid draft for `realytics-feasibility-study-v2`.
 - `agents/cash_flow_mapper.py` now emits asset-aware `cashFlowRunRequestDraft` payloads from `FeasibilityStudyV2`.
-- Remaining work is the Cash Flow Engine run implementation that consumes `CashFlowRunRequest` and generates monthly cash flow, PF draw, account allocation, Max Minus, risk flags, and report fragments.
+- `agents/cash_flow_engine.py` now consumes `CashFlowRunRequest` and generates sales collection, account allocation, tranche-aware PF draw, monthly cash flow, Max Minus, risk flags, and report fragments.
+- Remaining work is advanced scenario workflow: persistence, best/base/downside/stress/recovery scenario runner, waterfall integration, unsold LTV matrix, and Cash Flow Review UI.
 
 ### Sprint 2: Pure Calculation Wrappers
 
