@@ -12,7 +12,7 @@ The AI connection layer records provider, runtime mode, model, host, and linked 
 
 The application layer now includes baseline `use_cases` modules so API endpoints, MCP tools, future background jobs, and future UI-triggered actions can reuse the same workflow functions instead of duplicating agent orchestration in routers.
 
-The persistence boundary now includes baseline repository wrappers for reports, market evidence, and orchestration runs. These wrappers sit above the current SQLite/JSON-backed runtime stores and are used by the report, evidence, orchestration, and approval use cases.
+The persistence boundary now includes baseline repository wrappers for project CRUD, source document metadata, reports, market evidence, and orchestration runs. These wrappers sit above the current SQLite/JSON-backed runtime stores and are used by the project routes, upload/source-document routes, report, evidence, orchestration, and approval use cases.
 
 ## Implemented
 
@@ -37,6 +37,8 @@ Capabilities:
 Files:
 
 - `services/api-server/use_cases/common.py`
+- `services/api-server/use_cases/project_management.py`
+- `services/api-server/use_cases/source_documents.py`
 - `services/api-server/use_cases/development_feasibility.py`
 - `services/api-server/use_cases/cash_flow.py`
 - `services/api-server/use_cases/pf_review.py`
@@ -50,6 +52,8 @@ Files:
 Implemented baseline:
 
 - Development feasibility use case merges project state with request overrides and calls Development Feasibility Agent.
+- Project management use case handles create, list, get, update, delete, and parsed upload application through `ProjectRepository`.
+- Source document use case handles uploaded document metadata save/list/find through `SourceDocumentRepository`.
 - Cash Flow use case accepts a direct `CashFlowRunRequest` or derives one through the canonical Development Feasibility path.
 - PF review use case runs the orchestration workflow without coupling it to FastAPI.
 - Land ledger, marketability, legal review, report generation/export, market evidence review, and orchestration approval use cases are now available.
@@ -65,22 +69,24 @@ Purpose:
 
 Files:
 
+- `services/api-server/db/repositories/project_repository.py`
+- `services/api-server/db/repositories/source_document_repository.py`
 - `services/api-server/db/repositories/report_repository.py`
 - `services/api-server/db/repositories/market_evidence_repository.py`
 - `services/api-server/db/repositories/orchestration_repository.py`
 
 Implemented baseline:
 
+- Project repository creates, lists, fetches, updates, deletes, normalizes, and applies parsed project records.
+- Source document repository stores uploaded document metadata, lists project source documents, and locates archive metadata by archive ID.
 - Report repository creates report records, lists report metadata, fetches saved reports, saves exports, and returns export metadata.
 - Market evidence repository lists, fetches, stores, and sorts market evidence records.
 - Orchestration repository saves PF review runs, persists related market evidence, creates report records for Phase 11 artifacts, lists run metadata, and fetches runs.
-- Report generation/export, evidence review, PF review save, and orchestration approval use cases now call repositories instead of manipulating router-local store logic directly.
+- Project CRUD routes, upload/source-document routes, report generation/export, evidence review, PF review save, and orchestration approval use cases now call repositories instead of manipulating router-local store logic directly.
 
 Remaining:
 
-- Project CRUD repository.
-- Source document archive repository.
-- Runtime upload archive repository.
+- Runtime upload archive binary repository/service.
 - Async job state repository.
 
 ### Phase 11 PF Review Report
@@ -408,6 +414,7 @@ Latest verification baseline:
 - Python compile check: passed for Cash Flow Engine, mapper, Development Feasibility Agent, project router, and targeted test file.
 - Expanded use-case smoke: passed for marketability, legal review, report generation/export, evidence review, and orchestration approval use cases.
 - Repository use-case smoke: passed for report create/export, market evidence add/list/review, orchestration save, and orchestration approval using in-memory repository stores.
+- Project/source-document repository compile and smoke: passed for project create/update/apply/delete, project-scoped cleanup, source metadata save/list/find, and project router import compilation.
 
 - Land Ledger targeted test: `1 passed`
 - Real sample land ledger validation: executed against `01.본리동토지조서.xls`; status `needs_review`, PF summary `needs_enrichment`

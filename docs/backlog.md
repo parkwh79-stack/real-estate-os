@@ -56,9 +56,10 @@ Updated: 2026-05-14
 | P1 | Export | PDF export | Planned | |
 | P1 | Export | DOCX export | Planned | |
 | P1 | Architecture | Use case layer expansion | Done | Added use cases for land ledger import, marketability review, legal review, report generation/export, evidence review, and orchestration approval |
-| P1 | Architecture | Router thinning follow-up | Planned | Move remaining project CRUD, source-document archive, storage persistence, report lookup, and orchestration listing/get into use cases or repository wrappers |
+| P1 | Architecture | Router thinning follow-up | In Progress | Project CRUD, source-document metadata, report, evidence, and orchestration persistence now use repository wrappers; remaining work is runtime archive file operations, project lookup in all endpoints, and async job state |
 | P1 | Architecture | Repository wrapper baseline | Done | Added report, market evidence, and orchestration repository wrappers and connected report/evidence/orchestration use cases through repositories |
-| P1 | Architecture | Project and source document repositories | Planned | Add repository wrappers for project CRUD, source-document metadata, runtime upload archive lookup, and project-scoped persistence |
+| P1 | Architecture | Project and source document repositories | Done | Added project CRUD/source-document metadata repositories and matching use cases; project create/list/get/update/delete, parsed upload application, source-document listing, and archive metadata lookup now flow through use case -> repository |
+| P1 | Architecture | Runtime upload archive repository | Planned | Move source document binary archive path resolution, file existence checks, and download metadata behind a repository/service wrapper |
 | P1 | Architecture | Calculator package wrappers | Planned | Add `services/api-server/calculators` wrappers for feasibility, cash flow, LTV/LTC, waterfall, and sensitivity before moving implementations from `core` |
 | P1 | Architecture | Reports and DB package wrappers | Planned | Add `services/api-server/reports` and `services/api-server/db` compatibility wrappers before moving report and storage implementations |
 | P1 | Architecture | Shared contracts packages | Planned | Add `packages/shared-types` and `packages/realytics-contracts` after FeasibilityStudyV2, CashFlowRunRequest, Land Ledger, Marketability, and Phase 11 schemas stabilize |

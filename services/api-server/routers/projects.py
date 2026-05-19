@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Response
 from fastapi.responses import FileResponse
-from typing import List, Dict, Any
+from typing import Dict, Any
 from datetime import datetime, timezone
 import tempfile
 import os
@@ -21,7 +21,9 @@ from core.calculations import (
 from core.risk_assessment import build_basic_risk_matrix
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
 from db.repositories.orchestration_repository import OrchestrationRepository
+from db.repositories.project_repository import ProjectRepository
 from db.repositories.report_repository import ReportRepository
+from db.repositories.source_document_repository import SourceDocumentRepository
 from storage import load_state, save_state
 from use_cases.cash_flow import run_cash_flow_use_case
 from use_cases.common import deep_merge
@@ -32,12 +34,24 @@ from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case
+from use_cases.project_management import (
+    apply_parsed_project_data_use_case,
+    create_project_use_case,
+    delete_project_use_case,
+    get_project_use_case,
+    list_projects_use_case,
+    update_project_use_case,
+)
 from use_cases.report_generation import export_saved_report_use_case, generate_and_save_pf_report_use_case
+from use_cases.source_documents import (
+    find_source_document_by_archive_id_use_case,
+    list_source_documents_use_case,
+    save_source_document_metadata_use_case,
+)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 import json
-import os
 
 API_SERVER_ROOT = Path(__file__).resolve().parents[1]
 UPLOAD_ARCHIVE_ROOT = API_SERVER_ROOT / "data" / "runtime" / "uploads"
@@ -51,8 +65,27 @@ project_id_counter = 1
 def persist_state() -> None:
     save_state(PROJECTS_DB, REPORTS_DB, ORCHESTRATIONS_DB, project_id_counter, MARKET_EVIDENCE_DB)
 
+def allocate_project_id() -> str:
+    global project_id_counter
+    project_id = str(project_id_counter)
+    project_id_counter += 1
+    return project_id
+
+def project_repository() -> ProjectRepository:
+    return ProjectRepository(
+        PROJECTS_DB,
+        REPORTS_DB,
+        ORCHESTRATIONS_DB,
+        MARKET_EVIDENCE_DB,
+        persist_state,
+        allocate_project_id,
+    )
+
 def report_repository() -> ReportRepository:
     return ReportRepository(REPORTS_DB, persist_state)
+
+def source_document_repository() -> SourceDocumentRepository:
+    return SourceDocumentRepository(PROJECTS_DB, persist_state)
 
 def market_evidence_repository() -> MarketEvidenceRepository:
     return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state)
@@ -64,26 +97,6 @@ def orchestration_repository() -> OrchestrationRepository:
         market_evidence_repository(),
         persist_state,
     )
-
-def normalize_project_record(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
-    now = now_iso()
-    record = dict(project_data)
-    project = dict(record.get("project", {}))
-    if not project:
-        project = {
-            key: record.pop(key)
-            for key in list(record.keys())
-            if key in {"name", "type", "status", "review_date"}
-        }
-    project["id"] = project_id
-    project.setdefault("name", record.get("name", f"Project {project_id}"))
-    project.setdefault("status", "draft")
-    record["project"] = project
-    record["id"] = project_id
-    record.setdefault("_meta", {})
-    record["_meta"].setdefault("created_at", now)
-    record["_meta"]["updated_at"] = now
-    return record
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -129,34 +142,6 @@ def archive_uploaded_document(
         "downloadUrl": f"/projects/{project_id}/source-documents/{archive_id}/download",
         "contentType": content_type,
     }
-
-def project_source_documents(project_id: str) -> List[Dict[str, Any]]:
-    project = PROJECTS_DB.get(project_id, {})
-    documents = list(project.get("source_documents") or [])
-    upload_meta = project.get("_meta", {}).get("upload")
-    if isinstance(upload_meta, dict):
-        upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
-        already_listed = any(
-            (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
-            for document in documents
-        )
-        if not already_listed:
-            documents.append(upload_meta)
-    return documents
-
-def save_source_document_metadata(project_id: str, upload_meta: Dict[str, Any]) -> None:
-    project = PROJECTS_DB[project_id]
-    project.setdefault("_meta", {})
-    project["_meta"]["upload"] = upload_meta
-    documents = project.setdefault("source_documents", [])
-    upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
-    already_listed = any(
-        (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
-        for document in documents
-    )
-    if not already_listed:
-        documents.append(upload_meta)
-    persist_state()
 
 def attach_document_market_evidence_metadata(
     parsed_data: Dict[str, Any],
@@ -207,14 +192,6 @@ def attach_document_market_evidence_metadata(
         for key in ["proposedPricePerPy", "demandLevel", "upcomingSupplyUnits"]:
             if market.get(key) and not document_market_evidence.get(key):
                 document_market_evidence[key] = market[key]
-
-def apply_parsed_project_data(project_id: str, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
-    if "project" not in parsed_data:
-        parsed_data["project"] = {}
-    parsed_data["project"]["id"] = project_id
-    PROJECTS_DB[project_id].update(parsed_data)
-    persist_state()
-    return PROJECTS_DB[project_id]
 
 async def parse_uploaded_business_plan(
     project_id: str,
@@ -311,46 +288,34 @@ load_fixtures()
 
 @router.get("/")
 def get_projects():
-    return list(PROJECTS_DB.values())
+    return list_projects_use_case(project_repository())
 
 @router.post("/")
 def create_project(project_data: Dict[str, Any]):
-    global project_id_counter
-    pid = str(project_id_counter)
-    PROJECTS_DB[pid] = normalize_project_record(pid, project_data)
-    project_id_counter += 1
-    persist_state()
-    return PROJECTS_DB[pid]
+    return create_project_use_case(project_repository(), project_data)
 
 @router.get("/{project_id}")
 def get_project(project_id: str):
-    if project_id not in PROJECTS_DB:
+    project = get_project_use_case(project_repository(), project_id)
+    if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return PROJECTS_DB[project_id]
+    return project
 
 @router.put("/{project_id}")
 def update_project(project_id: str, project_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    project = update_project_use_case(project_repository(), project_id, project_data)
+    if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    PROJECTS_DB[project_id] = normalize_project_record(
-        project_id,
-        deep_merge(PROJECTS_DB[project_id], project_data),
-    )
-    persist_state()
-    return PROJECTS_DB[project_id]
+    return project
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str):
-    if project_id not in PROJECTS_DB:
+    deleted = delete_project_use_case(project_repository(), project_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
-    deleted = PROJECTS_DB.pop(project_id)
-    REPORTS_DB.pop(project_id, None)
-    ORCHESTRATIONS_DB.pop(project_id, None)
-    MARKET_EVIDENCE_DB.pop(project_id, None)
     project_archive_dir = project_upload_archive_dir(project_id)
     if project_archive_dir.exists():
         shutil.rmtree(project_archive_dir)
-    persist_state()
     return {
         "deleted": True,
         "project_id": project_id,
@@ -378,14 +343,17 @@ async def upload_business_plan(
     if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
         upload_meta = parsed_data.get("_meta", {}).get("upload")
         if isinstance(upload_meta, dict):
-            save_source_document_metadata(project_id, upload_meta)
+            save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
         return {
             "project_id": project_id,
             "status": "host_llm_required",
             "upload": parsed_data,
         }
 
-    return apply_parsed_project_data(project_id, parsed_data)
+    project = apply_parsed_project_data_use_case(project_repository(), project_id, parsed_data)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
 
 @router.post("/{project_id}/land-ledger/analyze")
 async def analyze_land_ledger_upload(
@@ -422,7 +390,7 @@ async def upload_business_plan_and_run_pf_review(
     if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
         upload_meta = parsed_data.get("_meta", {}).get("upload")
         if isinstance(upload_meta, dict):
-            save_source_document_metadata(project_id, upload_meta)
+            save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
         return {
             "project_id": project_id,
             "status": "host_llm_required",
@@ -430,7 +398,9 @@ async def upload_business_plan_and_run_pf_review(
             "message": "Host LLM extraction is required before PF review orchestration can run.",
         }
 
-    project_data = apply_parsed_project_data(project_id, parsed_data)
+    project_data = apply_parsed_project_data_use_case(project_repository(), project_id, parsed_data)
+    if not project_data:
+        raise HTTPException(status_code=404, detail="Project not found")
     run = run_and_save_pf_review_use_case(
         orchestration_repository(),
         project_id,
@@ -541,7 +511,7 @@ def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = N
 def list_project_source_documents(project_id: str):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project_source_documents(project_id)
+    return list_source_documents_use_case(source_document_repository(), project_id)
 
 @router.get("/{project_id}/source-documents/{archive_id}/download")
 def download_project_source_document(project_id: str, archive_id: str):
@@ -550,13 +520,10 @@ def download_project_source_document(project_id: str, archive_id: str):
     if not is_valid_archive_id(archive_id):
         raise HTTPException(status_code=404, detail="Source document not found")
 
-    document = next(
-        (
-            item
-            for item in project_source_documents(project_id)
-            if (item.get("archiveId") or item.get("originalFileHash")) == archive_id
-        ),
-        None,
+    document = find_source_document_by_archive_id_use_case(
+        source_document_repository(),
+        project_id,
+        archive_id,
     )
     if not document:
         raise HTTPException(status_code=404, detail="Source document not found")

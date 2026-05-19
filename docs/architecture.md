@@ -60,7 +60,7 @@ Important current implementation locations:
 | Calculations | `services/api-server/core` | Pure calculation functions, logistics helpers, and risk assessment |
 | Schemas | `services/api-server/schemas` | Feasibility Study v2, report, orchestration, and Valuemap schemas |
 | Storage | `services/api-server/storage.py` | SQLite/JSON-backed MVP persistence |
-| Repositories | `services/api-server/db/repositories` | Wrapper layer over current MVP runtime stores for reports, market evidence, and orchestration runs |
+| Repositories | `services/api-server/db/repositories` | Wrapper layer over current MVP runtime stores for projects, source document metadata, reports, market evidence, and orchestration runs |
 | Runtime data | `services/api-server/data/runtime` | SQLite state and uploaded document archive; ignored by Git |
 | Product docs | `docs/product` | Agent roadmaps and implementation status |
 | Integration docs | `docs/integrations` | Korean Law MCP and external integration notes |
@@ -120,7 +120,7 @@ This target is directionally correct, but it should be reached through compatibi
 | `services/api-server/calculators` | Missing | Add wrappers that re-export stable functions from `core` before moving implementation |
 | `services/api-server/integrations` | Missing | Add sidecar/client adapters for VWorld, MOLEG/Korean Law MCP, Valuemap, and public data |
 | `services/api-server/reports` | Missing | Move report generation behind wrappers from `agents/report_agent.py` and `agents/report_export_agent.py` |
-| `services/api-server/db` | Exists as baseline | Expand repository wrappers for project CRUD, source documents, and persistent job state before moving `storage.py` implementation |
+| `services/api-server/db` | Exists as baseline | Expand repository wrappers for persistent job state before moving `storage.py` implementation |
 | `packages/shared-types` | Missing | Add later for generated or hand-maintained frontend/backend shared types |
 | `packages/realytics-contracts` | Missing | Add later for canonical JSON schemas, workbook contracts, and API contracts |
 | Root `docker-compose.yml` | Missing | Add after API/web/dev services are stable enough for root orchestration |
@@ -179,6 +179,8 @@ Current baseline use cases:
 | Use Case | File | Responsibility |
 |---|---|---|
 | Development feasibility analysis | `services/api-server/use_cases/development_feasibility.py` | Merge project state with overrides and call Development Feasibility Agent |
+| Project management | `services/api-server/use_cases/project_management.py` | Create, list, fetch, update, delete, and apply parsed project records through the project repository |
+| Source document metadata | `services/api-server/use_cases/source_documents.py` | Save, list, and locate uploaded source document metadata through the source document repository |
 | Cash Flow Engine run | `services/api-server/use_cases/cash_flow.py` | Accept direct CashFlowRunRequest or derive one from Development Feasibility Agent output |
 | PF review orchestration | `services/api-server/use_cases/pf_review.py` | Run the PF review workflow without binding it to FastAPI |
 | Land ledger import | `services/api-server/use_cases/land_ledger_import.py` | Analyze uploaded workbook files after the router has prepared a local file path and import metadata |
@@ -192,6 +194,8 @@ Current baseline repositories:
 
 | Repository | File | Responsibility |
 |---|---|---|
+| Project repository | `services/api-server/db/repositories/project_repository.py` | Create, list, fetch, update, delete, normalize, and apply parsed project records |
+| Source document repository | `services/api-server/db/repositories/source_document_repository.py` | Store, list, and locate uploaded source document metadata attached to projects |
 | Report repository | `services/api-server/db/repositories/report_repository.py` | Create, list, fetch, and export saved report records |
 | Market evidence repository | `services/api-server/db/repositories/market_evidence_repository.py` | Store, list, fetch, and sort market evidence records |
 | Orchestration repository | `services/api-server/db/repositories/orchestration_repository.py` | Save PF review runs and related report/evidence artifacts |
@@ -349,8 +353,8 @@ First create repository wrappers around the current runtime stores and `save_sta
 
 Status:
 
-- Report, market evidence, and orchestration repository wrappers are implemented.
-- Remaining repository wrappers: project CRUD, source document archive metadata, runtime upload archive lookup, and future async job state.
+- Project, source document metadata, report, market evidence, and orchestration repository wrappers are implemented.
+- Remaining repository wrappers: runtime upload archive file operations and future async job state.
 
 ### Phase G: Shared Packages
 
@@ -402,14 +406,13 @@ Development Feasibility Agent is an orchestrator for feasibility readiness. It s
 
 Recommended next coding sequence:
 
-1. Continue thinning `routers/projects.py` by moving remaining workflow assembly into use cases.
-2. Add repositories/use cases for project CRUD/storage and source-document archive handling.
-3. Add `services/api-server/calculators` wrappers.
-4. Update a small number of tests to import calculators directly.
-5. Keep old `core` imports working.
+1. Add `services/api-server/calculators` wrappers.
+2. Update a small number of tests to import calculators directly.
+3. Keep old `core` imports working.
+4. Continue thinning `routers/projects.py` by moving remaining workflow assembly into use cases.
+5. Add repository/use-case wrappers for runtime upload archive file operations and async job state.
 6. Add `docs/pf_cashflow_logic.md` from the Cash Flow Engine and Calculation Scenario Engine docs.
 7. Add `docs/agent_design.md` from the current agent boundaries.
 8. Add `services/api-server/reports` wrappers.
-9. Add `services/api-server/db` repository wrappers.
 
 The safest first code move is the use-case layer because it creates a shared application boundary before deeper package migration.

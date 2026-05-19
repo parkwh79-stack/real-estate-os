@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List
+
+
+class SourceDocumentRepository:
+    """Repository wrapper for source document metadata attached to projects."""
+
+    def __init__(self, projects_store: Dict[str, Dict[str, Any]], persist: Callable[[], None]):
+        self.projects_store = projects_store
+        self.persist = persist
+
+    def list(self, project_id: str) -> List[Dict[str, Any]]:
+        project = self.projects_store.get(project_id, {})
+        documents = list(project.get("source_documents") or [])
+        upload_meta = project.get("_meta", {}).get("upload")
+        if isinstance(upload_meta, dict):
+            upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
+            already_listed = any(
+                (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
+                for document in documents
+            )
+            if not already_listed:
+                documents.append(upload_meta)
+        return documents
+
+    def save_upload_metadata(self, project_id: str, upload_meta: Dict[str, Any]) -> Dict[str, Any] | None:
+        project = self.projects_store.get(project_id)
+        if not project:
+            return None
+        project.setdefault("_meta", {})
+        project["_meta"]["upload"] = upload_meta
+        documents = project.setdefault("source_documents", [])
+        upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
+        already_listed = any(
+            (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
+            for document in documents
+        )
+        if not already_listed:
+            documents.append(upload_meta)
+        self.persist()
+        return upload_meta
+
+    def find_by_archive_id(self, project_id: str, archive_id: str) -> Dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in self.list(project_id)
+                if (item.get("archiveId") or item.get("originalFileHash")) == archive_id
+            ),
+            None,
+        )
