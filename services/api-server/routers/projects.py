@@ -18,16 +18,17 @@ from core.calculations import (
     build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics
 )
 from core.risk_assessment import assess_risk_item, calculate_overall_risk, build_basic_risk_matrix
-from agents.legal_review_agent import LegalReviewAgent
-from agents.land_ledger_agent import LandLedgerAgent
-from agents.marketability_agent import MarketabilityAgent
-from agents.report_agent import ReportAgent
-from agents.report_export_agent import ReportExportAgent
 from storage import load_state, save_state
 from use_cases.cash_flow import run_cash_flow_use_case
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
+from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
+from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case
+from use_cases.legal_review import review_legal_and_permits_use_case
+from use_cases.marketability_review import analyze_marketability_use_case
+from use_cases.orchestration_approval import approve_orchestration_run_use_case
 from use_cases.pf_review import run_pf_review_use_case
+from use_cases.report_generation import export_report_use_case, generate_pf_report_use_case
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -318,7 +319,7 @@ async def parse_uploaded_land_ledger(file: UploadFile) -> Dict[str, Any]:
     original_file_hash = hashlib.sha256(content).hexdigest()
 
     try:
-        return LandLedgerAgent().analyze_xls(
+        return analyze_land_ledger_workbook_use_case(
             tmp_path,
             {
                 "import_id": str(uuid4()),
@@ -625,8 +626,7 @@ def assess_risk(project_id: str, input_data: Dict[str, Any]):
 def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    source_data = deep_merge(PROJECTS_DB[project_id], input_data or {})
-    return MarketabilityAgent().analyze(source_data)
+    return analyze_marketability_use_case(PROJECTS_DB[project_id], input_data)
 
 @router.get("/{project_id}/source-documents")
 def list_project_source_documents(project_id: str):
@@ -669,17 +669,7 @@ def download_project_source_document(project_id: str, archive_id: str):
 def list_project_market_evidence(project_id: str, run_id: str | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    records = list(MARKET_EVIDENCE_DB.get(project_id, {}).values())
-    if run_id:
-        records = [record for record in records if record.get("runId") == run_id]
-    return sorted(
-        records,
-        key=lambda item: (
-            item.get("createdAt") or "",
-            item.get("evidenceType") or "",
-            item.get("evidenceId") or "",
-        ),
-    )
+    return list_market_evidence_use_case(MARKET_EVIDENCE_DB.get(project_id, {}).values(), run_id)
 
 @router.post("/{project_id}/market-evidence/review")
 def review_project_market_evidence(project_id: str, input_data: Dict[str, Any]):
@@ -694,23 +684,10 @@ def review_project_market_evidence(project_id: str, input_data: Dict[str, Any]):
     if not record:
         raise HTTPException(status_code=404, detail="Market evidence record not found")
 
-    review_status = input_data.get("review_status") or input_data.get("reviewStatus")
-    allowed_statuses = {"pending_review", "approved", "rejected", "needs_revision", "auto_validated"}
-    if review_status not in allowed_statuses:
-        raise HTTPException(status_code=400, detail=f"review_status must be one of {sorted(allowed_statuses)}")
-
-    reviewed_at = now_iso()
-    review_entry = {
-        "reviewStatus": review_status,
-        "reviewedAt": reviewed_at,
-        "reviewedBy": input_data.get("reviewed_by") or input_data.get("reviewedBy") or "system",
-        "reviewComment": input_data.get("comment", ""),
-    }
-    record["reviewStatus"] = review_status
-    record["reviewedAt"] = reviewed_at
-    record["reviewedBy"] = review_entry["reviewedBy"]
-    record["reviewComment"] = review_entry["reviewComment"]
-    record.setdefault("reviewHistory", []).append(review_entry)
+    try:
+        review_market_evidence_use_case(record, input_data, now_iso())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     persist_state()
     return record
 
@@ -718,19 +695,16 @@ def review_project_market_evidence(project_id: str, input_data: Dict[str, Any]):
 def review_legal_and_permits(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    input_data = input_data or {}
-    source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
-    return LegalReviewAgent().review(source_data, input_data.get("law_context"))
+    return review_legal_and_permits_use_case(PROJECTS_DB[project_id], input_data)
 
 @router.post("/{project_id}/reports/generate")
 def generate_report(project_id: str, input_data: Dict[str, Any]):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    source_data = deep_merge(PROJECTS_DB[project_id], input_data)
-    agent = ReportAgent()
-    structured_report = agent.generate_structured_report(source_data)
-    md_report = agent.generate_report(source_data)
+    generated = generate_pf_report_use_case(PROJECTS_DB[project_id], input_data)
+    structured_report = generated["structuredReport"]
+    md_report = generated["reportMarkdown"]
     report_record = save_report_record(project_id, structured_report, md_report)
     return {
         "project_id": project_id,
@@ -762,9 +736,8 @@ def get_report(project_id: str, report_id: str):
 def create_report_export(project_id: str, report_id: str, input_data: Dict[str, Any] | None = None):
     record = find_report_record(project_id, report_id)
     input_data = input_data or {}
-    export_format = input_data.get("format", "markdown")
     try:
-        rendered = ReportExportAgent().export(record, export_format)
+        rendered = export_report_use_case(record, input_data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -853,12 +826,9 @@ def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict
     if run["status"] not in {"completed", "completed_with_warnings"}:
         raise HTTPException(status_code=409, detail="Only completed runs can be approved")
 
-    input_data = input_data or {}
-    run["status"] = "approved"
-    run["approval"] = {
-        "approved_at": now_iso(),
-        "approved_by": input_data.get("approved_by", "system"),
-        "comment": input_data.get("comment", ""),
-    }
+    try:
+        approve_orchestration_run_use_case(run, input_data, now_iso())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     persist_state()
     return run

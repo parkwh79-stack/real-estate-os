@@ -12,7 +12,7 @@ The repository currently includes:
 
 - Next.js web application for project dashboards, land review, risk review, orchestration, report viewing, finance, feasibility, and cash-flow screens.
 - FastAPI backend for project CRUD, calculations, agents, orchestration, reports, uploads, and exports.
-- Application use-case layer for reusable API, MCP, batch job, and future UI-triggered workflows.
+- Application use-case layer for reusable API, MCP, batch job, and future UI-triggered workflows, including feasibility, cash flow, PF review, land ledger, marketability, legal review, report, and evidence review flows.
 - SQLite-backed MVP persistence for projects, reports, and orchestration runs.
 - MCP server integration for Claude Desktop or other MCP hosts.
 - AI connection layer for OpenAI API, Anthropic API, and Claude Desktop host-LLM mode.

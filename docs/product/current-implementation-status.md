@@ -38,13 +38,20 @@ Files:
 - `services/api-server/use_cases/development_feasibility.py`
 - `services/api-server/use_cases/cash_flow.py`
 - `services/api-server/use_cases/pf_review.py`
+- `services/api-server/use_cases/land_ledger_import.py`
+- `services/api-server/use_cases/marketability_review.py`
+- `services/api-server/use_cases/legal_review.py`
+- `services/api-server/use_cases/report_generation.py`
+- `services/api-server/use_cases/evidence_review.py`
+- `services/api-server/use_cases/orchestration_approval.py`
 
 Implemented baseline:
 
 - Development feasibility use case merges project state with request overrides and calls Development Feasibility Agent.
 - Cash Flow use case accepts a direct `CashFlowRunRequest` or derives one through the canonical Development Feasibility path.
 - PF review use case runs the orchestration workflow without coupling it to FastAPI.
-- `routers/projects.py` now delegates development feasibility, cash-flow run, upload-and-run PF review, and PF review orchestration to use-case functions.
+- Land ledger, marketability, legal review, report generation/export, market evidence review, and orchestration approval use cases are now available.
+- `routers/projects.py` now delegates development feasibility, cash-flow run, upload-and-run PF review, PF review orchestration, land ledger analysis, marketability analysis, legal review, report generation/export, evidence review, and orchestration approval to use-case functions.
 
 Purpose:
 
@@ -375,6 +382,7 @@ Latest verification baseline:
 
 - Cash Flow Engine direct smoke: passed against `daegu_bondong_mixed_use_pf.json`; generated 36 monthly rows and 10 PF draw rows with `funding_gap_covered` status.
 - Python compile check: passed for Cash Flow Engine, mapper, Development Feasibility Agent, project router, and targeted test file.
+- Expanded use-case smoke: passed for marketability, legal review, report generation/export, evidence review, and orchestration approval use cases.
 
 - Land Ledger targeted test: `1 passed`
 - Real sample land ledger validation: executed against `01.본리동토지조서.xls`; status `needs_review`, PF summary `needs_enrichment`

@@ -179,6 +179,12 @@ Current baseline use cases:
 | Development feasibility analysis | `services/api-server/use_cases/development_feasibility.py` | Merge project state with overrides and call Development Feasibility Agent |
 | Cash Flow Engine run | `services/api-server/use_cases/cash_flow.py` | Accept direct CashFlowRunRequest or derive one from Development Feasibility Agent output |
 | PF review orchestration | `services/api-server/use_cases/pf_review.py` | Run the PF review workflow without binding it to FastAPI |
+| Land ledger import | `services/api-server/use_cases/land_ledger_import.py` | Analyze uploaded workbook files after the router has prepared a local file path and import metadata |
+| Marketability review | `services/api-server/use_cases/marketability_review.py` | Merge project state with market overrides and call Marketability Agent |
+| Legal and permit review | `services/api-server/use_cases/legal_review.py` | Merge project overrides and law context before calling Legal Review Agent |
+| Report generation/export | `services/api-server/use_cases/report_generation.py` | Generate structured PF report/markdown and export saved report records |
+| Market evidence review | `services/api-server/use_cases/evidence_review.py` | Filter evidence records and apply analyst review status |
+| Orchestration approval | `services/api-server/use_cases/orchestration_approval.py` | Approve completed orchestration runs without binding approval logic to FastAPI |
 
 Use-case rules:
 
@@ -223,7 +229,8 @@ services/api-server/use_cases/
 |-- marketability_review.py
 |-- legal_review.py
 |-- report_generation.py
-`-- evidence_review.py
+|-- evidence_review.py
+`-- orchestration_approval.py
 ```
 
 Migration rule:
@@ -380,8 +387,8 @@ Development Feasibility Agent is an orchestrator for feasibility readiness. It s
 
 Recommended next coding sequence:
 
-1. Expand `services/api-server/use_cases` for land ledger import, marketability, legal review, report generation, and evidence review.
-2. Thin `routers/projects.py` by moving workflow assembly into use cases.
+1. Continue thinning `routers/projects.py` by moving remaining workflow assembly into use cases.
+2. Add use cases for project CRUD/storage and source-document archive handling.
 3. Add `services/api-server/calculators` wrappers.
 4. Update a small number of tests to import calculators directly.
 5. Keep old `core` imports working.
