@@ -427,6 +427,7 @@ Notes:
 
 ## Useful Documentation
 
+- Architecture and migration plan: [`docs/architecture.md`](docs/architecture.md)
 - Current implementation status: [`docs/product/current-implementation-status.md`](docs/product/current-implementation-status.md)
 - Product backlog: [`docs/backlog.md`](docs/backlog.md)
 - Phase 11 PF review report: [`docs/product/phase-11-pf-review-report.md`](docs/product/phase-11-pf-review-report.md)

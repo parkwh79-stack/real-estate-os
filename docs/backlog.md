@@ -44,6 +44,7 @@ Updated: 2026-05-14
 | P0 | Frontend | Land and risk review detail views | Done | Project land page split into review sections; project risk page shows all 20 PF risk management controls with API-assessed grade/score where available |
 | P0 | Integration | Korean Law MCP connector | Done | Sidecar integration guide, query plan MCP tool, `realytics-law-context-v1` adapter, citation verification handling, and legal-review integration completed; direct API-server MCP client automation is optional future hardening |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
+| P0 | Architecture | Repository architecture alignment plan | Done | Added `docs/architecture.md` with current vs target structure, gap analysis, migration principles, and phased refactor plan |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
 | P0 | Report | Structured report export pipeline | In Progress | Markdown/JSON/print-ready HTML export history added; PDF/DOCX binary renderers remain next |
 | P0 | Parser | Source provenance per parsed field | In Progress | Market evidence field-level locator coverage is implemented; next step is locator coverage for non-market parser fields such as land, regulation, cost, schedule, PF, and covenants |
@@ -53,6 +54,9 @@ Updated: 2026-05-14
 | P1 | Export | Developer feasibility Excel export | In Progress | Export should generate formula-preserving `realytics-fs-xlsx-v1` workbook with assumptions, product mix, costs, financing, monthly CF, sensitivity, summary, and checks |
 | P1 | Export | PDF export | Planned | |
 | P1 | Export | DOCX export | Planned | |
+| P1 | Architecture | Calculator package wrappers | Planned | Add `services/api-server/calculators` wrappers for feasibility, cash flow, LTV/LTC, waterfall, and sensitivity before moving implementations from `core` |
+| P1 | Architecture | Reports and DB package wrappers | Planned | Add `services/api-server/reports` and `services/api-server/db` compatibility wrappers before moving report and storage implementations |
+| P1 | Architecture | Shared contracts packages | Planned | Add `packages/shared-types` and `packages/realytics-contracts` after FeasibilityStudyV2, CashFlowRunRequest, Land Ledger, Marketability, and Phase 11 schemas stabilize |
 | P1 | Calculation | Cash Flow Engine / Agent design | Done | Added English roadmap and schema alignment review for monthly cash flow, Max Minus, PF draw, sales collection, account allocation, waterfall, Exit sale rate, unsold LTV, risk flags, API, UI, and report fragments |
 | P1 | Calculation | Development Feasibility to FeasibilityStudyV2 draft mapping | Done | DevelopmentFeasibilityAgent now emits a FeasibilityStudyV2-valid draft with site, program, revenue, cost, financing, schedule, scenarios, metrics, and mapping diagnostics |
 | P1 | Calculation | Asset-type calculation profiles | Done | Added deterministic asset profiles for apartment, officetel, commercial, KIC, mixed-use, logistics, lodging, and other assets; profiles drive revenue mode, collection schedule, recovery haircut, and LTV threshold |
