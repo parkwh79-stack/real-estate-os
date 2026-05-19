@@ -33,12 +33,16 @@ def test_development_feasibility_agent_builds_developer_and_pf_metrics():
         "CashFlowEngine",
         "CalculationScenarioEngine",
     ]
-    assert result["feasibilityStudyV2Integration"]["mapperStatus"] == "draft_available"
+    assert result["feasibilityStudyV2Integration"]["mapperStatus"] == "cash_flow_request_draft_available"
     assert result["feasibilityStudyV2Draft"]["version"] == "realytics-feasibility-study-v2"
     assert result["feasibilityStudyV2Draft"]["metrics"]["total_revenue"] == 150_000_000_000
     assert result["feasibilityStudyV2Draft"]["financing"][0]["priority"] == "senior"
     assert result["assetCalculationProfiles"]["profiles"]["mixed_use"]["revenueMode"] == "mixed_presale_by_component"
     assert result["feasibilityStudyV2Draft"]["raw_import"]["assetCalculationProfiles"]["profileVersion"] == "asset-calculation-profile-v1"
+    assert result["cashFlowRunRequestDraft"]["requestType"] == "cash_flow_run_request_v1"
+    assert result["cashFlowRunRequestDraft"]["productMix"][0]["type"] == "mixed_use"
+    assert result["cashFlowRunRequestDraft"]["productMix"][0]["revenueMode"] == "mixed_presale_by_component"
+    assert result["cashFlowRunRequestDraft"]["pfStructure"][0]["repaymentPriority"] == 1
     assert FeasibilityStudyV2.model_validate(result["feasibilityStudyV2Draft"]).metrics.development_profit == 30_000_000_000
     assert result["sensitivity"]
 

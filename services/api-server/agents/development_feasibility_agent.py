@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
 
+from agents.cash_flow_mapper import build_cash_flow_run_request_from_feasibility_study
 from core.calculations import (
     calculate_development_profit,
     calculate_exit_sale_rate,
@@ -95,6 +96,7 @@ class DevelopmentFeasibilityAgent:
             sensitivity,
             asset_profile_summary,
         )
+        cash_flow_request_draft = build_cash_flow_run_request_from_feasibility_study(feasibility_v2_draft)
 
         return {
             "analysisType": "developer_and_pf_feasibility",
@@ -110,6 +112,7 @@ class DevelopmentFeasibilityAgent:
             "assetCalculationProfiles": asset_profile_summary,
             "feasibilityStudyV2Integration": self._feasibility_study_v2_integration(project_data, feasibility_v2_draft),
             "feasibilityStudyV2Draft": feasibility_v2_draft,
+            "cashFlowRunRequestDraft": cash_flow_request_draft,
             "dataQuality": quality,
         }
 
@@ -353,7 +356,7 @@ class DevelopmentFeasibilityAgent:
             "canonicalSchema": FEASIBILITY_STUDY_SCHEMA_VERSION,
             "workbookContract": FEASIBILITY_WORKBOOK_VERSION,
             "sourceSchemaPath": "services/api-server/schemas/feasibility_study.py",
-            "mapperStatus": "draft_available",
+            "mapperStatus": "cash_flow_request_draft_available",
             "requiredMappers": [
                 "DevelopmentFeasibilityAgent output -> FeasibilityStudyV2 draft",
                 "FeasibilityStudyV2 -> CashFlowRunRequest",

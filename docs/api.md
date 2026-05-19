@@ -67,7 +67,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/development-feasibility/analyze`
 - **Description**: Analyze developer-side project feasibility from business plan or architectural plan data.
 - **Request Body**: Optional override containing `architectural_plan`, `sales_assumptions`, `cost_assumptions`, `feasibility_input`, and `pf_structure`.
-- **Response**: Architectural program, revenue, costs, developer returns, PF readiness, downstream engine readiness, asset calculation profiles, FeasibilityStudyV2 integration status, a schema-valid `feasibilityStudyV2Draft`, sensitivity, and data quality. The agent acts as the feasibility orchestrator and delegates monthly cash flow, waterfall, unsold LTV, and tranche recovery to Cash Flow / Calculation Scenario engines when those workflows are implemented.
+- **Response**: Architectural program, revenue, costs, developer returns, PF readiness, downstream engine readiness, asset calculation profiles, FeasibilityStudyV2 integration status, a schema-valid `feasibilityStudyV2Draft`, asset-aware `cashFlowRunRequestDraft`, sensitivity, and data quality. The agent acts as the feasibility orchestrator and delegates monthly cash flow, waterfall, unsold LTV, and tranche recovery to Cash Flow / Calculation Scenario engines when those workflows are implemented.
 
 ### `POST /projects/{project_id}/land-ledger/analyze`
 - **Description**: Upload and analyze a legacy Korean land ledger `.xls` file.

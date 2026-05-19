@@ -176,7 +176,7 @@ Current implementation exists at the pure-function level.
 | Tranche recovery helper | Implemented as pure function |
 | Full Cash Flow Agent schema | Not implemented |
 | Development Feasibility to FeasibilityStudyV2 draft mapper | Implemented |
-| FeasibilityStudyV2 to CashFlowRunRequest mapper | Not implemented |
+| FeasibilityStudyV2 to CashFlowRunRequest draft mapper | Implemented |
 | PF draw schedule | Not implemented |
 | Sales collection schedule by product | Not implemented |
 | Operating / repayment account allocation | Not implemented |
@@ -751,7 +751,8 @@ Required tests:
 Status:
 
 - `DevelopmentFeasibilityAgent` now emits `feasibilityStudyV2Draft`, a schema-valid draft for `realytics-feasibility-study-v2`.
-- Remaining Sprint 1 work is the `FeasibilityStudyV2 -> CashFlowRunRequest` mapper and related fixtures.
+- `agents/cash_flow_mapper.py` now emits asset-aware `cashFlowRunRequestDraft` payloads from `FeasibilityStudyV2`.
+- Remaining work is the Cash Flow Engine run implementation that consumes `CashFlowRunRequest` and generates monthly cash flow, PF draw, account allocation, Max Minus, risk flags, and report fragments.
 
 ### Sprint 2: Pure Calculation Wrappers
 

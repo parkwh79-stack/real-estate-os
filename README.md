@@ -84,6 +84,7 @@ Implemented:
 - PF readiness
 - Downstream readiness flags for Cash Flow, Waterfall, Unsold LTV, and Scenario Engine delegation
 - Asset-type calculation profiles for future Cash FlowRunRequest mapping
+- Asset-aware `cashFlowRunRequestDraft` generated from FeasibilityStudyV2 draft
 - Sensitivity analysis
 - Data quality warnings
 - `realytics-feasibility-study-v2` backend schema

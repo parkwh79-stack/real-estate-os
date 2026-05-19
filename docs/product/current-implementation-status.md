@@ -164,6 +164,7 @@ MCP:
 - The agent does not directly perform Cash Flow / Waterfall / Unsold LTV calculations; it returns `downstreamEngineReadiness` and `feasibilityStudyV2Integration` so specialized engines can be called later.
 - The agent now emits `feasibilityStudyV2Draft`, a schema-valid `realytics-feasibility-study-v2` draft containing site, program, revenue items, cost items, financing, schedule, scenarios, metrics, and raw import metadata.
 - The draft now includes deterministic `assetCalculationProfiles` in `raw_import` so the future `FeasibilityStudyV2 -> CashFlowRunRequest` mapper can apply asset-specific revenue mode, collection schedule, recovery haircut, and LTV threshold.
+- `agents/cash_flow_mapper.py` now converts `FeasibilityStudyV2` drafts into asset-aware `cashFlowRunRequestDraft` payloads with sources/uses, product mix profiles, PF structure, schedule, scenario set, diagnostics, and source metadata.
 
 ### Land Ledger Import Agent
 
@@ -388,7 +389,7 @@ Latest verification baseline:
 - Convert synchronous orchestration into async queue-based jobs.
 - Add UI/API scenario workflow for waterfall and unsold LTV matrix.
 - Implement Calculation Scenario Engine Sprint 1: schema and pure wrappers for waterfall scenarios, unsold LTV matrix, and tranche recovery matrix.
-- Implement Cash Flow Engine Sprint 1 next step: mapping from `FeasibilityStudyV2` to asset-aware `CashFlowRunRequest` with diagnostics and fixture payloads.
+- Implement Cash Flow Engine run logic that consumes `CashFlowRunRequest` and generates monthly cash flow, PF draw schedule, account allocation, Max Minus, risk flags, and report fragments.
 - Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
 
 ### P2
