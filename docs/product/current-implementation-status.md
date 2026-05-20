@@ -95,8 +95,9 @@ Remaining:
 - Structured API response for `POST /projects/{project_id}/reports/generate`.
 - Markdown compatibility output through `report_markdown`.
 - Saved report version numbers and export history metadata.
-- Export artifact creation for `markdown`, `json`, and print-ready `html`.
+- Export artifact creation for `markdown`, `json`, print-ready `html`, binary `pdf`, and binary `docx`.
 - Download endpoint for previously created report export artifacts.
+- Binary report exports are stored as base64 inside the MVP JSON/SQLite state record and decoded back to bytes by the download endpoint.
 - Report section registry in `services/api-server/schemas/report.py`.
 - Frontend report payload types in `apps/web/lib/report-types.ts`.
 - Anonymized Hana-style regression fixture in `services/api-server/data/fixtures/hana_pf_review_anonymized.json`.
@@ -287,6 +288,13 @@ Supported land ledger lifecycle statuses:
 - Each control shows category, responsible owner, required evidence, API-assessed grade/score when available, and mitigation text when supplied.
 - The page also shows overall risk grade, category-level matrix rows, top risks, and recommendations.
 
+### Land Agent Dashboard Summary
+
+- Main dashboard now includes Land Agent overview cards for managed projects, PNU coverage, land review readiness, and unresolved land/evidence issues.
+- Main dashboard now includes a Land Agent control section for parcel/PNU identification, zoning and buildability, land acquisition status, official land price, registry evidence, and legal/PF readiness.
+- Project dashboard now includes per-project land readiness cards with PNU, regulation, acquisition ratio, and registry evidence status.
+- Dashboard pages use live API project data when the API server is available and fall back to local sample data when the API is offline, so land analysis remains visible in the web app.
+
 ### Marketability Analysis Agent
 
 File: `services/api-server/agents/marketability_agent.py`
@@ -415,6 +423,8 @@ Latest verification baseline:
 - Expanded use-case smoke: passed for marketability, legal review, report generation/export, evidence review, and orchestration approval use cases.
 - Repository use-case smoke: passed for report create/export, market evidence add/list/review, orchestration save, and orchestration approval using in-memory repository stores.
 - Project/source-document repository compile and smoke: passed for project create/update/apply/delete, project-scoped cleanup, source metadata save/list/find, and project router import compilation.
+- Web Land Agent dashboard verification: `npm run lint --workspace web` passed, `npm run check-types --workspace web` passed, and browser DOM checks confirmed the main dashboard and project dashboard render the new land analysis sections.
+- Report export renderer verification: Python compile passed for report export agent/router/tests; direct export smoke passed for markdown, JSON, HTML, PDF, and DOCX with JSON-serializable storage records and binary decode checks.
 
 - Land Ledger targeted test: `1 passed`
 - Real sample land ledger validation: executed against `01.본리동토지조서.xls`; status `needs_review`, PF summary `needs_enrichment`
@@ -435,7 +445,7 @@ Latest verification baseline:
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 - Source-level provenance per parsed field is not yet persisted.
-- Markdown, JSON, and print-ready HTML report exports are implemented. PDF/DOCX binary renderers are not yet implemented from the structured report data.
+- Markdown, JSON, print-ready HTML, PDF, and DOCX report exports are implemented from the same structured Phase 11 report record.
 - Calculation Scenario Engine design is documented in `docs/product/calculation-scenario-engine.md`; existing waterfall and unsold LTV pure functions remain implemented, while API/UI scenario workflows are still pending.
 - Cash Flow Engine / Cash Flow Agent design is documented in `docs/product/cash-flow-engine-agent.md`; it aligns FeasibilityStudyV2 with monthly cash flow, Max Minus, PF draw, sales collection, account allocation, waterfall, Exit sale rate, unsold LTV, risk flags, API, UI, and report fragments.
 - Baseline Cash Flow Engine run is implemented through the required upstream path `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest -> Cash Flow Engine`, so Excel import/export, workbook formulas, provenance, and PF review outputs share one canonical feasibility source.
@@ -445,7 +455,7 @@ Latest verification baseline:
 
 ### P0
 
-- Add PDF/DOCX binary renderers from the structured Phase 11 report export pipeline.
+- Harden PDF/DOCX visual QA with representative long legal clauses and real institution templates.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
 - Extend parser provenance from market evidence fields to non-market extracted fields so land, regulation, cost, schedule, PF, and covenant values can be traced back to uploaded documents.
 

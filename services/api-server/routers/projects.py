@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Response
 from fastapi.responses import FileResponse
 from typing import Dict, Any
 from datetime import datetime, timezone
+import base64
 import tempfile
 import os
 import shutil
@@ -638,8 +639,11 @@ def download_report_export(project_id: str, report_id: str, export_id: str):
     export_record = repo.get_export(record, export_id)
     if not export_record:
         raise HTTPException(status_code=404, detail="Report export not found")
+    content = export_record.get("content", "")
+    if export_record.get("content_encoding") == "base64":
+        content = base64.b64decode(content)
     return Response(
-        content=export_record.get("content", ""),
+        content=content,
         media_type=export_record.get("content_type", "text/plain; charset=utf-8"),
         headers={
             "Content-Disposition": f'attachment; filename="{export_record.get("file_name", "report-export.txt")}"'

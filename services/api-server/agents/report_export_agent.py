@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import textwrap
+import zipfile
+from base64 import b64encode
+from io import BytesIO
 from html import escape
 from typing import Any, Dict
+from xml.sax.saxutils import escape as xml_escape
 
 
 class ReportExportAgent:
-    supported_formats = {"markdown", "json", "html"}
+    supported_formats = {"markdown", "json", "html", "pdf", "docx"}
 
     def export(self, report_record: Dict[str, Any], export_format: str) -> Dict[str, Any]:
         normalized_format = export_format.lower().strip()
@@ -22,10 +27,22 @@ class ReportExportAgent:
             content = self._render_json(report_record)
             content_type = "application/json; charset=utf-8"
             extension = "json"
-        else:
+        elif normalized_format == "html":
             content = self._render_html(report_record)
             content_type = "text/html; charset=utf-8"
             extension = "html"
+        elif normalized_format == "pdf":
+            content_bytes = self._render_pdf(report_record)
+            return self._binary_export(report_record, normalized_format, "pdf", "application/pdf", content_bytes)
+        else:
+            content_bytes = self._render_docx(report_record)
+            return self._binary_export(
+                report_record,
+                normalized_format,
+                "docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                content_bytes,
+            )
 
         encoded = content.encode("utf-8")
         return {
@@ -133,6 +150,194 @@ class ReportExportAgent:
             items = "".join(f"<li>{self._render_value(item)}</li>" for item in value)
             return f"<ul>{items}</ul>"
         return escape(str(value if value is not None else "-"))
+
+    def _binary_export(
+        self,
+        report_record: Dict[str, Any],
+        export_format: str,
+        extension: str,
+        content_type: str,
+        content_bytes: bytes,
+    ) -> Dict[str, Any]:
+        return {
+            "format": export_format,
+            "file_name": self._file_name(report_record, extension),
+            "content_type": content_type,
+            "content": b64encode(content_bytes).decode("ascii"),
+            "content_encoding": "base64",
+            "byte_size": len(content_bytes),
+            "sha256": hashlib.sha256(content_bytes).hexdigest(),
+        }
+
+    def _plain_report_lines(self, report_record: Dict[str, Any]) -> list[str]:
+        report = report_record.get("report", {})
+        title = str(report_record.get("title") or report.get("title") or "PF Review Report")
+        lines = [
+            title,
+            f"Report ID: {report_record.get('report_id', '')}",
+            f"Version: {report_record.get('version', '')}",
+            "",
+        ]
+        section_order = report.get("sectionOrder", [])
+        sections = report.get("sections", {})
+        if section_order:
+            lines.append("Table of Contents")
+            for item in section_order:
+                lines.append(f"{item.get('index', '')}. {item.get('title', item.get('key', ''))}")
+            lines.append("")
+
+        for item in section_order:
+            key = item.get("key")
+            lines.append(f"{item.get('index', '')}. {item.get('title', key)}")
+            lines.extend(self._flatten_text(sections.get(key), indent=0))
+            lines.append("")
+
+        if not section_order:
+            markdown = self._render_markdown(report_record)
+            lines.extend(markdown.splitlines())
+        return lines
+
+    def _flatten_text(self, value: Any, indent: int = 0) -> list[str]:
+        prefix = "  " * indent
+        if isinstance(value, dict):
+            lines: list[str] = []
+            for key, inner in value.items():
+                if isinstance(inner, (dict, list)):
+                    lines.append(f"{prefix}{key}:")
+                    lines.extend(self._flatten_text(inner, indent + 1))
+                else:
+                    lines.append(f"{prefix}{key}: {self._scalar_text(inner)}")
+            return lines or [f"{prefix}-"]
+        if isinstance(value, list):
+            if not value:
+                return [f"{prefix}-"]
+            lines = []
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    lines.append(f"{prefix}-")
+                    lines.extend(self._flatten_text(item, indent + 1))
+                else:
+                    lines.append(f"{prefix}- {self._scalar_text(item)}")
+            return lines
+        return [f"{prefix}{self._scalar_text(value)}"]
+
+    @staticmethod
+    def _scalar_text(value: Any) -> str:
+        if value is None:
+            return "-"
+        if isinstance(value, float):
+            return f"{value:.4f}".rstrip("0").rstrip(".")
+        return str(value)
+
+    def _render_pdf(self, report_record: Dict[str, Any]) -> bytes:
+        lines = self._plain_report_lines(report_record)
+        wrapped_lines: list[str] = []
+        for line in lines:
+            if not line:
+                wrapped_lines.append("")
+                continue
+            wrapped_lines.extend(textwrap.wrap(line, width=86, replace_whitespace=False) or [""])
+
+        page_line_count = 50
+        pages = [
+            wrapped_lines[index:index + page_line_count]
+            for index in range(0, len(wrapped_lines), page_line_count)
+        ] or [[""]]
+
+        objects: list[bytes] = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"",
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /HYGoThic-Medium /Encoding /UniKS-UCS2-H /DescendantFonts [4 0 R] >>",
+            b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HYGoThic-Medium /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /DW 1000 >>",
+        ]
+        page_refs = []
+        for page_lines in pages:
+            content = self._pdf_page_stream(page_lines)
+            content_object_id = len(objects) + 1
+            objects.append(
+                b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream"
+            )
+            page_object_id = len(objects) + 1
+            objects.append(
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_object_id} 0 R >>".encode("ascii")
+            )
+            page_refs.append(f"{page_object_id} 0 R")
+
+        objects[1] = f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>".encode("ascii")
+
+        output = BytesIO()
+        output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        offsets = [0]
+        for index, obj in enumerate(objects, start=1):
+            offsets.append(output.tell())
+            output.write(f"{index} 0 obj\n".encode("ascii"))
+            output.write(obj)
+            output.write(b"\nendobj\n")
+        xref_offset = output.tell()
+        output.write(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+        output.write(b"0000000000 65535 f \n")
+        for offset in offsets[1:]:
+            output.write(f"{offset:010d} 00000 n \n".encode("ascii"))
+        output.write(
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+        )
+        return output.getvalue()
+
+    @staticmethod
+    def _pdf_page_stream(lines: list[str]) -> bytes:
+        commands = ["BT", "/F1 10 Tf", "14 TL"]
+        y = 802
+        for line in lines:
+            encoded = line.encode("utf-16-be").hex().upper()
+            commands.append(f"1 0 0 1 42 {y} Tm <{encoded}> Tj")
+            y -= 14
+        commands.append("ET")
+        return "\n".join(commands).encode("ascii")
+
+    def _render_docx(self, report_record: Dict[str, Any]) -> bytes:
+        lines = self._plain_report_lines(report_record)
+        document_body = "\n".join(self._docx_paragraph(line) for line in lines)
+        document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    {document_body}
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+        content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"""
+        rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+        styles = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:rPr><w:rFonts w:ascii="Malgun Gothic" w:eastAsia="Malgun Gothic"/></w:rPr>
+  </w:style>
+</w:styles>"""
+
+        output = BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as docx:
+            docx.writestr("[Content_Types].xml", content_types)
+            docx.writestr("_rels/.rels", rels)
+            docx.writestr("word/document.xml", document_xml)
+            docx.writestr("word/styles.xml", styles)
+        return output.getvalue()
+
+    @staticmethod
+    def _docx_paragraph(text: str) -> str:
+        safe_text = xml_escape(text)
+        return f"<w:p><w:r><w:t xml:space=\"preserve\">{safe_text}</w:t></w:r></w:p>"
 
     def _file_name(self, report_record: Dict[str, Any], extension: str) -> str:
         report_id = str(report_record.get("report_id", "report"))[:8]

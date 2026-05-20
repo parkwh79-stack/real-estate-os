@@ -182,8 +182,8 @@ The `phase-11-pf-review` template returns these `report.sections` keys:
 
 ### `POST /projects/{project_id}/reports/{report_id}/exports`
 - **Description**: Create an export artifact from a saved Phase 11 report.
-- **Request Body**: `{ "format": "markdown" }`, `{ "format": "json" }`, or `{ "format": "html" }`.
-- **Response**: Export metadata including `export_id`, `file_name`, `content_type`, `byte_size`, and `sha256`. Export content is stored for download but omitted from metadata responses.
+- **Request Body**: `{ "format": "markdown" }`, `{ "format": "json" }`, `{ "format": "html" }`, `{ "format": "pdf" }`, or `{ "format": "docx" }`.
+- **Response**: Export metadata including `export_id`, `file_name`, `content_type`, `byte_size`, and `sha256`. Export content is stored for download but omitted from metadata responses. Binary PDF/DOCX artifacts are stored internally as base64 so they remain compatible with the JSON/SQLite MVP state store.
 
 ### `GET /projects/{project_id}/reports/{report_id}/exports`
 - **Description**: List export artifacts for a saved report.

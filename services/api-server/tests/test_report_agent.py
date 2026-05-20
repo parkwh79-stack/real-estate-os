@@ -113,11 +113,31 @@ def test_report_export_endpoints_create_history_and_download_artifacts():
     assert html_export["format"] == "html"
     assert html_export["file_name"].endswith(".html")
 
+    pdf_export = client.post(
+        f"/projects/{project_id}/reports/{report_id}/exports",
+        json={"format": "pdf"},
+    ).json()
+    assert pdf_export["format"] == "pdf"
+    assert pdf_export["file_name"].endswith(".pdf")
+    assert pdf_export["content_type"] == "application/pdf"
+    assert pdf_export["byte_size"] > 0
+    assert "content" not in pdf_export
+
+    docx_export = client.post(
+        f"/projects/{project_id}/reports/{report_id}/exports",
+        json={"format": "docx"},
+    ).json()
+    assert docx_export["format"] == "docx"
+    assert docx_export["file_name"].endswith(".docx")
+    assert docx_export["content_type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert docx_export["byte_size"] > 0
+    assert "content" not in docx_export
+
     exports = client.get(f"/projects/{project_id}/reports/{report_id}/exports").json()
-    assert len(exports) >= 2
+    assert len(exports) >= 4
 
     detail = client.get(f"/projects/{project_id}/reports/{report_id}").json()
-    assert detail["export_count"] >= 2
+    assert detail["export_count"] >= 4
     assert detail["latest_exported_at"]
 
     download = client.get(
@@ -126,6 +146,20 @@ def test_report_export_endpoints_create_history_and_download_artifacts():
     assert download.status_code == 200
     assert "text/html" in download.headers["content-type"]
     assert "<!doctype html>" in download.text
+
+    pdf_download = client.get(
+        f"/projects/{project_id}/reports/{report_id}/exports/{pdf_export['export_id']}/download"
+    )
+    assert pdf_download.status_code == 200
+    assert pdf_download.headers["content-type"] == "application/pdf"
+    assert pdf_download.content.startswith(b"%PDF-1.4")
+
+    docx_download = client.get(
+        f"/projects/{project_id}/reports/{report_id}/exports/{docx_export['export_id']}/download"
+    )
+    assert docx_download.status_code == 200
+    assert docx_download.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert docx_download.content.startswith(b"PK")
 
 
 def test_report_export_rejects_unsupported_format():
@@ -139,6 +173,6 @@ def test_report_export_rejects_unsupported_format():
 
     res = client.post(
         f"/projects/{project_id}/reports/{report['report_id']}/exports",
-        json={"format": "pdf"},
+        json={"format": "xlsx"},
     )
     assert res.status_code == 400

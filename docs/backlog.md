@@ -42,19 +42,20 @@ Updated: 2026-05-14
 | P0 | Frontend | Orchestration run dashboard | Done | Project detail includes AI orchestration page with run start, run list, agent artifacts, quality checks, and approval state |
 | P0 | Frontend | Orchestration approval action UI | Done | Existing approve API wired into run dashboard with reviewer/comment input, submit button, approved-state refresh, and disabled state after approval |
 | P0 | Frontend | Land and risk review detail views | Done | Project land page split into review sections; project risk page shows all 20 PF risk management controls with API-assessed grade/score where available |
+| P0 | Frontend | Land Agent dashboard summary | Done | Main dashboard and project dashboard now show Land Agent signals for PNU, zoning/regulation, land acquisition, official land price, registry evidence, public land, and source/evidence readiness |
 | P0 | Integration | Korean Law MCP connector | Done | Sidecar integration guide, query plan MCP tool, `realytics-law-context-v1` adapter, citation verification handling, and legal-review integration completed; direct API-server MCP client automation is optional future hardening |
 | P0 | AI | Claude Desktop MCP user linkage | Done | MCP/API AI context records provider, host mode, model, and linked `user_id`; Claude Desktop mode returns host LLM extraction requests, Anthropic API key enables server-side Claude extraction |
 | P0 | Architecture | Repository architecture alignment plan | Done | Added `docs/architecture.md` with current vs target structure, gap analysis, migration principles, and phased refactor plan |
 | P0 | Architecture | Use case layer baseline | Done | Added `services/api-server/use_cases` and routed development feasibility, cash-flow run, and PF review orchestration through reusable application workflows |
 | P0 | Auth | User identity provider integration | Planned | Replace env/header-only user ID with login, tenant, session, and audit tables |
-| P0 | Report | Structured report export pipeline | In Progress | Markdown/JSON/print-ready HTML export history added; PDF/DOCX binary renderers remain next |
+| P0 | Report | Structured report export pipeline | Done | Markdown/JSON/print-ready HTML/PDF/DOCX export artifacts are supported with export history and download endpoints |
 | P0 | Parser | Source provenance per parsed field | In Progress | Market evidence field-level locator coverage is implemented; next step is locator coverage for non-market parser fields such as land, regulation, cost, schedule, PF, and covenants |
 | P0 | Integration | Batch PNU and official land price enrichment | Planned | Next after validation layer: resolve PNU with confidence score, fetch cadastral characteristics, official land price with base year/source, and registry/encumbrance evidence for imported parcels |
 | P0 | Report | PDF print layout QA | Done | Added A4 print CSS, table/section break controls, approval block handling, and QA checklist |
 | P1 | Export | Excel upload | In Progress | Feasibility Study v2 schema and workbook mapping designed; next step is XLSX template import validator |
 | P1 | Export | Developer feasibility Excel export | In Progress | Export should generate formula-preserving `realytics-fs-xlsx-v1` workbook with assumptions, product mix, costs, financing, monthly CF, sensitivity, summary, and checks |
-| P1 | Export | PDF export | Planned | |
-| P1 | Export | DOCX export | Planned | |
+| P1 | Export | PDF export | Done | Structured Phase 11 reports can be rendered as binary PDF artifacts and downloaded through saved export history |
+| P1 | Export | DOCX export | Done | Structured Phase 11 reports can be rendered as binary DOCX artifacts and downloaded through saved export history |
 | P1 | Architecture | Use case layer expansion | Done | Added use cases for land ledger import, marketability review, legal review, report generation/export, evidence review, and orchestration approval |
 | P1 | Architecture | Router thinning follow-up | In Progress | Project CRUD, source-document metadata, report, evidence, and orchestration persistence now use repository wrappers; remaining work is runtime archive file operations, project lookup in all endpoints, and async job state |
 | P1 | Architecture | Repository wrapper baseline | Done | Added report, market evidence, and orchestration repository wrappers and connected report/evidence/orchestration use cases through repositories |
