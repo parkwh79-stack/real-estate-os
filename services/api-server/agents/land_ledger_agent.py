@@ -33,6 +33,17 @@ SUPPORTED_WORKFLOW_STATUSES = [
 class LandLedgerAgent:
     """Parse Korean land acquisition ledgers into structured parcel data."""
 
+    def enrich_analysis(
+        self,
+        analysis: Dict[str, Any],
+        enrichment_options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Apply batch PNU/official-price/registry enrichment to a parsed ledger result."""
+        from agents.land_ledger_enrichment_agent import LandLedgerEnrichmentAgent
+
+        enriched = LandLedgerEnrichmentAgent().enrich(analysis, enrichment_options)
+        return self._rebuild_analysis(enriched)
+
     def analyze_xls(
         self,
         workbook_path: str | Path,
@@ -119,6 +130,29 @@ class LandLedgerAgent:
             "enrichmentPlan": self._enrichment_plan(),
             "supportedWorkflowStatuses": SUPPORTED_WORKFLOW_STATUSES,
         }
+
+    def _rebuild_analysis(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        parcels = analysis.get("parcels", [])
+        for parcel in parcels:
+            self._finalize_parcel(parcel)
+            parcel["qa"] = self._parcel_qa(parcel)
+            parcel["issues"] = self._parcel_issues(parcel)
+            parcel["workflowStatus"] = self._parcel_workflow_status(parcel)
+            parcel["pfReviewMapping"] = self._pf_review_mapping(parcel)
+
+        summary = self._summary(parcels)
+        source_totals = analysis.get("sourceTotals", {})
+        import_consistency = self._validate_import_consistency(parcels, summary, source_totals)
+        validation = self._validation(parcels, summary, source_totals)
+        analysis["summary"] = summary
+        analysis["importConsistency"] = import_consistency
+        analysis["validation"] = validation
+        analysis["landAcquisitionStatus"] = self._calculate_land_acquisition_status(parcels, summary)
+        analysis["pfSummary"] = self._generate_land_acquisition_pf_summary(parcels, summary)
+        analysis["qaProcess"] = self._qa_process(parcels)
+        if "importMetadata" in analysis:
+            analysis["importMetadata"]["validationStatus"] = validation["status"]
+        return analysis
 
     def _new_parcel(self, row: List[Any], sequence: int, row_index: int) -> Dict[str, Any]:
         dong = _clean_text(_cell(row, 1))

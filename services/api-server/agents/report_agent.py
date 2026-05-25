@@ -2,6 +2,8 @@ from typing import Dict, Any, List
 
 from core.calculations import calculate_exit_sale_rate, calculate_ltv
 from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
+from schemas.scenario import ScenarioSetRequest
+from agents.scenario_engine_agent import ScenarioEngineAgent
 
 class ReportAgent:
     def __init__(self):
@@ -31,6 +33,60 @@ class ReportAgent:
             "profit_margin",
             development_profit / total_revenue if total_revenue else 0,
         )
+
+        # Build ScenarioSetRequest on the fly using project inputs to get rich sensitivity grids
+        scenario_result = None
+        try:
+            raw_mix = input_data.get("product_mix") or input_data.get("productMix") or []
+            product_mix = []
+            for item in raw_mix:
+                if isinstance(item, dict):
+                    product_mix.append({
+                        "type": item.get("type") or item.get("name") or "A",
+                        "units": int(item.get("units") or item.get("unit_count") or 0),
+                        "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
+                        "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
+                    })
+            if not product_mix:
+                product_mix.append({
+                    "type": "General",
+                    "units": 100,
+                    "avgUnitPrice": (total_revenue / 100.0) if total_revenue else 1000000.0,
+                    "totalRevenue": total_revenue or 100000000.0
+                })
+
+            pf_structure = []
+            for idx, item in enumerate(tranches):
+                if isinstance(item, dict):
+                    pf_structure.append({
+                        "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
+                        "amount": float(item.get("amount") or 0.0),
+                        "priority": int(item.get("priority") or idx + 1),
+                        "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
+                        "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
+                    })
+            if not pf_structure:
+                pf_structure.append({
+                    "tranche": "Senior",
+                    "amount": total_pf or 10000000.0,
+                    "priority": 1,
+                    "interestRate": 0.065,
+                    "feeRate": 0.01
+                })
+
+            req = ScenarioSetRequest(
+                scenarioSetId="auto-report-set",
+                scenarioSetName="Auto Generated Report Scenario Set",
+                productMix=product_mix,
+                pfStructure=pf_structure,
+            )
+            scenario_result = ScenarioEngineAgent().run_scenario_set(req)
+        except Exception:
+            scenario_result = None
+
+        precedent_conditions = list(covenants.get("drawdown_conditions", []))
+        if scenario_result:
+            precedent_conditions.append(scenario_result.reportFragments.approvalCondition)
 
         sections = {
             "cover": self._structured_cover(project),
@@ -67,10 +123,10 @@ class ReportAgent:
             "financialStructureDiagram": self._structured_diagram(input_data),
             "salesPaymentSchedule": self._structured_sales_schedule(input_data.get("sales_schedule", {})),
             "salesRevenueDistribution": {
-                "policy": covenants.get("revenue_distribution", "대주단 협의 기준에 따름"),
-                "waterfall": covenants.get("execution_order", []),
+                "policy": scenario_result.reportFragments.waterfallSummary if scenario_result else covenants.get("revenue_distribution", "대주단 협의 기준에 따름"),
+                "waterfall": [w.model_dump() for w in scenario_result.waterfallScenarios] if scenario_result else covenants.get("execution_order", []),
             },
-            "summaryCashFlow": self._structured_cashflow(input_data, total_revenue, total_cost),
+            "summaryCashFlow": self._structured_cashflow(input_data, total_revenue, total_cost, scenario_result),
             "borrowerAnalysis": self._structured_party(input_data.get("developer_info", {}), "시행사"),
             "contractorAnalysis": self._structured_party(input_data.get("contractor_info", {}), "시공사"),
             "marketAnalysis": self._structured_market(input_data),
@@ -81,12 +137,14 @@ class ReportAgent:
                     "profitMargin": profit_margin,
                     "developmentProfit": development_profit,
                     "developmentProfitMillion": self._million(development_profit),
+                    "unsoldLtvBase": scenario_result.unsoldLtvMatrix.summary["baseCaseLtv"] if scenario_result else None,
+                    "unsoldLtvStress": scenario_result.unsoldLtvMatrix.summary["stressCaseLtv"] if scenario_result else None,
                 },
-                "summary": "LTV, Exit 분양률, 수익률을 기준으로 대출 회수 가능성을 점검합니다.",
+                "summary": scenario_result.reportFragments.unsoldLtvSummary if scenario_result else "LTV, Exit 분양률, 수익률을 기준으로 대출 회수 가능성을 점검합니다.",
             },
-            "exitStrategy": self._structured_exit_strategy(input_data, covenants),
+            "exitStrategy": self._structured_exit_strategy(input_data, covenants, scenario_result),
             "drawdownConditions": {
-                "precedent": covenants.get("drawdown_conditions", []),
+                "precedent": precedent_conditions,
                 "subsequent": covenants.get("subsequent_conditions", ["분양률 및 공정률 정기 보고", "자금집행 증빙 제출"]),
             },
             "eodTriggers": {
@@ -119,7 +177,61 @@ class ReportAgent:
         """
         project = input_data.get("project", {})
         covenants = input_data.get("covenants", {})
-        
+        tranches = input_data.get("pf_structure", [])
+        feasibility = input_data.get("feasibility_input", {})
+        total_pf = sum(t.get("amount", 0) for t in tranches)
+        total_revenue = feasibility.get("total_revenue", 0)
+
+        # Build ScenarioSetRequest on the fly using project inputs to get rich sensitivity grids
+        scenario_result = None
+        try:
+            raw_mix = input_data.get("product_mix") or input_data.get("productMix") or []
+            product_mix = []
+            for item in raw_mix:
+                if isinstance(item, dict):
+                    product_mix.append({
+                        "type": item.get("type") or item.get("name") or "A",
+                        "units": int(item.get("units") or item.get("unit_count") or 0),
+                        "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
+                        "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
+                    })
+            if not product_mix:
+                product_mix.append({
+                    "type": "General",
+                    "units": 100,
+                    "avgUnitPrice": (total_revenue / 100.0) if total_revenue else 1000000.0,
+                    "totalRevenue": total_revenue or 100000000.0
+                })
+
+            pf_structure = []
+            for idx, item in enumerate(tranches):
+                if isinstance(item, dict):
+                    pf_structure.append({
+                        "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
+                        "amount": float(item.get("amount") or 0.0),
+                        "priority": int(item.get("priority") or idx + 1),
+                        "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
+                        "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
+                    })
+            if not pf_structure:
+                pf_structure.append({
+                    "tranche": "Senior",
+                    "amount": total_pf or 10000000.0,
+                    "priority": 1,
+                    "interestRate": 0.065,
+                    "feeRate": 0.01
+                })
+
+            req = ScenarioSetRequest(
+                scenarioSetId="auto-report-set",
+                scenarioSetName="Auto Generated Report Scenario Set",
+                productMix=product_mix,
+                pfStructure=pf_structure,
+            )
+            scenario_result = ScenarioEngineAgent().run_scenario_set(req)
+        except Exception:
+            scenario_result = None
+
         md = self._build_cover(project)
         md += self._build_financial_terms(input_data)
         md += self._build_claim_preservation(covenants)
@@ -130,14 +242,14 @@ class ReportAgent:
         md += self._build_project_schedule(input_data)
         md += self._build_financial_structure_diagram(input_data)
         md += self._build_sales_schedule(input_data)
-        md += self._build_revenue_distribution(covenants)
-        md += self._build_cashflow_summary(input_data)
+        md += self._build_revenue_distribution(covenants, scenario_result)
+        md += self._build_cashflow_summary(input_data, scenario_result)
         md += self._build_borrower_analysis(input_data)
         md += self._build_contractor_analysis(input_data)
         md += self._build_marketability_analysis(input_data)
         md += self._build_feasibility_analysis(input_data)
-        md += self._build_exit_strategy(input_data)
-        md += self._build_drawdown_conditions(covenants)
+        md += self._build_exit_strategy(input_data, scenario_result)
+        md += self._build_drawdown_conditions(covenants, scenario_result)
         md += self._build_eod(covenants)
         md += self._build_fund_execution_order(covenants)
         
@@ -244,14 +356,25 @@ class ReportAgent:
             {"type": "잔금", "ratio": schedule.get("balance", 0), "timing": "입주 지정기간"},
         ]
 
-    def _structured_cashflow(self, data: Dict[str, Any], total_revenue: float, total_cost: float) -> Dict[str, Any]:
+    def _structured_cashflow(self, data: Dict[str, Any], total_revenue: float, total_cost: float, scenario_result: Any = None) -> Dict[str, Any]:
         profit = total_revenue - total_cost
+        rows = [
+            {"scenario": "기준", "cashIn": total_revenue, "cashOut": total_cost, "netCashFlow": profit},
+            {"scenario": "분양수입 10% 하락", "cashIn": total_revenue * 0.9, "cashOut": total_cost, "netCashFlow": total_revenue * 0.9 - total_cost},
+        ]
+        if scenario_result:
+            for w in scenario_result.waterfallScenarios:
+                if w.scenarioId in {"sale_70_disc_0", "sale_50_disc_10"}:
+                    label = "분양률 70% 시나리오" if "70" in w.scenarioId else "스트레스 분양률 50% (할인 10%)"
+                    rows.append({
+                        "scenario": label,
+                        "cashIn": w.cashAvailable,
+                        "cashOut": total_cost,
+                        "netCashFlow": w.cashAvailable - total_cost
+                    })
         return {
-            "assumption": "분양률 기본 시나리오 기준 요약 현금흐름입니다.",
-            "rows": [
-                {"scenario": "기준", "cashIn": total_revenue, "cashOut": total_cost, "netCashFlow": profit},
-                {"scenario": "분양수입 10% 하락", "cashIn": total_revenue * 0.9, "cashOut": total_cost, "netCashFlow": total_revenue * 0.9 - total_cost},
-            ],
+            "assumption": "분양률 기본 및 스트레스 시나리오 기준 요약 현금흐름입니다.",
+            "rows": rows,
         }
 
     def _structured_party(self, party: Dict[str, Any], role: str) -> Dict[str, Any]:
@@ -274,14 +397,17 @@ class ReportAgent:
             "summary": "입지, 경쟁 공급, 분양가 적정성을 기준으로 분양성을 점검합니다.",
         }
 
-    def _structured_exit_strategy(self, data: Dict[str, Any], covenants: Dict[str, Any]) -> Dict[str, Any]:
+    def _structured_exit_strategy(self, data: Dict[str, Any], covenants: Dict[str, Any], scenario_result: Any = None) -> Dict[str, Any]:
+        fallback = [
+            "할인분양 Trigger 실행",
+            "미분양 담보대출 또는 대환",
+            "시공사 책임준공 및 기타 신용보강 활용",
+        ]
+        if scenario_result:
+            fallback.append(scenario_result.reportFragments.trancheRecoverySummary)
         return {
             "primary": "분양수입금 기반 PF 원리금 상환",
-            "fallback": [
-                "할인분양 Trigger 실행",
-                "미분양 담보대출 또는 대환",
-                "시공사 책임준공 및 기타 신용보강 활용",
-            ],
+            "fallback": fallback,
             "discountTriggers": covenants.get("discount_triggers", []),
         }
 
@@ -418,14 +544,24 @@ class ReportAgent:
         md += f"- **잔금**: {s.get('balance', 0)*100}% (입주 시)\n"
         return md + "\n"
 
-    def _build_revenue_distribution(self, covenants: Dict[str, Any]) -> str:
+    def _build_revenue_distribution(self, covenants: Dict[str, Any], scenario_result: Any = None) -> str:
         md = "## 10. 분양수입금 배분 기준\n\n"
-        md += f"{covenants.get('revenue_distribution', '대주단 협의 기준에 따름')}\n"
+        if scenario_result:
+            md += f"{scenario_result.reportFragments.waterfallSummary}\n"
+        else:
+            md += f"{covenants.get('revenue_distribution', '대주단 협의 기준에 따름')}\n"
         return md + "\n"
 
-    def _build_cashflow_summary(self, data: Dict[str, Any]) -> str:
+    def _build_cashflow_summary(self, data: Dict[str, Any], scenario_result: Any = None) -> str:
         md = "## 11. 요약 현금흐름표\n\n"
-        md += "분양률 시나리오 기반의 월별 Cash-In/Out 분석 결과, 본 사업의 자금 부족액(Max Minus)은 대출 한도 내에서 충분히 커버 가능함.\n"
+        if scenario_result:
+            md += "### 분양률/할인 시나리오별 자금회수 및 현금유입\n\n"
+            md += "| 시나리오 ID | 분양률 | 할인율 | 회수 자금 | 리스크 경고 |\n"
+            md += "|:---|:---|:---|:---|:---|\n"
+            for w in scenario_result.waterfallScenarios:
+                md += f"| {w.scenarioId} | {w.saleRate*100}% | {w.discountRate*100}% | {w.cashAvailable:,}원 | {'경고 발생' if w.totalShortfall > 0 else '정상 회수'} |\n"
+        else:
+            md += "분양률 시나리오 기반의 월별 Cash-In/Out 분석 결과, 본 사업의 자금 부족액(Max Minus)은 대출 한도 내에서 충분히 커버 가능함.\n"
         return md + "\n"
 
     def _build_borrower_analysis(self, data: Dict[str, Any]) -> str:
@@ -457,13 +593,17 @@ class ReportAgent:
         md += f"- **수익률(Margin)**: {er.get('profit_margin', 0)*100}%\n"
         return md + "\n"
 
-    def _build_exit_strategy(self, data: Dict[str, Any]) -> str:
+    def _build_exit_strategy(self, data: Dict[str, Any], scenario_result: Any = None) -> str:
         md = "## 16. Exit 전략 및 상환 재원\n\n"
         md += "1차적으로 분양수입금을 통한 원리금 상환을 추진하며, 비상시 할인분양 또는 미분양 담보대출을 통한 대환 상환 시나리오를 확보함.\n"
+        if scenario_result:
+            md += f"\n**[시나리오 스트레스 테스트 분석]**\n{scenario_result.reportFragments.trancheRecoverySummary}\n"
         return md + "\n"
 
-    def _build_drawdown_conditions(self, covenants: Dict[str, Any]) -> str:
-        conds = covenants.get("drawdown_conditions", [])
+    def _build_drawdown_conditions(self, covenants: Dict[str, Any], scenario_result: Any = None) -> str:
+        conds = list(covenants.get("drawdown_conditions", []))
+        if scenario_result:
+            conds.append(scenario_result.reportFragments.approvalCondition)
         md = "## 17. 대출금 인출 선행조건\n\n"
         if not conds:
             md += "- 인허가 완료 및 신탁계약 체결 등\n"

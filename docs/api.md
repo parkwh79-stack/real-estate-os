@@ -35,7 +35,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Upload a PDF business plan and extract project data with the configured server-side AI provider.
 - **Headers**: Optional `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER` (`openai`, `anthropic`, or `claude_desktop`).
 - **Request Body**: Multipart form with `file`.
-- **Response**: Updated project object with parser `_meta.ai_connection` and `_meta.upload` provenance. Upload provenance includes original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, archive ID, archive path, and source document download URL. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
+- **Response**: Updated project object with parser `_meta.ai_connection` and `_meta.upload` provenance. Upload provenance includes original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, archive ID, archive path, archive hash algorithm, integrity status, and source document download URL. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
 
 ### `POST /projects/{project_id}/upload-and-run`
 - **Description**: Upload a PDF business plan, parse/update the project, then immediately run PF review orchestration and save the generated report.
@@ -46,12 +46,12 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 
 ### `GET /projects/{project_id}/source-documents`
 - **Description**: List uploaded source documents attached to the project.
-- **Response**: Source document metadata including original file name, SHA-256 hash, archive ID, file size, content type, upload timestamp, parser version, archive path, and download URL.
+- **Response**: Source document metadata including original file name, SHA-256 hash, archive ID, file size, content type, upload timestamp, parser version, archive path, archive hash algorithm, integrity status, and download URL.
 
 ### `GET /projects/{project_id}/source-documents/{archive_id}/download`
 - **Description**: Download the archived original source document for audit review.
 - **Response**: Original uploaded file as an attachment.
-- **Note**: The download is only available when the archive ID is listed on the project source document metadata.
+- **Note**: The download is only available when the archive ID is listed on the project source document metadata and the archived binary still matches its SHA-256 archive ID.
 
 ### `POST /projects/{project_id}/ai/connection/resolve`
 - **Description**: Resolve the active AI provider, model, runtime mode, and linked user ID without calling an external model.
@@ -73,7 +73,13 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Upload and analyze a legacy Korean land ledger `.xls` file.
 - **Request Body**: Multipart file upload.
 - **Response**: Import metadata, source totals, parcel list, owner/payment records, total area, total contract amount, validation status, import consistency checks, land acquisition status, PF summary, missing PNU/official-land-price indicators, registry evidence readiness, and enrichment plan.
-- **Note**: The current endpoint parses and validates the ledger but does not yet resolve PNU, fetch official land prices, or attach registry evidence automatically. If original workbook totals and parsed totals fail reconciliation, the response status is `needs_review` even when the file parses successfully.
+- **Note**: If original workbook totals and parsed totals fail reconciliation, the response status is `needs_review` even when the file parses successfully.
+
+### `POST /projects/{project_id}/land-ledger/enrich`
+- **Description**: Enrich a parsed land ledger with batch PNU, cadastral characteristics, official land price, and registry/encumbrance evidence.
+- **Request Body**: `{ "landLedger": {...}, "options": { "legalDongCode": "2729012300", "pnuResolutions": [], "cadastralCharacteristics": [], "officialLandPrices": [], "registryEvidence": [] }, "persist": false }`
+- **Response**: Updated land ledger with refreshed parcel QA, workflow status, enrichment run summary, PF summary, evidence records, and coverage ratios.
+- **Data Policy**: The endpoint can generate PNU from a configured legal dong code and normalized lot numbers, but official land price and registry evidence are never fabricated. They must come from provided connector records or future public/licensed adapters with base year/source evidence.
 
 ### `POST /projects/{project_id}/cashflow/calculate`
 - **Description**: Trigger monthly cash flow calculation.
@@ -95,6 +101,21 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Evaluate project risks.
 - **Request Body**: `{ "project_data": {...}, "risk_items": [...] }`. If `risk_items` is omitted, the API infers baseline project risks from land, permit, PF, feasibility, and covenant data.
 - **Response**: Basic PF risk matrix, category rows, assessed items, top risks, 5x5 heatmap, recommendations, missing categories, and overall risk rating.
+
+### `POST /projects/{project_id}/scenarios/waterfall`
+- **Description**: Run the Calculation Scenario Engine and return Waterfall repayment allocation scenarios.
+- **Request Body**: Scenario input can include `productMix`, `pfStructure`, `scenarioDrivers`, `waterfallRule`, and `sourceMetadata`. When omitted, the endpoint derives baseline product mix and PF structure from the project record.
+- **Response**: Scenario set ID and waterfall scenarios with sale rate, discount rate, cash available, claim amount, shortfall, and tranche-level payment/recovery rows.
+
+### `POST /projects/{project_id}/scenarios/unsold-ltv-matrix`
+- **Description**: Run the Calculation Scenario Engine and return a 2D unsold LTV matrix across sale-rate and discount-rate vectors.
+- **Request Body**: Same scenario input shape as `/scenarios/waterfall`.
+- **Response**: Scenario set ID and unsold LTV matrix with gross/discounted unsold value, unsold LTV, risk level, and summary metrics.
+
+### `POST /projects/{project_id}/scenarios/recovery`
+- **Description**: Run and persist a full recovery scenario set including waterfall scenarios, unsold LTV matrix, tranche recovery matrix, risk flags, and report fragments.
+- **Request Body**: Same scenario input shape as `/scenarios/waterfall`.
+- **Response**: `calculation_scenario_engine_v1` result and saved `project.scenario_results[scenarioSetId]`.
 
 ### `POST /projects/{project_id}/marketability/analyze`
 - **Description**: Analyze saleability for saleable real estate assets such as apartments, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale projects.
@@ -196,19 +217,36 @@ The `phase-11-pf-review` template returns these `report.sections` keys:
 ### `POST /projects/{project_id}/orchestrations/pf-review`
 - **Description**: Run the MVP PF review orchestration workflow synchronously.
 - **Request Body**: `{ "project_data": {...}, "options": { "user_id": "user-123", "ai_context": { "provider": "claude_desktop" } } }`
-- **Response**: An orchestration run with status, step outputs, artifacts, and errors.
+- **Response**: An orchestration run with status, step outputs, typed `handoffs`, per-agent `agentProgress`, artifacts, and errors.
 
-The workflow executes these steps:
+The workflow executes these canonical step keys:
 
-- `project_load`: 프로젝트 데이터 로드
-- `development_feasibility_analysis`: 디벨로퍼 사업수지분석
-- `feasibility_calculation`: 사업성 계산
-- `pf_structure_calculation`: PF 구조 계산
-- `marketability_analysis`: 분양성 검증
-- `legal_permit_review`: 법률/인허가 예비 검토
-- `risk_assessment`: 리스크 평가
-- `phase11_report_generation`: Phase 11 보고서 생성
-- `quality_check`: 품질 점검
+- `project_load`: Project data load
+- `land_agent_review`: Land acquisition and evidence review
+- `development_feasibility_analysis`: Developer feasibility analysis
+- `feasibility_calculation`: Feasibility calculation
+- `pf_structure_calculation`: PF structure calculation
+- `market_evidence_reconciliation`: Market evidence reconciliation
+- `marketability_analysis`: Marketability analysis
+- `data_quality_review`: Data quality review
+- `cross_agent_reconciliation`: Cross-agent reconciliation gate
+- `legal_permit_review`: Legal and permit pre-review
+- `risk_assessment`: Risk assessment
+- `risk_register_generation`: Risk register generation
+- `credit_review_decision`: Credit review decision
+- `phase11_report_generation`: Phase 11 report generation
+- `evidence_graph_generation`: Evidence graph generation
+- `quality_check`: Quality check
+
+Typed handoff artifacts currently include:
+
+- `development_feasibility_to_cash_flow`
+- `land_to_feasibility_legal_pf`
+- `market_evidence_to_marketability`
+- `marketability_to_feasibility`
+- `legal_to_credit_review`
+- `risk_register_to_credit_review`
+- `credit_review_to_report`
 
 ### `GET /projects/{project_id}/orchestrations`
 - **Description**: List PF review orchestration runs for a project.
@@ -218,7 +256,32 @@ The workflow executes these steps:
 - **Description**: Retrieve a specific orchestration run including steps and artifacts.
 - **Response**: Full orchestration run payload.
 
+### `GET /projects/{project_id}/snapshots`
+- **Description**: List immutable project snapshots saved from PF review orchestration runs.
+- **Response**: Snapshot metadata including `snapshotId`, `runId`, workflow, status, artifact keys, handoff count, reconciliation status, and quality pass flag.
+
+### `GET /projects/{project_id}/snapshots/{snapshot_id}`
+- **Description**: Retrieve one full server-side project snapshot for audit review or future similar-case comparison.
+- **Response**: `realytics-project-snapshot-v1` payload with canonical project inputs, orchestration summary, agent progress, typed handoffs, key agent artifacts, reconciliation result, quality gate, report metadata, and case-comparison seed fields.
+
+### `POST /projects/{project_id}/snapshots/similar`
+- **Description**: Search stored project snapshots for deterministic similar PF review cases and historical risk handling.
+- **Request**: Optional `snapshotId`, `limit`, `minScore`, and `includeSameProject`.
+- **Response**: `realytics-similar-case-search-v1` payload with the query seed, ranked similar cases, score breakdown, matched dimensions, matched risk rows, historical review status, mitigants, approval conditions, and Credit Review decision outcome.
+
 ### `POST /projects/{project_id}/orchestrations/{run_id}/approve`
 - **Description**: Mark a completed orchestration run as approved.
 - **Request Body**: `{ "approved_by": "credit_officer", "comment": "..." }`
 - **Response**: Updated orchestration run.
+- **Approval Gate**: Returns `409` when any handoff that requires review is still pending, rejected, or marked needs-revision.
+
+### `POST /projects/{project_id}/orchestrations/{run_id}/handoffs/{handoff_id}/review`
+- **Description**: Review one typed agent handoff inside an orchestration run.
+- **Request Body**: `{ "review_status": "approved | rejected | needs_revision", "reviewed_by": "credit_officer", "comment": "..." }`
+- **Response**: Updated orchestration run with the handoff review status, review history, and related `agentProgress` review flags.
+
+### `POST /projects/{project_id}/orchestrations/{run_id}/risk-register/{risk_id}/review`
+- **Description**: Review one Risk Register row inside an orchestration run.
+- **Request Body**: `{ "review_status": "approved | waived | needs_revision | resolved", "reviewed_by": "credit_officer", "comment": "...", "waiver_reason": "..." }`
+- **Response**: Updated orchestration run with the risk row `reviewStatus`, reviewer, timestamp, comment, `reviewHistory`, Risk Register review summary, and refreshed Credit Review human-review metadata.
+- **Approval Gate**: Final run approval is blocked while material risk rows that require human review remain outside `approved`, `waived`, or `resolved`.

@@ -1,6 +1,6 @@
 # REALYTICS x PLATFORM9 Current Implementation Status
 
-Updated: 2026-05-19
+Updated: 2026-05-20
 
 ## Summary
 
@@ -12,7 +12,27 @@ The AI connection layer records provider, runtime mode, model, host, and linked 
 
 The application layer now includes baseline `use_cases` modules so API endpoints, MCP tools, future background jobs, and future UI-triggered actions can reuse the same workflow functions instead of duplicating agent orchestration in routers.
 
-The persistence boundary now includes baseline repository wrappers for project CRUD, source document metadata, reports, market evidence, and orchestration runs. These wrappers sit above the current SQLite/JSON-backed runtime stores and are used by the project routes, upload/source-document routes, report, evidence, orchestration, and approval use cases.
+The persistence boundary now includes baseline repository wrappers for project CRUD, source document metadata, upload archive files, reports, market evidence, and orchestration runs. These wrappers sit above the current SQLite/JSON-backed runtime stores and are used by the project routes, upload/source-document routes, report, evidence, orchestration, and approval use cases.
+
+Agent-to-agent interaction now has a baseline implementation. PF review orchestration runs return typed `AgentHandoffEnvelope` artifacts and an `agentProgress` ledger, including Land to Feasibility/Legal/PF, Development Feasibility to Cash Flow, Market Evidence to Marketability, Marketability to Feasibility, and Legal to Credit Review handoffs. A first cross-agent reconciliation gate now checks revenue, land area, evidence readiness, and PF metric availability before legal/risk/report steps. Richer reviewer assignment remains a next architecture step. The target model is documented in `docs/product/agent-interaction-operating-model.md`.
+
+The long-term product direction is now documented as a Real Estate OS: agents should share canonical schemas, use controlled terminology, preserve evidence and source metadata on the server, create project snapshots per review run, and eventually compare current projects against a historical PF/development review database.
+
+Server-side project snapshots are now implemented as `realytics-project-snapshot-v1`. Each saved PF review run creates an immutable snapshot with canonical project inputs, agent artifacts, handoffs, reconciliation output, quality gate, report metadata, and case-comparison seed fields. Snapshot list/get APIs are available for audit and future similar-case retrieval.
+
+Historical Similar Case Search is now implemented as `realytics-similar-case-search-v1`. It compares stored project snapshots by case seed metrics, location tokens, PF size, LTV/LTC, Exit sale rate, market/land/reconciliation status, and Risk Register overlap, then returns how similar historical risks were reviewed, mitigated, waived, resolved, or converted into approval conditions.
+
+Evidence Graph Agent is now implemented as `realytics-evidence-graph-v1`. PF review orchestration creates an `evidenceGraph` artifact after Phase 11 report generation, linking project input, source documents, evidence IDs, agent artifacts, handoffs, extracted claims, Risk Register rows, source locators, and report sections. This is the baseline audit trail for explaining where report numbers, judgements, and material risk rows came from.
+
+Data Quality Agent is now implemented as `realytics-data-quality-v1`. PF review orchestration creates a `dataQualityReview` artifact before cross-agent reconciliation to detect project name, land area, GFA, sales revenue, PF amount, unit count, sqm/py conversion, VAT basis, schedule, and tranche structure conflicts. Blocking data quality issues prevent the orchestration quality gate from passing.
+
+Risk Register Agent is now implemented as `realytics-risk-register-v1`. PF review orchestration creates a `riskRegister` artifact after the Basic Risk Matrix and before report generation, consolidating Land, Marketability, Legal, Cash Flow, PF Structure, Scenario, Data Quality, and Risk Matrix issues into one credit-review table with top risks, approval-condition candidates, and a `risk_register_to_credit_review` handoff.
+
+Risk Register review workflow is now implemented. Material risk rows can be marked `approved`, `waived`, `needs_revision`, or `resolved` with reviewer, timestamp, comment, waiver reason, and row-level audit history. Final orchestration approval is blocked while risk rows requiring human review remain unresolved.
+
+Risk Register rows now carry `evidenceGraphLinks`. Each row is represented as a graph `risk` node and is linked back to its source artifact, evidence IDs, source documents, source locators, and supporting claim nodes when available.
+
+Credit Review Agent is now implemented as `realytics-credit-review-v1`. PF review orchestration creates a `creditReviewDecision` artifact after Risk Register and before report generation, converting Risk Register, Legal, Data Quality, Reconciliation, Marketability, and PF metrics into `approve`, `conditional_approval`, `rework_required`, or `reject_recommended` guidance with reasons, mitigants, waivers, approval conditions, and report paragraphs.
 
 ## Implemented
 
@@ -53,7 +73,7 @@ Implemented baseline:
 
 - Development feasibility use case merges project state with request overrides and calls Development Feasibility Agent.
 - Project management use case handles create, list, get, update, delete, and parsed upload application through `ProjectRepository`.
-- Source document use case handles uploaded document metadata save/list/find through `SourceDocumentRepository`.
+- Source document use case handles uploaded document metadata save/list/find through `SourceDocumentRepository` and binary archive save/download metadata through `UploadArchiveRepository`.
 - Cash Flow use case accepts a direct `CashFlowRunRequest` or derives one through the canonical Development Feasibility path.
 - PF review use case runs the orchestration workflow without coupling it to FastAPI.
 - Land ledger, marketability, legal review, report generation/export, market evidence review, and orchestration approval use cases are now available.
@@ -71,6 +91,7 @@ Files:
 
 - `services/api-server/db/repositories/project_repository.py`
 - `services/api-server/db/repositories/source_document_repository.py`
+- `services/api-server/db/repositories/upload_archive_repository.py`
 - `services/api-server/db/repositories/report_repository.py`
 - `services/api-server/db/repositories/market_evidence_repository.py`
 - `services/api-server/db/repositories/orchestration_repository.py`
@@ -79,6 +100,7 @@ Implemented baseline:
 
 - Project repository creates, lists, fetches, updates, deletes, normalizes, and applies parsed project records.
 - Source document repository stores uploaded document metadata, lists project source documents, and locates archive metadata by archive ID.
+- Upload archive repository stores source document binaries, resolves archive paths, verifies SHA-256 integrity, returns download metadata, and cleans up project archive folders.
 - Report repository creates report records, lists report metadata, fetches saved reports, saves exports, and returns export metadata.
 - Market evidence repository lists, fetches, stores, and sorts market evidence records.
 - Orchestration repository saves PF review runs, persists related market evidence, creates report records for Phase 11 artifacts, lists run metadata, and fetches runs.
@@ -86,7 +108,6 @@ Implemented baseline:
 
 Remaining:
 
-- Runtime upload archive binary repository/service.
 - Async job state repository.
 
 ### Phase 11 PF Review Report
@@ -102,6 +123,8 @@ Remaining:
 - Frontend report payload types in `apps/web/lib/report-types.ts`.
 - Anonymized Hana-style regression fixture in `services/api-server/data/fixtures/hana_pf_review_anonymized.json`.
 - A4 print QA controls and checklist in `docs/product/pdf-print-layout-qa.md`.
+- Automated visual QA and layout verification via `VisualQAAgent` using PyMuPDF (A4 size validation, overlap/collision checks, margin boundary checks, and pixel-by-pixel visual regression comparison), fully integrated as an automated Quality Gate during the `quality_check` orchestration step.
+
 
 ### PF Review Orchestration
 
@@ -116,6 +139,8 @@ Remaining:
   - `workflow`
   - `status`
   - `steps`
+  - `agentProgress`
+  - `handoffs`
   - `artifacts`
   - `errors`
   - `approval`
@@ -126,6 +151,22 @@ Frontend:
 - Route: `apps/web/app/project/[id]/orchestration/page.tsx`
 - The screen can start a PF review run, refresh run history, select a run, and inspect developer feasibility, marketability, legal/permit, report, quality-check artifacts, and approval state.
 - The screen can approve completed runs through the existing approve API with reviewer/comment input and immediate state refresh.
+- Orchestration run payloads now include typed handoff envelopes and per-agent progress records for downstream UI review.
+- The orchestration screen now displays `Agent Progress` and `Agent Handoffs` panels with progress bars, dependencies, latest artifacts, review flags, handoff routes, payload previews, confidence, evidence counts, blockers, assumptions, and data limitations.
+- The orchestration screen can now review individual handoffs as approved, rejected, or needs revision. Reviews persist reviewer, timestamp, comment, and review history, and update related agent progress review flags.
+- Final run approval is now blocked when any handoff that requires review is still pending, rejected, or marked needs-revision. The orchestration screen shows open review count and disables final approval until those handoffs are cleared.
+- The orchestration screen now renders a premium `SensitivityMatricesPanel` showcasing interactive tabs for Waterfall repayment allocation simulation (by dropdown scenario selection), a color-coded 2D Unsold LTV stress heatmap (mapping LTV values to HSL risk bands: safe, caution, high, critical), and tranche-level final recovery ratios under variable sale/discount triggers.
+
+
+Current limitation:
+
+- Orchestration runs are still sequential and synchronous.
+- Per-agent progress percentage, typed handoff envelopes, handoff review actions, and approval blocking for unresolved handoffs are now implemented. Remaining work is to add richer reviewer assignment, role-based permissions, and cross-run audit reporting.
+- Land Ledger Agent output is available through upload/analyze, but it is not yet a required first-class step in the PF review orchestration graph.
+- Land Agent output now produces a formal `land_to_feasibility_legal_pf` patch handoff for site, land cost, evidence readiness, PF land summary, acquisition status, blockers, limitations, confidence, and review state.
+- Marketability output now produces a formal Feasibility assumption patch handoff, but Development Feasibility does not yet reconcile and rerun from that patch automatically.
+- Orchestration now creates `reconciliationGate` artifacts to compare feasibility revenue, marketability revenue, project land area, Land Agent parcel area, official price readiness, registry readiness, market evidence readiness, and PF metric availability.
+- Canonical schema registry, glossary/canonical field map, risk register agent, approved override workflow, and historical review database remain next implementation work.
 
 ### Persistent MVP State Storage
 
@@ -246,13 +287,22 @@ Purpose:
 API:
 
 - `POST /projects/{project_id}/land-ledger/analyze`
+- `POST /projects/{project_id}/land-ledger/enrich`
 
 Important:
 
 - The reviewed sample contains 9 parcels, 22 owner/payment records, 4,691.9 sqm, and KRW 41.374 billion total contract amount.
 - The sample does not contain PNU or official land price, so the correct status is `needs_enrichment`.
-- The existing frontend PNU lookup is single-PNU and land-use focused; backend batch PNU and official land price enrichment is still required.
+- Backend batch PNU and evidence enrichment now exists through `LandLedgerEnrichmentAgent`; live public/official adapters still require API credentials and connector configuration.
 - Land ledger imports must not become `ready_for_pf_review` until PNU, official price, registry evidence, security redaction, and PF output mapping pass.
+
+2026-05-20 update:
+
+- Added `services/api-server/agents/land_ledger_enrichment_agent.py`.
+- `LandLedgerAgent.enrich_analysis` now combines parsed land ledger output with batch enrichment results and rebuilds parcel QA, workflow status, land acquisition status, and PF summary.
+- `/land-ledger/enrich` can resolve PNU from a confirmed legal dong code plus normalized lot number, or from supplied PNU resolution records.
+- The enrichment workflow attaches cadastral characteristics, official land price with base year/source, and registry/encumbrance evidence from connector/manual records.
+- Official land price and registry evidence are not fabricated when source records are missing; missing records remain enrichment/legal/PF blockers.
 
 2026-05-14 update:
 
@@ -404,15 +454,21 @@ API/MCP user linkage:
 ## Current Orchestration Steps
 
 1. `project_load`: Load project data.
-2. `development_feasibility_analysis`: Analyze developer-side feasibility from business/basic architectural plan fields.
-3. `feasibility_calculation`: Run core feasibility calculations.
-4. `pf_structure_calculation`: Calculate PF tranche and loan structure metrics.
-5. `market_evidence_reconciliation`: Reconcile uploaded document-derived market evidence before Marketability scoring.
-6. `marketability_analysis`: Validate marketability for saleable real estate assets.
-7. `legal_permit_review`: Run preliminary legal, permit, land-rights, trust-security, and covenant checks.
-8. `risk_assessment`: Produce a basic risk matrix.
-9. `phase11_report_generation`: Generate the Phase 11 PF review report artifact.
-10. `quality_check`: Check required artifacts and report completeness.
+2. `land_agent_review`: Review land acquisition and evidence readiness.
+3. `development_feasibility_analysis`: Analyze developer-side feasibility from business/basic architectural plan fields.
+4. `feasibility_calculation`: Run core feasibility calculations.
+5. `pf_structure_calculation`: Calculate PF tranche and loan structure metrics.
+6. `market_evidence_reconciliation`: Reconcile uploaded document-derived market evidence before Marketability scoring.
+7. `marketability_analysis`: Validate marketability for saleable real estate assets.
+8. `data_quality_review`: Detect numeric conflicts across documents, inputs, and Agent outputs.
+9. `cross_agent_reconciliation`: Reconcile cross-Agent assumptions before legal/risk/report steps.
+10. `legal_permit_review`: Run preliminary legal, permit, land-rights, trust-security, and covenant checks.
+11. `risk_assessment`: Produce a basic risk matrix.
+12. `risk_register_generation`: Consolidate Agent risks into one credit-review table.
+13. `credit_review_decision`: Produce approve/conditional/rework/reject credit guidance.
+14. `phase11_report_generation`: Generate the Phase 11 PF review report artifact.
+15. `evidence_graph_generation`: Link evidence, claims, handoffs, and report sections.
+16. `quality_check`: Check required artifacts and report completeness.
 
 ## Verification
 
@@ -425,6 +481,8 @@ Latest verification baseline:
 - Project/source-document repository compile and smoke: passed for project create/update/apply/delete, project-scoped cleanup, source metadata save/list/find, and project router import compilation.
 - Web Land Agent dashboard verification: `npm run lint --workspace web` passed, `npm run check-types --workspace web` passed, and browser DOM checks confirmed the main dashboard and project dashboard render the new land analysis sections.
 - Report export renderer verification: Python compile passed for report export agent/router/tests; direct export smoke passed for markdown, JSON, HTML, PDF, and DOCX with JSON-serializable storage records and binary decode checks.
+- PDF/DOCX Visual Regression Verification: passed automated structural and visual regression tests under `tests/test_visual_regression.py` using PyMuPDF (A4 dimension checking, paragraph overlap checks, vertical/horizontal margin boundary checks, and pixel-by-pixel regression baselines).
+
 
 - Land Ledger targeted test: `1 passed`
 - Real sample land ledger validation: executed against `01.본리동토지조서.xls`; status `needs_review`, PF summary `needs_enrichment`
@@ -446,10 +504,10 @@ Latest verification baseline:
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 - Source-level provenance per parsed field is not yet persisted.
 - Markdown, JSON, print-ready HTML, PDF, and DOCX report exports are implemented from the same structured Phase 11 report record.
-- Calculation Scenario Engine design is documented in `docs/product/calculation-scenario-engine.md`; existing waterfall and unsold LTV pure functions remain implemented, while API/UI scenario workflows are still pending.
+- Calculation Scenario Engine: fully implemented and documented. Features schemas (`schemas/scenario.py`), coordination wrapper (`ScenarioEngineAgent` inside `agents/scenario_engine_agent.py`), three API endpoints (`/scenarios/waterfall`, `/scenarios/unsold-ltv-matrix`, `/scenarios/recovery`), SQLite persistence, risk flag compilation, and Korean Hana-style PF review report synthesis.
 - Cash Flow Engine / Cash Flow Agent design is documented in `docs/product/cash-flow-engine-agent.md`; it aligns FeasibilityStudyV2 with monthly cash flow, Max Minus, PF draw, sales collection, account allocation, waterfall, Exit sale rate, unsold LTV, risk flags, API, UI, and report fragments.
 - Baseline Cash Flow Engine run is implemented through the required upstream path `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest -> Cash Flow Engine`, so Excel import/export, workbook formulas, provenance, and PF review outputs share one canonical feasibility source.
-- Advanced scenario persistence, waterfall API workflow, unsold LTV matrix workflow, and frontend Cash Flow Review UI remain pending.
+- Advanced scenario persistence, waterfall API workflow, unsold LTV matrix workflow, tranche recoveries, and Korean scenario report fragments are complete. Next step: frontend Scenario Review UI and Cash Flow Review UI.
 
 ## Next Work
 
@@ -468,9 +526,9 @@ Latest verification baseline:
 - Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.
 - Add standalone UI pages for Development Feasibility, Marketability, Legal Review, and Orchestration artifacts.
 - Convert synchronous orchestration into async queue-based jobs.
-- Add UI/API scenario workflow for waterfall and unsold LTV matrix.
-- Implement Calculation Scenario Engine Sprint 1: schema and pure wrappers for waterfall scenarios, unsold LTV matrix, and tranche recovery matrix.
-- Implement Cash Flow Engine advanced scenario workflow: saved latest runs, best/base/downside/stress/recovery scenarios, waterfall, unsold LTV matrix, and Cash Flow Review UI.
+- Add frontend Scenario Review UI for waterfall, unsold LTV matrix, and tranche recovery outputs.
+- Add Cash Flow Review UI for saved latest runs and best/base/downside/stress/recovery scenario comparison.
+- Extend scenario engine with richer product-type recovery haircuts and lender-specific threshold presets.
 - Optionally add API-server-side MCP client automation for Korean Law MCP if Claude Desktop-mediated sidecar operation is not sufficient.
 
 ### P2

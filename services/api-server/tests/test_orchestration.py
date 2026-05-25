@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from main import app
-from schemas.orchestration import PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
+from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 
 
 def project_with_discount_triggers(client: TestClient) -> str:
@@ -29,15 +29,55 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert run["user_id"] == "pytest"
     assert run["ai_connection"]["user_id"] == "pytest"
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
+    assert len(run["handoffs"]) >= 7
+    assert set(run["agentProgress"]) == {key for key, _ in PF_REVIEW_STEPS}
+    assert run["agentProgress"]["marketability_analysis"]["status"] == "completed"
+    assert run["agentProgress"]["marketability_analysis"]["progressPercent"] == 100
+    assert run["agentProgress"]["quality_check"]["lastArtifactKey"] == "qualityCheck"
+    assert {
+        handoff["handoffType"]
+        for handoff in run["handoffs"]
+    } >= {
+        "development_feasibility_to_cash_flow",
+        "land_to_feasibility_legal_pf",
+        "market_evidence_to_marketability",
+        "marketability_to_feasibility",
+        "legal_to_credit_review",
+        "risk_register_to_credit_review",
+        "credit_review_to_report",
+    }
+    AgentHandoffEnvelope.model_validate(run["handoffs"][0])
+    AgentProgress.model_validate(run["agentProgress"]["marketability_analysis"])
     assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["landAgentReview"]["analysisType"] == "land_agent_orchestration_review_v1"
+    assert run["agentProgress"]["land_agent_review"]["status"] == "completed"
+    assert run["artifacts"]["reconciliationGate"]["analysisType"] == "cross_agent_reconciliation_gate_v1"
+    assert run["agentProgress"]["cross_agent_reconciliation"]["status"] == "completed"
+    assert run["artifacts"]["dataQualityReview"]["analysisType"] == "data_quality_review"
+    assert run["agentProgress"]["data_quality_review"]["status"] == "completed"
+    assert run["artifacts"]["evidenceGraph"]["analysisType"] == "evidence_graph"
+    assert run["agentProgress"]["evidence_graph_generation"]["status"] == "completed"
     assert run["artifacts"]["developerFeasibility"]["analysisType"] == "developer_and_pf_feasibility"
     assert run["artifacts"]["marketabilityAnalysis"]["applicable"] is True
     assert run["artifacts"]["legalPermitReview"]["mcp"]["requested"] is True
+    assert run["artifacts"]["riskRegister"]["analysisType"] == "risk_register"
+    assert run["agentProgress"]["risk_register_generation"]["status"] == "completed"
+    assert run["artifacts"]["creditReviewDecision"]["analysisType"] == "credit_review_decision"
+    assert run["agentProgress"]["credit_review_decision"]["status"] == "completed"
     assert run["artifacts"]["phase11Report"]["report"]["qualityChecks"]["actualSectionCount"] == 20
     assert run["artifacts"]["reportRecord"]["run_id"] == run["run_id"]
+    assert run["artifacts"]["projectSnapshot"]["runId"] == run["run_id"]
 
     reports = client.get(f"/projects/{project_id}/reports").json()
     assert any(report["run_id"] == run["run_id"] for report in reports)
+
+    snapshots = client.get(f"/projects/{project_id}/snapshots").json()
+    assert any(snapshot["runId"] == run["run_id"] for snapshot in snapshots)
+    snapshot_id = next(snapshot["snapshotId"] for snapshot in snapshots if snapshot["runId"] == run["run_id"])
+    snapshot = client.get(f"/projects/{project_id}/snapshots/{snapshot_id}").json()
+    assert snapshot["runId"] == run["run_id"]
+    assert snapshot["schemaVersion"] == "realytics-project-snapshot-v1"
+    assert snapshot["caseComparisonSeed"]["totalRevenue"] is not None
 
 
 def test_pf_review_orchestration_can_be_retrieved_and_approved():
@@ -47,6 +87,63 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
 
     fetched = client.get(f"/projects/{project_id}/orchestrations/{run['run_id']}").json()
     assert fetched["run_id"] == run["run_id"]
+
+    handoff_id = fetched["handoffs"][0]["handoffId"]
+    needs_revision = client.post(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff_id}/review",
+        json={
+            "review_status": "needs_revision",
+            "reviewed_by": "credit_officer",
+            "comment": "Handoff needs workflow QA follow-up",
+        },
+    ).json()
+    needs_revision_handoff = next(item for item in needs_revision["handoffs"] if item["handoffId"] == handoff_id)
+    assert needs_revision_handoff["reviewStatus"] == "needs_revision"
+    assert needs_revision_handoff["status"] == "needs_review"
+
+    blocked_approval = client.post(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",
+        json={"approved_by": "credit_officer", "comment": "Should be blocked"},
+    )
+    assert blocked_approval.status_code == 409
+    assert "Unresolved agent handoff reviews" in blocked_approval.json()["detail"]
+
+    reviewed = client.post(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff_id}/review",
+        json={
+            "review_status": "approved",
+            "reviewed_by": "credit_officer",
+            "comment": "Handoff accepted for workflow QA",
+        },
+    ).json()
+    reviewed_handoff = next(item for item in reviewed["handoffs"] if item["handoffId"] == handoff_id)
+    assert reviewed_handoff["reviewStatus"] == "approved"
+    assert reviewed_handoff["status"] == "accepted"
+    assert reviewed_handoff["reviewedBy"] == "credit_officer"
+    assert reviewed_handoff["reviewHistory"][-1]["reviewComment"] == "Handoff accepted for workflow QA"
+
+    for handoff in reviewed["handoffs"]:
+        if handoff["reviewStatus"] in {"pending", "rejected", "needs_revision"}:
+            reviewed = client.post(
+                f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff['handoffId']}/review",
+                json={
+                    "review_status": "approved",
+                    "reviewed_by": "credit_officer",
+                    "comment": "Remaining handoff accepted for workflow QA",
+                },
+            ).json()
+
+    for risk in reviewed["artifacts"]["riskRegister"]["risks"]:
+        if risk.get("requiresHumanReview"):
+            reviewed = client.post(
+                f"/projects/{project_id}/orchestrations/{run['run_id']}/risk-register/{risk['riskId']}/review",
+                json={
+                    "review_status": "waived",
+                    "reviewed_by": "credit_officer",
+                    "comment": "Risk accepted for workflow QA.",
+                    "waiver_reason": "Test run waiver.",
+                },
+            ).json()
 
     approved = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",
@@ -90,6 +187,7 @@ def test_upload_and_run_creates_orchestration(monkeypatch):
     assert body["run"]["status"] == "completed"
     assert body["run"]["user_id"] == "upload-test"
     assert body["run"]["artifacts"]["reportRecord"]["run_id"] == body["run"]["run_id"]
+    assert body["run"]["artifacts"]["projectSnapshot"]["runId"] == body["run"]["run_id"]
     assert body["project"]["_meta"]["upload"]["originalFileName"] == "business-plan.pdf"
     assert body["project"]["_meta"]["upload"]["originalFileHash"]
     assert body["project"]["_meta"]["upload"]["archiveStored"] is True

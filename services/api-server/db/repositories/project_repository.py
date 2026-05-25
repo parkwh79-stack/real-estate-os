@@ -15,6 +15,7 @@ class ProjectRepository:
         reports_store: Dict[str, Any],
         orchestrations_store: Dict[str, Any],
         market_evidence_store: Dict[str, Any],
+        project_snapshots_store: Dict[str, Any],
         persist: Callable[[], None],
         allocate_project_id: Callable[[], str],
     ):
@@ -22,6 +23,7 @@ class ProjectRepository:
         self.reports_store = reports_store
         self.orchestrations_store = orchestrations_store
         self.market_evidence_store = market_evidence_store
+        self.project_snapshots_store = project_snapshots_store
         self.persist = persist
         self.allocate_project_id = allocate_project_id
 
@@ -69,6 +71,7 @@ class ProjectRepository:
         self.reports_store.pop(project_id, None)
         self.orchestrations_store.pop(project_id, None)
         self.market_evidence_store.pop(project_id, None)
+        self.project_snapshots_store.pop(project_id, None)
         self.persist()
         return deleted
 

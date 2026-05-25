@@ -5,10 +5,6 @@ from datetime import datetime, timezone
 import base64
 import tempfile
 import os
-import shutil
-import hashlib
-import string
-from pathlib import Path
 from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
 from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
@@ -20,21 +16,30 @@ from core.calculations import (
     calculate_feasibility_metrics,
 )
 from core.risk_assessment import build_basic_risk_matrix
+from schemas.scenario import ScenarioSetRequest
+from agents.scenario_engine_agent import ScenarioEngineAgent
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
 from db.repositories.orchestration_repository import OrchestrationRepository
 from db.repositories.project_repository import ProjectRepository
+from db.repositories.project_snapshot_repository import ProjectSnapshotRepository
 from db.repositories.report_repository import ReportRepository
 from db.repositories.source_document_repository import SourceDocumentRepository
+from db.repositories.upload_archive_repository import UploadArchiveRepository
 from storage import load_state, save_state
 from use_cases.cash_flow import run_cash_flow_use_case
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
-from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case
+from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case, enrich_land_ledger_use_case
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
-from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case
+from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case
+from use_cases.project_snapshots import (
+    get_project_snapshot_use_case,
+    list_project_snapshots_use_case,
+    search_similar_project_snapshots_use_case,
+)
 from use_cases.project_management import (
     apply_parsed_project_data_use_case,
     create_project_use_case,
@@ -45,7 +50,9 @@ from use_cases.project_management import (
 )
 from use_cases.report_generation import export_saved_report_use_case, generate_and_save_pf_report_use_case
 from use_cases.source_documents import (
-    find_source_document_by_archive_id_use_case,
+    archive_source_document_use_case,
+    delete_project_upload_archive_use_case,
+    get_source_document_download_use_case,
     list_source_documents_use_case,
     save_source_document_metadata_use_case,
 )
@@ -54,17 +61,22 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 import json
 
-API_SERVER_ROOT = Path(__file__).resolve().parents[1]
-UPLOAD_ARCHIVE_ROOT = API_SERVER_ROOT / "data" / "runtime" / "uploads"
-
 PROJECTS_DB = {}
 ORCHESTRATIONS_DB = {}
 REPORTS_DB = {}
 MARKET_EVIDENCE_DB = {}
+PROJECT_SNAPSHOTS_DB = {}
 project_id_counter = 1
 
 def persist_state() -> None:
-    save_state(PROJECTS_DB, REPORTS_DB, ORCHESTRATIONS_DB, project_id_counter, MARKET_EVIDENCE_DB)
+    save_state(
+        PROJECTS_DB,
+        REPORTS_DB,
+        ORCHESTRATIONS_DB,
+        project_id_counter,
+        MARKET_EVIDENCE_DB,
+        PROJECT_SNAPSHOTS_DB,
+    )
 
 def allocate_project_id() -> str:
     global project_id_counter
@@ -78,6 +90,7 @@ def project_repository() -> ProjectRepository:
         REPORTS_DB,
         ORCHESTRATIONS_DB,
         MARKET_EVIDENCE_DB,
+        PROJECT_SNAPSHOTS_DB,
         persist_state,
         allocate_project_id,
     )
@@ -88,61 +101,26 @@ def report_repository() -> ReportRepository:
 def source_document_repository() -> SourceDocumentRepository:
     return SourceDocumentRepository(PROJECTS_DB, persist_state)
 
+def upload_archive_repository() -> UploadArchiveRepository:
+    return UploadArchiveRepository()
+
 def market_evidence_repository() -> MarketEvidenceRepository:
     return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state)
+
+def project_snapshot_repository() -> ProjectSnapshotRepository:
+    return ProjectSnapshotRepository(PROJECT_SNAPSHOTS_DB, persist_state)
 
 def orchestration_repository() -> OrchestrationRepository:
     return OrchestrationRepository(
         ORCHESTRATIONS_DB,
         report_repository(),
         market_evidence_repository(),
+        project_snapshot_repository(),
         persist_state,
     )
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-def safe_upload_suffix(filename: str | None) -> str:
-    suffix = Path(filename or "").suffix.lower()
-    if not suffix or len(suffix) > 12:
-        return ".bin"
-    return suffix
-
-def is_valid_archive_id(value: str | None) -> bool:
-    return bool(
-        isinstance(value, str)
-        and len(value) == 64
-        and all(char in string.hexdigits for char in value)
-    )
-
-def project_upload_archive_dir(project_id: str) -> Path:
-    archive_root = UPLOAD_ARCHIVE_ROOT.resolve()
-    archive_dir = (archive_root / str(project_id)).resolve()
-    if archive_root not in archive_dir.parents:
-        raise HTTPException(status_code=400, detail="Invalid project archive path")
-    return archive_dir
-
-def archive_uploaded_document(
-    project_id: str,
-    content: bytes,
-    original_file_name: str | None,
-    content_type: str | None,
-) -> Dict[str, Any]:
-    archive_id = hashlib.sha256(content).hexdigest()
-    suffix = safe_upload_suffix(original_file_name)
-    project_archive_dir = project_upload_archive_dir(project_id)
-    project_archive_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = project_archive_dir / f"{archive_id}{suffix}"
-    if not archive_path.exists():
-        archive_path.write_bytes(content)
-
-    return {
-        "archiveId": archive_id,
-        "archiveStored": True,
-        "archivePath": str(archive_path.relative_to(API_SERVER_ROOT)).replace("\\", "/"),
-        "downloadUrl": f"/projects/{project_id}/source-documents/{archive_id}/download",
-        "contentType": content_type,
-    }
 
 def attach_document_market_evidence_metadata(
     parsed_data: Dict[str, Any],
@@ -204,11 +182,16 @@ async def parse_uploaded_business_plan(
         tmp.write(content)
         tmp_path = tmp.name
     uploaded_at = now_iso()
-    original_file_hash = hashlib.sha256(content).hexdigest()
-    archive_meta = archive_uploaded_document(project_id, content, file.filename, file.content_type)
+    archive_meta = archive_source_document_use_case(
+        upload_archive_repository(),
+        project_id,
+        content,
+        file.filename,
+        file.content_type,
+    )
     upload_meta = {
         "originalFileName": file.filename,
-        "originalFileHash": original_file_hash,
+        "originalFileHash": archive_meta["archiveId"],
         "contentType": file.content_type,
         "fileSizeBytes": len(content),
         "uploadedAt": uploaded_at,
@@ -240,7 +223,7 @@ async def parse_uploaded_land_ledger(file: UploadFile) -> Dict[str, Any]:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
-    original_file_hash = hashlib.sha256(content).hexdigest()
+    original_file_hash = UploadArchiveRepository.hash_content(content)
 
     try:
         return analyze_land_ledger_workbook_use_case(
@@ -270,6 +253,7 @@ def load_fixtures():
         REPORTS_DB.update(state["reports"])
         ORCHESTRATIONS_DB.update(state["orchestrations"])
         MARKET_EVIDENCE_DB.update(state.get("market_evidence", {}))
+        PROJECT_SNAPSHOTS_DB.update(state.get("project_snapshots", {}))
         project_id_counter = state["project_id_counter"]
         return
 
@@ -314,9 +298,7 @@ def delete_project(project_id: str):
     deleted = delete_project_use_case(project_repository(), project_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
-    project_archive_dir = project_upload_archive_dir(project_id)
-    if project_archive_dir.exists():
-        shutil.rmtree(project_archive_dir)
+    delete_project_upload_archive_use_case(upload_archive_repository(), project_id)
     return {
         "deleted": True,
         "project_id": project_id,
@@ -368,6 +350,29 @@ async def analyze_land_ledger_upload(
         "project_id": project_id,
         "landLedger": ledger,
         "note": "PNU and official land price enrichment require external connectors after ledger import.",
+    }
+
+@router.post("/{project_id}/land-ledger/enrich")
+def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    input_data = input_data or {}
+    land_ledger = input_data.get("landLedger") or PROJECTS_DB[project_id].get("landLedger")
+    if not land_ledger:
+        raise HTTPException(status_code=400, detail="landLedger payload or saved project landLedger is required")
+
+    enriched = enrich_land_ledger_use_case(land_ledger, input_data.get("options", {}))
+    if input_data.get("persist", False):
+        project = dict(PROJECTS_DB[project_id])
+        project["landLedger"] = enriched
+        updated = update_project_use_case(project_repository(), project_id, project)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Project not found")
+    return {
+        "project_id": project_id,
+        "landLedger": enriched,
+        "note": "PNU/official price/registry enrichment uses provided connector records or legalDongCode; no official price or registry status is fabricated without source evidence.",
     }
 
 @router.post("/{project_id}/upload-and-run")
@@ -502,6 +507,138 @@ def assess_risk(project_id: str, input_data: Dict[str, Any]):
     raw_items = input_data.get("risk_items", source_data.get("risk_items", []))
     return build_basic_risk_matrix(source_data, raw_items)
 
+
+def build_scenario_request_from_project(project: Dict[str, Any], input_data: Dict[str, Any]) -> ScenarioSetRequest:
+    # 1. Product Mix
+    raw_mix = (
+        input_data.get("productMix")
+        or input_data.get("product_mix")
+        or project.get("productMix")
+        or project.get("product_mix")
+        or project.get("feasibility_input", {}).get("productMix")
+        or project.get("feasibility_input", {}).get("product_mix")
+        or []
+    )
+    product_mix = []
+    for item in raw_mix:
+        if isinstance(item, dict):
+            product_mix.append({
+                "type": item.get("type") or item.get("name") or "A",
+                "units": int(item.get("units") or item.get("unit_count") or item.get("volume") or 0),
+                "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or item.get("price") or 0.0),
+                "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or item.get("revenue") or 0.0)
+            })
+    # Fallback if empty
+    if not product_mix:
+        feas_in = project.get("feasibility_input", {})
+        total_rev = float(feas_in.get("total_revenue") or feas_in.get("sales_revenue") or 100000000)
+        product_mix.append({
+            "type": "General",
+            "units": 100,
+            "avgUnitPrice": total_rev / 100.0,
+            "totalRevenue": total_rev
+        })
+
+    # 2. PF Structure
+    raw_pf = (
+        input_data.get("pfStructure")
+        or input_data.get("pf_structure")
+        or input_data.get("tranches")
+        or project.get("pfStructure")
+        or project.get("pf_structure")
+        or project.get("tranches")
+        or []
+    )
+    pf_structure = []
+    for idx, item in enumerate(raw_pf):
+        if isinstance(item, dict):
+            pf_structure.append({
+                "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
+                "amount": float(item.get("amount") or item.get("principal") or 0.0),
+                "priority": int(item.get("priority") or idx + 1),
+                "interestRate": float(item.get("interestRate") or item.get("interest_rate") or item.get("rate") or 0.0),
+                "feeRate": float(item.get("feeRate") or item.get("fee_rate") or 0.0)
+            })
+    # Fallback if empty
+    if not pf_structure:
+        pf_structure.append({
+            "tranche": "Senior",
+            "amount": float(project.get("pf_amount") or 10000000),
+            "priority": 1,
+            "interestRate": 0.065,
+            "feeRate": 0.01
+        })
+
+    # 3. Drivers
+    drivers = input_data.get("scenarioDrivers") or {}
+
+    # 4. Waterfall Rule
+    rule = input_data.get("waterfallRule") or {}
+
+    # 5. Metadata
+    meta = input_data.get("sourceMetadata") or {
+        "sourceName": "manual scenario input",
+        "sourceType": "manual_upload"
+    }
+
+    return ScenarioSetRequest(
+        scenarioSetId=input_data.get("scenarioSetId"),
+        scenarioSetName=input_data.get("scenarioSetName"),
+        baseDate=input_data.get("baseDate"),
+        projectId=project.get("project", {}).get("id") or project.get("id"),
+        productMix=product_mix,
+        pfStructure=pf_structure,
+        scenarioDrivers=drivers,
+        waterfallRule=rule,
+        sourceMetadata=meta
+    )
+
+
+@router.post("/{project_id}/scenarios/waterfall")
+def run_project_scenarios_waterfall(project_id: str, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    req = build_scenario_request_from_project(PROJECTS_DB[project_id], input_data)
+    agent = ScenarioEngineAgent()
+    result = agent.run_scenario_set(req)
+    return {
+        "scenarioSetId": result.scenarioSetId,
+        "waterfallScenarios": result.waterfallScenarios
+    }
+
+
+@router.post("/{project_id}/scenarios/unsold-ltv-matrix")
+def run_project_scenarios_unsold_ltv(project_id: str, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    req = build_scenario_request_from_project(PROJECTS_DB[project_id], input_data)
+    agent = ScenarioEngineAgent()
+    result = agent.run_scenario_set(req)
+    return {
+        "scenarioSetId": result.scenarioSetId,
+        "unsoldLtvMatrix": result.unsoldLtvMatrix
+    }
+
+
+@router.post("/{project_id}/scenarios/recovery")
+def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project = PROJECTS_DB[project_id]
+    req = build_scenario_request_from_project(project, input_data)
+    agent = ScenarioEngineAgent()
+    result = agent.run_scenario_set(req)
+
+    # Persist in the project record
+    project_copy = dict(project)
+    project_copy.setdefault("scenario_results", {})
+    project_copy["scenario_results"][result.scenarioSetId] = result.model_dump()
+    PROJECTS_DB[project_id] = project_copy
+    persist_state()
+
+    return result
+
 @router.post("/{project_id}/marketability/analyze")
 def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
@@ -518,28 +655,19 @@ def list_project_source_documents(project_id: str):
 def download_project_source_document(project_id: str, archive_id: str):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    if not is_valid_archive_id(archive_id):
-        raise HTTPException(status_code=404, detail="Source document not found")
-
-    document = find_source_document_by_archive_id_use_case(
+    download = get_source_document_download_use_case(
         source_document_repository(),
+        upload_archive_repository(),
         project_id,
         archive_id,
     )
-    if not document:
+    if not download:
         raise HTTPException(status_code=404, detail="Source document not found")
 
-    archive_path = (
-        project_upload_archive_dir(project_id)
-        / f"{archive_id}{safe_upload_suffix(document.get('originalFileName'))}"
-    )
-    if not archive_path.exists():
-        raise HTTPException(status_code=404, detail="Archived source document file not found")
-
     return FileResponse(
-        archive_path,
-        media_type=document.get("contentType") or "application/octet-stream",
-        filename=document.get("originalFileName") or f"{archive_id}{archive_path.suffix}",
+        download["path"],
+        media_type=download["mediaType"],
+        filename=download["filename"],
     )
 
 @router.get("/{project_id}/market-evidence")
@@ -681,6 +809,37 @@ def get_project_orchestration(project_id: str, run_id: str):
         raise HTTPException(status_code=404, detail="Orchestration run not found")
     return run
 
+@router.get("/{project_id}/snapshots")
+def list_project_snapshots(project_id: str):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return list_project_snapshots_use_case(project_snapshot_repository(), project_id)
+
+@router.post("/{project_id}/snapshots/similar")
+def search_project_similar_snapshots(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        return search_similar_project_snapshots_use_case(
+            project_snapshot_repository(),
+            project_id,
+            input_data,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+@router.get("/{project_id}/snapshots/{snapshot_id}")
+def get_project_snapshot(project_id: str, snapshot_id: str):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        return get_project_snapshot_use_case(project_snapshot_repository(), project_id, snapshot_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 @router.post("/{project_id}/orchestrations/{run_id}/approve")
 def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
@@ -688,6 +847,54 @@ def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict
 
     try:
         return approve_orchestration_run_by_id_use_case(orchestration_repository(), project_id, run_id, input_data, now_iso())
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+@router.post("/{project_id}/orchestrations/{run_id}/handoffs/{handoff_id}/review")
+def review_project_orchestration_handoff(
+    project_id: str,
+    run_id: str,
+    handoff_id: str,
+    input_data: Dict[str, Any] | None = None,
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        return review_orchestration_handoff_by_id_use_case(
+            orchestration_repository(),
+            project_id,
+            run_id,
+            handoff_id,
+            input_data,
+            now_iso(),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+@router.post("/{project_id}/orchestrations/{run_id}/risk-register/{risk_id}/review")
+def review_project_orchestration_risk_register_row(
+    project_id: str,
+    run_id: str,
+    risk_id: str,
+    input_data: Dict[str, Any] | None = None,
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        return review_risk_register_row_by_id_use_case(
+            orchestration_repository(),
+            project_id,
+            run_id,
+            risk_id,
+            input_data,
+            now_iso(),
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

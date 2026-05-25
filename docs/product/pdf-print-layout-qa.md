@@ -31,7 +31,31 @@ This checklist covers the `/report` Phase 11 PF review report page.
 7. Confirm rows are not split mid-line.
 8. Confirm the approval block is visible and not split across pages.
 
+## Automated Visual QA & Regression Testing
+
+To verify layout integrity programmatically, the platform includes a **`VisualQAAgent`** (`services/api-server/agents/visual_qa_agent.py`) backed by the high-performance **PyMuPDF (fitz)** rendering engine.
+
+### 1. Structural Verification Rules
+The visual agent automatically scans every generated PDF document for layout anomalies:
+*   **Page Dimension Validation:** Ensures every page conforms exactly to the **A4 standard** (595.27 x 841.89 points) within a strict rounding tolerance.
+*   **Content Overflow Detection:** Scans horizontal and vertical boundaries to verify no text renders outside printable margins (minimum 12mm / 34pt).
+*   **Text Collision / Overlap:** Checks Y-coordinate bounding box overlaps to identify colliding lines or crushed paragraphs.
+*   **Approval Block Integrity:** Checks for the presence of the signature block (`결재` / `approval`) on the final page, raising a warning if it's missing or detached.
+*   **Empty Page Identification:** Counts block elements to detect stray blank pages or page-break policy failures.
+
+### 2. Pixel-Level Visual Regression
+The harness supports pixel-by-pixel rendering comparison against a certified approved baseline:
+1.  **Baseline Generation:** During the initial approved execution, the PDF pages are rasterized into high-resolution images (`baseline_*.png`) in the runtime baselines storage.
+2.  **Visual Comparer:** On subsequent runs (such as after system or style modifications), pages are re-rasterized and matched pixel-by-pixel against the references.
+3.  **Visual Layout Diff:** If changes exceed a 0.05% pixel-count threshold (protecting against sub-pixel anti-aliasing), a visual diff layout is generated (`diff_page_*.png`) highlighting modifications in bright red to aid the manual review.
+
+### 3. Execution in Test Suite
+Automated regression tests are fully integrated into our testing suite under `tests/test_visual_regression.py` and are checked alongside compiler and structural assertions.
+
+---
+
 ## Residual Risk
 
 - Browser print engines differ slightly. Final institution templates should still be sampled in Chrome and Edge before external delivery.
 - Real report data can contain longer legal text than the anonymized fixture; long covenant clauses should be reviewed with representative PDFs before production export.
+- Structural warnings (such as margin overflows or missing approval blocks) should be actively monitored on the Orchestration Agent's dashboard.

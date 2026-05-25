@@ -1,6 +1,6 @@
 # Land Ledger Import, Validation, and Enrichment
 
-Updated: 2026-05-14
+Updated: 2026-05-20
 
 ## Sample Reviewed
 
@@ -272,6 +272,34 @@ Current response includes:
 - `enrichmentPlan`
 - `supportedWorkflowStatuses`
 
+New enrichment endpoint:
+
+- `POST /projects/{project_id}/land-ledger/enrich`
+
+The enrichment endpoint accepts a parsed `landLedger` payload plus connector/manual options:
+
+- `legalDongCode`
+- `pnuResolutions`
+- `cadastralCharacteristics`
+- `officialLandPrices`
+- `registryEvidence`
+
+Implemented enrichment behavior:
+
+- Generates 19-digit PNU from `legalDongCode`, mountain flag, normalized main lot number, and normalized sub lot number when a direct PNU resolution record is not provided.
+- Stores PNU confidence, match method, candidate count, warning, and evidence metadata.
+- Attaches cadastral characteristics with source/evidence metadata.
+- Attaches official land price only when a connector/manual record provides price, base year, base date, and source/evidence metadata.
+- Attaches registry/encumbrance evidence only when evidence is provided; registry verification is not fabricated.
+- Rebuilds parcel QA, lifecycle status, land acquisition status, PF summary, and evidence coverage after enrichment.
+
+Data policy:
+
+- PNU can be deterministically generated from a confirmed legal dong code and normalized lot number.
+- Official land price must come from a public/official connector or manually supplied evidence record with base year and source.
+- Registry and encumbrance evidence must come from an attached document or licensed/official source.
+- Missing official price or registry evidence remains a blocker for legal/PF completion.
+
 Recommended next persistent workflow endpoints:
 
 - `POST /projects/{project_id}/land-ledger/import`
@@ -289,9 +317,9 @@ P0:
 
 - Persist original land ledger file hash, parser version, parsed output version, and approval status.
 - Add first-class import records instead of only one-shot analyze responses.
-- Add backend batch PNU resolver with confidence score and candidate warnings.
-- Add official land price connector with base year/source evidence.
-- Add registry/evidence attachment model and legal review checklist.
+- Connect backend batch PNU resolver to official public/address APIs where credentials are available.
+- Connect official land price adapter to public/official API with base year/source evidence.
+- Connect registry/evidence attachment model and legal review checklist to persisted evidence tables.
 - Add UI review/approval workflow after upload.
 
 P1:

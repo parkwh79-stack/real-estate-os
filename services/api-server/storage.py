@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 DEFAULT_STATE_FILE = Path(__file__).parent / "data" / "runtime" / "state.json"
 DEFAULT_SQLITE_FILE = Path(__file__).parent / "data" / "runtime" / "realytics.sqlite3"
 
@@ -37,6 +37,7 @@ def default_state() -> Dict[str, Any]:
         "reports": {},
         "orchestrations": {},
         "market_evidence": {},
+        "project_snapshots": {},
     }
 
 
@@ -56,6 +57,7 @@ def load_state() -> Dict[str, Any] | None:
             legacy_state["orchestrations"],
             legacy_state["project_id_counter"],
             legacy_state.get("market_evidence", {}),
+            legacy_state.get("project_snapshots", {}),
         )
         return legacy_state
 
@@ -68,12 +70,14 @@ def save_state(
     orchestrations: Dict[str, Any],
     project_id_counter: int,
     market_evidence: Dict[str, Any] | None = None,
+    project_snapshots: Dict[str, Any] | None = None,
 ) -> None:
     market_evidence = market_evidence or {}
+    project_snapshots = project_snapshots or {}
     if storage_backend() == "json":
-        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence)
+        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, project_snapshots)
         return
-    _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence)
+    _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, project_snapshots)
 
 
 def _load_json_state() -> Dict[str, Any] | None:
@@ -91,6 +95,7 @@ def _save_json_state(
     orchestrations: Dict[str, Any],
     project_id_counter: int,
     market_evidence: Dict[str, Any],
+    project_snapshots: Dict[str, Any],
 ) -> None:
     path = state_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,6 +107,7 @@ def _save_json_state(
         "reports": reports,
         "orchestrations": orchestrations,
         "market_evidence": market_evidence,
+        "project_snapshots": project_snapshots,
     })
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -158,6 +164,14 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL,
             PRIMARY KEY (project_id, record_key)
         );
+        CREATE TABLE IF NOT EXISTS project_snapshots (
+            project_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            run_id TEXT,
+            created_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, snapshot_id)
+        );
         """
     )
     conn.commit()
@@ -191,6 +205,12 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         ):
             market_evidence.setdefault(row["project_id"], {})[row["record_key"]] = json.loads(row["payload_json"])
 
+        project_snapshots: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, snapshot_id, payload_json FROM project_snapshots ORDER BY project_id, created_at"
+        ):
+            project_snapshots.setdefault(row["project_id"], {})[row["snapshot_id"]] = json.loads(row["payload_json"])
+
         metadata = {
             row["key"]: row["value"]
             for row in conn.execute("SELECT key, value FROM metadata")
@@ -206,6 +226,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         "reports": reports,
         "orchestrations": orchestrations,
         "market_evidence": market_evidence,
+        "project_snapshots": project_snapshots,
     })
 
 
@@ -215,6 +236,7 @@ def _save_sqlite_state(
     orchestrations: Dict[str, Any],
     project_id_counter: int,
     market_evidence: Dict[str, Any],
+    project_snapshots: Dict[str, Any],
 ) -> None:
     with _connect_sqlite() as conn:
         conn.execute("BEGIN")
@@ -223,6 +245,7 @@ def _save_sqlite_state(
         conn.execute("DELETE FROM reports")
         conn.execute("DELETE FROM orchestrations")
         conn.execute("DELETE FROM market_evidence")
+        conn.execute("DELETE FROM project_snapshots")
         conn.executemany(
             "INSERT INTO metadata(key, value) VALUES(?, ?)",
             [
@@ -292,6 +315,22 @@ def _save_sqlite_state(
                         json.dumps(record, ensure_ascii=False),
                     ),
                 )
+        for project_id, records in project_snapshots.items():
+            iterable = records.values() if isinstance(records, dict) else records
+            for record in iterable:
+                conn.execute(
+                    """
+                    INSERT INTO project_snapshots(project_id, snapshot_id, run_id, created_at, payload_json)
+                    VALUES(?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        record.get("snapshotId") or record.get("snapshot_id"),
+                        record.get("runId") or record.get("run_id"),
+                        record.get("createdAt") or record.get("created_at"),
+                        json.dumps(record, ensure_ascii=False),
+                    ),
+                )
         conn.commit()
 
 
@@ -304,4 +343,5 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("reports", {})
     normalized.setdefault("orchestrations", {})
     normalized.setdefault("market_evidence", {})
+    normalized.setdefault("project_snapshots", {})
     return normalized

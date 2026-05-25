@@ -23,4 +23,4 @@ def run_and_save_pf_review_use_case(
 ) -> Dict[str, Any]:
     """Run PF review and persist the run plus derived artifacts through repositories."""
     run = run_pf_review_use_case(project_id, project_data, options)
-    return orchestration_repository.save_run(project_id, run)
+    return orchestration_repository.save_run(project_id, run, project_data)

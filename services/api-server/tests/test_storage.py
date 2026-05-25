@@ -14,6 +14,7 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
         orchestrations={"1": {"run-1": {"status": "completed"}}},
         project_id_counter=2,
         market_evidence={"1": {"run-1:ev-1": {"recordKey": "run-1:ev-1", "evidenceId": "ev-1"}}},
+        project_snapshots={"1": {"snapshot-run-1": {"snapshotId": "snapshot-run-1", "runId": "run-1"}}},
     )
 
     state = load_state()
@@ -23,6 +24,7 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
     assert state["reports"]["1"][0]["report_id"] == "r-1"
     assert state["orchestrations"]["1"]["run-1"]["status"] == "completed"
     assert state["market_evidence"]["1"]["run-1:ev-1"]["evidenceId"] == "ev-1"
+    assert state["project_snapshots"]["1"]["snapshot-run-1"]["runId"] == "run-1"
     assert Path(state_path).exists()
 
 
@@ -48,6 +50,15 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
                 }
             }
         },
+        project_snapshots={
+            "1": {
+                "snapshot-run-1": {
+                    "snapshotId": "snapshot-run-1",
+                    "runId": "run-1",
+                    "createdAt": "now",
+                }
+            }
+        },
     )
 
     state = load_state()
@@ -58,6 +69,7 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
     assert state["reports"]["1"][0]["report_id"] == "r-1"
     assert state["orchestrations"]["1"]["run-1"]["status"] == "completed"
     assert state["market_evidence"]["1"]["run-1:ev-1"]["evidenceType"] == "sale_comparable"
+    assert state["project_snapshots"]["1"]["snapshot-run-1"]["runId"] == "run-1"
     assert Path(db_path).exists()
 
 
@@ -94,3 +106,4 @@ def test_default_state_shape():
     assert state["reports"] == {}
     assert state["orchestrations"] == {}
     assert state["market_evidence"] == {}
+    assert state["project_snapshots"] == {}

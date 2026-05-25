@@ -72,3 +72,82 @@ def test_land_ledger_lot_number_normalization_handles_korean_variants():
             parsed["subLotNo"],
             parsed["normalizedLotNumber"],
         ) == expected
+
+
+def test_land_ledger_batch_enrichment_resolves_pnu_price_and_registry_evidence():
+    site = "\ub300"
+    total = "\ud569  \uacc4"
+    rows = [
+        ["Bonri single parcel land ledger", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        [43728, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        ["seq", "dong", "lot", "category", "area_sqm", "", "owner", "amount", "", "deposit", "", "interim", "balance", "holder", "bank", "account", "contract_date", "deposit_due", "balance_due", "remarks"],
+        ["", "dong", "lot", "", "sqm", "py", "", "individual_amount", "parcel_total", "paid", "unpaid", "", "", "", "", "", "", "", "", ""],
+        [1, "Bonri", "1-3", site, 100.0, 30.25, "Owner A", 1_000_000_000, 1_000_000_000, 100_000_000, 0, 300_000_000, 600_000_000, "Owner A", "IBK", "243-014339-02-038", "19.7.3", "19.9.30", "", ""],
+        [total, "", "", "", 100.0, 30.25, "unit price", "", 1_000_000_000, 100_000_000, 0, 300_000_000, 600_000_000, "", "", "", "", "", "", ""],
+    ]
+
+    agent = LandLedgerAgent()
+    imported = agent.analyze_rows(rows, sheet_name="land ledger", source_file="sample.xls")
+    assert imported["pfSummary"]["status"] == "needs_enrichment"
+
+    enriched = agent.enrich_analysis(
+        imported,
+        {
+            "legalDongCode": "2729012300",
+            "cadastralCharacteristics": [
+                {
+                    "addressFragment": "Bonri 1-3",
+                    "landCategory": site,
+                    "standardLandCategoryCode": "08",
+                    "areaSqm": 100.0,
+                    "zoning": "general_commercial",
+                    "landUseZones": ["urban_area"],
+                    "sourceName": "manual cadastral fixture",
+                    "sourceUrlOrEvidenceId": "cad-fixture-001",
+                    "baseDate": "2026-01-01",
+                }
+            ],
+            "officialLandPrices": [
+                {
+                    "addressFragment": "Bonri 1-3",
+                    "pricePerSqm": 2_500_000,
+                    "baseYear": 2026,
+                    "baseDate": "2026-01-01",
+                    "sourceName": "official land price fixture",
+                    "sourceUrlOrEvidenceId": "olp-fixture-001",
+                }
+            ],
+            "registryEvidence": [
+                {
+                    "addressFragment": "Bonri 1-3",
+                    "evidenceId": "registry-fixture-001",
+                    "sourceName": "registry fixture",
+                    "issuedAt": "2026-05-01",
+                    "registeredOwner": "Owner A",
+                    "ownerMatchStatus": "matched",
+                    "mortgageExists": False,
+                    "seizureExists": False,
+                    "provisionalRegistrationExists": False,
+                    "easementExists": False,
+                    "trustRegistrationExists": True,
+                    "verificationStatus": "attached_pending_legal_review",
+                }
+            ],
+        },
+    )
+
+    parcel = enriched["parcels"][0]
+    assert parcel["pnu"] == "2729012300100010003"
+    assert parcel["pnuResolveConfidence"] == 0.95
+    assert parcel["officialLandPricePerSqm"] == 2_500_000
+    assert parcel["officialLandPriceBaseYear"] == 2026
+    assert parcel["officialTotalLandValue"] == 250_000_000
+    assert parcel["registryEvidence"]["ownerMatchStatus"] == "matched"
+    assert parcel["cadastralCharacteristics"]["zoning"] == "general_commercial"
+    assert parcel["workflowStatus"] == "ready_for_pf_review"
+    assert enriched["summary"]["missingPnuCount"] == 0
+    assert enriched["summary"]["missingOfficialLandPriceCount"] == 0
+    assert enriched["summary"]["registryEvidenceMissingCount"] == 0
+    assert enriched["pfSummary"]["status"] == "ready_for_pf_review"
+    assert enriched["enrichmentRun"]["status"] == "completed"
+    assert any(evidence["evidenceType"] == "official_land_price" for evidence in parcel["evidence"])
