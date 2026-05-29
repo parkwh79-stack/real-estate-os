@@ -48,6 +48,8 @@ class RiskRegisterAgent:
 
     def _land_risks(self, land: Dict[str, Any]) -> List[Dict[str, Any]]:
         risks = []
+        evidence_ids = land.get("evidenceIds") or []
+        source_locators = land.get("sourceLocators") or []
         for index, issue in enumerate(land.get("blockingIssues", []), 1):
             risks.append(self._risk(
                 source_agent="LandAgent",
@@ -59,6 +61,8 @@ class RiskRegisterAgent:
                 severity="critical",
                 probability="medium",
                 mitigant="Resolve land title, acquisition, registry, or ledger validation issue before PF approval.",
+                evidence_ids=evidence_ids,
+                source_locators=source_locators,
             ))
         for index, issue in enumerate(land.get("dataLimitations", []), 1):
             risks.append(self._risk(
@@ -71,6 +75,8 @@ class RiskRegisterAgent:
                 severity="medium",
                 probability="medium",
                 mitigant="Attach PNU, official land price, registry, acquisition, and source evidence.",
+                evidence_ids=evidence_ids,
+                source_locators=source_locators,
             ))
         summary = land.get("summary") or {}
         coverage_checks = [
@@ -91,6 +97,8 @@ class RiskRegisterAgent:
                     severity="high" if ratio < 0.8 else "medium",
                     probability="medium",
                     mitigant="Complete land evidence enrichment and closing checklist.",
+                    evidence_ids=evidence_ids,
+                    source_locators=source_locators,
                 ))
         return risks
 
@@ -110,6 +118,8 @@ class RiskRegisterAgent:
                 probability="medium",
                 mitigant=self._market_mitigant(item.get("code")),
                 evidence_ids=item.get("evidenceIds") or item.get("evidence_ids") or [],
+                source_locators=item.get("sourceLocators") or item.get("source_locators") or [],
+                source_document_ids=item.get("sourceDocumentIds") or item.get("source_document_ids") or [],
             ))
         return risks
 
@@ -216,6 +226,9 @@ class RiskRegisterAgent:
                 severity=self._normalize_severity(flag.get("severity")),
                 probability="medium",
                 mitigant="Review waterfall, unsold LTV, discount-sale trigger, and tranche recovery scenarios.",
+                evidence_ids=flag.get("evidenceIds") or flag.get("evidence_ids") or [],
+                source_locators=flag.get("sourceLocators") or flag.get("source_locators") or [],
+                source_document_ids=flag.get("sourceDocumentIds") or flag.get("source_document_ids") or [],
             ))
         return risks
 
@@ -278,12 +291,21 @@ class RiskRegisterAgent:
         normalized_severity = self._normalize_severity(severity)
         normalized_probability = self._normalize_probability(probability)
         score = self._severity_score(normalized_severity) * self._probability_score(normalized_probability)
+        normalized_code = self._code(code)
+        normalized_source_locators = source_locators or [
+            self._artifact_source_locator(
+                source_artifact=source_artifact,
+                code=normalized_code,
+                title=title,
+                description=description,
+            )
+        ]
         return {
             "riskId": "",
             "sourceAgent": source_agent,
             "sourceArtifact": source_artifact,
             "category": category,
-            "code": self._code(code),
+            "code": normalized_code,
             "title": title,
             "description": description,
             "severity": normalized_severity,
@@ -293,7 +315,7 @@ class RiskRegisterAgent:
             "financialImpact": None,
             "mitigant": mitigant,
             "evidenceIds": evidence_ids or [],
-            "sourceLocators": source_locators or [],
+            "sourceLocators": normalized_source_locators,
             "sourceDocumentIds": source_document_ids or [],
             "evidenceGraphLinks": {
                 "riskNodeId": None,
@@ -312,6 +334,29 @@ class RiskRegisterAgent:
             "reviewComment": None,
             "reviewHistory": [],
             "creditDecisionImpact": self._credit_impact(normalized_severity),
+        }
+
+    def _artifact_source_locator(
+        self,
+        *,
+        source_artifact: str,
+        code: str,
+        title: str,
+        description: str,
+    ) -> Dict[str, Any]:
+        artifact_path = source_artifact or "unknownArtifact"
+        return {
+            "locatorId": f"{artifact_path}:{code}",
+            "sourceType": "agent_artifact",
+            "source": artifact_path.split(".", 1)[0],
+            "path": artifact_path,
+            "label": title or code,
+            "locatorPrecision": "artifact_level",
+            "note": (
+                "Fallback locator created from the responsible agent artifact. "
+                "Attach document page, Excel cell, API row, or evidence ID before final approval when available."
+            ),
+            "description": description,
         }
 
     def _dedupe_and_number(self, risks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -427,6 +472,8 @@ class RiskRegisterAgent:
     def _market_mitigant(self, code: Any) -> str:
         if code in {"NO_COMPARABLE_DATA", "MARKET_EVIDENCE_MISSING", "MARKET_EVIDENCE_NEEDS_REVIEW"}:
             return "Attach comparable, presale, rent, or uploaded market evidence before final pricing conclusion."
+        if code == "PROPOSED_PRICE_BASIS_MISSING":
+            return "Attach or derive proposed price per py from product mix, saleable area, total revenue, or explicit pricing assumption before confirming price adequacy."
         if code in {"PRICE_PREMIUM_HIGH", "PRICE_PREMIUM_EXCESSIVE"}:
             return "Review sale price adjustment, buyer financing, and discount-sale trigger conditions."
         if code in {"EXIT_RATE_HIGH", "ABSORPTION_BELOW_EXIT", "EXIT_PRESSURE_HIGH"}:

@@ -1,0 +1,297 @@
+{
+  "fixtureMeta": {
+    "schemaVersion": "realytics-pilot-input-package-v1",
+    "purpose": "Template payload for the first controlled PF review pilot run",
+    "updatedAt": "2026-05-27",
+    "notes": [
+      "Use anonymized values for shared fixtures.",
+      "For real pilot runs, preserve file names, page numbers, Excel sheet/cell locators, API base dates, and analyst assumptions.",
+      "Do not treat this template as verified market, legal, or valuation data."
+    ]
+  },
+  "project": {
+    "name": "Pilot Mixed-use PF Project",
+    "type": "mixed_use",
+    "location": "Daegu Dalseo-gu sample location",
+    "review_date": "2026-05-27",
+    "financial_institution": "REALYTICS Pilot",
+    "status": "pilot"
+  },
+  "land": {
+    "pnu": "2729011700101230004",
+    "address": "Daegu Dalseo-gu sample legal dong 123-4",
+    "area_sqm": 5000.0,
+    "legalDongCode": "2729011700",
+    "raw_lot_number": "123-4",
+    "normalized_lot_number": "123-4"
+  },
+  "land_acquisition": [
+    {
+      "parcelId": "P-001",
+      "pnu": "2729011700101230004",
+      "owner": "Seller A",
+      "share": 1.0,
+      "area_sqm": 5000.0,
+      "contractAmount": 30000000000,
+      "depositPaid": 3000000000,
+      "balanceDue": 27000000000,
+      "paymentStatus": "deposit_paid"
+    }
+  ],
+  "landEvidence": {
+    "officialLandPrice": 1250000,
+    "officialLandPriceBaseYear": 2026,
+    "officialLandPriceEvidence": {
+      "evidenceId": "official-price-2026-pnu-2729011700101230004",
+      "sourceName": "Manual official land price evidence",
+      "sourceType": "manual_upload",
+      "baseDate": "2026-01-01",
+      "fileName": "official_land_price.pdf",
+      "page": 1,
+      "confidence": 0.95
+    },
+    "registryEvidence": [
+      {
+        "evidenceId": "registry-pnu-2729011700101230004",
+        "sourceName": "Manual registry evidence",
+        "sourceType": "manual_upload",
+        "baseDate": "2026-05-27",
+        "fileName": "registry_record.pdf",
+        "page": 1,
+        "ownerMatchStatus": "match",
+        "mortgageExists": false,
+        "seizureExists": false,
+        "provisionalRegistrationExists": false,
+        "trustRegistrationExists": false,
+        "confidence": 0.9
+      }
+    ],
+    "sourceMetadata": {
+      "sourceName": "Pilot manual land evidence package",
+      "sourceType": "manual_upload",
+      "baseDate": "2026-05-27",
+      "confidence": 0.9
+    }
+  },
+  "architectural_plan": {
+    "land_area_sqm": 5000.0,
+    "gross_floor_area_sqm": 42000.0,
+    "building_use": "mixed_use_residential",
+    "units": 240,
+    "parking_count": 300,
+    "floors": "B3/F35"
+  },
+  "feasibility_input": {
+    "total_revenue": 150000000000,
+    "total_cost": 120000000000,
+    "land_cost": 30000000000,
+    "construction_cost": 62000000000,
+    "finance_cost": 8000000000,
+    "other_cost": 20000000000
+  },
+  "product_mix": [
+    {
+      "type": "apartment",
+      "units": 180,
+      "exclusiveAreaPy": 25.7,
+      "contractAreaPy": 38.2,
+      "avgUnitPrice": 650000000,
+      "pricePerPy": 17015706,
+      "totalRevenue": 117000000000,
+      "sourceLocators": [
+        {
+          "sourceType": "excel_cell",
+          "fileName": "03_feasibility_workbook.xlsx",
+          "sheetName": "ProductMix",
+          "cell": "G12",
+          "fieldName": "apartment.totalRevenue"
+        }
+      ]
+    },
+    {
+      "type": "officetel",
+      "units": 60,
+      "exclusiveAreaPy": 12.0,
+      "contractAreaPy": 20.0,
+      "avgUnitPrice": 350000000,
+      "pricePerPy": 17500000,
+      "totalRevenue": 21000000000,
+      "sourceLocators": [
+        {
+          "sourceType": "excel_cell",
+          "fileName": "03_feasibility_workbook.xlsx",
+          "sheetName": "ProductMix",
+          "cell": "G18",
+          "fieldName": "officetel.totalRevenue"
+        }
+      ]
+    },
+    {
+      "type": "commercial_retail",
+      "units": 20,
+      "exclusiveAreaPy": 5.0,
+      "contractAreaPy": 12.0,
+      "avgUnitPrice": 600000000,
+      "pricePerPy": 50000000,
+      "totalRevenue": 12000000000,
+      "sourceLocators": [
+        {
+          "sourceType": "excel_cell",
+          "fileName": "03_feasibility_workbook.xlsx",
+          "sheetName": "ProductMix",
+          "cell": "G24",
+          "fieldName": "commercial.totalRevenue"
+        }
+      ]
+    }
+  ],
+  "market": {
+    "proposedPricePerPy": 17500000,
+    "manualComparables": [
+      {
+        "caseId": "PILOT-COMP-001",
+        "name": "Nearby mixed-use comparable A",
+        "productType": "apartment",
+        "distanceM": 650,
+        "pricePerPy": 16800000,
+        "baseDate": "2026-04-30",
+        "sourceName": "Manual comparable table",
+        "sourceType": "manual_upload",
+        "sourceUrlOrEvidenceId": "market-comparable-xlsx-row-5",
+        "confidence": 0.8,
+        "sourceLocator": {
+          "sourceType": "excel_cell",
+          "fileName": "05_market_comparables.xlsx",
+          "sheetName": "Comparables",
+          "row": 5,
+          "fieldName": "pricePerPy"
+        }
+      },
+      {
+        "caseId": "PILOT-COMP-002",
+        "name": "Nearby officetel comparable B",
+        "productType": "officetel_residential",
+        "distanceM": 900,
+        "pricePerPy": 16200000,
+        "baseDate": "2026-04-30",
+        "sourceName": "Manual comparable table",
+        "sourceType": "manual_upload",
+        "sourceUrlOrEvidenceId": "market-comparable-xlsx-row-6",
+        "confidence": 0.78,
+        "sourceLocator": {
+          "sourceType": "excel_cell",
+          "fileName": "05_market_comparables.xlsx",
+          "sheetName": "Comparables",
+          "row": 6,
+          "fieldName": "pricePerPy"
+        }
+      }
+    ]
+  },
+  "pf_structure": [
+    {
+      "tranche": "Tr.A Senior",
+      "amount": 50000000000,
+      "priority": 1,
+      "interest_rate": 0.06,
+      "fee_rate": 0.01,
+      "maturityMonths": 49
+    },
+    {
+      "tranche": "Tr.B Mezzanine",
+      "amount": 15000000000,
+      "priority": 2,
+      "interest_rate": 0.08,
+      "fee_rate": 0.015,
+      "maturityMonths": 49
+    },
+    {
+      "tranche": "Tr.C Junior",
+      "amount": 5000000000,
+      "priority": 3,
+      "interest_rate": 0.1,
+      "fee_rate": 0.02,
+      "maturityMonths": 49
+    }
+  ],
+  "covenants": {
+    "discount_triggers": [
+      {
+        "month": 6,
+        "targetSalesRate": 0.4,
+        "allowedDiscountRate": 0.05,
+        "action": "lender_consultation_required"
+      },
+      {
+        "month": 12,
+        "targetSalesRate": 0.6,
+        "allowedDiscountRate": 0.1,
+        "action": "discount_sale_required"
+      },
+      {
+        "month": 24,
+        "targetSalesRate": 0.75,
+        "allowedDiscountRate": 0.15,
+        "action": "mandatory_discount_and_cash_sweep"
+      }
+    ],
+    "claim_preservation": [
+      "Managed land trust first beneficiary right",
+      "Responsible completion covenant",
+      "Cash sweep after completion",
+      "Construction cost retention"
+    ]
+  },
+  "scenarioDrivers": {
+    "saleRates": [0.4, 0.5, 0.6, 0.7, 0.8, 1.0],
+    "discountRates": [0.0, 0.05, 0.1, 0.15, 0.2],
+    "additionalPriorityCosts": 0
+  },
+  "sourceDocuments": [
+    {
+      "documentType": "business_plan",
+      "fileName": "01_business_plan.pdf",
+      "required": true,
+      "status": "to_be_uploaded"
+    },
+    {
+      "documentType": "feasibility_workbook",
+      "fileName": "03_feasibility_workbook.xlsx",
+      "required": true,
+      "status": "to_be_uploaded"
+    },
+    {
+      "documentType": "land_ledger",
+      "fileName": "04_land_ledger.xls",
+      "required": true,
+      "status": "to_be_uploaded"
+    },
+    {
+      "documentType": "market_comparables",
+      "fileName": "05_market_comparables.xlsx",
+      "required": true,
+      "status": "to_be_uploaded"
+    }
+  ],
+  "pilotReviewPlan": {
+    "firstRunMode": "direct_payload",
+    "approvalTarget": "conditional_approval_candidate",
+    "requiredArtifacts": [
+      "landAgentReview",
+      "developerFeasibility",
+      "marketEvidenceReview",
+      "marketabilityAnalysis",
+      "dataQualityReview",
+      "reconciliationGate",
+      "legalPermitReview",
+      "riskRegister",
+      "creditReviewDecision",
+      "restructuringPlan",
+      "phase11Report",
+      "evidenceGraph",
+      "qualityCheck",
+      "approvalReadinessGate"
+    ],
+    "humanReviewRequired": true
+  }
+}

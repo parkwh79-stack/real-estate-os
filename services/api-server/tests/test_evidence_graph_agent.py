@@ -79,6 +79,9 @@ def test_evidence_graph_agent_links_report_sections_claims_and_evidence():
     assert graph["summary"]["sourceDocumentCount"] == 1
     assert graph["summary"]["claimCount"] >= 2
     assert graph["summary"]["riskCount"] == 1
+    assert graph["summary"]["sourceLocatorCount"] == 1
+    assert graph["summary"]["riskRowsWithSourceLocatorCount"] == 1
+    assert graph["summary"]["riskRowsWithoutExplicitEvidenceCount"] == 0
     assert any(node["id"] == "evidence:comp-1" for node in graph["nodes"])
     assert any(node["id"] == "risk:R-MKT-001" for node in graph["nodes"])
     assert any(node["id"] == "locator:R-MKT-001:market-sheet:B12" for node in graph["nodes"])

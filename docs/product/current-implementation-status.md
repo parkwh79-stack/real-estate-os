@@ -10,6 +10,10 @@ The current implementation is synchronous and uses SQLite-backed state storage f
 
 The AI connection layer records provider, runtime mode, model, host, and linked `user_id` for API uploads, MCP document parsing, and orchestration runs.
 
+User activity logging is now implemented as a baseline troubleshooting/audit layer. The API server records request-level `user_activity_logs` in JSON/SQLite runtime state, extracts user IDs from request headers or query params, links project/run IDs from request paths, and exposes `POST /audit/login-event`, `GET /audit/user-activity`, `GET /audit/user-activity/summary`, and `GET /audit/user-activity/export`. Source document downloads, report export creation, and report export downloads also emit explicit sensitive activity events. The web app exposes `/audit` and `/project/{id}/audit` panels for event mix, sensitive actions, slow requests, and recent activity rows. Persisted tenant, user, and session records are now available through `/auth/tenants`, `/auth/users`, `/auth/session`, and `/auth/me`; role-derived RBAC checks now protect audit log reads, source document downloads, report export creation, and report export downloads, with `REALYTICS_RBAC_MODE=strict` available for blocking behavior. This is not full authentication yet, so real identity provider integration, broader RBAC coverage, tenant isolation enforcement, and secret management remain planned.
+
+Land Evidence storage is now a separate server-side record set rather than only an embedded land ledger artifact. The API server persists `pnu_resolution`, `cadastral_record`, `official_land_price`, and `registry_record` records through JSON/SQLite `land_evidence`, exposes `GET/POST /projects/{project_id}/land-evidence`, and can persist evidence records directly from `/land-ledger/enrich` when `persistEvidence` is true. PF Review orchestration now hydrates saved `land_evidence` into the project payload before a run, so Land Agent readiness, Legal Review land-right checks, Risk Register source locators, and Evidence Graph links can reflect stored PNU, official-price, and registry evidence. Approval Readiness Gate now evaluates land readiness through separate blocker checks for PNU, official land price, registry evidence, and land acquisition readiness.
+
 The application layer now includes baseline `use_cases` modules so API endpoints, MCP tools, future background jobs, and future UI-triggered actions can reuse the same workflow functions instead of duplicating agent orchestration in routers.
 
 The persistence boundary now includes baseline repository wrappers for project CRUD, source document metadata, upload archive files, reports, market evidence, and orchestration runs. These wrappers sit above the current SQLite/JSON-backed runtime stores and are used by the project routes, upload/source-document routes, report, evidence, orchestration, and approval use cases.
@@ -22,13 +26,35 @@ Server-side project snapshots are now implemented as `realytics-project-snapshot
 
 Historical Similar Case Search is now implemented as `realytics-similar-case-search-v1`. It compares stored project snapshots by case seed metrics, location tokens, PF size, LTV/LTC, Exit sale rate, market/land/reconciliation status, and Risk Register overlap, then returns how similar historical risks were reviewed, mitigated, waived, resolved, or converted into approval conditions.
 
+Snapshot Diff is now implemented as `realytics-snapshot-diff-v1`. It compares two saved snapshots from the same project and returns changed case seed fields, added/removed/changed Risk Register rows, Credit Review decision changes, artifact changes, report-section changes, material-change flags, and re-review recommendations.
+
+Approval Readiness Gate is now implemented as `realytics-approval-readiness-gate-v1`. It separates report completeness from credit approval readiness by checking report quality, legal/data/reconciliation blockers, Risk Register blocking status, Credit Review reject/rework decisions, unresolved handoffs, unresolved material risk reviews, land evidence warnings, and missing risk source locators. Review actions for handoffs and Risk Register rows now refresh this gate so unresolved review counts do not become stale.
+
 Evidence Graph Agent is now implemented as `realytics-evidence-graph-v1`. PF review orchestration creates an `evidenceGraph` artifact after Phase 11 report generation, linking project input, source documents, evidence IDs, agent artifacts, handoffs, extracted claims, Risk Register rows, source locators, and report sections. This is the baseline audit trail for explaining where report numbers, judgements, and material risk rows came from.
 
-Data Quality Agent is now implemented as `realytics-data-quality-v1`. PF review orchestration creates a `dataQualityReview` artifact before cross-agent reconciliation to detect project name, land area, GFA, sales revenue, PF amount, unit count, sqm/py conversion, VAT basis, schedule, and tranche structure conflicts. Blocking data quality issues prevent the orchestration quality gate from passing.
+2026-05-26 locator update: Marketability, Scenario, and Data Quality risk rows now carry explicit `sourceLocators` into the Risk Register and Evidence Graph. Marketability pricing risks include proposed-price and comparable/product-mix field paths plus source locators where available. Scenario risks include waterfall row, tranche shortfall, unsold LTV matrix cell, and scenario summary locators. Evidence Graph now summarizes `sourceLocatorCount` and `riskRowsWithSourceLocatorCount`.
+
+2026-05-27 locator update: every Risk Register row now carries at least one explicit source locator. Rows with direct field/scenario/document evidence keep precise locators; generated Land, Legal, Cash Flow, PF Structure, and Risk Matrix rows receive an `agent_artifact` fallback locator with `locatorPrecision=artifact_level` until document page, Excel cell, API row, registry evidence, or official-price evidence is attached.
+
+2026-05-27 land evidence update: PF review orchestration accepts a flat `landEvidence` package when a full land ledger import is not yet available. If the package supplies PNU, official land price evidence with base year, registry/encumbrance evidence, source metadata, and complete acquisition coverage, Land Agent marks the land patch `ready_for_pf_review` and clears the land-evidence approval warning.
+
+2026-05-27 scenario restructuring update: `RestructuringAgent` is implemented as `realytics-restructuring-agent-v1` with `POST /projects/{project_id}/scenarios/restructuring`. It quantifies the minimum senior tranche reduction or DSRA/equity injection needed to remove `SENIOR_SHORTFALL`, calculates the PF reduction/equity increase or additional collateral value required to cure `UNSOLD_LTV_BREACH`, reruns a senior-resized scenario, and returns source locators to the relevant waterfall row and unsold LTV matrix cell. The Scenario Engine waterfall now treats interest plus fee as the tranche claim rate so row claims and simulated payments are aligned. PF review orchestration now also creates a `restructuringPlan` artifact and `restructuring_to_credit_review` handoff so rejection-cure recommendations are visible inside the same review run.
+
+2026-05-27 pilot readiness update: `docs/product/pilot-project-runbook.md` and `services/api-server/data/fixtures/pilot_project_input_package_template.json` are added for the first real pilot. The template defines project/site, land evidence, feasibility, product mix, market comparables, PF tranches, discount triggers, scenario drivers, source documents, and required review artifacts. A fixture smoke test now confirms the template completes all 18 PF review orchestration steps and produces `qualityCheck`, `approvalReadinessGate`, `creditReviewDecision`, `restructuringPlan`, `phase11Report`, and `evidenceGraph` artifacts. `services/api-server/scripts/run_pilot_fixture.py` can run any pilot package locally and emit a compact approval, risk, land, restructuring, and evidence summary JSON. `services/api-server/scripts/prepare_pilot_workspace.py` creates an external pilot workspace, copies the payload template, inventories source documents with SHA-256 hashes, and keeps original files outside Git unless explicitly copied.
+
+2026-05-28 sample-derived pilot update: `services/api-server/scripts/update_pilot_input_from_samples.py` now extracts the local Bonri feasibility workbook, land ledger, and PF review DOCX into `data/runtime/pilot-input/pilot_input_payload.json`. Extracted values include 4,691.9 sqm land area, 9 parcels, KRW 41.374bn land purchase amount, KRW 165.597bn VAT-excluded revenue, KRW 151.842bn total cost, and KRW 90.000bn PF across Tr.A/B/C. The resulting pilot run completes all 18 orchestration steps with no runtime errors and passes report completeness, but `approvalReadinessGate` remains blocked because official land price evidence, registry/encumbrance evidence, unresolved handoff/risk reviews, and Unsold LTV cure evidence are still missing.
+
+2026-05-28 land evidence workflow update: `services/api-server/scripts/build_land_evidence_request.py` now also emits `land-evidence-template.json`, and `services/api-server/scripts/apply_land_evidence_to_pilot.py` attaches filled official land price, cadastral, and registry evidence back into the runtime pilot payload. The attachment workflow filters blank or non-source-backed records, reruns Land Agent enrichment, and preserves `needs_review` / `needs_enrichment` status when evidence is missing instead of manufacturing approval readiness.
+
+2026-05-28 connector runner update: `services/api-server/scripts/fetch_land_evidence_from_connectors.py` can now run the configured land data connector router against the runtime pilot payload and emit both raw connector diagnostics and an evidence JSON compatible with the manual attachment workflow. `docs/product/land-data-api-connector.md` documents the URL-template environment variables for VWorld/public-data/internal proxy connectors. In the current local environment no API URL templates are configured, so the dry run correctly returned `skipped_missing_config` diagnostics with zero fabricated cadastral or official price records.
+
+Data Quality Agent is now implemented as `realytics-data-quality-v1`. PF review orchestration creates a `dataQualityReview` artifact before cross-agent reconciliation to detect project name, land area, GFA, sales revenue, PF amount, unit count, sqm/py conversion, VAT basis, schedule, and tranche structure conflicts. Blocking data quality issues now block the Approval Readiness Gate rather than the report-completeness quality check.
 
 Risk Register Agent is now implemented as `realytics-risk-register-v1`. PF review orchestration creates a `riskRegister` artifact after the Basic Risk Matrix and before report generation, consolidating Land, Marketability, Legal, Cash Flow, PF Structure, Scenario, Data Quality, and Risk Matrix issues into one credit-review table with top risks, approval-condition candidates, and a `risk_register_to_credit_review` handoff.
 
 Risk Register review workflow is now implemented. Material risk rows can be marked `approved`, `waived`, `needs_revision`, or `resolved` with reviewer, timestamp, comment, waiver reason, and row-level audit history. Final orchestration approval is blocked while risk rows requiring human review remain unresolved.
+
+Risk Register server records are now implemented. PF review runs persist their `riskRegister` artifact into JSON/SQLite `risk_registers` by project/run, expose list/get APIs for project-level review history, synchronize row-review outcomes back to the persisted register, and emit `risk_register_row_review` audit events.
 
 Risk Register rows now carry `evidenceGraphLinks`. Each row is represented as a graph `risk` node and is linked back to its source artifact, evidence IDs, source documents, source locators, and supporting claim nodes when available.
 
@@ -303,6 +329,7 @@ Important:
 - `/land-ledger/enrich` can resolve PNU from a confirmed legal dong code plus normalized lot number, or from supplied PNU resolution records.
 - The enrichment workflow attaches cadastral characteristics, official land price with base year/source, and registry/encumbrance evidence from connector/manual records.
 - Official land price and registry evidence are not fabricated when source records are missing; missing records remain enrichment/legal/PF blockers.
+- 2026-05-27 update: `services/api-server/integrations/land_data_connectors.py` adds a configurable live connector router. `useLiveConnectors=true` can call cadastral and official land price URL templates when `REALYTICS_CADASTRAL_URL_TEMPLATE`, `REALYTICS_OFFICIAL_LAND_PRICE_URL_TEMPLATE`, and API-key environment variables are configured. If configuration is missing, the run returns explicit diagnostics and continues with no fabricated official data. Live registry lookup is intentionally not implemented; registry completion still requires manual or licensed evidence.
 
 2026-05-14 update:
 
@@ -370,6 +397,7 @@ Purpose:
 - 2026-05-18 update: MarketabilityAgent now returns product-specific `marketability_score_v2` breakdowns, lender risk flag details, and report paragraphs generated from pricing, demand, supply, Exit, absorption, trigger, and unsold recovery outputs.
 - 2026-05-18 update: Marketability source metadata now preserves source name/type/evidence ID/collected date/base date/license note/confidence plus complete/partial status and missing-field summaries across normalized comparables and market evidence records.
 - 2026-05-18 update: MarketEvidenceAgent now adds field-level `fieldSourceLocators`, record `locatorCoverage`, and summary `fieldLocatorCoverage` for product mix, sale comparable, and rent comparable evidence, including page/table/row inference from evidence IDs.
+- 2026-05-26 update: Marketability pricing-basis hardening now derives proposed price per py from product mix total revenue/area where possible and emits `PROPOSED_PRICE_BASIS_MISSING` instead of `NO_COMPARABLE_DATA` when comparable evidence exists but the target project's pricing basis is missing.
 - Serviced residence is treated as applicable when it is a strata-sale/presale asset; operating hotel/lodging remains non-saleable and should be handled by a separate operating asset Agent.
 
 API:
@@ -466,9 +494,11 @@ API/MCP user linkage:
 11. `risk_assessment`: Produce a basic risk matrix.
 12. `risk_register_generation`: Consolidate Agent risks into one credit-review table.
 13. `credit_review_decision`: Produce approve/conditional/rework/reject credit guidance.
-14. `phase11_report_generation`: Generate the Phase 11 PF review report artifact.
-15. `evidence_graph_generation`: Link evidence, claims, handoffs, and report sections.
-16. `quality_check`: Check required artifacts and report completeness.
+14. `scenario_restructuring_plan`: Quantify senior shortfall and unsold LTV cure actions before approval.
+15. `phase11_report_generation`: Generate the Phase 11 PF review report artifact.
+16. `evidence_graph_generation`: Link evidence, claims, handoffs, and report sections.
+17. `quality_check`: Check required artifacts, report completeness, and PDF QA.
+18. `approval_readiness_gate`: Check whether the run is ready for credit approval.
 
 ## Verification
 
@@ -504,7 +534,8 @@ Latest verification baseline:
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
 - Source-level provenance per parsed field is not yet persisted.
 - Markdown, JSON, print-ready HTML, PDF, and DOCX report exports are implemented from the same structured Phase 11 report record.
-- Calculation Scenario Engine: fully implemented and documented. Features schemas (`schemas/scenario.py`), coordination wrapper (`ScenarioEngineAgent` inside `agents/scenario_engine_agent.py`), three API endpoints (`/scenarios/waterfall`, `/scenarios/unsold-ltv-matrix`, `/scenarios/recovery`), SQLite persistence, risk flag compilation, and Korean Hana-style PF review report synthesis.
+- Calculation Scenario Engine: fully implemented and documented. Features schemas (`schemas/scenario.py`), coordination wrapper (`ScenarioEngineAgent` inside `agents/scenario_engine_agent.py`), API endpoints (`/scenarios/waterfall`, `/scenarios/unsold-ltv-matrix`, `/scenarios/recovery`, `/scenarios/restructuring`), SQLite persistence, risk flag compilation, and Korean Hana-style PF review report synthesis.
+- Restructuring Agent: implemented and exposed through `/scenarios/restructuring` to convert rejection-driving scenario flags into quantified cure actions before rerunning PF review. It does not override Credit Review; it provides the numerical path for senior exposure reduction, DSRA/equity support, PF exposure reduction, collateral enhancement, forward sale, bulk sale, or refinancing evidence.
 - Cash Flow Engine / Cash Flow Agent design is documented in `docs/product/cash-flow-engine-agent.md`; it aligns FeasibilityStudyV2 with monthly cash flow, Max Minus, PF draw, sales collection, account allocation, waterfall, Exit sale rate, unsold LTV, risk flags, API, UI, and report fragments.
 - Baseline Cash Flow Engine run is implemented through the required upstream path `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest -> Cash Flow Engine`, so Excel import/export, workbook formulas, provenance, and PF review outputs share one canonical feasibility source.
 - Advanced scenario persistence, waterfall API workflow, unsold LTV matrix workflow, tranche recoveries, and Korean scenario report fragments are complete. Next step: frontend Scenario Review UI and Cash Flow Review UI.
@@ -519,6 +550,7 @@ Latest verification baseline:
 
 ### P1
 
+- Run the first real pilot using `docs/product/pilot-project-runbook.md` and replace template evidence with the user's actual anonymized project package.
 - Add Excel-style developer feasibility export.
 - Generate/import the `realytics-fs-xlsx-v1` feasibility workbook with formulas preserved.
 - Add legacy adapter for the Bonri-style Korean workbook cell map so existing 사업수지 files can import into `FeasibilityStudyV2`.

@@ -77,8 +77,10 @@ class LegalReviewAgent:
 
     def _land_rights_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
         parcels = data.get("land_acquisition", [])
+        land_evidence = data.get("landEvidence") or data.get("land_evidence") or {}
+        registry_records = self._registry_records(land_evidence)
         issues = []
-        if not parcels:
+        if not parcels and not registry_records:
             issues.append("Land ownership, share ratio, area, and encumbrance data are missing.")
         share_sum = sum(p.get("share", 0) for p in parcels)
         if parcels and share_sum < 0.999:
@@ -86,12 +88,47 @@ class LegalReviewAgent:
         mortgages = [p.get("mortgage") for p in parcels if p.get("mortgage")]
         if mortgages:
             issues.append("Existing mortgages or encumbrances require release or trust-transfer conditions.")
+        registry_release_required = [
+            record
+            for record in registry_records
+            if record.get("releaseRequired")
+            or record.get("mortgageExists")
+            or record.get("seizureExists")
+            or record.get("provisionalRegistrationExists")
+            or record.get("easementExists")
+        ]
+        owner_unmatched = [
+            record
+            for record in registry_records
+            if record.get("ownerMatchStatus") not in {None, "matched", "not_applicable"}
+        ]
+        if registry_release_required:
+            issues.append("Registry evidence includes encumbrances or release-required items.")
+        if owner_unmatched:
+            issues.append("Registry owner match status requires legal confirmation.")
         return self._check(
             "land_rights",
             "Land rights and encumbrances",
-            "blocking" if parcels and share_sum < 0.999 else "caution" if issues else "clear",
-            issues or ["Land ownership and rights data were reviewed from the supplied data."],
+            "blocking" if (parcels and share_sum < 0.999) or owner_unmatched else "caution" if issues else "clear",
+            issues or ["Land ownership and rights evidence were reviewed from supplied registry/land data."],
         )
+
+    def _registry_records(self, land_evidence: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(land_evidence, dict):
+            return []
+        records = land_evidence.get("registryEvidence") or land_evidence.get("registry_evidence")
+        if isinstance(records, list):
+            return [record for record in records if isinstance(record, dict)]
+        if isinstance(records, dict):
+            return [records]
+        all_records = land_evidence.get("records") or []
+        if isinstance(all_records, list):
+            return [
+                record
+                for record in all_records
+                if isinstance(record, dict) and record.get("evidenceType") == "registry_record"
+            ]
+        return []
 
     def _trust_security_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
         claims = data.get("covenants", {}).get("claim_preservation", [])

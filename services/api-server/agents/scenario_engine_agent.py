@@ -38,7 +38,7 @@ class ScenarioEngineAgent:
             {
                 "tranche": tranche.tranche,
                 "amount": tranche.amount,
-                "interest_rate": tranche.interestRate,
+                "interest_rate": tranche.interestRate + tranche.feeRate,
                 "priority": tranche.priority,
             }
             for tranche in sorted_tranches
@@ -270,46 +270,148 @@ class ScenarioEngineAgent:
         stress_waterfall = next((item for item in waterfall_scenarios if item.scenarioId == "sale_50_disc_10"), None)
 
         if base_waterfall and base_waterfall.totalShortfall > 0:
-            risk_flags.append(ScenarioRiskFlag(code="WATERFALL_SHORTFALL", severity="high", message="기본 시나리오(분양률 70%)에서 전체 대출 원리금 상환 재원이 부족합니다."))
+            risk_flags.append(ScenarioRiskFlag(
+                code="WATERFALL_SHORTFALL",
+                severity="high",
+                message="Base waterfall scenario has total repayment shortfall.",
+                sourceLocators=[_waterfall_locator(base_waterfall.scenarioId, "totalShortfall", base_waterfall.totalShortfall)],
+            ))
             for row in base_waterfall.rows:
                 if row.shortfall <= 0:
                     continue
                 if row.priority == 1:
-                    risk_flags.append(ScenarioRiskFlag(code="SENIOR_SHORTFALL", severity="critical", message="기본 분양률 시나리오에서 선순위(Senior) 대출 상환에 손실이 발생합니다."))
+                    risk_flags.append(ScenarioRiskFlag(
+                        code="SENIOR_SHORTFALL",
+                        severity="critical",
+                        message="Base waterfall scenario shows senior tranche repayment shortfall.",
+                        sourceLocators=[_waterfall_row_locator(base_waterfall.scenarioId, row)],
+                    ))
                 elif row.priority == 2:
-                    risk_flags.append(ScenarioRiskFlag(code="MEZZANINE_SHORTFALL", severity="high", message="기본 분양률 시나리오에서 중순위(Mezzanine) 대출 상환 재원이 부족합니다."))
+                    risk_flags.append(ScenarioRiskFlag(
+                        code="MEZZANINE_SHORTFALL",
+                        severity="high",
+                        message="Base waterfall scenario shows mezzanine tranche repayment shortfall.",
+                        sourceLocators=[_waterfall_row_locator(base_waterfall.scenarioId, row)],
+                    ))
 
         if stress_waterfall and any(row.shortfall > 0 and row.priority == 1 for row in stress_waterfall.rows):
-            risk_flags.append(ScenarioRiskFlag(code="STRESS_SENIOR_SHORTFALL", severity="high", message="스트레스 시나리오(분양률 50%)에서 선순위 대출 일부 상환 지연 또는 미상환 리스크가 있습니다."))
+            stress_row = next((row for row in stress_waterfall.rows if row.shortfall > 0 and row.priority == 1), None)
+            risk_flags.append(ScenarioRiskFlag(
+                code="STRESS_SENIOR_SHORTFALL",
+                severity="high",
+                message="Stress waterfall scenario shows senior tranche repayment shortfall.",
+                sourceLocators=[_waterfall_row_locator(stress_waterfall.scenarioId, stress_row)] if stress_row else [_waterfall_locator(stress_waterfall.scenarioId, "totalShortfall", stress_waterfall.totalShortfall)],
+            ))
 
         max_ltv = unsold_ltv_matrix.summary.get("maxLtv", 0.0)
         if max_ltv > 0.90:
-            risk_flags.append(ScenarioRiskFlag(code="UNSOLD_LTV_BREACH", severity="high", message=f"스트레스 시나리오의 미분양 담보 LTV가 최고 {max_ltv * 100:.1f}%로 기준치 90%를 초과합니다."))
+            risk_flags.append(ScenarioRiskFlag(
+                code="UNSOLD_LTV_BREACH",
+                severity="high",
+                message=f"Unsold LTV reaches {max_ltv * 100:.1f}% and breaches the 90% threshold.",
+                sourceLocators=_unsold_ltv_locators(unsold_ltv_matrix, min_ltv=0.90),
+            ))
         elif max_ltv > 0.80:
-            risk_flags.append(ScenarioRiskFlag(code="UNSOLD_LTV_HIGH", severity="caution", message=f"미분양 담보 LTV가 최고 {max_ltv * 100:.1f}% 수준으로 상승하여 지속 관리가 필요합니다."))
+            risk_flags.append(ScenarioRiskFlag(
+                code="UNSOLD_LTV_HIGH",
+                severity="caution",
+                message=f"Unsold LTV reaches {max_ltv * 100:.1f}% and requires monitoring.",
+                sourceLocators=_unsold_ltv_locators(unsold_ltv_matrix, min_ltv=0.80),
+            ))
 
         if unsold_ltv_matrix.summary.get("breachCount", 0) > 5:
-            risk_flags.append(ScenarioRiskFlag(code="TRIGGER_REQUIRED", severity="high", message="다수의 시나리오에서 LTV 한도 및 원리금 회수성이 악화되므로 할인분양 실행조건, Cash Sweep, Trigger 설정이 필요합니다."))
+            risk_flags.append(ScenarioRiskFlag(
+                code="TRIGGER_REQUIRED",
+                severity="high",
+                message="Multiple scenario cells breach LTV or repayment thresholds, so discount-sale and cash sweep triggers are required.",
+                sourceLocators=[{
+                    "locatorId": "scenariosEvaluation.unsoldLtvMatrix.summary.breachCount",
+                    "sourceType": "scenario_summary_field",
+                    "source": "scenariosEvaluation.unsoldLtvMatrix.summary",
+                    "path": "unsoldLtvMatrix.summary.breachCount",
+                    "label": "Unsold LTV breach count",
+                    "value": unsold_ltv_matrix.summary.get("breachCount", 0),
+                }],
+            ))
         return risk_flags
-
     @staticmethod
     def _build_report_fragments(avg_unit_price: float, base_ltv: float, max_ltv: float) -> ScenarioReportFragments:
         return ScenarioReportFragments(
             waterfallSummary=(
-                "분양대금 상환순서(Waterfall) 시뮬레이션 결과, 기준 분양률 70% 수준에서는 총 PF 원리금 및 수수료 청구액 대비 상환 가능성을 점검할 수 있습니다. "
-                "다만 50% 이하의 스트레스 분양률 또는 할인분양이 발생하는 경우 중·후순위 대출 상환 재원에 공백이 발생할 수 있으므로 분양수입금 상환적립과 Cash Sweep 조건을 약정에 반영할 필요가 있습니다."
+                "Waterfall simulation checks whether sale proceeds can repay total PF principal, interest, and fees at the base 70% sale-rate scenario. "
+                "If sale rate falls to 50% or discount sale occurs, mezzanine and junior repayment can weaken, so repayment-reserve allocation and cash-sweep covenants should be reviewed."
             ),
             unsoldLtvSummary=(
-                f"미분양 발생 시 담보가치 검토 결과, 평균 분양가 KRW {avg_unit_price:,.0f} 기준으로 10% 할인분양을 가정한 기준 미분양 LTV는 {base_ltv * 100:.1f}% 수준으로 산정됩니다. "
-                f"스트레스 조건에서는 LTV가 최고 {max_ltv * 100:.1f}%까지 상승할 수 있어 대주단의 담보보전 리스크 관리가 필요합니다."
+                f"Unsold recovery analysis uses an average unit price of KRW {avg_unit_price:,.0f}. Under the base 10% discount assumption, unsold LTV is estimated at {base_ltv * 100:.1f}%. "
+                f"In stress conditions, LTV can rise to {max_ltv * 100:.1f}%, requiring lender-side collateral and recovery monitoring."
             ),
             trancheRecoverySummary=(
-                "각 Tranche별 최종 회수율(Recovery Rate)을 추정한 결과, 선순위 Tranche는 상대적으로 회수 안정성이 높으나 중순위 이하 채권은 분양률 하락 및 할인매각 적용 시 최종 회수율이 저하될 수 있습니다. "
-                "따라서 후순위 노출액, Equity 완충, 공사비 유보 및 할인분양 Trigger를 함께 검토해야 합니다."
+                "Tranche recovery analysis indicates senior exposure is relatively more resilient, while mezzanine and junior recovery can decline under slower sales or higher discounts. "
+                "Junior exposure, equity cushion, construction-cost retention, and discount-sale triggers should be reviewed together."
             ),
             approvalCondition=(
-                "본건 구조의 리스크를 완화하기 위하여 다음 조건을 대출약정의 특약 또는 승인조건으로 제안합니다. "
-                "1) 누적 분양률이 60%에 미달하는 기간에는 분양수입금의 상환적립 비율을 강화하고 대주단 협의 없는 자금집행을 제한할 것. "
-                "2) 준공 후 3개월 내 미분양률이 20%를 초과하는 경우 대주단 협의 하에 10% 이상 할인분양 또는 Bulk Sale을 실행하는 Trigger 조항을 반영할 것."
+                "Recommended approval conditions: 1) strengthen repayment-reserve allocation and restrict unsupervised fund execution while cumulative sale rate remains below 60%; "
+                "2) if unsold inventory exceeds 20% within three months after completion, require lender consultation for discount sale of at least 10% or bulk sale trigger execution."
             ),
         )
+
+
+def _waterfall_locator(scenario_id: str, field: str, value: Any) -> Dict[str, Any]:
+    return {
+        "locatorId": f"scenariosEvaluation.waterfallScenarios[{scenario_id}].{field}",
+        "sourceType": "scenario_waterfall_field",
+        "source": "scenariosEvaluation.waterfallScenarios",
+        "path": f"waterfallScenarios[scenarioId={scenario_id}].{field}",
+        "label": f"Waterfall {field}",
+        "scenarioId": scenario_id,
+        "value": value,
+    }
+
+
+def _waterfall_row_locator(scenario_id: str, row: Any) -> Dict[str, Any]:
+    tranche = getattr(row, "tranche", None) or "unknown"
+    priority = getattr(row, "priority", None)
+    return {
+        "locatorId": f"scenariosEvaluation.waterfallScenarios[{scenario_id}].rows[{tranche}].shortfall",
+        "sourceType": "scenario_waterfall_row",
+        "source": "scenariosEvaluation.waterfallScenarios",
+        "path": f"waterfallScenarios[scenarioId={scenario_id}].rows[tranche={tranche}]",
+        "label": f"{tranche} waterfall row shortfall",
+        "scenarioId": scenario_id,
+        "tranche": tranche,
+        "priority": priority,
+        "shortfall": getattr(row, "shortfall", None),
+        "recoveryRatio": getattr(row, "recoveryRatio", None),
+    }
+
+
+def _unsold_ltv_locators(matrix: UnsoldLtvMatrix, min_ltv: float) -> List[Dict[str, Any]]:
+    locators: List[Dict[str, Any]] = []
+    rows = sorted(
+        [row for row in matrix.rows if row.unsoldLtv >= min_ltv],
+        key=lambda row: row.unsoldLtv,
+        reverse=True,
+    )
+    for index, row in enumerate(rows[:5], 1):
+        locators.append({
+            "locatorId": f"scenariosEvaluation.unsoldLtvMatrix.rows[{row.saleRate:.2f}:{row.discountRate:.2f}].unsoldLtv",
+            "sourceType": "scenario_matrix_cell",
+            "source": "scenariosEvaluation.unsoldLtvMatrix",
+            "path": f"unsoldLtvMatrix.rows[saleRate={row.saleRate},discountRate={row.discountRate}].unsoldLtv",
+            "label": f"Unsold LTV matrix cell {index}",
+            "saleRate": row.saleRate,
+            "discountRate": row.discountRate,
+            "unsoldUnits": row.unsoldUnits,
+            "unsoldLtv": row.unsoldLtv,
+            "riskLevel": row.riskLevel,
+        })
+    if not locators:
+        locators.append({
+            "locatorId": "scenariosEvaluation.unsoldLtvMatrix.summary.maxLtv",
+            "sourceType": "scenario_summary_field",
+            "source": "scenariosEvaluation.unsoldLtvMatrix.summary",
+            "path": "unsoldLtvMatrix.summary.maxLtv",
+            "label": "Unsold LTV max value",
+            "value": matrix.summary.get("maxLtv"),
+        })
+    return locators

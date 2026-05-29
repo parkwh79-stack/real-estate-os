@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from agents.land_ledger_agent import CURRENT_OFFICIAL_PRICE_BASE_YEAR, DEFAULT_PNU_CONFIDENCE_THRESHOLD
+from integrations.land_data_connectors import LandDataConnectorRouter
 
 
 LAND_LEDGER_ENRICHMENT_AGENT_VERSION = "land-ledger-enrichment-agent-v1.0"
@@ -20,12 +21,22 @@ class LandLedgerEnrichmentAgent:
         options = options or {}
         started_at = _now()
         legal_dong_code = options.get("legalDongCode") or options.get("legal_dong_code")
+        live_connector_result: Dict[str, Any] = {}
+        parcels = analysis.get("parcels", [])
+        if options.get("useLiveConnectors") or options.get("use_live_connectors"):
+            live_connector_result = LandDataConnectorRouter().fetch_records_for_parcels(
+                parcels,
+                legal_dong_code=legal_dong_code,
+                base_year=options.get("baseYear") or options.get("base_year") or CURRENT_OFFICIAL_PRICE_BASE_YEAR,
+                timeout_seconds=float(options.get("connectorTimeoutSeconds") or options.get("connector_timeout_seconds") or 8.0),
+            )
+            options = _merge_connector_result(options, live_connector_result)
+
         pnu_records = _index_records(options.get("pnuResolutions") or options.get("pnu_resolutions") or [])
         cadastral_records = _index_records(options.get("cadastralCharacteristics") or options.get("cadastral_characteristics") or [])
         official_price_records = _index_records(options.get("officialLandPrices") or options.get("official_land_prices") or [])
         registry_records = _index_records(options.get("registryEvidence") or options.get("registry_evidence") or [])
 
-        parcels = analysis.get("parcels", [])
         parcel_results = []
         for parcel in parcels:
             parcel_results.append(
@@ -62,10 +73,15 @@ class LandLedgerEnrichmentAgent:
             "statusCounts": status_counts,
             "status": "completed" if not blocking else "partial_success",
             "blockingIssueCount": len(blocking),
+            "liveConnectorResult": live_connector_result or {
+                "schemaVersion": "realytics-land-data-connectors-v1",
+                "mode": "not_requested",
+                "diagnostics": [],
+            },
             "dataSourcePolicy": {
                 "pnu": "manual fixture, legal-dong-code resolver, or future public API adapter",
-                "cadastral": "manual fixture or future cadastral/public land-use adapter",
-                "officialLandPrice": "manual fixture or future official land price adapter; no price is fabricated",
+                "cadastral": "manual fixture or configured cadastral/public land-use adapter",
+                "officialLandPrice": "manual fixture or configured official land price adapter; no price is fabricated",
                 "registryEvidence": "manual evidence attachment or licensed registry source; no registry completion without evidence",
             },
         }
@@ -266,6 +282,17 @@ def _lookup_record(records: Dict[str, Dict[str, Any]], parcel: Dict[str, Any]) -
         if record:
             return record
     return None
+
+
+def _merge_connector_result(options: Dict[str, Any], connector_result: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(options)
+    for key in ["pnuResolutions", "cadastralCharacteristics", "officialLandPrices", "registryEvidence"]:
+        existing = merged.get(key) or []
+        if not isinstance(existing, list):
+            existing = list(existing.values()) if isinstance(existing, dict) else []
+        fetched = connector_result.get(key) or []
+        merged[key] = existing + [item for item in fetched if isinstance(item, dict)]
+    return merged
 
 
 def _evidence(evidence_type: str, record: Dict[str, Any], parcel: Dict[str, Any]) -> Dict[str, Any]:

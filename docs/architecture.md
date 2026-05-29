@@ -504,7 +504,7 @@ REALYTICS should treat canonical schemas, controlled vocabulary, source evidence
 
 Recommended next coding sequence:
 
-1. Add snapshot diffing over stored project snapshots and harden Historical Similar Case Search with outcomes and vector retrieval.
+1. Harden Snapshot Diff and Historical Similar Case Search with actual outcomes, field-level evidence locators, and vector retrieval.
 2. Add `services/api-server/calculators` wrappers.
 3. Update a small number of tests to import calculators directly.
 4. Keep old `core` imports working.

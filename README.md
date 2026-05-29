@@ -299,6 +299,7 @@ Implemented APIs:
 - `GET /projects/{project_id}/snapshots`
 - `GET /projects/{project_id}/snapshots/{snapshot_id}`
 - `POST /projects/{project_id}/snapshots/similar`
+- `POST /projects/{project_id}/snapshots/diff`
 - `POST /projects/{project_id}/orchestrations/{run_id}/handoffs/{handoff_id}/review`
 - `POST /projects/{project_id}/orchestrations/{run_id}/risk-register/{risk_id}/review`
 - `POST /projects/{project_id}/orchestrations/{run_id}/approve`
@@ -311,20 +312,35 @@ Implemented interaction model:
 - Data Quality Agent checks project name, land area, GFA, sales revenue, PF amount, unit count, sqm/py conversion, VAT basis, schedule, and tranche structure conflicts before final report and approval gates.
 - Risk Register Agent consolidates Land, Marketability, Legal, Cash Flow, PF Structure, Scenario, Data Quality, and Risk Matrix issues into one credit-review table with approval-condition candidates.
 - Risk Register row review supports `approved`, `waived`, `needs_revision`, and `resolved` with reviewer, comment, waiver reason, and audit history. Final approval is blocked while material risk rows remain unresolved.
+- Risk Register is now persisted as server-side JSON/SQLite `risk_registers` records by project/run, with list/get APIs and row-review synchronization for audit and historical review.
 - Credit Review Agent converts the risk register and key upstream artifacts into approve, conditional approval, rework, or reject guidance with reasons, mitigants, waivers, and report paragraphs.
 - Each saved PF review run now creates an immutable `realytics-project-snapshot-v1` record for audit, historical comparison, and future similar-case retrieval.
 - Historical Similar Case Search now compares saved snapshots by project type, location, scale, PF amount, LTV/LTC, Exit sale rate, land/market/reconciliation status, and Risk Register overlap, then returns how similar historical risks were handled.
+- Snapshot Diff now compares two saved snapshots from the same project and highlights changed assumptions, Risk Register rows, Credit Review decision, artifacts, report sections, and re-review recommendations.
+- A first end-to-end Daegu mixed-use PF pilot run is documented, including orchestration, Risk Register, Evidence Graph, Snapshot Diff, Similar Case Search, and identified hardening gaps.
+- Approval Readiness Gate now separates report/artifact completeness from actual credit approval readiness, checking blocking risks, rejected/rework credit decisions, unresolved reviews, and missing evidence warnings.
 - Each PF review run now creates a deterministic `realytics-evidence-graph-v1` artifact linking source documents, evidence IDs, agent artifacts, handoffs, claims, Risk Register rows, source locators, and Phase 11 report sections.
 - Each Risk Register row now stores `evidenceGraphLinks` so reviewers can trace a risk back to its document, Excel cell/API locator, Agent artifact, evidence ID, and supporting claim nodes.
 - Human review statuses include `pending`, `approved`, `rejected`, and `needs_revision`.
 - Final approval is blocked when required handoffs remain unresolved, rejected, or marked as needing revision.
 - Orchestration UI shows progress, handoff status, open reviews, and review actions.
+- Baseline user activity logging stores API request and login events in JSON/SQLite runtime state and exposes `POST /audit/login-event` plus `GET /audit/user-activity` for troubleshooting who did what, when, and against which project/run.
+- Audit review screens are available at `/audit` and `/project/{id}/audit` to inspect event mix, sensitive document/report actions, slow requests, and recent user activity.
+- Identity/session MVP stores tenants, users, and sessions in JSON/SQLite and exposes `/auth/tenants`, `/auth/users`, `/auth/session`, and `/auth/me`; RBAC checks now cover audit reads, source document downloads, and report export/download with optional strict mode.
+- Land Evidence records are now persisted separately from the land ledger via `land_evidence` JSON/SQLite storage and `GET/POST /projects/{id}/land-evidence`; `/land-ledger/enrich` can persist PNU, cadastral, official land price, and registry evidence when `persistEvidence` is enabled.
+- PF review runs hydrate persisted Land Evidence into the orchestration payload so Land Agent readiness, Legal Review, Risk Register source locators, and Evidence Graph links can reflect stored PNU, official-price, and registry records.
+- Approval Readiness Gate now treats land readiness as explicit blocker checks: PNU, official land price, registry evidence, and land acquisition readiness.
 
 Key files:
 
 - `services/api-server/agents/orchestration_agent.py`
 - `services/api-server/schemas/orchestration.py`
 - `services/api-server/use_cases/orchestration_approval.py`
+- `services/api-server/routers/audit.py`
+- `services/api-server/routers/auth.py`
+- `services/api-server/core/authz.py`
+- `services/api-server/tests/test_land_evidence_storage.py`
+- `apps/web/components/audit/activity-log-panel.tsx`
 - `apps/web/app/project/[id]/orchestration/page.tsx`
 
 ### 9. Phase 11 PF Review Report
@@ -515,6 +531,8 @@ Notes:
 - Agent interaction operating model: [`docs/product/agent-interaction-operating-model.md`](docs/product/agent-interaction-operating-model.md)
 - Server-side project snapshots: [`docs/product/project-snapshots.md`](docs/product/project-snapshots.md)
 - Historical Similar Case Search: [`docs/product/historical-similar-case-search.md`](docs/product/historical-similar-case-search.md)
+- Daegu mixed-use PF pilot run: [`docs/product/pilot-run-daegu-mixed-use-pf.md`](docs/product/pilot-run-daegu-mixed-use-pf.md)
+- Pilot hardening notes: [`docs/product/pilot-hardening-notes.md`](docs/product/pilot-hardening-notes.md)
 - Evidence Graph Agent: [`docs/product/evidence-graph-agent.md`](docs/product/evidence-graph-agent.md)
 - Data Quality Agent: [`docs/product/data-quality-agent.md`](docs/product/data-quality-agent.md)
 - Risk Register Agent: [`docs/product/risk-register-agent.md`](docs/product/risk-register-agent.md)

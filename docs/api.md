@@ -77,9 +77,18 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 
 ### `POST /projects/{project_id}/land-ledger/enrich`
 - **Description**: Enrich a parsed land ledger with batch PNU, cadastral characteristics, official land price, and registry/encumbrance evidence.
-- **Request Body**: `{ "landLedger": {...}, "options": { "legalDongCode": "2729012300", "pnuResolutions": [], "cadastralCharacteristics": [], "officialLandPrices": [], "registryEvidence": [] }, "persist": false }`
+- **Request Body**: `{ "landLedger": {...}, "options": { "legalDongCode": "2729012300", "useLiveConnectors": false, "baseYear": 2026, "pnuResolutions": [], "cadastralCharacteristics": [], "officialLandPrices": [], "registryEvidence": [] }, "persist": false }`
 - **Response**: Updated land ledger with refreshed parcel QA, workflow status, enrichment run summary, PF summary, evidence records, and coverage ratios.
-- **Data Policy**: The endpoint can generate PNU from a configured legal dong code and normalized lot numbers, but official land price and registry evidence are never fabricated. They must come from provided connector records or future public/licensed adapters with base year/source evidence.
+- **Live Connector Options**:
+  - `useLiveConnectors`: when true, runs the configured land data connector router before manual records are applied.
+  - `legalDongCode`: required to deterministically generate PNU from normalized lot number when PNU is missing.
+  - `baseYear`: target official land price base year.
+  - `connectorTimeoutSeconds`: per-request timeout for configured connector calls.
+- **Connector Environment Variables**:
+  - `REALYTICS_CADASTRAL_URL_TEMPLATE`: URL template for cadastral/land-use lookup. Supports `{pnu}`, `{service_key}`, and `{base_year}`.
+  - `REALYTICS_OFFICIAL_LAND_PRICE_URL_TEMPLATE`: URL template for official land price lookup. Supports `{pnu}`, `{service_key}`, and `{base_year}`.
+  - API key lookup order: `REALYTICS_PUBLIC_DATA_API_KEY`, `DATA_GO_KR_API_KEY`, `REALYTICS_VWORLD_API_KEY`, `VWORLD_API_KEY`.
+- **Data Policy**: The endpoint can generate PNU from a configured legal dong code and normalized lot numbers. Official land price and registry evidence are never fabricated. Official price must come from provided connector/manual records or configured public/licensed adapters with base year/source evidence. Registry evidence remains manual/licensed evidence attachment; live registry lookup is not implemented.
 
 ### `POST /projects/{project_id}/cashflow/calculate`
 - **Description**: Trigger monthly cash flow calculation.
@@ -116,6 +125,12 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Run and persist a full recovery scenario set including waterfall scenarios, unsold LTV matrix, tranche recovery matrix, risk flags, and report fragments.
 - **Request Body**: Same scenario input shape as `/scenarios/waterfall`.
 - **Response**: `calculation_scenario_engine_v1` result and saved `project.scenario_results[scenarioSetId]`.
+
+### `POST /projects/{project_id}/scenarios/restructuring`
+- **Description**: Run the Calculation Scenario Engine, then produce a deterministic restructuring plan for rejection-driving scenario risks such as `SENIOR_SHORTFALL` and `UNSOLD_LTV_BREACH`.
+- **Request Body**: Same scenario input shape as `/scenarios/waterfall`, plus optional `options` such as `{ "seniorBuffer": 1000000000, "unsoldLtvTarget": 0.90 }`.
+- **Response**: `pf_restructuring_plan` with base scenario health, adjusted senior-resized scenario health, senior shortfall cure amount, DSRA/equity alternative, unsold LTV cure amount, additional collateral value, approval path, source metadata, and source locators back to waterfall rows and unsold LTV matrix cells.
+- **Credit Policy**: This endpoint does not waive credit risk. It quantifies what must change before a rejected scenario can move toward conditional approval. Senior shortfall must be removed by tranche reduction, DSRA/equity, or equivalent repayment support; unsold LTV breach must be cured by PF reduction, equity increase, additional collateral, forward sale, bulk sale, refinancing evidence, or other source-backed recovery support.
 
 ### `POST /projects/{project_id}/marketability/analyze`
 - **Description**: Analyze saleability for saleable real estate assets such as apartments, officetels, knowledge industry centers, mixed-use projects, and commercial pre-sale projects.
@@ -234,9 +249,11 @@ The workflow executes these canonical step keys:
 - `risk_assessment`: Risk assessment
 - `risk_register_generation`: Risk register generation
 - `credit_review_decision`: Credit review decision
+- `scenario_restructuring_plan`: Scenario restructuring plan
 - `phase11_report_generation`: Phase 11 report generation
 - `evidence_graph_generation`: Evidence graph generation
-- `quality_check`: Quality check
+- `quality_check`: Report completeness quality check
+- `approval_readiness_gate`: Approval readiness gate
 
 Typed handoff artifacts currently include:
 
@@ -269,6 +286,11 @@ Typed handoff artifacts currently include:
 - **Request**: Optional `snapshotId`, `limit`, `minScore`, and `includeSameProject`.
 - **Response**: `realytics-similar-case-search-v1` payload with the query seed, ranked similar cases, score breakdown, matched dimensions, matched risk rows, historical review status, mitigants, approval conditions, and Credit Review decision outcome.
 
+### `POST /projects/{project_id}/snapshots/diff`
+- **Description**: Compare two saved project snapshots from the same project for audit, re-review, and committee supplement workflows.
+- **Request**: `baseSnapshotId` and `compareSnapshotId`.
+- **Response**: `realytics-snapshot-diff-v1` payload with seed metric changes, added/removed/changed risks, Credit Review decision changes, artifact changes, report-section changes, material changes, and re-review recommendation.
+
 ### `POST /projects/{project_id}/orchestrations/{run_id}/approve`
 - **Description**: Mark a completed orchestration run as approved.
 - **Request Body**: `{ "approved_by": "credit_officer", "comment": "..." }`
@@ -285,3 +307,85 @@ Typed handoff artifacts currently include:
 - **Request Body**: `{ "review_status": "approved | waived | needs_revision | resolved", "reviewed_by": "credit_officer", "comment": "...", "waiver_reason": "..." }`
 - **Response**: Updated orchestration run with the risk row `reviewStatus`, reviewer, timestamp, comment, `reviewHistory`, Risk Register review summary, and refreshed Credit Review human-review metadata.
 - **Approval Gate**: Final run approval is blocked while material risk rows that require human review remain outside `approved`, `waived`, or `resolved`.
+- **Persistence**: The updated Risk Register is synchronized to the server-side `risk_registers` store and the action is logged as `risk_register_row_review`.
+
+### `GET /projects/{project_id}/risk-registers`
+- **Description**: List server-persisted Risk Register records for a project across orchestration runs.
+- **Response**: `realytics-risk-register-list-v1` payload with run ID, status, risk count, review summary, and update time.
+
+### `GET /projects/{project_id}/orchestrations/{run_id}/risk-register`
+- **Description**: Retrieve the server-persisted Risk Register for one orchestration run.
+- **Response**: Full `realytics-risk-register-v1` payload, including risks, source locators, evidence links, review statuses, and review history.
+
+## Land Evidence APIs
+
+### `GET /projects/{project_id}/land-evidence`
+- **Description**: List persisted land evidence records for a project.
+- **Query params**: `pnu`, `evidence_type`.
+- **RBAC**: Requires `evidence:read` when strict RBAC mode is enabled.
+
+### `POST /projects/{project_id}/land-evidence`
+- **Description**: Persist one or more land evidence records such as PNU resolution, cadastral record, official land price, or registry record.
+- **Request Body**: `{ "records": [{ "evidenceType": "official_land_price", "pnu": "...", "pricePerSqm": 0, "baseYear": 2026, "sourceUrlOrEvidenceId": "..." }] }`
+- **RBAC**: Requires `project:write` when strict RBAC mode is enabled.
+
+### `POST /projects/{project_id}/land-ledger/enrich`
+- **Update**: When `persistEvidence` or `persist` is true, enrichment outputs are saved into `land_evidence` records for downstream legal/PF review.
+
+## Auth / Identity APIs
+
+### `POST /auth/tenants`
+- **Description**: Create or update a tenant/workspace identity record.
+- **Request Body**: `{ "tenantId": "tenant-a", "name": "Tenant A", "status": "active" }`
+
+### `POST /auth/users`
+- **Description**: Create or update a persisted user identity record.
+- **Request Body**: `{ "userId": "analyst-1", "tenantId": "tenant-a", "email": "a@example.com", "displayName": "Analyst", "role": "reviewer" }`
+
+### `GET /auth/users`
+- **Description**: List persisted users, optionally filtered by tenant.
+- **Query params**: `tenant_id`, `limit`.
+
+### `POST /auth/session`
+- **Description**: Create an MVP session for a persisted user and emit a login audit event.
+- **Request Body**: `{ "userId": "analyst-1", "tenantId": "tenant-a", "provider": "local", "host": "web" }`
+
+### `GET /auth/me`
+- **Description**: Resolve the current identity context from `x-realytics-session-id`, `x-realytics-user-id`, or `x-user-id`.
+- **Response**: Authenticated flag, user, session, role-derived permission hints, and MVP limitations.
+- **Note**: This is a persisted identity/session baseline, not yet a production identity provider.
+
+### RBAC Mode
+- **Header**: Use `x-realytics-session-id` to apply persisted user roles to sensitive endpoints.
+- **Environment**: `REALYTICS_RBAC_MODE=permissive|strict`.
+- **Permissive mode**: Unknown legacy users are allowed but authorization metadata records a warning.
+- **Strict mode**: Unknown users or users without the required permission receive `403`.
+- **Protected MVP endpoints**: audit log read/export, source document download, report export creation, and report export download.
+
+## Audit APIs
+
+### `POST /audit/login-event`
+- **Description**: Record an observed login/session event for troubleshooting and audit review.
+- **Headers**: `x-realytics-user-id` or `x-user-id` can provide the user ID when the payload does not.
+- **Request Body**: `{ "userId": "analyst-1", "provider": "local", "status": "success", "tenantId": "tenant-a", "host": "web" }`
+- **Response**: Stored login event record.
+
+### `GET /audit/user-activity`
+- **Description**: List server-side user activity logs. Supports filtering by user, project, and event type.
+- **Query params**: `limit`, `user_id`, `project_id`, `event_type`.
+- **Example**: `GET /audit/user-activity?user_id=analyst-1&limit=100`
+- **Note**: This is a baseline activity log, not a complete authentication system. Real identity provider integration, tenant/session/RBAC tables, and raw evidence access logs remain planned.
+
+### `GET /audit/user-activity/summary`
+- **Description**: Return count-based troubleshooting summary by event type, user, project, status bucket, sensitive event count, and slow request count.
+- **Query params**: `limit`, `user_id`, `project_id`, `event_type`.
+
+### `GET /audit/user-activity/export`
+- **Description**: Export user activity logs for audit handoff.
+- **Query params**: `format=json|csv`, `limit`, `user_id`, `project_id`, `event_type`.
+
+Explicit sensitive events currently recorded:
+
+- `source_document_download`
+- `report_export_created`
+- `report_export_download`

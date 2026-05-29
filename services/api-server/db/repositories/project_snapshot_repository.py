@@ -175,6 +175,8 @@ def _artifact_snapshots(artifacts: Dict[str, Any]) -> Dict[str, Any]:
         "creditReviewDecision",
         "scenariosEvaluation",
         "evidenceGraph",
+        "qualityCheck",
+        "approvalReadinessGate",
     ]
     return {
         key: artifacts[key]

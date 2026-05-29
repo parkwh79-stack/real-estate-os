@@ -11,6 +11,7 @@ from agents.legal_review_agent import LegalReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.marketability_agent import MarketabilityAgent
 from agents.report_agent import ReportAgent
+from agents.restructuring_agent import RestructuringAgent
 from agents.risk_register_agent import RiskRegisterAgent
 from core.calculations import (
     calculate_feasibility_metrics,
@@ -134,6 +135,8 @@ class OrchestrationAgent:
             pf_structure = self._calculate_pf_structure(project_data)
 
             # Execute Scenario Engine during orchestration run to dynamically construct sensitivity analyses
+            scenario_req = None
+            scenario_run_result = None
             try:
                 from schemas.scenario import ScenarioSetRequest
                 from agents.scenario_engine_agent import ScenarioEngineAgent
@@ -321,7 +324,7 @@ class OrchestrationAgent:
                 else [],
                 requires_human_review=legal_review.get("status") != "clear",
                 progress_impact={
-                    "unblocks": ["risk_assessment", "quality_check"],
+                    "unblocks": ["risk_assessment", "approval_readiness_gate"],
                     "downstreamAgents": ["RiskAssessmentEngine", "CreditReviewAgent"],
                 },
             )
@@ -402,6 +405,43 @@ class OrchestrationAgent:
                 },
             )
 
+            restructuring_plan = self._build_restructuring_plan(scenario_req, scenario_run_result)
+            run["artifacts"]["restructuringPlan"] = restructuring_plan
+            restructuring_blockers = self._restructuring_blockers(restructuring_plan)
+            self._complete_step(run, "scenario_restructuring_plan", {
+                "status": restructuring_plan.get("status"),
+                "recommendationCount": len(restructuring_plan.get("recommendations", [])),
+                "approvalPath": restructuring_plan.get("approvalPath", {}).get("currentStatus"),
+                "seniorShortfallStatus": restructuring_plan.get("seniorShortfallFix", {}).get("status"),
+                "unsoldLtvStatus": restructuring_plan.get("unsoldLtvFix", {}).get("status"),
+            }, artifact_key="restructuringPlan")
+            self._add_handoff(
+                run,
+                handoff_type="restructuring_to_credit_review",
+                from_agent="RestructuringAgent",
+                to_agent="CreditReviewAgent",
+                payload_schema="PFRestructuringPlanV1",
+                payload={
+                    "approvalPath": restructuring_plan.get("approvalPath", {}),
+                    "seniorShortfallFix": restructuring_plan.get("seniorShortfallFix", {}),
+                    "unsoldLtvFix": restructuring_plan.get("unsoldLtvFix", {}),
+                    "recommendations": restructuring_plan.get("recommendations", []),
+                },
+                evidence_ids=self._collect_evidence_ids(restructuring_plan),
+                confidence=restructuring_plan.get("sourceMetadata", {}).get("confidence"),
+                blocking_issues=restructuring_blockers,
+                data_limitations=restructuring_plan.get("dataLimitations", []),
+                requires_human_review=bool(restructuring_blockers),
+                assumptions=[
+                    "Restructuring recommendations are scenario outputs and do not waive credit risk.",
+                    "Any senior reduction, DSRA, equity, collateral, forward-sale, or refinancing cure must be source-backed and rerun before final approval.",
+                ],
+                progress_impact={
+                    "requiresReconciliation": ["credit_review_decision", "approval_readiness_gate"],
+                    "downstreamAgents": ["CreditReviewAgent", "ApprovalReadinessGate"],
+                },
+            )
+
             report_agent = ReportAgent()
             structured_report = report_agent.generate_structured_report(project_data)
             report_markdown = report_agent.generate_report(project_data)
@@ -433,7 +473,7 @@ class OrchestrationAgent:
                 report_record = {
                     "report_id": f"report-{run['run_id']}",
                     "version": 1,
-                    "title": "AI PF 심사보고서",
+                    "title": "AI PF Review Report",
                     "report": structured_report,
                     "report_markdown": report_markdown,
                 }
@@ -452,6 +492,10 @@ class OrchestrationAgent:
             run["artifacts"]["qualityCheck"] = quality
             self._complete_step(run, "quality_check", quality, artifact_key="qualityCheck")
 
+            approval_readiness = self._approval_readiness_gate(run)
+            run["artifacts"]["approvalReadinessGate"] = approval_readiness
+            self._complete_step(run, "approval_readiness_gate", approval_readiness, artifact_key="approvalReadinessGate")
+
             run["status"] = "completed" if quality["pass"] else "completed_with_warnings"
         except Exception as exc:
             run["status"] = "failed"
@@ -463,19 +507,66 @@ class OrchestrationAgent:
 
     def _review_land_readiness(self, data: Dict[str, Any]) -> Dict[str, Any]:
         land_ledger = data.get("landLedger") or data.get("land_ledger") or {}
+        land_evidence = data.get("landEvidence") or data.get("land_evidence") or {}
         land = data.get("land") or data.get("site") or {}
         project = data.get("project") or {}
 
         if not isinstance(land_ledger, dict) or not land_ledger:
-            pnu = land.get("pnu") or data.get("pnu")
-            official_price = land.get("official_land_price") or land.get("officialLandPrice")
-            status = "basic_site_data_only" if pnu or official_price else "land_ledger_not_provided"
-            limitations = [
-                "Land ledger import is not attached to this orchestration run.",
-                "Parcel-level owner, acquisition, official price, and registry evidence cannot be validated yet.",
-            ]
-            if pnu:
-                limitations = limitations[1:]
+            pnu_resolutions = land_evidence.get("pnuResolutions") or land_evidence.get("pnu_resolutions") or []
+            first_pnu_resolution = next((item for item in pnu_resolutions if isinstance(item, dict)), {})
+            pnu = land.get("pnu") or data.get("pnu") or first_pnu_resolution.get("pnu") or first_pnu_resolution.get("resolvedPnu")
+            official_price = (
+                land.get("official_land_price")
+                or land.get("officialLandPrice")
+                or land_evidence.get("officialLandPrice")
+                or land_evidence.get("official_land_price")
+            )
+            total_area = (
+                land.get("land_area_sqm")
+                or land.get("landAreaSqm")
+                or land.get("area_sqm")
+                or land.get("areaSqm")
+            )
+            official_price_evidence = (
+                land_evidence.get("officialLandPriceEvidence")
+                or land_evidence.get("official_land_price_evidence")
+            )
+            registry_evidence = (
+                land_evidence.get("registryEvidence")
+                or land_evidence.get("registry_evidence")
+                or land_evidence.get("encumbranceEvidence")
+                or land_evidence.get("encumbrance_evidence")
+            )
+            acquisition_ratio = self._basic_acquisition_ratio(data, total_area, land_evidence)
+            source_documents = (
+                land_evidence.get("sourceDocuments")
+                or land_evidence.get("source_documents")
+                or []
+            )
+            pnu_ready = bool(pnu)
+            official_ready = bool(official_price or official_price_evidence)
+            registry_ready = bool(registry_evidence)
+            acquisition_ready = acquisition_ratio >= 1
+            source_ready = bool(land_evidence or source_documents)
+            ready_for_pf = pnu_ready and official_ready and registry_ready and acquisition_ready
+            status = (
+                "ready_for_pf_review"
+                if ready_for_pf
+                else "basic_site_data_only"
+                if pnu or official_price or land_evidence
+                else "land_ledger_not_provided"
+            )
+            limitations = []
+            if not land_evidence:
+                limitations.append("Land ledger import or flat land evidence package is not attached to this orchestration run.")
+            if not pnu_ready:
+                limitations.append("PNU evidence is missing.")
+            if not official_ready:
+                limitations.append("Official land price evidence is missing.")
+            if not registry_ready:
+                limitations.append("Registry and encumbrance evidence is missing.")
+            if not acquisition_ready:
+                limitations.append("Land acquisition area ratio is below 100%.")
             return {
                 "analysisType": "land_agent_orchestration_review_v1",
                 "status": status,
@@ -483,28 +574,37 @@ class OrchestrationAgent:
                     "projectName": project.get("name"),
                     "pnu": pnu,
                     "officialLandPrice": official_price,
-                    "parcelCount": 0,
-                    "totalAreaSqm": land.get("land_area_sqm") or land.get("landAreaSqm"),
+                    "officialLandPriceBaseYear": land_evidence.get("officialLandPriceBaseYear")
+                    or land_evidence.get("official_land_price_base_year"),
+                    "parcelCount": land_evidence.get("parcelCount") or land_evidence.get("parcel_count") or 0,
+                    "totalAreaSqm": total_area,
                     "totalPurchaseAmount": None,
-                    "pnuCoverageRatio": 1.0 if pnu else 0.0,
-                    "officialLandPriceCoverageRatio": 1.0 if official_price else 0.0,
-                    "registryEvidenceCoverageRatio": 0.0,
+                    "pnuCoverageRatio": 1.0 if pnu_ready else 0.0,
+                    "officialLandPriceCoverageRatio": 1.0 if official_ready else 0.0,
+                    "registryEvidenceCoverageRatio": 1.0 if registry_ready else 0.0,
+                    "acquisitionAreaRatio": acquisition_ratio,
                 },
                 "landLedgerStatus": status,
-                "landAcquisitionStatus": {},
+                "landAcquisitionStatus": {
+                    "acquisitionAreaRatio": acquisition_ratio,
+                    "source": "landEvidence" if land_evidence else "land_acquisition",
+                },
                 "pfSummary": {},
                 "evidenceReadiness": {
-                    "pnuReady": bool(pnu),
-                    "officialPriceReady": bool(official_price),
-                    "registryEvidenceReady": False,
-                    "acquisitionReady": False,
-                    "sourceDataReady": False,
+                    "pnuReady": pnu_ready,
+                    "officialPriceReady": official_ready,
+                    "registryEvidenceReady": registry_ready,
+                    "acquisitionReady": acquisition_ready,
+                    "sourceDataReady": source_ready,
                 },
                 "blockingIssues": [],
                 "dataLimitations": limitations,
-                "requiresHumanReview": False,
-                "confidence": 0.35 if pnu or official_price else 0.15,
-                "handoffReadiness": "limited_patch",
+                "requiresHumanReview": not ready_for_pf,
+                "confidence": 0.85 if ready_for_pf else 0.45 if pnu or official_price or land_evidence else 0.15,
+                "handoffReadiness": "pf_ready_patch" if ready_for_pf else "limited_patch",
+                "evidenceIds": self._collect_evidence_ids(land_evidence),
+                "sourceLocators": self._land_source_locators(land_evidence),
+                "sourceMetadata": land_evidence.get("sourceMetadata") or land_evidence.get("source_metadata") or {},
             }
 
         summary = land_ledger.get("summary", {})
@@ -578,9 +678,30 @@ class OrchestrationAgent:
             "requiresHumanReview": requires_review,
             "confidence": self._normalize_confidence(confidence),
             "handoffReadiness": "pf_ready_patch" if ready_for_pf else "review_required_patch",
+            "evidenceIds": self._collect_evidence_ids(land_ledger),
+            "sourceLocators": self._land_source_locators(land_ledger),
             "sourceMetadata": land_ledger.get("importMetadata", {}),
             "reviewMemo": pf_summary.get("reviewMemo"),
         }
+
+    def _land_source_locators(self, value: Dict[str, Any]) -> List[Dict[str, Any]]:
+        locators: List[Dict[str, Any]] = []
+        records = value.get("records") if isinstance(value, dict) else None
+        if isinstance(records, list):
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                source = record.get("sourceUrlOrEvidenceId") or record.get("evidenceId")
+                if source:
+                    locators.append({
+                        "locatorId": source,
+                        "source": source,
+                        "label": f"{record.get('evidenceType', 'land_evidence')} {record.get('pnu') or record.get('parcelKey') or ''}".strip(),
+                        "path": f"landEvidence.records[{record.get('recordKey') or record.get('evidenceId')}]",
+                        "evidenceType": record.get("evidenceType"),
+                        "pnu": record.get("pnu"),
+                    })
+        return locators
 
     def _land_handoff_payload(self, land_review: Dict[str, Any]) -> Dict[str, Any]:
         summary = land_review.get("summary", {})
@@ -614,6 +735,35 @@ class OrchestrationAgent:
         missing = summary.get(missing_key) or 0
         return max(0.0, min(1.0, 1 - (missing / parcel_count)))
 
+    def _basic_acquisition_ratio(
+        self,
+        data: Dict[str, Any],
+        total_area: Any,
+        land_evidence: Dict[str, Any],
+    ) -> float:
+        explicit_ratio = (
+            land_evidence.get("acquisitionAreaRatio")
+            or land_evidence.get("acquisition_area_ratio")
+        )
+        if isinstance(explicit_ratio, (int, float)):
+            return max(0.0, min(1.0, float(explicit_ratio)))
+        parcels = data.get("land_acquisition") or data.get("landAcquisition") or []
+        if not isinstance(parcels, list) or not parcels:
+            return 0.0
+        acquired_area = sum(
+            float(parcel.get("area_sqm") or parcel.get("areaSqm") or parcel.get("area") or 0)
+            for parcel in parcels
+            if isinstance(parcel, dict)
+        )
+        if isinstance(total_area, (int, float)) and total_area > 0:
+            return max(0.0, min(1.0, acquired_area / float(total_area)))
+        shares = [
+            float(parcel.get("share") or 0)
+            for parcel in parcels
+            if isinstance(parcel, dict)
+        ]
+        return 1.0 if shares and sum(shares) >= 1 else 0.0
+
     def _calculate_feasibility(self, data: Dict[str, Any]) -> Dict[str, Any]:
         return calculate_feasibility_metrics(data.get("feasibility_input", {}))
 
@@ -637,6 +787,43 @@ class OrchestrationAgent:
     def _assess_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
         return build_basic_risk_matrix(data)
 
+    def _build_restructuring_plan(self, scenario_req: Any, scenario_run_result: Any) -> Dict[str, Any]:
+        if scenario_req is None or scenario_run_result is None:
+            return {
+                "schemaVersion": "realytics-restructuring-agent-v1",
+                "analysisType": "pf_restructuring_plan",
+                "status": "skipped",
+                "reason": "Scenario Engine result is unavailable; restructuring plan could not be generated.",
+                "recommendations": [],
+                "approvalPath": {
+                    "currentStatus": "scenario_result_missing",
+                    "remainingBlockers": [],
+                    "nextSteps": ["Run Scenario Engine before restructuring analysis."],
+                    "conditionDrafts": [],
+                },
+                "dataLimitations": ["Scenario Engine output is missing."],
+                "sourceMetadata": {
+                    "sourceName": "Orchestration Agent",
+                    "sourceType": "agent_artifact",
+                    "confidence": 0.0,
+                },
+            }
+        return RestructuringAgent().build_restructuring_plan(scenario_req, scenario_run_result)
+
+    def _restructuring_blockers(self, restructuring_plan: Dict[str, Any]) -> List[str]:
+        blockers = []
+        approval_path = restructuring_plan.get("approvalPath") or {}
+        for code in approval_path.get("remainingBlockers") or []:
+            if code in {"SENIOR_SHORTFALL", "STRESS_SENIOR_SHORTFALL"}:
+                blockers.append(f"{code}: senior repayment cure must be applied and rerun before approval.")
+            elif code == "UNSOLD_LTV_BREACH":
+                blockers.append(
+                    "UNSOLD_LTV_BREACH: PF reduction, equity increase, collateral, forward sale, bulk sale, or refinancing evidence is required."
+                )
+            else:
+                blockers.append(str(code))
+        return blockers
+
     def _quality_check(
         self,
         run: Dict[str, Any],
@@ -658,17 +845,13 @@ class OrchestrationAgent:
             "riskAssessment",
             "riskRegister",
             "creditReviewDecision",
+            "restructuringPlan",
             "phase11Report",
             "evidenceGraph",
         ]
         missing_artifacts = [
             artifact for artifact in required_artifacts if artifact not in run["artifacts"]
         ]
-        legal_status = run["artifacts"]["legalPermitReview"]["status"]
-        reconciliation_status = run["artifacts"]["reconciliationGate"]["status"]
-        data_quality_status = run["artifacts"]["dataQualityReview"]["status"]
-        credit_review_status = run["artifacts"]["creditReviewDecision"]["status"]
-
         pdf_structure_pass = True
         pdf_visual_pass = True
         if structure_results:
@@ -679,25 +862,238 @@ class OrchestrationAgent:
         is_passed = (
             report_quality["isComplete"]
             and not missing_artifacts
-            and legal_status != "blocking_issue"
-            and reconciliation_status != "blocking"
-            and data_quality_status != "blocking"
             and pdf_structure_pass
             and pdf_visual_pass
         )
 
         return {
             "pass": is_passed,
+            "gateType": "report_completeness",
             "reportComplete": report_quality["isComplete"],
-            "legalReviewStatus": legal_status,
-            "dataQualityStatus": data_quality_status,
-            "creditReviewStatus": credit_review_status,
-            "reconciliationStatus": reconciliation_status,
             "missingReportSections": report_quality["missingSections"],
             "missingArtifacts": missing_artifacts,
             "pdfStructureQA": structure_results or {"status": "skipped", "reason": "No PDF rendered"},
             "pdfVisualQA": visual_results or {"status": "skipped", "reason": "No PDF rendered"},
         }
+
+    def _approval_readiness_gate(self, run: Dict[str, Any]) -> Dict[str, Any]:
+        artifacts = run.get("artifacts", {})
+        risk_register = artifacts.get("riskRegister") or {}
+        credit_review = artifacts.get("creditReviewDecision") or {}
+        legal_review = artifacts.get("legalPermitReview") or {}
+        data_quality = artifacts.get("dataQualityReview") or {}
+        reconciliation = artifacts.get("reconciliationGate") or {}
+        quality = artifacts.get("qualityCheck") or {}
+        land_review = artifacts.get("landAgentReview") or {}
+        evidence_graph = artifacts.get("evidenceGraph") or {}
+        restructuring = artifacts.get("restructuringPlan") or {}
+        restructuring_blockers = set((restructuring.get("approvalPath") or {}).get("remainingBlockers") or [])
+
+        gates = [
+            self._approval_readiness_check(
+                "REPORT_COMPLETENESS_PASS",
+                bool(quality.get("pass")),
+                "Report completeness quality check must pass.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "LEGAL_NOT_BLOCKING",
+                legal_review.get("status") != "blocking_issue",
+                f"Legal review status is {legal_review.get('status')}.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "DATA_QUALITY_NOT_BLOCKING",
+                data_quality.get("status") != "blocking",
+                f"Data Quality status is {data_quality.get('status')}.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "RECONCILIATION_NOT_BLOCKING",
+                reconciliation.get("status") != "blocking",
+                f"Reconciliation status is {reconciliation.get('status')}.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "RISK_REGISTER_NOT_BLOCKING",
+                risk_register.get("status") != "blocking",
+                f"Risk Register status is {risk_register.get('status')}.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "CREDIT_DECISION_NOT_REJECT_OR_REWORK",
+                credit_review.get("decision") not in {"reject_recommended", "rework_required"},
+                f"Credit Review decision is {credit_review.get('decision')}.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "SENIOR_RESTRUCTURING_CLEARED",
+                not {"SENIOR_SHORTFALL", "STRESS_SENIOR_SHORTFALL"}.intersection(restructuring_blockers),
+                "Senior shortfall restructuring blockers must be cured and rerun before approval.",
+                severity="blocking",
+            ),
+        ]
+
+        unresolved_handoffs = self._unresolved_handoff_reviews(run)
+        unresolved_risks = self._unresolved_risk_reviews(run)
+        gates.append(self._approval_readiness_check(
+            "HANDOFF_REVIEWS_RESOLVED",
+            not unresolved_handoffs,
+            f"{len(unresolved_handoffs)} handoff review(s) remain unresolved.",
+            severity="blocking",
+        ))
+        gates.append(self._approval_readiness_check(
+            "RISK_REVIEWS_RESOLVED",
+            not unresolved_risks,
+            f"{len(unresolved_risks)} material risk review(s) remain unresolved.",
+            severity="blocking",
+        ))
+
+        land_readiness = land_review.get("evidenceReadiness") or {}
+        gates.extend([
+            self._approval_readiness_check(
+                "LAND_PNU_READY",
+                bool(land_readiness.get("pnuReady")),
+                "Parcel-level PNU evidence must be attached before PF approval.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "LAND_OFFICIAL_PRICE_READY",
+                bool(land_readiness.get("officialPriceReady")),
+                "Official land price evidence with base year/source must be attached before PF approval.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "LAND_REGISTRY_EVIDENCE_READY",
+                bool(land_readiness.get("registryEvidenceReady")),
+                "Registry and encumbrance evidence must be attached before PF approval.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "LAND_ACQUISITION_READY",
+                bool(land_readiness.get("acquisitionReady")),
+                "Land acquisition or closing readiness must be complete before PF approval.",
+                severity="blocking",
+            ),
+        ])
+
+        land_status = land_review.get("status")
+        if land_status in {"land_ledger_not_provided", "basic_site_data_only"}:
+            gates.append(self._approval_readiness_check(
+                "LAND_EVIDENCE_READY",
+                False,
+                f"Land evidence status is {land_status}; parcel-level PNU, official price, acquisition, and registry evidence remain preliminary.",
+                severity="warning",
+            ))
+
+        risk_rows_without_evidence = (
+            evidence_graph.get("summary", {}).get("riskRowsWithoutExplicitEvidenceCount")
+            if isinstance(evidence_graph, dict)
+            else None
+        )
+        if isinstance(risk_rows_without_evidence, int) and risk_rows_without_evidence > 0:
+            gates.append(self._approval_readiness_check(
+                "RISK_SOURCE_LOCATORS_ATTACHED",
+                False,
+                f"{risk_rows_without_evidence} risk row(s) lack explicit evidence IDs or source locators.",
+                severity="warning",
+            ))
+
+        if "UNSOLD_LTV_BREACH" in restructuring_blockers:
+            gates.append(self._approval_readiness_check(
+                "UNSOLD_LTV_RESTRUCTURING_REQUIRED",
+                False,
+                "Unsold LTV breach remains in restructuring plan; PF reduction, equity, collateral, forward-sale, bulk-sale, or refinancing evidence is required.",
+                severity="warning",
+            ))
+
+        blockers = [gate for gate in gates if not gate["pass"] and gate["severity"] == "blocking"]
+        warnings = [gate for gate in gates if not gate["pass"] and gate["severity"] == "warning"]
+        readiness_pass = not blockers
+        return {
+            "schemaVersion": "realytics-approval-readiness-gate-v1",
+            "analysisType": "approval_readiness_gate",
+            "pass": readiness_pass,
+            "status": "ready_for_approval" if readiness_pass else "not_ready_for_approval",
+            "gateType": "approval_readiness",
+            "summary": {
+                "blockingIssueCount": len(blockers),
+                "warningCount": len(warnings),
+                "unresolvedHandoffReviewCount": len(unresolved_handoffs),
+                "unresolvedRiskReviewCount": len(unresolved_risks),
+                "riskRegisterStatus": risk_register.get("status"),
+                "creditDecision": credit_review.get("decision"),
+                "legalStatus": legal_review.get("status"),
+                "dataQualityStatus": data_quality.get("status"),
+                "reconciliationStatus": reconciliation.get("status"),
+                "landEvidenceReady": all(
+                    bool(land_readiness.get(key))
+                    for key in ["pnuReady", "officialPriceReady", "registryEvidenceReady", "acquisitionReady"]
+                ),
+            },
+            "gates": gates,
+            "blockers": blockers,
+            "warnings": warnings,
+            "requiredActions": self._approval_readiness_actions(blockers, warnings),
+        }
+
+    def _approval_readiness_check(self, code: str, passed: bool, message: str, severity: str) -> Dict[str, Any]:
+        return {
+            "code": code,
+            "pass": passed,
+            "severity": severity,
+            "message": message,
+        }
+
+    def _unresolved_handoff_reviews(self, run: Dict[str, Any]) -> List[Dict[str, Any]]:
+        unresolved = []
+        for handoff in run.get("handoffs", []):
+            review_status = handoff.get("reviewStatus", "not_required")
+            status = handoff.get("status")
+            requires_review = bool(handoff.get("requiresHumanReview"))
+            if review_status in {"rejected", "needs_revision"}:
+                unresolved.append(handoff)
+            elif requires_review and review_status != "approved":
+                unresolved.append(handoff)
+            elif status in {"blocked", "needs_review"} and review_status != "approved":
+                unresolved.append(handoff)
+        return unresolved
+
+    def _unresolved_risk_reviews(self, run: Dict[str, Any]) -> List[Dict[str, Any]]:
+        risk_register = run.get("artifacts", {}).get("riskRegister") or {}
+        unresolved = []
+        for risk in risk_register.get("risks", []):
+            if not risk.get("requiresHumanReview"):
+                continue
+            review_status = risk.get("reviewStatus") or risk.get("status") or "open"
+            if review_status not in {"approved", "waived", "resolved"}:
+                unresolved.append(risk)
+        return unresolved
+
+    def _approval_readiness_actions(
+        self,
+        blockers: List[Dict[str, Any]],
+        warnings: List[Dict[str, Any]],
+    ) -> List[str]:
+        action_by_code = {
+            "REPORT_COMPLETENESS_PASS": "Fix missing report sections, missing artifacts, or PDF QA failures.",
+            "LEGAL_NOT_BLOCKING": "Resolve legal and permit blocking issues or attach counsel-approved waiver.",
+            "DATA_QUALITY_NOT_BLOCKING": "Resolve blocking data-quality conflicts or select an authoritative source.",
+            "RECONCILIATION_NOT_BLOCKING": "Resolve cross-agent assumption conflicts before approval.",
+            "RISK_REGISTER_NOT_BLOCKING": "Resolve or waive critical Risk Register rows before approval.",
+            "CREDIT_DECISION_NOT_REJECT_OR_REWORK": "Rework the transaction or obtain a revised Credit Review decision.",
+            "SENIOR_RESTRUCTURING_CLEARED": "Apply senior tranche reduction, DSRA/equity injection, or source-backed repayment support, then rerun Scenario Engine and Credit Review.",
+            "HANDOFF_REVIEWS_RESOLVED": "Approve or revise unresolved Agent handoffs.",
+            "RISK_REVIEWS_RESOLVED": "Approve, waive, or resolve material Risk Register rows.",
+            "LAND_EVIDENCE_READY": "Attach parcel-level PNU, official land price, acquisition, and registry evidence.",
+            "RISK_SOURCE_LOCATORS_ATTACHED": "Attach evidence IDs, document locators, Excel cells, API records, or scenario matrix locators to risk rows.",
+            "UNSOLD_LTV_RESTRUCTURING_REQUIRED": "Reduce PF exposure, increase equity, add collateral, or attach forward-sale/bulk-sale/refinancing evidence for the unsold LTV cure.",
+        }
+        actions = [
+            action_by_code.get(gate["code"], gate["message"])
+            for gate in blockers + warnings
+        ]
+        return list(dict.fromkeys(actions))
 
     def _complete_step(
         self,
@@ -1123,12 +1519,18 @@ class OrchestrationAgent:
 
     def _is_blocking_risk(self, flag: Any) -> bool:
         if isinstance(flag, str):
-            return flag in {"NO_COMPARABLE_DATA", "PRICE_PREMIUM_EXCESSIVE", "EXIT_RATE_HIGH"}
+            return flag in {
+                "NO_COMPARABLE_DATA",
+                "PROPOSED_PRICE_BASIS_MISSING",
+                "PRICE_PREMIUM_EXCESSIVE",
+                "EXIT_RATE_HIGH",
+            }
         if isinstance(flag, dict):
             severity = str(flag.get("severity", "")).lower()
             code = flag.get("code")
             return severity in {"critical", "high"} or code in {
                 "NO_COMPARABLE_DATA",
+                "PROPOSED_PRICE_BASIS_MISSING",
                 "PRICE_PREMIUM_EXCESSIVE",
                 "EXIT_RATE_HIGH",
             }
@@ -1187,9 +1589,11 @@ class OrchestrationAgent:
             "risk_assessment": "RiskAssessmentEngine",
             "risk_register_generation": "RiskRegisterAgent",
             "credit_review_decision": "CreditReviewAgent",
+            "scenario_restructuring_plan": "RestructuringAgent",
             "phase11_report_generation": "ReportAgent",
             "evidence_graph_generation": "EvidenceGraphAgent",
             "quality_check": "OrchestrationQualityGate",
+            "approval_readiness_gate": "ApprovalReadinessGate",
         }.get(key, key)
 
     def _step_key_for_agent(self, agent_name: str) -> str | None:
@@ -1207,11 +1611,13 @@ class OrchestrationAgent:
             "ReconciliationGate": "cross_agent_reconciliation",
             "LegalReviewAgent": "legal_permit_review",
             "CreditReviewAgent": "credit_review_decision",
+            "RestructuringAgent": "scenario_restructuring_plan",
             "RiskAssessmentEngine": "risk_assessment",
             "RiskRegisterAgent": "risk_register_generation",
             "ReportAgent": "phase11_report_generation",
             "EvidenceGraphAgent": "evidence_graph_generation",
             "OrchestrationQualityGate": "quality_check",
+            "ApprovalReadinessGate": "approval_readiness_gate",
         }.get(agent_name)
 
     def _depends_on_for_step(self, key: str) -> List[str]:

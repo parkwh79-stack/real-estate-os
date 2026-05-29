@@ -109,9 +109,12 @@ Snapshots are created automatically when a PF review run is saved.
 GET /projects/{project_id}/snapshots
 GET /projects/{project_id}/snapshots/{snapshot_id}
 POST /projects/{project_id}/snapshots/similar
+POST /projects/{project_id}/snapshots/diff
 ```
 
 `POST /snapshots/similar` returns `realytics-similar-case-search-v1`, a deterministic comparison of stored snapshots that includes score breakdowns, matched dimensions, Risk Register overlap, historical review status, mitigants, approval conditions, and Credit Review decision outcome.
+
+`POST /snapshots/diff` returns `realytics-snapshot-diff-v1`, a same-project comparison that highlights changed seed metrics, added/removed/changed risks, Credit Review decision changes, artifact changes, report-section changes, and re-review recommendations.
 
 ## Current Implementation
 
@@ -131,7 +134,7 @@ Every major PF review orchestration run should create a server-side project snap
 
 ## Next Steps
 
-1. Add snapshot diffing between two runs of the same project.
-2. Add actual outcome fields such as achieved sales rate, realized discount, repayment completion, and EOD events.
-3. Promote reviewed risk treatments into first-class historical risk records.
-4. Connect full report sentence IDs to Evidence Graph and similar-case retrieval.
+1. Add actual outcome fields such as achieved sales rate, realized discount, repayment completion, and EOD events.
+2. Promote reviewed risk treatments into first-class historical risk records.
+3. Connect full report sentence IDs to Evidence Graph and similar-case retrieval.
+4. Add UI panels for snapshot diff and similar-case search.

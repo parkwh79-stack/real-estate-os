@@ -1,5 +1,8 @@
 from db.repositories.project_snapshot_repository import ProjectSnapshotRepository
-from use_cases.project_snapshots import search_similar_project_snapshots_use_case
+from use_cases.project_snapshots import (
+    diff_project_snapshots_use_case,
+    search_similar_project_snapshots_use_case,
+)
 
 
 def test_similar_case_search_matches_seed_metrics_and_risk_handling():
@@ -55,6 +58,111 @@ def test_similar_case_search_matches_seed_metrics_and_risk_handling():
     assert result["similarCases"][0]["riskMatches"][0]["reviewStatus"] == "waived"
     assert result["similarCases"][0]["decisionOutcome"]["decision"] == "conditional_approval"
     assert result["similarCases"][0]["handlingSummary"]["approvalConditions"]
+
+
+def test_snapshot_diff_detects_material_seed_risk_and_decision_changes():
+    base = _snapshot(
+        project_id="p-query",
+        run_id="run-base",
+        project_type="mixed_use_residential",
+        location="Daegu Dalseo",
+        pf_amount=90_000_000_000,
+        exit_sale_rate=0.62,
+        risk_code="PRICE_PREMIUM_HIGH",
+        review_status="approved",
+        decision="conditional_approval",
+    )
+    compare = _snapshot(
+        project_id="p-query",
+        run_id="run-compare",
+        project_type="mixed_use_residential",
+        location="Daegu Dalseo",
+        pf_amount=100_000_000_000,
+        exit_sale_rate=0.72,
+        risk_code="PRICE_PREMIUM_HIGH",
+        review_status="needs_revision",
+        decision="rework_required",
+    )
+    compare["agentArtifacts"]["riskRegister"]["risks"].append({
+        "riskId": "R-FIN-001",
+        "code": "PF_EXIT_SALE_RATE_HIGH",
+        "category": "Exit Risk",
+        "severity": "high",
+        "probability": "medium",
+        "grade": "High",
+        "score": 12,
+        "reviewStatus": "pending_review",
+        "mitigant": "Reduce PF exposure or add stronger sales trigger.",
+        "evidenceGraphLinks": {"riskNodeId": "risk:R-FIN-001"},
+    })
+    store = {
+        "p-query": {
+            base["snapshotId"]: base,
+            compare["snapshotId"]: compare,
+        }
+    }
+    repo = ProjectSnapshotRepository(store, lambda: None)
+
+    result = diff_project_snapshots_use_case(
+        repo,
+        "p-query",
+        base["snapshotId"],
+        compare["snapshotId"],
+    )
+
+    assert result["schemaVersion"] == "realytics-snapshot-diff-v1"
+    assert result["summary"]["requiresReReview"] is True
+    assert any(change["field"] == "pfAmount" for change in result["seedChanges"])
+    assert result["riskChanges"]["added"][0]["code"] == "PF_EXIT_SALE_RATE_HIGH"
+    assert result["decisionChange"]["changed"] is True
+    assert result["reReviewRecommendation"]["required"] is True
+
+
+def test_similar_case_risk_matching_requires_exact_code_when_query_code_exists():
+    query = _snapshot(
+        project_id="p-query",
+        run_id="run-query",
+        project_type="mixed_use_residential",
+        location="Daegu Dalseo",
+        pf_amount=90_000_000_000,
+        exit_sale_rate=0.67,
+        risk_code="PRICE_PREMIUM_HIGH",
+        review_status="pending_review",
+    )
+    candidate = _snapshot(
+        project_id="p-candidate",
+        run_id="run-candidate",
+        project_type="mixed_use_residential",
+        location="Daegu Dalseo",
+        pf_amount=89_000_000_000,
+        exit_sale_rate=0.66,
+        risk_code="SUPPLY_OVERHANG",
+        review_status="waived",
+        decision="conditional_approval",
+    )
+    candidate_risk = candidate["agentArtifacts"]["riskRegister"]["risks"][0]
+    candidate_risk["riskId"] = "R-MKT-002"
+    candidate_risk["code"] = "SUPPLY_OVERHANG"
+    candidate_risk["category"] = "Market Risk"
+    candidate_risk["severity"] = "high"
+
+    repo = ProjectSnapshotRepository(
+        {
+            "p-query": {query["snapshotId"]: query},
+            "p-candidate": {candidate["snapshotId"]: candidate},
+        },
+        lambda: None,
+    )
+
+    result = search_similar_project_snapshots_use_case(repo, "p-query", {"limit": 1, "min_score": 0})
+
+    assert result["similarCases"]
+    assert result["similarCases"][0]["riskMatches"] == []
+    risk_overlap = next(
+        item for item in result["similarCases"][0]["scoreBreakdown"] if item["dimension"] == "riskOverlap"
+    )
+    assert risk_overlap["score"] == 0
+    assert risk_overlap["metadata"]["matchedRiskCount"] == 0
 
 
 def _snapshot(

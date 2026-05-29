@@ -137,6 +137,66 @@ def test_marketability_agent_normalizes_product_mix_and_pricing_comparables():
     assert result["unsoldRecovery"]["trancheRecovery"][0]["recoveryRatio"] == 1
 
 
+def test_marketability_agent_distinguishes_missing_price_basis_from_missing_comparables():
+    result = MarketabilityAgent().analyze({
+        "project": {"type": "officetel"},
+        "product_mix": [
+            {
+                "type": "A",
+                "contractAreaPy": 20,
+                "units": 100,
+            }
+        ],
+        "pf_structure": [{"name": "Tr.A", "amount": 35_000_000_000, "priority": 1}],
+        "sales_schedule": {"contract_deposit": 0.1},
+        "market": {
+            "comparables": [
+                {"name": "Nearby A", "pricePerPy": 30_000_000, "sourceUrlOrEvidenceId": "comp-a"},
+                {"name": "Nearby B", "pricePerPy": 31_000_000, "sourceUrlOrEvidenceId": "comp-b"},
+            ],
+        },
+    })
+
+    assert result["comparableSummary"]["totalCount"] == 2
+    assert result["pricing"]["judgement"] == "needs_proposed_price_basis"
+    assert result["pricing"]["hasComparableData"] is True
+    assert result["pricing"]["proposedPriceBasisStatus"] == "missing"
+    assert "PROPOSED_PRICE_BASIS_MISSING" in result["riskFlags"]
+    assert "NO_COMPARABLE_DATA" not in result["riskFlags"]
+    assert "proposed_price_per_py_basis" in result["missingRequiredData"]
+    detail = next(flag for flag in result["riskFlagDetails"] if flag["code"] == "PROPOSED_PRICE_BASIS_MISSING")
+    assert detail["sourceLocators"]
+    assert any(locator["path"] == "marketabilityAnalysis.pricing.proposedPricePerPy" for locator in detail["sourceLocators"])
+
+
+def test_marketability_agent_derives_price_basis_from_product_mix_revenue():
+    result = MarketabilityAgent().analyze({
+        "project": {"type": "officetel"},
+        "product_mix": [
+            {
+                "type": "A",
+                "contractAreaPy": 20,
+                "units": 100,
+                "totalRevenue": 60_000_000_000,
+            }
+        ],
+        "pf_structure": [{"name": "Tr.A", "amount": 35_000_000_000, "priority": 1}],
+        "sales_schedule": {"contract_deposit": 0.1},
+        "market": {
+            "comparables": [
+                {"name": "Nearby A", "pricePerPy": 30_000_000, "sourceUrlOrEvidenceId": "comp-a"},
+                {"name": "Nearby B", "pricePerPy": 31_000_000, "sourceUrlOrEvidenceId": "comp-b"},
+            ],
+        },
+    })
+
+    assert result["productMix"][0]["pricePerPy"] == 30_000_000
+    assert result["pricing"]["proposedPricePerPy"] == 30_000_000
+    assert result["pricing"]["proposedPriceBasis"] == "product_mix_weighted_average"
+    assert result["pricing"]["proposedPriceBasisStatus"] == "available"
+    assert "PROPOSED_PRICE_BASIS_MISSING" not in result["riskFlags"]
+
+
 def test_marketability_agent_accepts_manual_transaction_presale_and_listing_arrays():
     result = MarketabilityAgent().analyze({
         "project": {"type": "mixed_use"},

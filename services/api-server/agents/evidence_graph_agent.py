@@ -135,7 +135,9 @@ class EvidenceGraphAgent:
         edges = builder.edges
         section_nodes = [node for node in nodes if node["type"] == "report_section"]
         risk_nodes = [node for node in nodes if node["type"] == "risk"]
+        source_locator_nodes = [node for node in nodes if node["type"] == "source_locator"]
         risks_without_explicit_evidence = self._risks_without_explicit_evidence(artifacts)
+        risk_rows_with_source_locators = self._risks_with_source_locators(artifacts)
         unlinked_sections = [
             node["metadata"]["sectionKey"]
             for node in section_nodes
@@ -154,6 +156,8 @@ class EvidenceGraphAgent:
                 "evidenceCount": sum(1 for node in nodes if node["type"] == "evidence"),
                 "claimCount": sum(1 for node in nodes if node["type"] == "claim"),
                 "riskCount": len(risk_nodes),
+                "sourceLocatorCount": len(source_locator_nodes),
+                "riskRowsWithSourceLocatorCount": len(risk_rows_with_source_locators),
                 "reportSectionCount": len(section_nodes),
                 "unlinkedReportSectionCount": len(unlinked_sections),
                 "riskRowsWithoutExplicitEvidenceCount": len(risks_without_explicit_evidence),
@@ -373,6 +377,17 @@ class EvidenceGraphAgent:
             if not risk.get("evidenceIds") and not risk.get("sourceLocators") and not risk.get("sourceDocumentIds"):
                 missing.append(str(risk.get("riskId") or risk.get("code") or "unknown"))
         return missing
+
+    def _risks_with_source_locators(self, artifacts: Dict[str, Any]) -> List[str]:
+        risk_register = artifacts.get("riskRegister") or {}
+        risks = risk_register.get("risks") or []
+        if not isinstance(risks, list):
+            return []
+        return [
+            str(risk.get("riskId") or risk.get("code") or "unknown")
+            for risk in risks
+            if isinstance(risk, dict) and risk.get("sourceLocators")
+        ]
 
     def _safe_id(self, value: str) -> str:
         cleaned = []

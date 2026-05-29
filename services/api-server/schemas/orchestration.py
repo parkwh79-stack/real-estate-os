@@ -23,9 +23,11 @@ PF_REVIEW_STEPS = [
     ("risk_assessment", "Risk assessment"),
     ("risk_register_generation", "Risk register generation"),
     ("credit_review_decision", "Credit review decision"),
+    ("scenario_restructuring_plan", "Scenario restructuring plan"),
     ("phase11_report_generation", "Phase 11 report generation"),
     ("evidence_graph_generation", "Evidence graph generation"),
-    ("quality_check", "Quality check"),
+    ("quality_check", "Report completeness quality check"),
+    ("approval_readiness_gate", "Approval readiness gate"),
 ]
 
 TERMINAL_RUN_STATUSES = {"completed", "completed_with_warnings", "failed", "approved"}

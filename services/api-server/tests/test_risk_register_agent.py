@@ -93,16 +93,18 @@ def test_risk_register_agent_consolidates_agent_risks():
     assert result["summary"]["riskCount"] >= 8
     assert result["summary"]["humanReviewRequiredCount"] > 0
     assert result["approvalConditions"]
-    assert result["creditReviewInputs"]["recommendedDecisionBand"] == "보완 후 재심"
+    assert result["creditReviewInputs"]["recommendedDecisionBand"] == "rework_required"
     codes = {risk["code"] for risk in result["risks"]}
     assert "NO_COMPARABLE_DATA" in codes
     assert "MAX_MINUS_EXCEEDS_PF_LIMIT" in codes
     assert "UNSOLD_LTV_BREACH" in codes
     assert "SALES_REVENUE_CONSISTENCY" in codes
+    assert all(risk["sourceLocators"] for risk in result["risks"])
 
 
-def test_risk_register_row_review_preserves_audit_history():
+def test_risk_register_row_review_preserves_audit_history_and_refreshes_readiness():
     run = {
+        "handoffs": [],
         "artifacts": {
             "riskRegister": {
                 "risks": [
@@ -133,7 +135,11 @@ def test_risk_register_row_review_preserves_audit_history():
                 "keyRisks": [{"riskId": "R-MKT-001", "title": "No comparable data"}],
                 "humanReview": {"required": True, "reason": "1 row requires review."},
             },
-        }
+            "approvalReadinessGate": {
+                "pass": False,
+                "summary": {"unresolvedRiskReviewCount": 1},
+            },
+        },
     }
 
     assert len(unresolved_risk_reviews(run)) == 1
@@ -155,4 +161,5 @@ def test_risk_register_row_review_preserves_audit_history():
     assert risk["reviewHistory"][-1]["waiverReason"] == "Committee-approved exception."
     assert reviewed["artifacts"]["riskRegister"]["reviewSummary"]["unresolvedReviewCount"] == 0
     assert reviewed["artifacts"]["creditReviewDecision"]["keyRisks"][0]["reviewStatus"] == "waived"
+    assert reviewed["artifacts"]["approvalReadinessGate"]["summary"]["unresolvedRiskReviewCount"] == 0
     assert unresolved_risk_reviews(reviewed) == []

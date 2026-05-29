@@ -271,6 +271,8 @@ class MarketabilityAgent:
                 or item.get("price_per_contract_py")
             ) or 0
             total_revenue = _to_float(item.get("totalRevenue") or item.get("total_revenue"))
+            if not price_per_py and total_revenue and units and contract_py:
+                price_per_py = total_revenue / (units * contract_py)
             total_revenue = total_revenue or units * contract_py * price_per_py
             normalized.append({
                 "type": item.get("type") or item.get("name") or f"type-{index + 1}",
@@ -282,6 +284,8 @@ class MarketabilityAgent:
                 "totalRevenue": total_revenue,
                 "exclusiveRatio": exclusive_py / contract_py if contract_py else None,
                 "evidenceIds": item.get("evidenceIds", []),
+                "sourceLocator": item.get("sourceLocator") or item.get("source_locator") or {},
+                "fieldSourceLocators": item.get("fieldSourceLocators") or item.get("field_source_locators") or {},
             })
 
         if normalized:
@@ -429,11 +433,19 @@ class MarketabilityAgent:
         normalized_comparables: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         proposed = _weighted_average_price(product_mix)
-        proposed = proposed or _to_float(data.get("market", {}).get("proposedPricePerPy")) or 0
+        proposed_basis = "product_mix_weighted_average" if proposed else None
+        market_proposed = _to_float(data.get("market", {}).get("proposedPricePerPy"))
+        if not proposed and market_proposed:
+            proposed = market_proposed
+            proposed_basis = "market.proposedPricePerPy"
+        proposed = proposed or 0
         comparable_prices = [case["adjustedPricePerPy"] for case in normalized_comparables if case.get("adjustedPricePerPy")]
         if not comparable_prices:
             return {
                 "proposedPricePerPy": proposed,
+                "proposedPriceBasis": proposed_basis,
+                "proposedPriceBasisStatus": "available" if proposed_basis else "missing",
+                "hasComparableData": False,
                 "comparableMinPricePerPy": None,
                 "comparableMedianPricePerPy": None,
                 "comparableMaxPricePerPy": None,
@@ -446,11 +458,31 @@ class MarketabilityAgent:
         comparable_min = min(comparable_prices)
         comparable_median = median(comparable_prices)
         comparable_max = max(comparable_prices)
+        evidence_ids = [case.get("sourceUrlOrEvidenceId") for case in normalized_comparables if case.get("sourceUrlOrEvidenceId")]
+        if not proposed:
+            return {
+                "proposedPricePerPy": 0,
+                "proposedPriceBasis": None,
+                "proposedPriceBasisStatus": "missing",
+                "hasComparableData": True,
+                "comparableMinPricePerPy": comparable_min,
+                "comparableMedianPricePerPy": comparable_median,
+                "comparableMaxPricePerPy": comparable_max,
+                "premiumToMedian": None,
+                "percentile": None,
+                "judgement": "needs_proposed_price_basis",
+                "pricingComment": "Comparable evidence exists, but the proposed sale price per py cannot be derived from product mix, market assumptions, or revenue/area inputs.",
+                "evidenceIds": evidence_ids,
+            }
+
         premium = (proposed - comparable_median) / comparable_median if proposed and comparable_median else None
         percentile = len([price for price in comparable_prices if proposed >= price]) / len(comparable_prices) if proposed else None
         judgement = _pricing_judgement(premium)
         return {
             "proposedPricePerPy": proposed,
+            "proposedPriceBasis": proposed_basis,
+            "proposedPriceBasisStatus": "available",
+            "hasComparableData": True,
             "comparableMinPricePerPy": comparable_min,
             "comparableMedianPricePerPy": comparable_median,
             "comparableMaxPricePerPy": comparable_max,
@@ -458,7 +490,7 @@ class MarketabilityAgent:
             "percentile": percentile,
             "judgement": judgement,
             "pricingComment": _pricing_comment(judgement, premium),
-            "evidenceIds": [case.get("sourceUrlOrEvidenceId") for case in normalized_comparables if case.get("sourceUrlOrEvidenceId")],
+            "evidenceIds": evidence_ids,
         }
 
     def _analyze_demand(self, data: Dict[str, Any], product_type: str) -> Dict[str, Any]:
@@ -818,8 +850,12 @@ class MarketabilityAgent:
     ) -> List[str]:
         flags = []
         premium = pricing.get("premiumToMedian")
-        if premium is None or not comparables:
+        if not comparables:
             flags.append("NO_COMPARABLE_DATA")
+        elif pricing.get("judgement") == "needs_proposed_price_basis" or not pricing.get("proposedPricePerPy"):
+            flags.append("PROPOSED_PRICE_BASIS_MISSING")
+        elif premium is None:
+            flags.append("PROPOSED_PRICE_BASIS_MISSING")
         elif premium >= 0.20:
             flags.append("PRICE_PREMIUM_EXCESSIVE")
         elif premium >= 0.10:
@@ -849,12 +885,50 @@ class MarketabilityAgent:
     ) -> List[Dict[str, Any]]:
         details: List[Dict[str, Any]] = []
         premium = pricing.get("premiumToMedian")
-        if premium is None or not comparables:
-            details.append(_risk_detail("NO_COMPARABLE_DATA", "high", "Comparable transaction or presale data is missing.", "pricing"))
+        if not comparables:
+            details.append(_risk_detail(
+                "NO_COMPARABLE_DATA",
+                "high",
+                "Comparable transaction or presale data is missing.",
+                "pricing",
+                source_locators=[_agent_field_locator("marketabilityAnalysis.normalizedComparables", "Normalized comparable set")],
+            ))
+        elif pricing.get("judgement") == "needs_proposed_price_basis" or not pricing.get("proposedPricePerPy"):
+            details.append(_risk_detail(
+                "PROPOSED_PRICE_BASIS_MISSING",
+                "high",
+                "Comparable evidence exists, but proposed price per py basis is missing or cannot be derived.",
+                "pricing",
+                evidence_ids=_pricing_evidence_ids(pricing, product_mix),
+                source_locators=_pricing_source_locators(pricing, comparables, product_mix, include_product_mix=True),
+            ))
+        elif premium is None:
+            details.append(_risk_detail(
+                "PROPOSED_PRICE_BASIS_MISSING",
+                "high",
+                "Comparable evidence exists, but proposed price premium cannot be calculated because the proposed price basis is missing.",
+                "pricing",
+                evidence_ids=_pricing_evidence_ids(pricing, product_mix),
+                source_locators=_pricing_source_locators(pricing, comparables, product_mix, include_product_mix=True),
+            ))
         elif premium >= 0.20:
-            details.append(_risk_detail("PRICE_PREMIUM_EXCESSIVE", "high", f"Proposed price is {premium:.1%} above comparable median.", "pricing"))
+            details.append(_risk_detail(
+                "PRICE_PREMIUM_EXCESSIVE",
+                "high",
+                f"Proposed price is {premium:.1%} above comparable median.",
+                "pricing",
+                evidence_ids=_pricing_evidence_ids(pricing, product_mix),
+                source_locators=_pricing_source_locators(pricing, comparables, product_mix),
+            ))
         elif premium >= 0.10:
-            details.append(_risk_detail("PRICE_PREMIUM_HIGH", "medium", f"Proposed price is {premium:.1%} above comparable median.", "pricing"))
+            details.append(_risk_detail(
+                "PRICE_PREMIUM_HIGH",
+                "medium",
+                f"Proposed price is {premium:.1%} above comparable median.",
+                "pricing",
+                evidence_ids=_pricing_evidence_ids(pricing, product_mix),
+                source_locators=_pricing_source_locators(pricing, comparables, product_mix),
+            ))
         if supply.get("competitionLevel") == "high":
             details.append(_risk_detail("SUPPLY_OVERHANG", "high", "Competition or upcoming supply is high.", "supply"))
         if demand.get("demandLevel") == "unknown":
@@ -911,6 +985,8 @@ class MarketabilityAgent:
             missing.append("nearby_transaction_or_presale_comparables")
         if pricing.get("judgement") == "needs_comparable_data":
             missing.append("pricing_evidence")
+        if pricing.get("judgement") == "needs_proposed_price_basis":
+            missing.append("proposed_price_per_py_basis")
         if not self._data_sources(data) and not comparables:
             missing.append("market_data_source_metadata")
         if not data.get("sales_schedule"):
@@ -968,8 +1044,12 @@ class MarketabilityAgent:
         for check in checks:
             if check["score"] < 70:
                 recommendations.append(f"{check['category']}: {check['finding']}")
-        if "NO_COMPARABLE_DATA" in risk_flags or missing:
+        if "NO_COMPARABLE_DATA" in risk_flags:
             recommendations.append("Do not confirm sale price adequacy until comparable evidence and source metadata are attached.")
+        if "PROPOSED_PRICE_BASIS_MISSING" in risk_flags:
+            recommendations.append("Derive proposed price per py from product mix, total revenue and saleable area, or an explicit market pricing assumption before confirming price adequacy.")
+        if missing and "NO_COMPARABLE_DATA" not in risk_flags and "PROPOSED_PRICE_BASIS_MISSING" not in risk_flags:
+            recommendations.append("Resolve missing marketability inputs before treating the review as final.")
         if "PRICE_PREMIUM_HIGH" in risk_flags or "PRICE_PREMIUM_EXCESSIVE" in risk_flags:
             recommendations.append("Review sale price adjustment, unit-level pricing, or buyer financing conditions.")
         if "EXIT_RATE_HIGH" in risk_flags:
@@ -997,10 +1077,11 @@ class MarketabilityAgent:
         source_note = "Market source metadata is attached." if data_sources else "Primary transaction/presale sources are not attached and further verification is required."
         pricing_comment = pricing.get("pricingComment") or "Comparable evidence is required to judge proposed sale price."
         risk_comment = ", ".join(risk_flags) if risk_flags else "no material risk flag"
-        completion_rate = absorption.get("completion", 0)
+        completion_rate = absorption.get("completion") or 0
         pressure = absorption.get("exitPressure", {}).get("pressureLevel", "unknown")
         completion_trigger = discount_trigger[-1] if discount_trigger else {}
-        unsold_ltv = unsold_recovery.get("unsoldLTV", 0)
+        completion_target_rate = completion_trigger.get("targetSalesRate") or 0
+        unsold_ltv = unsold_recovery.get("unsoldLTV") or 0
         recovery_judgement = unsold_recovery.get("recoveryJudgement", "not reviewed")
         return {
             "marketAnalysis": (
@@ -1020,7 +1101,7 @@ class MarketabilityAgent:
             ),
             "discountTrigger": (
                 f"Recommended trigger checkpoints are 3 months, 6 months, 12 months, and completion. "
-                f"Completion target sales rate is {completion_trigger.get('targetSalesRate', 0):.2%} with "
+                f"Completion target sales rate is {completion_target_rate:.2%} with "
                 f"{completion_trigger.get('triggerType', 'exit protection')} action."
             ),
             "unsoldRisk": (
@@ -1060,7 +1141,10 @@ def _weighted_average_price(product_mix: List[Dict[str, Any]]) -> float:
         area = sum(item.get("contractAreaPy") or 0 for item in product_mix)
         return total_revenue / area if total_revenue and area else 0
     total = sum((item.get("pricePerPy") or 0) * (item.get("contractAreaPy") or 0) * (item.get("units") or 0) for item in product_mix)
-    return total / total_area if total else 0
+    if total:
+        return total / total_area
+    total_revenue = sum(item.get("totalRevenue") or 0 for item in product_mix)
+    return total_revenue / total_area if total_revenue else 0
 
 
 def _pricing_judgement(premium: Optional[float]) -> str:
@@ -1099,6 +1183,7 @@ def _pricing_score(pricing: Dict[str, Any]) -> float:
         "high": 58,
         "excessive": 38,
         "needs_comparable_data": 55,
+        "needs_proposed_price_basis": 50,
     }
     return scores.get(pricing.get("judgement"), 55)
 
@@ -1233,13 +1318,103 @@ def _source_metadata_summary(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _risk_detail(code: str, severity: str, message: str, category: str) -> Dict[str, Any]:
+def _risk_detail(
+    code: str,
+    severity: str,
+    message: str,
+    category: str,
+    evidence_ids: List[str] | None = None,
+    source_locators: List[Dict[str, Any]] | None = None,
+    source_document_ids: List[str] | None = None,
+) -> Dict[str, Any]:
     return {
         "code": code,
         "severity": severity,
         "category": category,
         "message": message,
+        "evidenceIds": evidence_ids or [],
+        "sourceLocators": source_locators or [],
+        "sourceDocumentIds": source_document_ids or [],
     }
+
+
+def _pricing_evidence_ids(pricing: Dict[str, Any], product_mix: List[Dict[str, Any]]) -> List[str]:
+    evidence_ids: List[str] = []
+    evidence_ids.extend(str(item) for item in pricing.get("evidenceIds", []) if item)
+    for item in product_mix:
+        evidence_ids.extend(str(entry) for entry in item.get("evidenceIds", []) if entry)
+    return sorted(set(evidence_ids))
+
+
+def _pricing_source_locators(
+    pricing: Dict[str, Any],
+    comparables: List[Dict[str, Any]],
+    product_mix: List[Dict[str, Any]],
+    include_product_mix: bool = False,
+) -> List[Dict[str, Any]]:
+    locators = [
+        _agent_field_locator("marketabilityAnalysis.pricing.proposedPricePerPy", "Proposed price per py"),
+        _agent_field_locator("marketabilityAnalysis.pricing.comparableMedianPricePerPy", "Comparable median price per py"),
+    ]
+    for index, comparable in enumerate(comparables):
+        locator = _normal_locator(comparable.get("sourceLocator"), f"marketabilityAnalysis.normalizedComparables[{index}]", "comparable_price")
+        if locator:
+            locators.append(locator)
+        field_locators = comparable.get("fieldSourceLocators") or {}
+        price_locator = field_locators.get("pricePerPy") if isinstance(field_locators, dict) else None
+        locator = _normal_locator(price_locator, f"marketabilityAnalysis.normalizedComparables[{index}].pricePerPy", "comparable_price_field")
+        if locator:
+            locators.append(locator)
+
+    if include_product_mix:
+        for index, item in enumerate(product_mix):
+            locator = _normal_locator(item.get("sourceLocator"), f"marketabilityAnalysis.productMix[{index}]", "product_mix")
+            if locator:
+                locators.append(locator)
+            field_locators = item.get("fieldSourceLocators") or {}
+            if isinstance(field_locators, dict):
+                for field in ["pricePerPy", "totalRevenue", "units", "contractAreaPy"]:
+                    locator = _normal_locator(
+                        field_locators.get(field),
+                        f"marketabilityAnalysis.productMix[{index}].{field}",
+                        f"product_mix_{field}",
+                    )
+                    if locator:
+                        locators.append(locator)
+            else:
+                for field in ["pricePerPy", "totalRevenue", "units", "contractAreaPy"]:
+                    locators.append(_agent_field_locator(f"marketabilityAnalysis.productMix[{index}].{field}", f"Product mix {field}"))
+    return _dedupe_locators(locators)
+
+
+def _agent_field_locator(path: str, label: str) -> Dict[str, Any]:
+    return {
+        "locatorId": path,
+        "sourceType": "agent_artifact_field",
+        "source": "marketabilityAnalysis",
+        "path": path,
+        "label": label,
+    }
+
+
+def _normal_locator(locator: Any, fallback_path: str, fallback_label: str) -> Dict[str, Any] | None:
+    if not isinstance(locator, dict) or not locator:
+        return None
+    normalized = dict(locator)
+    normalized.setdefault("locatorId", normalized.get("id") or normalized.get("fieldName") or fallback_path)
+    normalized.setdefault("sourceType", normalized.get("sourceType") or "source_locator")
+    normalized.setdefault("source", normalized.get("source") or normalized.get("documentName") or normalized.get("table") or "market_evidence")
+    normalized.setdefault("path", normalized.get("path") or fallback_path)
+    normalized.setdefault("label", normalized.get("label") or normalized.get("fieldName") or fallback_label)
+    return normalized
+
+
+def _dedupe_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for locator in locators:
+        locator_id = str(locator.get("locatorId") or locator.get("path") or locator.get("source") or len(deduped))
+        deduped[locator_id] = locator
+    return list(deduped.values())
 
 
 def _dedupe_risk_details(details: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

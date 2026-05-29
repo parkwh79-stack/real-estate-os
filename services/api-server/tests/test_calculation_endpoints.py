@@ -76,3 +76,54 @@ def test_risk_assess_endpoint_returns_basic_matrix():
     assert body["overall"]["overall_grade"] == "Critical"
     assert body["categories"]
     assert len(body["heatmap"]) == 25
+
+
+def test_scenario_restructuring_endpoint_returns_cure_plan():
+    client = TestClient(app)
+    project_id = first_project_id(client)
+
+    res = client.post(
+        f"/projects/{project_id}/scenarios/restructuring",
+        json={
+            "scenarioSetId": "api-restructuring-test",
+            "baseDate": "2026-05-27",
+            "productMix": [
+                {
+                    "type": "Apartment",
+                    "units": 100,
+                    "avgUnitPrice": 1_200_000_000,
+                    "totalRevenue": 120_000_000_000,
+                }
+            ],
+            "pfStructure": [
+                {
+                    "tranche": "Senior",
+                    "amount": 100_000_000_000,
+                    "priority": 1,
+                    "interestRate": 0.06,
+                    "feeRate": 0.01,
+                },
+                {
+                    "tranche": "Mezzanine",
+                    "amount": 20_000_000_000,
+                    "priority": 2,
+                    "interestRate": 0.08,
+                    "feeRate": 0.02,
+                },
+            ],
+            "scenarioDrivers": {
+                "saleRates": [0.4, 0.5, 0.7, 1.0],
+                "discountRates": [0.0, 0.1, 0.2],
+            },
+            "options": {"seniorBuffer": 1_000_000_000, "unsoldLtvTarget": 0.90},
+        },
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["analysisType"] == "pf_restructuring_plan"
+    assert body["seniorShortfallFix"]["status"] == "action_required"
+    assert body["seniorShortfallFix"]["requiredSeniorReduction"] > 0
+    assert body["unsoldLtvFix"]["status"] == "action_required"
+    assert body["unsoldLtvFix"]["requiredPfReductionOrEquityIncrease"] > 0
+    assert body["approvalPath"]["currentStatus"] in {"rework_required", "conditional_approval_candidate"}

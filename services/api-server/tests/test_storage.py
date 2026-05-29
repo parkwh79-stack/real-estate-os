@@ -1,6 +1,22 @@
 from pathlib import Path
 
-from storage import default_state, load_state, save_state, storage_backend
+from storage import (
+    create_user_session,
+    default_state,
+    get_user,
+    get_user_session,
+    get_risk_register_record,
+    list_land_evidence_records,
+    list_risk_register_records,
+    list_user_activity_logs,
+    load_state,
+    record_user_activity_log,
+    save_state,
+    storage_backend,
+    upsert_land_evidence_record,
+    upsert_risk_register_record,
+    upsert_user,
+)
 
 
 def test_json_state_storage_round_trip(tmp_path, monkeypatch):
@@ -14,7 +30,10 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
         orchestrations={"1": {"run-1": {"status": "completed"}}},
         project_id_counter=2,
         market_evidence={"1": {"run-1:ev-1": {"recordKey": "run-1:ev-1", "evidenceId": "ev-1"}}},
+        land_evidence={"1": {"official_land_price:pnu-1": {"recordKey": "official_land_price:pnu-1", "pnu": "pnu-1"}}},
+        risk_registers={"1": {"run-1": {"runId": "run-1", "status": "blocking", "risks": [{"riskId": "R-1"}]}}},
         project_snapshots={"1": {"snapshot-run-1": {"snapshotId": "snapshot-run-1", "runId": "run-1"}}},
+        user_activity_logs=[{"eventId": "evt-1", "eventType": "login", "userId": "u-1"}],
     )
 
     state = load_state()
@@ -24,7 +43,11 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
     assert state["reports"]["1"][0]["report_id"] == "r-1"
     assert state["orchestrations"]["1"]["run-1"]["status"] == "completed"
     assert state["market_evidence"]["1"]["run-1:ev-1"]["evidenceId"] == "ev-1"
+    assert state["land_evidence"]["1"]["official_land_price:pnu-1"]["pnu"] == "pnu-1"
+    assert state["risk_registers"]["1"]["run-1"]["status"] == "blocking"
     assert state["project_snapshots"]["1"]["snapshot-run-1"]["runId"] == "run-1"
+    assert state["user_activity_logs"][0]["eventId"] == "evt-1"
+    assert state["identity"]["users"] == {}
     assert Path(state_path).exists()
 
 
@@ -72,6 +95,56 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
     assert state["project_snapshots"]["1"]["snapshot-run-1"]["runId"] == "run-1"
     assert Path(db_path).exists()
 
+    record = record_user_activity_log({
+        "eventType": "api_request",
+        "userId": "u-1",
+        "projectId": "1",
+        "method": "GET",
+        "path": "/projects/1",
+        "statusCode": 200,
+    })
+    logs = list_user_activity_logs(user_id="u-1", project_id="1")
+
+    assert record["eventId"]
+    assert logs[0]["userId"] == "u-1"
+    assert logs[0]["projectId"] == "1"
+
+    user = upsert_user({
+        "userId": "u-identity",
+        "tenantId": "tenant-1",
+        "email": "identity@example.com",
+        "displayName": "Identity User",
+        "role": "reviewer",
+    })
+    session = create_user_session({
+        "userId": "u-identity",
+        "tenantId": "tenant-1",
+        "provider": "local-test",
+    })
+
+    assert user["role"] == "reviewer"
+    assert get_user("u-identity")["tenantId"] == "tenant-1"
+    assert get_user_session(session["sessionId"])["userId"] == "u-identity"
+
+    land_record = upsert_land_evidence_record("1", {
+        "evidenceType": "official_land_price",
+        "pnu": "2729011700101230004",
+        "pricePerSqm": 1500000,
+        "baseYear": 2026,
+        "sourceName": "manual-test",
+    })
+    land_records = list_land_evidence_records("1", pnu="2729011700101230004")
+    assert land_record["recordKey"]
+    assert land_records[0]["pricePerSqm"] == 1500000
+
+    risk_register = upsert_risk_register_record("1", "run-1", {
+        "status": "blocking",
+        "risks": [{"riskId": "RISK-1", "severity": "critical"}],
+    })
+    assert risk_register["riskCount"] == 1
+    assert get_risk_register_record("1", "run-1")["risks"][0]["riskId"] == "RISK-1"
+    assert list_risk_register_records("1")[0]["runId"] == "run-1"
+
 
 def test_sqlite_state_load_migrates_legacy_json_state(tmp_path, monkeypatch):
     json_path = tmp_path / "state.json"
@@ -106,4 +179,10 @@ def test_default_state_shape():
     assert state["reports"] == {}
     assert state["orchestrations"] == {}
     assert state["market_evidence"] == {}
+    assert state["land_evidence"] == {}
+    assert state["risk_registers"] == {}
     assert state["project_snapshots"] == {}
+    assert state["user_activity_logs"] == []
+    assert state["identity"]["tenants"] == {}
+    assert state["identity"]["users"] == {}
+    assert state["identity"]["sessions"] == {}

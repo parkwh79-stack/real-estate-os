@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from db.repositories.orchestration_repository import OrchestrationRepository
+from storage import upsert_risk_register_record
 
 
 def approve_orchestration_run_use_case(
@@ -127,6 +128,7 @@ def review_orchestration_handoff_use_case(
     handoff["requiresHumanReview"] = review_status != "approved"
 
     _refresh_progress_review_state(run, handoff_id, review_status, reviewed_at)
+    _refresh_approval_readiness_gate(run)
     return run
 
 
@@ -195,6 +197,7 @@ def review_risk_register_row_use_case(
     _sync_risk_row_references(run, risk_id, risk)
     _refresh_risk_register_review_summary(risk_register)
     _refresh_credit_review_from_risk_reviews(run)
+    _refresh_approval_readiness_gate(run)
     return run
 
 
@@ -211,6 +214,7 @@ def review_risk_register_row_by_id_use_case(
     if not run:
         raise LookupError("Orchestration run not found")
     reviewed = review_risk_register_row_use_case(run, risk_id, input_data, reviewed_at)
+    upsert_risk_register_record(project_id, run_id, reviewed["artifacts"]["riskRegister"])
     orchestration_repository.save()
     return reviewed
 
@@ -303,3 +307,18 @@ def _refresh_credit_review_from_risk_reviews(run: Dict[str, Any]) -> None:
     elif credit_review.get("decision") == "approve":
         credit_review["humanReview"]["required"] = False
         credit_review["humanReview"]["reason"] = "Risk register reviews are cleared."
+
+
+def _refresh_approval_readiness_gate(run: Dict[str, Any]) -> None:
+    """Refresh approval readiness after handoff or risk review actions."""
+    try:
+        from agents.orchestration_agent import OrchestrationAgent
+
+        run.setdefault("artifacts", {})["approvalReadinessGate"] = (
+            OrchestrationAgent()._approval_readiness_gate(run)
+        )
+    except Exception as exc:
+        run.setdefault("artifacts", {})["approvalReadinessGateRefreshError"] = {
+            "message": str(exc),
+            "type": exc.__class__.__name__,
+        }

@@ -879,6 +879,7 @@ The target Real Estate OS should use four layers.
 | Cash Flow Mapper | Convert FeasibilityStudyV2 into CashFlowRunRequest. |
 | Cash Flow Engine | Calculate monthly cash flow, Max Minus, PF draw, sales collection, account allocation, and report fragments. |
 | Calculation Scenario Engine | Run waterfall, unsold LTV, tranche recovery, discount stress, downside, and recovery scenarios. |
+| Restructuring Agent | Convert rejection-driving scenario risks into quantified senior reduction, DSRA/equity, PF reduction, collateral, forward-sale, bulk-sale, or refinancing cure actions. |
 | PF Structuring Agent | Recommend Senior/Mezz/Junior/Equity structure, LTV/LTC, all-in cost, Exit sale rate, cash sweep, and reserve rules. |
 | Covenant Generator Agent | Draft sales, progress, LTV, DSCR, completion, drawdown, cash sweep, and EOD covenants. |
 
@@ -924,11 +925,13 @@ The target Real Estate OS should use four layers.
 | Async orchestration | Move agent runs to background jobs with live progress. |
 | Evidence Graph Agent | Baseline implemented. PF review runs now create `evidenceGraph` artifacts linking project inputs, source documents, evidence IDs, agent artifacts, handoffs, claims, and Phase 11 report sections. |
 | Historical Similar Case Search | Baseline implemented. Stored project snapshots can now be compared by case seed metrics, Risk Register overlap, prior review status, mitigants, approval conditions, and Credit Review outcomes. |
+| Snapshot Diff | Baseline implemented. Two same-project snapshots can now be compared for changed assumptions, risks, decisions, artifacts, report sections, material changes, and re-review recommendations. |
 | Data Quality Agent | Baseline implemented. PF review runs now create `dataQualityReview` artifacts for project name, land area, GFA, sales revenue, PF amount, unit count, sqm/py conversion, VAT basis, schedule, and tranche structure conflicts. |
 | Data Quality Agent | Detect cross-document and cross-agent inconsistencies before final calculations. |
 | Risk Register Agent | Baseline implemented. PF review runs now create `riskRegister` artifacts and a `risk_register_to_credit_review` handoff consolidating Land, Marketability, Legal, Cash Flow, PF Structure, Scenario, Data Quality, and Risk Matrix risks. |
 | Risk Register review workflow | Baseline implemented. Risk rows can be approved, waived, marked needs-revision, or resolved with reviewer, timestamp, comment, waiver reason, audit history, and final approval blocking for unresolved material risks. |
 | Credit Review Agent | Baseline implemented. PF review runs now create `creditReviewDecision` artifacts and a `credit_review_to_report` handoff with decision guidance, reasons, conditions, waivers, and report paragraphs. |
+| Restructuring Agent | Baseline implemented. PF review runs now create `restructuringPlan` artifacts and a `restructuring_to_credit_review` handoff with quantified cure actions for senior shortfall and unsold LTV breach. |
 
 ### P2
 

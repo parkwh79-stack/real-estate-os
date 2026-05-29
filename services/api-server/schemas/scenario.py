@@ -117,6 +117,9 @@ class ScenarioRiskFlag(BaseModel):
     code: str
     severity: str
     message: str
+    evidenceIds: List[str] = Field(default_factory=list)
+    sourceLocators: List[Dict[str, Any]] = Field(default_factory=list)
+    sourceDocumentIds: List[str] = Field(default_factory=list)
 
 
 class ScenarioReportFragments(BaseModel):

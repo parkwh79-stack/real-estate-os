@@ -470,15 +470,20 @@ class ReportAgent:
 
     def _build_discount_triggers(self, covenants: Dict[str, Any]) -> str:
         triggers = covenants.get("discount_triggers", [])
-        md = "## 3. 할인분양 Trigger 및 조건\n\n"
+        md = "## 3. Discount Sale Trigger Conditions\n\n"
         if not triggers:
-            md += "해당사항 없음.\n"
+            md += "- No discount trigger supplied.\n"
         else:
-            md += "| 개월차 | 목표분양률 | 할인율 | 비고 |\n|:---:|:---:|:---:|:---|\n"
+            md += "| Month | Target sale rate | Discount rate | Note |\n|:---:|:---:|:---:|:---|\n"
             for t in triggers:
-                md += f"| {t.get('month')}개월 | {t.get('target_rate')*100}% | {t.get('discount')*100}% | 미달 시 즉시 실행 |\n"
+                target_rate = t.get("target_rate")
+                if target_rate is None:
+                    target_rate = t.get("targetSalesRate")
+                discount = t.get("discount")
+                if discount is None:
+                    discount = t.get("allowedDiscountRate")
+                md += f"| {t.get('month')} | {(target_rate or 0)*100}% | {(discount or 0)*100}% | Execute if target is missed |\n"
         return md + "\n"
-
     def _build_financing_structure(self, data: Dict[str, Any]) -> str:
         pf = sum(t.get("amount", 0) for t in data.get("pf_structure", []))
         rev = data.get("feasibility_input", {}).get("total_revenue", 0)

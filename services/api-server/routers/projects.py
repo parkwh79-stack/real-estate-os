@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Response
+from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response
 from fastapi.responses import FileResponse
 from typing import Dict, Any
 from datetime import datetime, timezone
@@ -9,6 +9,7 @@ from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
 from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
 
+from core.authz import authorize_request
 from core.calculations import (
     calculate_cashflow_max_minus,
     build_monthly_cash_flow,
@@ -18,6 +19,7 @@ from core.calculations import (
 from core.risk_assessment import build_basic_risk_matrix
 from schemas.scenario import ScenarioSetRequest
 from agents.scenario_engine_agent import ScenarioEngineAgent
+from agents.restructuring_agent import RestructuringAgent
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
 from db.repositories.orchestration_repository import OrchestrationRepository
 from db.repositories.project_repository import ProjectRepository
@@ -25,7 +27,16 @@ from db.repositories.project_snapshot_repository import ProjectSnapshotRepositor
 from db.repositories.report_repository import ReportRepository
 from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
-from storage import load_state, save_state
+from storage import (
+    get_risk_register_record,
+    list_land_evidence_records,
+    list_risk_register_records,
+    load_state,
+    record_user_activity_log,
+    save_state,
+    upsert_land_evidence_record,
+    upsert_risk_register_record,
+)
 from use_cases.cash_flow import run_cash_flow_use_case
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
@@ -36,6 +47,7 @@ from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case
 from use_cases.project_snapshots import (
+    diff_project_snapshots_use_case,
     get_project_snapshot_use_case,
     list_project_snapshots_use_case,
     search_similar_project_snapshots_use_case,
@@ -121,6 +133,168 @@ def orchestration_repository() -> OrchestrationRepository:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def user_id_from_request(request: Request) -> str:
+    return (
+        request.headers.get("x-realytics-user-id")
+        or request.headers.get("x-user-id")
+        or request.headers.get("x-codex-user-id")
+        or request.query_params.get("user_id")
+        or "anonymous"
+    )
+
+def record_sensitive_project_event(
+    request: Request,
+    *,
+    event_type: str,
+    project_id: str,
+    run_id: str | None = None,
+    metadata: Dict[str, Any] | None = None,
+) -> None:
+    record_user_activity_log(
+        {
+            "eventType": event_type,
+            "userId": user_id_from_request(request),
+            "projectId": project_id,
+            "runId": run_id,
+            "method": request.method,
+            "path": request.url.path,
+            "clientHost": request.client.host if request.client else None,
+            "userAgent": request.headers.get("user-agent"),
+            "requestId": request.headers.get("x-request-id"),
+            "metadata": metadata or {},
+        }
+    )
+
+def land_evidence_records_from_ledger(land_ledger: Dict[str, Any]) -> list[Dict[str, Any]]:
+    records: list[Dict[str, Any]] = []
+    for parcel in land_ledger.get("parcels", []) or []:
+        pnu = parcel.get("pnu") or parcel.get("resolvedPnu")
+        parcel_key = parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence")
+        if pnu:
+            records.append({
+                "recordKey": f"pnu_resolution:{pnu}",
+                "evidenceId": f"pnu_resolution:{pnu}",
+                "evidenceType": "pnu_resolution",
+                "pnu": pnu,
+                "parcelKey": parcel_key,
+                "addressFragment": parcel.get("addressFragment"),
+                "matchConfidence": parcel.get("pnuResolveConfidence"),
+                "matchMethod": parcel.get("pnuMatchMethod"),
+                "sourceName": parcel.get("enrichmentEvidence", {}).get("pnuResolution", {}).get("sourceName", "LandLedgerEnrichmentAgent"),
+                "sourceType": parcel.get("enrichmentEvidence", {}).get("pnuResolution", {}).get("sourceType", "manual_or_configured_connector"),
+                "sourceUrlOrEvidenceId": parcel.get("enrichmentEvidence", {}).get("pnuResolution", {}).get("sourceUrlOrEvidenceId"),
+                "verificationStatus": "resolved" if (parcel.get("pnuResolveConfidence") or 0) >= 0.85 else "needs_review",
+            })
+        if parcel.get("cadastralCharacteristics"):
+            cadastral = parcel["cadastralCharacteristics"]
+            records.append({
+                **cadastral,
+                "recordKey": f"cadastral_record:{pnu or parcel_key}",
+                "evidenceId": f"cadastral_record:{pnu or parcel_key}",
+                "evidenceType": "cadastral_record",
+                "pnu": pnu,
+                "parcelKey": parcel_key,
+                "sourceName": cadastral.get("sourceName") or "manual_or_configured_connector",
+                "sourceUrlOrEvidenceId": cadastral.get("sourceUrlOrEvidenceId"),
+                "verificationStatus": "attached_pending_review",
+            })
+        if parcel.get("officialLandPricePerSqm"):
+            records.append({
+                "recordKey": f"official_land_price:{pnu or parcel_key}",
+                "evidenceId": parcel.get("officialLandPriceSourceUrlOrEvidenceId") or f"official_land_price:{pnu or parcel_key}",
+                "evidenceType": "official_land_price",
+                "pnu": pnu,
+                "parcelKey": parcel_key,
+                "pricePerSqm": parcel.get("officialLandPricePerSqm"),
+                "officialTotalLandValue": parcel.get("officialTotalLandValue"),
+                "baseYear": parcel.get("officialLandPriceBaseYear"),
+                "baseDate": parcel.get("officialLandPriceBaseDate"),
+                "sourceName": parcel.get("officialLandPriceSource"),
+                "sourceUrlOrEvidenceId": parcel.get("officialLandPriceSourceUrlOrEvidenceId"),
+                "fetchedAt": parcel.get("officialLandPriceFetchedAt"),
+                "verificationStatus": "attached_pending_review",
+            })
+        if parcel.get("registryEvidence"):
+            registry = parcel["registryEvidence"]
+            records.append({
+                **registry,
+                "recordKey": f"registry_record:{pnu or parcel_key}",
+                "evidenceId": registry.get("evidenceId") or f"registry_record:{pnu or parcel_key}",
+                "evidenceType": "registry_record",
+                "pnu": pnu,
+                "parcelKey": parcel_key,
+                "sourceName": registry.get("source") or "manual_registry_evidence",
+                "sourceUrlOrEvidenceId": registry.get("sourceUrlOrEvidenceId") or registry.get("evidenceId"),
+                "verificationStatus": registry.get("verificationStatus", "attached_pending_legal_review"),
+            })
+    return records
+
+def persisted_land_evidence_package(project_id: str) -> Dict[str, Any]:
+    records = list_land_evidence_records(project_id)
+    by_type: Dict[str, list[Dict[str, Any]]] = {}
+    for record in records:
+        by_type.setdefault(record.get("evidenceType") or "land_evidence", []).append(record)
+
+    first_official_price = next(
+        (
+            record
+            for record in records
+            if record.get("evidenceType") == "official_land_price"
+        ),
+        None,
+    )
+    registry_records = by_type.get("registry_record", [])
+    pnu_records = by_type.get("pnu_resolution", [])
+    return {
+        "schemaVersion": "realytics-land-evidence-package-v1",
+        "recordCount": len(records),
+        "records": records,
+        "recordsByType": by_type,
+        "pnuResolutions": pnu_records,
+        "cadastralCharacteristics": by_type.get("cadastral_record", []),
+        "officialLandPrices": by_type.get("official_land_price", []),
+        "registryEvidence": registry_records,
+        "parcelCount": len({record.get("pnu") or record.get("parcelKey") for record in records if record.get("pnu") or record.get("parcelKey")}),
+        "officialLandPrice": first_official_price.get("pricePerSqm") if first_official_price else None,
+        "officialLandPriceBaseYear": first_official_price.get("baseYear") if first_official_price else None,
+        "officialLandPriceEvidence": first_official_price,
+        "registryEvidenceReady": bool(registry_records),
+        "sourceMetadata": {
+            "sourceName": "server_land_evidence_store",
+            "sourceType": "runtime_db",
+            "recordCount": len(records),
+        },
+    }
+
+def attach_persisted_land_evidence(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    package = persisted_land_evidence_package(project_id)
+    if not package["records"]:
+        return project_data
+
+    enriched_project = dict(project_data)
+    existing_evidence = enriched_project.get("landEvidence") or enriched_project.get("land_evidence") or {}
+    enriched_project["landEvidence"] = deep_merge(existing_evidence, package)
+
+    land_ledger = enriched_project.get("landLedger") or enriched_project.get("land_ledger")
+    if isinstance(land_ledger, dict) and land_ledger.get("parcels"):
+        try:
+            enriched_project["landLedger"] = enrich_land_ledger_use_case(
+                land_ledger,
+                {
+                    "pnuResolutions": package.get("pnuResolutions", []),
+                    "cadastralCharacteristics": package.get("cadastralCharacteristics", []),
+                    "officialLandPrices": package.get("officialLandPrices", []),
+                    "registryEvidence": package.get("registryEvidence", []),
+                    "mode": "server_land_evidence_store",
+                },
+            )
+        except Exception as exc:
+            enriched_project["landEvidence"]["ledgerHydrationWarning"] = {
+                "message": "Stored land evidence was attached as a flat package, but could not be merged into the land ledger.",
+                "error": str(exc),
+            }
+    return enriched_project
 
 def attach_document_market_evidence_metadata(
     parsed_data: Dict[str, Any],
@@ -369,9 +543,15 @@ def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | Non
         updated = update_project_use_case(project_repository(), project_id, project)
         if not updated:
             raise HTTPException(status_code=404, detail="Project not found")
+    persisted_evidence = []
+    if input_data.get("persistEvidence") or input_data.get("persist_evidence") or input_data.get("persist", False):
+        for record in land_evidence_records_from_ledger(enriched):
+            persisted_evidence.append(upsert_land_evidence_record(project_id, record))
     return {
         "project_id": project_id,
         "landLedger": enriched,
+        "persistedLandEvidenceCount": len(persisted_evidence),
+        "persistedLandEvidence": persisted_evidence,
         "note": "PNU/official price/registry enrichment uses provided connector records or legalDongCode; no official price or registry status is fabricated without source evidence.",
     }
 
@@ -407,6 +587,7 @@ async def upload_business_plan_and_run_pf_review(
     project_data = apply_parsed_project_data_use_case(project_repository(), project_id, parsed_data)
     if not project_data:
         raise HTTPException(status_code=404, detail="Project not found")
+    project_data = attach_persisted_land_evidence(project_id, project_data)
     run = run_and_save_pf_review_use_case(
         orchestration_repository(),
         project_id,
@@ -639,6 +820,22 @@ def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
 
     return result
 
+@router.post("/{project_id}/scenarios/restructuring")
+def run_project_scenarios_restructuring(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    input_data = input_data or {}
+    project = PROJECTS_DB[project_id]
+    source_data = deep_merge(project, input_data.get("project_data", {}))
+    req = build_scenario_request_from_project(source_data, input_data)
+    scenario_result = ScenarioEngineAgent().run_scenario_set(req)
+    return RestructuringAgent().build_restructuring_plan(
+        req,
+        scenario_result,
+        input_data.get("options", {}),
+    )
+
 @router.post("/{project_id}/marketability/analyze")
 def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
@@ -651,10 +848,40 @@ def list_project_source_documents(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
     return list_source_documents_use_case(source_document_repository(), project_id)
 
-@router.get("/{project_id}/source-documents/{archive_id}/download")
-def download_project_source_document(project_id: str, archive_id: str):
+@router.get("/{project_id}/land-evidence")
+def list_project_land_evidence(project_id: str, request: Request, pnu: str | None = None, evidence_type: str | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "evidence:read")
+    return {
+        "schemaVersion": "realytics-land-evidence-list-v1",
+        "projectId": project_id,
+        "records": list_land_evidence_records(project_id, pnu=pnu, evidence_type=evidence_type),
+    }
+
+@router.post("/{project_id}/land-evidence")
+def upsert_project_land_evidence(project_id: str, request: Request, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    raw_records = input_data.get("records") if isinstance(input_data.get("records"), list) else [input_data]
+    records = [
+        upsert_land_evidence_record(project_id, record)
+        for record in raw_records
+        if isinstance(record, dict)
+    ]
+    return {
+        "schemaVersion": "realytics-land-evidence-upsert-v1",
+        "projectId": project_id,
+        "count": len(records),
+        "records": records,
+    }
+
+@router.get("/{project_id}/source-documents/{archive_id}/download")
+def download_project_source_document(project_id: str, archive_id: str, request: Request):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "evidence:read")
     download = get_source_document_download_use_case(
         source_document_repository(),
         upload_archive_repository(),
@@ -663,6 +890,20 @@ def download_project_source_document(project_id: str, archive_id: str):
     )
     if not download:
         raise HTTPException(status_code=404, detail="Source document not found")
+
+    record_sensitive_project_event(
+        request,
+        event_type="source_document_download",
+        project_id=project_id,
+        metadata={
+            "archiveId": archive_id,
+            "filename": download.get("filename"),
+            "mediaType": download.get("mediaType"),
+            "fileSizeBytes": download.get("fileSizeBytes"),
+            "archiveIntegrityStatus": download.get("archiveIntegrityStatus"),
+            "authorization": authz.get("authorization"),
+        },
+    )
 
     return FileResponse(
         download["path"],
@@ -737,13 +978,27 @@ def get_report(project_id: str, report_id: str):
     }
 
 @router.post("/{project_id}/reports/{report_id}/exports")
-def create_report_export(project_id: str, report_id: str, input_data: Dict[str, Any] | None = None):
+def create_report_export(project_id: str, report_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    authz = authorize_request(request, "report:export")
     try:
         export_record = export_saved_report_use_case(report_repository(), project_id, report_id, input_data)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="report_export_created",
+        project_id=project_id,
+        metadata={
+            "reportId": report_id,
+            "exportId": export_record.get("export_id"),
+            "format": export_record.get("format"),
+            "fileName": export_record.get("file_name"),
+            "contentType": export_record.get("content_type"),
+            "authorization": authz.get("authorization"),
+        },
+    )
     return report_repository().export_metadata(export_record)
 
 @router.get("/{project_id}/reports/{report_id}/exports")
@@ -757,9 +1012,10 @@ def list_report_exports(project_id: str, report_id: str):
     return [repo.export_metadata(export) for export in record.get("exports", [])]
 
 @router.get("/{project_id}/reports/{report_id}/exports/{export_id}/download")
-def download_report_export(project_id: str, report_id: str, export_id: str):
+def download_report_export(project_id: str, report_id: str, export_id: str, request: Request):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "report:export")
     repo = report_repository()
     record = repo.get(project_id, report_id)
     if not record:
@@ -770,6 +1026,19 @@ def download_report_export(project_id: str, report_id: str, export_id: str):
     content = export_record.get("content", "")
     if export_record.get("content_encoding") == "base64":
         content = base64.b64decode(content)
+    record_sensitive_project_event(
+        request,
+        event_type="report_export_download",
+        project_id=project_id,
+        metadata={
+            "reportId": report_id,
+            "exportId": export_id,
+            "format": export_record.get("format"),
+            "fileName": export_record.get("file_name"),
+            "contentType": export_record.get("content_type"),
+            "authorization": authz.get("authorization"),
+        },
+    )
     return Response(
         content=content,
         media_type=export_record.get("content_type", "text/plain; charset=utf-8"),
@@ -785,6 +1054,7 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
 
     input_data = input_data or {}
     source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
+    source_data = attach_persisted_land_evidence(project_id, source_data)
     return run_and_save_pf_review_use_case(
         orchestration_repository(),
         project_id,
@@ -809,6 +1079,40 @@ def get_project_orchestration(project_id: str, run_id: str):
         raise HTTPException(status_code=404, detail="Orchestration run not found")
     return run
 
+@router.get("/{project_id}/risk-registers")
+def list_project_risk_registers(project_id: str, request: Request):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    return {
+        "schemaVersion": "realytics-risk-register-list-v1",
+        "projectId": project_id,
+        "records": [
+            {
+                "registerId": record.get("registerId"),
+                "runId": record.get("runId"),
+                "status": record.get("status"),
+                "riskCount": record.get("riskCount", len(record.get("risks") or [])),
+                "reviewSummary": record.get("reviewSummary") or {},
+                "updatedAt": record.get("updatedAt"),
+            }
+            for record in list_risk_register_records(project_id)
+        ],
+    }
+
+@router.get("/{project_id}/orchestrations/{run_id}/risk-register")
+def get_project_orchestration_risk_register(project_id: str, run_id: str, request: Request):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    record = get_risk_register_record(project_id, run_id)
+    if not record:
+        run = orchestration_repository().get(project_id, run_id)
+        record = (run or {}).get("artifacts", {}).get("riskRegister")
+    if not record:
+        raise HTTPException(status_code=404, detail="Risk register not found")
+    return record
+
 @router.get("/{project_id}/snapshots")
 def list_project_snapshots(project_id: str):
     if project_id not in PROJECTS_DB:
@@ -826,6 +1130,26 @@ def search_project_similar_snapshots(project_id: str, input_data: Dict[str, Any]
             project_snapshot_repository(),
             project_id,
             input_data,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+@router.post("/{project_id}/snapshots/diff")
+def diff_project_snapshots(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    base_snapshot_id = input_data.get("baseSnapshotId") or input_data.get("base_snapshot_id")
+    compare_snapshot_id = input_data.get("compareSnapshotId") or input_data.get("compare_snapshot_id")
+    if not base_snapshot_id or not compare_snapshot_id:
+        raise HTTPException(status_code=400, detail="baseSnapshotId and compareSnapshotId are required")
+
+    try:
+        return diff_project_snapshots_use_case(
+            project_snapshot_repository(),
+            project_id,
+            str(base_snapshot_id),
+            str(compare_snapshot_id),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -881,13 +1205,15 @@ def review_project_orchestration_risk_register_row(
     project_id: str,
     run_id: str,
     risk_id: str,
+    request: Request,
     input_data: Dict[str, Any] | None = None,
 ):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "risk:review")
 
     try:
-        return review_risk_register_row_by_id_use_case(
+        reviewed = review_risk_register_row_by_id_use_case(
             orchestration_repository(),
             project_id,
             run_id,
@@ -895,6 +1221,18 @@ def review_project_orchestration_risk_register_row(
             input_data,
             now_iso(),
         )
+        record_sensitive_project_event(
+            request,
+            event_type="risk_register_row_review",
+            project_id=project_id,
+            run_id=run_id,
+            metadata={
+                "riskId": risk_id,
+                "reviewStatus": (input_data or {}).get("review_status") or (input_data or {}).get("reviewStatus"),
+                "authorization": authz.get("authorization"),
+            },
+        )
+        return reviewed
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

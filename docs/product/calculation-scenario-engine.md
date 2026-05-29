@@ -322,26 +322,51 @@ Scenario Engine output should feed the following Phase 11 report sections:
 | `DISCOUNT_STRESS_FAIL` | 10% or higher discount scenario fails required repayment |
 | `TRIGGER_REQUIRED` | Scenario requires sale-rate, discount, or cash sweep trigger |
 
+## 10.1 Restructuring Plan
+
+The Scenario Engine now has a restructuring wrapper for rejection-driving financial risks.
+
+API:
+
+```text
+POST /projects/{project_id}/scenarios/restructuring
+```
+
+Purpose:
+
+- Quantify the senior tranche reduction or DSRA/equity injection required to remove `SENIOR_SHORTFALL`.
+- Quantify the PF reduction/equity increase or additional collateral value required to cure `UNSOLD_LTV_BREACH`.
+- Rerun a senior-resized scenario and show whether senior repayment is restored.
+- Preserve source locators to the waterfall row and unsold LTV matrix cell used for the cure calculation.
+
+Policy:
+
+- This output is not a waiver.
+- Credit Review should move from reject to conditional approval only after the cure actions are applied, source-backed, and rerun through Scenario Engine / PF Review orchestration.
+- Senior shortfall should not be solved only through narrative mitigants; the cash waterfall must support full senior repayment or a dedicated repayment support source must be attached.
+
 ## 11. Acceptance Criteria
 
 ### 11.1 Functional Criteria
 
-- [ ] API can run a waterfall scenario from project PF structure.
-- [ ] API can run waterfall from explicit scenario payload.
-- [ ] API can generate unsold LTV matrix.
-- [ ] API can generate tranche recovery matrix.
-- [ ] Result includes risk flags and report fragments.
-- [ ] Result can be saved as a scenario run.
+- [x] API can run a waterfall scenario from project PF structure.
+- [x] API can run waterfall from explicit scenario payload.
+- [x] API can generate unsold LTV matrix.
+- [x] API can generate tranche recovery matrix.
+- [x] API can generate a quantified restructuring plan for senior shortfall and unsold LTV breach.
+- [x] Result includes risk flags and report fragments.
+- [x] Result can be saved as a scenario run.
 - [ ] Marketability Agent can reference scenario result when available.
 - [ ] Phase 11 report can include scenario summary rows.
 
 ### 11.2 Calculation Criteria
 
-- [ ] Existing pure function tests remain valid.
-- [ ] Scenario wrapper tests cover senior-only, senior/mezzanine/junior, and insufficient-cash cases.
-- [ ] Unsold matrix tests cover 0%, 10%, 20% discount cases.
-- [ ] Zero or invalid unit counts do not produce division errors.
-- [ ] Output rounds ratios consistently.
+- [x] Existing pure function tests remain valid.
+- [x] Scenario wrapper tests cover senior-only, senior/mezzanine/junior, and insufficient-cash cases.
+- [x] Restructuring tests cover senior shortfall cure and unsold LTV cure amount.
+- [x] Unsold matrix tests cover 0%, 10%, 20% discount cases.
+- [x] Zero or invalid unit counts do not produce division errors.
+- [x] Output rounds ratios consistently.
 
 ### 11.3 Review Criteria
 
@@ -367,6 +392,7 @@ Scenario Engine output should feed the following Phase 11 report sections:
   - `/scenarios/waterfall`
   - `/scenarios/unsold-ltv-matrix`
   - `/scenarios/recovery`
+  - `/scenarios/restructuring`
 - Merge project defaults with request assumptions.
 - Add result persistence.
 

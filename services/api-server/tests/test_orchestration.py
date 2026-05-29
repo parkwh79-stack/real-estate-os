@@ -1,5 +1,9 @@
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+from agents.orchestration_agent import OrchestrationAgent
 from main import app
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 
@@ -29,11 +33,12 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert run["user_id"] == "pytest"
     assert run["ai_connection"]["user_id"] == "pytest"
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
-    assert len(run["handoffs"]) >= 7
+    assert len(run["handoffs"]) >= 8
     assert set(run["agentProgress"]) == {key for key, _ in PF_REVIEW_STEPS}
     assert run["agentProgress"]["marketability_analysis"]["status"] == "completed"
     assert run["agentProgress"]["marketability_analysis"]["progressPercent"] == 100
     assert run["agentProgress"]["quality_check"]["lastArtifactKey"] == "qualityCheck"
+    assert run["agentProgress"]["approval_readiness_gate"]["lastArtifactKey"] == "approvalReadinessGate"
     assert {
         handoff["handoffType"]
         for handoff in run["handoffs"]
@@ -45,10 +50,15 @@ def test_pf_review_orchestration_completes_and_saves_report():
         "legal_to_credit_review",
         "risk_register_to_credit_review",
         "credit_review_to_report",
+        "restructuring_to_credit_review",
     }
     AgentHandoffEnvelope.model_validate(run["handoffs"][0])
     AgentProgress.model_validate(run["agentProgress"]["marketability_analysis"])
     assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["qualityCheck"]["gateType"] == "report_completeness"
+    assert run["artifacts"]["approvalReadinessGate"]["analysisType"] == "approval_readiness_gate"
+    assert run["artifacts"]["approvalReadinessGate"]["gateType"] == "approval_readiness"
+    assert isinstance(run["artifacts"]["approvalReadinessGate"]["pass"], bool)
     assert run["artifacts"]["landAgentReview"]["analysisType"] == "land_agent_orchestration_review_v1"
     assert run["agentProgress"]["land_agent_review"]["status"] == "completed"
     assert run["artifacts"]["reconciliationGate"]["analysisType"] == "cross_agent_reconciliation_gate_v1"
@@ -64,6 +74,9 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert run["agentProgress"]["risk_register_generation"]["status"] == "completed"
     assert run["artifacts"]["creditReviewDecision"]["analysisType"] == "credit_review_decision"
     assert run["agentProgress"]["credit_review_decision"]["status"] == "completed"
+    assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
+    assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "completed"
+    assert run["agentProgress"]["scenario_restructuring_plan"]["lastArtifactKey"] == "restructuringPlan"
     assert run["artifacts"]["phase11Report"]["report"]["qualityChecks"]["actualSectionCount"] == 20
     assert run["artifacts"]["reportRecord"]["run_id"] == run["run_id"]
     assert run["artifacts"]["projectSnapshot"]["runId"] == run["run_id"]
@@ -78,6 +91,158 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert snapshot["runId"] == run["run_id"]
     assert snapshot["schemaVersion"] == "realytics-project-snapshot-v1"
     assert snapshot["caseComparisonSeed"]["totalRevenue"] is not None
+
+    risk_registers = client.get(f"/projects/{project_id}/risk-registers").json()
+    assert any(record["runId"] == run["run_id"] for record in risk_registers["records"])
+    persisted_risk_register = client.get(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}/risk-register"
+    ).json()
+    assert persisted_risk_register["runId"] == run["run_id"]
+    assert persisted_risk_register["risks"] == run["artifacts"]["riskRegister"]["risks"]
+
+
+def test_approval_readiness_gate_blocks_rejected_or_unreviewed_runs():
+    run = {
+        "handoffs": [
+            {
+                "requiresHumanReview": True,
+                "reviewStatus": "pending",
+                "status": "needs_review",
+            }
+        ],
+        "artifacts": {
+            "qualityCheck": {"pass": True},
+            "legalPermitReview": {"status": "clear"},
+            "dataQualityReview": {"status": "clear"},
+            "reconciliationGate": {"status": "clear"},
+            "riskRegister": {
+                "status": "blocking",
+                "risks": [
+                    {
+                        "riskId": "R-FIN-001",
+                        "requiresHumanReview": True,
+                        "reviewStatus": "pending_review",
+                    }
+                ],
+            },
+            "creditReviewDecision": {"decision": "reject_recommended"},
+            "landAgentReview": {"status": "basic_site_data_only"},
+            "evidenceGraph": {"summary": {"riskRowsWithoutExplicitEvidenceCount": 2}},
+        },
+    }
+
+    gate = OrchestrationAgent()._approval_readiness_gate(run)
+
+    assert gate["schemaVersion"] == "realytics-approval-readiness-gate-v1"
+    assert gate["pass"] is False
+    assert gate["status"] == "not_ready_for_approval"
+    assert {item["code"] for item in gate["blockers"]} >= {
+        "RISK_REGISTER_NOT_BLOCKING",
+        "CREDIT_DECISION_NOT_REJECT_OR_REWORK",
+        "HANDOFF_REVIEWS_RESOLVED",
+        "RISK_REVIEWS_RESOLVED",
+        "LAND_PNU_READY",
+        "LAND_OFFICIAL_PRICE_READY",
+        "LAND_REGISTRY_EVIDENCE_READY",
+        "LAND_ACQUISITION_READY",
+    }
+
+
+def test_approval_readiness_gate_clears_land_evidence_blockers_when_ready():
+    run = {
+        "handoffs": [],
+        "artifacts": {
+            "qualityCheck": {"pass": True},
+            "legalPermitReview": {"status": "clear"},
+            "dataQualityReview": {"status": "clear"},
+            "reconciliationGate": {"status": "clear"},
+            "riskRegister": {"status": "clear", "risks": []},
+            "creditReviewDecision": {"decision": "conditional_approval"},
+            "landAgentReview": {
+                "status": "ready_for_pf_review",
+                "evidenceReadiness": {
+                    "pnuReady": True,
+                    "officialPriceReady": True,
+                    "registryEvidenceReady": True,
+                    "acquisitionReady": True,
+                },
+            },
+            "evidenceGraph": {"summary": {"riskRowsWithoutExplicitEvidenceCount": 0}},
+        },
+    }
+
+    gate = OrchestrationAgent()._approval_readiness_gate(run)
+    land_gates = {
+        item["code"]: item
+        for item in gate["gates"]
+        if item["code"].startswith("LAND_")
+    }
+
+    assert land_gates["LAND_PNU_READY"]["pass"] is True
+    assert land_gates["LAND_OFFICIAL_PRICE_READY"]["pass"] is True
+    assert land_gates["LAND_REGISTRY_EVIDENCE_READY"]["pass"] is True
+    assert land_gates["LAND_ACQUISITION_READY"]["pass"] is True
+    assert gate["summary"]["landEvidenceReady"] is True
+
+
+def test_land_readiness_uses_flat_land_evidence_package():
+    review = OrchestrationAgent()._review_land_readiness({
+        "project": {"name": "Flat Land Evidence Pilot"},
+        "land": {
+            "pnu": "2729011700100010001",
+            "area_sqm": 5000.0,
+        },
+        "land_acquisition": [
+            {"owner": "Owner A", "share": 1.0, "area_sqm": 5000.0},
+        ],
+        "landEvidence": {
+            "officialLandPrice": 1250000,
+            "officialLandPriceBaseYear": 2026,
+            "officialLandPriceEvidence": {
+                "evidenceId": "official-price-2026-pnu-2729011700100010001",
+            },
+            "registryEvidence": [
+                {"evidenceId": "registry-pnu-2729011700100010001"},
+            ],
+            "sourceMetadata": {
+                "sourceName": "Manual pilot evidence package",
+                "baseDate": "2026-05-27",
+            },
+        },
+    })
+
+    assert review["status"] == "ready_for_pf_review"
+    assert review["summary"]["totalAreaSqm"] == 5000.0
+    assert review["summary"]["officialLandPriceCoverageRatio"] == 1.0
+    assert review["summary"]["registryEvidenceCoverageRatio"] == 1.0
+    assert review["summary"]["acquisitionAreaRatio"] == 1.0
+    assert review["evidenceReadiness"]["officialPriceReady"] is True
+    assert review["evidenceReadiness"]["registryEvidenceReady"] is True
+    assert review["handoffReadiness"] == "pf_ready_patch"
+    assert set(review["evidenceIds"]) == {
+        "official-price-2026-pnu-2729011700100010001",
+        "registry-pnu-2729011700100010001",
+    }
+
+
+def test_pilot_input_package_template_runs_orchestration():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    run = OrchestrationAgent().run_pf_review("pilot-template-test", payload)
+
+    assert run["status"] == "completed"
+    assert len(run["steps"]) == len(PF_REVIEW_STEPS)
+    assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["approvalReadinessGate"]["analysisType"] == "approval_readiness_gate"
+    assert run["artifacts"]["creditReviewDecision"]["decision"] in {
+        "approve",
+        "conditional_approval",
+        "rework_required",
+        "reject_recommended",
+    }
+    assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
+    assert run["errors"] == []
 
 
 def test_pf_review_orchestration_can_be_retrieved_and_approved():
@@ -144,6 +309,14 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
                     "waiver_reason": "Test run waiver.",
                 },
             ).json()
+
+    persisted_after_review = client.get(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}/risk-register"
+    ).json()
+    assert all(
+        risk.get("reviewStatus") in {"waived", "approved", "resolved"} or not risk.get("requiresHumanReview")
+        for risk in persisted_after_review["risks"]
+    )
 
     approved = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",

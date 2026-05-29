@@ -46,7 +46,7 @@ The baseline scorer uses `caseComparisonSeed` fields:
 | `marketabilityGrade` | exact match |
 | `landReadinessStatus` | exact match |
 | `reconciliationStatus` | exact match |
-| Risk Register rows | risk code/category/severity overlap |
+| Risk Register rows | exact risk-code overlap when the query risk has `code`; category/severity fallback only when the query risk has no code |
 
 ## Output
 
@@ -83,6 +83,8 @@ How did prior similar cases handle PRICE_PREMIUM_HIGH?
 Was it waived, approved with condition, resolved, or sent back for revision?
 ```
 
+Risk matching is intentionally conservative. If a query Risk Register row has an explicit `code`, a historical risk must match the same code to be treated as the same risk. Category/severity fallback is only used for legacy or incomplete query risks that do not have a code. This prevents unrelated high-severity risks in the same category from being overcounted as historical treatment for the current risk.
+
 ## API
 
 ```text
@@ -115,10 +117,20 @@ Example request:
 - It does not yet include actual outcome data such as realized sales rate, default, extension, or loss.
 - It does not yet use vector search over full reports or RAG over similar memo paragraphs.
 
+## Related Snapshot Diff
+
+The same snapshot infrastructure now supports:
+
+```text
+realytics-snapshot-diff-v1
+```
+
+Snapshot Diff compares two saved snapshots from the same project and returns changed assumptions, Risk Register changes, Credit Review decision changes, artifact changes, report-section changes, material-change flags, and a re-review recommendation.
+
 ## Next Steps
 
 1. Add exact PNU/legal-dong/location hierarchy matching.
 2. Add actual outcome fields to snapshots.
 3. Persist reviewed risk treatment as first-class historical risk records.
 4. Add vector index over report sections and Evidence Graph claims.
-5. Feed similar-case results into Credit Review Agent and Phase 11 report risk memo.
+5. Feed similar-case and snapshot-diff results into Credit Review Agent and Phase 11 report risk memo.

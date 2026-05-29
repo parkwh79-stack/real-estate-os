@@ -7,6 +7,7 @@ from schemas.scenario import (
     ScenarioDrivers
 )
 from agents.scenario_engine_agent import ScenarioEngineAgent
+from agents.restructuring_agent import RestructuringAgent
 from agents.report_agent import ReportAgent
 
 
@@ -62,10 +63,48 @@ def test_scenario_engine_agent_execution():
 
     # Verify risk flags and Korean report fragments
     assert len(result.riskFlags) >= 0
+    assert any(flag.sourceLocators for flag in result.riskFlags)
     assert result.reportFragments.waterfallSummary != ""
     assert result.reportFragments.unsoldLtvSummary != ""
     assert result.reportFragments.trancheRecoverySummary != ""
     assert result.reportFragments.approvalCondition != ""
+
+
+def test_restructuring_agent_recommends_senior_and_unsold_ltv_cures():
+    req = ScenarioSetRequest(
+        scenarioSetId="reject-fix-test",
+        baseDate="2026-05-27",
+        productMix=[
+            ProductMixItem(type="Apartment", units=100, avgUnitPrice=1_200_000_000.0, totalRevenue=120_000_000_000.0),
+        ],
+        pfStructure=[
+            TrancheItem(tranche="Senior", amount=100_000_000_000.0, priority=1, interestRate=0.06, feeRate=0.01),
+            TrancheItem(tranche="Mezzanine", amount=20_000_000_000.0, priority=2, interestRate=0.08, feeRate=0.02),
+        ],
+        scenarioDrivers=ScenarioDrivers(
+            saleRates=[0.4, 0.5, 0.7, 1.0],
+            discountRates=[0.0, 0.1, 0.2],
+        ),
+    )
+
+    base_result = ScenarioEngineAgent().run_scenario_set(req)
+    assert any(flag.code == "SENIOR_SHORTFALL" for flag in base_result.riskFlags)
+    assert any(flag.code == "UNSOLD_LTV_BREACH" for flag in base_result.riskFlags)
+
+    plan = RestructuringAgent().build_restructuring_plan(
+        req,
+        base_result,
+        {"seniorBuffer": 1_000_000_000, "unsoldLtvTarget": 0.90},
+    )
+
+    assert plan["analysisType"] == "pf_restructuring_plan"
+    assert plan["seniorShortfallFix"]["status"] == "action_required"
+    assert plan["seniorShortfallFix"]["requiredSeniorReduction"] > 0
+    assert plan["unsoldLtvFix"]["status"] == "action_required"
+    assert plan["unsoldLtvFix"]["requiredPfReductionOrEquityIncrease"] > 0
+    assert plan["adjustedScenarioHealth"]["seniorShortfall"] == 0
+    assert "SENIOR_SHORTFALL" not in plan["adjustedScenarioHealth"]["riskCodes"]
+    assert plan["recommendations"][0]["code"] == "REDUCE_SENIOR_OR_ADD_EQUITY"
 
 
 def test_report_agent_dynamic_scenarios():
@@ -173,4 +212,3 @@ def test_orchestration_quality_check_visual_qa():
     
     assert quality["pdfStructureQA"]["status"] in {"passed", "warnings", "failed"}
     assert quality["pdfVisualQA"]["status"] in {"passed", "regression_detected"}
-
