@@ -116,6 +116,72 @@ def test_land_ledger_enrich_can_persist_land_evidence_records():
     assert any(record["evidenceType"] == "official_land_price" for record in listed.json()["records"])
 
 
+def test_land_acquisition_status_record_clears_acquisition_gate():
+    client = TestClient(app)
+    project_id = client.get("/projects/").json()[0]["project"]["id"]
+
+    saved = client.post(
+        f"/projects/{project_id}/land-evidence",
+        headers={"x-realytics-user-id": "land-analyst"},
+        json={
+            "records": [
+                {
+                    "evidenceType": "pnu_resolution",
+                    "pnu": "2729011700101230004",
+                    "parcelKey": "123-4",
+                    "matchConfidence": 0.95,
+                    "sourceName": "manual pnu evidence",
+                    "verificationStatus": "resolved",
+                },
+                {
+                    "evidenceType": "official_land_price",
+                    "pnu": "2729011700101230004",
+                    "parcelKey": "123-4",
+                    "pricePerSqm": 1500000,
+                    "baseYear": 2026,
+                    "baseDate": "2026-01-01",
+                    "sourceName": "manual official price evidence",
+                    "sourceUrlOrEvidenceId": "official-price-evidence-001",
+                },
+                {
+                    "evidenceType": "registry_record",
+                    "pnu": "2729011700101230004",
+                    "parcelKey": "123-4",
+                    "evidenceId": "registry-pdf-001",
+                    "registeredOwner": "Seller A",
+                    "mortgageExists": False,
+                    "verificationStatus": "attached_pending_legal_review",
+                },
+                {
+                    "evidenceType": "land_acquisition_status",
+                    "pnu": "2729011700101230004",
+                    "parcelKey": "123-4",
+                    "acquisitionAreaRatio": 1.0,
+                    "acquisitionStatus": "trust_registered",
+                    "sourceName": "manual closing evidence",
+                    "sourceUrlOrEvidenceId": "closing-confirmation-001",
+                    "verificationStatus": "verified_for_pf_review",
+                },
+            ]
+        },
+    )
+    assert saved.status_code == 200
+
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        json={"requestedBy": "test"},
+    )
+    assert run.status_code == 200
+    land_review = run.json()["artifacts"]["landAgentReview"]
+    assert land_review["evidenceReadiness"]["acquisitionReady"] is True
+    assert land_review["summary"]["acquisitionAreaRatio"] == 1.0
+    land_gate_by_code = {
+        gate["code"]: gate
+        for gate in run.json()["artifacts"]["approvalReadinessGate"]["gates"]
+    }
+    assert land_gate_by_code["LAND_ACQUISITION_READY"]["pass"] is True
+
+
 def test_pf_review_run_consumes_persisted_land_evidence():
     client = TestClient(app)
     created = client.post(

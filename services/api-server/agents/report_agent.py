@@ -157,6 +157,8 @@ class ReportAgent:
             },
         }
 
+        self._attach_imported_risk_report_sections(sections, input_data.get("riskReportSections") or {})
+
         return {
             "template": PHASE_11_TEMPLATE,
             "title": "AI PF 심사보고서",
@@ -422,6 +424,33 @@ class ReportAgent:
             "missingSections": missing,
             "isComplete": len(missing) == 0 and len(sections) == len(PHASE_11_SECTION_ORDER),
         }
+
+    def _attach_imported_risk_report_sections(self, sections: Dict[str, Any], imported: Dict[str, Any]) -> None:
+        if not isinstance(imported, dict) or not imported:
+            return
+        paragraphs = imported.get("paragraphs") if isinstance(imported.get("paragraphs"), list) else []
+        approval_conditions = imported.get("approvalConditions") if isinstance(imported.get("approvalConditions"), list) else []
+        metrics = imported.get("metrics") if isinstance(imported.get("metrics"), dict) else {}
+        cash_flow_summary = imported.get("cashFlowSummary") if isinstance(imported.get("cashFlowSummary"), list) else []
+        source_map = imported.get("sourceMap") if isinstance(imported.get("sourceMap"), list) else []
+
+        if paragraphs:
+            sections.setdefault("summaryCashFlow", {})["importedRiskReportParagraphs"] = paragraphs
+            exit_paragraphs = [
+                paragraph
+                for paragraph in paragraphs
+                if "exit" in str(paragraph.get("section") or paragraph.get("category") or "").lower()
+                or "Exit" in str(paragraph.get("section") or paragraph.get("category") or "")
+            ]
+            sections.setdefault("exitStrategy", {})["importedRiskReportParagraphs"] = exit_paragraphs or paragraphs
+        if approval_conditions:
+            sections.setdefault("drawdownConditions", {})["importedApprovalConditions"] = approval_conditions
+        if metrics:
+            sections.setdefault("businessFeasibility", {})["importedRiskWorkbookMetrics"] = metrics
+        if cash_flow_summary:
+            sections.setdefault("summaryCashFlow", {})["importedCashFlowSummary"] = cash_flow_summary
+        if source_map:
+            sections.setdefault("businessFeasibility", {})["importedSourceMap"] = source_map
 
     def _as_label_items(self, values: List[Any]) -> List[Dict[str, Any]]:
         return [{"label": str(value), "status": "반영"} for value in values]

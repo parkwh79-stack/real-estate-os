@@ -14,6 +14,7 @@ node_modules
 
 # Testing
 coverage
+.pytest_cache/
 
 # Turbo
 .turbo
@@ -26,6 +27,13 @@ coverage
 out/
 build
 dist
+.runtime/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
 
 # Debug

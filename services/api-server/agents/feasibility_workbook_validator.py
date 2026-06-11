@@ -38,6 +38,61 @@ LEGACY_BONRI_WORKBOOK_PROFILE = {
     },
 }
 
+REALYTICS_FORMULA_WORKBOOK_PROFILE = {
+    "profile": "realytics-formula-cash-flow-export",
+    "required_sheets": [
+        "00_사용안내",
+        "01_입력가정",
+        "02A_분양수입",
+        "02B_수납스케줄",
+        "02_사업수지",
+        "03A_공정률",
+        "03_월별현금흐름",
+        "03B_PF인출상환",
+        "03C_Tranche상환",
+        "03D_Tranche월별상환",
+        "04A_할인민감도",
+        "04B_할인Trigger",
+        "04_검증",
+        "05_수식지도",
+        "06_샘플대사",
+        "07_Import계약",
+    ],
+    "key_cells": {},
+    "required_named_ranges": [
+        "realytics_fs_schema_version",
+        "realytics_source_workbook",
+        "fs_total_revenue",
+        "fs_total_project_cost",
+        "fs_pf_loan",
+        "fs_revenue_scenario",
+        "cf_monthly_revenue",
+        "cf_cumulative_cash_flow",
+        "cf_max_minus",
+        "pf_ending_balance",
+        "pf_tranche_shortfall_total",
+        "trigger_adjusted_revenue_total",
+    ],
+    "formula_integrity_sheets": [
+        "00_사용안내",
+        "01_입력가정",
+        "02A_분양수입",
+        "02B_수납스케줄",
+        "02_사업수지",
+        "03A_공정률",
+        "03_월별현금흐름",
+        "03B_PF인출상환",
+        "03C_Tranche상환",
+        "03D_Tranche월별상환",
+        "04A_할인민감도",
+        "04B_할인Trigger",
+        "04_검증",
+        "05_수식지도",
+        "06_샘플대사",
+        "07_Import계약",
+    ],
+}
+
 
 def validate_feasibility_workbook(
     workbook_path: str | Path,
@@ -53,32 +108,57 @@ def validate_feasibility_workbook(
     needs a legacy workbook adapter.
     """
     workbook_path = Path(workbook_path)
-    selected_profile = profile or LEGACY_BONRI_WORKBOOK_PROFILE
 
     formula_wb = load_workbook(workbook_path, data_only=False, read_only=False)
     value_wb = load_workbook(workbook_path, data_only=True, read_only=False)
+    selected_profile = profile or _detect_profile(formula_wb)
 
-    sheets = _sheet_profiles(formula_wb)
-    required_sheet_checks = _required_sheet_checks(formula_wb.sheetnames, selected_profile["required_sheets"])
-    key_cells = _read_key_cells(formula_wb, value_wb, selected_profile["key_cells"])
-    reconciliation_checks = _reconciliation_checks(key_cells, tolerance)
-    formula_integrity = _formula_integrity(formula_wb, value_wb, max_error_samples)
-    schema_readiness = _schema_readiness(formula_wb, selected_profile)
-    status = _status(required_sheet_checks, reconciliation_checks, formula_integrity)
+    try:
+        sheets = _sheet_profiles(formula_wb)
+        required_sheet_checks = _required_sheet_checks(formula_wb.sheetnames, selected_profile["required_sheets"])
+        key_cells = _read_key_cells(formula_wb, value_wb, selected_profile["key_cells"])
+        reconciliation_checks = _reconciliation_checks(key_cells, tolerance)
+        formula_integrity = _formula_integrity(
+            formula_wb,
+            value_wb,
+            max_error_samples,
+            included_sheet_names=selected_profile.get("formula_integrity_sheets"),
+        )
+        defined_names = _defined_name_profiles(formula_wb)
+        named_range_values = _read_named_range_values(
+            formula_wb,
+            value_wb,
+            selected_profile.get("required_named_ranges", []),
+        )
+        schema_readiness = _schema_readiness(formula_wb, selected_profile)
+        status = _status(required_sheet_checks, reconciliation_checks, formula_integrity, schema_readiness)
 
-    return {
-        "status": status,
-        "profile": selected_profile["profile"],
-        "fileName": workbook_path.name,
-        "sheetCount": len(formula_wb.worksheets),
-        "sheets": sheets,
-        "requiredSheetChecks": required_sheet_checks,
-        "keyCells": key_cells,
-        "reconciliationChecks": reconciliation_checks,
-        "formulaIntegrity": formula_integrity,
-        "schemaReadiness": schema_readiness,
-        "recommendations": _recommendations(status, formula_integrity, schema_readiness),
-    }
+        return {
+            "status": status,
+            "profile": selected_profile["profile"],
+            "fileName": workbook_path.name,
+            "sheetCount": len(formula_wb.worksheets),
+            "sheets": sheets,
+            "requiredSheetChecks": required_sheet_checks,
+            "keyCells": key_cells,
+            "reconciliationChecks": reconciliation_checks,
+            "formulaIntegrity": formula_integrity,
+            "definedNames": defined_names,
+            "namedRangeValues": named_range_values,
+            "schemaReadiness": schema_readiness,
+            "recommendations": _recommendations(status, formula_integrity, schema_readiness),
+        }
+    finally:
+        formula_wb.close()
+        value_wb.close()
+
+
+def _detect_profile(workbook: Any) -> Dict[str, Any]:
+    defined_names = set(workbook.defined_names.keys())
+    sheet_names = set(workbook.sheetnames)
+    if "realytics_fs_schema_version" in defined_names or "07_Import계약" in sheet_names:
+        return REALYTICS_FORMULA_WORKBOOK_PROFILE
+    return LEGACY_BONRI_WORKBOOK_PROFILE
 
 
 def _sheet_profiles(workbook: Any) -> List[Dict[str, Any]]:
@@ -144,6 +224,9 @@ def _read_key_cells(
 
 
 def _reconciliation_checks(key_cells: Dict[str, Dict[str, Any]], tolerance: float) -> List[Dict[str, Any]]:
+    if not key_cells:
+        return []
+
     def value(key: str) -> float:
         raw = key_cells.get(key, {}).get("value")
         return float(raw) if isinstance(raw, (int, float)) else 0.0
@@ -201,14 +284,22 @@ def _numeric_check(name: str, lhs: float, rhs: float, tolerance: float) -> Dict[
     }
 
 
-def _formula_integrity(formula_wb: Any, value_wb: Any, max_error_samples: int) -> Dict[str, Any]:
+def _formula_integrity(
+    formula_wb: Any,
+    value_wb: Any,
+    max_error_samples: int,
+    included_sheet_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     cached_error_counts: Dict[str, int] = {}
     cached_error_samples: List[Dict[str, Any]] = []
     formula_ref_samples: List[Dict[str, Any]] = []
     formula_ref_count = 0
     formula_count = 0
+    included_sheet_set = set(included_sheet_names or [])
 
     for value_sheet in value_wb.worksheets:
+        if included_sheet_set and value_sheet.title not in included_sheet_set:
+            continue
         formula_sheet: Worksheet = formula_wb[value_sheet.title]
         for row in value_sheet.iter_rows():
             for value_cell in row:
@@ -240,7 +331,60 @@ def _formula_integrity(formula_wb: Any, value_wb: Any, max_error_samples: int) -
         "cachedErrorSamples": cached_error_samples,
         "formulaRefSamples": formula_ref_samples,
         "hasBlockingFormulaErrors": formula_ref_count > 0 or cached_error_counts.get("#REF!", 0) > 0,
+        "scopedSheetNames": sorted(included_sheet_set) if included_sheet_set else "all",
     }
+
+
+def _defined_name_profiles(workbook: Any) -> List[Dict[str, Any]]:
+    profiles: List[Dict[str, Any]] = []
+    for name in workbook.defined_names.keys():
+        try:
+            destinations = [
+                {"sheetName": sheet_name, "range": cell_range}
+                for sheet_name, cell_range in workbook.defined_names[name].destinations
+            ]
+        except Exception:
+            destinations = []
+        profiles.append({"name": str(name), "destinations": destinations})
+    return profiles
+
+
+def _read_named_range_values(
+    formula_wb: Any,
+    value_wb: Any,
+    required_named_ranges: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    values: Dict[str, Dict[str, Any]] = {}
+    for name in required_named_ranges:
+        if name not in formula_wb.defined_names:
+            values[name] = {
+                "present": False,
+                "destinations": [],
+                "value": None,
+                "formula": None,
+            }
+            continue
+
+        destinations = list(formula_wb.defined_names[name].destinations)
+        first_value = None
+        first_formula = None
+        for sheet_name, cell_range in destinations:
+            if sheet_name not in formula_wb.sheetnames or ":" in cell_range:
+                continue
+            first_value = _json_safe_value(value_wb[sheet_name][cell_range].value)
+            first_formula = formula_wb[sheet_name][cell_range].value
+            break
+
+        values[name] = {
+            "present": True,
+            "destinations": [
+                {"sheetName": sheet_name, "range": cell_range}
+                for sheet_name, cell_range in destinations
+            ],
+            "value": first_value,
+            "formula": first_formula,
+        }
+    return values
 
 
 def _schema_readiness(workbook: Any, profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -250,32 +394,63 @@ def _schema_readiness(workbook: Any, profile: Dict[str, Any]) -> Dict[str, Any]:
     for sheet in workbook.worksheets:
         table_names.extend(list(sheet.tables.keys()) if hasattr(sheet, "tables") else [])
 
+    required_named_ranges = profile.get("required_named_ranges", [])
+    missing_required_named_ranges = [
+        name for name in required_named_ranges
+        if name not in workbook.defined_names
+    ]
     realytics_named_ranges = [
         name for name in workbook.defined_names.keys()
         if str(name).startswith("fs_")
+        or str(name).startswith("cf_")
+        or str(name).startswith("realytics_")
     ]
-    expected_sections = {
-        "site": "입력" in sheet_names,
-        "program": "입력" in sheet_names,
-        "product_mix": "분양" in sheet_names,
-        "revenue": "사업수지" in sheet_names and "분양" in sheet_names,
-        "costs": "사업수지" in sheet_names and "제경비" in sheet_names,
-        "financing": "2.현금흐름" in sheet_names,
-        "monthly_cash_flow": "2.현금흐름" in sheet_names,
-        "review": "검토서" in sheet_names,
-    }
+
+    if profile["profile"] == REALYTICS_FORMULA_WORKBOOK_PROFILE["profile"]:
+        expected_sections = {
+            "site": "01_입력가정" in sheet_names,
+            "program": "02A_분양수입" in sheet_names,
+            "product_mix": "02A_분양수입" in sheet_names and "02B_수납스케줄" in sheet_names,
+            "revenue": "02A_분양수입" in sheet_names and "02_사업수지" in sheet_names,
+            "costs": "02_사업수지" in sheet_names,
+            "financing": "03B_PF인출상환" in sheet_names and "03C_Tranche상환" in sheet_names,
+            "monthly_cash_flow": "03_월별현금흐름" in sheet_names,
+            "review": "04_검증" in sheet_names and "07_Import계약" in sheet_names,
+        }
+        direct_v2_import_ready = required_present and not missing_required_named_ranges
+        requires_legacy_adapter = False
+        notes = [
+            "Workbook exposes REALYTICS named ranges for formula-auditable import.",
+            "Full FeasibilityStudyV2 import still requires product-level table parsing and provenance mapping.",
+        ]
+    else:
+        expected_sections = {
+            "site": "입력" in sheet_names,
+            "program": "입력" in sheet_names,
+            "product_mix": "분양" in sheet_names,
+            "revenue": "사업수지" in sheet_names and "분양" in sheet_names,
+            "costs": "사업수지" in sheet_names and "제경비" in sheet_names,
+            "financing": "2.현금흐름" in sheet_names,
+            "monthly_cash_flow": "2.현금흐름" in sheet_names,
+            "review": "검토서" in sheet_names,
+        }
+        direct_v2_import_ready = len(realytics_named_ranges) > 0 and len(table_names) > 0
+        requires_legacy_adapter = len(realytics_named_ranges) == 0 or len(table_names) == 0
+        notes = [
+            "The sample workbook conceptually covers FeasibilityStudyV2 sections.",
+            "It does not use REALYTICS fs_* named ranges or Excel tables, so direct v2 import requires a legacy-cell-map adapter.",
+        ]
 
     return {
         "requiredLegacySheetsPresent": required_present,
         "sectionsCovered": expected_sections,
         "realyticsNamedRangeCount": len(realytics_named_ranges),
+        "requiredNamedRanges": required_named_ranges,
+        "missingRequiredNamedRanges": missing_required_named_ranges,
         "excelTableCount": len(table_names),
-        "directV2ImportReady": len(realytics_named_ranges) > 0 and len(table_names) > 0,
-        "requiresLegacyAdapter": len(realytics_named_ranges) == 0 or len(table_names) == 0,
-        "notes": [
-            "The sample workbook conceptually covers FeasibilityStudyV2 sections.",
-            "It does not use REALYTICS fs_* named ranges or Excel tables, so direct v2 import requires a legacy-cell-map adapter.",
-        ],
+        "directV2ImportReady": direct_v2_import_ready,
+        "requiresLegacyAdapter": requires_legacy_adapter,
+        "notes": notes,
     }
 
 
@@ -283,8 +458,11 @@ def _status(
     required_sheet_checks: List[Dict[str, Any]],
     reconciliation_checks: List[Dict[str, Any]],
     formula_integrity: Dict[str, Any],
+    schema_readiness: Dict[str, Any],
 ) -> str:
     if any(not check["present"] for check in required_sheet_checks):
+        return "failed"
+    if schema_readiness["missingRequiredNamedRanges"]:
         return "failed"
     if any(not check["passed"] for check in reconciliation_checks):
         return "failed"
@@ -303,8 +481,12 @@ def _recommendations(
         recommendations.append("Resolve #REF! formulas before accepting the workbook as an authoritative feasibility model.")
     if formula_integrity["cachedErrorCounts"].get("#DIV/0!", 0) > 0:
         recommendations.append("Review #DIV/0! cells and confirm whether they are harmless blank-row artifacts or real calculation errors.")
+    if schema_readiness["missingRequiredNamedRanges"]:
+        recommendations.append("Add missing REALYTICS named ranges before accepting this workbook for canonical import.")
     if schema_readiness["requiresLegacyAdapter"]:
         recommendations.append("Build a legacy workbook adapter that maps the current Korean workbook cell addresses into FeasibilityStudyV2.")
+    if schema_readiness["directV2ImportReady"]:
+        recommendations.append("Workbook exposes the required REALYTICS import contract; next step is field-level FeasibilityStudyV2 mapping and provenance capture.")
     if status == "passed":
         recommendations.append("Workbook is structurally ready for import and agent-side metric comparison.")
     return recommendations

@@ -72,8 +72,38 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/land-ledger/analyze`
 - **Description**: Upload and analyze a legacy Korean land ledger `.xls` file.
 - **Request Body**: Multipart file upload.
-- **Response**: Import metadata, source totals, parcel list, owner/payment records, total area, total contract amount, validation status, import consistency checks, land acquisition status, PF summary, missing PNU/official-land-price indicators, registry evidence readiness, and enrichment plan.
+- **Response**: Import metadata, upload/archive metadata, source totals, parcel list, owner/payment records, total area, total contract amount, validation status, import consistency checks, land acquisition status, PF summary, missing PNU/official-land-price indicators, registry evidence readiness, and enrichment plan. Uploaded land ledger files are archived as `documentType=land_ledger` source documents.
 - **Note**: If original workbook totals and parsed totals fail reconciliation, the response status is `needs_review` even when the file parses successfully.
+
+### `POST /projects/{project_id}/feasibility-workbook/validate`
+- **Description**: Archive and validate a formula-driven feasibility workbook before accepting it as a canonical FeasibilityStudyV2 import source.
+- **Request Body**: Multipart `.xlsx` or `.xlsm` file upload.
+- **Response**: `{ "project_id": "...", "upload": {...}, "validation": {...}, "feasibilityStudyV2Draft": {...} }` with source-document archive metadata, workbook profile, required sheet checks, key cells, formula integrity, reconciliation checks, schema readiness, recommendations, and a conservative FeasibilityStudyV2 import draft when the workbook profile is supported. Uploaded workbooks are archived as `documentType=feasibility_workbook` source documents.
+- **Note**: Validation is read-only. The returned draft is not canonical until a reviewer approves it through `/feasibility-workbook/approve`.
+
+### `POST /projects/{project_id}/feasibility-workbook/approve`
+- **Description**: Persist a reviewer-approved workbook import draft as the project's canonical `FeasibilityStudyV2`.
+- **Request Body**: `{ "importId": "fs-import-1", "approvedBy": "credit_officer", "comment": "...", "feasibilityStudyV2Draft": {...}, "validation": {...} }`
+- **Response**: Approval metadata, canonical FeasibilityStudyV2, derived `feasibility_input` metrics, and the updated project record. The original draft provenance remains in `raw_import.approval`.
+- **Audit**: Emits `feasibility_workbook_import_approved` user activity.
+
+### `POST /projects/{project_id}/feasibility-workbook/learn`
+- **Description**: Archive and profile a feasibility or cash-flow workbook as an LLM-first learning candidate for future importer/template rules.
+- **Request Body**: Multipart `.xlsx` or `.xlsm` file upload.
+- **Response**: `{ "project_id": "...", "upload": {...}, "learning": {...} }` with workbook profile, template similarity scores, source-located mapping candidates, LLM judgement plan, automation decision, continuous learning plan, safe LLM prompt context, safety policy, warnings, and next actions.
+- **Note**: Workbook learning is read-only. Mapping candidates cannot become production import behavior until LLM judgement, automated validation, shadow-mode import, regression fixture checks, audit metadata, and rollback requirements are satisfied.
+
+### `POST /projects/{project_id}/risk-report-workbook/validate`
+- **Description**: Archive and parse a compact `risk-report-xlsx-v1` workbook into a Risk Register/report-section import draft.
+- **Request Body**: Multipart `.xlsx` file upload.
+- **Response**: `{ "project_id": "...", "upload": {...}, "riskReportImportDraft": {...} }` with schema validation, named-range values, key PF metrics, imported risk rows, report paragraphs, approval-condition text, cash-flow summary rows, source-cell mapping, and source-document archive metadata.
+- **Note**: Validation is read-only. The workbook must include `risk_schema_version=realytics-risk-report-xlsx-v1` and required `risk_*` named ranges.
+
+### `POST /projects/{project_id}/risk-report-workbook/approve`
+- **Description**: Persist an approved `risk-report-xlsx-v1` import into the server-side Risk Register store and project report-section data.
+- **Request Body**: `{ "approvedBy": "risk_reviewer", "comment": "...", "riskReportImportDraft": {...} }`
+- **Response**: Approval metadata, persisted Risk Register record, imported report sections, and the updated project record. The Risk Register is saved using the workbook `importId` as the run ID.
+- **Audit**: Emits `risk_report_workbook_import_approved` user activity.
 
 ### `POST /projects/{project_id}/land-ledger/enrich`
 - **Description**: Enrich a parsed land ledger with batch PNU, cadastral characteristics, official land price, and registry/encumbrance evidence.
@@ -279,12 +309,18 @@ Typed handoff artifacts currently include:
 
 ### `GET /projects/{project_id}/snapshots/{snapshot_id}`
 - **Description**: Retrieve one full server-side project snapshot for audit review or future similar-case comparison.
-- **Response**: `realytics-project-snapshot-v1` payload with canonical project inputs, orchestration summary, agent progress, typed handoffs, key agent artifacts, reconciliation result, quality gate, report metadata, and case-comparison seed fields.
+- **Response**: `realytics-project-snapshot-v1` payload with canonical project inputs, orchestration summary, agent progress, typed handoffs, key agent artifacts, reconciliation result, quality gate, report metadata, case-comparison seed fields, and optional `historicalOutcome`.
+
+### `POST /projects/{project_id}/snapshots/{snapshot_id}/outcome`
+- **Description**: Attach actual post-approval outcome data to a saved snapshot for back-testing and future similar-case learning.
+- **Request**: `{ "actualSalesRate": 0.94, "actualDiscountRate": 0.03, "repaymentCompleted": true, "repaymentCompletionDate": "2026-12-31", "eodOccurred": false, "lossOccurred": false, "recoveryRate": 1.0, "seniorRecoveryRate": 1.0, "mezzanineRecoveryRate": 1.0, "juniorRecoveryRate": 1.0, "actualExitSource": "unit sales", "outcomeMemo": "...", "sourceMetadata": {...}, "sourceLocators": [...] }`
+- **Response**: `realytics-historical-outcome-upsert-v1` payload with normalized `historicalOutcome` and the updated snapshot.
+- **Audit Policy**: This does not rewrite the original review decision or risk treatment. It appends/updates a post-closing outcome block with updater, timestamp, source metadata, and source locators.
 
 ### `POST /projects/{project_id}/snapshots/similar`
 - **Description**: Search stored project snapshots for deterministic similar PF review cases and historical risk handling.
 - **Request**: Optional `snapshotId`, `limit`, `minScore`, and `includeSameProject`.
-- **Response**: `realytics-similar-case-search-v1` payload with the query seed, ranked similar cases, score breakdown, matched dimensions, matched risk rows, historical review status, mitigants, approval conditions, and Credit Review decision outcome.
+- **Response**: `realytics-similar-case-search-v1` payload with the query seed, ranked similar cases, score breakdown, matched dimensions, matched risk rows, historical review status, mitigants, approval conditions, Credit Review decision outcome, and post-approval `historicalOutcome` when available.
 
 ### `POST /projects/{project_id}/snapshots/diff`
 - **Description**: Compare two saved project snapshots from the same project for audit, re-review, and committee supplement workflows.
@@ -316,6 +352,25 @@ Typed handoff artifacts currently include:
 ### `GET /projects/{project_id}/orchestrations/{run_id}/risk-register`
 - **Description**: Retrieve the server-persisted Risk Register for one orchestration run.
 - **Response**: Full `realytics-risk-register-v1` payload, including risks, source locators, evidence links, review statuses, and review history.
+
+### `GET /projects/{project_id}/evidence-graphs`
+- **Description**: List server-persisted Evidence Graph records for a project across orchestration runs.
+- **Response**: `realytics-evidence-graph-list-v1` payload with graph ID, run ID, node count, edge count, risk node count, source locator count, and update time.
+
+### `GET /projects/{project_id}/orchestrations/{run_id}/evidence-graph`
+- **Description**: Retrieve the server-persisted Evidence Graph for one orchestration run.
+- **Response**: Full `realytics-evidence-graph-v1` payload, including source nodes, claim nodes, risk nodes, report section nodes, source locators, edges, audit warnings, and summary metrics.
+
+### `GET /projects/{project_id}/assumption-overrides`
+- **Description**: List approved assumption override records used to resolve Data Quality conflicts without overwriting original source values.
+- **Query params**: Optional `status` and `check_key`.
+- **Response**: `realytics-assumption-override-list-v1` payload with override ID, data-quality check key, canonical field, approved value, reviewer, reason, evidence IDs, source locators, and status.
+
+### `POST /projects/{project_id}/assumption-overrides`
+- **Description**: Persist one or more human-approved canonical assumptions, such as authoritative total sales revenue, PF amount, land area, or GFA.
+- **Request Body**: `{ "overrideId": "ovr-1", "checkKey": "sales_revenue_consistency", "canonicalField": "feasibility_input.total_revenue", "approvedValue": 100000000000, "unit": "KRW", "reason": "Signed workbook is authoritative.", "sourceLocators": [] }`
+- **Response**: `realytics-assumption-override-upsert-v1` payload with saved override records.
+- **Review Policy**: The override resolves the matching Data Quality check in downstream PF Review runs, but the original conflicting values remain visible in the check metadata for audit.
 
 ## Land Evidence APIs
 

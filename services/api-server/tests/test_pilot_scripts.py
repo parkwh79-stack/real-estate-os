@@ -7,6 +7,7 @@ from scripts.prepare_pilot_workspace import prepare_workspace
 from scripts.run_pilot_fixture import summarize_run
 from scripts.build_land_evidence_request import build_manual_template, build_request
 from scripts.apply_land_evidence_to_pilot import apply_evidence
+from scripts.build_pilot_blocker_resolution_package import build_resolution_package
 from agents.orchestration_agent import OrchestrationAgent
 from agents.land_ledger_agent import LandLedgerAgent
 
@@ -53,6 +54,23 @@ def test_pilot_run_summary_contains_key_review_sections():
     assert "land" in summary
     assert "restructuringPlan" in summary
     assert "evidenceGraph" in summary
+
+
+def test_pilot_blocker_resolution_package_summarizes_approval_blockers():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    run = OrchestrationAgent().run_pf_review("pilot-blocker-package-test", payload)
+    land_request = build_request(payload)
+
+    package = build_resolution_package(run, land_request)
+
+    assert package["schemaVersion"] == "realytics-pilot-blocker-resolution-package-v1"
+    assert package["summary"]["approvalReady"] is False
+    assert package["summary"]["blockingIssueCount"] >= 1
+    assert package["landEvidencePlan"]["parcelCount"] >= 1
+    assert package["reviewPlan"]["unresolvedRiskReviewCount"] >= 1
+    assert "rerunPlan" in package
+    assert package["nonFabricationPolicy"]
 
 
 def test_land_evidence_template_and_attachment_workflow():

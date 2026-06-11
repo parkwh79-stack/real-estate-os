@@ -405,7 +405,7 @@ class OrchestrationAgent:
                 },
             )
 
-            restructuring_plan = self._build_restructuring_plan(scenario_req, scenario_run_result)
+            restructuring_plan = self._build_restructuring_plan(scenario_req, scenario_run_result, project_data)
             run["artifacts"]["restructuringPlan"] = restructuring_plan
             restructuring_blockers = self._restructuring_blockers(restructuring_plan)
             self._complete_step(run, "scenario_restructuring_plan", {
@@ -425,6 +425,7 @@ class OrchestrationAgent:
                     "approvalPath": restructuring_plan.get("approvalPath", {}),
                     "seniorShortfallFix": restructuring_plan.get("seniorShortfallFix", {}),
                     "unsoldLtvFix": restructuring_plan.get("unsoldLtvFix", {}),
+                    "adoptedCures": restructuring_plan.get("adoptedCures", {}),
                     "recommendations": restructuring_plan.get("recommendations", []),
                 },
                 evidence_ids=self._collect_evidence_ids(restructuring_plan),
@@ -787,7 +788,7 @@ class OrchestrationAgent:
     def _assess_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
         return build_basic_risk_matrix(data)
 
-    def _build_restructuring_plan(self, scenario_req: Any, scenario_run_result: Any) -> Dict[str, Any]:
+    def _build_restructuring_plan(self, scenario_req: Any, scenario_run_result: Any, project_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if scenario_req is None or scenario_run_result is None:
             return {
                 "schemaVersion": "realytics-restructuring-agent-v1",
@@ -808,7 +809,18 @@ class OrchestrationAgent:
                     "confidence": 0.0,
                 },
             }
-        return RestructuringAgent().build_restructuring_plan(scenario_req, scenario_run_result)
+        adopted_cures = []
+        if isinstance(project_data, dict):
+            adopted_cures = (
+                project_data.get("adoptedRestructuringCures")
+                or project_data.get("adopted_restructuring_cures")
+                or []
+            )
+        return RestructuringAgent().build_restructuring_plan(
+            scenario_req,
+            scenario_run_result,
+            {"adoptedRestructuringCures": adopted_cures},
+        )
 
     def _restructuring_blockers(self, restructuring_plan: Dict[str, Any]) -> List[str]:
         blockers = []

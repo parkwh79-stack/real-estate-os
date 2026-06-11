@@ -16,6 +16,7 @@ ROLE_PERMISSIONS = {
         "report:read",
         "report:export",
         "risk:review",
+        "assumption:override",
         "audit:read",
         "user:manage",
     },
@@ -25,6 +26,7 @@ ROLE_PERMISSIONS = {
         "report:read",
         "report:export",
         "risk:review",
+        "assumption:override",
         "audit:read",
     },
     "analyst": {

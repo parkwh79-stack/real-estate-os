@@ -7,10 +7,11 @@ from typing import Any, Dict
 from uuid import uuid4
 
 
-STATE_VERSION = 8
+STATE_VERSION = 11
 DEFAULT_STATE_FILE = Path(__file__).parent / "data" / "runtime" / "state.json"
 DEFAULT_SQLITE_FILE = Path(__file__).parent / "data" / "runtime" / "realytics.sqlite3"
 MAX_JSON_ACTIVITY_LOGS = 10000
+ASSUMPTION_OVERRIDE_STATUSES = {"active", "revoked", "expired", "superseded"}
 
 
 def storage_backend() -> str:
@@ -42,6 +43,9 @@ def default_state() -> Dict[str, Any]:
         "market_evidence": {},
         "land_evidence": {},
         "risk_registers": {},
+        "evidence_graphs": {},
+        "assumption_overrides": {},
+        "restructuring_cures": {},
         "project_snapshots": {},
         "user_activity_logs": [],
         "identity": {
@@ -71,6 +75,9 @@ def load_state() -> Dict[str, Any] | None:
             legacy_state.get("project_snapshots", {}),
             legacy_state.get("user_activity_logs", []),
             risk_registers=legacy_state.get("risk_registers", {}),
+            evidence_graphs=legacy_state.get("evidence_graphs", {}),
+            assumption_overrides=legacy_state.get("assumption_overrides", {}),
+            restructuring_cures=legacy_state.get("restructuring_cures", {}),
         )
         return legacy_state
 
@@ -87,18 +94,24 @@ def save_state(
     user_activity_logs: list[Dict[str, Any]] | None = None,
     land_evidence: Dict[str, Any] | None = None,
     risk_registers: Dict[str, Any] | None = None,
+    evidence_graphs: Dict[str, Any] | None = None,
+    assumption_overrides: Dict[str, Any] | None = None,
+    restructuring_cures: Dict[str, Any] | None = None,
 ) -> None:
     market_evidence = market_evidence or {}
     project_snapshots = project_snapshots or {}
     land_evidence = land_evidence or _load_existing_land_evidence_records()
     risk_registers = risk_registers or _load_existing_risk_registers()
+    evidence_graphs = evidence_graphs or _load_existing_evidence_graphs()
+    assumption_overrides = assumption_overrides or _load_existing_assumption_overrides()
+    restructuring_cures = restructuring_cures or _load_existing_restructuring_cures()
     if user_activity_logs is None:
         user_activity_logs = _load_existing_user_activity_logs()
     identity = _load_existing_identity_records()
     if storage_backend() == "json":
-        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, project_snapshots, user_activity_logs, identity)
+        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity)
         return
-    _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, project_snapshots)
+    _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, assumption_overrides, restructuring_cures, project_snapshots)
 
 
 def record_user_activity_log(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,6 +145,9 @@ def record_user_activity_log(event: Dict[str, Any]) -> Dict[str, Any]:
             state.get("market_evidence", {}),
             state.get("land_evidence", {}),
             state.get("risk_registers", {}),
+            state.get("evidence_graphs", {}),
+            state.get("assumption_overrides", {}),
+            state.get("restructuring_cures", {}),
             state.get("project_snapshots", {}),
             state["user_activity_logs"],
             state.get("identity", default_state()["identity"]),
@@ -388,6 +404,403 @@ def list_risk_register_records(project_id: str) -> list[Dict[str, Any]]:
     return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)
 
 
+def upsert_evidence_graph_record(
+    project_id: str,
+    run_id: str,
+    evidence_graph: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist an Evidence Graph artifact as a first-class audit graph record."""
+    now = datetime.now(timezone.utc).isoformat()
+    graph = evidence_graph or {}
+    summary = graph.get("summary") if isinstance(graph.get("summary"), dict) else {}
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    normalized = {
+        **graph,
+        "schemaVersion": graph.get("schemaVersion") or "realytics-evidence-graph-v1",
+        "projectId": project_id,
+        "runId": run_id,
+        "graphId": graph.get("graphId") or graph.get("graph_id") or f"{run_id}:evidence-graph",
+        "updatedAt": now,
+    }
+    normalized.setdefault("nodes", nodes)
+    normalized.setdefault("edges", edges)
+    normalized.setdefault("summary", summary)
+    normalized["nodeCount"] = int(summary.get("nodeCount") or len(nodes))
+    normalized["edgeCount"] = int(summary.get("edgeCount") or len(edges))
+    normalized["riskNodeCount"] = int(summary.get("riskNodeCount") or len([node for node in nodes if node.get("type") == "risk"]))
+    normalized["sourceLocatorCount"] = int(summary.get("sourceLocatorCount") or len([node for node in nodes if node.get("type") == "source_locator"]))
+
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("evidence_graphs", {})
+        state["evidence_graphs"].setdefault(project_id, {})[run_id] = normalized
+        _save_json_state_from_state(state)
+        return normalized
+
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO evidence_graphs(
+                project_id, run_id, graph_id, node_count, edge_count,
+                risk_node_count, source_locator_count, updated_at, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, run_id) DO UPDATE SET
+                graph_id=excluded.graph_id,
+                node_count=excluded.node_count,
+                edge_count=excluded.edge_count,
+                risk_node_count=excluded.risk_node_count,
+                source_locator_count=excluded.source_locator_count,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                project_id,
+                run_id,
+                normalized["graphId"],
+                normalized["nodeCount"],
+                normalized["edgeCount"],
+                normalized["riskNodeCount"],
+                normalized["sourceLocatorCount"],
+                normalized["updatedAt"],
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return normalized
+
+
+def get_evidence_graph_record(project_id: str, run_id: str) -> Dict[str, Any] | None:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        return state.get("evidence_graphs", {}).get(project_id, {}).get(run_id)
+    with _connect_sqlite() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM evidence_graphs WHERE project_id = ? AND run_id = ?",
+            (project_id, run_id),
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def list_evidence_graph_records(project_id: str) -> list[Dict[str, Any]]:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        records = list(state.get("evidence_graphs", {}).get(project_id, {}).values())
+    else:
+        with _connect_sqlite() as conn:
+            records = [
+                json.loads(row["payload_json"])
+                for row in conn.execute(
+                    "SELECT payload_json FROM evidence_graphs WHERE project_id = ? ORDER BY updated_at DESC",
+                    (project_id,),
+                )
+            ]
+    return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)
+
+
+def upsert_assumption_override_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a human-approved canonical assumption override for a data-quality conflict."""
+    now = datetime.now(timezone.utc).isoformat()
+    check_key = record.get("checkKey") or record.get("check_key") or record.get("dataQualityCheckKey")
+    canonical_field = record.get("canonicalField") or record.get("canonical_field") or record.get("field")
+    if not check_key:
+        raise ValueError("checkKey is required")
+    if not canonical_field:
+        raise ValueError("canonicalField is required")
+    status = record.get("status") or "active"
+    if status not in ASSUMPTION_OVERRIDE_STATUSES:
+        raise ValueError("status must be active, revoked, expired, or superseded")
+    override_id = record.get("overrideId") or record.get("override_id") or f"{check_key}:{canonical_field}:{uuid4()}"
+    normalized = {
+        **record,
+        "overrideId": str(override_id),
+        "projectId": project_id,
+        "checkKey": str(check_key),
+        "canonicalField": str(canonical_field),
+        "approvedValue": record.get("approvedValue") if "approvedValue" in record else record.get("approved_value"),
+        "unit": record.get("unit"),
+        "status": status,
+        "approvedBy": record.get("approvedBy") or record.get("approved_by") or "system",
+        "approvedAt": record.get("approvedAt") or record.get("approved_at") or now,
+        "reason": record.get("reason") or record.get("comment") or record.get("reviewComment") or "",
+        "sourceLocators": record.get("sourceLocators") or record.get("source_locators") or [],
+        "evidenceIds": record.get("evidenceIds") or record.get("evidence_ids") or [],
+        "appliesToRunId": record.get("appliesToRunId") or record.get("applies_to_run_id"),
+        "statusReason": record.get("statusReason") or record.get("status_reason") or record.get("revokeReason") or record.get("expireReason") or "",
+        "statusChangedBy": record.get("statusChangedBy") or record.get("status_changed_by") or record.get("approvedBy") or record.get("approved_by") or "system",
+        "statusChangedAt": record.get("statusChangedAt") or record.get("status_changed_at") or now,
+        "expiresAt": record.get("expiresAt") or record.get("expires_at"),
+        "supersededByOverrideId": record.get("supersededByOverrideId") or record.get("superseded_by_override_id"),
+        "supersededAt": record.get("supersededAt") or record.get("superseded_at"),
+        "createdAt": record.get("createdAt") or record.get("created_at") or now,
+        "updatedAt": now,
+    }
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("assumption_overrides", {})
+        project_records = state["assumption_overrides"].setdefault(project_id, {})
+        _supersede_existing_active_assumption_overrides(project_records, normalized, now)
+        project_records[normalized["overrideId"]] = normalized
+        _save_json_state_from_state(state)
+        return normalized
+
+    with _connect_sqlite() as conn:
+        _supersede_sqlite_active_assumption_overrides(conn, project_id, normalized, now)
+        conn.execute(
+            """
+            INSERT INTO assumption_overrides(
+                project_id, override_id, check_key, canonical_field, status,
+                approved_by, approved_at, updated_at, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, override_id) DO UPDATE SET
+                check_key=excluded.check_key,
+                canonical_field=excluded.canonical_field,
+                status=excluded.status,
+                approved_by=excluded.approved_by,
+                approved_at=excluded.approved_at,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                project_id,
+                normalized["overrideId"],
+                normalized["checkKey"],
+                normalized["canonicalField"],
+                normalized["status"],
+                normalized["approvedBy"],
+                normalized["approvedAt"],
+                normalized["updatedAt"],
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return normalized
+
+
+def list_assumption_override_records(
+    project_id: str,
+    *,
+    status: str | None = None,
+    check_key: str | None = None,
+) -> list[Dict[str, Any]]:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        records = list(state.get("assumption_overrides", {}).get(project_id, {}).values())
+    else:
+        query = "SELECT payload_json FROM assumption_overrides WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if check_key:
+            query += " AND check_key = ?"
+            params.append(check_key)
+        query += " ORDER BY updated_at DESC, override_id"
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if check_key:
+        records = [record for record in records if record.get("checkKey") == check_key]
+    records = [_with_effective_assumption_override_status(record) for record in records]
+    if status:
+        records = [record for record in records if record.get("effectiveStatus") == status]
+    return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)
+
+
+def _with_effective_assumption_override_status(record: Dict[str, Any]) -> Dict[str, Any]:
+    effective = record.get("status") or "active"
+    expires_at = record.get("expiresAt") or record.get("expires_at")
+    if effective == "active" and expires_at and _iso_datetime_is_past(str(expires_at)):
+        effective = "expired"
+    if record.get("effectiveStatus") == effective:
+        return record
+    return {**record, "effectiveStatus": effective}
+
+
+def _iso_datetime_is_past(value: str) -> bool:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed <= datetime.now(timezone.utc)
+    except ValueError:
+        return False
+
+
+def _supersede_existing_active_assumption_overrides(
+    records: Dict[str, Any],
+    new_record: Dict[str, Any],
+    now: str,
+) -> None:
+    if new_record.get("status") != "active":
+        return
+    for override_id, existing in list(records.items()):
+        if override_id == new_record["overrideId"]:
+            continue
+        if existing.get("status", "active") != "active":
+            continue
+        if existing.get("checkKey") != new_record.get("checkKey"):
+            continue
+        if existing.get("canonicalField") != new_record.get("canonicalField"):
+            continue
+        records[override_id] = {
+            **existing,
+            "status": "superseded",
+            "effectiveStatus": "superseded",
+            "supersededByOverrideId": new_record["overrideId"],
+            "supersededAt": now,
+            "statusChangedBy": new_record.get("approvedBy") or "system",
+            "statusChangedAt": now,
+            "statusReason": f"Superseded by {new_record['overrideId']}.",
+            "updatedAt": now,
+        }
+
+
+def _supersede_sqlite_active_assumption_overrides(
+    conn: sqlite3.Connection,
+    project_id: str,
+    new_record: Dict[str, Any],
+    now: str,
+) -> None:
+    if new_record.get("status") != "active":
+        return
+    rows = conn.execute(
+        """
+        SELECT override_id, payload_json
+        FROM assumption_overrides
+        WHERE project_id = ?
+          AND status = 'active'
+          AND check_key = ?
+          AND canonical_field = ?
+          AND override_id <> ?
+        """,
+        (
+            project_id,
+            new_record.get("checkKey"),
+            new_record.get("canonicalField"),
+            new_record.get("overrideId"),
+        ),
+    ).fetchall()
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        payload.update({
+            "status": "superseded",
+            "effectiveStatus": "superseded",
+            "supersededByOverrideId": new_record["overrideId"],
+            "supersededAt": now,
+            "statusChangedBy": new_record.get("approvedBy") or "system",
+            "statusChangedAt": now,
+            "statusReason": f"Superseded by {new_record['overrideId']}.",
+            "updatedAt": now,
+        })
+        conn.execute(
+            """
+            UPDATE assumption_overrides
+            SET status = ?, updated_at = ?, payload_json = ?
+            WHERE project_id = ? AND override_id = ?
+            """,
+            ("superseded", now, json.dumps(payload, ensure_ascii=False), project_id, row["override_id"]),
+        )
+
+
+def upsert_restructuring_cure_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a reviewer-selected PF restructuring cure for scenario blockers."""
+    now = datetime.now(timezone.utc).isoformat()
+    cure_type = record.get("cureType") or record.get("cure_type") or record.get("type")
+    if not cure_type:
+        raise ValueError("cureType is required")
+    status = record.get("status") or "active"
+    if status not in {"active", "revoked", "expired", "superseded"}:
+        raise ValueError("status must be active, revoked, expired, or superseded")
+    cure_id = record.get("cureId") or record.get("cure_id") or f"{cure_type}:{uuid4()}"
+    normalized = {
+        **record,
+        "cureId": str(cure_id),
+        "projectId": project_id,
+        "cureType": str(cure_type),
+        "status": status,
+        "riskCodes": record.get("riskCodes") or record.get("risk_codes") or [],
+        "amount": record.get("amount"),
+        "amountUnit": record.get("amountUnit") or record.get("amount_unit") or "KRW",
+        "targetMetric": record.get("targetMetric") or record.get("target_metric"),
+        "targetValue": record.get("targetValue") if "targetValue" in record else record.get("target_value"),
+        "description": record.get("description") or record.get("memo") or record.get("reviewComment") or "",
+        "sourceName": record.get("sourceName") or record.get("source_name") or "manual_restructuring_cure",
+        "sourceType": record.get("sourceType") or record.get("source_type") or "manual_upload",
+        "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("source_url_or_evidence_id") or str(cure_id),
+        "sourceLocators": record.get("sourceLocators") or record.get("source_locators") or [],
+        "evidenceIds": record.get("evidenceIds") or record.get("evidence_ids") or [],
+        "reviewedBy": record.get("reviewedBy") or record.get("reviewed_by") or "credit_officer",
+        "reviewedAt": record.get("reviewedAt") or record.get("reviewed_at") or now,
+        "appliesToRunId": record.get("appliesToRunId") or record.get("applies_to_run_id"),
+        "expiresAt": record.get("expiresAt") or record.get("expires_at"),
+        "createdAt": record.get("createdAt") or record.get("created_at") or now,
+        "updatedAt": now,
+    }
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("restructuring_cures", {})
+        state["restructuring_cures"].setdefault(project_id, {})[normalized["cureId"]] = normalized
+        _save_json_state_from_state(state)
+        return normalized
+
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO restructuring_cures(
+                project_id, cure_id, cure_type, status, reviewed_by,
+                reviewed_at, updated_at, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, cure_id) DO UPDATE SET
+                cure_type=excluded.cure_type,
+                status=excluded.status,
+                reviewed_by=excluded.reviewed_by,
+                reviewed_at=excluded.reviewed_at,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                project_id,
+                normalized["cureId"],
+                normalized["cureType"],
+                normalized["status"],
+                normalized["reviewedBy"],
+                normalized["reviewedAt"],
+                normalized["updatedAt"],
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return normalized
+
+
+def list_restructuring_cure_records(
+    project_id: str,
+    *,
+    status: str | None = None,
+    cure_type: str | None = None,
+) -> list[Dict[str, Any]]:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        records = list(state.get("restructuring_cures", {}).get(project_id, {}).values())
+    else:
+        query = "SELECT payload_json FROM restructuring_cures WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if cure_type:
+            query += " AND cure_type = ?"
+            params.append(cure_type)
+        query += " ORDER BY updated_at DESC, cure_id"
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if status:
+        records = [record for record in records if record.get("status") == status]
+    if cure_type:
+        records = [record for record in records if record.get("cureType") == cure_type]
+    return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)
+
+
 def upsert_tenant(record: Dict[str, Any]) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     tenant = {
@@ -593,6 +1006,9 @@ def _save_json_state(
     market_evidence: Dict[str, Any],
     land_evidence: Dict[str, Any],
     risk_registers: Dict[str, Any],
+    evidence_graphs: Dict[str, Any],
+    assumption_overrides: Dict[str, Any],
+    restructuring_cures: Dict[str, Any],
     project_snapshots: Dict[str, Any],
     user_activity_logs: list[Dict[str, Any]],
     identity: Dict[str, Any] | None = None,
@@ -609,6 +1025,9 @@ def _save_json_state(
         "market_evidence": market_evidence,
         "land_evidence": land_evidence,
         "risk_registers": risk_registers,
+        "evidence_graphs": evidence_graphs,
+        "assumption_overrides": assumption_overrides,
+        "restructuring_cures": restructuring_cures,
         "project_snapshots": project_snapshots,
         "user_activity_logs": user_activity_logs[-MAX_JSON_ACTIVITY_LOGS:],
         "identity": identity or default_state()["identity"],
@@ -702,6 +1121,51 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_risk_registers_project_updated
             ON risk_registers(project_id, updated_at);
+        CREATE TABLE IF NOT EXISTS evidence_graphs (
+            project_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            graph_id TEXT,
+            node_count INTEGER,
+            edge_count INTEGER,
+            risk_node_count INTEGER,
+            source_locator_count INTEGER,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_evidence_graphs_project_updated
+            ON evidence_graphs(project_id, updated_at);
+        CREATE TABLE IF NOT EXISTS assumption_overrides (
+            project_id TEXT NOT NULL,
+            override_id TEXT NOT NULL,
+            check_key TEXT,
+            canonical_field TEXT,
+            status TEXT,
+            approved_by TEXT,
+            approved_at TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, override_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_assumption_overrides_project_status
+            ON assumption_overrides(project_id, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_assumption_overrides_project_check
+            ON assumption_overrides(project_id, check_key);
+        CREATE TABLE IF NOT EXISTS restructuring_cures (
+            project_id TEXT NOT NULL,
+            cure_id TEXT NOT NULL,
+            cure_type TEXT,
+            status TEXT,
+            reviewed_by TEXT,
+            reviewed_at TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, cure_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_restructuring_cures_project_status
+            ON restructuring_cures(project_id, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_restructuring_cures_project_type
+            ON restructuring_cures(project_id, cure_type);
         CREATE TABLE IF NOT EXISTS project_snapshots (
             project_id TEXT NOT NULL,
             snapshot_id TEXT NOT NULL,
@@ -815,6 +1279,24 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         ):
             risk_registers.setdefault(row["project_id"], {})[row["run_id"]] = json.loads(row["payload_json"])
 
+        evidence_graphs: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, run_id, payload_json FROM evidence_graphs ORDER BY project_id, updated_at"
+        ):
+            evidence_graphs.setdefault(row["project_id"], {})[row["run_id"]] = json.loads(row["payload_json"])
+
+        assumption_overrides: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, override_id, payload_json FROM assumption_overrides ORDER BY project_id, updated_at, override_id"
+        ):
+            assumption_overrides.setdefault(row["project_id"], {})[row["override_id"]] = json.loads(row["payload_json"])
+
+        restructuring_cures: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, cure_id, payload_json FROM restructuring_cures ORDER BY project_id, updated_at, cure_id"
+        ):
+            restructuring_cures.setdefault(row["project_id"], {})[row["cure_id"]] = json.loads(row["payload_json"])
+
         user_activity_logs = [
             _activity_row_to_record(row)
             for row in conn.execute(
@@ -844,7 +1326,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         }
 
     has_identity_records = any(identity.get(key) for key in ("tenants", "users", "sessions"))
-    if not projects and not reports and not orchestrations and not risk_registers and not metadata and not has_identity_records:
+    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not assumption_overrides and not restructuring_cures and not metadata and not has_identity_records:
         return None
 
     return _normalize_state({
@@ -856,6 +1338,9 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         "market_evidence": market_evidence,
         "land_evidence": land_evidence,
         "risk_registers": risk_registers,
+        "evidence_graphs": evidence_graphs,
+        "assumption_overrides": assumption_overrides,
+        "restructuring_cures": restructuring_cures,
         "project_snapshots": project_snapshots,
         "user_activity_logs": user_activity_logs,
         "identity": identity,
@@ -869,6 +1354,9 @@ def _save_sqlite_state(
     project_id_counter: int,
     market_evidence: Dict[str, Any],
     risk_registers: Dict[str, Any],
+    evidence_graphs: Dict[str, Any],
+    assumption_overrides: Dict[str, Any],
+    restructuring_cures: Dict[str, Any],
     project_snapshots: Dict[str, Any],
 ) -> None:
     with _connect_sqlite() as conn:
@@ -879,6 +1367,9 @@ def _save_sqlite_state(
         conn.execute("DELETE FROM orchestrations")
         conn.execute("DELETE FROM market_evidence")
         conn.execute("DELETE FROM risk_registers")
+        conn.execute("DELETE FROM evidence_graphs")
+        conn.execute("DELETE FROM assumption_overrides")
+        conn.execute("DELETE FROM restructuring_cures")
         conn.execute("DELETE FROM project_snapshots")
         conn.executemany(
             "INSERT INTO metadata(key, value) VALUES(?, ?)",
@@ -973,6 +1464,86 @@ def _save_sqlite_state(
                         json.dumps(record, ensure_ascii=False),
                     ),
                 )
+        for project_id, records in evidence_graphs.items():
+            iterable = records.values() if isinstance(records, dict) else records
+            for record in iterable:
+                run_id = record.get("runId") or record.get("run_id")
+                if not run_id:
+                    continue
+                summary = record.get("summary") if isinstance(record.get("summary"), dict) else {}
+                nodes = record.get("nodes") if isinstance(record.get("nodes"), list) else []
+                edges = record.get("edges") if isinstance(record.get("edges"), list) else []
+                conn.execute(
+                    """
+                    INSERT INTO evidence_graphs(
+                        project_id, run_id, graph_id, node_count, edge_count,
+                        risk_node_count, source_locator_count, updated_at, payload_json
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        run_id,
+                        record.get("graphId") or record.get("graph_id") or f"{run_id}:evidence-graph",
+                        int(record.get("nodeCount") or summary.get("nodeCount") or len(nodes)),
+                        int(record.get("edgeCount") or summary.get("edgeCount") or len(edges)),
+                        int(record.get("riskNodeCount") or summary.get("riskNodeCount") or len([node for node in nodes if node.get("type") == "risk"])),
+                        int(record.get("sourceLocatorCount") or summary.get("sourceLocatorCount") or len([node for node in nodes if node.get("type") == "source_locator"])),
+                        record.get("updatedAt") or record.get("updated_at"),
+                        json.dumps(record, ensure_ascii=False),
+                    ),
+                )
+        for project_id, records in assumption_overrides.items():
+            iterable = records.values() if isinstance(records, dict) else records
+            for record in iterable:
+                override_id = record.get("overrideId") or record.get("override_id")
+                if not override_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO assumption_overrides(
+                        project_id, override_id, check_key, canonical_field, status,
+                        approved_by, approved_at, updated_at, payload_json
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        override_id,
+                        record.get("checkKey") or record.get("check_key"),
+                        record.get("canonicalField") or record.get("canonical_field"),
+                        record.get("status"),
+                        record.get("approvedBy") or record.get("approved_by"),
+                        record.get("approvedAt") or record.get("approved_at"),
+                        record.get("updatedAt") or record.get("updated_at"),
+                        json.dumps(record, ensure_ascii=False),
+                    ),
+                )
+        for project_id, records in restructuring_cures.items():
+            iterable = records.values() if isinstance(records, dict) else records
+            for record in iterable:
+                cure_id = record.get("cureId") or record.get("cure_id")
+                if not cure_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO restructuring_cures(
+                        project_id, cure_id, cure_type, status, reviewed_by,
+                        reviewed_at, updated_at, payload_json
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        cure_id,
+                        record.get("cureType") or record.get("cure_type"),
+                        record.get("status"),
+                        record.get("reviewedBy") or record.get("reviewed_by"),
+                        record.get("reviewedAt") or record.get("reviewed_at"),
+                        record.get("updatedAt") or record.get("updated_at"),
+                        json.dumps(record, ensure_ascii=False),
+                    ),
+                )
         for project_id, records in project_snapshots.items():
             iterable = records.values() if isinstance(records, dict) else records
             for record in iterable:
@@ -1003,6 +1574,9 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("market_evidence", {})
     normalized.setdefault("land_evidence", {})
     normalized.setdefault("risk_registers", {})
+    normalized.setdefault("evidence_graphs", {})
+    normalized.setdefault("assumption_overrides", {})
+    normalized.setdefault("restructuring_cures", {})
     normalized.setdefault("project_snapshots", {})
     normalized.setdefault("user_activity_logs", [])
     normalized.setdefault("identity", default_state()["identity"])
@@ -1022,6 +1596,9 @@ def _save_json_state_from_state(state: Dict[str, Any]) -> None:
         state.get("market_evidence", {}),
         state.get("land_evidence", {}),
         state.get("risk_registers", {}),
+        state.get("evidence_graphs", {}),
+        state.get("assumption_overrides", {}),
+        state.get("restructuring_cures", {}),
         state.get("project_snapshots", {}),
         state.get("user_activity_logs", []),
         state.get("identity", default_state()["identity"]),
@@ -1077,6 +1654,54 @@ def _load_existing_risk_registers() -> Dict[str, Any]:
         ):
             risk_registers.setdefault(row["project_id"], {})[row["run_id"]] = json.loads(row["payload_json"])
         return risk_registers
+
+
+def _load_existing_evidence_graphs() -> Dict[str, Any]:
+    if storage_backend() == "json":
+        state = _load_json_state()
+        return (state or {}).get("evidence_graphs", {})
+    path = sqlite_file_path()
+    if not path.exists():
+        return {}
+    with _connect_sqlite() as conn:
+        evidence_graphs: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, run_id, payload_json FROM evidence_graphs ORDER BY project_id, updated_at"
+        ):
+            evidence_graphs.setdefault(row["project_id"], {})[row["run_id"]] = json.loads(row["payload_json"])
+        return evidence_graphs
+
+
+def _load_existing_assumption_overrides() -> Dict[str, Any]:
+    if storage_backend() == "json":
+        state = _load_json_state()
+        return (state or {}).get("assumption_overrides", {})
+    path = sqlite_file_path()
+    if not path.exists():
+        return {}
+    with _connect_sqlite() as conn:
+        assumption_overrides: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, override_id, payload_json FROM assumption_overrides ORDER BY project_id, updated_at, override_id"
+        ):
+            assumption_overrides.setdefault(row["project_id"], {})[row["override_id"]] = json.loads(row["payload_json"])
+        return assumption_overrides
+
+
+def _load_existing_restructuring_cures() -> Dict[str, Any]:
+    if storage_backend() == "json":
+        state = _load_json_state()
+        return (state or {}).get("restructuring_cures", {})
+    path = sqlite_file_path()
+    if not path.exists():
+        return {}
+    with _connect_sqlite() as conn:
+        restructuring_cures: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, cure_id, payload_json FROM restructuring_cures ORDER BY project_id, updated_at, cure_id"
+        ):
+            restructuring_cures.setdefault(row["project_id"], {})[row["cure_id"]] = json.loads(row["payload_json"])
+        return restructuring_cures
 
 
 def _load_existing_identity_records() -> Dict[str, Any]:

@@ -1,6 +1,6 @@
 # Evidence Graph Agent
 
-Updated: 2026-05-25
+Updated: 2026-06-08
 
 ## Purpose
 
@@ -114,9 +114,24 @@ Implemented files:
 - `services/api-server/agents/evidence_graph_agent.py`
 - `services/api-server/agents/orchestration_agent.py`
 - `services/api-server/db/repositories/project_snapshot_repository.py`
+- `services/api-server/storage.py`
 - `services/api-server/tests/test_evidence_graph_agent.py`
 
 The PF review orchestration now runs `evidence_graph_generation` after Phase 11 report generation and before the final quality check. Saved project snapshots include `evidenceGraph` as a captured artifact.
+
+Evidence Graph persistence is implemented through JSON/SQLite `evidence_graphs` records keyed by `projectId + runId`.
+
+APIs:
+
+- `GET /projects/{project_id}/evidence-graphs`
+- `GET /projects/{project_id}/orchestrations/{run_id}/evidence-graph`
+
+Frontend:
+
+- `/project/{id}/evidence` lists persisted graph records for a project.
+- Reviewers can filter graph nodes by risk, report section, claim/calculation, source document, source locator, or evidence node.
+- Selecting a node shows its metadata, connected graph edges, connected nodes, and any source locator nodes that identify document pages, Excel cells, API rows, evidence IDs, or agent artifact paths.
+- If a material risk has only artifact-level support and no direct source locator, the UI explicitly flags that the Risk Register row needs evidence/source-locator hardening before audit reliance.
 
 ## Current Limits
 
@@ -129,6 +144,6 @@ The PF review orchestration now runs `evidence_graph_generation` after Phase 11 
 
 1. Add field-level parser locators for land, regulation, cost, schedule, PF, and covenant fields.
 2. Add report sentence IDs so each sentence can link to claims and evidence.
-3. Persist graph records separately for querying across runs.
-4. Connect graph claims to snapshot diff and similar-case search.
-5. Add UI graph view for reviewers and auditors.
+3. Connect graph claims to snapshot diff and similar-case search.
+4. Add graph query APIs for source locator, risk node, report section, and claim lookups.
+5. Add visual graph layout and source-locator query APIs for larger audits.

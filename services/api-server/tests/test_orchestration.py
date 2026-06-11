@@ -100,6 +100,15 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert persisted_risk_register["runId"] == run["run_id"]
     assert persisted_risk_register["risks"] == run["artifacts"]["riskRegister"]["risks"]
 
+    evidence_graphs = client.get(f"/projects/{project_id}/evidence-graphs").json()
+    assert any(record["runId"] == run["run_id"] for record in evidence_graphs["records"])
+    persisted_evidence_graph = client.get(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}/evidence-graph"
+    ).json()
+    assert persisted_evidence_graph["runId"] == run["run_id"]
+    assert persisted_evidence_graph["summary"] == run["artifacts"]["evidenceGraph"]["summary"]
+    assert persisted_evidence_graph["nodes"] == run["artifacts"]["evidenceGraph"]["nodes"]
+
 
 def test_approval_readiness_gate_blocks_rejected_or_unreviewed_runs():
     run = {
@@ -243,6 +252,47 @@ def test_pilot_input_package_template_runs_orchestration():
     }
     assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
     assert run["errors"] == []
+
+
+def test_restructuring_cure_is_attached_to_next_pf_review_run():
+    client = TestClient(app)
+    project_id = project_with_discount_triggers(client)
+
+    saved = client.post(
+        f"/projects/{project_id}/restructuring-cures",
+        json={
+            "cureId": "test-dsra-cure",
+            "cureType": "equity_dsra_injection",
+            "status": "active",
+            "riskCodes": ["SENIOR_SHORTFALL", "UNSOLD_LTV_BREACH"],
+            "amount": 2_000_000_000,
+            "sourceUrlOrEvidenceId": "dsra-confirmation-test-p1",
+            "reviewedBy": "credit_officer",
+        },
+        headers={"X-REALYTICS-USER-ID": "credit_officer"},
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["records"][0]["cureId"] == "test-dsra-cure"
+
+    listed = client.get(f"/projects/{project_id}/restructuring-cures", params={"status": "active"}).json()
+    assert any(record["cureId"] == "test-dsra-cure" for record in listed["records"])
+
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        json={"options": {"requested_by": "pytest-cure"}},
+    ).json()
+    adopted = run["artifacts"]["restructuringPlan"]["adoptedCures"]
+
+    assert adopted["activeCount"] >= 1
+    assert adopted["sourceBackedActiveCount"] >= 1
+    assert any(record["cureId"] == "test-dsra-cure" for record in adopted["records"])
+    restructuring_handoff = next(
+        handoff
+        for handoff in run["handoffs"]
+        if handoff["handoffType"] == "restructuring_to_credit_review"
+    )
+    assert restructuring_handoff["payload"]["adoptedCures"]["sourceBackedActiveCount"] >= 1
 
 
 def test_pf_review_orchestration_can_be_retrieved_and_approved():
@@ -451,3 +501,65 @@ def test_pf_review_persists_market_evidence_records():
     assert reviewed["reviewStatus"] == "approved"
     assert reviewed["reviewedBy"] == "market_analyst"
     assert reviewed["reviewHistory"][-1]["reviewComment"] == "Comparable evidence accepted."
+
+
+def test_approved_assumption_override_is_attached_to_pf_review_run():
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "DQ Override API Test", "type": "mixed_use"},
+            "feasibility_input": {
+                "total_revenue": 100_000,
+                "total_cost": 80_000,
+                "finance_cost": 5_000,
+            },
+            "product_mix": [{"type": "A", "units": 10, "totalRevenue": 70_000}],
+            "pf_structure": [{"tranche": "Tranche A", "amount": 50_000, "priority": 1}],
+            "expected_results": {"total_pf_amount": 50_000},
+        },
+    ).json()
+    project_id = created["project"]["id"]
+
+    override_response = client.post(
+        f"/projects/{project_id}/assumption-overrides",
+        json={
+            "overrideId": "ovr-sales-revenue-api",
+            "checkKey": "sales_revenue_consistency",
+            "canonicalField": "feasibility_input.total_revenue",
+            "approvedValue": 100_000,
+            "unit": "KRW",
+            "approvedBy": "credit_officer",
+            "reason": "Signed feasibility workbook is authoritative for the pilot.",
+            "sourceLocators": [{"sourceType": "excel_cell", "sheet": "Summary", "cell": "B12"}],
+        },
+    )
+    assert override_response.status_code == 200
+    assert override_response.json()["records"][0]["overrideId"] == "ovr-sales-revenue-api"
+
+    listed = client.get(f"/projects/{project_id}/assumption-overrides").json()
+    assert listed["records"][0]["checkKey"] == "sales_revenue_consistency"
+
+    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    data_quality = run["artifacts"]["dataQualityReview"]
+    sales_check = next(check for check in data_quality["checks"] if check["key"] == "sales_revenue_consistency")
+    assert sales_check["status"] == "overridden"
+    assert data_quality["appliedOverrides"][0]["overrideId"] == "ovr-sales-revenue-api"
+
+    revoke_response = client.post(
+        f"/projects/{project_id}/assumption-overrides",
+        json={
+            **override_response.json()["records"][0],
+            "status": "revoked",
+            "statusReason": "Reviewer revoked the approved assumption during QA.",
+            "statusChangedBy": "credit_officer",
+        },
+    )
+    assert revoke_response.status_code == 200
+    assert revoke_response.json()["records"][0]["status"] == "revoked"
+
+    revoked_run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    revoked_data_quality = revoked_run["artifacts"]["dataQualityReview"]
+    revoked_sales_check = next(check for check in revoked_data_quality["checks"] if check["key"] == "sales_revenue_consistency")
+    assert revoked_sales_check["status"] != "overridden"
+    assert all(item["overrideId"] != "ovr-sales-revenue-api" for item in revoked_data_quality["appliedOverrides"])

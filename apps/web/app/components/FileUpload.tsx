@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { GitBranch, Loader2, Upload } from "lucide-react";
+import { authHeaders } from "../../lib/auth-client";
 
 type UploadMode = "parse" | "run";
 
@@ -37,9 +38,7 @@ export default function FileUpload({ projectId }: { projectId: string }) {
     try {
       const res = await fetch(`http://127.0.0.1:8000/projects/${projectId}/${endpoint}`, {
         method: "POST",
-        headers: {
-          "X-REALYTICS-USER-ID": "web",
-        },
+        headers: authHeaders("web"),
         body: formData,
       });
 

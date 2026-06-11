@@ -7,7 +7,10 @@ import tempfile
 import os
 from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
+from agents.feasibility_workbook_importer import import_feasibility_study_from_workbook
+from agents.feasibility_workbook_validator import validate_feasibility_workbook
 from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
+from agents.risk_report_workbook_importer import import_risk_report_workbook
 
 from core.authz import authorize_request
 from core.calculations import (
@@ -28,19 +31,26 @@ from db.repositories.report_repository import ReportRepository
 from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
 from storage import (
+    get_evidence_graph_record,
     get_risk_register_record,
+    list_evidence_graph_records,
+    list_assumption_override_records,
     list_land_evidence_records,
+    list_restructuring_cure_records,
     list_risk_register_records,
     load_state,
     record_user_activity_log,
     save_state,
+    upsert_assumption_override_record,
     upsert_land_evidence_record,
+    upsert_restructuring_cure_record,
     upsert_risk_register_record,
 )
 from use_cases.cash_flow import run_cash_flow_use_case
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
+from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_case
 from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case, enrich_land_ledger_use_case
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
@@ -51,6 +61,7 @@ from use_cases.project_snapshots import (
     get_project_snapshot_use_case,
     list_project_snapshots_use_case,
     search_similar_project_snapshots_use_case,
+    upsert_project_snapshot_outcome_use_case,
 )
 from use_cases.project_management import (
     apply_parsed_project_data_use_case,
@@ -67,6 +78,10 @@ from use_cases.source_documents import (
     get_source_document_download_use_case,
     list_source_documents_use_case,
     save_source_document_metadata_use_case,
+)
+from use_cases.workbook_import_approval import (
+    approve_feasibility_workbook_import_use_case,
+    approve_risk_report_workbook_import_use_case,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -246,6 +261,15 @@ def persisted_land_evidence_package(project_id: str) -> Dict[str, Any]:
     )
     registry_records = by_type.get("registry_record", [])
     pnu_records = by_type.get("pnu_resolution", [])
+    acquisition_records = by_type.get("land_acquisition_status", [])
+    latest_acquisition = acquisition_records[0] if acquisition_records else None
+    acquisition_ratio = None
+    if latest_acquisition:
+        acquisition_ratio = (
+            latest_acquisition.get("acquisitionAreaRatio")
+            or latest_acquisition.get("acquisition_area_ratio")
+            or latest_acquisition.get("acquisitionRatio")
+        )
     return {
         "schemaVersion": "realytics-land-evidence-package-v1",
         "recordCount": len(records),
@@ -260,6 +284,9 @@ def persisted_land_evidence_package(project_id: str) -> Dict[str, Any]:
         "officialLandPriceBaseYear": first_official_price.get("baseYear") if first_official_price else None,
         "officialLandPriceEvidence": first_official_price,
         "registryEvidenceReady": bool(registry_records),
+        "landAcquisitionEvidence": latest_acquisition,
+        "acquisitionAreaRatio": acquisition_ratio,
+        "acquisitionEvidenceReady": bool(latest_acquisition),
         "sourceMetadata": {
             "sourceName": "server_land_evidence_store",
             "sourceType": "runtime_db",
@@ -294,6 +321,48 @@ def attach_persisted_land_evidence(project_id: str, project_data: Dict[str, Any]
                 "message": "Stored land evidence was attached as a flat package, but could not be merged into the land ledger.",
                 "error": str(exc),
             }
+    return enriched_project
+
+def attach_approved_assumption_overrides(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    overrides = list_assumption_override_records(project_id, status="active")
+    if not overrides:
+        return project_data
+    enriched_project = dict(project_data)
+    existing = enriched_project.get("approvedAssumptionOverrides") or enriched_project.get("approved_assumption_overrides") or []
+    if not isinstance(existing, list):
+        existing = []
+    by_id = {
+        str(item.get("overrideId") or item.get("override_id")): item
+        for item in existing
+        if isinstance(item, dict) and (item.get("overrideId") or item.get("override_id"))
+    }
+    for override in overrides:
+        by_id[override["overrideId"]] = override
+    enriched_project["approvedAssumptionOverrides"] = list(by_id.values())
+    enriched_project.setdefault("sourceMetadata", {})
+    if isinstance(enriched_project["sourceMetadata"], dict):
+        enriched_project["sourceMetadata"]["approvedAssumptionOverrideCount"] = len(overrides)
+    return enriched_project
+
+def attach_active_restructuring_cures(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    cures = list_restructuring_cure_records(project_id, status="active")
+    if not cures:
+        return project_data
+    enriched_project = dict(project_data)
+    existing = enriched_project.get("adoptedRestructuringCures") or enriched_project.get("adopted_restructuring_cures") or []
+    if not isinstance(existing, list):
+        existing = []
+    by_id = {
+        str(item.get("cureId") or item.get("cure_id")): item
+        for item in existing
+        if isinstance(item, dict) and (item.get("cureId") or item.get("cure_id"))
+    }
+    for cure in cures:
+        by_id[cure["cureId"]] = cure
+    enriched_project["adoptedRestructuringCures"] = list(by_id.values())
+    enriched_project.setdefault("sourceMetadata", {})
+    if isinstance(enriched_project["sourceMetadata"], dict):
+        enriched_project["sourceMetadata"]["adoptedRestructuringCureCount"] = len(cures)
     return enriched_project
 
 def attach_document_market_evidence_metadata(
@@ -366,6 +435,7 @@ async def parse_uploaded_business_plan(
     upload_meta = {
         "originalFileName": file.filename,
         "originalFileHash": archive_meta["archiveId"],
+        "documentType": "business_plan",
         "contentType": file.content_type,
         "fileSizeBytes": len(content),
         "uploadedAt": uploaded_at,
@@ -390,14 +460,30 @@ async def parse_uploaded_business_plan(
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-async def parse_uploaded_land_ledger(file: UploadFile) -> Dict[str, Any]:
+async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[str, Any]:
     suffix = os.path.splitext(file.filename or "")[1] or ".xls"
     uploaded_at = now_iso()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
-    original_file_hash = UploadArchiveRepository.hash_content(content)
+    archive_meta = archive_source_document_use_case(
+        upload_archive_repository(),
+        project_id,
+        content,
+        file.filename,
+        file.content_type,
+    )
+    upload_meta = {
+        "originalFileName": file.filename,
+        "originalFileHash": archive_meta["archiveId"],
+        "documentType": "land_ledger",
+        "contentType": file.content_type,
+        "fileSizeBytes": len(content),
+        "uploadedAt": uploaded_at,
+        "parserVersion": "land-ledger-agent-v1",
+        **archive_meta,
+    }
 
     try:
         return analyze_land_ledger_workbook_use_case(
@@ -405,15 +491,183 @@ async def parse_uploaded_land_ledger(file: UploadFile) -> Dict[str, Any]:
             {
                 "import_id": str(uuid4()),
                 "original_file_name": file.filename,
-                "original_file_hash": original_file_hash,
+                "original_file_hash": archive_meta["archiveId"],
                 "uploaded_at": uploaded_at,
             },
         ) | {
-            "upload": {
-                "originalFileName": file.filename,
-                "originalFileHash": original_file_hash,
-                "uploadedAt": uploaded_at,
+            "upload": upload_meta
+        }
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFile) -> Dict[str, Any]:
+    suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
+    uploaded_at = now_iso()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    archive_meta = archive_source_document_use_case(
+        upload_archive_repository(),
+        project_id,
+        content,
+        file.filename,
+        file.content_type,
+    )
+    upload_meta = {
+        "originalFileName": file.filename,
+        "originalFileHash": archive_meta["archiveId"],
+        "documentType": "feasibility_workbook",
+        "contentType": file.content_type,
+        "fileSizeBytes": len(content),
+        "uploadedAt": uploaded_at,
+        "parserVersion": "feasibility-workbook-validator-v1",
+        **archive_meta,
+    }
+
+    try:
+        feasibility_study_v2_draft = None
+        try:
+            validation = validate_feasibility_workbook(tmp_path)
+            feasibility_study_v2_draft = import_feasibility_study_from_workbook(
+                tmp_path,
+                project_id=project_id,
+                source_document=upload_meta,
+            )
+        except Exception as exc:
+            validation = {
+                "status": "parse_failed",
+                "fileName": file.filename,
+                "error": str(exc),
+                "recommendations": [
+                    "Upload an .xlsx workbook compatible with the realytics-fs-xlsx-v1 contract or legacy Bonri workbook profile."
+                ],
             }
+        upload_meta["validationStatus"] = validation.get("status")
+        return {
+            "project_id": project_id,
+            "upload": upload_meta,
+            "validation": validation,
+            "feasibilityStudyV2Draft": feasibility_study_v2_draft,
+            "note": "Workbook validation is read-only; a FeasibilityStudyV2 draft is returned for reviewer comparison before persisted import.",
+        }
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+async def validate_uploaded_risk_report_workbook(project_id: str, file: UploadFile) -> Dict[str, Any]:
+    suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
+    uploaded_at = now_iso()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    archive_meta = archive_source_document_use_case(
+        upload_archive_repository(),
+        project_id,
+        content,
+        file.filename,
+        file.content_type,
+    )
+    upload_meta = {
+        "originalFileName": file.filename,
+        "originalFileHash": archive_meta["archiveId"],
+        "documentType": "risk_report_workbook",
+        "contentType": file.content_type,
+        "fileSizeBytes": len(content),
+        "uploadedAt": uploaded_at,
+        "parserVersion": "risk-report-workbook-importer-v1",
+        **archive_meta,
+    }
+
+    try:
+        try:
+            draft = import_risk_report_workbook(
+                tmp_path,
+                project_id=project_id,
+                source_document=upload_meta,
+            )
+        except Exception as exc:
+            draft = {
+                "schemaVersion": "realytics-risk-report-xlsx-v1",
+                "analysisType": "risk_report_workbook_import_draft",
+                "validation": {
+                    "status": "parse_failed",
+                    "importReady": False,
+                    "error": str(exc),
+                    "recommendations": [
+                        "Upload a readable .xlsx file generated from the risk-report-xlsx-v1 contract."
+                    ],
+                },
+                "sourceDocument": upload_meta,
+            }
+        upload_meta["validationStatus"] = (draft.get("validation") or {}).get("status")
+        return {
+            "project_id": project_id,
+            "upload": upload_meta,
+            "riskReportImportDraft": draft,
+            "note": "Risk report workbook validation is read-only. Use the approve endpoint to persist Risk Register rows and report sections.",
+        }
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+async def learn_uploaded_feasibility_workbook(project_id: str, file: UploadFile) -> Dict[str, Any]:
+    suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
+    uploaded_at = now_iso()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    archive_meta = archive_source_document_use_case(
+        upload_archive_repository(),
+        project_id,
+        content,
+        file.filename,
+        file.content_type,
+    )
+    upload_meta = {
+        "originalFileName": file.filename,
+        "originalFileHash": archive_meta["archiveId"],
+        "documentType": "feasibility_workbook_learning_candidate",
+        "contentType": file.content_type,
+        "fileSizeBytes": len(content),
+        "uploadedAt": uploaded_at,
+        "parserVersion": "excel-workbook-learning-agent-v1",
+        **archive_meta,
+    }
+
+    try:
+        try:
+            learning = learn_excel_workbook_mapping_use_case(tmp_path, source_document=upload_meta)
+        except Exception as exc:
+            learning = {
+                "analysisType": "realytics-excel-workbook-learning-v1",
+                "status": "profile_failed",
+                "fileName": file.filename,
+                "error": str(exc),
+                "warnings": [
+                    "Workbook could not be profiled. Keep the original archived file and request manual review."
+                ],
+                "nextActions": [
+                    "Confirm the file is a readable .xlsx workbook.",
+                    "If the file is .xls, convert or route it through the legacy workbook adapter.",
+                ],
+            }
+        upload_meta["learningStatus"] = learning.get("status")
+        return {
+            "project_id": project_id,
+            "upload": upload_meta,
+            "learning": learning,
+            "note": (
+                "Workbook learning is read-only. Mapping candidates require LLM judgement, "
+                "automated validation, shadow-mode import, and regression tests before they "
+                "become monitored production import rules."
+            ),
         }
     finally:
         if os.path.exists(tmp_path):
@@ -519,12 +773,120 @@ async def analyze_land_ledger_upload(
 ):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    ledger = await parse_uploaded_land_ledger(file)
+    ledger = await parse_uploaded_land_ledger(project_id, file)
+    upload_meta = ledger.get("upload")
+    if isinstance(upload_meta, dict):
+        save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
     return {
         "project_id": project_id,
         "landLedger": ledger,
         "note": "PNU and official land price enrichment require external connectors after ledger import.",
     }
+
+@router.post("/{project_id}/feasibility-workbook/validate")
+async def validate_project_feasibility_workbook(
+    project_id: str,
+    file: UploadFile = File(...),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    result = await validate_uploaded_feasibility_workbook(project_id, file)
+    save_source_document_metadata_use_case(source_document_repository(), project_id, result["upload"])
+    return result
+
+@router.post("/{project_id}/feasibility-workbook/approve")
+def approve_project_feasibility_workbook_import(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any],
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "assumption:override")
+    try:
+        result = approve_feasibility_workbook_import_use_case(
+            project_repository(),
+            project_id,
+            input_data,
+            approved_by=input_data.get("approvedBy")
+            or input_data.get("approved_by")
+            or user_id_from_request(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="feasibility_workbook_import_approved",
+        project_id=project_id,
+        metadata={
+            "importId": result.get("importId"),
+            "approvedBy": result.get("approval", {}).get("approvedBy"),
+            "sourceDocument": result.get("approval", {}).get("sourceDocument"),
+            "authorization": authz.get("authorization"),
+        },
+    )
+    return result
+
+@router.post("/{project_id}/feasibility-workbook/learn")
+async def learn_project_feasibility_workbook(
+    project_id: str,
+    file: UploadFile = File(...),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    result = await learn_uploaded_feasibility_workbook(project_id, file)
+    save_source_document_metadata_use_case(source_document_repository(), project_id, result["upload"])
+    return result
+
+@router.post("/{project_id}/risk-report-workbook/validate")
+async def validate_project_risk_report_workbook(
+    project_id: str,
+    file: UploadFile = File(...),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    result = await validate_uploaded_risk_report_workbook(project_id, file)
+    save_source_document_metadata_use_case(source_document_repository(), project_id, result["upload"])
+    return result
+
+@router.post("/{project_id}/risk-report-workbook/approve")
+def approve_project_risk_report_workbook_import(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any],
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "risk:review")
+    try:
+        result = approve_risk_report_workbook_import_use_case(
+            project_repository(),
+            project_id,
+            input_data,
+            approved_by=input_data.get("approvedBy")
+            or input_data.get("approved_by")
+            or user_id_from_request(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="risk_report_workbook_import_approved",
+        project_id=project_id,
+        run_id=result.get("importId"),
+        metadata={
+            "importId": result.get("importId"),
+            "riskCount": (result.get("riskRegister") or {}).get("riskCount"),
+            "approvedBy": result.get("approval", {}).get("approvedBy"),
+            "sourceDocument": result.get("approval", {}).get("sourceDocument"),
+            "authorization": authz.get("authorization"),
+        },
+    )
+    return result
 
 @router.post("/{project_id}/land-ledger/enrich")
 def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | None = None):
@@ -588,6 +950,8 @@ async def upload_business_plan_and_run_pf_review(
     if not project_data:
         raise HTTPException(status_code=404, detail="Project not found")
     project_data = attach_persisted_land_evidence(project_id, project_data)
+    project_data = attach_approved_assumption_overrides(project_id, project_data)
+    project_data = attach_active_restructuring_cures(project_id, project_data)
     run = run_and_save_pf_review_use_case(
         orchestration_repository(),
         project_id,
@@ -877,6 +1241,121 @@ def upsert_project_land_evidence(project_id: str, request: Request, input_data: 
         "records": records,
     }
 
+@router.get("/{project_id}/assumption-overrides")
+def list_project_assumption_overrides(
+    project_id: str,
+    request: Request,
+    status: str | None = None,
+    check_key: str | None = None,
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    return {
+        "schemaVersion": "realytics-assumption-override-list-v1",
+        "projectId": project_id,
+        "records": list_assumption_override_records(project_id, status=status, check_key=check_key),
+    }
+
+@router.post("/{project_id}/assumption-overrides")
+def upsert_project_assumption_override(project_id: str, request: Request, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "assumption:override")
+    raw_records = input_data.get("records") if isinstance(input_data.get("records"), list) else [input_data]
+    try:
+        records = [
+            upsert_assumption_override_record(
+                project_id,
+                {
+                    **record,
+                    "approvedBy": record.get("approvedBy")
+                    or record.get("approved_by")
+                    or user_id_from_request(request),
+                },
+            )
+            for record in raw_records
+            if isinstance(record, dict)
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    statuses = sorted({record.get("status") for record in records if record.get("status")})
+    record_sensitive_project_event(
+        request,
+        event_type="assumption_override_approved" if statuses == ["active"] else "assumption_override_status_changed",
+        project_id=project_id,
+        metadata={
+            "count": len(records),
+            "overrideIds": [record.get("overrideId") for record in records],
+            "checkKeys": sorted({record.get("checkKey") for record in records if record.get("checkKey")}),
+            "statuses": statuses,
+            "authorization": authz.get("authorization"),
+        },
+    )
+    return {
+        "schemaVersion": "realytics-assumption-override-upsert-v1",
+        "projectId": project_id,
+        "count": len(records),
+        "records": records,
+    }
+
+@router.get("/{project_id}/restructuring-cures")
+def list_project_restructuring_cures(
+    project_id: str,
+    request: Request,
+    status: str | None = None,
+    cure_type: str | None = None,
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    return {
+        "schemaVersion": "realytics-restructuring-cure-list-v1",
+        "projectId": project_id,
+        "records": list_restructuring_cure_records(project_id, status=status, cure_type=cure_type),
+    }
+
+@router.post("/{project_id}/restructuring-cures")
+def upsert_project_restructuring_cure(project_id: str, request: Request, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "project:write")
+    raw_records = input_data.get("records") if isinstance(input_data.get("records"), list) else [input_data]
+    try:
+        records = [
+            upsert_restructuring_cure_record(
+                project_id,
+                {
+                    **record,
+                    "reviewedBy": record.get("reviewedBy")
+                    or record.get("reviewed_by")
+                    or user_id_from_request(request),
+                },
+            )
+            for record in raw_records
+            if isinstance(record, dict)
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="restructuring_cure_selected",
+        project_id=project_id,
+        metadata={
+            "count": len(records),
+            "cureIds": [record.get("cureId") for record in records],
+            "cureTypes": sorted({record.get("cureType") for record in records if record.get("cureType")}),
+            "statuses": sorted({record.get("status") for record in records if record.get("status")}),
+            "authorization": authz.get("authorization"),
+        },
+    )
+    return {
+        "schemaVersion": "realytics-restructuring-cure-upsert-v1",
+        "projectId": project_id,
+        "count": len(records),
+        "records": records,
+    }
+
 @router.get("/{project_id}/source-documents/{archive_id}/download")
 def download_project_source_document(project_id: str, archive_id: str, request: Request):
     if project_id not in PROJECTS_DB:
@@ -1055,6 +1534,8 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
     input_data = input_data or {}
     source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
     source_data = attach_persisted_land_evidence(project_id, source_data)
+    source_data = attach_approved_assumption_overrides(project_id, source_data)
+    source_data = attach_active_restructuring_cures(project_id, source_data)
     return run_and_save_pf_review_use_case(
         orchestration_repository(),
         project_id,
@@ -1113,6 +1594,41 @@ def get_project_orchestration_risk_register(project_id: str, run_id: str, reques
         raise HTTPException(status_code=404, detail="Risk register not found")
     return record
 
+@router.get("/{project_id}/evidence-graphs")
+def list_project_evidence_graphs(project_id: str, request: Request):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    return {
+        "schemaVersion": "realytics-evidence-graph-list-v1",
+        "projectId": project_id,
+        "records": [
+            {
+                "graphId": record.get("graphId"),
+                "runId": record.get("runId"),
+                "nodeCount": record.get("nodeCount", (record.get("summary") or {}).get("nodeCount")),
+                "edgeCount": record.get("edgeCount", (record.get("summary") or {}).get("edgeCount")),
+                "riskNodeCount": record.get("riskNodeCount", (record.get("summary") or {}).get("riskNodeCount")),
+                "sourceLocatorCount": record.get("sourceLocatorCount", (record.get("summary") or {}).get("sourceLocatorCount")),
+                "updatedAt": record.get("updatedAt"),
+            }
+            for record in list_evidence_graph_records(project_id)
+        ],
+    }
+
+@router.get("/{project_id}/orchestrations/{run_id}/evidence-graph")
+def get_project_orchestration_evidence_graph(project_id: str, run_id: str, request: Request):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    record = get_evidence_graph_record(project_id, run_id)
+    if not record:
+        run = orchestration_repository().get(project_id, run_id)
+        record = (run or {}).get("artifacts", {}).get("evidenceGraph")
+    if not record:
+        raise HTTPException(status_code=404, detail="Evidence graph not found")
+    return record
+
 @router.get("/{project_id}/snapshots")
 def list_project_snapshots(project_id: str):
     if project_id not in PROJECTS_DB:
@@ -1163,6 +1679,51 @@ def get_project_snapshot(project_id: str, snapshot_id: str):
         return get_project_snapshot_use_case(project_snapshot_repository(), project_id, snapshot_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+@router.post("/{project_id}/snapshots/{snapshot_id}/outcome")
+def upsert_project_snapshot_outcome(
+    project_id: str,
+    snapshot_id: str,
+    request: Request,
+    input_data: Dict[str, Any],
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "project:write")
+    try:
+        snapshot = upsert_project_snapshot_outcome_use_case(
+            project_snapshot_repository(),
+            project_id,
+            snapshot_id,
+            input_data or {},
+            updated_by=user_id_from_request(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    outcome = snapshot.get("historicalOutcome") or {}
+    record_sensitive_project_event(
+        request,
+        event_type="historical_outcome_upserted",
+        project_id=project_id,
+        run_id=snapshot.get("runId"),
+        metadata={
+            "snapshotId": snapshot_id,
+            "outcomeStatus": outcome.get("outcomeStatus"),
+            "repaymentCompleted": outcome.get("repaymentCompleted"),
+            "eodOccurred": outcome.get("eodOccurred"),
+            "lossOccurred": outcome.get("lossOccurred"),
+            "recoveryRate": outcome.get("recoveryRate"),
+            "authorization": authz.get("authorization"),
+        },
+    )
+    return {
+        "schemaVersion": "realytics-historical-outcome-upsert-v1",
+        "projectId": project_id,
+        "snapshotId": snapshot_id,
+        "runId": snapshot.get("runId"),
+        "historicalOutcome": outcome,
+        "snapshot": snapshot,
+    }
 
 @router.post("/{project_id}/orchestrations/{run_id}/approve")
 def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict[str, Any] | None = None):

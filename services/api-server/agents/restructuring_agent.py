@@ -25,6 +25,9 @@ class RestructuringAgent:
         scenario_result = scenario_result or ScenarioEngineAgent().run_scenario_set(request)
         senior_buffer = float(options.get("seniorBuffer") or options.get("senior_buffer") or DEFAULT_MIN_SENIOR_BUFFER_KRW)
         ltv_target = float(options.get("unsoldLtvTarget") or options.get("unsold_ltv_target") or DEFAULT_UNSOLD_LTV_TARGET)
+        adopted_cures = options.get("adoptedRestructuringCures") or options.get("adopted_restructuring_cures") or []
+        if not adopted_cures:
+            adopted_cures = getattr(request, "sourceMetadata", {}).get("adoptedRestructuringCures", []) if isinstance(getattr(request, "sourceMetadata", {}), dict) else []
 
         senior_fix = self._senior_shortfall_fix(request, scenario_result, senior_buffer)
         unsold_ltv_fix = self._unsold_ltv_fix(scenario_result, ltv_target)
@@ -50,8 +53,9 @@ class RestructuringAgent:
             "adjustedRequestSummary": adjusted_request_summary,
             "seniorShortfallFix": senior_fix,
             "unsoldLtvFix": unsold_ltv_fix,
+            "adoptedCures": self._adopted_cure_summary(adopted_cures),
             "recommendations": recommendations,
-            "approvalPath": self._approval_path(after or before, recommendations),
+            "approvalPath": self._approval_path(after or before, recommendations, adopted_cures),
             "sourceMetadata": {
                 "sourceName": "Calculation Scenario Engine",
                 "sourceType": "agent_artifact",
@@ -240,7 +244,7 @@ class RestructuringAgent:
             })
         return recommendations
 
-    def _approval_path(self, health: Dict[str, Any], recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _approval_path(self, health: Dict[str, Any], recommendations: List[Dict[str, Any]], adopted_cures: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
         risk_codes = set(health.get("riskCodes", []))
         blockers = []
         if "SENIOR_SHORTFALL" in risk_codes:
@@ -249,9 +253,17 @@ class RestructuringAgent:
             blockers.append("UNSOLD_LTV_BREACH")
         if "STRESS_SENIOR_SHORTFALL" in risk_codes:
             blockers.append("STRESS_SENIOR_SHORTFALL")
+        active_cures = self._active_source_backed_cures(adopted_cures or [])
         return {
             "currentStatus": "rework_required" if blockers else "conditional_approval_candidate",
             "remainingBlockers": blockers,
+            "adoptedCureCount": len(adopted_cures or []),
+            "sourceBackedActiveCureCount": len(active_cures),
+            "adoptedCureCodes": sorted({
+                code
+                for cure in active_cures
+                for code in (cure.get("riskCodes") or [])
+            }),
             "nextSteps": [
                 "Apply recommended restructuring inputs.",
                 "Re-run Scenario Engine and PF Review orchestration.",
@@ -264,6 +276,35 @@ class RestructuringAgent:
                 if item.get("conditionDraft")
             ],
         }
+
+    def _adopted_cure_summary(self, cures: List[Dict[str, Any]]) -> Dict[str, Any]:
+        records = [cure for cure in cures if isinstance(cure, dict)]
+        active = [cure for cure in records if cure.get("status") == "active"]
+        source_backed = self._active_source_backed_cures(records)
+        return {
+            "schemaVersion": "realytics-restructuring-cure-summary-v1",
+            "recordCount": len(records),
+            "activeCount": len(active),
+            "sourceBackedActiveCount": len(source_backed),
+            "records": records,
+            "sourceBackedRecords": source_backed,
+            "warning": None if source_backed else "No active source-backed restructuring cure has been attached.",
+        }
+
+    def _active_source_backed_cures(self, cures: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        result = []
+        for cure in cures:
+            if not isinstance(cure, dict) or cure.get("status") != "active":
+                continue
+            has_source = bool(
+                cure.get("sourceUrlOrEvidenceId")
+                or cure.get("source_url_or_evidence_id")
+                or cure.get("evidenceIds")
+                or cure.get("sourceLocators")
+            )
+            if has_source:
+                result.append(cure)
+        return result
 
     def _senior_tranche(self, request: ScenarioSetRequest) -> TrancheItem | None:
         if not request.pfStructure:

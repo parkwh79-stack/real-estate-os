@@ -54,6 +54,8 @@ Each snapshot includes:
 | `quality` | Orchestration quality gate output |
 | `report` | Phase 11 report metadata and section keys |
 | `caseComparisonSeed` | Lightweight fields for future similar-case search |
+| `historicalOutcome` | Optional post-approval actual performance outcome |
+| `historicalOutcomeHistory` | Prior outcome updates retained for audit trail |
 
 ## Captured Agent Artifacts
 
@@ -101,6 +103,46 @@ The snapshot includes a normalized seed for later comparison:
 
 This is intentionally small. Later, a Similar Case Agent can index these seeds before reading full snapshots.
 
+## Historical Outcome Fields
+
+Snapshots now support a mutable post-closing outcome block. This does not change the original review snapshot, credit decision, or risk treatment. It attaches actual performance data after approval so future similar-case search can answer whether prior decisions worked in practice.
+
+Schema:
+
+```text
+realytics-historical-outcome-v1
+```
+
+Core fields:
+
+| Field | Purpose |
+|---|---|
+| `outcomeStatus` | `repaid`, `partial_or_pending`, `eod_occurred`, or `loss_realized` |
+| `actualSalesRate` | Actual cumulative sales or presale rate |
+| `actualDiscountRate` | Realized average discount rate |
+| `repaymentCompleted` | Whether PF repayment was completed |
+| `repaymentCompletionDate` | Actual repayment completion date |
+| `extensionOccurred` | Whether maturity extension occurred |
+| `extensionCount` | Number of extensions |
+| `eodOccurred` | Whether EOD/default occurred |
+| `eodDate` | EOD/default date |
+| `lossOccurred` | Whether lender/principal loss occurred |
+| `lossAmount` | Actual loss amount |
+| `recoveryRate` | Total recovery rate |
+| `seniorRecoveryRate` | Senior tranche recovery rate |
+| `mezzanineRecoveryRate` | Mezzanine tranche recovery rate |
+| `juniorRecoveryRate` | Junior tranche recovery rate |
+| `actualExitSource` | Unit sales, bulk sale, refinancing, sponsor support, collateral sale, etc. |
+| `outcomeMemo` | Reviewer note on actual performance |
+| `sourceMetadata` | Source name, base date, confidence, and usage note |
+| `sourceLocators` | Document page, Excel cell, API row, or evidence locator supporting the outcome |
+
+`outcomeQuality` marks the outcome `complete` only when sales rate, discount rate, repayment, EOD, loss, and recovery fields are populated.
+
+The web orchestration page now includes a Historical Outcome panel that uses the same endpoint. Reviewers can select a saved snapshot, enter actual performance fields, and attach source metadata/source locators without using scripts. The same page also includes a Historical Similar Cases panel that searches stored snapshots and shows similarity score, matched risk treatments, approval conditions, and actual outcome fields for returned historical cases.
+
+The web orchestration page also includes a Snapshot Diff panel. Reviewers can select a base snapshot and compare snapshot, then inspect changed case seed assumptions, Risk Register changes, Credit Review decision changes, artifact/report-section changes, material changes, and re-review recommendations.
+
 ## API
 
 Snapshots are created automatically when a PF review run is saved.
@@ -108,11 +150,12 @@ Snapshots are created automatically when a PF review run is saved.
 ```text
 GET /projects/{project_id}/snapshots
 GET /projects/{project_id}/snapshots/{snapshot_id}
+POST /projects/{project_id}/snapshots/{snapshot_id}/outcome
 POST /projects/{project_id}/snapshots/similar
 POST /projects/{project_id}/snapshots/diff
 ```
 
-`POST /snapshots/similar` returns `realytics-similar-case-search-v1`, a deterministic comparison of stored snapshots that includes score breakdowns, matched dimensions, Risk Register overlap, historical review status, mitigants, approval conditions, and Credit Review decision outcome.
+`POST /snapshots/similar` returns `realytics-similar-case-search-v1`, a deterministic comparison of stored snapshots that includes score breakdowns, matched dimensions, Risk Register overlap, historical review status, mitigants, approval conditions, Credit Review decision outcome, and actual historical outcome when available.
 
 `POST /snapshots/diff` returns `realytics-snapshot-diff-v1`, a same-project comparison that highlights changed seed metrics, added/removed/changed risks, Credit Review decision changes, artifact changes, report-section changes, and re-review recommendations.
 
@@ -134,7 +177,7 @@ Every major PF review orchestration run should create a server-side project snap
 
 ## Next Steps
 
-1. Add actual outcome fields such as achieved sales rate, realized discount, repayment completion, and EOD events.
-2. Promote reviewed risk treatments into first-class historical risk records.
-3. Connect full report sentence IDs to Evidence Graph and similar-case retrieval.
-4. Add UI panels for snapshot diff and similar-case search.
+1. Promote reviewed risk treatments into first-class historical risk records.
+2. Connect full report sentence IDs to Evidence Graph and similar-case retrieval.
+3. Add vector retrieval and outcome-based back-testing dashboards.
+4. Promote selected snapshot diff findings into formal review tasks.

@@ -30,6 +30,12 @@ class DataQualityAgent:
             self._tranche_total_check(project_data),
         ]
         checks = [check for check in checks if check is not None]
+        checks, applied_overrides = self._apply_approved_overrides(
+            checks,
+            project_data.get("approvedAssumptionOverrides")
+            or project_data.get("approved_assumption_overrides")
+            or [],
+        )
         status = self._status(checks)
         return {
             "schemaVersion": DATA_QUALITY_SCHEMA_VERSION,
@@ -39,11 +45,13 @@ class DataQualityAgent:
             "summary": {
                 "checkCount": len(checks),
                 "clearCount": sum(1 for check in checks if check["status"] == "clear"),
+                "overriddenCount": sum(1 for check in checks if check["status"] == "overridden"),
                 "warningCount": sum(1 for check in checks if check["status"] == "warning"),
                 "blockingCount": sum(1 for check in checks if check["status"] == "blocking"),
                 "missingCount": sum(1 for check in checks if check["status"] == "missing_data"),
             },
             "checks": checks,
+            "appliedOverrides": applied_overrides,
             "blockingIssues": [
                 check["message"]
                 for check in checks
@@ -320,6 +328,62 @@ class DataQualityAgent:
         if any(check["status"] in {"warning", "missing_data"} for check in checks):
             return "needs_review"
         return "clear"
+
+    def _apply_approved_overrides(
+        self,
+        checks: List[Dict[str, Any]],
+        overrides: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        if not isinstance(overrides, list) or not overrides:
+            return checks, []
+        active_overrides = {
+            str(item.get("checkKey")): item
+            for item in overrides
+            if isinstance(item, dict)
+            and item.get("status", "active") == "active"
+            and item.get("effectiveStatus", item.get("status", "active")) == "active"
+            and item.get("checkKey")
+        }
+        if not active_overrides:
+            return checks, []
+
+        applied: List[Dict[str, Any]] = []
+        updated_checks: List[Dict[str, Any]] = []
+        for check in checks:
+            override = active_overrides.get(str(check.get("key")))
+            if not override or check.get("status") not in {"blocking", "warning", "missing_data"}:
+                updated_checks.append(check)
+                continue
+            override_summary = {
+                "overrideId": override.get("overrideId"),
+                "checkKey": override.get("checkKey"),
+                "canonicalField": override.get("canonicalField"),
+                "approvedValue": override.get("approvedValue"),
+                "unit": override.get("unit"),
+                "approvedBy": override.get("approvedBy"),
+                "approvedAt": override.get("approvedAt"),
+                "reason": override.get("reason"),
+                "evidenceIds": override.get("evidenceIds") or [],
+                "sourceLocators": override.get("sourceLocators") or [],
+            }
+            resolved_check = {
+                **check,
+                "originalStatus": check.get("status"),
+                "originalSeverity": check.get("severity"),
+                "status": "overridden",
+                "severity": "clear",
+                "message": (
+                    f"{check.get('label')} was resolved by approved assumption override "
+                    f"{override.get('overrideId')}."
+                ),
+                "approvedAssumptionOverride": override_summary,
+            }
+            metadata = resolved_check.get("metadata")
+            if isinstance(metadata, dict):
+                resolved_check["metadata"] = {**metadata, "approvedAssumptionOverride": override_summary}
+            applied.append(override_summary)
+            updated_checks.append(resolved_check)
+        return updated_checks, applied
 
     def _next_actions(self, checks: List[Dict[str, Any]]) -> List[str]:
         if any(check["status"] == "blocking" for check in checks):

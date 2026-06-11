@@ -2,6 +2,7 @@ from db.repositories.project_snapshot_repository import ProjectSnapshotRepositor
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
     search_similar_project_snapshots_use_case,
+    upsert_project_snapshot_outcome_use_case,
 )
 
 
@@ -57,6 +58,8 @@ def test_similar_case_search_matches_seed_metrics_and_risk_handling():
     assert result["similarCases"][0]["riskMatches"][0]["matchedCode"] == "PRICE_PREMIUM_HIGH"
     assert result["similarCases"][0]["riskMatches"][0]["reviewStatus"] == "waived"
     assert result["similarCases"][0]["decisionOutcome"]["decision"] == "conditional_approval"
+    assert result["similarCases"][0]["historicalOutcome"]["repaymentCompleted"] is True
+    assert result["similarCases"][0]["handlingSummary"]["historicalOutcomeStatus"] == "repaid"
     assert result["similarCases"][0]["handlingSummary"]["approvalConditions"]
 
 
@@ -165,6 +168,63 @@ def test_similar_case_risk_matching_requires_exact_code_when_query_code_exists()
     assert risk_overlap["metadata"]["matchedRiskCount"] == 0
 
 
+def test_snapshot_historical_outcome_upsert_and_similar_case_result():
+    query = _snapshot(
+        project_id="p-query",
+        run_id="run-query",
+        project_type="mixed_use_residential",
+        location="Daegu Dalseo",
+        pf_amount=90_000_000_000,
+        exit_sale_rate=0.67,
+        risk_code="PRICE_PREMIUM_HIGH",
+        review_status="pending_review",
+    )
+    candidate = _snapshot(
+        project_id="p-candidate",
+        run_id="run-candidate",
+        project_type="mixed_use_residential",
+        location="Daegu Dalseo",
+        pf_amount=88_000_000_000,
+        exit_sale_rate=0.66,
+        risk_code="PRICE_PREMIUM_HIGH",
+        review_status="waived",
+        decision="conditional_approval",
+    )
+    store = {
+        "p-query": {query["snapshotId"]: query},
+        "p-candidate": {candidate["snapshotId"]: candidate},
+    }
+    repo = ProjectSnapshotRepository(store, lambda: None)
+
+    updated = upsert_project_snapshot_outcome_use_case(
+        repo,
+        "p-candidate",
+        candidate["snapshotId"],
+        {
+            "actualSalesRate": 0.94,
+            "actualDiscountRate": 0.03,
+            "repaymentCompleted": True,
+            "repaymentCompletionDate": "2026-12-31",
+            "eodOccurred": False,
+            "lossOccurred": False,
+            "recoveryRate": 1.0,
+            "sourceMetadata": {"sourceName": "closing report"},
+            "sourceLocators": [{"type": "document_page", "page": 3}],
+        },
+        updated_by="portfolio_manager",
+    )
+
+    assert updated["historicalOutcome"]["outcomeStatus"] == "repaid"
+    assert updated["historicalOutcome"]["actualSalesRate"] == 0.94
+    assert updated["historicalOutcome"]["outcomeQuality"]["status"] == "complete"
+
+    result = search_similar_project_snapshots_use_case(repo, "p-query", {"limit": 1})
+
+    assert result["similarCases"][0]["historicalOutcome"]["actualSalesRate"] == 0.94
+    assert result["similarCases"][0]["historicalOutcome"]["recoveryRate"] == 1.0
+    assert result["similarCases"][0]["handlingSummary"]["repaymentCompleted"] is True
+
+
 def _snapshot(
     *,
     project_id,
@@ -223,5 +283,20 @@ def _snapshot(
                 "confidence": 0.82,
                 "approvalConditions": [f"{risk_id} approval condition for historical handling"],
             },
+        },
+        "historicalOutcome": {
+            "schemaVersion": "realytics-historical-outcome-v1",
+            "outcomeStatus": "repaid" if decision != "approve" else "partial_or_pending",
+            "actualSalesRate": 0.91 if decision != "approve" else None,
+            "actualDiscountRate": 0.04 if decision != "approve" else None,
+            "repaymentCompleted": decision != "approve",
+            "repaymentCompletionDate": "2026-12-31" if decision != "approve" else None,
+            "extensionOccurred": False,
+            "eodOccurred": False,
+            "lossOccurred": False,
+            "recoveryRate": 1.0 if decision != "approve" else None,
+            "outcomeQuality": {"status": "complete" if decision != "approve" else "partial"},
+            "sourceMetadata": {"sourceName": "historical fixture"},
+            "sourceLocators": [{"type": "manual_fixture"}],
         },
     }

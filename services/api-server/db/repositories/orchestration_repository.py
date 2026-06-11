@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
 from db.repositories.project_snapshot_repository import ProjectSnapshotRepository
 from db.repositories.report_repository import ReportRepository
-from storage import upsert_risk_register_record
+from storage import upsert_evidence_graph_record, upsert_risk_register_record
 
 
 class OrchestrationRepository:
@@ -35,6 +35,8 @@ class OrchestrationRepository:
         self.market_evidence_repository.add_from_run(project_id, run)
         if isinstance(run.get("artifacts", {}).get("riskRegister"), dict):
             upsert_risk_register_record(project_id, run["run_id"], run["artifacts"]["riskRegister"])
+        if isinstance(run.get("artifacts", {}).get("evidenceGraph"), dict):
+            upsert_evidence_graph_record(project_id, run["run_id"], run["artifacts"]["evidenceGraph"])
         self.persist()
 
         if "phase11Report" in run.get("artifacts", {}):

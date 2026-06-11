@@ -28,6 +28,7 @@ Current output:
 | `checks` | Deterministic data quality checks |
 | `blockingIssues` | Issues that must be resolved before final PF approval |
 | `dataLimitations` | Warnings or missing data that must remain visible |
+| `appliedOverrides` | Approved assumption overrides applied to resolve specific checks |
 | `nextActions` | Recommended analyst or agent follow-up |
 
 ## Implemented Checks
@@ -82,6 +83,21 @@ Implemented files:
 
 Saved project snapshots now capture `dataQualityReview`.
 
+Approved assumption overrides are implemented as first-class server records. Active overrides are attached to PF review runs before Data Quality review; matching checks are marked `overridden` while original status, severity, values, diff ratio, and source metadata remain visible.
+
+APIs:
+
+- `GET /projects/{project_id}/assumption-overrides`
+- `POST /projects/{project_id}/assumption-overrides`
+
+Frontend:
+
+- `/project/{id}/orchestration` now includes a `Data Quality 기준값 승인` panel.
+- Reviewers can inspect each Data Quality check and its source-by-source conflicting values.
+- The UI maps check keys to canonical fields such as `feasibility_input.total_revenue`, `pf_structure.amount.sum`, `land.area_sqm`, and `architectural_plan.gross_floor_area_sqm`.
+- Reviewers can choose one source value or enter a manual approved value, then save an active assumption override with reviewer, reason, unit, source locators, check key, canonical field, and approved value.
+- The next PF Review rerun attaches active overrides before Data Quality review and marks matching checks as `overridden` without deleting original conflict metadata.
+
 ## Important Rule
 
 Data Quality Agent must not silently choose the most convenient value. If authoritative values conflict, it must flag the conflict and require either:
@@ -94,7 +110,7 @@ Data Quality Agent must not silently choose the most convenient value. If author
 ## Next Steps
 
 1. Add field-level source locators for non-market parser fields.
-2. Add approved assumption override records.
-3. Add UI panel for data quality checks.
-4. Feed blocking issues directly into Risk Register Agent.
-5. Add Excel named-range and cell-address references to each numeric conflict.
+2. Add override revoke / expire workflow.
+3. Feed remaining blocking issues directly into Risk Register Agent.
+4. Add Excel named-range and cell-address references to each numeric conflict.
+5. Link override records into Evidence Graph claim/source-locator views and Risk Register deep links.

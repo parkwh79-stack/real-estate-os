@@ -44,6 +44,24 @@ export interface Tranche {
   lenders: string;
 }
 
+export interface CalculationTraceStep {
+  id: string;
+  label: string;
+  workbookSheet: string;
+  sampleSource: string;
+  webOutput: string;
+  formula: string;
+  explanation: string;
+}
+
+export interface ExcelMirrorSheet {
+  sheetName: string;
+  role: string;
+  sourceRange: string;
+  webPurpose: string;
+  status: "반영" | "부분 반영" | "다음 단계";
+}
+
 export const demoProject: ProjectSummary = {
   id: "P9-2026-05A",
   name: "대구 달서구 본동 주상복합 PF",
@@ -177,11 +195,106 @@ export const tranches: Tranche[] = [
 
 export const cashFlowAssumptions = {
   revenue: 1656.1,
-  landCost: 225.7,
-  constructionCost: 864.5,
-  financeCost: 116.9,
-  otherCost: 245.9,
+  landCost: 460.3,
+  constructionCost: 720.4,
+  financeCost: 163.0,
+  otherCost: 174.7,
 };
+
+export const excelMirrorSheets: ExcelMirrorSheet[] = [
+  {
+    sheetName: "입력",
+    role: "사업개요와 건축개요",
+    sourceRange: "샘플 입력!D2:E26, M5:M8",
+    webPurpose: "대지면적, 연면적, 용적률, 사업기간, 상품별 전용면적을 계산 전제값으로 사용",
+    status: "반영",
+  },
+  {
+    sheetName: "분양",
+    role: "상품별 분양수입",
+    sourceRange: "샘플 분양!3:42",
+    webPurpose: "아파트, 오피스텔, 근린생활시설의 세대수, 계약면적, 분양수입을 합산",
+    status: "반영",
+  },
+  {
+    sheetName: "사업수지",
+    role: "수입·비용·시행이익",
+    sourceRange: "샘플 사업수지!D8:D74",
+    webPurpose: "총분양수입, 총사업비, 시행이익, 이익률, LTC/LTV 계산의 기준표",
+    status: "반영",
+  },
+  {
+    sheetName: "2.현금흐름",
+    role: "월별 Cash Flow",
+    sourceRange: "샘플 2.현금흐름!31:130",
+    webPurpose: "분양수입, 사업비, PF 인출·상환, 누적 현금흐름과 Max Minus 산정",
+    status: "부분 반영",
+  },
+  {
+    sheetName: "05_수식지도 / 07_Import계약",
+    role: "계산 감사와 서버 재수입",
+    sourceRange: "REALYTICS 확장 시트",
+    webPurpose: "각 숫자의 수식, 원천 셀, named range, 서버 import 계약을 추적",
+    status: "반영",
+  },
+];
+
+export const calculationTraceSteps: CalculationTraceStep[] = [
+  {
+    id: "revenue",
+    label: "총분양수입",
+    workbookSheet: "분양 → 사업수지",
+    sampleSource: "분양!J21 + J30 + J40 = 사업수지!D8",
+    webOutput: "02A_분양수입!C9, 02_사업수지!C4",
+    formula: "=SUM(아파트 분양수입, 오피스텔 분양수입, 근린생활시설 분양수입)",
+    explanation: "상품별 공급가액을 먼저 산정하고, 부가세 제외 기준 총분양수입으로 사업수지에 연결합니다.",
+  },
+  {
+    id: "cost",
+    label: "총사업비",
+    workbookSheet: "사업수지",
+    sampleSource: "사업수지!D18,D26,D33,D41,D52,D62,D71",
+    webOutput: "02_사업수지!C13",
+    formula: "=대지비+공사비+용역비+분양제경비+부담금+금융비용+기타사업비",
+    explanation: "실제 샘플의 비용 소계 행을 그대로 비용 카테고리로 가져와 총사업비를 계산합니다.",
+  },
+  {
+    id: "profit",
+    label: "시행이익",
+    workbookSheet: "사업수지",
+    sampleSource: "사업수지!D74",
+    webOutput: "02_사업수지!C15",
+    formula: "=총분양수입-총사업비",
+    explanation: "개발사업성의 1차 판단값입니다. 이후 매출이익률과 원가대비 이익률로 전환합니다.",
+  },
+  {
+    id: "monthly-cf",
+    label: "월별 Cash Flow",
+    workbookSheet: "2.현금흐름",
+    sampleSource: "2.현금흐름!31:130",
+    webOutput: "03_월별현금흐름!D:AV",
+    formula: "=월별 수입합계-월별 지출합계",
+    explanation: "분양대금 수납시점, 공정률 기반 공사비, 금융비용을 월별로 배분해 순현금흐름을 계산합니다.",
+  },
+  {
+    id: "max-minus",
+    label: "Max Minus",
+    workbookSheet: "2.현금흐름 → 03_월별현금흐름",
+    sampleSource: "누계 현금흐름 최저점",
+    webOutput: "03_월별현금흐름!C22",
+    formula: "=MIN(월별 누적현금흐름)",
+    explanation: "프로젝트 기간 중 가장 큰 자금부족 지점입니다. PF 한도와 Equity 투입 필요성을 판단합니다.",
+  },
+  {
+    id: "pf-repayment",
+    label: "PF 인출·상환",
+    workbookSheet: "2.현금흐름 → 03B/03C",
+    sampleSource: "2.현금흐름!48:55, 93:109",
+    webOutput: "03B_PF인출상환, 03C_Tranche상환",
+    formula: "=상환적립 가능액을 이자와 원금에 우선 배분",
+    explanation: "분양수입금 Waterfall을 반영해 선순위, 중순위, 후순위 회수 가능성을 검토합니다.",
+  },
+];
 
 export function formatEok(value: number, fractionDigits = 1) {
   return `${value.toLocaleString("ko-KR", {

@@ -10,7 +10,7 @@ Updated: 2026-05-20
 
 The repository currently includes:
 
-- Next.js web application for project dashboards, land review, risk review, orchestration, report viewing, finance, feasibility, and cash-flow screens.
+- Next.js web application for project dashboards, pilot input package upload, land review, risk review, orchestration, report viewing, finance, feasibility, and cash-flow screens.
 - FastAPI backend for project CRUD, calculations, agents, orchestration, reports, uploads, and exports.
 - Application use-case layer for reusable API, MCP, batch job, and future UI-triggered workflows, including project management, source documents, feasibility, cash flow, PF review, land ledger, marketability, legal review, report, and evidence review flows.
 - Repository wrapper layer for project CRUD, source document metadata, upload archives, report, market evidence, and orchestration persistence boundaries.
@@ -25,6 +25,7 @@ The repository currently includes:
 - Korean Law MCP sidecar integration design and legal-review adapter.
 - Agent-to-Agent handoff envelopes, progress tracking, human review status, and final approval gating for PF review orchestration.
 - Structured report export pipeline with Markdown, JSON, print-ready HTML, PDF, and DOCX artifacts.
+- Project-level real pilot input package UI for archiving business plans, land ledgers, feasibility workbooks, land evidence JSON, and approved data-quality overrides before PF review runs.
 
 ## Main Capabilities
 
@@ -310,16 +311,19 @@ Implemented interaction model:
 - `AgentProgress` schema for per-Agent status, dependency, artifact, and review visibility.
 - Handoffs currently include land to feasibility/legal/PF, development feasibility to cash flow, market evidence to marketability, marketability to feasibility, legal review to credit review, risk register to credit review, and credit review to report.
 - Data Quality Agent checks project name, land area, GFA, sales revenue, PF amount, unit count, sqm/py conversion, VAT basis, schedule, and tranche structure conflicts before final report and approval gates.
+- Data Quality override workflow persists approved assumption overrides so reviewers can select an authoritative revenue, PF amount, land area, or similar baseline without deleting the original conflict metadata.
 - Risk Register Agent consolidates Land, Marketability, Legal, Cash Flow, PF Structure, Scenario, Data Quality, and Risk Matrix issues into one credit-review table with approval-condition candidates.
 - Risk Register row review supports `approved`, `waived`, `needs_revision`, and `resolved` with reviewer, comment, waiver reason, and audit history. Final approval is blocked while material risk rows remain unresolved.
 - Risk Register is now persisted as server-side JSON/SQLite `risk_registers` records by project/run, with list/get APIs and row-review synchronization for audit and historical review.
 - Credit Review Agent converts the risk register and key upstream artifacts into approve, conditional approval, rework, or reject guidance with reasons, mitigants, waivers, and report paragraphs.
 - Each saved PF review run now creates an immutable `realytics-project-snapshot-v1` record for audit, historical comparison, and future similar-case retrieval.
 - Historical Similar Case Search now compares saved snapshots by project type, location, scale, PF amount, LTV/LTC, Exit sale rate, land/market/reconciliation status, and Risk Register overlap, then returns how similar historical risks were handled.
+- Historical outcome fields can now be attached to snapshots so similar-case search can show actual sales rate, discount rate, repayment/EOD/loss status, and recovery rates after approval.
 - Snapshot Diff now compares two saved snapshots from the same project and highlights changed assumptions, Risk Register rows, Credit Review decision, artifacts, report sections, and re-review recommendations.
 - A first end-to-end Daegu mixed-use PF pilot run is documented, including orchestration, Risk Register, Evidence Graph, Snapshot Diff, Similar Case Search, and identified hardening gaps.
 - Approval Readiness Gate now separates report/artifact completeness from actual credit approval readiness, checking blocking risks, rejected/rework credit decisions, unresolved reviews, and missing evidence warnings.
 - Each PF review run now creates a deterministic `realytics-evidence-graph-v1` artifact linking source documents, evidence IDs, agent artifacts, handoffs, claims, Risk Register rows, source locators, and Phase 11 report sections.
+- Evidence Graph is now persisted as server-side JSON/SQLite `evidence_graphs` records by project/run, with list/get APIs for audit graph retrieval.
 - Each Risk Register row now stores `evidenceGraphLinks` so reviewers can trace a risk back to its document, Excel cell/API locator, Agent artifact, evidence ID, and supporting claim nodes.
 - Human review statuses include `pending`, `approved`, `rejected`, and `needs_revision`.
 - Final approval is blocked when required handoffs remain unresolved, rejected, or marked as needing revision.

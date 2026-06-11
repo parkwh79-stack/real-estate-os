@@ -30,6 +30,26 @@ def get_project_snapshot_use_case(
     return snapshot
 
 
+def upsert_project_snapshot_outcome_use_case(
+    snapshot_repository: ProjectSnapshotRepository,
+    project_id: str,
+    snapshot_id: str,
+    outcome_data: Dict[str, Any],
+    *,
+    updated_by: str = "system",
+) -> Dict[str, Any]:
+    """Attach actual post-approval performance outcomes to a saved review snapshot."""
+    snapshot = snapshot_repository.upsert_historical_outcome(
+        project_id,
+        snapshot_id,
+        outcome_data,
+        updated_by=updated_by,
+    )
+    if not snapshot:
+        raise LookupError("Project snapshot not found")
+    return snapshot
+
+
 def search_similar_project_snapshots_use_case(
     snapshot_repository: ProjectSnapshotRepository,
     project_id: str,
@@ -173,6 +193,7 @@ def _score_snapshot_similarity(query: Dict[str, Any], candidate: Dict[str, Any])
         "caseComparisonSeed": candidate_seed,
         "riskMatches": _risk_matches(query, candidate),
         "decisionOutcome": _decision_outcome(candidate),
+        "historicalOutcome": _historical_outcome(candidate),
         "approvalConditions": _approval_conditions(candidate),
         "handlingSummary": _handling_summary(query, candidate),
     }
@@ -524,6 +545,37 @@ def _decision_outcome(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _historical_outcome(snapshot: Dict[str, Any]) -> Dict[str, Any] | None:
+    outcome = snapshot.get("historicalOutcome")
+    if not isinstance(outcome, dict):
+        return None
+    return {
+        "schemaVersion": outcome.get("schemaVersion"),
+        "outcomeStatus": outcome.get("outcomeStatus"),
+        "actualSalesRate": outcome.get("actualSalesRate"),
+        "actualDiscountRate": outcome.get("actualDiscountRate"),
+        "repaymentCompleted": outcome.get("repaymentCompleted"),
+        "repaymentCompletionDate": outcome.get("repaymentCompletionDate"),
+        "extensionOccurred": outcome.get("extensionOccurred"),
+        "extensionCount": outcome.get("extensionCount"),
+        "eodOccurred": outcome.get("eodOccurred"),
+        "eodDate": outcome.get("eodDate"),
+        "lossOccurred": outcome.get("lossOccurred"),
+        "lossAmount": outcome.get("lossAmount"),
+        "recoveryRate": outcome.get("recoveryRate"),
+        "seniorRecoveryRate": outcome.get("seniorRecoveryRate"),
+        "mezzanineRecoveryRate": outcome.get("mezzanineRecoveryRate"),
+        "juniorRecoveryRate": outcome.get("juniorRecoveryRate"),
+        "actualExitSource": outcome.get("actualExitSource"),
+        "outcomeMemo": outcome.get("outcomeMemo"),
+        "outcomeQuality": outcome.get("outcomeQuality"),
+        "sourceMetadata": outcome.get("sourceMetadata"),
+        "sourceLocators": outcome.get("sourceLocators"),
+        "updatedBy": outcome.get("updatedBy"),
+        "updatedAt": outcome.get("updatedAt"),
+    }
+
+
 def _approval_conditions(snapshot: Dict[str, Any]) -> List[str]:
     credit = (snapshot.get("agentArtifacts") or {}).get("creditReviewDecision") or {}
     risk_register = (snapshot.get("agentArtifacts") or {}).get("riskRegister") or {}
@@ -547,11 +599,17 @@ def _condition_for_risk(snapshot: Dict[str, Any], risk_id: Any) -> str | None:
 
 def _handling_summary(query: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
     matches = _risk_matches(query, candidate)
+    outcome = _historical_outcome(candidate)
     return {
         "matchedRiskCount": len(matches),
         "reviewStatuses": sorted({str(match.get("reviewStatus")) for match in matches if match.get("reviewStatus")}),
         "mitigants": list(dict.fromkeys(str(match.get("mitigant")) for match in matches if match.get("mitigant")))[:5],
         "approvalConditions": _approval_conditions(candidate)[:5],
+        "historicalOutcomeStatus": outcome.get("outcomeStatus") if outcome else None,
+        "repaymentCompleted": outcome.get("repaymentCompleted") if outcome else None,
+        "eodOccurred": outcome.get("eodOccurred") if outcome else None,
+        "lossOccurred": outcome.get("lossOccurred") if outcome else None,
+        "recoveryRate": outcome.get("recoveryRate") if outcome else None,
     }
 
 
@@ -600,5 +658,15 @@ def _similar_case_limitations(query_snapshot: Dict[str, Any], candidates: List[D
         limitations.append(f"Query snapshot is missing comparison seed fields: {', '.join(missing_seed_keys)}.")
     if not candidates:
         limitations.append("No similar historical snapshot matched the current filters.")
-    limitations.append("This baseline search is deterministic over stored snapshots and does not yet use vector embeddings or actual post-closing outcomes.")
+    if not any(candidate.get("historicalOutcome") for candidate in candidates):
+        limitations.append("No returned similar case has actual post-approval outcome data yet.")
+    else:
+        partial_count = sum(
+            1
+            for candidate in candidates
+            if (candidate.get("historicalOutcome") or {}).get("outcomeQuality", {}).get("status") != "complete"
+        )
+        if partial_count:
+            limitations.append(f"{partial_count} returned similar case(s) have partial outcome data.")
+    limitations.append("This baseline search is deterministic over stored snapshots and does not yet use vector embeddings.")
     return limitations

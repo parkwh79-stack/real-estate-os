@@ -48,6 +48,28 @@ class ProjectSnapshotRepository:
     def get(self, project_id: str, snapshot_id: str) -> Dict[str, Any] | None:
         return self.snapshot_store.get(project_id, {}).get(snapshot_id)
 
+    def upsert_historical_outcome(
+        self,
+        project_id: str,
+        snapshot_id: str,
+        outcome_data: Dict[str, Any],
+        *,
+        updated_by: str = "system",
+    ) -> Dict[str, Any] | None:
+        snapshot = self.get(project_id, snapshot_id)
+        if not snapshot:
+            return None
+        outcome = normalize_historical_outcome(outcome_data, updated_by=updated_by)
+        previous_outcome = snapshot.get("historicalOutcome")
+        history = list(snapshot.get("historicalOutcomeHistory") or [])
+        if previous_outcome:
+            history.append(previous_outcome)
+        snapshot["historicalOutcome"] = outcome
+        snapshot["historicalOutcomeHistory"] = history[-20:]
+        snapshot["updatedAt"] = outcome["updatedAt"]
+        self.persist()
+        return snapshot
+
     def latest(self, project_id: str) -> Dict[str, Any] | None:
         snapshots = list(self.snapshot_store.get(project_id, {}).values())
         if not snapshots:
@@ -72,6 +94,12 @@ class ProjectSnapshotRepository:
             "handoffCount": len(snapshot.get("handoffs", [])),
             "reconciliationStatus": snapshot.get("reconciliation", {}).get("status"),
             "qualityPass": snapshot.get("quality", {}).get("pass"),
+            "outcomeStatus": (snapshot.get("historicalOutcome") or {}).get("outcomeStatus"),
+            "repaymentCompleted": (snapshot.get("historicalOutcome") or {}).get("repaymentCompleted"),
+            "eodOccurred": (snapshot.get("historicalOutcome") or {}).get("eodOccurred"),
+            "lossOccurred": (snapshot.get("historicalOutcome") or {}).get("lossOccurred"),
+            "actualSalesRate": (snapshot.get("historicalOutcome") or {}).get("actualSalesRate"),
+            "recoveryRate": (snapshot.get("historicalOutcome") or {}).get("recoveryRate"),
         }
 
 
@@ -108,7 +136,101 @@ def build_project_snapshot(
         "quality": artifacts.get("qualityCheck", {}),
         "report": _report_snapshot(artifacts.get("phase11Report", {}), artifacts.get("reportRecord", {})),
         "caseComparisonSeed": _case_comparison_seed(project_data, artifacts),
+        "historicalOutcome": _historical_outcome_seed(project_data),
     }
+
+
+def normalize_historical_outcome(outcome_data: Dict[str, Any], *, updated_by: str = "system") -> Dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    outcome = {
+        "schemaVersion": "realytics-historical-outcome-v1",
+        "outcomeStatus": _outcome_status(outcome_data),
+        "actualSalesRate": _first(outcome_data, "actualSalesRate", "actual_sales_rate", "realizedSalesRate", "realized_sales_rate"),
+        "actualDiscountRate": _first(outcome_data, "actualDiscountRate", "actual_discount_rate", "realizedDiscountRate", "realized_discount_rate"),
+        "repaymentCompleted": _first_bool(outcome_data, "repaymentCompleted", "repayment_completed"),
+        "repaymentCompletionDate": _first(outcome_data, "repaymentCompletionDate", "repayment_completion_date"),
+        "extensionOccurred": _first_bool(outcome_data, "extensionOccurred", "extension_occurred"),
+        "extensionCount": _first(outcome_data, "extensionCount", "extension_count"),
+        "eodOccurred": _first_bool(outcome_data, "eodOccurred", "eod_occurred"),
+        "eodDate": _first(outcome_data, "eodDate", "eod_date"),
+        "lossOccurred": _first_bool(outcome_data, "lossOccurred", "loss_occurred"),
+        "lossAmount": _first(outcome_data, "lossAmount", "loss_amount"),
+        "recoveryRate": _first(outcome_data, "recoveryRate", "recovery_rate"),
+        "seniorRecoveryRate": _first(outcome_data, "seniorRecoveryRate", "senior_recovery_rate"),
+        "mezzanineRecoveryRate": _first(outcome_data, "mezzanineRecoveryRate", "mezzanine_recovery_rate"),
+        "juniorRecoveryRate": _first(outcome_data, "juniorRecoveryRate", "junior_recovery_rate"),
+        "actualExitSource": _first(outcome_data, "actualExitSource", "actual_exit_source"),
+        "outcomeMemo": _first(outcome_data, "outcomeMemo", "outcome_memo", "memo"),
+        "sourceMetadata": outcome_data.get("sourceMetadata") or outcome_data.get("source_metadata") or {},
+        "sourceLocators": outcome_data.get("sourceLocators") or outcome_data.get("source_locators") or [],
+        "updatedBy": outcome_data.get("updatedBy") or outcome_data.get("updated_by") or updated_by,
+        "updatedAt": now,
+    }
+    outcome["outcomeQuality"] = _outcome_quality(outcome)
+    return outcome
+
+
+def _historical_outcome_seed(project_data: Dict[str, Any]) -> Dict[str, Any] | None:
+    raw = project_data.get("historicalOutcome") or project_data.get("historical_outcome")
+    if not isinstance(raw, dict):
+        return None
+    return normalize_historical_outcome(raw, updated_by="project_payload")
+
+
+def _outcome_status(outcome_data: Dict[str, Any]) -> str:
+    explicit = outcome_data.get("outcomeStatus") or outcome_data.get("outcome_status")
+    if explicit:
+        return str(explicit)
+    repayment_completed = _first_bool(outcome_data, "repaymentCompleted", "repayment_completed")
+    eod_occurred = _first_bool(outcome_data, "eodOccurred", "eod_occurred")
+    loss_occurred = _first_bool(outcome_data, "lossOccurred", "loss_occurred")
+    if loss_occurred:
+        return "loss_realized"
+    if eod_occurred:
+        return "eod_occurred"
+    if repayment_completed:
+        return "repaid"
+    return "partial_or_pending"
+
+
+def _outcome_quality(outcome: Dict[str, Any]) -> Dict[str, Any]:
+    required = [
+        "actualSalesRate",
+        "actualDiscountRate",
+        "repaymentCompleted",
+        "eodOccurred",
+        "lossOccurred",
+        "recoveryRate",
+    ]
+    missing = [key for key in required if outcome.get(key) in {None, ""}]
+    return {
+        "status": "complete" if not missing else "partial",
+        "missingFields": missing,
+        "hasSourceMetadata": bool(outcome.get("sourceMetadata")),
+        "hasSourceLocators": bool(outcome.get("sourceLocators")),
+    }
+
+
+def _first(data: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return None
+
+
+def _first_bool(data: Dict[str, Any], *keys: str) -> bool | None:
+    value = _first(data, *keys)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "y", "1"}:
+            return True
+        if lowered in {"false", "no", "n", "0"}:
+            return False
+    return bool(value)
 
 
 def _canonical_project(project_data: Dict[str, Any]) -> Dict[str, Any]:

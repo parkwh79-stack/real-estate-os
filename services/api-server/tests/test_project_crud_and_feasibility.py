@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from main import app
 from routers import projects
+from storage import get_risk_register_record
 
 
 def test_project_crud_create_update_delete_cascades_runtime_records(monkeypatch):
@@ -79,5 +80,119 @@ def test_feasibility_calculate_endpoint_uses_project_defaults_and_overrides(monk
     assert override_result.status_code == 200
     assert override_result.json()["development_profit"] == 50
     assert override_result.json()["status"] in {"weak", "thin"}
+
+    client.delete(f"/projects/{project_id}")
+
+
+def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Import Approval Project"}}).json()
+    project_id = created["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": project_id,
+        "project_name": "Import Approval Project",
+        "asset_type": "mixed_use",
+        "metrics": {
+            "total_revenue": 100000000000,
+            "total_cost": 85000000000,
+            "development_profit": 15000000000,
+            "profit_margin": 0.15,
+            "ltv": 0.6,
+        },
+        "financing": [
+            {
+                "tranche_id": "tr_a",
+                "name": "Tr.A",
+                "priority": "senior",
+                "amount": 60000000000,
+            }
+        ],
+    }
+
+    approved = client.post(
+        f"/projects/{project_id}/feasibility-workbook/approve",
+        json={
+            "importId": "fs-import-test",
+            "approvedBy": "credit-officer",
+            "comment": "Use signed workbook as canonical feasibility.",
+            "feasibilityStudyV2Draft": draft,
+        },
+    )
+
+    assert approved.status_code == 200
+    body = approved.json()
+    assert body["canonicalFeasibilityStudyV2"]["raw_import"]["canonicalStatus"] == "approved"
+    assert body["feasibilityInput"]["total_revenue"] == 100000000000
+    fetched = client.get(f"/projects/{project_id}").json()
+    assert fetched["feasibilityStudyV2"]["project_name"] == "Import Approval Project"
+    assert fetched["_meta"]["latestFeasibilityWorkbookImportId"] == "fs-import-test"
+
+    client.delete(f"/projects/{project_id}")
+
+
+def test_risk_report_workbook_approve_persists_register_and_sections(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "risk-approval.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Risk Workbook Project"}}).json()
+    project_id = created["project"]["id"]
+    draft = {
+        "schemaVersion": "realytics-risk-report-xlsx-v1",
+        "importId": "risk-import-test",
+        "validation": {"status": "passed", "importReady": True},
+        "sourceDocument": {"originalFileName": "risk-report.xlsx"},
+        "metrics": {"totalRevenue": 1655.97, "pfLoan": 900},
+        "riskRegisterDraft": {
+            "schemaVersion": "realytics-risk-register-v1",
+            "status": "imported_pending_review",
+            "risks": [
+                {
+                    "riskId": "RR-XLSX-001",
+                    "code": "RISK_REPORT_XLSX_001",
+                    "severity": "critical",
+                    "reviewStatus": "pending_review",
+                }
+            ],
+        },
+        "reportSectionsDraft": {
+            "paragraphs": [
+                {
+                    "section": "Cash Flow",
+                    "category": "요약",
+                    "text": "현금흐름 검토 문구입니다.",
+                }
+            ],
+            "approvalConditions": [
+                {
+                    "section": "승인조건",
+                    "category": "금융",
+                    "text": "PF 한도 보강 조건입니다.",
+                }
+            ],
+        },
+    }
+
+    approved = client.post(
+        f"/projects/{project_id}/risk-report-workbook/approve",
+        json={
+            "approvedBy": "risk-reviewer",
+            "comment": "Approved for Risk Register and report section import.",
+            "riskReportImportDraft": draft,
+        },
+    )
+
+    assert approved.status_code == 200
+    body = approved.json()
+    assert body["riskRegister"]["riskCount"] == 1
+    assert body["reportSections"]["paragraphs"][0]["text"] == "현금흐름 검토 문구입니다."
+    assert get_risk_register_record(project_id, "risk-import-test")["risks"][0]["riskId"] == "RR-XLSX-001"
+    fetched = client.get(f"/projects/{project_id}").json()
+    assert fetched["riskReportSections"]["importApproval"]["approvedBy"] == "risk-reviewer"
+    assert fetched["_meta"]["latestRiskReportWorkbookImportId"] == "risk-import-test"
 
     client.delete(f"/projects/{project_id}")
