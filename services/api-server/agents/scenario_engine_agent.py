@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List
 
-from core.calculations import calculate_tranche_recovery, calculate_unsold_ltv, simulate_waterfall
+from core.calculations import calculate_tranche_recovery, simulate_waterfall
 from schemas.scenario import (
     ScenarioDrivers,
     ScenarioReportFragments,
@@ -159,18 +159,13 @@ class ScenarioEngineAgent:
             unsold_rate = max(0.0, 1.0 - sale_rate)
             unsold_units = int(total_units * unsold_rate)
             for discount_rate in drivers.discountRates:
-                ltv = calculate_unsold_ltv(
-                    pf_amount=total_pf_amount,
-                    total_units=total_units,
-                    unsold_units=unsold_units,
-                    avg_unit_price=avg_unit_price,
-                    discount_rate=discount_rate,
-                )
+                gross_value = unsold_units * avg_unit_price
+                discounted_value = gross_value * (1.0 - discount_rate)
+                collateral_value = max(0.0, discounted_value + max(0.0, drivers.additionalCollateralValue))
+                ltv = 0.0 if unsold_units <= 0 else (total_pf_amount / collateral_value if collateral_value > 0 else 0.0)
                 risk_level = self._ltv_risk_level(ltv)
                 if risk_level in {"high", "critical"}:
                     breach_count += 1
-                gross_value = unsold_units * avg_unit_price
-                discounted_value = gross_value * (1.0 - discount_rate)
                 rows.append(
                     UnsoldLtvRow(
                         saleRate=sale_rate,
@@ -179,6 +174,8 @@ class ScenarioEngineAgent:
                         discountRate=discount_rate,
                         grossUnsoldValue=gross_value,
                         discountedUnsoldValue=discounted_value,
+                        additionalCollateralValue=max(0.0, drivers.additionalCollateralValue),
+                        collateralAdjustedValue=collateral_value,
                         unsoldLtv=round(ltv, 4),
                         riskLevel=risk_level,
                     )
@@ -202,6 +199,7 @@ class ScenarioEngineAgent:
                 "stressCaseLtv": round(stress_row.unsoldLtv if stress_row else max_ltv, 4),
                 "maxLtv": round(max_ltv, 4),
                 "breachCount": breach_count,
+                "additionalCollateralValue": round(max(0.0, drivers.additionalCollateralValue), 0),
             },
         )
 

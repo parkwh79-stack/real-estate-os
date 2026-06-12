@@ -25,6 +25,10 @@ class ScenarioDrivers(BaseModel):
     unsoldRates: List[float] = Field(default_factory=lambda: [0.0, 0.1, 0.2, 0.3, 0.4])
     recoveryHaircuts: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3])
     additionalPriorityCosts: float = Field(default=0.0, description="Priority taxes or development fees")
+    additionalCollateralValue: float = Field(
+        default=0.0,
+        description="Source-backed additional collateral, forward-sale, bulk-sale, or refinancing support value for Unsold LTV cure scenarios.",
+    )
 
 
 class WaterfallRule(BaseModel):
@@ -92,6 +96,8 @@ class UnsoldLtvRow(BaseModel):
     discountRate: float
     grossUnsoldValue: float
     discountedUnsoldValue: float
+    additionalCollateralValue: float = 0.0
+    collateralAdjustedValue: float = 0.0
     unsoldLtv: float
     riskLevel: str
 

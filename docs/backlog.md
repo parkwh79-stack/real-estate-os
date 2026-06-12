@@ -1,6 +1,6 @@
 # Product Backlog
 
-Updated: 2026-06-11
+Updated: 2026-06-12
 
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
@@ -111,6 +111,8 @@ Updated: 2026-06-11
 | P1 | QA | Manual land evidence attachment workflow | Done | Added `services/api-server/scripts/apply_land_evidence_to_pilot.py`; it applies only non-empty source-backed official price/cadastral/registry records, reruns Land Agent enrichment, and keeps the pilot blocked when evidence is blank or incomplete |
 | P1 | QA | Pilot approval blocker resolution package | Done | Added `services/api-server/scripts/build_pilot_blocker_resolution_package.py`; latest pilot package identifies 6 approval blockers, 27 missing land evidence fields across 9 parcels, 18 unresolved material risk reviews, 7 unresolved handoff reviews, senior shortfall clear, and an Unsold LTV cure requirement of KRW 66.386bn PF reduction/equity increase or KRW 73.763bn additional collateral |
 | P1 | QA | Latest pilot execution status | Done | Reran the current pilot fixture as `pilot-latest`; all 18 orchestration steps completed and report quality passed, while approval readiness remains blocked by legal, data quality, risk review, credit rework, handoff review, risk review, and Unsold LTV cure requirements. Added `docs/product/pilot-latest-execution-status.md` and improved the blocker package markdown with readable owner labels plus pending handoff/material-risk tables |
+| P1 | QA | Pilot Data Quality blocker resolution | Done | Added `services/api-server/scripts/apply_pilot_data_quality_override.py`; applied `UNIT_COUNT_CONSISTENCY` override using `product_mix.units.sum=260`, reran the pilot as `pilot-latest-dq-cleared`, cleared Data Quality blocking count from 1 to 0, removed `DATA_QUALITY_NOT_BLOCKING`, and reduced material risk reviews from 6 to 5 |
+| P1 | QA | Pilot Unsold LTV collateral cure rerun | Done | Added `services/api-server/scripts/apply_pilot_financial_cure.py`; Scenario Engine now accepts source-backed `additionalCollateralValue`, recalculates collateral-adjusted Unsold LTV matrix cells, reran the DQ-cleared pilot with KRW 54.239bn additional collateral support, cleared `UNSOLD_LTV_BREACH` and the approval warning, and reduced pending material risk reviews from 5 to 3 |
 | P1 | Integration | Land evidence API connector runner | Done | Added `services/api-server/scripts/fetch_land_evidence_from_connectors.py` and `docs/product/land-data-api-connector.md`; configured URL templates can fetch cadastral and official land price records, while missing configuration returns diagnostics and no fabricated evidence |
 | P1 | QA | Approval readiness gate | Done | Added `realytics-approval-readiness-gate-v1` as a separate orchestration artifact so report completeness remains distinct from credit approval readiness |
 | P1 | Frontend | Approval Readiness Dashboard | Done | Orchestration page now summarizes Approval Readiness Gate status across Land Evidence, Risk Review, Credit Decision, and Handoff Review with blocking, needs-review, and ready cards |

@@ -138,7 +138,7 @@ class OrchestrationAgent:
             scenario_req = None
             scenario_run_result = None
             try:
-                from schemas.scenario import ScenarioSetRequest
+                from schemas.scenario import ScenarioDrivers, ScenarioSetRequest
                 from agents.scenario_engine_agent import ScenarioEngineAgent
 
                 raw_mix = project_data.get("product_mix") or project_data.get("productMix") or []
@@ -179,11 +179,23 @@ class OrchestrationAgent:
                         "feeRate": 0.01
                     })
 
+                raw_scenario_drivers = (
+                    project_data.get("scenarioDrivers")
+                    or project_data.get("scenario_drivers")
+                    or project_data.get("scenarioAssumptions")
+                    or project_data.get("scenario_assumptions")
+                    or {}
+                )
+                scenario_drivers = None
+                if isinstance(raw_scenario_drivers, dict) and raw_scenario_drivers:
+                    scenario_drivers = ScenarioDrivers.model_validate(raw_scenario_drivers)
+
                 scenario_req = ScenarioSetRequest(
                     scenarioSetId=f"run-{run['run_id']}",
                     scenarioSetName="Orchestration Run Scenario Set",
                     productMix=product_mix,
-                    pfStructure=pf_structure_list
+                    pfStructure=pf_structure_list,
+                    scenarioDrivers=scenario_drivers,
                 )
                 scenario_run_result = ScenarioEngineAgent().run_scenario_set(scenario_req)
                 run["artifacts"]["scenariosEvaluation"] = scenario_run_result.model_dump(by_alias=True)

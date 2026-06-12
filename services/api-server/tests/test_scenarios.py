@@ -107,6 +107,42 @@ def test_restructuring_agent_recommends_senior_and_unsold_ltv_cures():
     assert plan["recommendations"][0]["code"] == "REDUCE_SENIOR_OR_ADD_EQUITY"
 
 
+def test_additional_collateral_support_cures_unsold_ltv_breach():
+    base_req = ScenarioSetRequest(
+        scenarioSetId="additional-collateral-base",
+        baseDate="2026-06-12",
+        productMix=[
+            ProductMixItem(type="Apartment", units=100, avgUnitPrice=1_200_000_000.0, totalRevenue=120_000_000_000.0),
+        ],
+        pfStructure=[
+            TrancheItem(tranche="Senior", amount=70_000_000_000.0, priority=1, interestRate=0.06, feeRate=0.01),
+        ],
+        scenarioDrivers=ScenarioDrivers(
+            saleRates=[0.8],
+            discountRates=[0.2],
+        ),
+    )
+    base_result = ScenarioEngineAgent().run_scenario_set(base_req)
+    assert any(flag.code == "UNSOLD_LTV_BREACH" for flag in base_result.riskFlags)
+
+    supported_req = ScenarioSetRequest(
+        **{
+            **base_req.model_dump(),
+            "scenarioSetId": "additional-collateral-supported",
+            "scenarioDrivers": {
+                "saleRates": [0.8],
+                "discountRates": [0.2],
+                "additionalCollateralValue": 60_000_000_000.0,
+            },
+        }
+    )
+    supported_result = ScenarioEngineAgent().run_scenario_set(supported_req)
+
+    assert supported_result.unsoldLtvMatrix.summary["additionalCollateralValue"] == 60_000_000_000.0
+    assert supported_result.unsoldLtvMatrix.summary["maxLtv"] <= 0.9
+    assert all(flag.code != "UNSOLD_LTV_BREACH" for flag in supported_result.riskFlags)
+
+
 def test_report_agent_dynamic_scenarios():
     input_data = {
         "project": {

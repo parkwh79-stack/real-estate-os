@@ -8,6 +8,13 @@ from scripts.run_pilot_fixture import summarize_run
 from scripts.build_land_evidence_request import build_manual_template, build_request
 from scripts.apply_land_evidence_to_pilot import apply_evidence
 from scripts.build_pilot_blocker_resolution_package import build_resolution_package
+from scripts.apply_pilot_data_quality_override import (
+    _build_override,
+    _find_check,
+    _find_source_value,
+    _upsert_override,
+)
+from scripts.apply_pilot_financial_cure import _apply_cure
 from agents.orchestration_agent import OrchestrationAgent
 from agents.land_ledger_agent import LandLedgerAgent
 
@@ -74,6 +81,73 @@ def test_pilot_blocker_resolution_package_summarizes_approval_blockers():
     assert isinstance(package["reviewPlan"]["pendingRisks"], list)
     assert "rerunPlan" in package
     assert package["nonFabricationPolicy"]
+
+
+def test_pilot_data_quality_override_clears_unit_count_blocker():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    baseline_run = OrchestrationAgent().run_pf_review("pilot-dq-unit-baseline-test", payload)
+    check = _find_check(baseline_run, "unit_count_consistency")
+    source_value = _find_source_value(check, "product_mix.units.sum")
+    override = _build_override(
+        check=check,
+        check_key="unit_count_consistency",
+        canonical_field="architectural_plan.units",
+        approved_value=260,
+        approved_source="product_mix.units.sum",
+        source_value=source_value,
+        approved_by="credit_officer",
+        reason="Product mix schedule is authoritative for this pilot test.",
+    )
+    patched_payload = _upsert_override(payload, override)
+
+    rerun = OrchestrationAgent().run_pf_review("pilot-dq-unit-cleared-test", patched_payload)
+    data_quality = rerun["artifacts"]["dataQualityReview"]
+    unit_check = next(check for check in data_quality["checks"] if check["key"] == "unit_count_consistency")
+    blockers = [item["code"] for item in rerun["artifacts"]["approvalReadinessGate"]["blockers"]]
+
+    assert unit_check["status"] == "overridden"
+    assert data_quality["summary"]["blockingCount"] == 0
+    assert data_quality["appliedOverrides"][0]["overrideId"] == "ovr-pilot-unit-count-consistency-260"
+    assert "DATA_QUALITY_NOT_BLOCKING" not in blockers
+
+
+def test_pilot_additional_collateral_cure_clears_unsold_ltv_warning_after_dq_override():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    baseline_run = OrchestrationAgent().run_pf_review("pilot-financial-cure-baseline-test", payload)
+    check = _find_check(baseline_run, "unit_count_consistency")
+    source_value = _find_source_value(check, "product_mix.units.sum")
+    override = _build_override(
+        check=check,
+        check_key="unit_count_consistency",
+        canonical_field="architectural_plan.units",
+        approved_value=260,
+        approved_source="product_mix.units.sum",
+        source_value=source_value,
+        approved_by="credit_officer",
+        reason="Product mix schedule is authoritative for this pilot test.",
+    )
+    dq_payload = _upsert_override(payload, override)
+    dq_run = OrchestrationAgent().run_pf_review("pilot-financial-cure-dq-test", dq_payload)
+    amount = dq_run["artifacts"]["restructuringPlan"]["unsoldLtvFix"]["requiredAdditionalCollateralValue"]
+
+    cured_payload = _apply_cure(
+        dq_payload,
+        prior_run=dq_run,
+        cure_type="additional_collateral",
+        amount=amount,
+        evidence_id="collateral-evidence-test-001",
+        reviewed_by="credit_officer",
+    )
+    cured_run = OrchestrationAgent().run_pf_review("pilot-financial-cure-cleared-test", cured_payload)
+    scenario_risk_codes = [flag["code"] for flag in cured_run["artifacts"]["scenariosEvaluation"]["riskFlags"]]
+    approval_warnings = [item["code"] for item in cured_run["artifacts"]["approvalReadinessGate"]["warnings"]]
+
+    assert cured_payload["scenarioDrivers"]["additionalCollateralValue"] == amount
+    assert cured_run["artifacts"]["restructuringPlan"]["unsoldLtvFix"]["status"] == "clear"
+    assert "UNSOLD_LTV_BREACH" not in scenario_risk_codes
+    assert "UNSOLD_LTV_RESTRUCTURING_REQUIRED" not in approval_warnings
 
 
 def test_land_evidence_template_and_attachment_workflow():
