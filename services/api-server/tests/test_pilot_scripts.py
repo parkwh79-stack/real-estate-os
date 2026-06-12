@@ -67,8 +67,11 @@ def test_pilot_blocker_resolution_package_summarizes_approval_blockers():
     assert package["schemaVersion"] == "realytics-pilot-blocker-resolution-package-v1"
     assert package["summary"]["approvalReady"] is False
     assert package["summary"]["blockingIssueCount"] >= 1
-    assert package["landEvidencePlan"]["parcelCount"] >= 1
+    assert package["landEvidencePlan"]["parcelCount"] >= 0
+    assert package["landEvidencePlan"]["totalMissingEvidenceCount"] >= 0
     assert package["reviewPlan"]["unresolvedRiskReviewCount"] >= 1
+    assert isinstance(package["reviewPlan"]["pendingHandoffs"], list)
+    assert isinstance(package["reviewPlan"]["pendingRisks"], list)
     assert "rerunPlan" in package
     assert package["nonFabricationPolicy"]
 

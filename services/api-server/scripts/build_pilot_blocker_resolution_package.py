@@ -138,12 +138,25 @@ def _blocker_actions(blockers: List[Dict[str, Any]], warnings: List[Dict[str, An
                 "code": code,
                 "message": item.get("message"),
                 "severity": "blocking" if item in blockers else "warning",
-                "owner": action.get("owner", "Review owner"),
+                "owner": _safe_owner_for_code(code, action.get("owner", "Review owner")),
                 "requiredAction": action.get("action", item.get("message")),
                 "targetArtifactOrScreen": action.get("target", "Approval Readiness Dashboard"),
             }
         )
     return rows
+
+
+def _safe_owner_for_code(code: Any, fallback: Any) -> str:
+    owner_map = {
+        "RISK_REGISTER_NOT_BLOCKING": "Risk Register reviewer",
+        "CREDIT_DECISION_NOT_REJECT_OR_REWORK": "Credit Review Agent / credit reviewer",
+        "HANDOFF_REVIEWS_RESOLVED": "Agent owner reviewers",
+        "RISK_REVIEWS_RESOLVED": "Risk owner reviewers",
+        "LAND_OFFICIAL_PRICE_READY": "Land Agent / official land price owner",
+        "LAND_REGISTRY_EVIDENCE_READY": "Legal / registry evidence owner",
+        "UNSOLD_LTV_RESTRUCTURING_REQUIRED": "PF structuring / lender group",
+    }
+    return owner_map.get(str(code or ""), str(fallback or "Review owner"))
 
 
 def _land_evidence_plan(land_request: Dict[str, Any]) -> Dict[str, Any]:
@@ -345,6 +358,46 @@ def render_markdown(package: Dict[str, Any]) -> str:
             "",
             f"- Pending handoff reviews: {review.get('unresolvedHandoffReviewCount')}",
             f"- Pending material risk reviews: {review.get('unresolvedRiskReviewCount')}",
+            "",
+            "### Pending Handoffs",
+            "",
+            "| Handoff ID | From | To | Status | Review status | Blocking issues |",
+            "|---|---|---|---|---|---:|",
+        ]
+    )
+    for handoff in review.get("pendingHandoffs") or []:
+        lines.append(
+            "| {handoff_id} | {from_agent} | {to_agent} | {status} | {review_status} | {blocking_count} |".format(
+                handoff_id=_md(handoff.get("handoffId")),
+                from_agent=_md(handoff.get("fromAgent")),
+                to_agent=_md(handoff.get("toAgent")),
+                status=_md(handoff.get("status")),
+                review_status=_md(handoff.get("reviewStatus")),
+                blocking_count=handoff.get("blockingIssueCount") or 0,
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "### Pending Material Risks",
+            "",
+            "| Risk ID | Code | Category | Severity | Review status | Title |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    for risk in review.get("pendingRisks") or []:
+        lines.append(
+            "| {risk_id} | {code} | {category} | {severity} | {review_status} | {title} |".format(
+                risk_id=_md(risk.get("riskId")),
+                code=_md(risk.get("code")),
+                category=_md(risk.get("category")),
+                severity=_md(risk.get("severity")),
+                review_status=_md(risk.get("reviewStatus")),
+                title=_md(risk.get("title")),
+            )
+        )
+    lines.extend(
+        [
             "",
             "## Rerun Plan",
             "",
