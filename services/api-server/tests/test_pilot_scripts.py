@@ -15,6 +15,7 @@ from scripts.apply_pilot_data_quality_override import (
     _upsert_override,
 )
 from scripts.apply_pilot_financial_cure import _apply_cure
+from scripts.apply_pilot_review_actions import apply_review_actions, build_review_action_template
 from agents.orchestration_agent import OrchestrationAgent
 from agents.land_ledger_agent import LandLedgerAgent
 
@@ -148,6 +149,97 @@ def test_pilot_additional_collateral_cure_clears_unsold_ltv_warning_after_dq_ove
     assert cured_run["artifacts"]["restructuringPlan"]["unsoldLtvFix"]["status"] == "clear"
     assert "UNSOLD_LTV_BREACH" not in scenario_risk_codes
     assert "UNSOLD_LTV_RESTRUCTURING_REQUIRED" not in approval_warnings
+
+
+def test_pilot_review_action_template_lists_remaining_handoffs_and_risks():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    run = OrchestrationAgent().run_pf_review("pilot-review-template-test", payload)
+
+    template = build_review_action_template(run)
+
+    assert template["schemaVersion"] == "realytics-pilot-review-actions-v1"
+    assert template["reviewPolicy"]["nonFabrication"] is True
+    assert len(template["handoffReviews"]) >= 1
+    assert len(template["riskReviews"]) >= 1
+    risk_codes = {item["code"] for item in template["riskReviews"]}
+    assert "PERMIT_SCHEDULE_READINESS" in risk_codes
+
+
+def test_pilot_review_actions_require_evidence_for_risk_resolution():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    run = OrchestrationAgent().run_pf_review("pilot-review-evidence-required-test", payload)
+    template = build_review_action_template(run)
+    first_risk = template["riskReviews"][0]
+
+    try:
+        apply_review_actions(run, {
+            "riskReviews": [
+                {
+                    "riskId": first_risk["riskId"],
+                    "reviewStatus": "resolved",
+                    "reviewedBy": "legal_reviewer",
+                    "comment": "Resolved by reviewer.",
+                }
+            ]
+        })
+    except ValueError as exc:
+        assert "requires evidenceIds or sourceLocators" in str(exc)
+    else:
+        raise AssertionError("Risk resolution without evidence should fail")
+
+
+def test_pilot_review_actions_apply_source_backed_resolutions():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    run = OrchestrationAgent().run_pf_review("pilot-review-actions-test", payload)
+    template = build_review_action_template(run)
+    actions = {
+        "reviewedAt": "2026-06-12T00:00:00+00:00",
+        "handoffReviews": [
+            {
+                "handoffId": handoff["handoffId"],
+                "reviewStatus": "approved",
+                "reviewedBy": "credit_officer",
+                "comment": "Source-backed handoff accepted for pilot review action test.",
+                "evidenceIds": [f"handoff-evidence-{index}"],
+                "sourceLocators": [
+                    {
+                        "sourceType": "pilot_review_action",
+                        "sourceUrlOrEvidenceId": f"handoff-evidence-{index}",
+                        "locatorPrecision": "review_action",
+                    }
+                ],
+            }
+            for index, handoff in enumerate(template["handoffReviews"], start=1)
+        ],
+        "riskReviews": [
+            {
+                "riskId": risk["riskId"],
+                "reviewStatus": "resolved",
+                "reviewedBy": "legal_reviewer",
+                "comment": "Source-backed evidence attached for pilot review action test.",
+                "evidenceIds": [f"risk-evidence-{index}"],
+                "sourceLocators": [
+                    {
+                        "sourceType": "pilot_review_action",
+                        "sourceUrlOrEvidenceId": f"risk-evidence-{index}",
+                        "locatorPrecision": "review_action",
+                    }
+                ],
+            }
+            for index, risk in enumerate(template["riskReviews"], start=1)
+        ],
+    }
+
+    reviewed = apply_review_actions(run, actions)
+    gate = reviewed["artifacts"]["approvalReadinessGate"]
+
+    assert gate["summary"]["unresolvedHandoffReviewCount"] == 0
+    assert gate["summary"]["unresolvedRiskReviewCount"] == 0
+    assert "HANDOFF_REVIEWS_RESOLVED" not in [item["code"] for item in gate["blockers"]]
+    assert "RISK_REVIEWS_RESOLVED" not in [item["code"] for item in gate["blockers"]]
 
 
 def test_land_evidence_template_and_attachment_workflow():
