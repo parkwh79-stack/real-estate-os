@@ -130,6 +130,13 @@ The remaining review actions have been converted into a source-backed review tem
 - Material risk review rows: 3
 - Policy: `approved` / `resolved` requires evidence IDs or source locators; `waived` requires waiver reason and evidence/source context; `needs_revision` records follow-up but does not clear the approval gate.
 
+The legal/permit/covenant subset has also been converted into a dedicated evidence package template:
+
+- Template: `.runtime/pilot-latest/pilot-legal-evidence-package-template.json`
+- Required evidence rows: 13
+- Covered risks: `PERMIT_SCHEDULE_READINESS`, `LEGAL_LAND_RIGHTS`, `COVENANT_AND_LEGAL_PACKAGE_COMPLETENESS`
+- Policy: complete source-backed packages can generate `resolved` review actions; empty or incomplete packages generate only `needs_revision`; waivers are never generated automatically.
+
 Initial pending material risks:
 
 | Risk ID | Code | Severity |
@@ -184,17 +191,19 @@ The latest local run generated these runtime files:
 .runtime/pilot-latest/blocker-resolution-package-dq-collateral-cure.json
 .runtime/pilot-latest/blocker-resolution-package-dq-collateral-cure.md
 .runtime/pilot-latest/pilot-review-actions-template.json
+.runtime/pilot-latest/pilot-legal-evidence-package-template.json
 ```
 
 These files are local runtime artifacts and should not be committed. This document records the durable pilot status.
 
 ## Next Actions
 
-1. Fill `.runtime/pilot-latest/pilot-review-actions-template.json` with source-backed evidence IDs or source locators for permit schedule, land rights, and covenant/legal package completeness.
-2. Apply the filled template with `services/api-server/scripts/apply_pilot_review_actions.py` and rebuild the blocker package.
-3. Review the four pending Agent handoffs and three pending material Risk Register rows as `approved`, `resolved`, `waived`, or `needs_revision` according to the evidence.
-4. Replace the pilot collateral cure evidence ID with real source-backed additional collateral, forward-sale, bulk-sale, or refinancing evidence before using the run for a real approval memo.
-5. Rerun the pilot and confirm `approvalReadinessGate.status` moves from `not_ready_for_approval` toward `ready_for_conditional_approval`.
+1. Fill `.runtime/pilot-latest/pilot-legal-evidence-package-template.json` with source-backed permit, registry, trust/security, covenant/EOD, and legal opinion evidence.
+2. Convert the filled package into review actions with `services/api-server/scripts/build_pilot_legal_evidence_package.py`.
+3. Apply the generated review actions with `services/api-server/scripts/apply_pilot_review_actions.py` and rebuild the blocker package.
+4. Separately resolve non-legal pending handoffs, especially marketability data limitations and any restructuring/collateral evidence replacement.
+5. Replace the pilot collateral cure evidence ID with real source-backed additional collateral, forward-sale, bulk-sale, or refinancing evidence before using the run for a real approval memo.
+6. Rerun the pilot and confirm `approvalReadinessGate.status` moves from `not_ready_for_approval` toward `ready_for_conditional_approval`.
 
 ## Non-Fabrication Rule
 

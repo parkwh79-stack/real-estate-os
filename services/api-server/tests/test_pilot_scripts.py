@@ -16,6 +16,11 @@ from scripts.apply_pilot_data_quality_override import (
 )
 from scripts.apply_pilot_financial_cure import _apply_cure
 from scripts.apply_pilot_review_actions import apply_review_actions, build_review_action_template
+from scripts.build_pilot_legal_evidence_package import (
+    EVIDENCE_REQUIREMENTS,
+    build_legal_evidence_package_template,
+    build_review_actions_from_legal_evidence_package,
+)
 from agents.orchestration_agent import OrchestrationAgent
 from agents.land_ledger_agent import LandLedgerAgent
 
@@ -240,6 +245,89 @@ def test_pilot_review_actions_apply_source_backed_resolutions():
     assert gate["summary"]["unresolvedRiskReviewCount"] == 0
     assert "HANDOFF_REVIEWS_RESOLVED" not in [item["code"] for item in gate["blockers"]]
     assert "RISK_REVIEWS_RESOLVED" not in [item["code"] for item in gate["blockers"]]
+
+
+def test_pilot_legal_evidence_package_template_requires_source_backed_documents():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    run = OrchestrationAgent().run_pf_review("pilot-legal-evidence-template-test", payload)
+    review_template = build_review_action_template(run)
+
+    package = build_legal_evidence_package_template(review_template)
+    actions = build_review_actions_from_legal_evidence_package(review_template, package)
+
+    assert package["schemaVersion"] == "realytics-legal-evidence-package-v1"
+    assert len(package["documents"]) == sum(
+        len(requirement["evidenceTypes"])
+        for requirement in EVIDENCE_REQUIREMENTS.values()
+    )
+    assert all(row["status"] == "missing" for row in package["riskRequirements"])
+    assert all(action["reviewStatus"] == "needs_revision" for action in actions["riskReviews"])
+
+
+def test_pilot_legal_evidence_package_generates_resolved_actions_when_complete():
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    run = OrchestrationAgent().run_pf_review("pilot-legal-evidence-complete-test", payload)
+    review_template = build_review_action_template(run)
+    package = build_legal_evidence_package_template(review_template)
+    for index, document in enumerate(package["documents"], start=1):
+        evidence_id = f"legal-evidence-{index:03d}"
+        document.update({
+            "evidenceId": evidence_id,
+            "documentTitle": f"{document['riskCode']} {document['evidenceType']}",
+            "sourceName": "legal_evidence_package_test",
+            "sourceUrlOrEvidenceId": evidence_id,
+            "issuedAt": "2026-06-12",
+            "reviewedBy": "legal_reviewer",
+            "confidence": 0.95,
+            "summary": "Source-backed pilot test evidence.",
+        })
+        document["sourceLocators"][0].update({
+            "sourceUrlOrEvidenceId": evidence_id,
+            "pageNumber": 1,
+            "textExcerpt": "Source-backed pilot test evidence.",
+        })
+
+    actions = build_review_actions_from_legal_evidence_package(review_template, package)
+    legal_risk_actions = [
+        action
+        for action in actions["riskReviews"]
+        if action["code"] in EVIDENCE_REQUIREMENTS
+    ]
+    legal_handoff_actions = [
+        action
+        for action in actions["handoffReviews"]
+        if action["handoffType"] in {
+            "legal_to_credit_review",
+            "risk_register_to_credit_review",
+            "credit_review_to_report",
+        }
+    ]
+    marketability_handoff = next(
+        action
+        for action in actions["handoffReviews"]
+        if action["handoffType"] == "marketability_to_feasibility"
+    )
+
+    assert all(action["reviewStatus"] == "resolved" for action in legal_risk_actions)
+    assert all(action["evidenceIds"] for action in legal_risk_actions)
+    assert all(action["sourceLocators"] for action in legal_risk_actions)
+    assert all(action["reviewStatus"] == "approved" for action in legal_handoff_actions)
+    assert marketability_handoff["reviewStatus"] == "needs_revision"
+
+    reviewed = apply_review_actions(run, actions)
+    gate = reviewed["artifacts"]["approvalReadinessGate"]
+    reviewed_risks = {
+        risk["code"]: risk
+        for risk in reviewed["artifacts"]["riskRegister"]["risks"]
+        if risk.get("code") in EVIDENCE_REQUIREMENTS
+    }
+    assert all(risk["reviewStatus"] == "resolved" for risk in reviewed_risks.values())
+    assert all(risk["evidenceIds"] for risk in reviewed_risks.values())
+    assert gate["summary"]["unresolvedRiskReviewCount"] >= 1
+    assert gate["summary"]["unresolvedHandoffReviewCount"] >= 1
+    assert "HANDOFF_REVIEWS_RESOLVED" in [item["code"] for item in gate["blockers"]]
 
 
 def test_land_evidence_template_and_attachment_workflow():
