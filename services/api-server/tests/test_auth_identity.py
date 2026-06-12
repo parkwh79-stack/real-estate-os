@@ -1,3 +1,9 @@
+import base64
+import hashlib
+import hmac
+import json
+import time
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -103,3 +109,97 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
         json={"format": "markdown"},
     )
     assert allowed.status_code == 200
+
+
+def test_hs256_bearer_token_creates_idp_identity_context(monkeypatch):
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "test-idp-secret")
+    monkeypatch.setenv("REALYTICS_IDP_ISSUER", "https://idp.example.test")
+    monkeypatch.setenv("REALYTICS_IDP_AUDIENCE", "realytics-api")
+    client = TestClient(app)
+    token = _make_hs256_token(
+        {
+            "iss": "https://idp.example.test",
+            "aud": "realytics-api",
+            "sub": "idp-user-1",
+            "email": "idp-user@example.com",
+            "name": "IdP Reviewer",
+            "tenant_id": "tenant-idp",
+            "role": "reviewer",
+            "exp": int(time.time()) + 3600,
+            "jti": "token-001",
+        },
+        "test-idp-secret",
+    )
+
+    me = client.get("/auth/me", headers={"authorization": f"Bearer {token}"})
+
+    assert me.status_code == 200
+    body = me.json()
+    assert body["authenticated"] is True
+    assert body["authSource"] == "bearer_token"
+    assert body["user"]["userId"] == "idp-user@example.com"
+    assert body["user"]["tenantId"] == "tenant-idp"
+    assert body["user"]["role"] == "reviewer"
+    assert "risk:review" in body["permissions"]
+    assert body["identityProvider"]["mode"] == "hs256"
+    assert "hs256SecretConfigured" not in body["identityProvider"]
+
+
+def test_bearer_token_tenant_mismatch_is_blocked(monkeypatch):
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "test-idp-secret")
+    client = TestClient(app)
+    token = _make_hs256_token(
+        {
+            "sub": "tenant-user",
+            "tenant_id": "tenant-a",
+            "role": "reviewer",
+            "exp": int(time.time()) + 3600,
+        },
+        "test-idp-secret",
+    )
+
+    me = client.get(
+        "/auth/me",
+        headers={
+            "authorization": f"Bearer {token}",
+            "x-realytics-tenant-id": "tenant-b",
+        },
+    )
+
+    assert me.status_code == 403
+    assert me.json()["detail"]["error"] == "tenant_mismatch"
+
+
+def test_idp_status_does_not_return_secret(monkeypatch):
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "super-secret-value")
+    monkeypatch.setenv("REALYTICS_IDP_PROVIDER", "okta")
+    client = TestClient(app)
+
+    status = client.get("/auth/idp/status")
+
+    assert status.status_code == 200
+    body = status.json()
+    rendered = json.dumps(body)
+    assert body["enabled"] is True
+    assert body["provider"] == "okta"
+    assert body["hs256SecretConfigured"] is True
+    assert "super-secret-value" not in rendered
+
+
+def _make_hs256_token(claims: dict, secret: str) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    encoded_header = _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    encoded_payload = _b64url(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        f"{encoded_header}.{encoded_payload}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    return f"{encoded_header}.{encoded_payload}.{_b64url(signature)}"
+
+
+def _b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")

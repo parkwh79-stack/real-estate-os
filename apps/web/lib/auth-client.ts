@@ -129,6 +129,8 @@ export async function resolveCurrentIdentity(sessionId?: string) {
     user: RealyticsUser;
     session?: RealyticsSession;
     permissions?: string[];
+    authSource?: string;
+    identityProvider?: Record<string, unknown>;
     limitations?: string[];
   };
 }

@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit, auth, valuemap, projects
+from core.idp import principal_from_request
 from storage import get_user_session, record_user_activity_log
 
 app = FastAPI(
@@ -50,6 +51,12 @@ async def user_activity_middleware(request: Request, call_next):
             if not user_id and session_id:
                 session = get_user_session(session_id)
                 user_id = session.get("userId") if session else None
+            if not user_id and request.headers.get("authorization"):
+                try:
+                    principal = principal_from_request(request)
+                    user_id = principal.user_id if principal else None
+                except Exception:
+                    user_id = None
             user_id = user_id or "anonymous"
             try:
                 record_user_activity_log(

@@ -5,7 +5,8 @@ from typing import Any, Dict
 
 from fastapi import HTTPException, Request
 
-from storage import get_user, get_user_session
+from core.idp import enforce_tenant_header_match, principal_from_request, sanitized_idp_config
+from storage import get_user, get_user_session, upsert_user
 
 
 ROLE_PERMISSIONS = {
@@ -49,6 +50,36 @@ def permissions_for_role(role: str | None) -> list[str]:
 
 
 def identity_context_from_request(request: Request) -> Dict[str, Any]:
+    principal = principal_from_request(request)
+    if principal:
+        enforce_tenant_header_match(request, principal)
+        user = upsert_user(
+            {
+                "userId": principal.user_id,
+                "tenantId": principal.tenant_id,
+                "email": principal.email,
+                "displayName": principal.display_name,
+                "role": principal.role,
+                "status": "active",
+                "metadata": {
+                    "identityProvider": principal.provider,
+                    "tokenId": principal.token_id,
+                    "authSource": "bearer_token",
+                },
+            }
+        )
+        permissions = permissions_for_role(user.get("role"))
+        return {
+            "authenticated": True,
+            "user": user,
+            "session": None,
+            "role": user.get("role"),
+            "permissions": permissions,
+            "rbacMode": rbac_mode(),
+            "identityProvider": sanitized_idp_config(),
+            "authSource": "bearer_token",
+        }
+
     session_id = request.headers.get("x-realytics-session-id")
     session = get_user_session(session_id) if session_id else None
     user_id = (

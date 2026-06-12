@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
-from core.authz import permissions_for_role
+from core.authz import identity_context_from_request, permissions_for_role
+from core.idp import idp_status
 from storage import (
     create_user_session,
     get_user,
@@ -80,27 +81,20 @@ def create_session(payload: Dict[str, Any]):
 
 
 @router.get("/me")
-def get_identity_context(
-    x_realytics_session_id: str | None = Header(None),
-    x_realytics_user_id: str | None = Header(None),
-    x_user_id: str | None = Header(None),
-):
-    session = get_user_session(x_realytics_session_id) if x_realytics_session_id else None
-    user_id = session.get("userId") if session else (x_realytics_user_id or x_user_id)
-    user = get_user(user_id) if user_id else None
+def get_identity_context(request: Request):
+    context = identity_context_from_request(request)
+    user = context.get("user")
+    session = context.get("session")
 
-    if not user:
+    if not context.get("authenticated"):
         return {
             "schemaVersion": "realytics-identity-context-v1",
             "authenticated": False,
-            "user": {
-                "userId": user_id or "anonymous",
-                "tenantId": None,
-                "role": "anonymous",
-                "status": "unknown",
-            },
+            "user": user,
             "session": session,
             "permissions": [],
+            "authSource": context.get("authSource", "local_session_or_header"),
+            "identityProvider": context.get("identityProvider"),
             "limitations": [
                 "No persisted user record was found for the supplied session or user header.",
             ],
@@ -111,8 +105,15 @@ def get_identity_context(
         "authenticated": user.get("status") == "active",
         "user": user,
         "session": session,
-        "permissions": permissions_for_role(user.get("role")),
+        "permissions": context.get("permissions") or permissions_for_role(user.get("role")),
+        "authSource": context.get("authSource", "local_session_or_header"),
+        "identityProvider": context.get("identityProvider"),
         "limitations": [
-            "Header/session based identity is an MVP control and not a substitute for a production identity provider.",
+            "Header/session based identity is an MVP control. Bearer-token identity is available when REALYTICS_IDP_MODE is configured.",
         ],
     }
+
+
+@router.get("/idp/status")
+def get_idp_status():
+    return idp_status()
