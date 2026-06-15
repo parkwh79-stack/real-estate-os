@@ -54,6 +54,7 @@ Current implementation baseline:
 - `POST /integrations/kakao/login/authorize-url`
 - Existing Bearer-token path can accept Kakao ID token later when OIDC/JWKS verification is enabled.
 - Settings UI panel for Kakao readiness and notification policy.
+- Mobile Kakao action center: `/project/{project_id}/mobile?source=kakao&event={event_type}`.
 
 Production hardening still required:
 
@@ -96,7 +97,7 @@ Prohibited in message body:
 - Legal opinion detail
 - Risk memo detail
 
-The message body should contain only a short notification and a link back to REALYTICS.
+The message body should contain only a short notification and a link back to REALYTICS. Mobile UX policy is maintained in `docs/product/mobile-kakao-review-ux.md`.
 
 Current implementation baseline:
 
@@ -104,6 +105,7 @@ Current implementation baseline:
 - `POST /integrations/kakao/messages/preview`
 - Preview only by default; no live send without explicit `KAKAO_MESSAGE_MODE=send` and provider approval.
 - Settings UI exposes whether Kakao REST API key, redirect URI, and message token are configured without exposing secret values.
+- If `REALYTICS_WEB_BASE_URL` is configured and a `projectId` is supplied, the message preview generates a mobile-first REALYTICS action URL.
 
 ## Adapter Policy
 

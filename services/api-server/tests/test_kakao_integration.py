@@ -93,3 +93,24 @@ def test_kakao_message_preview_allows_safe_event_summary():
     body = response.json()
     assert body["readyToSend"] is True
     assert body["templateObject"]["button_title"] == "REALYTICS에서 확인"
+
+
+def test_kakao_message_preview_builds_mobile_action_url_from_project_id(monkeypatch):
+    monkeypatch.setenv("REALYTICS_WEB_BASE_URL", "https://realytics.example")
+    client = TestClient(app)
+
+    response = client.post(
+        "/integrations/kakao/messages/preview",
+        json={
+            "eventType": "approval_readiness_changed",
+            "projectId": "pilot",
+            "projectName": "본리동 PF",
+            "body": "본리동 PF: 승인 가능성 상태가 변경되었습니다. REALYTICS에서 확인하세요.",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["readyToSend"] is True
+    assert body["recommendedMobilePath"] == "/project/pilot/mobile?source=kakao&event=approval_readiness_changed"
+    assert body["templateObject"]["link"]["web_url"] == "https://realytics.example/project/pilot/mobile?source=kakao&event=approval_readiness_changed"

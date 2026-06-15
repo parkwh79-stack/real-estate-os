@@ -125,7 +125,7 @@ def build_kakao_authorize_url(
 def build_safe_kakao_message_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
     event_type = str(payload.get("eventType") or "")
     project_name = _safe_text(payload.get("projectName") or payload.get("projectId") or "REALYTICS project")
-    action_url = str(payload.get("actionUrl") or "")
+    action_url = str(payload.get("actionUrl") or _default_mobile_action_url(payload, event_type) or "")
     title = ALLOWED_NOTIFICATION_EVENTS.get(event_type, "REALYTICS 알림")
     raw_body = payload.get("body") or f"{project_name}: {title}"
     body = _safe_text(raw_body)
@@ -152,6 +152,7 @@ def build_safe_kakao_message_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
         "title": title,
         "templateObject": template,
         "blockedReasons": blocked,
+        "recommendedMobilePath": _mobile_action_path(payload, event_type),
         "policy": {
             "noSensitivePfData": True,
             "bodyContainsOnlyNotificationSummary": True,
@@ -159,6 +160,24 @@ def build_safe_kakao_message_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             "detailedReviewMustStayInWebApp": True,
         },
     }
+
+
+def _default_mobile_action_url(payload: Dict[str, Any], event_type: str) -> str | None:
+    web_base_url = os.environ.get("REALYTICS_WEB_BASE_URL")
+    if not web_base_url:
+        return None
+    path = _mobile_action_path(payload, event_type)
+    if not path:
+        return None
+    return f"{web_base_url.rstrip('/')}{path}"
+
+
+def _mobile_action_path(payload: Dict[str, Any], event_type: str) -> str | None:
+    project_id = payload.get("projectId") or payload.get("project_id")
+    if not project_id:
+        return None
+    event = event_type or "notification"
+    return f"/project/{project_id}/mobile?source=kakao&event={event}"
 
 
 def _safe_text(value: Any) -> str:
