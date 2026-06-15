@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { CheckCircle2, KeyRound, LogOut, ShieldCheck, UserRound } from "lucide-react";
+import { CheckCircle2, KeyRound, LogOut, MessageCircle, ShieldCheck, UserRound } from "lucide-react";
 import {
   apiBase,
   clearStoredAuthSession,
@@ -32,6 +32,28 @@ interface IdpStatus {
   limitations?: string[];
 }
 
+interface KakaoStatus {
+  login: {
+    provider: string;
+    oidcDiscoveryUrl: string;
+    issuer: string;
+    restApiKeyConfigured: boolean;
+    clientSecretConfigured: boolean;
+    redirectUriConfigured: boolean;
+    redirectUri?: string;
+    recommendedIdpMode: string;
+    currentIdpMode: string;
+  };
+  message: {
+    mode: string;
+    enabled: boolean;
+    accessTokenConfigured: boolean;
+    supportedEvents: string[];
+    safeMessagePolicy: string;
+  };
+  limitations?: string[];
+}
+
 export default function SettingsPage() {
   const [tenantId, setTenantId] = useState("pilot-tenant");
   const [tenantName, setTenantName] = useState("REALYTICS Pilot Workspace");
@@ -41,6 +63,7 @@ export default function SettingsPage() {
   const [role, setRole] = useState("reviewer");
   const [session, setSession] = useState<StoredAuthSession | null>(null);
   const [idpStatus, setIdpStatus] = useState<IdpStatus | null>(null);
+  const [kakaoStatus, setKakaoStatus] = useState<KakaoStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -65,6 +88,10 @@ export default function SettingsPage() {
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => setIdpStatus(body as IdpStatus | null))
       .catch(() => setIdpStatus(null));
+    fetch(`${apiBase}/integrations/kakao/status`, { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => setKakaoStatus(body as KakaoStatus | null))
+      .catch(() => setKakaoStatus(null));
   }, []);
 
   const selectedRole = useMemo(() => roleOptions.find((item) => item.value === role), [role]);
@@ -264,6 +291,66 @@ export default function SettingsPage() {
           {idpStatus?.limitations?.length ? (
             <div className="mt-4 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500 dark:bg-slate-800/70">
               {idpStatus.limitations.join(" ")}
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[0.9fr_1fr]">
+        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-center gap-2">
+            <MessageCircle className="h-5 w-5 text-amber-500" />
+            <h2 className="text-lg font-bold text-slate-950 dark:text-white">카카오 로그인·알림 연동 상태</h2>
+          </div>
+          <p className="mt-2 text-sm leading-6 text-slate-500">
+            카카오는 외부 협력자 로그인과 알림 채널로 사용하고, 심사 상세자료·PF 금액·소유자·계좌·등기부 내용은
+            REALYTICS 웹앱 안에서만 확인하도록 제한합니다.
+          </p>
+          <div className="mt-4 grid gap-3">
+            <InfoRow label="Login Provider" value={kakaoStatus?.login.provider ?? "kakao"} />
+            <InfoRow label="OIDC Issuer" value={kakaoStatus?.login.issuer ?? "-"} />
+            <InfoRow label="Redirect URI" value={kakaoStatus?.login.redirectUri ?? "-"} />
+            <InfoRow label="Recommended Mode" value={kakaoStatus?.login.recommendedIdpMode ?? "oidc_jwks"} />
+            <div className="flex flex-wrap gap-2">
+              <StatusPill tone={kakaoStatus?.login.restApiKeyConfigured ? "green" : "slate"}>
+                REST API 키 {kakaoStatus?.login.restApiKeyConfigured ? "설정됨" : "미설정"}
+              </StatusPill>
+              <StatusPill tone={kakaoStatus?.login.redirectUriConfigured ? "green" : "slate"}>
+                Redirect URI {kakaoStatus?.login.redirectUriConfigured ? "설정됨" : "미설정"}
+              </StatusPill>
+              <StatusPill tone={kakaoStatus?.message.accessTokenConfigured ? "green" : "slate"}>
+                메시지 토큰 {kakaoStatus?.message.accessTokenConfigured ? "설정됨" : "미설정"}
+              </StatusPill>
+              <StatusPill tone={kakaoStatus?.message.enabled ? "green" : "slate"}>
+                메시지 모드 {kakaoStatus?.message.mode ?? "preview_only"}
+              </StatusPill>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <h2 className="text-lg font-bold text-slate-950 dark:text-white">카카오 운영 적용 기준</h2>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {[
+              "카카오 앱에서 OIDC와 Redirect URI 등록",
+              "REALYTICS_IDP_PROVIDER=kakao 설정",
+              "REST API 키와 client secret은 secret manager에 저장",
+              "카카오톡 본문은 알림 요약과 웹앱 링크만 허용",
+              "PF 금액·계좌·PNU·등기·제한물권·개인정보 전송 금지",
+              "실제 업무 알림은 BizMessage/알림톡 별도 검토",
+            ].map((item) => (
+              <div
+                key={item}
+                className="flex items-start gap-2 rounded-lg border border-slate-200 p-3 text-sm font-semibold text-slate-700 dark:border-slate-800 dark:text-slate-200"
+              >
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                {item}
+              </div>
+            ))}
+          </div>
+          {kakaoStatus?.limitations?.length ? (
+            <div className="mt-4 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500 dark:bg-slate-800/70">
+              {kakaoStatus.limitations.join(" ")}
             </div>
           ) : null}
         </div>

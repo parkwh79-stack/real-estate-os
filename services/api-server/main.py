@@ -5,7 +5,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import audit, auth, valuemap, projects
+from routers import audit, auth, kakao, valuemap, projects
 from core.idp import principal_from_request
 from storage import get_user_session, record_user_activity_log
 
@@ -85,6 +85,7 @@ app.include_router(valuemap.router)
 app.include_router(projects.router)
 app.include_router(audit.router)
 app.include_router(auth.router)
+app.include_router(kakao.router)
 
 
 @app.get("/")
