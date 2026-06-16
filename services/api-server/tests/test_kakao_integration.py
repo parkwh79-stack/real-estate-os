@@ -121,6 +121,27 @@ def test_kakao_message_preview_builds_mobile_action_url_from_project_id(monkeypa
     assert body["templateObject"]["link"]["web_url"] == "https://realytics.example/project/pilot/mobile?source=kakao&event=approval_readiness_changed"
 
 
+def test_kakao_message_preview_routes_document_upload_to_intake(monkeypatch):
+    monkeypatch.setenv("REALYTICS_WEB_BASE_URL", "https://realytics.example")
+    client = TestClient(app)
+
+    response = client.post(
+        "/integrations/kakao/messages/preview",
+        json={
+            "eventType": "document_upload_requested",
+            "projectId": "pilot",
+            "projectName": "본리동 PF",
+            "body": "사업자료 업로드가 필요합니다. REALYTICS에서 파일을 접수하세요.",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["readyToSend"] is True
+    assert body["recommendedMobilePath"] == "/project/pilot/kakao-intake?source=kakao&event=document_upload_requested"
+    assert body["templateObject"]["link"]["web_url"] == "https://realytics.example/project/pilot/kakao-intake?source=kakao&event=document_upload_requested"
+
+
 def test_kakao_authorize_url_generates_signed_state_when_omitted(monkeypatch):
     monkeypatch.setenv("KAKAO_REST_API_KEY", "kakao-rest-key")
     monkeypatch.setenv("KAKAO_REDIRECT_URI", "https://realytics.example/auth/kakao/callback")

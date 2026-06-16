@@ -28,6 +28,9 @@ KAKAO_MESSAGE_ENDPOINTS = {
 }
 
 ALLOWED_NOTIFICATION_EVENTS = {
+    "document_upload_requested": "사업자료 업로드 요청",
+    "document_analysis_started": "AI 분석 시작",
+    "document_analysis_completed": "AI 분석 완료",
     "risk_review_required": "리스크 검토 필요",
     "handoff_review_required": "에이전트 인계사항 검토 필요",
     "legal_evidence_required": "법무/인허가 증빙 보완 필요",
@@ -315,6 +318,8 @@ def _mobile_action_path(payload: Dict[str, Any], event_type: str) -> str | None:
     if not project_id:
         return None
     event = event_type or "notification"
+    if event in {"document_upload_requested", "document_analysis_started"}:
+        return f"/project/{project_id}/kakao-intake?source=kakao&event={event}"
     return f"/project/{project_id}/mobile?source=kakao&event={event}"
 
 

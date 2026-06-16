@@ -26,7 +26,7 @@ The repository currently includes:
 - Agent-to-Agent handoff envelopes, progress tracking, human review status, and final approval gating for PF review orchestration.
 - Structured report export pipeline with Markdown, JSON, print-ready HTML, PDF, and DOCX artifacts.
 - Project-level real pilot input package UI for archiving business plans, land ledgers, feasibility workbooks, land evidence JSON, and approved data-quality overrides before PF review runs.
-- Kakao Login and KakaoTalk notification baseline with mobile review action center, Kakao OAuth callback, REALYTICS session handoff, safe message preview, and audit logging.
+- Kakao Login and KakaoTalk notification baseline with mobile file intake, mobile review action center, Kakao OAuth callback, REALYTICS session handoff, safe message preview, and audit logging.
 
 ## Main Capabilities
 
@@ -446,6 +446,8 @@ Implemented:
 - REALYTICS user/session creation after Kakao callback.
 - Mobile/web session handoff page at `/auth/kakao/session`.
 - Mobile-first Kakao action center at `/project/{project_id}/mobile`.
+- Mobile Kakao file intake page at `/project/{project_id}/kakao-intake`.
+- Kakao event routing for `document_upload_requested`, `document_analysis_started`, and `document_analysis_completed`.
 - Kakao message preview endpoint that blocks sensitive PF data before any future live send path.
 - `kakao_message_preview` and `kakao_login_callback` user activity audit events.
 - Settings UI panel for Kakao login/message readiness and notification policy.
@@ -461,6 +463,7 @@ Key files:
 - `services/api-server/routers/kakao.py`
 - `services/api-server/routers/auth.py`
 - `apps/web/app/project/[id]/mobile/page.tsx`
+- `apps/web/app/project/[id]/kakao-intake/page.tsx`
 - `apps/web/app/auth/kakao/session/page.tsx`
 - `apps/web/app/settings/page.tsx`
 
@@ -470,6 +473,17 @@ APIs:
 - `POST /integrations/kakao/login/authorize-url`
 - `POST /integrations/kakao/messages/preview`
 - `GET /auth/kakao/callback`
+
+Recommended Kakao intake flow:
+
+```text
+KakaoTalk upload request
+  -> REALYTICS Kakao Intake page
+  -> business plan / land ledger / feasibility workbook upload
+  -> Parser, Land, Feasibility, Marketability, and PF Review agents
+  -> KakaoTalk safe summary notification
+  -> detailed report and evidence stay inside REALYTICS
+```
 
 Important limitation:
 
@@ -594,6 +608,7 @@ Notes:
 - Korean Law MCP integration: [`docs/integrations/korean-law-mcp.md`](docs/integrations/korean-law-mcp.md)
 - Kakao Login and KakaoTalk Message integration: [`docs/product/kakao-login-message-integration.md`](docs/product/kakao-login-message-integration.md)
 - Mobile Kakao review UX: [`docs/product/mobile-kakao-review-ux.md`](docs/product/mobile-kakao-review-ux.md)
+- Kakao Intake Workflow: [`docs/product/kakao-intake-workflow.md`](docs/product/kakao-intake-workflow.md)
 - API documentation: [`docs/api.md`](docs/api.md)
 
 ## Verification Notes

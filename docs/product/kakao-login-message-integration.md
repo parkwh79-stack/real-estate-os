@@ -78,6 +78,9 @@ REALYTICS use cases:
 
 | Event | Kakao message content |
 |---|---|
+| `document_upload_requested` | "사업자료 업로드가 필요합니다. REALYTICS에서 파일을 접수하세요." |
+| `document_analysis_started` | "AI 분석을 시작했습니다." |
+| `document_analysis_completed` | "AI 분석이 완료되었습니다. REALYTICS에서 결과를 확인하세요." |
 | `risk_review_required` | "리스크 검토 필요. REALYTICS에서 확인하세요." |
 | `handoff_review_required` | "에이전트 인계사항 검토 필요." |
 | `legal_evidence_required` | "법무/인허가 증빙 보완 필요." |
@@ -98,6 +101,7 @@ Prohibited in message body:
 - Risk memo detail
 
 The message body should contain only a short notification and a link back to REALYTICS. Mobile UX policy is maintained in `docs/product/mobile-kakao-review-ux.md`.
+Kakao-driven file intake policy is maintained in `docs/product/kakao-intake-workflow.md`.
 
 Current implementation baseline:
 
@@ -106,6 +110,7 @@ Current implementation baseline:
 - Preview only by default; no live send without explicit `KAKAO_MESSAGE_MODE=send` and provider approval.
 - Settings UI exposes whether Kakao REST API key, redirect URI, and message token are configured without exposing secret values.
 - If `REALYTICS_WEB_BASE_URL` is configured and a `projectId` is supplied, the message preview generates a mobile-first REALYTICS action URL.
+- `document_upload_requested` and `document_analysis_started` route to the Kakao Intake page: `/project/{project_id}/kakao-intake`.
 - Message preview attempts are recorded in the user activity audit log as `kakao_message_preview`.
 
 ## Adapter Policy

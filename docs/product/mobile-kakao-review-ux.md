@@ -25,10 +25,12 @@ Kakao notification links should land on:
 The current implementation provides:
 
 - `apps/web/app/project/[id]/mobile/page.tsx`
+- `apps/web/app/project/[id]/kakao-intake/page.tsx`
 - `apps/web/app/auth/kakao/session/page.tsx`
 - `recommendedMobilePath` in `POST /integrations/kakao/messages/preview`
 - Default Kakao action URL generation when `REALYTICS_WEB_BASE_URL` is configured
 - Kakao OAuth callback session handoff through `/auth/kakao/session?session_id=...&redirect=...`
+- Kakao Intake Workflow documented in `docs/product/kakao-intake-workflow.md`
 
 ## Mobile Screen Structure
 
@@ -102,6 +104,7 @@ The mobile page is therefore a decision router:
 KakaoTalk notification
     -> Kakao OIDC callback
     -> REALYTICS session connector
+    -> Kakao Intake page when files are needed
     -> Mobile Action Center
     -> One next action
     -> Desktop/deep workflow only when needed
@@ -112,6 +115,7 @@ KakaoTalk notification
 - A Kakao message preview can produce a mobile action path from `projectId`.
 - A Kakao callback can create a REALYTICS session and redirect to the mobile session connector.
 - The mobile session connector stores the verified REALYTICS session through `/auth/me`.
+- A document upload request can route users to `/project/{project_id}/kakao-intake`.
 - The mobile page can load without requiring the desktop orchestration UI.
 - Sensitive PF data is not embedded in Kakao message body.
 - Kakao message preview is recorded as a user activity audit event.
