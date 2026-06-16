@@ -1,5 +1,10 @@
 from fastapi.testclient import TestClient
+from urllib.parse import parse_qs, urlparse
+import base64
+import json
+import time
 
+from integrations.kakao import KAKAO_ISSUER, create_kakao_oauth_state
 from main import app
 
 
@@ -114,3 +119,118 @@ def test_kakao_message_preview_builds_mobile_action_url_from_project_id(monkeypa
     assert body["readyToSend"] is True
     assert body["recommendedMobilePath"] == "/project/pilot/mobile?source=kakao&event=approval_readiness_changed"
     assert body["templateObject"]["link"]["web_url"] == "https://realytics.example/project/pilot/mobile?source=kakao&event=approval_readiness_changed"
+
+
+def test_kakao_authorize_url_generates_signed_state_when_omitted(monkeypatch):
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "kakao-rest-key")
+    monkeypatch.setenv("KAKAO_REDIRECT_URI", "https://realytics.example/auth/kakao/callback")
+    client = TestClient(app)
+
+    response = client.post(
+        "/integrations/kakao/login/authorize-url",
+        json={"redirectPath": "/project/pilot/mobile?source=kakao"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready"] is True
+    assert body["state"].startswith("rk1.")
+    assert "state=rk1." in body["authorizeUrl"]
+
+
+def test_kakao_callback_creates_realytics_session_and_redirects(monkeypatch):
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "kakao-rest-key")
+    monkeypatch.setenv("KAKAO_REDIRECT_URI", "https://api.example/auth/kakao/callback")
+    monkeypatch.setenv("REALYTICS_WEB_BASE_URL", "https://realytics.example")
+    monkeypatch.setenv("KAKAO_DEFAULT_TENANT_ID", "tenant-kakao")
+    monkeypatch.setenv("KAKAO_DEFAULT_ROLE", "reviewer")
+    nonce = "nonce-callback"
+    state = create_kakao_oauth_state(nonce=nonce, redirect_path="/project/pilot/mobile?source=kakao")
+    id_token = _fake_jwt(
+        {
+            "iss": KAKAO_ISSUER,
+            "aud": "kakao-rest-key",
+            "sub": "12345",
+            "email": "kakao.reviewer@example.com",
+            "nickname": "카카오 심사역",
+            "nonce": nonce,
+            "exp": int(time.time()) + 600,
+        }
+    )
+
+    monkeypatch.setattr(
+        "routers.auth.exchange_kakao_authorization_code",
+        lambda code, redirect_uri=None: {
+            "access_token": "access-token",
+            "id_token": id_token,
+            "token_type": "bearer",
+            "scope": "openid profile_nickname account_email",
+        },
+    )
+    monkeypatch.setattr(
+        "routers.auth.fetch_kakao_user_info",
+        lambda access_token: {
+            "id": 12345,
+            "kakao_account": {
+                "email": "kakao.reviewer@example.com",
+                "profile": {"nickname": "카카오 심사역"},
+            },
+        },
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        "/auth/kakao/callback",
+        params={"code": "auth-code", "state": state},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("https://realytics.example/auth/kakao/session")
+    query = parse_qs(urlparse(location).query)
+    session_id = query["session_id"][0]
+    assert query["redirect"][0] == "/project/pilot/mobile?source=kakao"
+
+    me = client.get("/auth/me", headers={"x-realytics-session-id": session_id})
+    assert me.status_code == 200
+    body = me.json()
+    assert body["authenticated"] is True
+    assert body["user"]["userId"] == "kakao.reviewer@example.com"
+    assert body["user"]["tenantId"] == "tenant-kakao"
+    assert body["session"]["provider"] == "kakao"
+
+    logs = client.get("/audit/user-activity", params={"user_id": "kakao.reviewer@example.com", "limit": 20}).json()["logs"]
+    assert any(log["eventType"] == "kakao_login_callback" for log in logs)
+
+
+def test_kakao_message_preview_records_audit_log(monkeypatch):
+    monkeypatch.setenv("REALYTICS_WEB_BASE_URL", "https://realytics.example")
+    client = TestClient(app)
+
+    response = client.post(
+        "/integrations/kakao/messages/preview",
+        headers={"x-realytics-user-id": "kakao-auditor"},
+        json={
+            "eventType": "risk_review_required",
+            "projectId": "pilot",
+            "body": "리스크 검토 필요. REALYTICS에서 확인하세요.",
+        },
+    )
+
+    assert response.status_code == 200
+    logs = client.get("/audit/user-activity", params={"user_id": "kakao-auditor", "limit": 20}).json()["logs"]
+    preview_logs = [log for log in logs if log["eventType"] == "kakao_message_preview"]
+    assert preview_logs
+    assert preview_logs[-1]["projectId"] == "pilot"
+    assert preview_logs[-1]["metadata"]["recommendedMobilePath"] == "/project/pilot/mobile?source=kakao&event=risk_review_required"
+
+
+def _fake_jwt(payload: dict) -> str:
+    header = {"alg": "none", "typ": "JWT"}
+    return f"{_b64url(header)}.{_b64url(payload)}.sig"
+
+
+def _b64url(payload: dict) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")

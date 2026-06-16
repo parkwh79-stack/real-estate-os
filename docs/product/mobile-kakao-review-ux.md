@@ -25,8 +25,10 @@ Kakao notification links should land on:
 The current implementation provides:
 
 - `apps/web/app/project/[id]/mobile/page.tsx`
+- `apps/web/app/auth/kakao/session/page.tsx`
 - `recommendedMobilePath` in `POST /integrations/kakao/messages/preview`
 - Default Kakao action URL generation when `REALYTICS_WEB_BASE_URL` is configured
+- Kakao OAuth callback session handoff through `/auth/kakao/session?session_id=...&redirect=...`
 
 ## Mobile Screen Structure
 
@@ -98,6 +100,8 @@ The mobile page is therefore a decision router:
 
 ```text
 KakaoTalk notification
+    -> Kakao OIDC callback
+    -> REALYTICS session connector
     -> Mobile Action Center
     -> One next action
     -> Desktop/deep workflow only when needed
@@ -106,16 +110,19 @@ KakaoTalk notification
 ## Acceptance Criteria
 
 - A Kakao message preview can produce a mobile action path from `projectId`.
+- A Kakao callback can create a REALYTICS session and redirect to the mobile session connector.
+- The mobile session connector stores the verified REALYTICS session through `/auth/me`.
 - The mobile page can load without requiring the desktop orchestration UI.
 - Sensitive PF data is not embedded in Kakao message body.
+- Kakao message preview is recorded as a user activity audit event.
 - The first viewport shows readiness status and next action.
 - The page uses Korean financial review terminology instead of internal machine labels.
 - The page provides clear escalation into input package, orchestration, and evidence graph workflows.
 
 ## Next Steps
 
-1. Add a mobile-safe authentication callback after Kakao OIDC login is implemented.
-2. Add push notification preview records to the server-side audit log.
-3. Add mobile review actions for simple `approve`, `needs_revision`, and `acknowledge` decisions where policy allows.
-4. Add a QR/deep-link preview in the settings page for pilot testers.
-5. Test on real iOS/Android KakaoTalk in-app browser after deployment.
+1. Add JWKS/RS256 verification before treating Kakao ID tokens as production-grade.
+2. Add mobile review actions for simple `approve`, `needs_revision`, and `acknowledge` decisions where policy allows.
+3. Add a QR/deep-link preview in the settings page for pilot testers.
+4. Test on real iOS/Android KakaoTalk in-app browser after deployment.
+5. Add live-send notification repository records and delivery status when Kakao permissions are approved.

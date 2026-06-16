@@ -52,17 +52,17 @@ Current implementation baseline:
 
 - `GET /integrations/kakao/status`
 - `POST /integrations/kakao/login/authorize-url`
+- `GET /auth/kakao/callback`
 - Existing Bearer-token path can accept Kakao ID token later when OIDC/JWKS verification is enabled.
 - Settings UI panel for Kakao readiness and notification policy.
 - Mobile Kakao action center: `/project/{project_id}/mobile?source=kakao&event={event_type}`.
+- Mobile session connector: `/auth/kakao/session`.
 
 Production hardening still required:
 
 - OIDC discovery fetch
 - JWKS / RS256 signature validation
-- Authorization code callback
-- Token exchange
-- Nonce/state persistence and replay protection
+- Production-grade nonce/state persistence store and replay protection
 - Kakao unlink webhook handling
 
 ## KakaoTalk Message API
@@ -106,6 +106,7 @@ Current implementation baseline:
 - Preview only by default; no live send without explicit `KAKAO_MESSAGE_MODE=send` and provider approval.
 - Settings UI exposes whether Kakao REST API key, redirect URI, and message token are configured without exposing secret values.
 - If `REALYTICS_WEB_BASE_URL` is configured and a `projectId` is supplied, the message preview generates a mobile-first REALYTICS action URL.
+- Message preview attempts are recorded in the user activity audit log as `kakao_message_preview`.
 
 ## Adapter Policy
 
@@ -118,11 +119,12 @@ The Kakao adapter must follow these rules:
 5. Treat KakaoTalk Message API and AlimTalk/BizMessage as separate adapters.
 6. Use official Kakao APIs or approved BizMessage providers only.
 7. Record notification preview/send attempts in the audit log before production enablement.
+8. Treat the current callback ID token parsing as pilot-grade until JWKS/RS256 validation is enabled.
 
 ## Next Engineering Steps
 
 1. Add OIDC/JWKS verification mode to `core/idp.py`.
-2. Add `/auth/kakao/callback` with state/nonce validation and token exchange.
-3. Add notification repository records for message previews/send attempts.
-4. Add BizMessage/AlimTalk provider abstraction for operational alerts.
-5. Add Kakao consent/permission review workflow before enabling live message sends.
+2. Add notification repository records for live send attempts and delivery status.
+3. Add BizMessage/AlimTalk provider abstraction for operational alerts.
+4. Add Kakao consent/permission review workflow before enabling live message sends.
+5. Add Kakao unlink webhook handling and session revocation.

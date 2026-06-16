@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import os
 import re
+import json
+import base64
+import hashlib
+import hmac
+import time
 from typing import Any, Dict, List
+from urllib import request as urllib_request
 from urllib.parse import urlencode
+
+from fastapi import HTTPException
 
 
 KAKAO_OIDC_DISCOVERY_URL = "https://kauth.kakao.com/.well-known/openid-configuration"
 KAKAO_AUTHORIZATION_URL = "https://kauth.kakao.com/oauth/authorize"
+KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
+KAKAO_USERINFO_URL = "https://kapi.kakao.com/v2/user/me"
 KAKAO_ISSUER = "https://kauth.kakao.com"
 
 KAKAO_MESSAGE_ENDPOINTS = {
@@ -101,12 +111,13 @@ def build_kakao_authorize_url(
             "missingConfig": missing,
             "authorizeUrl": None,
         }
+    resolved_state = state or create_kakao_oauth_state(nonce=nonce)
     params = {
         "client_id": rest_api_key,
         "redirect_uri": resolved_redirect_uri,
         "response_type": "code",
         "scope": os.environ.get("KAKAO_LOGIN_SCOPE") or "openid profile_nickname account_email",
-        "state": state,
+        "state": resolved_state,
         "nonce": nonce,
     }
     if prompt:
@@ -117,8 +128,135 @@ def build_kakao_authorize_url(
         "authorizeUrl": f"{KAKAO_AUTHORIZATION_URL}?{urlencode(params)}",
         "redirectUri": resolved_redirect_uri,
         "scope": params["scope"],
-        "state": state,
+        "state": resolved_state,
         "nonce": nonce,
+    }
+
+
+def create_kakao_oauth_state(*, nonce: str, redirect_path: str | None = None, ttl_seconds: int = 600) -> str:
+    """Create a stateless HMAC-protected OAuth state value for Kakao redirects."""
+    issued_at = int(time.time())
+    payload = {
+        "nonce": nonce,
+        "redirectPath": redirect_path or "/dashboard",
+        "iat": issued_at,
+        "exp": issued_at + ttl_seconds,
+    }
+    encoded_payload = _b64url_json(payload)
+    signature = _sign_oauth_state(encoded_payload)
+    return f"rk1.{encoded_payload}.{signature}"
+
+
+def verify_kakao_oauth_state(state: str | None) -> Dict[str, Any]:
+    if not state:
+        raise HTTPException(status_code=400, detail={"error": "missing_state"})
+    parts = str(state).split(".")
+    if len(parts) != 3 or parts[0] != "rk1":
+        if _require_signed_state():
+            raise HTTPException(status_code=400, detail={"error": "invalid_state_format"})
+        return {"legacyState": state, "nonce": None, "redirectPath": "/dashboard", "signatureVerified": False}
+    _, encoded_payload, signature = parts
+    expected = _sign_oauth_state(encoded_payload)
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=400, detail={"error": "invalid_state_signature"})
+    payload = _json_b64url_decode(encoded_payload)
+    exp = payload.get("exp")
+    if exp is not None and int(exp) < int(time.time()):
+        raise HTTPException(status_code=400, detail={"error": "state_expired"})
+    payload["signatureVerified"] = True
+    return payload
+
+
+def exchange_kakao_authorization_code(code: str, *, redirect_uri: str | None = None) -> Dict[str, Any]:
+    rest_api_key = os.environ.get("KAKAO_REST_API_KEY")
+    resolved_redirect_uri = redirect_uri or os.environ.get("KAKAO_REDIRECT_URI")
+    if not rest_api_key or not resolved_redirect_uri:
+        raise HTTPException(status_code=500, detail={"error": "kakao_login_not_configured"})
+    form = {
+        "grant_type": "authorization_code",
+        "client_id": rest_api_key,
+        "redirect_uri": resolved_redirect_uri,
+        "code": code,
+    }
+    client_secret = os.environ.get("KAKAO_CLIENT_SECRET")
+    if client_secret:
+        form["client_secret"] = client_secret
+    return _post_form_json(KAKAO_TOKEN_URL, form)
+
+
+def fetch_kakao_user_info(access_token: str) -> Dict[str, Any]:
+    if not access_token:
+        raise HTTPException(status_code=401, detail={"error": "missing_kakao_access_token"})
+    req = urllib_request.Request(
+        KAKAO_USERINFO_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    with urllib_request.urlopen(req, timeout=10) as response:  # nosec - official Kakao endpoint constant
+        return json.loads(response.read().decode("utf-8"))
+
+
+def build_kakao_identity_records(
+    *,
+    tokens: Dict[str, Any],
+    user_info: Dict[str, Any] | None,
+    state_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    id_token = tokens.get("id_token")
+    claims = _decode_id_token_without_signature(str(id_token)) if id_token else {}
+    if claims:
+        _validate_kakao_claims(claims, expected_nonce=state_payload.get("nonce"))
+
+    kakao_account = (user_info or {}).get("kakao_account") if isinstance(user_info, dict) else {}
+    profile = kakao_account.get("profile") if isinstance(kakao_account, dict) else {}
+    kakao_id = (user_info or {}).get("id") if isinstance(user_info, dict) else None
+    subject = claims.get("sub") or kakao_id
+    if not subject:
+        raise HTTPException(status_code=401, detail={"error": "missing_kakao_subject"})
+    email = claims.get("email") or (kakao_account or {}).get("email")
+    display_name = (
+        claims.get("nickname")
+        or claims.get("name")
+        or (profile or {}).get("nickname")
+        or (str(email) if email else f"kakao-{subject}")
+    )
+    tenant_id = os.environ.get("KAKAO_DEFAULT_TENANT_ID") or os.environ.get("REALYTICS_DEFAULT_TENANT_ID") or "pilot-tenant"
+    role = os.environ.get("KAKAO_DEFAULT_ROLE") or "viewer"
+    user_id = str(email or f"kakao:{subject}")
+    user = {
+        "userId": user_id,
+        "tenantId": tenant_id,
+        "email": str(email) if email else None,
+        "displayName": str(display_name),
+        "role": role,
+        "status": "active",
+        "metadata": {
+            "provider": "kakao",
+            "kakaoSubject": str(subject),
+            "idTokenPresent": bool(id_token),
+            "idTokenSignatureVerification": "not_yet_verified_jwks",
+            "stateSignatureVerified": bool(state_payload.get("signatureVerified")),
+        },
+    }
+    session = {
+        "userId": user_id,
+        "tenantId": tenant_id,
+        "provider": "kakao",
+        "host": "kakao_oauth_callback",
+        "metadata": {
+            "kakaoSubject": str(subject),
+            "tokenType": tokens.get("token_type"),
+            "scope": tokens.get("scope"),
+            "idTokenPresent": bool(id_token),
+            "stateSignatureVerified": bool(state_payload.get("signatureVerified")),
+            "redirectPath": state_payload.get("redirectPath") or "/dashboard",
+        },
+    }
+    return {
+        "user": user,
+        "session": session,
+        "claims": _sanitize_claims(claims),
+        "redirectPath": state_payload.get("redirectPath") or "/dashboard",
     }
 
 
@@ -200,3 +338,77 @@ def _detect_sensitive_fields(payload: Dict[str, Any]) -> List[str]:
                     blocked.append(f"sensitive_text:{key}")
                     break
     return sorted(set(blocked))
+
+
+def _post_form_json(url: str, form: Dict[str, Any]) -> Dict[str, Any]:
+    data = urlencode(form).encode("utf-8")
+    req = urllib_request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded;charset=utf-8"},
+        method="POST",
+    )
+    with urllib_request.urlopen(req, timeout=10) as response:  # nosec - official Kakao endpoint constant
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _validate_kakao_claims(claims: Dict[str, Any], *, expected_nonce: str | None) -> None:
+    if claims.get("iss") and claims.get("iss") != KAKAO_ISSUER:
+        raise HTTPException(status_code=401, detail={"error": "kakao_issuer_mismatch"})
+    audience = os.environ.get("REALYTICS_IDP_AUDIENCE") or os.environ.get("KAKAO_REST_API_KEY")
+    if audience:
+        aud = claims.get("aud")
+        valid = audience in aud if isinstance(aud, list) else aud == audience
+        if not valid:
+            raise HTTPException(status_code=401, detail={"error": "kakao_audience_mismatch"})
+    if expected_nonce and claims.get("nonce") and claims.get("nonce") != expected_nonce:
+        raise HTTPException(status_code=401, detail={"error": "kakao_nonce_mismatch"})
+    exp = claims.get("exp")
+    if exp is not None and int(exp) < int(time.time()):
+        raise HTTPException(status_code=401, detail={"error": "kakao_id_token_expired"})
+
+
+def _decode_id_token_without_signature(token: str) -> Dict[str, Any]:
+    parts = token.split(".")
+    if len(parts) < 2:
+        raise HTTPException(status_code=401, detail={"error": "invalid_kakao_id_token"})
+    return _json_b64url_decode(parts[1])
+
+
+def _sanitize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {"iss", "aud", "sub", "exp", "iat", "nonce", "email", "nickname", "name"}
+    return {key: claims.get(key) for key in allowed if key in claims}
+
+
+def _require_signed_state() -> bool:
+    return (os.environ.get("KAKAO_REQUIRE_SIGNED_STATE") or "false").lower() in {"1", "true", "yes"}
+
+
+def _state_secret() -> str:
+    return os.environ.get("KAKAO_OAUTH_STATE_SECRET") or os.environ.get("REALYTICS_IDP_JWT_SECRET") or "realytics-local-kakao-state"
+
+
+def _sign_oauth_state(encoded_payload: str) -> str:
+    digest = hmac.new(_state_secret().encode("utf-8"), encoded_payload.encode("utf-8"), hashlib.sha256).digest()
+    return _b64url_bytes(digest)
+
+
+def _b64url_json(payload: Dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return _b64url_bytes(raw)
+
+
+def _b64url_bytes(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _json_b64url_decode(value: str) -> Dict[str, Any]:
+    padding = "=" * (-len(value) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(value + padding)
+        decoded = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail={"error": "invalid_kakao_token_encoding"}) from exc
+    if not isinstance(decoded, dict):
+        raise HTTPException(status_code=401, detail={"error": "invalid_kakao_token_payload"})
+    return decoded
