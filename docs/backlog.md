@@ -162,9 +162,9 @@ Updated: 2026-06-12
 | P1 | Calculation | Rejection cure / restructuring plan | Done | Added `RestructuringAgent`, `/scenarios/restructuring`, `scenario_restructuring_plan` orchestration step, and `restructuring_to_credit_review` handoff to quantify senior shortfall cures, DSRA/equity alternatives, unsold LTV cure amount, additional collateral value, and source-located approval path before rerunning Credit Review |
 | P1 | Workflow | Unsold LTV / senior shortfall cure selection | Done | Added JSON/SQLite `restructuring_cures` records, list/upsert APIs, audit event logging, active cure hydration into PF review orchestration, adopted-cure summary in `RestructuringAgent`, handoff propagation, regression tests, and an orchestration-page UI for saving source-backed senior reduction, Equity/DSRA, additional collateral, forward-sale/refinancing, or repayment-waterfall strengthening cures |
 | P1 | QA | Automated PDF visual QA | Done | Added `VisualQAAgent` for A4 structure, margin overflow, overlap, empty-page, approval-block, and baseline visual regression checks integrated into orchestration quality gate |
-| P1 | Logistics | Logistics module | Planned | Special fields & formulas |
-| P1 | Report | Report template editor | Planned | |
-| P1 | QA | Parser regression fixtures | Planned | Anonymized business plan/basic architectural plan documents for parser QA |
+| P1 | Logistics | Logistics module | Done | Development Feasibility Agent now returns logistics-specific NOI, cap-rate Exit value, forward-sale LTV, appraisal LTV, tenant stability, location/spec scores, formulas, and risk flags for logistics assets |
+| P1 | Report | Report template editor | Done | Added project-scoped report template CRUD APIs with version history, editable Phase 11 sections, variables/style/approval blocks, audit event logging, and server persistence through project records |
+| P1 | QA | Parser regression fixtures | Done | Added anonymized parser regression fixture cases for business plan and basic architectural plan QA with required non-market source locator paths and regression tests |
 | P1 | API | 20-section report generation API | Done | `/reports/generate` returns structured Phase 11 sections plus Markdown compatibility output |
 | P1 | Agent | Marketability subscription and unsold stats | Planned | Collect subscription competition, contract rate, unsold inventory, and local supply statistics |
 | P1 | Agent | Marketability absorption model | Planned | Predict monthly absorption using comparable cases, supply, price, and product type |

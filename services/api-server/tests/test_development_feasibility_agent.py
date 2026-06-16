@@ -13,6 +13,11 @@ def load_example():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_logistics_example():
+    path = Path(__file__).parents[1] / "data" / "examples" / "dudong_lg_logistics_pf.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_development_feasibility_agent_builds_developer_and_pf_metrics():
     result = DevelopmentFeasibilityAgent().analyze(load_example())
 
@@ -48,6 +53,19 @@ def test_development_feasibility_agent_builds_developer_and_pf_metrics():
     assert result["cashFlowRunResult"]["pfDrawSchedule"]
     assert FeasibilityStudyV2.model_validate(result["feasibilityStudyV2Draft"]).metrics.development_profit == 30_000_000_000
     assert result["sensitivity"]
+
+
+def test_development_feasibility_agent_adds_logistics_analysis():
+    result = DevelopmentFeasibilityAgent().analyze(load_logistics_example())
+
+    logistics = result["logisticsAnalysis"]
+    assert logistics["applicable"] is True
+    assert logistics["schemaVersion"] == "realytics-logistics-analysis-v1"
+    assert logistics["lease"]["annualNoi"] == 9_720_000_000
+    assert logistics["exit"]["forwardSaleLtv"] == 100_000_000_000 / 194_400_000_000
+    assert logistics["tenant"]["stabilityScore"] >= 80
+    assert logistics["score"] >= 80
+    assert result["feasibilityStudyV2Draft"]["raw_import"]["logisticsAnalysis"]["applicable"] is True
 
 
 def test_development_feasibility_endpoint_returns_analysis():

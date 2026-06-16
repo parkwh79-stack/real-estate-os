@@ -67,7 +67,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/development-feasibility/analyze`
 - **Description**: Analyze developer-side project feasibility from business plan or architectural plan data.
 - **Request Body**: Optional override containing `architectural_plan`, `sales_assumptions`, `cost_assumptions`, `feasibility_input`, and `pf_structure`.
-- **Response**: Architectural program, revenue, costs, developer returns, PF readiness, downstream engine readiness, asset calculation profiles, FeasibilityStudyV2 integration status, a schema-valid `feasibilityStudyV2Draft`, asset-aware `cashFlowRunRequestDraft`, baseline `cashFlowRunResult`, sensitivity, and data quality. The agent acts as the feasibility orchestrator and delegates monthly cash flow to Cash Flow Engine while Waterfall, Unsold LTV, and tranche recovery remain Calculation Scenario Engine workflows.
+- **Response**: Architectural program, revenue, costs, developer returns, PF readiness, downstream engine readiness, asset calculation profiles, logistics analysis when `project.type=logistics`, FeasibilityStudyV2 integration status, a schema-valid `feasibilityStudyV2Draft`, asset-aware `cashFlowRunRequestDraft`, baseline `cashFlowRunResult`, sensitivity, and data quality. The agent acts as the feasibility orchestrator and delegates monthly cash flow to Cash Flow Engine while Waterfall, Unsold LTV, and tranche recovery remain Calculation Scenario Engine workflows. Logistics analysis includes NOI, cap-rate Exit value, forward-sale LTV, appraisal LTV, tenant stability, location/spec scores, formulas, and logistics risk flags.
 
 ### `POST /projects/{project_id}/land-ledger/analyze`
 - **Description**: Upload and analyze a legacy Korean land ledger `.xls` file.
@@ -104,6 +104,20 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: `{ "approvedBy": "risk_reviewer", "comment": "...", "riskReportImportDraft": {...} }`
 - **Response**: Approval metadata, persisted Risk Register record, imported report sections, and the updated project record. The Risk Register is saved using the workbook `importId` as the run ID.
 - **Audit**: Emits `risk_report_workbook_import_approved` user activity.
+
+### `GET /projects/{project_id}/report-templates`
+- **Description**: List editable report templates saved on a project.
+- **Response**: `{ "schemaVersion": "realytics-report-template-list-v1", "projectId": "...", "templates": [...] }`
+
+### `POST /projects/{project_id}/report-templates`
+- **Description**: Create or update a project-scoped report template for Phase 11 or future report variants.
+- **Request Body**: `{ "templateId": "phase11-custom", "name": "...", "sections": [...], "style": {}, "variables": {}, "approvalBlock": {}, "editedBy": "..." }`
+- **Response**: Saved `realytics-report-template-v1` template, version number, history, and updated project record.
+- **Audit**: Emits `report_template_upserted` user activity.
+
+### `GET /projects/{project_id}/report-templates/{template_id}`
+- **Description**: Fetch one saved report template.
+- **Response**: `realytics-report-template-v1`.
 
 ### `POST /projects/{project_id}/land-ledger/enrich`
 - **Description**: Enrich a parsed land ledger with batch PNU, cadastral characteristics, official land price, and registry/encumbrance evidence.

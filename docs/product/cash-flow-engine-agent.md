@@ -550,6 +550,31 @@ Important rule:
 }
 ```
 
+Current baseline implementation:
+
+- `DevelopmentFeasibilityAgent` detects `project.type=logistics`.
+- The logistics analysis uses `services/api-server/core/logistics.py` helper formulas.
+- Output is attached as `logisticsAnalysis` and preserved in `feasibilityStudyV2Draft.raw_import.logisticsAnalysis`.
+
+Implemented formula fields:
+
+| Field | Formula |
+| --- | --- |
+| NOI | `leasable_area_py * rent_per_py * 12 - operating_expenses` |
+| Cap Rate Exit Value | `NOI / cap_rate` |
+| Forward Sale LTV | `pf_amount / forward_sale_price` |
+| Appraisal LTV | `pf_amount / appraisal_value` |
+| Tenant Stability Score | credit rating score + lease term score |
+| Logistics Location Score | IC distance and port distance adjustment |
+| Spec Adequacy Score | clear height, floor load, and ramp availability |
+
+Remaining logistics hardening:
+
+- Add lease/forward-sale/refinancing monthly cash-flow schedules.
+- Add forward-sale closing condition evidence and buyer funding evidence.
+- Add logistics-specific report paragraphs and covenant/EOD templates.
+- Add UI panels for lease, forward buyer, cap rate, and warehouse spec review.
+
 ## 7. Monthly Cash Flow Output
 
 ```json

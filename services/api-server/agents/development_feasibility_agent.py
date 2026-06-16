@@ -10,6 +10,16 @@ from core.calculations import (
     calculate_profit_margin,
     sqm_to_py,
 )
+from core.logistics import (
+    assess_logistics_risks,
+    calculate_appraisal_ltv,
+    calculate_exit_value,
+    calculate_forward_sale_ltv,
+    calculate_location_score,
+    calculate_logistics_noi,
+    calculate_spec_adequacy_score,
+    calculate_tenant_stability_score,
+)
 from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION
 
 
@@ -87,6 +97,7 @@ class DevelopmentFeasibilityAgent:
         pf["requiresUnsoldLtvMatrix"] = engine_readiness["requiresUnsoldLtvMatrix"]
         pf["requiresWaterfallAnalysis"] = engine_readiness["requiresWaterfallAnalysis"]
         asset_profile_summary = self._asset_profile_summary(project_data)
+        logistics_analysis = self._logistics_analysis(project_data, pf_structure)
         feasibility_v2_draft = self._feasibility_study_v2_draft(
             project_data,
             program,
@@ -96,6 +107,7 @@ class DevelopmentFeasibilityAgent:
             pf,
             sensitivity,
             asset_profile_summary,
+            logistics_analysis,
         )
         cash_flow_request_draft = build_cash_flow_run_request_from_feasibility_study(feasibility_v2_draft)
         cash_flow_run_result = run_cash_flow_engine(cash_flow_request_draft)
@@ -112,6 +124,7 @@ class DevelopmentFeasibilityAgent:
             "sensitivity": sensitivity,
             "downstreamEngineReadiness": engine_readiness,
             "assetCalculationProfiles": asset_profile_summary,
+            "logisticsAnalysis": logistics_analysis,
             "feasibilityStudyV2Integration": self._feasibility_study_v2_integration(project_data, feasibility_v2_draft),
             "feasibilityStudyV2Draft": feasibility_v2_draft,
             "cashFlowRunRequestDraft": cash_flow_request_draft,
@@ -384,6 +397,7 @@ class DevelopmentFeasibilityAgent:
         pf: Dict[str, Any],
         sensitivity: List[Dict[str, Any]],
         asset_profile_summary: Dict[str, Any],
+        logistics_analysis: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         project = project_data.get("project", {})
         land = project_data.get("land", {})
@@ -449,6 +463,105 @@ class DevelopmentFeasibilityAgent:
                 "sourceAnalysisType": "developer_and_pf_feasibility",
                 "note": "Draft mapping for FeasibilityStudyV2; workbook cell provenance is added by the workbook adapter.",
                 "assetCalculationProfiles": asset_profile_summary,
+                "logisticsAnalysis": logistics_analysis or {},
+            },
+        }
+
+    def _logistics_analysis(
+        self,
+        project_data: Dict[str, Any],
+        pf_structure: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        project = project_data.get("project", {})
+        if self._asset_type(project.get("type")) != "logistics":
+            return {
+                "applicable": False,
+                "reason": "Project is not classified as a logistics asset.",
+            }
+
+        pf_amount = sum(float(item.get("amount") or 0) for item in pf_structure)
+        leasable_area_py = float(project.get("leasable_area_py") or project_data.get("logistics", {}).get("leasable_area_py") or 0)
+        rent_per_py = float(project.get("rent_per_py") or project_data.get("logistics", {}).get("rent_per_py") or 0)
+        operating_expenses = float(project.get("operating_expenses") or project_data.get("logistics", {}).get("operating_expenses") or 0)
+        cap_rate = float(project.get("cap_rate") or project_data.get("logistics", {}).get("cap_rate") or 0)
+        noi = float(project.get("noi") or calculate_logistics_noi(leasable_area_py, rent_per_py, operating_expenses))
+        exit_value = calculate_exit_value(noi, cap_rate)
+        forward_sale_price = float(project.get("forward_sale_price") or project_data.get("logistics", {}).get("forward_sale_price") or 0)
+        appraisal_value = float(project.get("appraisal_value") or project_data.get("logistics", {}).get("appraisal_value") or 0)
+        tenant_score = calculate_tenant_stability_score(
+            str(project.get("tenant_credit_rating") or ""),
+            int(project.get("lease_term_months") or 0),
+        )
+        location_score = calculate_location_score(
+            float(project.get("distance_to_ic_km") or 999),
+            float(project.get("distance_to_port_km") or 999),
+        )
+        spec_score = calculate_spec_adequacy_score(
+            float(project.get("clear_height") or 0),
+            float(project.get("floor_load") or 0),
+            bool(project.get("ramp_available")),
+        )
+        score = round((tenant_score * 0.4) + (location_score * 0.3) + (spec_score * 0.3), 2)
+        forward_sale_ltv = calculate_forward_sale_ltv(pf_amount, forward_sale_price)
+        appraisal_ltv = calculate_appraisal_ltv(pf_amount, appraisal_value) if appraisal_value else None
+        risk_flags = []
+        if forward_sale_price <= 0:
+            risk_flags.append("FORWARD_SALE_PRICE_MISSING")
+        elif forward_sale_ltv > 0.80:
+            risk_flags.append("FORWARD_SALE_LTV_HIGH")
+        if cap_rate <= 0:
+            risk_flags.append("CAP_RATE_MISSING")
+        if tenant_score < 70:
+            risk_flags.append("TENANT_STABILITY_WEAK")
+        if spec_score < 70:
+            risk_flags.append("LOGISTICS_SPEC_WEAK")
+
+        return {
+            "applicable": True,
+            "schemaVersion": "realytics-logistics-analysis-v1",
+            "revenueMode": "lease_forward_sale_refinancing",
+            "tenant": {
+                "name": project.get("tenant_name"),
+                "creditRating": project.get("tenant_credit_rating"),
+                "leaseTermMonths": project.get("lease_term_months"),
+                "stabilityScore": tenant_score,
+            },
+            "lease": {
+                "leasableAreaPy": leasable_area_py,
+                "rentPerPy": rent_per_py,
+                "annualNoi": noi,
+                "operatingExpenses": operating_expenses,
+            },
+            "exit": {
+                "capRate": cap_rate,
+                "capRateExitValue": exit_value,
+                "forwardSalePrice": forward_sale_price,
+                "forwardBuyer": project.get("forward_buyer"),
+                "forwardSaleLtv": forward_sale_ltv,
+                "appraisalValue": appraisal_value or None,
+                "appraisalLtv": appraisal_ltv,
+            },
+            "location": {
+                "distanceToIcKm": project.get("distance_to_ic_km"),
+                "distanceToPortKm": project.get("distance_to_port_km"),
+                "score": location_score,
+            },
+            "spec": {
+                "clearHeight": project.get("clear_height"),
+                "floorLoad": project.get("floor_load"),
+                "dockCount": project.get("dock_count"),
+                "rampAvailable": bool(project.get("ramp_available")),
+                "coldChainSpec": bool(project.get("cold_chain_spec")),
+                "score": spec_score,
+            },
+            "score": score,
+            "riskFlags": risk_flags,
+            "riskItems": assess_logistics_risks(project),
+            "formulas": {
+                "NOI": "leasable_area_py * rent_per_py * 12 - operating_expenses",
+                "CapRateExitValue": "NOI / cap_rate",
+                "ForwardSaleLTV": "pf_amount / forward_sale_price",
+                "AppraisalLTV": "pf_amount / appraisal_value",
             },
         }
 

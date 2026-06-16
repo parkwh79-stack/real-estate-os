@@ -73,6 +73,11 @@ from use_cases.project_management import (
     update_project_use_case,
 )
 from use_cases.report_generation import export_saved_report_use_case, generate_and_save_pf_report_use_case
+from use_cases.report_templates import (
+    get_report_template_use_case,
+    list_report_templates_use_case,
+    upsert_report_template_use_case,
+)
 from use_cases.source_documents import (
     archive_source_document_use_case,
     delete_project_upload_archive_use_case,
@@ -1461,6 +1466,47 @@ def get_report(project_id: str, report_id: str):
         "report_markdown": record.get("report_markdown"),
         "exports": [repo.export_metadata(export) for export in record.get("exports", [])],
     }
+
+@router.get("/{project_id}/report-templates")
+def list_report_templates(project_id: str):
+    try:
+        return list_report_templates_use_case(project_repository(), project_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+@router.post("/{project_id}/report-templates")
+def upsert_report_template(project_id: str, request: Request, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "report:export")
+    try:
+        result = upsert_report_template_use_case(
+            project_repository(),
+            project_id,
+            input_data,
+            edited_by=input_data.get("editedBy") or input_data.get("edited_by") or user_id_from_request(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="report_template_upserted",
+        project_id=project_id,
+        metadata={
+            "templateId": result.get("template", {}).get("templateId"),
+            "reportType": result.get("template", {}).get("reportType"),
+            "version": result.get("template", {}).get("version"),
+            "authorization": authz.get("authorization"),
+        },
+    )
+    return result
+
+@router.get("/{project_id}/report-templates/{template_id}")
+def get_report_template(project_id: str, template_id: str):
+    try:
+        return get_report_template_use_case(project_repository(), project_id, template_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @router.post("/{project_id}/reports/{report_id}/exports")
 def create_report_export(project_id: str, report_id: str, request: Request, input_data: Dict[str, Any] | None = None):

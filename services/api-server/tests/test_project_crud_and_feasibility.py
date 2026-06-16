@@ -196,3 +196,57 @@ def test_risk_report_workbook_approve_persists_register_and_sections(tmp_path, m
     assert fetched["_meta"]["latestRiskReportWorkbookImportId"] == "risk-import-test"
 
     client.delete(f"/projects/{project_id}")
+
+
+def test_report_template_editor_api_persists_project_template(monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Template Editor Project"}}).json()
+    project_id = created["project"]["id"]
+
+    upsert = client.post(
+        f"/projects/{project_id}/report-templates",
+        json={
+            "templateId": "phase11-custom",
+            "name": "Custom Phase 11 Template",
+            "editedBy": "report-editor",
+            "sections": [
+                {
+                    "sectionKey": "marketability_analysis",
+                    "title": "분양성 검토",
+                    "sourceAgents": ["MarketabilityAgent"],
+                    "templateText": "분양가와 흡수율을 근거자료와 함께 기재한다.",
+                }
+            ],
+        },
+    )
+
+    assert upsert.status_code == 200
+    body = upsert.json()
+    assert body["template"]["templateId"] == "phase11-custom"
+    assert body["template"]["sections"][0]["title"] == "분양성 검토"
+    assert body["template"]["version"] == 1
+
+    listed = client.get(f"/projects/{project_id}/report-templates")
+    assert listed.status_code == 200
+    assert listed.json()["templates"][0]["templateId"] == "phase11-custom"
+
+    fetched = client.get(f"/projects/{project_id}/report-templates/phase11-custom")
+    assert fetched.status_code == 200
+    assert fetched.json()["name"] == "Custom Phase 11 Template"
+
+    updated = client.post(
+        f"/projects/{project_id}/report-templates",
+        json={
+            "templateId": "phase11-custom",
+            "name": "Custom Phase 11 Template v2",
+            "editedBy": "report-editor",
+            "changeMemo": "Update wording",
+            "sections": ["cover", "marketability_analysis"],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["template"]["version"] == 2
+    assert updated.json()["template"]["history"][0]["version"] == 1
+
+    client.delete(f"/projects/{project_id}")

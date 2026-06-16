@@ -1,0 +1,145 @@
+{
+  "schemaVersion": "realytics-parser-regression-fixtures-v1",
+  "fixtureMeta": {
+    "anonymized": true,
+    "purpose": "Parser QA for uploaded business plan and basic architectural plan documents without storing real customer documents.",
+    "sourcePolicy": "Synthetic anonymized text only. Do not store raw customer PDFs or personally identifiable data in Git."
+  },
+  "cases": [
+    {
+      "caseId": "parser-business-plan-mixed-use-001",
+      "documentType": "business_plan",
+      "rawText": "--- PAGE 1 ---\nProject: Anonymized Mixed-use PF\nLocation: Seoul Sample District\nTotal revenue: KRW 150,000,000,000\nPF loan: KRW 70,000,000,000\n--- PAGE 2 ---\nLand area: 4,500 sqm\nApplied FAR: 720%\nCompletion: 2029-12\nDrawdown condition: permit approval completed.",
+      "expectedProjectData": {
+        "project": {
+          "name": "Anonymized Mixed-use PF",
+          "type": "mixed_use"
+        },
+        "land": {
+          "address": "Seoul Sample District",
+          "area_sqm": 4500
+        },
+        "regulation": {
+          "applied_far": 720
+        },
+        "feasibility_input": {
+          "total_revenue": 150000000000
+        },
+        "pf_structure": [
+          {
+            "tranche": "Tr.A",
+            "amount": 70000000000,
+            "priority": 1
+          }
+        ],
+        "schedule": {
+          "completion": "2029-12"
+        },
+        "covenants": {
+          "drawdown_conditions": [
+            "permit approval completed"
+          ]
+        },
+        "source_locators": {
+          "project.name": {
+            "pageNumber": 1,
+            "fieldName": "project.name",
+            "textExcerpt": "Project: Anonymized Mixed-use PF",
+            "confidence": 0.95
+          },
+          "land.area_sqm": {
+            "pageNumber": 2,
+            "fieldName": "land.area_sqm",
+            "textExcerpt": "Land area: 4,500 sqm",
+            "confidence": 0.95
+          },
+          "regulation.applied_far": {
+            "pageNumber": 2,
+            "fieldName": "regulation.applied_far",
+            "textExcerpt": "Applied FAR: 720%",
+            "confidence": 0.9
+          },
+          "pf_structure[0].amount": {
+            "pageNumber": 1,
+            "fieldName": "pf_structure[0].amount",
+            "textExcerpt": "PF loan: KRW 70,000,000,000",
+            "confidence": 0.9
+          },
+          "schedule.completion": {
+            "pageNumber": 2,
+            "fieldName": "schedule.completion",
+            "textExcerpt": "Completion: 2029-12",
+            "confidence": 0.9
+          },
+          "covenants.drawdown_conditions": {
+            "pageNumber": 2,
+            "fieldName": "covenants.drawdown_conditions",
+            "textExcerpt": "Drawdown condition: permit approval completed.",
+            "confidence": 0.85
+          }
+        }
+      },
+      "requiredSourceLocatorPaths": [
+        "project.name",
+        "land.area_sqm",
+        "regulation.applied_far",
+        "pf_structure[0].amount",
+        "schedule.completion",
+        "covenants.drawdown_conditions"
+      ]
+    },
+    {
+      "caseId": "parser-basic-architectural-plan-001",
+      "documentType": "basic_architectural_plan",
+      "rawText": "--- PAGE 1 ---\nGross floor area: 52,000 sqm\nSaleable area: 37,000 sqm\nUnits: 320\nParking: 410\n--- PAGE 2 ---\nConstruction start: 2027-03\nCompletion: 2029-09",
+      "expectedProjectData": {
+        "project": {
+          "name": "Anonymized Architectural Plan",
+          "type": "residential"
+        },
+        "architectural_plan": {
+          "gross_floor_area_sqm": 52000,
+          "saleable_area_sqm": 37000,
+          "unit_count": 320,
+          "parking_count": 410
+        },
+        "schedule": {
+          "construction_start": "2027-03",
+          "completion": "2029-09"
+        },
+        "source_locators": {
+          "architectural_plan.gross_floor_area_sqm": {
+            "pageNumber": 1,
+            "fieldName": "architectural_plan.gross_floor_area_sqm",
+            "textExcerpt": "Gross floor area: 52,000 sqm",
+            "confidence": 0.95
+          },
+          "architectural_plan.saleable_area_sqm": {
+            "pageNumber": 1,
+            "fieldName": "architectural_plan.saleable_area_sqm",
+            "textExcerpt": "Saleable area: 37,000 sqm",
+            "confidence": 0.95
+          },
+          "architectural_plan.unit_count": {
+            "pageNumber": 1,
+            "fieldName": "architectural_plan.unit_count",
+            "textExcerpt": "Units: 320",
+            "confidence": 0.9
+          },
+          "schedule.completion": {
+            "pageNumber": 2,
+            "fieldName": "schedule.completion",
+            "textExcerpt": "Completion: 2029-09",
+            "confidence": 0.9
+          }
+        }
+      },
+      "requiredSourceLocatorPaths": [
+        "architectural_plan.gross_floor_area_sqm",
+        "architectural_plan.saleable_area_sqm",
+        "architectural_plan.unit_count",
+        "schedule.completion"
+      ]
+    }
+  ]
+}
