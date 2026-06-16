@@ -463,6 +463,7 @@ Purpose:
 - 2026-05-18 update: Marketability source metadata now preserves source name/type/evidence ID/collected date/base date/license note/confidence plus complete/partial status and missing-field summaries across normalized comparables and market evidence records.
 - 2026-05-18 update: MarketEvidenceAgent now adds field-level `fieldSourceLocators`, record `locatorCoverage`, and summary `fieldLocatorCoverage` for product mix, sale comparable, and rent comparable evidence, including page/table/row inference from evidence IDs.
 - 2026-05-26 update: Marketability pricing-basis hardening now derives proposed price per py from product mix total revenue/area where possible and emits `PROPOSED_PRICE_BASIS_MISSING` instead of `NO_COMPARABLE_DATA` when comparable evidence exists but the target project's pricing basis is missing.
+- 2026-06-16 update: upload parsing now attaches `realytics-parser-field-provenance-v1` to `_meta.parserFieldProvenance`, `parser_field_source_locators`, and `parser_locator_coverage` for non-market fields such as project, land, regulation, architectural plan, cost, feasibility, schedule, PF, developer/contractor, and covenants. Missing locators are explicitly listed without fabricating document evidence.
 - Serviced residence is treated as applicable when it is a strata-sale/presale asset; operating hotel/lodging remains non-saleable and should be handled by a separate operating asset Agent.
 
 API:
@@ -586,7 +587,7 @@ Latest verification baseline:
 - Web type check: passed
 - Web build: passed
 - Local dev servers: stopped as of 2026-05-13 after the user requested shutdown.
-- Current bundled Python runtime does not include `pytest` or `fastapi`, so the latest endpoint pytest run and FastAPI TestClient smoke could not be executed in this session.
+- 2026-06-16 targeted parser/export regression: `11 passed` for parser field provenance, feasibility workbook validation/import, and workbook approval persistence using `.runtime/api-venv`.
 
 ## Current Limitations
 
@@ -597,7 +598,7 @@ Latest verification baseline:
 - Korean Law MCP sidecar integration is complete for P0. Direct API-server MCP client automation is optional future hardening, not a blocker for the current connector.
 - ParserAgent requires either `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for real server-side document extraction; otherwise OpenAI/Anthropic modes return explicit mock metadata.
 - Claude Desktop's local host model cannot be invoked from inside the MCP server process. In `claude_desktop` mode the MCP server returns a `host_llm_required` payload so Claude Desktop can perform the extraction in the conversation.
-- Source-level provenance per parsed field is not yet persisted.
+- Parser field-level provenance is attached to uploaded business plan parse results for non-market fields; future hardening is to surface these locators in a dedicated frontend citation view and require page/table/API-row precision before final credit approval.
 - Markdown, JSON, print-ready HTML, PDF, and DOCX report exports are implemented from the same structured Phase 11 report record.
 - Calculation Scenario Engine: fully implemented and documented. Features schemas (`schemas/scenario.py`), coordination wrapper (`ScenarioEngineAgent` inside `agents/scenario_engine_agent.py`), API endpoints (`/scenarios/waterfall`, `/scenarios/unsold-ltv-matrix`, `/scenarios/recovery`, `/scenarios/restructuring`), SQLite persistence, risk flag compilation, and Korean Hana-style PF review report synthesis.
 - Restructuring Agent: implemented and exposed through `/scenarios/restructuring` to convert rejection-driving scenario flags into quantified cure actions before rerunning PF review. It does not override Credit Review; it provides the numerical path for senior exposure reduction, DSRA/equity support, PF exposure reduction, collateral enhancement, forward sale, bulk sale, or refinancing evidence.
@@ -611,13 +612,13 @@ Latest verification baseline:
 
 - Harden PDF/DOCX visual QA with representative long legal clauses and real institution templates.
 - Add first-class per-user auth/session storage instead of env/header-only `user_id` linkage.
-- Extend parser provenance from market evidence fields to non-market extracted fields so land, regulation, cost, schedule, PF, and covenant values can be traced back to uploaded documents.
+- Surface parser field provenance in report QA, Legal Review, and Credit Review screens so missing source locators become visible review tasks.
 
 ### P1
 
 - Run the first real pilot using `docs/product/pilot-project-runbook.md` and replace template evidence with the user's actual anonymized project package.
-- Add Excel-style developer feasibility export.
-- Generate/import the `realytics-fs-xlsx-v1` feasibility workbook with formulas preserved.
+- Extend the formula-auditable developer feasibility workbook with editable analyst assumption controls while preserving protected formula sheets.
+- Keep expanding `realytics-fs-xlsx-v1-draft` import coverage beyond core metrics and product-level monthly collection schedules into full product mix, cost, financing, and covenant tables.
 - Add legacy adapter for the Bonri-style Korean workbook cell map so existing 사업수지 files can import into `FeasibilityStudyV2`.
 - Add persistent land ledger import records, approval workflow, evidence tables, and backend batch PNU/official price/registry enrichment for imported land ledger parcels.
 - Add real anonymized business plan and basic architectural plan fixtures for parser and feasibility regression tests.

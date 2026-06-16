@@ -35,7 +35,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Description**: Upload a PDF business plan and extract project data with the configured server-side AI provider.
 - **Headers**: Optional `X-REALYTICS-USER-ID` and `X-REALYTICS-AI-PROVIDER` (`openai`, `anthropic`, or `claude_desktop`).
 - **Request Body**: Multipart form with `file`.
-- **Response**: Updated project object with parser `_meta.ai_connection` and `_meta.upload` provenance. Upload provenance includes original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, archive ID, archive path, archive hash algorithm, integrity status, and source document download URL. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
+- **Response**: Updated project object with parser `_meta.ai_connection`, `_meta.upload`, `_meta.parserFieldProvenance`, `parser_field_source_locators`, and `parser_locator_coverage` provenance. Upload provenance includes original file name, SHA-256 hash, content type, file size, upload timestamp, parser version, archive ID, archive path, archive hash algorithm, integrity status, and source document download URL. Parser field provenance covers non-market fields such as project, land, regulation, architectural plan, cost, feasibility, schedule, PF, developer/contractor, and covenants; missing locators are reported without fabricating evidence. In `claude_desktop` mode the response can include `host_llm_extraction` because the API server cannot access the Claude Desktop host model directly.
 
 ### `POST /projects/{project_id}/upload-and-run`
 - **Description**: Upload a PDF business plan, parse/update the project, then immediately run PF review orchestration and save the generated report.
@@ -78,7 +78,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/feasibility-workbook/validate`
 - **Description**: Archive and validate a formula-driven feasibility workbook before accepting it as a canonical FeasibilityStudyV2 import source.
 - **Request Body**: Multipart `.xlsx` or `.xlsm` file upload.
-- **Response**: `{ "project_id": "...", "upload": {...}, "validation": {...}, "feasibilityStudyV2Draft": {...} }` with source-document archive metadata, workbook profile, required sheet checks, key cells, formula integrity, reconciliation checks, schema readiness, recommendations, and a conservative FeasibilityStudyV2 import draft when the workbook profile is supported. Uploaded workbooks are archived as `documentType=feasibility_workbook` source documents.
+- **Response**: `{ "project_id": "...", "upload": {...}, "validation": {...}, "feasibilityStudyV2Draft": {...} }` with source-document archive metadata, workbook profile, required sheet checks, key cells, formula integrity, reconciliation checks, schema readiness, recommendations, and a conservative FeasibilityStudyV2 import draft when the workbook profile is supported. For `realytics-fs-xlsx-v1-draft` formula exports, the draft preserves core metrics plus `raw_import.productMonthlySalesRateScenarios` from the product-level monthly collection schedule. Uploaded workbooks are archived as `documentType=feasibility_workbook` source documents.
 - **Note**: Validation is read-only. The returned draft is not canonical until a reviewer approves it through `/feasibility-workbook/approve`.
 
 ### `POST /projects/{project_id}/feasibility-workbook/approve`

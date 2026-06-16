@@ -10,6 +10,7 @@ from agents.ai_connection import resolve_ai_context
 from agents.feasibility_workbook_importer import import_feasibility_study_from_workbook
 from agents.feasibility_workbook_validator import validate_feasibility_workbook
 from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
+from agents.parser_provenance import attach_parser_field_provenance
 from agents.risk_report_workbook_importer import import_risk_report_workbook
 
 from core.authz import authorize_request
@@ -454,6 +455,11 @@ async def parse_uploaded_business_plan(
         parsed_data["source_documents"].append(upload_meta)
 
         attach_document_market_evidence_metadata(parsed_data, upload_meta)
+        attach_parser_field_provenance(
+            parsed_data,
+            upload_meta=upload_meta,
+            parser_version=PARSER_AGENT_VERSION,
+        )
 
         return parsed_data
     finally:

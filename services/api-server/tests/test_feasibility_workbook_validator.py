@@ -104,6 +104,37 @@ def _build_realytics_formula_export_workbook(
     workbook["03B_PF인출상환"]["C11"] = 0
     workbook["03C_Tranche상환"]["L9"] = 0
     workbook["04B_할인Trigger"]["C16"] = 1490
+    collection = workbook["02B_수납스케줄"]
+    collection["A3"] = "상품유형"
+    collection["B3"] = "납입단계"
+    collection["C3"] = "수납월"
+    collection["D3"] = "납입비율"
+    collection["E3"] = "상품별 분양수입"
+    collection["F3"] = "단계별 수납액"
+    for index in range(45):
+        collection.cell(3, 7 + index).value = f"M{index + 1}"
+    collection["A4"] = "아파트"
+    collection["B4"] = "계약금"
+    collection["C4"] = 10
+    collection["D4"] = 0.1
+    collection["E4"] = 1267.3
+    collection["F4"] = 126.73
+    collection.cell(4, 16).value = 126.73
+    collection["A5"] = "아파트"
+    collection["B5"] = "잔금"
+    collection["C5"] = 42
+    collection["D5"] = 0.3
+    collection["E5"] = 1267.3
+    collection["F5"] = 380.19
+    collection.cell(5, 48).value = 380.19
+    collection["A6"] = "오피스텔"
+    collection["B6"] = "계약금"
+    collection["C6"] = 10
+    collection["D6"] = 0.1
+    collection["E6"] = 245.91
+    collection["F6"] = 24.591
+    collection.cell(6, 16).value = 24.591
+    collection["A7"] = "합계"
 
     named_ranges = {
         "realytics_fs_schema_version": "'07_Import계약'!$B$23",
@@ -253,3 +284,9 @@ def test_import_realytics_formula_export_workbook_to_feasibility_study_v2(tmp_pa
     assert study["metrics"]["total_revenue"] == 165597000000
     assert study["metrics"]["total_cost"] is not None
     assert study["raw_import"]["schemaVersion"] == "realytics-fs-xlsx-v1-draft"
+    scenarios = study["raw_import"]["productMonthlySalesRateScenarios"]
+    assert scenarios[0]["scenarioId"] == "base_product_collection_schedule"
+    assert scenarios[0]["sourceLocator"]["sheetName"] == "02B_수납스케줄"
+    assert scenarios[0]["products"][0]["productType"] == "아파트"
+    assert scenarios[0]["products"][0]["collectionSteps"][0]["dueMonth"] == 10
+    assert scenarios[0]["products"][0]["monthlyCollectionAmounts"][9] == 12673000000

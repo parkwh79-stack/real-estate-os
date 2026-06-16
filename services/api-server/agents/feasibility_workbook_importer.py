@@ -139,52 +139,66 @@ def _import_realytics_formula_export(
 ) -> Dict[str, Any]:
     named = validation.get("namedRangeValues", {})
     source_name = _source_name(workbook_path, source_document)
+    workbook = load_workbook(workbook_path, data_only=True, read_only=True)
 
-    total_revenue = _to_float((named.get("fs_total_revenue") or {}).get("value"))
-    total_cost = _to_float((named.get("fs_total_project_cost") or {}).get("value"))
-    pf_amount = _to_float((named.get("fs_pf_loan") or {}).get("value"))
-    if total_revenue and total_revenue < 10_000_000:
-        total_revenue *= 100_000_000
-    if total_cost and total_cost < 10_000_000:
-        total_cost *= 100_000_000
-    if pf_amount and pf_amount < 10_000_000:
-        pf_amount *= 100_000_000
+    try:
+        total_revenue = _to_float((named.get("fs_total_revenue") or {}).get("value"))
+        total_cost = _to_float((named.get("fs_total_project_cost") or {}).get("value"))
+        pf_amount = _to_float((named.get("fs_pf_loan") or {}).get("value"))
+        if total_revenue and total_revenue < 10_000_000:
+            total_revenue *= 100_000_000
+        if total_cost and total_cost < 10_000_000:
+            total_cost *= 100_000_000
+        if pf_amount and pf_amount < 10_000_000:
+            pf_amount *= 100_000_000
 
-    development_profit = total_revenue - total_cost if total_revenue and total_cost else None
-    draft = {
-        "project_id": project_id,
-        "project_name": None,
-        "asset_type": "mixed_use",
-        "revenue_items": [
-            _line_item("sales_revenue", "분양수입", "sales_revenue", total_revenue, "01_입력가정", "C6", source_name, "fs_total_revenue")
-        ],
-        "cost_items": [
-            _line_item("total_project_cost", "총사업비", "total_project_cost", total_cost, "02_사업수지", "C13", source_name, "fs_total_project_cost")
-        ],
-        "financing": [
-            {
-                "tranche_id": "pf_loan",
-                "name": "PF Loan",
-                "priority": "senior",
-                "amount": pf_amount,
-                "repayment_source": "Sales proceeds",
-                "excel_row_id": "fs_pf_loan",
-            }
-        ] if pf_amount else [],
-        "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, _to_float((named.get("cf_max_minus") or {}).get("value"))),
-        "raw_import": {
-            "profile": validation.get("profile"),
-            "validationStatus": validation.get("status"),
-            "sourceWorkbook": source_name,
-            "schemaVersion": (named.get("realytics_fs_schema_version") or {}).get("value"),
-            "namedRangeValues": named,
-            "sourceDocument": source_document or {},
-            "limitations": [
-                "Formula export import currently maps core metrics and named ranges; product-level table parsing remains next.",
+        product_monthly_scenarios = _realytics_product_monthly_sales_rate_scenarios(
+            workbook,
+            source_name,
+            total_revenue,
+        )
+        limitations = []
+        if not product_monthly_scenarios:
+            limitations.append(
+                "Product-level monthly sales-rate scenario rows were not found; only core metrics and named ranges were imported."
+            )
+
+        development_profit = total_revenue - total_cost if total_revenue and total_cost else None
+        draft = {
+            "project_id": project_id,
+            "project_name": None,
+            "asset_type": "mixed_use",
+            "revenue_items": [
+                _line_item("sales_revenue", "분양수입", "sales_revenue", total_revenue, "01_입력가정", "C6", source_name, "fs_total_revenue")
             ],
-        },
-    }
-    return draft
+            "cost_items": [
+                _line_item("total_project_cost", "총사업비", "total_project_cost", total_cost, "02_사업수지", "C13", source_name, "fs_total_project_cost")
+            ],
+            "financing": [
+                {
+                    "tranche_id": "pf_loan",
+                    "name": "PF Loan",
+                    "priority": "senior",
+                    "amount": pf_amount,
+                    "repayment_source": "Sales proceeds",
+                    "excel_row_id": "fs_pf_loan",
+                }
+            ] if pf_amount else [],
+            "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, _to_float((named.get("cf_max_minus") or {}).get("value"))),
+            "raw_import": {
+                "profile": validation.get("profile"),
+                "validationStatus": validation.get("status"),
+                "sourceWorkbook": source_name,
+                "schemaVersion": (named.get("realytics_fs_schema_version") or {}).get("value"),
+                "namedRangeValues": named,
+                "productMonthlySalesRateScenarios": product_monthly_scenarios,
+                "sourceDocument": source_document or {},
+                "limitations": limitations,
+            },
+        }
+        return draft
+    finally:
+        workbook.close()
 
 
 def _legacy_product_mix(sales: Any, input_sheet: Any, source_name: str) -> List[Dict[str, Any]]:
@@ -322,6 +336,115 @@ def _default_scenarios() -> List[Dict[str, Any]]:
     ]
 
 
+def _realytics_product_monthly_sales_rate_scenarios(
+    workbook: Any,
+    source_name: str,
+    total_revenue_krw: Optional[float],
+) -> List[Dict[str, Any]]:
+    sheet_name = "02B_수납스케줄"
+    if sheet_name not in workbook.sheetnames:
+        return []
+
+    sheet = workbook[sheet_name]
+    product_groups: Dict[str, Dict[str, Any]] = {}
+    total_monthly_amounts = [0.0 for _ in range(45)]
+    for row_index in range(4, sheet.max_row + 1):
+        product_type = _cell_value(sheet, f"A{row_index}")
+        stage = _cell_value(sheet, f"B{row_index}")
+        due_month = _to_float(_cell_value(sheet, f"C{row_index}"))
+        collection_rate = _to_float(_cell_value(sheet, f"D{row_index}"))
+        product_revenue = _to_float(_cell_value(sheet, f"E{row_index}"))
+        stage_amount = _to_float(_cell_value(sheet, f"F{row_index}"))
+        if not product_type or str(product_type).strip() == "합계":
+            continue
+        if not stage or stage_amount is None:
+            continue
+
+        key = str(product_type)
+        group = product_groups.setdefault(
+            key,
+            {
+                "productType": key,
+                "productRevenue": _eok_to_krw(product_revenue),
+                "collectionSteps": [],
+                "monthlyCollectionAmounts": [0.0 for _ in range(45)],
+            },
+        )
+        step_monthly_amounts = []
+        for month_index in range(45):
+            column = _column_name(7 + month_index)
+            amount = _to_float(_cell_value(sheet, f"{column}{row_index}")) or 0.0
+            step_monthly_amounts.append(_eok_to_krw(amount) or 0.0)
+            group["monthlyCollectionAmounts"][month_index] += _eok_to_krw(amount) or 0.0
+            total_monthly_amounts[month_index] += _eok_to_krw(amount) or 0.0
+
+        group["collectionSteps"].append(
+            {
+                "stage": str(stage),
+                "dueMonth": int(due_month) if due_month is not None else None,
+                "collectionRate": collection_rate,
+                "stageAmount": _eok_to_krw(stage_amount),
+                "monthlyCollectionAmounts": step_monthly_amounts,
+                "provenance": _provenance(source_name, "xlsx", sheet_name, f"A{row_index}:AY{row_index}", str(stage)),
+            }
+        )
+
+    if not product_groups:
+        return []
+
+    denominator = total_revenue_krw or sum(total_monthly_amounts)
+    product_scenarios = []
+    for group in product_groups.values():
+        product_revenue = group.get("productRevenue") or sum(group["monthlyCollectionAmounts"])
+        group["monthlyCollectionRates"] = [
+            amount / product_revenue if product_revenue else 0.0
+            for amount in group["monthlyCollectionAmounts"]
+        ]
+        group["cumulativeCollectionRates"] = _cumulative_rates(group["monthlyCollectionRates"])
+        product_scenarios.append(group)
+
+    return [
+        {
+            "scenarioId": "base_product_collection_schedule",
+            "label": "Base product-level monthly collection schedule",
+            "unit": "KRW",
+            "monthCount": 45,
+            "sourceSheet": sheet_name,
+            "sourceWorkbook": source_name,
+            "totalMonthlyCollectionAmounts": total_monthly_amounts,
+            "totalMonthlyCollectionRates": [
+                amount / denominator if denominator else 0.0
+                for amount in total_monthly_amounts
+            ],
+            "totalCumulativeCollectionRates": _cumulative_rates([
+                amount / denominator if denominator else 0.0
+                for amount in total_monthly_amounts
+            ]),
+            "products": product_scenarios,
+            "sourceLocator": {
+                "sourceType": "excel_range",
+                "sheetName": sheet_name,
+                "cell": f"A4:AY{sheet.max_row}",
+                "fieldName": "raw_import.productMonthlySalesRateScenarios",
+                "confidence": 0.95,
+            },
+        }
+    ]
+
+
+def _cumulative_rates(values: List[float]) -> List[float]:
+    total = 0.0
+    result = []
+    for value in values:
+        total += value
+        result.append(total)
+    return result
+
+
+def _eok_to_krw(value: Optional[float]) -> Optional[float]:
+    return value * 100_000_000 if value is not None else None
+
+
 def _minimal_draft(
     project_id: Optional[str],
     validation: Dict[str, Any],
@@ -427,6 +550,16 @@ def _source_name(workbook_path: Path, source_document: Optional[Dict[str, Any]])
 
 def _cell_value(sheet: Any, cell: str) -> Any:
     return sheet[cell].value
+
+
+def _column_name(column_index: int) -> str:
+    dividend = column_index
+    name = ""
+    while dividend > 0:
+        modulo = (dividend - 1) % 26
+        name = chr(65 + modulo) + name
+        dividend = (dividend - modulo) // 26
+    return name
 
 
 def _to_float(value: Any) -> Optional[float]:

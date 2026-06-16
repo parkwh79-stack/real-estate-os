@@ -168,3 +168,5 @@ Feasibility Study Agent should not use Excel outputs as final numbers unless:
 3. Formula integrity has no unresolved `#REF!` in authoritative cells.
 4. Schema readiness is either direct v2 import or a known legacy adapter.
 5. All imported metrics carry workbook cell provenance.
+6. Formula export imports preserve product-level monthly collection and sales-rate scenarios under `raw_import.productMonthlySalesRateScenarios`.
+7. A reviewer must approve the returned FeasibilityStudyV2 draft through `/projects/{project_id}/feasibility-workbook/approve` before the workbook becomes canonical project data.
