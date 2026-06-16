@@ -26,6 +26,7 @@ The repository currently includes:
 - Agent-to-Agent handoff envelopes, progress tracking, human review status, and final approval gating for PF review orchestration.
 - Structured report export pipeline with Markdown, JSON, print-ready HTML, PDF, and DOCX artifacts.
 - Project-level real pilot input package UI for archiving business plans, land ledgers, feasibility workbooks, land evidence JSON, and approved data-quality overrides before PF review runs.
+- Kakao Login and KakaoTalk notification baseline with mobile review action center, Kakao OAuth callback, REALYTICS session handoff, safe message preview, and audit logging.
 
 ## Main Capabilities
 
@@ -431,6 +432,49 @@ Key files:
 - `apps/web/app/project/[id]/orchestration/page.tsx`
 - `apps/web/app/project/[id]/report/page.tsx`
 
+### 11. Kakao Login and KakaoTalk Mobile Review Flow
+
+The platform now includes a pilot-grade Kakao integration for external collaborator login and mobile review notifications.
+
+Implemented:
+
+- Kakao integration status API that reports readiness without exposing REST API key, client secret, or message access token.
+- Kakao OIDC authorization URL generation with state and nonce.
+- HMAC-signed OAuth state generation and verification for pilot callback flow.
+- Kakao authorization-code callback at `GET /auth/kakao/callback`.
+- Kakao token exchange and Kakao user-info lookup.
+- REALYTICS user/session creation after Kakao callback.
+- Mobile/web session handoff page at `/auth/kakao/session`.
+- Mobile-first Kakao action center at `/project/{project_id}/mobile`.
+- Kakao message preview endpoint that blocks sensitive PF data before any future live send path.
+- `kakao_message_preview` and `kakao_login_callback` user activity audit events.
+- Settings UI panel for Kakao login/message readiness and notification policy.
+
+KakaoTalk message body policy:
+
+- Allowed: short notification summary and REALYTICS action link.
+- Prohibited: PF amount, loan/tranche amount, owner name, account number, PNU, registry/encumbrance details, resident registration number, phone/email-like personal data, legal opinion details, and risk memo details.
+
+Key files:
+
+- `services/api-server/integrations/kakao.py`
+- `services/api-server/routers/kakao.py`
+- `services/api-server/routers/auth.py`
+- `apps/web/app/project/[id]/mobile/page.tsx`
+- `apps/web/app/auth/kakao/session/page.tsx`
+- `apps/web/app/settings/page.tsx`
+
+APIs:
+
+- `GET /integrations/kakao/status`
+- `POST /integrations/kakao/login/authorize-url`
+- `POST /integrations/kakao/messages/preview`
+- `GET /auth/kakao/callback`
+
+Important limitation:
+
+- The current callback flow is pilot-grade. Production hardening still requires JWKS/RS256 Kakao ID token signature validation, replay-state persistence, Kakao unlink handling, live-send delivery status records, and Kakao permission/BizMessage/AlimTalk review before actual external message sending.
+
 ## Architecture
 
 ```mermaid
@@ -441,6 +485,7 @@ graph TD
     API --> Store[SQLite MVP Storage]
     API --> Reports[Report Export Engine]
     API --> UseCases[Application Use Case Layer]
+    API --> Kakao[Kakao Login and Notification Adapter]
     UseCases --> Repositories[Repository Boundary]
     Agents --> Feasibility[Development Feasibility Agent]
     Agents --> Land[Land Ledger Agent]
@@ -449,6 +494,7 @@ graph TD
     Agents --> Legal[Legal / Permit Agent]
     Agents --> Orchestrator[PF Review Orchestrator]
     Orchestrator --> Handoffs[Agent Handoff and Progress Model]
+    Kakao --> Mobile[Mobile Review Action Center]
     MCP[MCP Server] --> API
     Claude[Claude Desktop / MCP Host] --> MCP
 ```
@@ -546,6 +592,8 @@ Notes:
 - Calculation Scenario Engine roadmap: [`docs/product/calculation-scenario-engine.md`](docs/product/calculation-scenario-engine.md)
 - Feasibility workbook validation: [`docs/product/feasibility-workbook-validation.md`](docs/product/feasibility-workbook-validation.md)
 - Korean Law MCP integration: [`docs/integrations/korean-law-mcp.md`](docs/integrations/korean-law-mcp.md)
+- Kakao Login and KakaoTalk Message integration: [`docs/product/kakao-login-message-integration.md`](docs/product/kakao-login-message-integration.md)
+- Mobile Kakao review UX: [`docs/product/mobile-kakao-review-ux.md`](docs/product/mobile-kakao-review-ux.md)
 - API documentation: [`docs/api.md`](docs/api.md)
 
 ## Verification Notes
@@ -563,8 +611,14 @@ Recent local checks performed during development:
 - Cash Flow Engine direct smoke check: passed against the Daegu Bondong example, generating monthly cash flow and PF draw rows
 - Orchestration handoff/progress smoke check: passed, including review gate behavior
 - Land ledger enrichment direct smoke check: passed with supplied connector-style records
+- Kakao integration tests: passed locally with Kakao authorize URL, safe message preview, mobile action URL, callback session handoff, and audit log coverage
+- Web type check: passed after adding Kakao mobile action center and Kakao session connector
 
-Note: the current bundled Python runtime in the latest local session did not include `pytest`, `fastapi`, or `xlrd`, so the most recent backend changes were verified with Python compilation and direct Agent/use-case smoke tests rather than a full endpoint pytest rerun.
+Most recent Kakao-related local checks:
+
+- `pytest tests\test_kakao_integration.py tests\test_auth_identity.py tests\test_audit_activity.py -q`
+- `npm run check-types`
+- `py_compile integrations\kakao.py routers\kakao.py routers\auth.py main.py`
 
 ## Current Limitations
 
@@ -576,6 +630,8 @@ Note: the current bundled Python runtime in the latest local session did not inc
 - Marketability Agent still needs full parser-field evidence locator coverage, real public/partner comparable data adapters, product-specific scoring weights, stronger absorption/back-testing, and a dedicated frontend review page.
 - Korean Law MCP is designed as a sidecar/context adapter, not a vendored dependency.
 - Private partner data sources such as Hogangnono, Zigbang, KB, or Real Estate Planet require official API, licensing, or partnership before connector use.
+- Kakao integration is pilot-grade: live KakaoTalk sending is disabled until Kakao permission, consent, BizMessage/AlimTalk provider, delivery logging, and production token/security hardening are completed.
+- Kakao ID token parsing in the callback path is not yet production-grade JWKS/RS256 signature verification.
 
 ## License
 
