@@ -6,6 +6,7 @@ from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.ai_connection import resolve_ai_context, safe_ai_context
 from agents.credit_review_agent import CreditReviewAgent
 from agents.data_quality_agent import DataQualityAgent
+from agents.developability_score_agent import DevelopabilityScoreAgent
 from agents.evidence_graph_agent import EvidenceGraphAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
@@ -470,6 +471,8 @@ class OrchestrationAgent:
                 },
             )
 
+            self._run_developability_score_step(run, project_data)
+
             report_agent = ReportAgent()
             structured_report = report_agent.generate_structured_report(project_data)
             report_markdown = report_agent.generate_report(project_data)
@@ -694,6 +697,29 @@ class OrchestrationAgent:
             run["errors"].append({"message": f"Term annotation failed: {exc}", "type": exc.__class__.__name__})
             output = {"status": "error", "reason": str(exc)}
         self._complete_step(run, "term_annotation", output, artifact_key="termAnnotations")
+
+    def _run_developability_score_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+        try:
+            # Marketability is only kept in run artifacts; expose it to the score
+            # agent (which reads project_data) without disturbing other steps.
+            marketability = run["artifacts"].get("marketabilityAnalysis")
+            if marketability is not None:
+                project_data["marketabilityAnalysis"] = marketability
+            score = DevelopabilityScoreAgent().score(
+                project_data,
+                return_metrics=project_data.get("returnMetrics"),
+            )
+            project_data["developabilityScore"] = score
+            run["artifacts"]["developabilityScore"] = score
+            output = {
+                "overallScore": score.get("overallScore"),
+                "grade": score.get("grade"),
+                "gaps": score.get("gaps", []),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Developability score failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "developability_score", output, artifact_key="developabilityScore")
 
     def _run_return_metrics_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
         try:

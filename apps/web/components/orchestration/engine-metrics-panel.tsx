@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Activity, Loader2, RefreshCw, ShieldCheck, TrendingUp } from "lucide-react";
+import { Activity, Gauge, Loader2, RefreshCw, ShieldCheck, TrendingUp } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { EmptyState, MetricCard, SkeletonMetrics } from "../ui/primitives";
 
@@ -38,10 +38,24 @@ interface CreditEnhancement {
   activeCount?: number;
   missingCriticalMeasures?: string[];
 }
+interface DevelopabilityDimension {
+  label?: string;
+  score?: number | null;
+  available?: boolean;
+}
+interface Developability {
+  overallScore?: number | null;
+  grade?: string;
+  drivers?: string[];
+  gaps?: string[];
+  dimensions?: Record<string, DevelopabilityDimension>;
+  summary?: string;
+}
 interface RunArtifacts {
   returnMetrics?: ReturnMetrics;
   stressTest?: StressTest;
   creditEnhancement?: CreditEnhancement;
+  developabilityScore?: Developability;
 }
 
 function pct(value?: number | null): string {
@@ -103,6 +117,7 @@ export function EngineMetricsPanel({ projectId }: { projectId: string }) {
   const rm = artifacts?.returnMetrics?.metrics;
   const stress = artifacts?.stressTest;
   const ce = artifacts?.creditEnhancement;
+  const dev = artifacts?.developabilityScore;
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -192,6 +207,34 @@ export function EngineMetricsPanel({ projectId }: { projectId: string }) {
               {ce.missingCriticalMeasures && ce.missingCriticalMeasures.length > 0 ? (
                 <p className="mt-1 text-xs font-bold text-rose-600 dark:text-rose-300">
                   핵심수단 미확보: {ce.missingCriticalMeasures.join(", ")}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {dev ? (
+            <div className="rounded-lg bg-slate-50 p-4 dark:bg-slate-950/40">
+              <p className="flex items-center gap-2 text-sm font-bold text-slate-950 dark:text-white">
+                <Gauge className="h-4 w-4" /> 개발가능성 점수
+                <span className="rounded-md bg-indigo-100 px-2 py-0.5 text-xs font-black text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-200">
+                  {typeof dev.overallScore === "number" ? dev.overallScore.toFixed(0) : "—"}점 · {dev.grade ?? "—"}등급
+                </span>
+              </p>
+              {dev.dimensions && Object.keys(dev.dimensions).length > 0 ? (
+                <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-4">
+                  {Object.entries(dev.dimensions).map(([key, d]) => (
+                    <div key={key} className="rounded-md border border-slate-200 px-2 py-1 dark:border-slate-800">
+                      <p className="text-[11px] font-semibold text-slate-500">{d.label ?? key}</p>
+                      <p className="text-sm font-bold text-slate-900 dark:text-white">
+                        {d.available && typeof d.score === "number" ? `${d.score.toFixed(0)}점` : "데이터 부족"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {dev.gaps && dev.gaps.length > 0 ? (
+                <p className="mt-2 text-xs font-bold text-amber-600 dark:text-amber-300">
+                  보완 필요: {dev.gaps.join(", ")}
                 </p>
               ) : null}
             </div>

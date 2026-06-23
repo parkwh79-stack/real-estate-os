@@ -76,6 +76,15 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert run["agentProgress"]["credit_review_decision"]["status"] == "completed"
     assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
     assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "completed"
+    developability = run["artifacts"]["developabilityScore"]
+    assert developability["analysisType"] == "developability_score_v1"
+    assert developability["grade"] in {"A", "B", "C", "D", "E"}
+    assert isinstance(developability["overallScore"], (int, float))
+    assert run["agentProgress"]["developability_score"]["status"] == "completed"
+    assert (
+        run["artifacts"]["phase11Report"]["report"]["sections"]["businessFeasibility"]["developabilityScore"]["grade"]
+        == developability["grade"]
+    )
     assert run["agentProgress"]["scenario_restructuring_plan"]["lastArtifactKey"] == "restructuringPlan"
     assert run["artifacts"]["phase11Report"]["report"]["qualityChecks"]["actualSectionCount"] == 20
     assert run["artifacts"]["reportRecord"]["run_id"] == run["run_id"]

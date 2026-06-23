@@ -34,6 +34,7 @@ class ReportAgent:
         return_metrics = input_data.get("returnMetrics") or {}
         stress_test = input_data.get("stressTest") or {}
         credit_enhancement = input_data.get("creditEnhancement") or {}
+        developability = input_data.get("developabilityScore") or {}
         rm_metrics = return_metrics.get("metrics", {}) if isinstance(return_metrics, dict) else {}
         stress_scenarios = stress_test.get("scenarios", []) if isinstance(stress_test, dict) else []
         base_stress = next((s for s in stress_scenarios if s.get("key") == "base"), None)
@@ -194,6 +195,17 @@ class ReportAgent:
                     "worstCaseKey": stress_test.get("worstCaseKey"),
                     "seniorBreakScenarioKey": stress_test.get("seniorBreakScenarioKey"),
                 } if stress_scenarios else None,
+                "developabilityScore": {
+                    "overallScore": developability.get("overallScore"),
+                    "grade": developability.get("grade"),
+                    "drivers": developability.get("drivers", []),
+                    "gaps": developability.get("gaps", []),
+                    "dimensions": {
+                        key: {"label": dim.get("label"), "score": dim.get("score"), "available": dim.get("available")}
+                        for key, dim in (developability.get("dimensions") or {}).items()
+                    },
+                    "summary": developability.get("summary"),
+                } if developability else None,
                 "summary": scenario_result.reportFragments.unsoldLtvSummary if scenario_result else "LTV, Exit 분양률, 수익률을 기준으로 대출 회수 가능성을 점검합니다.",
             },
             "exitStrategy": self._structured_exit_strategy(input_data, covenants, scenario_result),

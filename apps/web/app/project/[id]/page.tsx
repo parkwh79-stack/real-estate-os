@@ -99,6 +99,10 @@ interface OrchestrationRun {
       adjustedSeniorLtv?: number;
       activeCount?: number;
     };
+    developabilityScore?: {
+      overallScore?: number | null;
+      grade?: string;
+    };
   };
 }
 
@@ -147,6 +151,13 @@ function buildEngineKpis(run: OrchestrationRun | null): EngineKpi[] {
   if (typeof rm?.equityMultiple?.value === "number") kpis.push({ label: "Equity Multiple", value: `${rm.equityMultiple.value.toFixed(2)}x` });
   if (typeof rm?.icr?.value === "number") kpis.push({ label: "ICR", value: `${rm.icr.value.toFixed(2)}x` });
   if (ce?.enhancementGrade) kpis.push({ label: "신용보강", value: `${ce.enhancementGrade}등급` });
+  const dev = artifacts.developabilityScore;
+  if (dev?.grade) {
+    kpis.push({
+      label: "개발가능성",
+      value: typeof dev.overallScore === "number" ? `${dev.overallScore.toFixed(0)}점 ${dev.grade}등급` : `${dev.grade}등급`,
+    });
+  }
   if (stress?.scenarios?.length) {
     kpis.push({ label: "Stress 결과", value: stress.seniorBreakScenarioKey ? `Senior 손실가능(${stress.seniorBreakScenarioKey})` : "Senior 보존" });
   }

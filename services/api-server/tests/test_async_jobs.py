@@ -40,7 +40,7 @@ def test_submit_sync_runs_and_completes_with_run_id():
     assert job["status"] == "completed"
     assert job["status"] in TERMINAL_STATUSES
     assert job["runId"]  # run_id propagated from the saved run
-    assert job["result"]["stepCount"] == 23  # full PF review step count (incl. term annotation)
+    assert job["result"]["stepCount"] == 24  # full PF review step count (incl. term annotation + developability score)
     assert repo.saved  # run was persisted through the repository
 
 
