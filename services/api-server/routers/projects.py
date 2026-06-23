@@ -2032,6 +2032,76 @@ def get_project_orchestration_credit_documents(project_id: str, run_id: str, req
     }
 
 
+CREDIT_DOCUMENT_ARTIFACT_KEYS = {"term-sheet": "termSheet", "ic-memo": "icMemo"}
+CREDIT_DOCUMENT_EXPORT_FORMATS = {"markdown", "md", "pdf", "docx"}
+
+
+@router.get("/{project_id}/orchestrations/{run_id}/credit-documents/{document}/export")
+def export_project_credit_document(
+    project_id: str,
+    run_id: str,
+    document: str,
+    request: Request,
+    format: str = "pdf",
+):
+    """Download a generated Term Sheet or IC Memo as markdown, PDF, or DOCX."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "report:export")
+
+    artifact_key = CREDIT_DOCUMENT_ARTIFACT_KEYS.get(document)
+    if not artifact_key:
+        raise HTTPException(status_code=400, detail="document must be 'term-sheet' or 'ic-memo'")
+    export_format = format.lower().strip()
+    if export_format not in CREDIT_DOCUMENT_EXPORT_FORMATS:
+        raise HTTPException(status_code=400, detail="format must be markdown, pdf, or docx")
+    if export_format == "md":
+        export_format = "markdown"
+
+    run = orchestration_repository().get(project_id, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Orchestration run not found")
+    document_payload = (run.get("artifacts", {}) or {}).get(artifact_key)
+    if not document_payload:
+        raise HTTPException(status_code=404, detail="Credit document was not generated for this run")
+
+    from agents.report_export_agent import ReportExportAgent
+
+    record = {
+        "report_id": f"{document}-{run_id}",
+        "title": document_payload.get("documentType") or document,
+        "report_markdown": document_payload.get("markdown") or "",
+        "report": {},
+        "version": 1,
+    }
+    result = ReportExportAgent().export(record, export_format)
+    content = result.get("content", "")
+    if result.get("content_encoding") == "base64":
+        content = base64.b64decode(content)
+    elif isinstance(content, str):
+        content = content.encode("utf-8")
+
+    record_sensitive_project_event(
+        request,
+        event_type="credit_document_export_download",
+        project_id=project_id,
+        run_id=run_id,
+        metadata={
+            "document": document,
+            "format": export_format,
+            "fileName": result.get("file_name"),
+            "authorization": authz.get("authorization"),
+        },
+    )
+    return Response(
+        content=content,
+        media_type=result.get("content_type", "application/octet-stream"),
+        headers={
+            "Content-Disposition": f'attachment; filename="{result.get("file_name", f"{document}.{export_format}")}"'
+        },
+    )
+
+
 @router.get("/{project_id}/risk-registers")
 def list_project_risk_registers(project_id: str, request: Request):
     if project_id not in PROJECTS_DB:

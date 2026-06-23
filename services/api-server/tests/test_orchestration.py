@@ -93,6 +93,19 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert ic_memo["recommendation"]["decisionLabel"] == run["artifacts"]["creditReviewDecision"]["decisionLabel"]
     assert "# 여신심사보고서" in ic_memo["markdown"]
     assert run["agentProgress"]["credit_document_generation"]["status"] == "completed"
+
+    credit_docs = client.get(f"/projects/{project_id}/orchestrations/{run['run_id']}/credit-documents").json()
+    assert credit_docs["termSheet"]["documentType"].startswith("거래조건서")
+    assert credit_docs["icMemo"]["documentType"].startswith("여신심사보고서")
+    pdf_dl = client.get(f"/projects/{project_id}/orchestrations/{run['run_id']}/credit-documents/ic-memo/export", params={"format": "pdf"})
+    assert pdf_dl.status_code == 200
+    assert pdf_dl.headers["content-type"] == "application/pdf"
+    assert pdf_dl.content[:4] == b"%PDF"
+    docx_dl = client.get(f"/projects/{project_id}/orchestrations/{run['run_id']}/credit-documents/term-sheet/export", params={"format": "docx"})
+    assert docx_dl.status_code == 200
+    assert docx_dl.content[:2] == b"PK"  # docx is a zip container
+    bad_doc = client.get(f"/projects/{project_id}/orchestrations/{run['run_id']}/credit-documents/unknown/export")
+    assert bad_doc.status_code == 400
     assert run["agentProgress"]["scenario_restructuring_plan"]["lastArtifactKey"] == "restructuringPlan"
     assert run["artifacts"]["phase11Report"]["report"]["qualityChecks"]["actualSectionCount"] == 20
     assert run["artifacts"]["reportRecord"]["run_id"] == run["run_id"]

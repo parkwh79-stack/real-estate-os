@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Copy, FileText, Loader2, RefreshCw } from "lucide-react";
+import { Copy, Download, FileText, Loader2, RefreshCw } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { EmptyState } from "../ui/primitives";
 
@@ -23,10 +23,12 @@ type TabKey = "icMemo" | "termSheet";
  */
 export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
   const [docs, setDocs] = useState<CreditDocuments | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("icMemo");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [downloading, setDownloading] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -43,8 +45,9 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
         setDocs(null);
         return;
       }
-      const runId = runs[0].run_id ?? runs[0].runId;
-      const res = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${runId}/credit-documents`, {
+      const latestRunId = runs[0].run_id ?? runs[0].runId;
+      setRunId(latestRunId);
+      const res = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${latestRunId}/credit-documents`, {
         cache: "no-store",
         headers: authHeaders("web"),
       });
@@ -77,6 +80,36 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
       setTimeout(() => setCopied(false), 1500);
     } catch {
       setError("클립보드 복사에 실패했습니다.");
+    }
+  };
+
+  const download = async (format: "pdf" | "docx") => {
+    if (!runId) return;
+    const documentSlug = tab === "icMemo" ? "ic-memo" : "term-sheet";
+    setDownloading(format);
+    setError(null);
+    try {
+      const res = await fetch(
+        `${apiBase}/projects/${projectId}/orchestrations/${runId}/credit-documents/${documentSlug}/export?format=${format}`,
+        { cache: "no-store", headers: authHeaders("web") },
+      );
+      if (!res.ok) throw new Error(`다운로드 실패 (${res.status})`);
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const fileName = match?.[1] ?? `${documentSlug}.${format}`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "다운로드에 실패했습니다.");
+    } finally {
+      setDownloading(null);
     }
   };
 
@@ -133,15 +166,35 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
                 거래조건서
               </button>
             </div>
-            <button
-              type="button"
-              onClick={() => void copy()}
-              disabled={!markdown}
-              className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"
-            >
-              <Copy className="h-3.5 w-3.5" />
-              {copied ? "복사됨" : "복사"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void copy()}
+                disabled={!markdown}
+                className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                {copied ? "복사됨" : "복사"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void download("pdf")}
+                disabled={!markdown || downloading !== null}
+                className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"
+              >
+                {downloading === "pdf" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => void download("docx")}
+                disabled={!markdown || downloading !== null}
+                className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"
+              >
+                {downloading === "docx" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                DOCX
+              </button>
+            </div>
           </div>
 
           <pre className="mt-3 max-h-[28rem] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-4 text-xs leading-relaxed text-slate-800 dark:bg-slate-950/40 dark:text-slate-200">
