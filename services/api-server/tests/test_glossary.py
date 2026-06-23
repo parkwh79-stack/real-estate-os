@@ -98,3 +98,83 @@ def test_glossary_rejects_approved_term_without_canonical_field(monkeypatch, tmp
 
     assert response.status_code == 400
     assert "canonicalField is required" in response.json()["detail"]
+
+
+def test_glossary_candidate_capture_and_approval(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "glossary-candidates.sqlite3"))
+    client = TestClient(app)
+
+    captured = client.post(
+        "/glossary/candidates/capture",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={
+            "projectId": "project-1",
+            "runId": "run-1",
+            "annotations": [
+                {
+                    "surface": "임대차확약",
+                    "status": "unmapped_candidate",
+                    "sourceField": "legal.conditions[0]",
+                    "sourceLocator": {"documentId": "doc-1", "pageNumber": 7},
+                    "confidence": 0.0,
+                }
+            ],
+        },
+    )
+
+    assert captured.status_code == 200
+    candidate = captured.json()["candidates"][0]
+    assert candidate["status"] == "pending_review"
+    assert candidate["projectId"] == "project-1"
+    assert candidate["occurrenceCount"] == 1
+
+    listed = client.get("/glossary/candidates", params={"status": "pending_review", "project_id": "project-1"})
+    assert listed.status_code == 200
+    assert listed.json()["count"] == 1
+
+    approved = client.post(
+        f"/glossary/candidates/{candidate['candidateId']}/review",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={
+            "status": "approved",
+            "termId": "lease_commitment",
+            "preferredTerm": "임대차확약",
+            "canonicalField": "real_asset.leaseCommitment",
+            "category": "real_asset",
+            "dataType": "boolean",
+            "reason": "파일럿 법률 검토에서 반복 등장하는 임대차 선행조건",
+        },
+    )
+
+    assert approved.status_code == 200
+    body = approved.json()
+    assert body["candidate"]["status"] == "approved"
+    assert body["candidate"]["occurrenceCount"] == 1
+    assert body["term"]["termId"] == "lease_commitment"
+    assert body["term"]["canonicalField"] == "real_asset.leaseCommitment"
+
+    resolved = client.get("/glossary/resolve", params={"term": "임대차확약"})
+    assert resolved.status_code == 200
+    assert resolved.json()["matched"] is True
+    assert resolved.json()["term"]["termId"] == "lease_commitment"
+
+    captured_again = client.post(
+        "/glossary/candidates/capture",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={
+            "projectId": "project-1",
+            "runId": "run-2",
+            "annotations": [
+                {
+                    "surface": "임대차확약",
+                    "status": "unmapped_candidate",
+                    "sourceField": "legal.conditions[0]",
+                    "sourceLocator": {"documentId": "doc-2", "pageNumber": 9},
+                }
+            ],
+        },
+    )
+    assert captured_again.status_code == 200
+    assert captured_again.json()["candidates"][0]["status"] == "approved"
+    assert captured_again.json()["candidates"][0]["occurrenceCount"] == 2

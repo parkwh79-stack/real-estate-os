@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import FileUpload from "../../components/FileUpload";
 import { IntentPlanMenu } from "../../../components/orchestration/intent-plan-menu";
+import { CovenantMonitorPanel } from "../../../components/monitoring/covenant-monitor-panel";
 import { financeTerm, readinessLabel, translateFinancialTerm } from "../../../lib/financial-terms";
 
 interface PfTranche {
@@ -509,6 +510,8 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
         <Kpi label="PF 대출금" value={fmtEok(pfTotal)} />
         <Kpi label="시행이익" value={fmtEok(profit)} tone={profit > 0 ? "good" : profit < 0 ? "bad" : undefined} />
       </section>
+
+      <CovenantMonitorPanel projectId={projectId} />
 
       <IntentPlanMenu projectId={projectId} />
 

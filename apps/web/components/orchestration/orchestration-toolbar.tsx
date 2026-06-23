@@ -1,17 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import { GitBranch, PlayCircle, TrendingUp } from "lucide-react";
+import { BookMarked, GitBranch, PlayCircle, TrendingUp } from "lucide-react";
 import { IntentPlanMenu } from "./intent-plan-menu";
 import { AsyncRunPanel } from "./async-run-panel";
 import { EngineMetricsPanel } from "./engine-metrics-panel";
+import { TermAnnotationsPanel } from "./term-annotations-panel";
 
-type TabKey = "plan" | "async" | "metrics";
+type TabKey = "plan" | "async" | "metrics" | "terms";
 
 const TABS: { key: TabKey; label: string; icon: typeof GitBranch }[] = [
   { key: "plan", label: "AI 작업 선택", icon: GitBranch },
   { key: "async", label: "백그라운드 실행", icon: PlayCircle },
   { key: "metrics", label: "수익·Stress·신용보강", icon: TrendingUp },
+  { key: "terms", label: "용어 표준화", icon: BookMarked },
 ];
 
 /**
@@ -55,6 +57,7 @@ export function OrchestrationToolbar({
       {tab === "plan" ? <IntentPlanMenu projectId={projectId} onWorkflowComplete={onRefresh} /> : null}
       {tab === "async" ? <AsyncRunPanel projectId={projectId} onComplete={onRefresh} /> : null}
       {tab === "metrics" ? <EngineMetricsPanel projectId={projectId} /> : null}
+      {tab === "terms" ? <TermAnnotationsPanel projectId={projectId} /> : null}
     </div>
   );
 }

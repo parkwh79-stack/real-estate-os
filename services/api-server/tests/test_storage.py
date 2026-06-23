@@ -284,6 +284,7 @@ def test_default_state_shape():
     assert state["assumption_overrides"] == {}
     assert state["restructuring_cures"] == {}
     assert state["glossary_terms"] == {}
+    assert state["glossary_term_candidates"] == {}
     assert state["project_snapshots"] == {}
     assert state["user_activity_logs"] == []
     assert state["identity"]["tenants"] == {}

@@ -676,7 +676,11 @@ class OrchestrationAgent:
         try:
             from use_cases.term_annotation import annotate_terms_use_case
 
-            term_annotations = annotate_terms_use_case(project_data)
+            term_annotations = annotate_terms_use_case(
+                project_data,
+                project_id=run.get("project_id"),
+                run_id=run.get("run_id"),
+            )
             project_data["termAnnotations"] = term_annotations
             run["artifacts"]["termAnnotations"] = term_annotations
             summary = term_annotations.get("summary", {})
@@ -693,21 +697,87 @@ class OrchestrationAgent:
 
     def _run_return_metrics_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
         try:
-            inputs = dict(project_data.get("feasibility_input", {}) or {})
-            inputs.setdefault("interest_expense", inputs.get("finance_cost", 0))
+            feasibility = dict(project_data.get("feasibility_input", {}) or {})
+            pf_amount = sum(
+                float(t.get("amount") or 0)
+                for t in (project_data.get("pf_structure") or [])
+                if isinstance(t, dict)
+            )
+            inputs = self._derive_return_inputs(feasibility, pf_amount)
             return_metrics = calculate_return_metrics(inputs)
             project_data["returnMetrics"] = return_metrics
             run["artifacts"]["returnMetrics"] = return_metrics
             metrics = return_metrics.get("metrics", {})
             output = {
                 "summary": return_metrics.get("summary"),
-                "icr": metrics.get("icr", {}).get("value"),
+                "projectIrr": metrics.get("projectIrr", {}).get("value"),
                 "equityMultiple": metrics.get("equityMultiple", {}).get("value"),
+                "icr": metrics.get("icr", {}).get("value"),
             }
         except Exception as exc:
             run["errors"].append({"message": f"Return metrics failed: {exc}", "type": exc.__class__.__name__})
             output = {"status": "error", "reason": str(exc)}
         self._complete_step(run, "return_metrics", output, artifact_key="returnMetrics")
+
+    @staticmethod
+    def _derive_return_inputs(fi: Dict[str, Any], pf_amount: float) -> Dict[str, Any]:
+        """Derive UNLEVERED project + levered equity cash flows from feasibility.
+
+        Project IRR is unlevered (finance cost excluded, per convention); equity
+        IRR is levered (equity = total cost − PF). ICR uses operating profit over
+        finance cost for sale-type development PF where there is no rental NOI.
+        """
+        def _num(*keys):
+            for k in keys:
+                v = fi.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    return float(v)
+            return 0.0
+
+        months, cstart, cend, sstart, send = 36, 3, 30, 7, 36
+        revenue = _num("total_revenue", "sales_revenue")
+        total_cost = _num("total_cost")
+        land = _num("land_cost", "land_purchase_cost")
+        construction = _num("construction_cost")
+        finance = _num("finance_cost")
+        other = max(0.0, total_cost - land - construction - finance) if total_cost else _num("other_cost")
+
+        outflow = [0.0] * months
+        inflow = [0.0] * months
+        if land:
+            outflow[0] += land
+        OrchestrationAgent._spread_amount(outflow, construction + other, cstart, cend, months)  # unlevered: no finance
+        OrchestrationAgent._spread_amount(inflow, revenue, sstart, send, months)
+        project_cashflows = [inflow[m] - outflow[m] for m in range(months)]
+
+        profit = revenue - total_cost
+        equity = max(0.0, total_cost - pf_amount)
+        equity_cashflows = [0.0] * months
+        if equity > 0:
+            OrchestrationAgent._spread_amount(equity_cashflows, -equity, 1, 6, months)
+            equity_cashflows[months - 1] += equity + profit  # capital return + residual profit after debt
+
+        operating_profit = _num("operating_profit") or (revenue - (land + construction + other))
+        return {
+            "project_cashflows": project_cashflows,
+            "equity_cashflows": equity_cashflows if equity > 0 else [],
+            "net_operating_income": operating_profit,
+            "interest_expense": finance,
+            "periods_per_year": 12,
+        }
+
+    @staticmethod
+    def _spread_amount(series: List[float], amount: float, start_month: int, end_month: int, months: int) -> None:
+        if amount == 0:
+            return
+        start = max(1, start_month)
+        end = min(months, max(start, end_month))
+        span = end - start + 1
+        if span <= 0:
+            return
+        per = amount / span
+        for month in range(start, end + 1):
+            series[month - 1] += per
 
     def _run_stress_test_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
         try:

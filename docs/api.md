@@ -426,6 +426,22 @@ Typed handoff artifacts currently include:
 - **Description**: Return approved canonical fields mapped to terms and aliases for parser, data-quality, report, and UI standardization.
 - **Response**: `realytics-canonical-field-map-v1`.
 
+### `GET /glossary/candidates`
+- **Description**: List unmapped real estate/PF term candidates captured from `TermAnnotationAgent`.
+- **Query params**: Optional `q`, `status`, `project_id`, `category`, and `limit`.
+- **Response**: `realytics-glossary-term-candidate-list-v1` with surface text, source field, source locator, occurrence count, review status, and suggested metadata.
+
+### `POST /glossary/candidates/capture`
+- **Description**: Persist `unmapped_candidate` annotations into the glossary review queue.
+- **Request Body**: `{ "projectId": "1", "runId": "run-1", "annotations": [{ "surface": "임대차확약", "status": "unmapped_candidate", "sourceField": "legal.conditions[0]", "sourceLocator": {...} }] }`
+- **Audit**: Emits `glossary_candidate_captured` user activity logs.
+
+### `POST /glossary/candidates/{candidate_id}/review`
+- **Description**: Approve, reject, merge, or request revision for a candidate. Approval creates or updates an approved glossary term.
+- **Request Body**: `{ "status": "approved", "termId": "lease_commitment", "preferredTerm": "임대차확약", "canonicalField": "real_asset.leaseCommitment", "category": "real_asset", "reason": "..." }`
+- **Validation**: `approved` requires `canonicalField`.
+- **Audit**: Emits `glossary_candidate_reviewed` user activity logs.
+
 ## Auth / Identity APIs
 
 ### `POST /auth/tenants`

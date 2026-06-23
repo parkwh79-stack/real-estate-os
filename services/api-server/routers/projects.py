@@ -70,6 +70,8 @@ from use_cases.orchestration_approval import approve_orchestration_run_by_id_use
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
 from use_cases.async_jobs import submit_pf_review_job, get_job_store
 from use_cases.term_annotation import annotate_terms_use_case
+from use_cases.covenant_monitoring import monitor_covenants_use_case
+from use_cases.developability_score import score_developability_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
     get_project_snapshot_use_case,
@@ -1848,6 +1850,24 @@ def _project_name(project_id: str) -> str:
     return (PROJECTS_DB.get(project_id, {}).get("project", {}) or {}).get("name") or project_id
 
 
+@router.get("/{project_id}/developability-score")
+def get_project_developability_score(project_id: str):
+    """Composite developability score (개발가능성 점수화) from land/regulation/feasibility/market."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = _hydrated_project_source(project_id, {})
+    return score_developability_use_case(source_data)
+
+
+@router.get("/{project_id}/monitoring")
+def get_project_monitoring(project_id: str):
+    """Live PF covenant monitoring (DSCR/LTV/LTC/Exit/sales-rate vs thresholds + stress EOD signal)."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = _hydrated_project_source(project_id, {})
+    return monitor_covenants_use_case(source_data)
+
+
 @router.post("/{project_id}/terms/annotate")
 def annotate_project_terms(project_id: str, input_data: Dict[str, Any] | None = None):
     """Attach controlled-vocabulary identity (termId + canonicalField + sourceLocator)
@@ -1855,7 +1875,7 @@ def annotate_project_terms(project_id: str, input_data: Dict[str, Any] | None = 
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, input_data or {})
-    return annotate_terms_use_case(source_data)
+    return annotate_terms_use_case(source_data, project_id=project_id)
 
 
 @router.post("/{project_id}/kakao/intake-plan")

@@ -167,7 +167,11 @@ class ReportAgent:
                     "profitMargin": profit_margin,
                     "developmentProfit": development_profit,
                     "developmentProfitMillion": self._million(development_profit),
-                    "projectIrr": (base_stress.get("projectIrr") if base_stress else _metric_value(rm_metrics, "projectIrr")),
+                    "projectIrr": (
+                        _metric_value(rm_metrics, "projectIrr")
+                        if _metric_value(rm_metrics, "projectIrr") is not None
+                        else (base_stress.get("projectIrr") if base_stress else None)
+                    ),
                     "equityIrr": _metric_value(rm_metrics, "equityIrr"),
                     "equityMultiple": _metric_value(rm_metrics, "equityMultiple"),
                     "paybackMonths": (rm_metrics.get("paybackPeriodMonths", {}) or {}).get("value") if isinstance(rm_metrics, dict) else None,

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -7,11 +8,12 @@ from typing import Any, Dict
 from uuid import uuid4
 
 
-STATE_VERSION = 12
+STATE_VERSION = 13
 DEFAULT_STATE_FILE = Path(__file__).parent / "data" / "runtime" / "state.json"
 DEFAULT_SQLITE_FILE = Path(__file__).parent / "data" / "runtime" / "realytics.sqlite3"
 MAX_JSON_ACTIVITY_LOGS = 10000
 ASSUMPTION_OVERRIDE_STATUSES = {"active", "revoked", "expired", "superseded"}
+GLOSSARY_CANDIDATE_STATUSES = {"pending_review", "approved", "rejected", "needs_revision", "merged"}
 
 
 def storage_backend() -> str:
@@ -48,6 +50,7 @@ def default_state() -> Dict[str, Any]:
         "assumption_overrides": {},
         "restructuring_cures": {},
         "glossary_terms": {},
+        "glossary_term_candidates": {},
         "project_snapshots": {},
         "user_activity_logs": [],
         "identity": {
@@ -101,6 +104,7 @@ def save_state(
     prompt_artifacts: Dict[str, Any] | None = None,
     assumption_overrides: Dict[str, Any] | None = None,
     restructuring_cures: Dict[str, Any] | None = None,
+    glossary_term_candidates: Dict[str, Any] | None = None,
 ) -> None:
     market_evidence = market_evidence or {}
     project_snapshots = project_snapshots or {}
@@ -110,11 +114,12 @@ def save_state(
     prompt_artifacts = prompt_artifacts or _load_existing_prompt_artifacts()
     assumption_overrides = assumption_overrides or _load_existing_assumption_overrides()
     restructuring_cures = restructuring_cures or _load_existing_restructuring_cures()
+    glossary_term_candidates = glossary_term_candidates or _load_existing_glossary_term_candidates()
     if user_activity_logs is None:
         user_activity_logs = _load_existing_user_activity_logs()
     identity = _load_existing_identity_records()
     if storage_backend() == "json":
-        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity)
+        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity, glossary_term_candidates=glossary_term_candidates)
         return
     _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots)
 
@@ -1118,6 +1123,7 @@ def _save_json_state(
     user_activity_logs: list[Dict[str, Any]],
     identity: Dict[str, Any] | None = None,
     glossary_terms: Dict[str, Any] | None = None,
+    glossary_term_candidates: Dict[str, Any] | None = None,
 ) -> None:
     path = state_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1136,6 +1142,7 @@ def _save_json_state(
         "assumption_overrides": assumption_overrides,
         "restructuring_cures": restructuring_cures,
         "glossary_terms": glossary_terms or _load_existing_glossary_terms(),
+        "glossary_term_candidates": glossary_term_candidates or _load_existing_glossary_term_candidates(),
         "project_snapshots": project_snapshots,
         "user_activity_logs": user_activity_logs[-MAX_JSON_ACTIVITY_LOGS:],
         "identity": identity or default_state()["identity"],
@@ -1301,6 +1308,24 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             ON glossary_terms(canonical_field, review_status);
         CREATE INDEX IF NOT EXISTS idx_glossary_terms_category
             ON glossary_terms(category, review_status);
+        CREATE TABLE IF NOT EXISTS glossary_term_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            status TEXT,
+            surface TEXT,
+            normalized_surface TEXT,
+            canonical_field TEXT,
+            category TEXT,
+            project_id TEXT,
+            source_field TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_glossary_term_candidates_status
+            ON glossary_term_candidates(status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_glossary_term_candidates_surface
+            ON glossary_term_candidates(normalized_surface, status);
+        CREATE INDEX IF NOT EXISTS idx_glossary_term_candidates_project
+            ON glossary_term_candidates(project_id, status);
         CREATE TABLE IF NOT EXISTS project_snapshots (
             project_id TEXT NOT NULL,
             snapshot_id TEXT NOT NULL,
@@ -1442,6 +1467,10 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
             row["term_id"]: json.loads(row["payload_json"])
             for row in conn.execute("SELECT term_id, payload_json FROM glossary_terms ORDER BY updated_at, term_id")
         }
+        glossary_term_candidates = {
+            row["candidate_id"]: json.loads(row["payload_json"])
+            for row in conn.execute("SELECT candidate_id, payload_json FROM glossary_term_candidates ORDER BY updated_at, candidate_id")
+        }
 
         user_activity_logs = [
             _activity_row_to_record(row)
@@ -1472,7 +1501,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         }
 
     has_identity_records = any(identity.get(key) for key in ("tenants", "users", "sessions"))
-    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not prompt_artifacts and not assumption_overrides and not restructuring_cures and not glossary_terms and not metadata and not has_identity_records:
+    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not prompt_artifacts and not assumption_overrides and not restructuring_cures and not glossary_terms and not glossary_term_candidates and not metadata and not has_identity_records:
         return None
 
     return _normalize_state({
@@ -1489,6 +1518,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         "assumption_overrides": assumption_overrides,
         "restructuring_cures": restructuring_cures,
         "glossary_terms": glossary_terms,
+        "glossary_term_candidates": glossary_term_candidates,
         "project_snapshots": project_snapshots,
         "user_activity_logs": user_activity_logs,
         "identity": identity,
@@ -1754,6 +1784,7 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("assumption_overrides", {})
     normalized.setdefault("restructuring_cures", {})
     normalized.setdefault("glossary_terms", {})
+    normalized.setdefault("glossary_term_candidates", {})
     normalized.setdefault("project_snapshots", {})
     normalized.setdefault("user_activity_logs", [])
     normalized.setdefault("identity", default_state()["identity"])
@@ -1781,6 +1812,7 @@ def _save_json_state_from_state(state: Dict[str, Any]) -> None:
         state.get("user_activity_logs", []),
         state.get("identity", default_state()["identity"]),
         state.get("glossary_terms", {}),
+        state.get("glossary_term_candidates", {}),
     )
 
 
@@ -1899,6 +1931,22 @@ def _load_existing_restructuring_cures() -> Dict[str, Any]:
         return restructuring_cures
 
 
+def _load_existing_glossary_term_candidates() -> Dict[str, Any]:
+    if storage_backend() == "json":
+        state = _load_json_state()
+        return (state or {}).get("glossary_term_candidates", {})
+    path = sqlite_file_path()
+    if not path.exists():
+        return {}
+    with _connect_sqlite() as conn:
+        return {
+            row["candidate_id"]: json.loads(row["payload_json"])
+            for row in conn.execute(
+                "SELECT candidate_id, payload_json FROM glossary_term_candidates ORDER BY updated_at, candidate_id"
+            )
+        }
+
+
 def list_glossary_term_records(
     *,
     query: str | None = None,
@@ -1932,6 +1980,196 @@ def list_glossary_term_records(
                 continue
         filtered.append(term)
     return sorted(filtered, key=lambda item: (item.get("category") or "", item.get("displayNameKo") or item.get("termId") or ""))
+
+
+def list_glossary_term_candidate_records(
+    *,
+    query: str | None = None,
+    status: str | None = None,
+    project_id: str | None = None,
+    category: str | None = None,
+    limit: int = 100,
+) -> list[Dict[str, Any]]:
+    limit = max(1, min(int(limit or 100), 500))
+    candidates = list(_load_existing_glossary_term_candidates().values())
+    normalized_query = _normalize_glossary_search_text(query)
+    filtered: list[Dict[str, Any]] = []
+    for candidate in candidates:
+        if status and candidate.get("status") != status:
+            continue
+        if project_id and candidate.get("projectId") != project_id:
+            continue
+        if category and candidate.get("category") != category:
+            continue
+        if normalized_query:
+            haystack = " ".join(
+                [
+                    str(candidate.get("surface") or ""),
+                    str(candidate.get("sourceField") or ""),
+                    str(candidate.get("suggestedCanonicalField") or ""),
+                    str(candidate.get("reviewReason") or ""),
+                ]
+            )
+            if normalized_query not in _normalize_glossary_search_text(haystack):
+                continue
+        filtered.append(candidate)
+    return sorted(
+        filtered,
+        key=lambda item: (item.get("status") or "", item.get("lastSeenAt") or item.get("updatedAt") or ""),
+        reverse=True,
+    )[:limit]
+
+
+def get_glossary_term_candidate_record(candidate_id: str) -> Dict[str, Any] | None:
+    if not candidate_id:
+        return None
+    return _load_existing_glossary_term_candidates().get(candidate_id)
+
+
+def upsert_glossary_term_candidate_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    surface = str(record.get("surface") or "").strip()
+    if not surface:
+        raise ValueError("surface is required")
+    normalized_surface = _normalize_glossary_search_text(surface)
+    source_field = str(record.get("sourceField") or record.get("source_field") or "").strip()
+    project_id = record.get("projectId") or record.get("project_id")
+    suggested_canonical = record.get("suggestedCanonicalField") or record.get("canonicalField") or record.get("canonical_field")
+    candidate_id = record.get("candidateId") or record.get("candidate_id") or _glossary_candidate_id(
+        surface=surface,
+        source_field=source_field,
+        project_id=project_id,
+        suggested_canonical=suggested_canonical,
+    )
+    existing = get_glossary_term_candidate_record(candidate_id)
+    incoming_status = record.get("status")
+    existing_status = (existing or {}).get("status")
+    if existing_status in {"approved", "rejected", "merged"} and incoming_status == "pending_review":
+        status = existing_status
+    else:
+        status = incoming_status or existing_status or "pending_review"
+    if status not in GLOSSARY_CANDIDATE_STATUSES:
+        raise ValueError(f"status must be one of {sorted(GLOSSARY_CANDIDATE_STATUSES)}")
+
+    record_occurrence = record.get("recordOccurrence", True)
+    occurrence = {
+        "at": record.get("lastSeenAt") or record.get("last_seen_at") or now,
+        "projectId": project_id,
+        "runId": record.get("runId") or record.get("run_id"),
+        "sourceField": source_field,
+        "sourceLocator": record.get("sourceLocator") or record.get("source_locator") or {},
+        "confidence": record.get("confidence"),
+        "surface": surface,
+    }
+    occurrences = list((existing or {}).get("occurrences") or [])
+    if record_occurrence and occurrence not in occurrences:
+        occurrences.append(occurrence)
+    occurrences = occurrences[-20:]
+
+    normalized = {
+        **(existing or {}),
+        **record,
+        "schemaVersion": record.get("schemaVersion") or "realytics-glossary-term-candidate-v1",
+        "candidateId": candidate_id,
+        "surface": surface,
+        "normalizedSurface": normalized_surface,
+        "status": status,
+        "projectId": project_id,
+        "runId": record.get("runId") or record.get("run_id") or (existing or {}).get("runId"),
+        "sourceField": source_field,
+        "sourceLocator": record.get("sourceLocator") or record.get("source_locator") or (existing or {}).get("sourceLocator") or {},
+        "suggestedTermId": record.get("suggestedTermId") or record.get("suggested_term_id") or (existing or {}).get("suggestedTermId"),
+        "suggestedCanonicalField": suggested_canonical or (existing or {}).get("suggestedCanonicalField"),
+        "category": record.get("category") or (existing or {}).get("category") or "unclassified",
+        "confidence": record.get("confidence") if record.get("confidence") is not None else (existing or {}).get("confidence"),
+        "occurrenceCount": int((existing or {}).get("occurrenceCount") or 0) + (1 if record_occurrence else 0),
+        "occurrences": occurrences,
+        "firstSeenAt": (existing or {}).get("firstSeenAt") or now,
+        "lastSeenAt": occurrence["at"],
+        "createdAt": (existing or {}).get("createdAt") or now,
+        "updatedAt": now,
+        "reviewHistory": list((existing or {}).get("reviewHistory") or []),
+    }
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("glossary_term_candidates", {})
+        state["glossary_term_candidates"][candidate_id] = normalized
+        _save_json_state_from_state(state)
+        return normalized
+
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO glossary_term_candidates(
+                candidate_id, status, surface, normalized_surface, canonical_field,
+                category, project_id, source_field, updated_at, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(candidate_id) DO UPDATE SET
+                status = excluded.status,
+                surface = excluded.surface,
+                normalized_surface = excluded.normalized_surface,
+                canonical_field = excluded.canonical_field,
+                category = excluded.category,
+                project_id = excluded.project_id,
+                source_field = excluded.source_field,
+                updated_at = excluded.updated_at,
+                payload_json = excluded.payload_json
+            """,
+            (
+                candidate_id,
+                normalized.get("status"),
+                normalized.get("surface"),
+                normalized.get("normalizedSurface"),
+                normalized.get("suggestedCanonicalField"),
+                normalized.get("category"),
+                normalized.get("projectId"),
+                normalized.get("sourceField"),
+                normalized.get("updatedAt"),
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return normalized
+
+
+def update_glossary_term_candidate_status_record(
+    candidate_id: str,
+    *,
+    status: str,
+    actor: str = "anonymous",
+    reason: str | None = None,
+    term_id: str | None = None,
+    canonical_field: str | None = None,
+) -> Dict[str, Any]:
+    current = get_glossary_term_candidate_record(candidate_id)
+    if not current:
+        raise KeyError("glossary term candidate not found")
+    if status not in GLOSSARY_CANDIDATE_STATUSES:
+        raise ValueError(f"status must be one of {sorted(GLOSSARY_CANDIDATE_STATUSES)}")
+    now = datetime.now(timezone.utc).isoformat()
+    history = list(current.get("reviewHistory") or [])
+    history.append({
+        "at": now,
+        "by": actor,
+        "status": status,
+        "reason": reason,
+        "termId": term_id,
+        "canonicalField": canonical_field,
+    })
+    updated = {
+        **current,
+        "recordOccurrence": False,
+        "status": status,
+        "reviewedBy": actor,
+        "reviewedAt": now,
+        "reviewReason": reason,
+        "approvedTermId": term_id or current.get("approvedTermId"),
+        "approvedCanonicalField": canonical_field or current.get("approvedCanonicalField"),
+        "reviewHistory": history,
+        "updatedAt": now,
+    }
+    return upsert_glossary_term_candidate_record(updated)
 
 
 def get_glossary_term_record(term_id: str) -> Dict[str, Any] | None:
@@ -1998,6 +2236,25 @@ def _load_existing_glossary_terms() -> Dict[str, Any]:
 
 def _normalize_glossary_search_text(value: str | None) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+def _glossary_candidate_id(
+    *,
+    surface: str,
+    source_field: str | None = None,
+    project_id: str | None = None,
+    suggested_canonical: str | None = None,
+) -> str:
+    fingerprint = "|".join(
+        [
+            _normalize_glossary_search_text(project_id),
+            _normalize_glossary_search_text(surface),
+            _normalize_glossary_search_text(source_field),
+            _normalize_glossary_search_text(suggested_canonical),
+        ]
+    )
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+    return f"gtc_{digest}"
 
 
 def _load_existing_identity_records() -> Dict[str, Any]:

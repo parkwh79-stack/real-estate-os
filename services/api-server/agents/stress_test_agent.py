@@ -127,13 +127,15 @@ class StressTestAgent:
         pf_amount: float,
     ) -> float:
         finance_years = max(0.0, (schedule.salesEndMonth - schedule.constructionStartMonth) / 12.0)
-        if sorted_tranches:
-            annual = sum(
-                t.amount * (t.interestRate + driver.interestRateDelta + t.feeRate)
-                for t in sorted_tranches
-            )
-            return annual * finance_years
-        return request.financeCost + pf_amount * driver.interestRateDelta * finance_years
+        # Anchor the base finance cost on the feasibility figure when available;
+        # only the rate shock adds incremental interest. When no feasibility
+        # finance cost is supplied, estimate the base from the tranche stack.
+        base_finance = request.financeCost
+        if base_finance <= 0 and sorted_tranches:
+            base_finance = sum(t.amount * (t.interestRate + t.feeRate) for t in sorted_tranches) * finance_years
+        exposure = pf_amount or sum(t.amount for t in sorted_tranches)
+        rate_shock = exposure * driver.interestRateDelta * finance_years
+        return base_finance + rate_shock
 
     @staticmethod
     def _build_scenario_cashflow(

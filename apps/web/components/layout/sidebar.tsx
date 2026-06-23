@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
+  BookMarked,
   BookOpen,
   FileCheck,
   FolderKanban,
@@ -21,11 +22,13 @@ const navItems = [
   { href: "/", label: "대시보드", icon: LayoutDashboard },
   { href: "/dashboard", label: "프로젝트 관리", icon: FolderKanban },
   { href: "/templates", label: "업무 템플릿", icon: LibraryBig },
+  { href: "/glossary", label: "표준 용어", icon: BookOpen },
   { href: "/analysis", label: "토지·거래 분석", icon: Map },
   { href: "/feasibility", label: "사업성 분석", icon: BarChart3 },
   { href: "/cashflow-detail", label: "CF 대시보드", icon: Wallet },
   { href: "/finance", label: "금융구조", icon: Layers },
   { href: "/report", label: "PF 심사보고서", icon: FileCheck },
+  { href: "/glossary/candidates", label: "용어 검토", icon: BookMarked },
 ];
 
 export function Sidebar() {
