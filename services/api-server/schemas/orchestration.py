@@ -34,6 +34,7 @@ PF_REVIEW_STEPS = [
     ("evidence_graph_generation", "Evidence graph generation"),
     ("quality_check", "Report completeness quality check"),
     ("approval_readiness_gate", "Approval readiness gate"),
+    ("credit_document_generation", "Term Sheet and IC Memo generation"),
 ]
 
 TERMINAL_RUN_STATUSES = {"completed", "completed_with_warnings", "failed", "approved"}

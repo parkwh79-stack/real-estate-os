@@ -2007,6 +2007,31 @@ def get_project_orchestration(project_id: str, run_id: str):
         raise HTTPException(status_code=404, detail="Orchestration run not found")
     return run
 
+
+@router.get("/{project_id}/orchestrations/{run_id}/credit-documents")
+def get_project_orchestration_credit_documents(project_id: str, run_id: str, request: Request):
+    """Return the Term Sheet and IC Memo generated during a PF review run."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+
+    run = orchestration_repository().get(project_id, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Orchestration run not found")
+    artifacts = run.get("artifacts", {})
+    term_sheet = artifacts.get("termSheet")
+    ic_memo = artifacts.get("icMemo")
+    if term_sheet is None and ic_memo is None:
+        raise HTTPException(status_code=404, detail="Credit documents were not generated for this run")
+    return {
+        "schemaVersion": "realytics-credit-documents-v1",
+        "projectId": project_id,
+        "runId": run_id,
+        "termSheet": term_sheet,
+        "icMemo": ic_memo,
+    }
+
+
 @router.get("/{project_id}/risk-registers")
 def list_project_risk_registers(project_id: str, request: Request):
     if project_id not in PROJECTS_DB:

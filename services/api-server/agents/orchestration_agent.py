@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.ai_connection import resolve_ai_context, safe_ai_context
+from agents.credit_document_agent import CreditDocumentAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.data_quality_agent import DataQualityAgent
 from agents.developability_score_agent import DevelopabilityScoreAgent
@@ -527,6 +528,10 @@ class OrchestrationAgent:
             run["artifacts"]["approvalReadinessGate"] = approval_readiness
             self._complete_step(run, "approval_readiness_gate", approval_readiness, artifact_key="approvalReadinessGate")
 
+            # Credit documents synthesise every prior artifact (incl. the approval
+            # readiness gate), so they are generated last.
+            self._run_credit_document_step(run, project_data)
+
             run["status"] = "completed" if quality["pass"] else "completed_with_warnings"
         except Exception as exc:
             run["status"] = "failed"
@@ -697,6 +702,23 @@ class OrchestrationAgent:
             run["errors"].append({"message": f"Term annotation failed: {exc}", "type": exc.__class__.__name__})
             output = {"status": "error", "reason": str(exc)}
         self._complete_step(run, "term_annotation", output, artifact_key="termAnnotations")
+
+    def _run_credit_document_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+        try:
+            agent = CreditDocumentAgent()
+            term_sheet = agent.build_term_sheet(project_data, run["artifacts"])
+            ic_memo = agent.build_ic_memo(project_data, run["artifacts"])
+            run["artifacts"]["termSheet"] = term_sheet
+            run["artifacts"]["icMemo"] = ic_memo
+            output = {
+                "termSheetTrancheCount": len(term_sheet.get("facility", {}).get("tranches", [])),
+                "icMemoDecision": ic_memo.get("recommendation", {}).get("decisionLabel"),
+                "icMemoApprovalReady": ic_memo.get("recommendation", {}).get("approvalReady"),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Credit document generation failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "credit_document_generation", output, artifact_key="icMemo")
 
     def _run_developability_score_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
         try:

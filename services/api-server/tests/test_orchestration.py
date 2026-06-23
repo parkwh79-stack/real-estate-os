@@ -85,6 +85,14 @@ def test_pf_review_orchestration_completes_and_saves_report():
         run["artifacts"]["phase11Report"]["report"]["sections"]["businessFeasibility"]["developabilityScore"]["grade"]
         == developability["grade"]
     )
+    term_sheet = run["artifacts"]["termSheet"]
+    assert term_sheet["documentType"].startswith("거래조건서")
+    assert term_sheet["markdown"].startswith("# 거래조건서")
+    ic_memo = run["artifacts"]["icMemo"]
+    assert ic_memo["documentType"].startswith("여신심사보고서")
+    assert ic_memo["recommendation"]["decisionLabel"] == run["artifacts"]["creditReviewDecision"]["decisionLabel"]
+    assert "# 여신심사보고서" in ic_memo["markdown"]
+    assert run["agentProgress"]["credit_document_generation"]["status"] == "completed"
     assert run["agentProgress"]["scenario_restructuring_plan"]["lastArtifactKey"] == "restructuringPlan"
     assert run["artifacts"]["phase11Report"]["report"]["qualityChecks"]["actualSectionCount"] == 20
     assert run["artifacts"]["reportRecord"]["run_id"] == run["run_id"]

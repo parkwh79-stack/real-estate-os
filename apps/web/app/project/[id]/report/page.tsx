@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { EngineMetricsPanel } from "../../../../components/orchestration/engine-metrics-panel";
+import { CreditDocumentsPanel } from "../../../../components/orchestration/credit-documents-panel";
 import { TermAnnotationsPanel } from "../../../../components/orchestration/term-annotations-panel";
 
 interface ProjectResponse {
@@ -295,6 +296,8 @@ export default function ReportPreviewPage() {
       </section>
 
       <EngineMetricsPanel projectId={projectId} />
+
+      <CreditDocumentsPanel projectId={projectId} />
 
       <TermAnnotationsPanel projectId={projectId} />
 
