@@ -157,12 +157,19 @@ class VisualQAAgent:
                 )
                 continue
 
+            # `Pixmap.samples` materializes a fresh bytes copy of the whole pixel
+            # buffer on every access. Reading it once into locals keeps this loop
+            # O(pixels); indexing it inside the loop made it O(pixels^2) and could
+            # take tens of minutes per A4 page once a baseline existed.
+            current_samples = pix.samples
+            baseline_samples = baseline_pix.samples
+            sample_limit = min(len(current_samples), len(baseline_samples))
             diff_pixels = 0
-            for idx in range(0, len(pix.samples), 3):
+            for idx in range(0, sample_limit - 2, 3):
                 if (
-                    abs(pix.samples[idx] - baseline_pix.samples[idx]) > 15
-                    or abs(pix.samples[idx + 1] - baseline_pix.samples[idx + 1]) > 15
-                    or abs(pix.samples[idx + 2] - baseline_pix.samples[idx + 2]) > 15
+                    abs(current_samples[idx] - baseline_samples[idx]) > 15
+                    or abs(current_samples[idx + 1] - baseline_samples[idx + 1]) > 15
+                    or abs(current_samples[idx + 2] - baseline_samples[idx + 2]) > 15
                 ):
                     diff_pixels += 1
 

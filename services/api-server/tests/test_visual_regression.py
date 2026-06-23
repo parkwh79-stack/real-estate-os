@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 from agents.visual_qa_agent import VisualQAAgent
 from agents.report_export_agent import ReportExportAgent
@@ -89,8 +90,20 @@ def test_visual_regression_baseline_generation():
         baseline_file = Path(temp_dir) / "baseline_regression_test_id_page_1.png"
         assert baseline_file.exists()
 
-        # Second run with same PDF should match the baseline perfectly
+        # Second run with same PDF should match the baseline perfectly.
+        # This run exercises the per-pixel comparison loop (a baseline now exists).
+        # Performance guard: `Pixmap.samples` re-copies the whole pixel buffer on
+        # every access, so indexing it inside the loop made a single A4 page take
+        # tens of minutes (O(pixels^2)). Reading samples once keeps it O(pixels)
+        # (<1s). 30s is a generous, non-flaky ceiling that still fails loudly if
+        # the quadratic pattern is ever reintroduced.
+        start = time.perf_counter()
         reg_report_2 = qa_agent.run_visual_regression(pdf_bytes, report_id="regression_test_id")
+        elapsed = time.perf_counter() - start
+        assert elapsed < 30, (
+            f"Visual regression comparison took {elapsed:.1f}s — pix.samples is likely "
+            "being re-materialized inside the pixel loop (O(pixels^2) regression)."
+        )
         assert reg_report_2["status"] == "passed"
         assert reg_report_2["matched_pages"] == 1
         assert reg_report_2["regression_pages"] == 0
