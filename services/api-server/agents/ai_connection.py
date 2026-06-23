@@ -9,6 +9,75 @@ CLAUDE_DESKTOP_ALIASES = {"claude-desktop", "claude_desktop", "mcp_host", "host_
 OPENAI_ALIASES = {"openai", "chatgpt", "gpt"}
 SECRET_KEYS = {"api_key", "apikey", "token", "secret", "password"}
 
+# Provider aliases normalised to a canonical provider key.
+PROVIDER_ALIASES = {
+    "openai": "openai", "chatgpt": "openai", "gpt": "openai",
+    "anthropic": "anthropic", "claude": "anthropic", "claude_api": "anthropic",
+    "claude-desktop": "claude_desktop", "claude_desktop": "claude_desktop",
+    "mcp_host": "claude_desktop", "host_llm": "claude_desktop",
+    "gemini": "gemini", "google": "gemini",
+    "groq": "groq",
+    "openrouter": "openrouter",
+    "deepseek": "deepseek",
+    "together": "together", "togetherai": "together",
+    "local": "local", "ollama": "local", "vllm": "local", "self_hosted": "local",
+}
+
+# OpenAI-compatible providers: anything that speaks the OpenAI Chat Completions
+# API can be reached by overriding base_url on the OpenAI SDK client. This lets
+# REALYTICS use Gemini, Groq, OpenRouter, DeepSeek, Together, or a self-hosted
+# (Ollama/vLLM) endpoint through one code path. Free tiers (Google AI Studio,
+# Groq, OpenRouter) and on-prem open models (privacy for sensitive PF data) are
+# usable without new SDKs.
+OPENAI_COMPATIBLE_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "openai": {
+        "base_url": None,  # default OpenAI endpoint
+        "api_key_env": "OPENAI_API_KEY",
+        "default_model": "gpt-4o",
+        "json_mode": True,
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key_env": "GEMINI_API_KEY",
+        "default_model": "gemini-2.5-flash",
+        "json_mode": True,
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "default_model": "llama-3.3-70b-versatile",
+        "json_mode": True,
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "default_model": "meta-llama/llama-3.3-70b-instruct",
+        "json_mode": False,
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "default_model": "deepseek-chat",
+        "json_mode": True,
+    },
+    "together": {
+        "base_url": "https://api.together.xyz/v1",
+        "api_key_env": "TOGETHER_API_KEY",
+        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "json_mode": True,
+    },
+    # Self-hosted open models (Ollama/vLLM/LM Studio). base_url and model come
+    # from environment; api key is optional (Ollama ignores it).
+    "local": {
+        "base_url": None,
+        "base_url_env": "REALYTICS_LLM_BASE_URL",
+        "api_key_env": "REALYTICS_LLM_API_KEY",
+        "default_model": "qwen2.5",
+        "json_mode": False,
+        "is_local": True,
+    },
+}
+
 
 @dataclass
 class AIExtractionResult:
@@ -36,19 +105,13 @@ def resolve_ai_context(
     host: str | None = None,
 ) -> Dict[str, Any]:
     requested = dict(ai_context or {})
-    provider = (
+    raw_provider = (
         requested.get("provider")
         or requested.get("ai_provider")
         or os.environ.get("REALYTICS_AI_PROVIDER")
         or "openai"
     )
-    provider = str(provider).strip().lower()
-    if provider in OPENAI_ALIASES:
-        provider = "openai"
-    elif provider in CLAUDE_DESKTOP_ALIASES:
-        provider = "claude_desktop"
-    elif provider in CLAUDE_API_ALIASES:
-        provider = "anthropic"
+    provider = PROVIDER_ALIASES.get(str(raw_provider).strip().lower(), str(raw_provider).strip().lower())
 
     resolved_user_id = (
         user_id
@@ -59,38 +122,82 @@ def resolve_ai_context(
     )
     resolved_host = host or requested.get("host") or os.environ.get("REALYTICS_AI_HOST") or "api"
 
-    if provider == "openai":
-        model = requested.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o"
-        direct_model_call = bool(os.environ.get("OPENAI_API_KEY"))
-        requires_api_key = None if direct_model_call else "OPENAI_API_KEY"
-        runtime_provider = "openai"
-    elif provider == "anthropic":
-        model = requested.get("model") or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-latest"
-        direct_model_call = bool(os.environ.get("ANTHROPIC_API_KEY"))
-        requires_api_key = None if direct_model_call else "ANTHROPIC_API_KEY"
-        runtime_provider = "anthropic"
-    elif provider == "claude_desktop":
-        model = requested.get("model") or os.environ.get("CLAUDE_DESKTOP_MODEL") or "claude-desktop-host"
-        direct_model_call = False
-        requires_api_key = None
-        runtime_provider = "mcp_host_llm"
-    else:
-        model = requested.get("model") or "unknown"
-        direct_model_call = False
-        requires_api_key = None
-        runtime_provider = "unsupported"
-
-    return {
+    base = {
         "host": resolved_host,
         "provider": provider,
-        "runtime_provider": runtime_provider,
-        "model": model,
         "user_id": str(resolved_user_id),
-        "direct_model_call": direct_model_call,
-        "requires_api_key": requires_api_key,
-        "server_side_extraction": provider in {"openai", "anthropic"} and direct_model_call,
-        "host_llm_available": provider == "claude_desktop",
+        "base_url": None,
+        "api_key_env": None,
+        "supports_json_mode": False,
+        "is_local": False,
     }
+
+    if provider == "anthropic":
+        model = requested.get("model") or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-6"
+        direct = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        base.update({
+            "runtime_provider": "anthropic",
+            "model": model,
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "direct_model_call": direct,
+            "requires_api_key": None if direct else "ANTHROPIC_API_KEY",
+            "server_side_extraction": direct,
+            "host_llm_available": False,
+        })
+        return base
+
+    if provider == "claude_desktop":
+        model = requested.get("model") or os.environ.get("CLAUDE_DESKTOP_MODEL") or "claude-desktop-host"
+        base.update({
+            "runtime_provider": "mcp_host_llm",
+            "model": model,
+            "direct_model_call": False,
+            "requires_api_key": None,
+            "server_side_extraction": False,
+            "host_llm_available": True,
+        })
+        return base
+
+    if provider in OPENAI_COMPATIBLE_PROVIDERS:
+        spec = OPENAI_COMPATIBLE_PROVIDERS[provider]
+        is_local = bool(spec.get("is_local"))
+        base_url = spec.get("base_url")
+        if spec.get("base_url_env"):
+            base_url = os.environ.get(spec["base_url_env"]) or base_url
+        api_key_env = spec.get("api_key_env")
+        env_model = os.environ.get(f"{provider.upper()}_MODEL") or (
+            os.environ.get("REALYTICS_LLM_MODEL") if is_local else None
+        )
+        model = requested.get("model") or env_model or spec.get("default_model") or "unknown"
+        has_key = bool(api_key_env and os.environ.get(api_key_env))
+        # Local endpoints are usable once a base_url is configured, even without a key.
+        direct = (is_local and bool(base_url)) or (not is_local and has_key)
+        requires_api_key = None
+        if not direct:
+            requires_api_key = spec.get("base_url_env") if is_local else api_key_env
+        base.update({
+            "runtime_provider": "openai" if provider == "openai" else "openai_compatible",
+            "model": model,
+            "base_url": base_url,
+            "api_key_env": api_key_env,
+            "supports_json_mode": bool(spec.get("json_mode")),
+            "is_local": is_local,
+            "direct_model_call": direct,
+            "requires_api_key": requires_api_key,
+            "server_side_extraction": direct,
+            "host_llm_available": False,
+        })
+        return base
+
+    base.update({
+        "runtime_provider": "unsupported",
+        "model": requested.get("model") or "unknown",
+        "direct_model_call": False,
+        "requires_api_key": None,
+        "server_side_extraction": False,
+        "host_llm_available": False,
+    })
+    return base
 
 
 class AIConnection:
@@ -104,8 +211,6 @@ class AIConnection:
         context = resolve_ai_context(ai_context)
         provider = context["provider"]
 
-        if provider == "openai":
-            return self._extract_with_openai(prompt, system, context)
         if provider == "anthropic":
             return self._extract_with_anthropic(prompt, system, context)
         if provider == "claude_desktop":
@@ -117,6 +222,8 @@ class AIConnection:
                     "Claude Desktop UI model internally; return a host_llm_extraction request instead."
                 ),
             )
+        if provider in OPENAI_COMPATIBLE_PROVIDERS:
+            return self._extract_with_openai_compatible(prompt, system, context)
 
         return AIExtractionResult(
             data=None,
@@ -124,37 +231,60 @@ class AIConnection:
             error=f"Unsupported AI provider: {provider}",
         )
 
-    def _extract_with_openai(
+    def _extract_with_openai_compatible(
         self,
         prompt: str,
         system: str,
         context: Dict[str, Any],
     ) -> AIExtractionResult:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
+        """Call any OpenAI Chat Completions-compatible endpoint via base_url.
+
+        Covers OpenAI plus Gemini (OpenAI-compat), Groq, OpenRouter, DeepSeek,
+        Together, and self-hosted Ollama/vLLM. Sensitive deployments should
+        prefer a local base_url so PF data never leaves the network.
+        """
+        api_key_env = context.get("api_key_env")
+        api_key = os.environ.get(api_key_env) if api_key_env else None
+        base_url = context.get("base_url")
+        is_local = context.get("is_local")
+
+        if is_local and not base_url:
             return AIExtractionResult(
                 data=None,
                 meta=context,
-                error="OPENAI_API_KEY not configured",
+                error="REALYTICS_LLM_BASE_URL not configured for the local/self-hosted model.",
+            )
+        if not is_local and not api_key:
+            return AIExtractionResult(
+                data=None,
+                meta=context,
+                error=f"{api_key_env or 'API key'} not configured for provider '{context['provider']}'.",
             )
 
         try:
             from openai import OpenAI
 
-            client = OpenAI(api_key=api_key)
-            response = client.chat.completions.create(
-                model=context["model"],
-                messages=[
+            client_kwargs: Dict[str, Any] = {"api_key": api_key or "not-needed"}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            client = OpenAI(**client_kwargs)
+
+            request_kwargs: Dict[str, Any] = {
+                "model": context["model"],
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.0,
-                response_format={"type": "json_object"},
-            )
+                "temperature": 0.0,
+            }
+            if context.get("supports_json_mode"):
+                request_kwargs["response_format"] = {"type": "json_object"}
+
+            response = client.chat.completions.create(**request_kwargs)
             content = response.choices[0].message.content or "{}"
             return AIExtractionResult(
                 data=_load_json_object(content),
-                meta={**context, "parsing_runtime": "openai.chat.completions"},
+                meta={**context, "parsing_runtime": f"openai_compatible:{context['provider']}"},
             )
         except Exception as exc:
             return AIExtractionResult(data=None, meta=context, error=str(exc))

@@ -1,19 +1,31 @@
+import Image from "next/image";
+import Link from "next/link";
 import {
   Bell,
+  BookOpen,
   CircleHelp,
   Search,
   ShieldCheck,
   UserCircle,
 } from "lucide-react";
 
+const BLOG_URL = "https://blog.naver.com/babo7910/224295847211";
+
 export function Header() {
   return (
     <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6 lg:px-8 dark:border-slate-800 dark:bg-slate-950/90">
       <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-950 text-white lg:hidden dark:bg-white dark:text-slate-950">
-            P9
-          </div>
+          <Link href="/" className="shrink-0 lg:hidden" aria-label="REALYTICS 홈">
+            <Image
+              src="/brand/realytics-logo.png"
+              alt="REALYTICS"
+              width={120}
+              height={40}
+              priority
+              className="h-8 w-auto max-w-[120px] object-contain"
+            />
+          </Link>
           <label className="flex h-10 w-full max-w-xl items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">
             <Search className="h-4 w-4" />
             <input
@@ -29,6 +41,16 @@ export function Header() {
             <ShieldCheck className="h-4 w-4" />
             API mock ready
           </div>
+          <a
+            href={BLOG_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:text-white"
+            aria-label="REALYTICS 블로그"
+            title="REALYTICS 블로그"
+          >
+            <BookOpen className="h-5 w-5" />
+          </a>
           <button
             type="button"
             className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:text-white"

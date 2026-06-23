@@ -306,6 +306,239 @@ def calculate_tranche_recovery(tranche_amount: float, total_recovery_pool: float
     recovery_rate = available_for_tranche / tranche_amount
     return min(1.0, recovery_rate)
 
+# ---------------------------------------------------------------------------
+# Return metrics engine (IRR / Equity IRR / Equity Multiple / Payback / ICR)
+# ---------------------------------------------------------------------------
+
+def npv(rate: float, cashflows: List[float]) -> float:
+    """Net present value of equally spaced cashflows at a per-period rate."""
+    total = 0.0
+    for index, cf in enumerate(cashflows):
+        total += _to_float(cf) / ((1.0 + rate) ** index)
+    return total
+
+def calculate_irr(cashflows: List[float], guess: float = 0.1) -> Optional[float]:
+    """Per-period IRR for equally spaced cashflows.
+
+    Returns the periodic rate (e.g. a monthly rate for monthly cashflows), or
+    None when the series has no sign change or no solvable rate. Uses
+    Newton-Raphson first and falls back to bisection so it stays numpy-free.
+    """
+    flows = [_to_float(cf) for cf in (cashflows or [])]
+    if len(flows) < 2:
+        return None
+    if not (any(cf > 0 for cf in flows) and any(cf < 0 for cf in flows)):
+        return None
+
+    rate = guess
+    for _ in range(100):
+        base = 1.0 + rate
+        if base <= 0.0 or rate > 1e3:
+            break
+        try:
+            value = 0.0
+            derivative = 0.0
+            for index, cf in enumerate(flows):
+                value += cf / (base ** index)
+                if index > 0:
+                    derivative -= index * cf / (base ** (index + 1))
+        except OverflowError:
+            break
+        if abs(value) < 1e-7:
+            return rate
+        if derivative == 0.0:
+            break
+        new_rate = rate - value / derivative
+        if new_rate <= -1.0:
+            break
+        if abs(new_rate - rate) < 1e-9:
+            return new_rate
+        rate = new_rate
+
+    low, high = -0.9999, 10.0
+    npv_low = npv(low, flows)
+    npv_high = npv(high, flows)
+    if npv_low == 0.0:
+        return low
+    if npv_high == 0.0:
+        return high
+    if (npv_low > 0) == (npv_high > 0):
+        return None
+    for _ in range(200):
+        mid = (low + high) / 2.0
+        npv_mid = npv(mid, flows)
+        if abs(npv_mid) < 1e-7:
+            return mid
+        if (npv_mid > 0) == (npv_low > 0):
+            low, npv_low = mid, npv_mid
+        else:
+            high, npv_high = mid, npv_mid
+    return (low + high) / 2.0
+
+def annualize_rate(periodic_rate: Optional[float], periods_per_year: int = 12) -> Optional[float]:
+    if periodic_rate is None or periodic_rate <= -1.0:
+        return None
+    return (1.0 + periodic_rate) ** periods_per_year - 1.0
+
+def calculate_irr_annualized(cashflows: List[float], periods_per_year: int = 12, guess: float = 0.1) -> Optional[float]:
+    return annualize_rate(calculate_irr(cashflows, guess=guess), periods_per_year)
+
+def calculate_equity_multiple(cashflows: List[float]) -> float:
+    """Total distributions divided by total contributions (TVPI-style)."""
+    inflows = 0.0
+    outflows = 0.0
+    for cf in (cashflows or []):
+        value = _to_float(cf)
+        if value >= 0:
+            inflows += value
+        else:
+            outflows += -value
+    if outflows <= 0:
+        return 0.0
+    return inflows / outflows
+
+def calculate_payback_period(cashflows: List[float], initial_cash: float = 0.0) -> Optional[float]:
+    """Periods until cumulative cashflow first turns non-negative.
+
+    Linear interpolation yields a fractional period. Returns None when the
+    series never recovers, and 0.0 when it never goes negative.
+    """
+    cumulative = float(initial_cash)
+    previous = cumulative
+    went_negative = cumulative < 0
+    for index, cf in enumerate(cashflows or [], start=1):
+        value = _to_float(cf)
+        previous = cumulative
+        cumulative += value
+        if cumulative < 0:
+            went_negative = True
+        if cumulative >= 0 and previous < 0:
+            if value == 0:
+                return float(index)
+            return (index - 1) + (-previous / value)
+    if not went_negative and (cashflows or []):
+        return 0.0
+    return None
+
+def calculate_icr(operating_income: float, interest_expense: float) -> float:
+    """Interest Coverage Ratio = operating income / interest expense."""
+    interest_expense = _to_float(interest_expense)
+    if interest_expense <= 0:
+        return 0.0
+    return _to_float(operating_income) / interest_expense
+
+def calculate_return_metrics(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Developer/equity return bundle: Project IRR, Equity IRR, Equity Multiple,
+    Payback period, and ICR, with hurdle comparison and review-status bands.
+
+    Accepts an explicit ``project_cashflows`` / ``equity_cashflows`` series, or
+    derives the project series from monthly ``revenue_schedule`` / ``cost_schedule``
+    (or ``cash_in`` / ``cash_out``) inputs through ``build_monthly_cash_flow``.
+    """
+    periods_per_year = int(input_data.get("periods_per_year", 12) or 12)
+    hurdle_rate = _to_float(input_data.get("hurdle_rate", 0.12))
+
+    project_cashflows = _resolve_cashflows(
+        input_data.get("project_cashflows")
+        or input_data.get("projectCashflows")
+        or input_data.get("cashflows"),
+        input_data,
+    )
+    equity_cashflows = [
+        _to_float(x)
+        for x in (input_data.get("equity_cashflows") or input_data.get("equityCashflows") or [])
+    ]
+
+    project_irr = calculate_irr_annualized(project_cashflows, periods_per_year) if project_cashflows else None
+    equity_irr = calculate_irr_annualized(equity_cashflows, periods_per_year) if equity_cashflows else None
+
+    if equity_cashflows:
+        equity_multiple = calculate_equity_multiple(equity_cashflows)
+    else:
+        invested = _to_float(input_data.get("equity_invested", 0.0))
+        distributions = _to_float(input_data.get("equity_distributions", 0.0))
+        equity_multiple = distributions / invested if invested > 0 else 0.0
+
+    payback_basis = equity_cashflows or project_cashflows
+    payback_period = calculate_payback_period(payback_basis) if payback_basis else None
+
+    noi = _to_float(input_data.get("net_operating_income", input_data.get("noi", 0.0)))
+    interest_expense = _to_float(input_data.get("interest_expense", input_data.get("annual_interest", 0.0)))
+    icr = calculate_icr(noi, interest_expense)
+
+    return {
+        "periodsPerYear": periods_per_year,
+        "hurdleRate": hurdle_rate,
+        "metrics": {
+            "projectIrr": {
+                "value": project_irr,
+                "status": _return_rate_status(project_irr),
+                "meetsHurdle": project_irr is not None and project_irr >= hurdle_rate,
+            },
+            "equityIrr": {
+                "value": equity_irr,
+                "status": _return_rate_status(equity_irr),
+                "meetsHurdle": equity_irr is not None and equity_irr >= hurdle_rate,
+            },
+            "equityMultiple": {"value": equity_multiple, "status": _equity_multiple_status(equity_multiple)},
+            "paybackPeriodMonths": {
+                "value": payback_period,
+                "paybackYears": round(payback_period / 12.0, 2) if payback_period is not None else None,
+            },
+            "icr": {"value": icr, "status": _higher_is_better_status(icr, 1.50, 1.20, 1.00)},
+        },
+        "inputs": {
+            "projectCashflowPeriods": len(project_cashflows),
+            "equityCashflowPeriods": len(equity_cashflows),
+            "netOperatingIncome": noi,
+            "interestExpense": interest_expense,
+        },
+        "summary": _return_metric_summary(project_irr, equity_irr, equity_multiple, hurdle_rate),
+    }
+
+def _resolve_cashflows(explicit: Any, input_data: Dict[str, Any]) -> List[float]:
+    if isinstance(explicit, list) and explicit:
+        return [_to_float(x) for x in explicit]
+    if any(input_data.get(key) for key in ("revenue_schedule", "cost_schedule", "cash_in", "cash_out", "cashIn", "cashOut")):
+        built = build_monthly_cash_flow(input_data)
+        return [_to_float(x) for x in built.get("net_cashflows", [])]
+    return []
+
+def _return_rate_status(rate: Optional[float]) -> str:
+    if rate is None:
+        return "not_available"
+    if rate < 0:
+        return "loss"
+    if rate >= 0.18:
+        return "strong"
+    if rate >= 0.12:
+        return "bankable"
+    if rate >= 0.07:
+        return "thin"
+    return "weak"
+
+def _equity_multiple_status(equity_multiple: float) -> str:
+    if equity_multiple <= 0:
+        return "not_available"
+    if equity_multiple >= 2.0:
+        return "strong"
+    if equity_multiple >= 1.5:
+        return "bankable"
+    if equity_multiple >= 1.2:
+        return "thin"
+    if equity_multiple >= 1.0:
+        return "weak"
+    return "loss"
+
+def _return_metric_summary(project_irr: Optional[float], equity_irr: Optional[float], equity_multiple: float, hurdle_rate: float) -> str:
+    if project_irr is None:
+        return "Return metrics require a project cashflow series with at least one outflow and one inflow."
+    if project_irr < 0:
+        return "Project IRR is negative; invested capital is not recovered under these assumptions."
+    if project_irr < hurdle_rate:
+        return f"Project IRR {project_irr:.1%} is below the {hurdle_rate:.0%} hurdle; equity pricing or structure needs review."
+    return f"Project IRR {project_irr:.1%} meets the {hurdle_rate:.0%} hurdle."
+
 def _schedule_to_series(schedule: List[Any]) -> List[Dict[str, Any]]:
     series = []
     for index, item in enumerate(schedule, start=1):

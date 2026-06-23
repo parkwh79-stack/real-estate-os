@@ -7,7 +7,7 @@ from typing import Any, Dict
 from uuid import uuid4
 
 
-STATE_VERSION = 11
+STATE_VERSION = 12
 DEFAULT_STATE_FILE = Path(__file__).parent / "data" / "runtime" / "state.json"
 DEFAULT_SQLITE_FILE = Path(__file__).parent / "data" / "runtime" / "realytics.sqlite3"
 MAX_JSON_ACTIVITY_LOGS = 10000
@@ -44,8 +44,10 @@ def default_state() -> Dict[str, Any]:
         "land_evidence": {},
         "risk_registers": {},
         "evidence_graphs": {},
+        "prompt_artifacts": {},
         "assumption_overrides": {},
         "restructuring_cures": {},
+        "glossary_terms": {},
         "project_snapshots": {},
         "user_activity_logs": [],
         "identity": {
@@ -76,6 +78,7 @@ def load_state() -> Dict[str, Any] | None:
             legacy_state.get("user_activity_logs", []),
             risk_registers=legacy_state.get("risk_registers", {}),
             evidence_graphs=legacy_state.get("evidence_graphs", {}),
+            prompt_artifacts=legacy_state.get("prompt_artifacts", {}),
             assumption_overrides=legacy_state.get("assumption_overrides", {}),
             restructuring_cures=legacy_state.get("restructuring_cures", {}),
         )
@@ -95,6 +98,7 @@ def save_state(
     land_evidence: Dict[str, Any] | None = None,
     risk_registers: Dict[str, Any] | None = None,
     evidence_graphs: Dict[str, Any] | None = None,
+    prompt_artifacts: Dict[str, Any] | None = None,
     assumption_overrides: Dict[str, Any] | None = None,
     restructuring_cures: Dict[str, Any] | None = None,
 ) -> None:
@@ -103,15 +107,16 @@ def save_state(
     land_evidence = land_evidence or _load_existing_land_evidence_records()
     risk_registers = risk_registers or _load_existing_risk_registers()
     evidence_graphs = evidence_graphs or _load_existing_evidence_graphs()
+    prompt_artifacts = prompt_artifacts or _load_existing_prompt_artifacts()
     assumption_overrides = assumption_overrides or _load_existing_assumption_overrides()
     restructuring_cures = restructuring_cures or _load_existing_restructuring_cures()
     if user_activity_logs is None:
         user_activity_logs = _load_existing_user_activity_logs()
     identity = _load_existing_identity_records()
     if storage_backend() == "json":
-        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity)
+        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity)
         return
-    _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, assumption_overrides, restructuring_cures, project_snapshots)
+    _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots)
 
 
 def record_user_activity_log(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -146,6 +151,7 @@ def record_user_activity_log(event: Dict[str, Any]) -> Dict[str, Any]:
             state.get("land_evidence", {}),
             state.get("risk_registers", {}),
             state.get("evidence_graphs", {}),
+            state.get("prompt_artifacts", {}),
             state.get("assumption_overrides", {}),
             state.get("restructuring_cures", {}),
             state.get("project_snapshots", {}),
@@ -496,6 +502,104 @@ def list_evidence_graph_records(project_id: str) -> list[Dict[str, Any]]:
                     (project_id,),
                 )
             ]
+    return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)
+
+
+def upsert_prompt_artifact_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a generated AI work-order or prompt draft as an auditable artifact."""
+    now = datetime.now(timezone.utc).isoformat()
+    artifact_type = record.get("artifactType") or record.get("artifact_type") or "ai_work_order"
+    workflow = record.get("workflow") or record.get("recommendedWorkflow") or record.get("recommended_workflow")
+    artifact_id = record.get("artifactId") or record.get("artifact_id") or f"{artifact_type}:{workflow or 'general'}:{uuid4()}"
+    normalized = {
+        **record,
+        "schemaVersion": record.get("schemaVersion") or "realytics-prompt-artifact-v1",
+        "projectId": project_id,
+        "artifactId": str(artifact_id),
+        "artifactType": artifact_type,
+        "workflow": workflow,
+        "title": record.get("title") or "AI 업무 주문서",
+        "body": record.get("body") or record.get("prompt") or "",
+        "createdBy": record.get("createdBy") or record.get("created_by") or "system",
+        "createdAt": record.get("createdAt") or record.get("created_at") or now,
+        "updatedAt": now,
+    }
+
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("prompt_artifacts", {})
+        state["prompt_artifacts"].setdefault(project_id, {})[normalized["artifactId"]] = normalized
+        _save_json_state_from_state(state)
+        return normalized
+
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO prompt_artifacts(
+                project_id, artifact_id, artifact_type, workflow,
+                created_by, created_at, updated_at, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, artifact_id) DO UPDATE SET
+                artifact_type=excluded.artifact_type,
+                workflow=excluded.workflow,
+                created_by=excluded.created_by,
+                created_at=excluded.created_at,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                project_id,
+                normalized["artifactId"],
+                normalized["artifactType"],
+                normalized.get("workflow"),
+                normalized.get("createdBy"),
+                normalized.get("createdAt"),
+                normalized.get("updatedAt"),
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return normalized
+
+
+def get_prompt_artifact_record(project_id: str, artifact_id: str) -> Dict[str, Any] | None:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        return state.get("prompt_artifacts", {}).get(project_id, {}).get(artifact_id)
+    with _connect_sqlite() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM prompt_artifacts WHERE project_id = ? AND artifact_id = ?",
+            (project_id, artifact_id),
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def list_prompt_artifact_records(
+    project_id: str,
+    *,
+    artifact_type: str | None = None,
+    workflow: str | None = None,
+) -> list[Dict[str, Any]]:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        records = list(state.get("prompt_artifacts", {}).get(project_id, {}).values())
+    else:
+        query = "SELECT payload_json FROM prompt_artifacts WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if artifact_type:
+            query += " AND artifact_type = ?"
+            params.append(artifact_type)
+        if workflow:
+            query += " AND workflow = ?"
+            params.append(workflow)
+        query += " ORDER BY updated_at DESC, artifact_id"
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if artifact_type:
+        records = [record for record in records if record.get("artifactType") == artifact_type]
+    if workflow:
+        records = [record for record in records if record.get("workflow") == workflow]
     return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)
 
 
@@ -1007,11 +1111,13 @@ def _save_json_state(
     land_evidence: Dict[str, Any],
     risk_registers: Dict[str, Any],
     evidence_graphs: Dict[str, Any],
+    prompt_artifacts: Dict[str, Any],
     assumption_overrides: Dict[str, Any],
     restructuring_cures: Dict[str, Any],
     project_snapshots: Dict[str, Any],
     user_activity_logs: list[Dict[str, Any]],
     identity: Dict[str, Any] | None = None,
+    glossary_terms: Dict[str, Any] | None = None,
 ) -> None:
     path = state_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1026,8 +1132,10 @@ def _save_json_state(
         "land_evidence": land_evidence,
         "risk_registers": risk_registers,
         "evidence_graphs": evidence_graphs,
+        "prompt_artifacts": prompt_artifacts,
         "assumption_overrides": assumption_overrides,
         "restructuring_cures": restructuring_cures,
+        "glossary_terms": glossary_terms or _load_existing_glossary_terms(),
         "project_snapshots": project_snapshots,
         "user_activity_logs": user_activity_logs[-MAX_JSON_ACTIVITY_LOGS:],
         "identity": identity or default_state()["identity"],
@@ -1135,6 +1243,21 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_evidence_graphs_project_updated
             ON evidence_graphs(project_id, updated_at);
+        CREATE TABLE IF NOT EXISTS prompt_artifacts (
+            project_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            artifact_type TEXT,
+            workflow TEXT,
+            created_by TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, artifact_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_prompt_artifacts_project_updated
+            ON prompt_artifacts(project_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_prompt_artifacts_project_workflow
+            ON prompt_artifacts(project_id, workflow);
         CREATE TABLE IF NOT EXISTS assumption_overrides (
             project_id TEXT NOT NULL,
             override_id TEXT NOT NULL,
@@ -1166,6 +1289,18 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             ON restructuring_cures(project_id, status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_restructuring_cures_project_type
             ON restructuring_cures(project_id, cure_type);
+        CREATE TABLE IF NOT EXISTS glossary_terms (
+            term_id TEXT PRIMARY KEY,
+            canonical_field TEXT,
+            review_status TEXT,
+            category TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_glossary_terms_canonical_field
+            ON glossary_terms(canonical_field, review_status);
+        CREATE INDEX IF NOT EXISTS idx_glossary_terms_category
+            ON glossary_terms(category, review_status);
         CREATE TABLE IF NOT EXISTS project_snapshots (
             project_id TEXT NOT NULL,
             snapshot_id TEXT NOT NULL,
@@ -1285,6 +1420,12 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         ):
             evidence_graphs.setdefault(row["project_id"], {})[row["run_id"]] = json.loads(row["payload_json"])
 
+        prompt_artifacts: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, artifact_id, payload_json FROM prompt_artifacts ORDER BY project_id, updated_at, artifact_id"
+        ):
+            prompt_artifacts.setdefault(row["project_id"], {})[row["artifact_id"]] = json.loads(row["payload_json"])
+
         assumption_overrides: Dict[str, Any] = {}
         for row in conn.execute(
             "SELECT project_id, override_id, payload_json FROM assumption_overrides ORDER BY project_id, updated_at, override_id"
@@ -1296,6 +1437,11 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
             "SELECT project_id, cure_id, payload_json FROM restructuring_cures ORDER BY project_id, updated_at, cure_id"
         ):
             restructuring_cures.setdefault(row["project_id"], {})[row["cure_id"]] = json.loads(row["payload_json"])
+
+        glossary_terms = {
+            row["term_id"]: json.loads(row["payload_json"])
+            for row in conn.execute("SELECT term_id, payload_json FROM glossary_terms ORDER BY updated_at, term_id")
+        }
 
         user_activity_logs = [
             _activity_row_to_record(row)
@@ -1326,7 +1472,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         }
 
     has_identity_records = any(identity.get(key) for key in ("tenants", "users", "sessions"))
-    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not assumption_overrides and not restructuring_cures and not metadata and not has_identity_records:
+    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not prompt_artifacts and not assumption_overrides and not restructuring_cures and not glossary_terms and not metadata and not has_identity_records:
         return None
 
     return _normalize_state({
@@ -1339,8 +1485,10 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         "land_evidence": land_evidence,
         "risk_registers": risk_registers,
         "evidence_graphs": evidence_graphs,
+        "prompt_artifacts": prompt_artifacts,
         "assumption_overrides": assumption_overrides,
         "restructuring_cures": restructuring_cures,
+        "glossary_terms": glossary_terms,
         "project_snapshots": project_snapshots,
         "user_activity_logs": user_activity_logs,
         "identity": identity,
@@ -1355,6 +1503,7 @@ def _save_sqlite_state(
     market_evidence: Dict[str, Any],
     risk_registers: Dict[str, Any],
     evidence_graphs: Dict[str, Any],
+    prompt_artifacts: Dict[str, Any],
     assumption_overrides: Dict[str, Any],
     restructuring_cures: Dict[str, Any],
     project_snapshots: Dict[str, Any],
@@ -1368,6 +1517,7 @@ def _save_sqlite_state(
         conn.execute("DELETE FROM market_evidence")
         conn.execute("DELETE FROM risk_registers")
         conn.execute("DELETE FROM evidence_graphs")
+        conn.execute("DELETE FROM prompt_artifacts")
         conn.execute("DELETE FROM assumption_overrides")
         conn.execute("DELETE FROM restructuring_cures")
         conn.execute("DELETE FROM project_snapshots")
@@ -1493,6 +1643,31 @@ def _save_sqlite_state(
                         json.dumps(record, ensure_ascii=False),
                     ),
                 )
+        for project_id, records in prompt_artifacts.items():
+            iterable = records.values() if isinstance(records, dict) else records
+            for record in iterable:
+                artifact_id = record.get("artifactId") or record.get("artifact_id")
+                if not artifact_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO prompt_artifacts(
+                        project_id, artifact_id, artifact_type, workflow,
+                        created_by, created_at, updated_at, payload_json
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        artifact_id,
+                        record.get("artifactType") or record.get("artifact_type"),
+                        record.get("workflow"),
+                        record.get("createdBy") or record.get("created_by"),
+                        record.get("createdAt") or record.get("created_at"),
+                        record.get("updatedAt") or record.get("updated_at"),
+                        json.dumps(record, ensure_ascii=False),
+                    ),
+                )
         for project_id, records in assumption_overrides.items():
             iterable = records.values() if isinstance(records, dict) else records
             for record in iterable:
@@ -1575,8 +1750,10 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("land_evidence", {})
     normalized.setdefault("risk_registers", {})
     normalized.setdefault("evidence_graphs", {})
+    normalized.setdefault("prompt_artifacts", {})
     normalized.setdefault("assumption_overrides", {})
     normalized.setdefault("restructuring_cures", {})
+    normalized.setdefault("glossary_terms", {})
     normalized.setdefault("project_snapshots", {})
     normalized.setdefault("user_activity_logs", [])
     normalized.setdefault("identity", default_state()["identity"])
@@ -1597,11 +1774,13 @@ def _save_json_state_from_state(state: Dict[str, Any]) -> None:
         state.get("land_evidence", {}),
         state.get("risk_registers", {}),
         state.get("evidence_graphs", {}),
+        state.get("prompt_artifacts", {}),
         state.get("assumption_overrides", {}),
         state.get("restructuring_cures", {}),
         state.get("project_snapshots", {}),
         state.get("user_activity_logs", []),
         state.get("identity", default_state()["identity"]),
+        state.get("glossary_terms", {}),
     )
 
 
@@ -1672,6 +1851,22 @@ def _load_existing_evidence_graphs() -> Dict[str, Any]:
         return evidence_graphs
 
 
+def _load_existing_prompt_artifacts() -> Dict[str, Any]:
+    if storage_backend() == "json":
+        state = _load_json_state()
+        return (state or {}).get("prompt_artifacts", {})
+    path = sqlite_file_path()
+    if not path.exists():
+        return {}
+    with _connect_sqlite() as conn:
+        prompt_artifacts: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, artifact_id, payload_json FROM prompt_artifacts ORDER BY project_id, updated_at, artifact_id"
+        ):
+            prompt_artifacts.setdefault(row["project_id"], {})[row["artifact_id"]] = json.loads(row["payload_json"])
+        return prompt_artifacts
+
+
 def _load_existing_assumption_overrides() -> Dict[str, Any]:
     if storage_backend() == "json":
         state = _load_json_state()
@@ -1702,6 +1897,107 @@ def _load_existing_restructuring_cures() -> Dict[str, Any]:
         ):
             restructuring_cures.setdefault(row["project_id"], {})[row["cure_id"]] = json.loads(row["payload_json"])
         return restructuring_cures
+
+
+def list_glossary_term_records(
+    *,
+    query: str | None = None,
+    category: str | None = None,
+    canonical_field: str | None = None,
+    review_status: str | None = None,
+) -> list[Dict[str, Any]]:
+    terms = list(_load_existing_glossary_terms().values())
+    normalized_query = _normalize_glossary_search_text(query)
+    filtered: list[Dict[str, Any]] = []
+    for term in terms:
+        if category and term.get("category") != category:
+            continue
+        if canonical_field and term.get("canonicalField") != canonical_field:
+            continue
+        if review_status and term.get("reviewStatus") != review_status:
+            continue
+        if normalized_query:
+            haystack = " ".join(
+                [
+                    str(term.get("termId") or ""),
+                    str(term.get("preferredTerm") or ""),
+                    str(term.get("displayNameKo") or ""),
+                    str(term.get("displayNameEn") or ""),
+                    " ".join(str(alias) for alias in term.get("aliases") or []),
+                    str(term.get("definitionKo") or ""),
+                    str(term.get("canonicalField") or ""),
+                ]
+            )
+            if normalized_query not in _normalize_glossary_search_text(haystack):
+                continue
+        filtered.append(term)
+    return sorted(filtered, key=lambda item: (item.get("category") or "", item.get("displayNameKo") or item.get("termId") or ""))
+
+
+def get_glossary_term_record(term_id: str) -> Dict[str, Any] | None:
+    if not term_id:
+        return None
+    return _load_existing_glossary_terms().get(term_id)
+
+
+def upsert_glossary_term_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    term_id = record.get("termId") or record.get("term_id")
+    if not term_id:
+        raise ValueError("termId is required")
+    record = dict(record)
+    record["termId"] = term_id
+    record["updatedAt"] = record.get("updatedAt") or datetime.now(timezone.utc).isoformat()
+    record["createdAt"] = record.get("createdAt") or record["updatedAt"]
+    record["version"] = int(record.get("version") or 1)
+
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("glossary_terms", {})
+        state["glossary_terms"][term_id] = record
+        _save_json_state_from_state(state)
+        return record
+
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO glossary_terms(term_id, canonical_field, review_status, category, updated_at, payload_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(term_id) DO UPDATE SET
+                canonical_field = excluded.canonical_field,
+                review_status = excluded.review_status,
+                category = excluded.category,
+                updated_at = excluded.updated_at,
+                payload_json = excluded.payload_json
+            """,
+            (
+                term_id,
+                record.get("canonicalField") or record.get("canonical_field"),
+                record.get("reviewStatus") or record.get("review_status"),
+                record.get("category"),
+                record.get("updatedAt"),
+                json.dumps(record, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return record
+
+
+def _load_existing_glossary_terms() -> Dict[str, Any]:
+    if storage_backend() == "json":
+        state = _load_json_state()
+        return (state or {}).get("glossary_terms", {})
+    path = sqlite_file_path()
+    if not path.exists():
+        return {}
+    with _connect_sqlite() as conn:
+        return {
+            row["term_id"]: json.loads(row["payload_json"])
+            for row in conn.execute("SELECT term_id, payload_json FROM glossary_terms ORDER BY updated_at, term_id")
+        }
+
+
+def _normalize_glossary_search_text(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
 
 
 def _load_existing_identity_records() -> Dict[str, Any]:

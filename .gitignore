@@ -28,6 +28,7 @@ out/
 build
 dist
 .runtime/
+services/api-server/services/api-server/data/runtime/
 
 # Python
 __pycache__/

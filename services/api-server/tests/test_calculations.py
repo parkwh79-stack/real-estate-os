@@ -5,7 +5,10 @@ from core.calculations import (
     calculate_ltc, calculate_dscr, calculate_all_in_cost, calculate_exit_sale_rate,
     calculate_cashflow_max_minus, simulate_waterfall, calculate_unsold_ltv,
     calculate_tranche_recovery, calculate_cashflow_max_minus_details,
-    build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics
+    build_monthly_cash_flow, calculate_pf_metrics, calculate_feasibility_metrics,
+    npv, calculate_irr, annualize_rate, calculate_irr_annualized,
+    calculate_equity_multiple, calculate_payback_period, calculate_icr,
+    calculate_return_metrics,
 )
 from core.risk_assessment import build_basic_risk_matrix
 
@@ -157,6 +160,69 @@ def test_calculate_pf_metrics_returns_statuses_and_tranche_costs():
     assert result["metrics"]["exit_sale_rate"]["value"] == 0.75
     assert result["tranches"][0]["all_in_cost"] == pytest.approx(0.07)
     assert result["metrics"]["dscr"]["status"] in {"safe", "caution", "high", "critical"}
+
+def test_npv_discounts_future_cashflows():
+    assert npv(0.0, [-100, 50, 50, 50]) == 50.0
+    assert npv(0.1, [-100, 110]) == pytest.approx(0.0, abs=1e-9)
+
+def test_calculate_irr_simple_two_period():
+    assert calculate_irr([-100, 110]) == pytest.approx(0.10, abs=1e-6)
+
+def test_calculate_irr_multi_period():
+    # -1000 with three 500 inflows -> periodic IRR ~23.375%
+    assert calculate_irr([-1000, 500, 500, 500]) == pytest.approx(0.23375, abs=1e-4)
+
+def test_calculate_irr_returns_none_without_sign_change():
+    assert calculate_irr([100, 200, 300]) is None
+    assert calculate_irr([-100, -200]) is None
+    assert calculate_irr([50]) is None
+
+def test_annualize_rate():
+    assert annualize_rate(0.01, 12) == pytest.approx((1.01 ** 12) - 1)
+    assert annualize_rate(0.1, 1) == pytest.approx(0.1)
+    assert annualize_rate(None) is None
+
+def test_calculate_irr_annualized_matches_periodic_when_annual():
+    assert calculate_irr_annualized([-100, 110], periods_per_year=1) == pytest.approx(0.10, abs=1e-6)
+
+def test_calculate_equity_multiple():
+    assert calculate_equity_multiple([-100, -50, 300]) == pytest.approx(2.0)
+    assert calculate_equity_multiple([100, 200]) == 0.0  # no contribution
+    assert calculate_equity_multiple([-100, 120]) == pytest.approx(1.2)
+
+def test_calculate_payback_period_interpolates():
+    assert calculate_payback_period([-100, 40, 40, 40]) == pytest.approx(3.5)
+    assert calculate_payback_period([-100, 40, 40]) is None  # never recovers
+    assert calculate_payback_period([100, 50]) == 0.0  # never negative
+
+def test_calculate_icr():
+    assert calculate_icr(150, 100) == 1.5
+    assert calculate_icr(150, 0) == 0.0
+
+def test_calculate_return_metrics_bundle():
+    result = calculate_return_metrics({
+        "project_cashflows": [-1000, 500, 500, 500],
+        "equity_cashflows": [-300, 0, 0, 700],
+        "periods_per_year": 1,
+        "hurdle_rate": 0.12,
+        "net_operating_income": 180,
+        "interest_expense": 100,
+    })
+    assert result["metrics"]["projectIrr"]["value"] == pytest.approx(0.23375, abs=1e-3)
+    assert result["metrics"]["projectIrr"]["meetsHurdle"] is True
+    assert result["metrics"]["equityMultiple"]["value"] == pytest.approx(700 / 300)
+    assert result["metrics"]["paybackPeriodMonths"]["value"] == pytest.approx(3 + 300 / 700)
+    assert result["metrics"]["icr"]["value"] == pytest.approx(1.8)
+    assert result["metrics"]["icr"]["status"] == "safe"
+
+def test_calculate_return_metrics_derives_from_schedules():
+    result = calculate_return_metrics({
+        "revenue_schedule": [0, 0, 1300],
+        "cost_schedule": [1000, 0, 0],
+        "periods_per_year": 12,
+    })
+    assert result["inputs"]["projectCashflowPeriods"] == 3
+    assert result["metrics"]["projectIrr"]["value"] is not None
 
 def test_build_basic_risk_matrix_infers_project_risks():
     matrix = build_basic_risk_matrix({

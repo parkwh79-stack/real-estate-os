@@ -130,6 +130,7 @@ class EvidenceGraphAgent:
         self._add_claim_nodes(builder, artifacts)
         self._add_risk_nodes(builder, artifacts)
         self._add_report_section_nodes(builder, artifacts)
+        self._add_glossary_term_nodes(builder, artifacts)
 
         nodes = list(builder.nodes.values())
         edges = builder.edges
@@ -157,6 +158,7 @@ class EvidenceGraphAgent:
                 "claimCount": sum(1 for node in nodes if node["type"] == "claim"),
                 "riskCount": len(risk_nodes),
                 "sourceLocatorCount": len(source_locator_nodes),
+                "glossaryTermCount": sum(1 for node in nodes if node["type"] == "glossary_term"),
                 "riskRowsWithSourceLocatorCount": len(risk_rows_with_source_locators),
                 "reportSectionCount": len(section_nodes),
                 "unlinkedReportSectionCount": len(unlinked_sections),
@@ -188,6 +190,32 @@ class EvidenceGraphAgent:
                 },
             )
             builder.add_edge(f"artifact:{artifact_key}", claim_id, "derived_claim", f"{label} is derived from {artifact_key}.")
+
+    def _add_glossary_term_nodes(self, builder: "_GraphBuilder", artifacts: Dict[str, Any]) -> None:
+        term_annotations = artifacts.get("termAnnotations") or {}
+        for annotation in term_annotations.get("annotations", []):
+            if annotation.get("status") != "mapped" or not annotation.get("termId"):
+                continue
+            term_id = annotation["termId"]
+            canonical_field = annotation.get("canonicalField")
+            term_node = f"term:{term_id}"
+            builder.add_node(term_node, "glossary_term", annotation.get("displayNameKo") or term_id, {
+                "termId": term_id,
+                "canonicalField": canonical_field,
+                "category": annotation.get("category"),
+                "surface": annotation.get("surface"),
+                "matchType": annotation.get("matchType"),
+            })
+            if canonical_field:
+                field_node = f"canonical_field:{canonical_field}"
+                builder.add_node(field_node, "canonical_field", canonical_field, {"canonicalField": canonical_field})
+                builder.add_edge(term_node, field_node, "maps_to_field", f"{term_id} maps to canonical field {canonical_field}.")
+            locator = annotation.get("sourceLocator")
+            source_field = annotation.get("sourceField")
+            if locator and source_field:
+                locator_node = f"locator:term:{term_id}:{source_field}"
+                builder.add_node(locator_node, "source_locator", str(source_field), locator if isinstance(locator, dict) else {"value": locator})
+                builder.add_edge(term_node, locator_node, "located_at", f"{term_id} was extracted from {source_field}.")
 
     def _add_risk_nodes(self, builder: "_GraphBuilder", artifacts: Dict[str, Any]) -> None:
         risk_register = artifacts.get("riskRegister") or {}

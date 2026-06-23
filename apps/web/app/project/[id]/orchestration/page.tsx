@@ -21,6 +21,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { authHeaders, getStoredAuthSession } from "../../../../lib/auth-client";
+import { OrchestrationToolbar } from "../../../../components/orchestration/orchestration-toolbar";
 
 interface RunSummary {
   run_id: string;
@@ -1574,6 +1575,11 @@ export default function ProjectOrchestrationPage() {
           </button>
         </div>
       </div>
+
+      <OrchestrationToolbar
+        projectId={projectId}
+        onRefresh={() => void loadRuns(selectedRun?.run_id)}
+      />
 
       {error ? (
         <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">

@@ -20,6 +20,9 @@ class CreditReviewAgent:
         reconciliation = artifacts.get("reconciliationGate") or {}
         marketability = artifacts.get("marketabilityAnalysis") or {}
         pf_structure = artifacts.get("pfStructure") or {}
+        return_metrics = artifacts.get("returnMetrics") or {}
+        stress_test = artifacts.get("stressTest") or {}
+        signals = self._return_stress_signals(return_metrics, stress_test)
 
         decision = self._decision(
             risk_register=risk_register,
@@ -28,8 +31,14 @@ class CreditReviewAgent:
             reconciliation=reconciliation,
             marketability=marketability,
             pf_structure=pf_structure,
+            signals=signals,
         )
         approval_conditions = self._approval_conditions(risk_register, legal, data_quality, reconciliation)
+        if signals["seniorBreakKeys"]:
+            approval_conditions.append(
+                "스트레스 시 Senior 원금 손실 가능 — 추가 신용보강·담보 확보 또는 PF 축소·Equity 확충 필요."
+            )
+            approval_conditions = self._dedupe(approval_conditions)[:13]
         key_risks = self._key_risks(top_risks)
         mitigants = self._mitigants(risk_register, project_data)
         required_follow_ups = self._required_follow_ups(decision, risk_register, legal, data_quality, reconciliation)
@@ -57,6 +66,12 @@ class CreditReviewAgent:
                 "ltv": pf_structure.get("ltv"),
                 "ltc": pf_structure.get("ltc"),
                 "exitSaleRate": pf_structure.get("exit_sale_rate"),
+                "projectIrrBase": signals["baseIrr"],
+                "equityMultiple": signals["equityMultiple"],
+                "paybackMonths": signals["paybackMonths"],
+                "icr": signals["icr"],
+                "stressWorstCaseKey": signals["worstCaseKey"],
+                "stressSeniorBreakScenarios": sorted(signals["seniorBreakKeys"]),
             },
             "decisionReasons": self._decision_reasons(
                 decision,
@@ -66,6 +81,7 @@ class CreditReviewAgent:
                 reconciliation,
                 marketability,
                 pf_structure,
+                signals=signals,
             ),
             "keyRisks": key_risks,
             "mitigants": mitigants,
@@ -82,6 +98,29 @@ class CreditReviewAgent:
             "dataLimitations": self._data_limitations(risk_register, data_quality, marketability),
         }
 
+    def _return_stress_signals(self, return_metrics: Dict[str, Any], stress_test: Dict[str, Any]) -> Dict[str, Any]:
+        scenarios = stress_test.get("scenarios") or []
+        base_irr = next((s.get("projectIrr") for s in scenarios if s.get("key") == "base"), None)
+        senior_break_keys = {
+            s.get("key") for s in scenarios if s.get("seniorStatus") == "senior_principal_loss_possible"
+        }
+        senior_break_keys.discard(None)
+        metrics = return_metrics.get("metrics") or {}
+
+        def _val(key):
+            entry = metrics.get(key) or {}
+            return entry.get("value") if isinstance(entry, dict) else None
+
+        return {
+            "baseIrr": base_irr,
+            "hurdle": return_metrics.get("hurdleRate") or 0.12,
+            "seniorBreakKeys": senior_break_keys,
+            "worstCaseKey": stress_test.get("worstCaseKey"),
+            "icr": _val("icr"),
+            "equityMultiple": _val("equityMultiple"),
+            "paybackMonths": (metrics.get("paybackPeriodMonths") or {}).get("value") if isinstance(metrics.get("paybackPeriodMonths"), dict) else None,
+        }
+
     def _decision(
         self,
         *,
@@ -91,18 +130,32 @@ class CreditReviewAgent:
         reconciliation: Dict[str, Any],
         marketability: Dict[str, Any],
         pf_structure: Dict[str, Any],
+        signals: Dict[str, Any] | None = None,
     ) -> str:
+        signals = signals or {}
         risks = risk_register.get("risks") or []
         critical_count = sum(1 for risk in risks if risk.get("severity") == "critical")
         high_count = sum(1 for risk in risks if risk.get("severity") == "high")
         critical_codes = {risk.get("code") for risk in risks if risk.get("severity") == "critical"}
 
+        base_irr = signals.get("baseIrr")
+        hurdle = signals.get("hurdle") or 0.12
+        senior_break_keys = signals.get("seniorBreakKeys") or set()
+
         if legal.get("status") == "blocking_issue" or data_quality.get("status") == "blocking" or reconciliation.get("status") == "blocking":
             return "rework_required"
+        # Stress reveals senior principal loss already in the base case, or the
+        # base-case project return is negative -> escalate hardest.
+        if "base" in senior_break_keys:
+            return "reject_recommended"
         if critical_count >= 3:
             return "rework_required"
         if {"SENIOR_SHORTFALL", "STRESS_SENIOR_SHORTFALL"}.intersection(critical_codes):
             return "reject_recommended"
+        if isinstance(base_irr, (int, float)) and base_irr < 0:
+            return "rework_required"
+        if "mild" in senior_break_keys:
+            return "rework_required"
         if pf_structure.get("exit_sale_rate") and pf_structure.get("exit_sale_rate") >= 0.85:
             return "rework_required"
         if marketability.get("grade") in {"D", "E"}:
@@ -110,6 +163,11 @@ class CreditReviewAgent:
         if risk_register.get("status") in {"blocking", "high_risk"} or high_count:
             return "conditional_approval"
         if data_quality.get("status") == "needs_review" or legal.get("status") == "caution":
+            return "conditional_approval"
+        # Tail/severe stress breaks senior, or base IRR is below hurdle -> conditions.
+        if senior_break_keys:
+            return "conditional_approval"
+        if isinstance(base_irr, (int, float)) and base_irr < hurdle:
             return "conditional_approval"
         return "approve"
 
@@ -207,7 +265,9 @@ class CreditReviewAgent:
         reconciliation: Dict[str, Any],
         marketability: Dict[str, Any],
         pf_structure: Dict[str, Any],
+        signals: Dict[str, Any] | None = None,
     ) -> List[str]:
+        signals = signals or {}
         reasons = [f"Credit decision is {self._decision_label(decision)}."]
         if risk_register.get("status"):
             reasons.append(f"Risk Register status is {risk_register.get('status')}.")
@@ -221,6 +281,16 @@ class CreditReviewAgent:
             reasons.append(f"Marketability grade is {marketability.get('grade')} with score {marketability.get('score')}.")
         if isinstance(pf_structure.get("exit_sale_rate"), (int, float)):
             reasons.append(f"PF Exit sale rate is {pf_structure.get('exit_sale_rate'):.1%}.")
+        base_irr = signals.get("baseIrr")
+        if isinstance(base_irr, (int, float)):
+            reasons.append(f"Stress base-case Project IRR is {base_irr:.1%} (hurdle {float(signals.get('hurdle') or 0.12):.0%}).")
+        if signals.get("seniorBreakKeys"):
+            reasons.append(
+                "Senior principal loss is possible under stress scenario(s): "
+                + ", ".join(sorted(signals["seniorBreakKeys"])) + "."
+            )
+        if isinstance(signals.get("icr"), (int, float)) and signals.get("icr"):
+            reasons.append(f"Interest coverage (ICR) is {signals['icr']:.2f}.")
         return reasons
 
     def _report_paragraphs(

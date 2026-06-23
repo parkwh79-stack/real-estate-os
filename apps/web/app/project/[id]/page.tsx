@@ -16,11 +16,8 @@ import {
   Upload,
 } from "lucide-react";
 import FileUpload from "../../components/FileUpload";
-import {
-  financeTerm,
-  readinessLabel,
-  translateFinancialTerm,
-} from "../../../lib/financial-terms";
+import { IntentPlanMenu } from "../../../components/orchestration/intent-plan-menu";
+import { financeTerm, readinessLabel, translateFinancialTerm } from "../../../lib/financial-terms";
 
 interface PfTranche {
   amount?: number;
@@ -52,15 +49,12 @@ interface ApprovalReadinessGate {
   pass?: boolean;
   status?: string;
   summary?: {
-    blockingIssueCount?: number;
-    warningCount?: number;
     unresolvedHandoffReviewCount?: number;
     unresolvedRiskReviewCount?: number;
     creditDecision?: string;
     landEvidenceReady?: boolean;
   };
   blockers?: Array<{ code?: string; message?: string; severity?: string }>;
-  warnings?: Array<{ code?: string; message?: string; severity?: string }>;
   requiredActions?: string[];
 }
 
@@ -75,27 +69,41 @@ interface OrchestrationRun {
       decision?: string;
       decisionLabel?: string;
       decisionReasons?: string[];
-      approvalConditions?: string[];
       requiredFollowUps?: string[];
     };
     riskRegister?: {
-      status?: string;
-      summary?: {
-        riskCount?: number;
-        criticalCount?: number;
-        highCount?: number;
-        humanReviewRequiredCount?: number;
-      };
       risks?: Array<{
-        code?: string;
-        title?: string;
-        severity?: string;
         reviewStatus?: string;
         status?: string;
         requiresHumanReview?: boolean;
       }>;
     };
+    returnMetrics?: {
+      metrics?: {
+        projectIrr?: { value?: number | null };
+        equityIrr?: { value?: number | null };
+        equityMultiple?: { value?: number | null };
+        icr?: { value?: number | null };
+        paybackPeriodMonths?: { value?: number | null };
+      };
+    };
+    stressTest?: {
+      scenarios?: Array<{ key?: string; projectIrr?: number | null; seniorStatus?: string; statusLabel?: string }>;
+      worstCaseKey?: string | null;
+      seniorBreakScenarioKey?: string | null;
+    };
+    creditEnhancement?: {
+      enhancementGrade?: string;
+      baseSeniorLtv?: number;
+      adjustedSeniorLtv?: number;
+      activeCount?: number;
+    };
   };
+}
+
+interface EngineKpi {
+  label: string;
+  value: string;
 }
 
 interface ProjectDiagnosis {
@@ -114,9 +122,35 @@ interface ProjectDiagnosis {
 
 const apiBase = "http://127.0.0.1:8000";
 
-function fmtEok(value: number) {
+function fmtEok(value?: number) {
+  if (!value || Number.isNaN(value)) return "-";
   const eok = value / 100_000_000;
   return `${eok.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}억원`;
+}
+
+function fmtPct(value?: number | null) {
+  return typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "—";
+}
+
+function buildEngineKpis(run: OrchestrationRun | null): EngineKpi[] {
+  const artifacts = run?.artifacts;
+  if (!artifacts) return [];
+  const rm = artifacts.returnMetrics?.metrics;
+  const stress = artifacts.stressTest;
+  const ce = artifacts.creditEnhancement;
+  const credit = artifacts.creditReviewDecision;
+  const baseIrr = stress?.scenarios?.find((s) => s.key === "base")?.projectIrr ?? rm?.projectIrr?.value;
+
+  const kpis: EngineKpi[] = [];
+  if (typeof baseIrr === "number") kpis.push({ label: "Project IRR", value: fmtPct(baseIrr) });
+  if (typeof rm?.equityMultiple?.value === "number") kpis.push({ label: "Equity Multiple", value: `${rm.equityMultiple.value.toFixed(2)}x` });
+  if (typeof rm?.icr?.value === "number") kpis.push({ label: "ICR", value: `${rm.icr.value.toFixed(2)}x` });
+  if (ce?.enhancementGrade) kpis.push({ label: "신용보강", value: `${ce.enhancementGrade}등급` });
+  if (stress?.scenarios?.length) {
+    kpis.push({ label: "Stress 결과", value: stress.seniorBreakScenarioKey ? `Senior 손실가능(${stress.seniorBreakScenarioKey})` : "Senior 보존" });
+  }
+  if (credit?.decisionLabel) kpis.push({ label: "여신 의견", value: credit.decisionLabel });
+  return kpis;
 }
 
 async function safeJson<T>(url: string, fallback: T): Promise<T> {
@@ -140,20 +174,20 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
       statusLabel: "사업자료 입력 필요",
       statusTone: "warn",
       summary:
-        "아직 AI 통합심사가 실행되지 않았습니다. 사업계획서, 사업수지 Excel, 토지조서, 공시지가와 등기부 증빙을 먼저 올리면 AI가 보완자료와 승인 가능성을 진단합니다.",
+        "아직 AI 통합심사가 실행되지 않았습니다. 사업계획서, 사업수지 Excel, 토지조서, 공시지가·등기부 증빙을 올리면 AI가 보완자료와 승인 가능성을 진단합니다.",
       primaryAction: { href: `/project/${projectId}/input-package`, label: "사업자료 입력하기" },
       updateAreas: [
         {
           title: financeTerm("inputPackage"),
-          body: "사업계획서, 건축개요, 사업수지 Excel, 토지조서, 공시지가, 등기부 증빙을 하나의 파일럿 패키지로 등록하세요.",
+          body: "사업계획서, 건축개요, 사업수지 Excel, 토지조서, 공시지가, 등기부 증빙을 하나의 파일 패키지로 등록하세요.",
           href: `/project/${projectId}/input-package`,
           severity: "warn",
         },
       ],
       nextSteps: [
         "사업계획서 또는 PF 검토용 자료를 업로드합니다.",
-        "사업수지 Excel과 토지조서를 함께 올리면 수치 충돌을 더 정확히 잡을 수 있습니다.",
-        "자료 입력 후 AI 통합심사를 실행합니다.",
+        "사업수지 Excel과 토지조서를 함께 올리면 숫자 충돌을 더 정확히 잡을 수 있습니다.",
+        "자료 입력 후 AI 업무 주문서에서 실행할 분석을 선택합니다.",
       ],
     };
   }
@@ -178,8 +212,7 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
   if (landBlocked) {
     updateAreas.push({
       title: financeTerm("landEvidence"),
-      body:
-        "PNU, 개별공시지가, 지적특성, 등기부 권리관계, 토지취득률 증빙이 부족합니다. 이 항목이 해소되어야 법무검토와 PF 승인 가능성 판단으로 넘어갈 수 있습니다.",
+      body: "PNU, 개별공시지가, 지적특성, 등기부 권리관계, 토지취득률 증빙이 부족합니다. 이 항목이 해소되어야 법무검토와 PF 승인 가능성 판단으로 넘어갈 수 있습니다.",
       href: `/project/${projectId}/input-package`,
       severity: "bad",
     });
@@ -188,8 +221,7 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
   if (creditRejected) {
     updateAreas.push({
       title: financeTerm("pfStructure"),
-      body:
-        "여신심사 의견이 부결 또는 재작업 권고입니다. 선순위 부족, 미분양 LTV 초과, Exit 분양률 부담이 있으면 PF 감액, Equity/DSRA 증액, 상환계좌 배분 강화, 담보 보강이 필요합니다.",
+      body: "여신심사 의견이 부결 또는 재작업 권고입니다. 선순위 상환부족, 미분양 LTV 초과, Exit 분양률 부담이 있으면 PF 감액, Equity/DSRA 증액, 상환계좌 배분 강화, 추가담보 보강이 필요합니다.",
       href: `/project/${projectId}/orchestration`,
       severity: "bad",
     });
@@ -207,7 +239,7 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
   if (unresolvedHandoffCount > 0) {
     updateAreas.push({
       title: financeTerm("handoff"),
-      body: `${unresolvedHandoffCount}개 에이전트 인계사항이 미검토 상태입니다. 다음 에이전트 또는 최종 심사로 넘기기 전에 검토 상태를 확정하세요.`,
+      body: `${unresolvedHandoffCount}개 Agent 이관사항이 미검토 상태입니다. 다음 Agent 또는 최종 심사로 넘기기 전에 검토 상태를 확정하세요.`,
       href: `/project/${projectId}/orchestration`,
       severity: "warn",
     });
@@ -217,7 +249,7 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
     updateAreas.push({
       title: financeTerm("approvalReadiness"),
       body: gate?.pass
-        ? "현재 기준으로 승인 가능성 점검이 통과되었습니다. 보고서와 승인조건, 근거 연결도를 최종 확인하세요."
+        ? "현재 기준으로 승인 가능성 게이트를 통과했습니다. 보고서와 승인조건, 근거 연결도를 최종 확인하세요."
         : "차단 항목은 없지만 일부 보완 권고가 남아 있습니다. 승인조건과 보고서 문구를 확인하세요.",
       href: gate?.pass ? `/project/${projectId}/report` : `/project/${projectId}/orchestration`,
       severity: gate?.pass ? "good" : "warn",
@@ -235,10 +267,10 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
         ? "금융구조 보완 필요"
         : landBlocked
           ? "토지 증빙 보완 필요"
-          : "보완 후 재심 필요",
+          : "보완 및 재심사 필요",
     statusTone: gate?.pass ? "good" : creditRejected || landBlocked ? "bad" : "warn",
     summary: gate?.pass
-      ? "AI 통합심사 기준으로 자료 정합성, 리스크 검토, 승인 가능성 점검을 통과했습니다."
+      ? "AI 통합심사 기준으로 자료 정합성, 리스크 검토, 승인 가능성 평가가 통과되었습니다."
       : "AI가 현재 심사 기준본을 검토한 결과, 승인 전에 보완해야 할 항목이 남아 있습니다.",
     primaryAction: {
       href: landBlocked ? `/project/${projectId}/input-package` : `/project/${projectId}/orchestration`,
@@ -248,8 +280,8 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
     nextSteps: nextSteps.length
       ? nextSteps
       : [
-        "승인 가능성 점검 화면에서 차단 항목을 확인합니다.",
-        "필요한 증빙과 리스크 검토 상태를 보완합니다.",
+        "승인 가능성 화면에서 차단 항목을 확인합니다.",
+        "필요 증빙과 리스크 검토 상태를 보완합니다.",
         "보완 후 AI 통합심사를 다시 실행합니다.",
       ],
   };
@@ -257,24 +289,24 @@ function buildDiagnosis(projectId: string, latestRun: OrchestrationRun | null): 
 
 const workflowSteps = [
   {
-    title: "1. 사업계획서 업로드",
-    body: "사업계획서, 건축개요, 사업수지 Excel, 토지조서를 파일럿 패키지로 올립니다.",
+    title: "1. 사업자료 업로드",
+    body: "사업계획서, 건축개요, 사업수지 Excel, 토지조서를 파일 패키지로 올립니다.",
   },
   {
-    title: "2. AI 진단",
-    body: "AI가 사업수지, 분양성, 토지권원, PF 구조, 리스크를 같은 스키마로 점검합니다.",
+    title: "2. AI 업무 주문서",
+    body: "AI가 가능한 업무, 추천 workflow, 부족자료, 검증조건을 먼저 정리합니다.",
   },
   {
-    title: "3. 보완자료 확인",
-    body: "누락 증빙, 숫자 충돌, 승인 차단 리스크를 업무 항목으로 보여줍니다.",
+    title: "3. 필요한 분석 실행",
+    body: "토지권원, 사업수지, 분양성, PF 구조, Stress Test 중 필요한 분석만 실행합니다.",
   },
   {
-    title: "4. 재실행·승인 가능성",
-    body: "보완 후 다시 실행하여 approval readiness가 통과되는지 확인합니다.",
+    title: "4. 보완자료 확인",
+    body: "숫자 충돌, 근거 부족, 승인 차단 리스크를 업무 항목으로 보여줍니다.",
   },
   {
-    title: "5. 보고서·감사근거",
-    body: "PF 심사보고서와 근거 연결도로 숫자와 문장의 출처를 확인합니다.",
+    title: "5. 보고서·근거 출력",
+    body: "PF 심사보고서와 Evidence Graph로 숫자와 문장의 출처를 확인합니다.",
   },
 ];
 
@@ -288,23 +320,23 @@ const workspaceMenus = [
   },
   {
     href: "orchestration",
-    label: financeTerm("approvalReadiness"),
+    label: financeTerm("orchestration"),
     icon: GitBranch,
-    desc: "AI 통합심사 실행, 승인 차단 항목, 리스크 검토, 인계사항 확인",
+    desc: "AI 업무 주문서, Agent 실행, 승인 가능성, 리스크 검토 상태 확인",
     tone: "text-slate-700 dark:text-slate-200",
   },
   {
     href: "evidence",
     label: financeTerm("evidenceGraph"),
     icon: FileSearch,
-    desc: "리스크, 보고서 문구, 계산값이 어느 문서·엑셀 셀·API row에서 왔는지 추적",
+    desc: "리스크, 보고서 문장, 계산값이 어느 문서·셀·API row에서 왔는지 추적",
     tone: "text-amber-600",
   },
   {
     href: "land",
     label: financeTerm("landEvidence"),
     icon: MapPin,
-    desc: "PNU, 개별공시지가, 지적특성, 등기부 권리관계와 토지확보율 검토",
+    desc: "PNU, 공시지가, 등기부 권리관계, 토지취득률 검토",
     tone: "text-emerald-600",
   },
   {
@@ -318,7 +350,7 @@ const workspaceMenus = [
     href: "pf-structure",
     label: financeTerm("pfStructure"),
     icon: Layers,
-    desc: "Tranche, LTV/LTC, Exit 분양률, 상환재원, 구조조정안 검토",
+    desc: "Tranche, LTV/LTC, Exit 분양률, 상환재원, 구조 보완 검토",
     tone: "text-violet-600",
   },
   {
@@ -361,6 +393,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
   const cost = feasibility.total_cost ?? 0;
   const profit = revenue - cost;
   const diagnosis = buildDiagnosis(projectId, latestRun);
+  const engineKpis = buildEngineKpis(latestRun);
 
   return (
     <div className="space-y-6 pb-8">
@@ -383,7 +416,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
         </div>
         <div className="flex flex-wrap gap-2">
           <HeaderLink href={`/project/${projectId}/input-package`} icon={<Upload className="h-4 w-4" />} label="자료 입력" />
-          <HeaderLink href={`/project/${projectId}/orchestration`} icon={<GitBranch className="h-4 w-4" />} label="통합심사" />
+          <HeaderLink href={`/project/${projectId}/orchestration`} icon={<GitBranch className="h-4 w-4" />} label="AI 심사" />
           <HeaderLink href={`/project/${projectId}/evidence`} icon={<FileSearch className="h-4 w-4" />} label="근거 연결도" />
         </div>
       </div>
@@ -426,6 +459,20 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
           </Link>
         </div>
 
+        {engineKpis.length > 0 ? (
+          <div className="mt-5">
+            <p className="text-xs font-bold uppercase text-slate-500">핵심 지표 (최신 심사)</p>
+            <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+              {engineKpis.map((kpi) => (
+                <div key={kpi.label} className="rounded-lg bg-white/80 p-3 dark:bg-slate-950/40">
+                  <p className="text-[11px] font-semibold text-slate-500">{kpi.label}</p>
+                  <p className="mt-1 text-sm font-black text-slate-950 dark:text-white">{kpi.value}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_0.85fr]">
           <div className="space-y-3">
             <p className="text-sm font-bold text-slate-950 dark:text-white">업데이트가 필요한 항목</p>
@@ -457,11 +504,13 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
       </section>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Kpi label="총분양수입" value={revenue ? fmtEok(revenue) : "-"} />
-        <Kpi label="총사업비" value={cost ? fmtEok(cost) : "-"} />
-        <Kpi label="PF 대출금" value={pfTotal > 0 ? fmtEok(pfTotal) : "-"} />
-        <Kpi label="시행이익" value={profit !== 0 ? fmtEok(profit) : "-"} tone={profit > 0 ? "good" : profit < 0 ? "bad" : undefined} />
+        <Kpi label="총분양수입" value={fmtEok(revenue)} />
+        <Kpi label="총사업비" value={fmtEok(cost)} />
+        <Kpi label="PF 대출금" value={fmtEok(pfTotal)} />
+        <Kpi label="시행이익" value={fmtEok(profit)} tone={profit > 0 ? "good" : profit < 0 ? "bad" : undefined} />
       </section>
+
+      <IntentPlanMenu projectId={projectId} />
 
       <section className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -471,14 +520,14 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
             </div>
             <div>
               <h3 className="font-bold text-slate-950 dark:text-white">사업계획서 빠른 입력</h3>
-              <p className="text-xs text-slate-500">사업계획서 PDF를 올리면 AI가 사업개요와 주요 수치를 추출하고 보완 필요 항목을 진단합니다.</p>
+              <p className="text-xs text-slate-500">PDF를 올리면 AI가 사업개요와 주요 수치를 추출하고, 필요한 보완자료를 진단합니다.</p>
             </div>
           </div>
           <div className="mt-4">
             <FileUpload projectId={projectId} />
           </div>
           <div className="mt-4 rounded-lg bg-slate-50 p-3 text-xs font-semibold leading-5 text-slate-500 dark:bg-slate-800/70">
-            정식 파일럿은 사업자료·증빙 입력 화면에서 사업수지 Excel, 토지조서, 공시지가, 등기부 증빙까지 묶어서 올리는 방식이 더 정확합니다.
+            정식 파일럿은 사업자료·증빙 입력 화면에서 사업수지 Excel, 토지조서, 공시지가, 등기부까지 묶어서 올리는 방식이 더 정확합니다.
           </div>
         </div>
 
@@ -495,13 +544,13 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
             />
             <WorkflowLink
               href={`/project/${projectId}/orchestration`}
-              title="2. AI 통합심사 실행"
-              body="토지, 사업수지, 분양성, 현금흐름, PF 구조, 리스크, 보고서를 한 번에 점검합니다."
+              title="2. AI 업무 주문서 확인"
+              body="AI가 가능한 분석과 부족자료, 추천 workflow, 검증조건을 제시합니다."
             />
             <WorkflowLink
               href={`/project/${projectId}/evidence`}
               title="3. 근거 연결도 확인"
-              body="리스크와 보고서 문구가 어느 문서, 엑셀 셀, API row에서 왔는지 감사 관점에서 확인합니다."
+              body="리스크와 보고서 문구가 어느 문서, Excel 셀, API row에서 왔는지 감사 관점에서 확인합니다."
             />
           </div>
         </div>

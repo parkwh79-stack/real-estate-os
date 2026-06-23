@@ -13,7 +13,6 @@ import {
 import {
   financeTerm,
   readinessLabel,
-  reviewStatusLabel,
   severityLabel,
   translateFinancialTerm,
 } from "../../../../lib/financial-terms";
@@ -92,7 +91,24 @@ interface OrchestrationRun {
         requiresHumanReview?: boolean;
       }>;
     };
+    returnMetrics?: {
+      metrics?: {
+        projectIrr?: { value?: number | null };
+        equityMultiple?: { value?: number | null };
+        icr?: { value?: number | null };
+      };
+    };
+    stressTest?: {
+      scenarios?: Array<{ key?: string; projectIrr?: number | null }>;
+      seniorBreakScenarioKey?: string | null;
+    };
+    creditEnhancement?: { enhancementGrade?: string };
   };
+}
+
+interface EngineKpi {
+  label: string;
+  value: string;
 }
 
 interface MobileAction {
@@ -201,6 +217,28 @@ function buildActions(projectId: string, run: OrchestrationRun | null): MobileAc
   return actions;
 }
 
+function fmtPct(value?: number | null) {
+  return typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "—";
+}
+
+function buildEngineKpis(run: OrchestrationRun | null): EngineKpi[] {
+  const artifacts = run?.artifacts;
+  if (!artifacts) return [];
+  const rm = artifacts.returnMetrics?.metrics;
+  const stress = artifacts.stressTest;
+  const ce = artifacts.creditEnhancement;
+  const baseIrr = stress?.scenarios?.find((s) => s.key === "base")?.projectIrr ?? rm?.projectIrr?.value;
+  const kpis: EngineKpi[] = [];
+  if (typeof baseIrr === "number") kpis.push({ label: "Project IRR", value: fmtPct(baseIrr) });
+  if (typeof rm?.equityMultiple?.value === "number") kpis.push({ label: "Equity Multiple", value: `${rm.equityMultiple.value.toFixed(2)}x` });
+  if (typeof rm?.icr?.value === "number") kpis.push({ label: "ICR", value: `${rm.icr.value.toFixed(2)}x` });
+  if (ce?.enhancementGrade) kpis.push({ label: "신용보강", value: `${ce.enhancementGrade}등급` });
+  if (stress?.scenarios?.length) {
+    kpis.push({ label: "Stress", value: stress.seniorBreakScenarioKey ? "Senior 손실가능" : "Senior 보존" });
+  }
+  return kpis;
+}
+
 function iconFor(action: MobileAction) {
   const cls = "h-5 w-5";
   if (action.icon === "upload") return <Upload className={cls} />;
@@ -243,6 +281,7 @@ export default async function ProjectMobileActionPage({ params }: { params: Prom
   const unresolvedHandoffCount = (latestRun?.handoffs ?? []).filter(handoffNeedsReview).length;
   const actions = buildActions(projectId, latestRun);
   const topBlockers = gate?.blockers?.slice(0, 3) ?? [];
+  const engineKpis = buildEngineKpis(latestRun);
 
   return (
     <main className="mx-auto max-w-2xl space-y-4 pb-20">
@@ -276,6 +315,17 @@ export default async function ProjectMobileActionPage({ params }: { params: Prom
         <MiniStat label="인계 미검토" value={`${unresolvedHandoffCount}`} />
         <MiniStat label="여신심사 의견" value={translateFinancialTerm(credit?.decisionLabel ?? credit?.decision ?? "-")} />
       </section>
+
+      {engineKpis.length > 0 ? (
+        <section className="px-4">
+          <p className="mb-2 text-sm font-black text-slate-950 dark:text-white">핵심 지표</p>
+          <div className="grid grid-cols-2 gap-3">
+            {engineKpis.map((kpi) => (
+              <MiniStat key={kpi.label} label={kpi.label} value={kpi.value} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="space-y-3 px-4">
         <div>

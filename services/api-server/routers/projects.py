@@ -19,10 +19,18 @@ from core.calculations import (
     build_monthly_cash_flow,
     calculate_pf_metrics,
     calculate_feasibility_metrics,
+    calculate_return_metrics,
 )
 from core.risk_assessment import build_basic_risk_matrix
 from schemas.scenario import ScenarioSetRequest
+from schemas.stress_test import StressTestRequest, StressTranche, StressScenarioDriver, StressTestSchedule
 from agents.scenario_engine_agent import ScenarioEngineAgent
+from agents.stress_test_agent import StressTestAgent
+from schemas.credit_enhancement import CreditEnhancementRequest
+from agents.credit_enhancement_agent import CreditEnhancementAgent
+from schemas.cash_sweep import CashSweepRequest
+from agents.cash_sweep_agent import CashSweepAgent
+from integrations.kakao import build_kakao_intake_plan_message, build_kakao_workflow_result_message
 from agents.restructuring_agent import RestructuringAgent
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
 from db.repositories.orchestration_repository import OrchestrationRepository
@@ -33,10 +41,12 @@ from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
 from storage import (
     get_evidence_graph_record,
+    get_prompt_artifact_record,
     get_risk_register_record,
     list_evidence_graph_records,
     list_assumption_override_records,
     list_land_evidence_records,
+    list_prompt_artifact_records,
     list_restructuring_cure_records,
     list_risk_register_records,
     load_state,
@@ -44,6 +54,7 @@ from storage import (
     save_state,
     upsert_assumption_override_record,
     upsert_land_evidence_record,
+    upsert_prompt_artifact_record,
     upsert_restructuring_cure_record,
     upsert_risk_register_record,
 )
@@ -56,7 +67,9 @@ from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case, 
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
-from use_cases.pf_review import run_and_save_pf_review_use_case
+from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
+from use_cases.async_jobs import submit_pf_review_job, get_job_store
+from use_cases.term_annotation import annotate_terms_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
     get_project_snapshot_use_case,
@@ -370,6 +383,41 @@ def attach_active_restructuring_cures(project_id: str, project_data: Dict[str, A
     if isinstance(enriched_project["sourceMetadata"], dict):
         enriched_project["sourceMetadata"]["adoptedRestructuringCureCount"] = len(cures)
     return enriched_project
+
+
+def persist_work_order_prompt_artifact(
+    project_id: str,
+    plan: Dict[str, Any],
+    *,
+    created_by: str,
+    source: str = "orchestration_plan",
+) -> Dict[str, Any] | None:
+    prompt_draft = plan.get("promptDraft") if isinstance(plan, dict) else None
+    if not isinstance(prompt_draft, dict) or not prompt_draft.get("body"):
+        return None
+    artifact = upsert_prompt_artifact_record(
+        project_id,
+        {
+            "artifactType": "ai_work_order",
+            "workflow": plan.get("recommendedWorkflow"),
+            "title": prompt_draft.get("title") or "AI 업무 주문서",
+            "body": prompt_draft.get("body"),
+            "intendedTool": prompt_draft.get("intendedTool"),
+            "createdBy": created_by,
+            "source": source,
+            "recommendedWorkflow": plan.get("recommendedWorkflow"),
+            "outputOptions": plan.get("outputOptions") or [],
+            "validationOptions": plan.get("validationOptions") or [],
+            "dataAvailability": plan.get("dataAvailability") or {},
+            "summary": plan.get("summary"),
+            "evidenceGraphHints": {
+                "nodeType": "prompt_artifact",
+                "connectsTo": ["orchestration_plan", "selected_workflow", "validation_conditions"],
+            },
+        },
+    )
+    return artifact
+
 
 def attach_document_market_evidence_metadata(
     parsed_data: Dict[str, Any],
@@ -1054,6 +1102,20 @@ def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
         "exit_sale_rate": result["metrics"]["exit_sale_rate"]["value"],
     }
 
+@router.post("/{project_id}/returns/calculate")
+def calculate_returns(project_id: str, input_data: Dict[str, Any] | None = None):
+    """Project IRR, Equity IRR, Equity Multiple, Payback, and ICR.
+
+    Reuses the project's feasibility inputs (for ICR's operating income and
+    interest) and accepts an explicit ``project_cashflows`` / ``equity_cashflows``
+    series or monthly ``revenue_schedule`` / ``cost_schedule`` overrides.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    feasibility = PROJECTS_DB[project_id].get("feasibility_input", {})
+    source_data = deep_merge(feasibility, input_data or {})
+    return calculate_return_metrics(source_data)
+
 @router.post("/{project_id}/risk/assess")
 def assess_risk(project_id: str, input_data: Dict[str, Any]):
     if project_id not in PROJECTS_DB:
@@ -1148,6 +1210,108 @@ def build_scenario_request_from_project(project: Dict[str, Any], input_data: Dic
         waterfallRule=rule,
         sourceMetadata=meta
     )
+
+
+def build_stress_test_request_from_project(project: Dict[str, Any], input_data: Dict[str, Any]) -> StressTestRequest:
+    input_data = input_data or {}
+    feasibility = project.get("feasibility_input", {}) or {}
+
+    def pick(*keys, default=0.0):
+        for source in (input_data, feasibility):
+            for key in keys:
+                if source.get(key) not in (None, ""):
+                    return _to_number(source.get(key))
+        return default
+
+    total_revenue = pick("totalRevenue", "total_revenue", "sales_revenue")
+    land_cost = pick("landCost", "land_cost")
+    construction_cost = pick("constructionCost", "construction_cost")
+    finance_cost = pick("financeCost", "finance_cost")
+    total_cost = pick("totalCost", "total_cost")
+    other_cost = pick("otherCost", "other_cost")
+    if other_cost <= 0 and total_cost > 0:
+        other_cost = max(0.0, total_cost - land_cost - construction_cost - finance_cost)
+
+    raw_tranches = input_data.get("pfStructure") or project.get("pf_structure", []) or []
+    tranches: List[StressTranche] = []
+    for index, tranche in enumerate(raw_tranches, start=1):
+        if not isinstance(tranche, dict):
+            continue
+        tranches.append(StressTranche(
+            tranche=str(tranche.get("tranche") or tranche.get("name") or f"Tr.{index}"),
+            amount=_to_number(tranche.get("amount", 0.0)),
+            priority=int(tranche.get("priority", index) or index),
+            interestRate=_to_number(tranche.get("interestRate", tranche.get("interest_rate", tranche.get("rate", 0.0)))),
+            feeRate=_to_number(tranche.get("feeRate", tranche.get("fee_rate", 0.0))),
+        ))
+
+    scenarios = None
+    if isinstance(input_data.get("scenarios"), list) and input_data["scenarios"]:
+        scenarios = [StressScenarioDriver(**s) for s in input_data["scenarios"]]
+    schedule = StressTestSchedule(**input_data["schedule"]) if isinstance(input_data.get("schedule"), dict) else None
+
+    return StressTestRequest(
+        projectId=input_data.get("projectId") or project.get("project", {}).get("id"),
+        totalRevenue=total_revenue,
+        landCost=land_cost,
+        constructionCost=construction_cost,
+        otherCost=other_cost,
+        financeCost=finance_cost,
+        pfAmount=_to_number(input_data.get("pfAmount", 0.0)),
+        pfStructure=tranches,
+        unsoldRecoveryHaircut=_to_number(input_data.get("unsoldRecoveryHaircut", 0.2)),
+        hurdleRate=_to_number(input_data.get("hurdleRate", 0.12)),
+        periodsPerYear=int(input_data.get("periodsPerYear", 12) or 12),
+        schedule=schedule,
+        scenarios=scenarios,
+    )
+
+
+def _to_number(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@router.post("/{project_id}/stress-test/run")
+def run_project_stress_test(project_id: str, input_data: Dict[str, Any] | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    req = build_stress_test_request_from_project(PROJECTS_DB[project_id], input_data or {})
+    result = StressTestAgent().run_stress_test(req)
+    return result.model_dump()
+
+
+@router.post("/{project_id}/credit-enhancement/evaluate")
+def evaluate_credit_enhancement(project_id: str, input_data: Dict[str, Any] | None = None):
+    """Evaluate the six PF credit-enhancement measures and quantify their
+    combined effect on senior LTV, credit grade, and DSCR."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    if input_data.get("baseSeniorLtv") in (None, ""):
+        # Default the base senior LTV from the project's PF structure metrics.
+        project = PROJECTS_DB[project_id]
+        feasibility = project.get("feasibility_input", {})
+        pf_source = {
+            "tranches": project.get("pf_structure", []),
+            "total_revenue": feasibility.get("total_revenue", 0),
+            "total_cost": feasibility.get("total_cost", 0),
+        }
+        pf_metrics = calculate_pf_metrics(pf_source)
+        input_data["baseSeniorLtv"] = pf_metrics["metrics"]["ltv"]["value"]
+    req = CreditEnhancementRequest(**input_data)
+    return CreditEnhancementAgent().evaluate(req).model_dump()
+
+
+@router.post("/{project_id}/cash-sweep/simulate")
+def simulate_project_cash_sweep(project_id: str, input_data: Dict[str, Any]):
+    """Simulate monthly Cash Sweep + Reserve allocation against a tranche stack."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    req = CashSweepRequest(**(input_data or {}))
+    return CashSweepAgent().simulate(req).model_dump()
 
 
 @router.post("/{project_id}/scenarios/waterfall")
@@ -1578,22 +1742,233 @@ def download_report_export(project_id: str, report_id: str, export_id: str, requ
         },
     )
 
+def _hydrated_project_source(project_id: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    source_data = deep_merge(PROJECTS_DB[project_id], (input_data or {}).get("project_data", {}))
+    source_data = attach_persisted_land_evidence(project_id, source_data)
+    source_data = attach_approved_assumption_overrides(project_id, source_data)
+    source_data = attach_active_restructuring_cures(project_id, source_data)
+    return source_data
+
+
+@router.post("/{project_id}/orchestration/plan")
+def plan_orchestration(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Intent router: inspect available materials and return the workflow menu,
+    missing data, and a recommended default before any agents run."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = _hydrated_project_source(project_id, input_data or {})
+    plan = plan_orchestration_use_case(project_id, source_data)
+    prompt_artifact = persist_work_order_prompt_artifact(
+        project_id,
+        plan,
+        created_by=user_id_from_request(request),
+    )
+    if prompt_artifact:
+        plan["promptArtifact"] = {
+            "artifactId": prompt_artifact.get("artifactId"),
+            "artifactType": prompt_artifact.get("artifactType"),
+            "workflow": prompt_artifact.get("workflow"),
+            "createdAt": prompt_artifact.get("createdAt"),
+        }
+        record_sensitive_project_event(
+            request,
+            event_type="prompt_artifact_created",
+            project_id=project_id,
+            metadata={
+                "artifactId": prompt_artifact.get("artifactId"),
+                "artifactType": prompt_artifact.get("artifactType"),
+                "workflow": prompt_artifact.get("workflow"),
+                "source": "orchestration_plan",
+            },
+        )
+    return plan
+
+
+@router.get("/{project_id}/prompt-artifacts")
+def list_project_prompt_artifacts(project_id: str, request: Request, artifact_type: str | None = None, workflow: str | None = None):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    return {
+        "schemaVersion": "realytics-prompt-artifact-list-v1",
+        "projectId": project_id,
+        "records": [
+            {
+                "artifactId": record.get("artifactId"),
+                "artifactType": record.get("artifactType"),
+                "workflow": record.get("workflow"),
+                "title": record.get("title"),
+                "createdBy": record.get("createdBy"),
+                "createdAt": record.get("createdAt"),
+                "updatedAt": record.get("updatedAt"),
+                "summary": record.get("summary"),
+            }
+            for record in list_prompt_artifact_records(project_id, artifact_type=artifact_type, workflow=workflow)
+        ],
+    }
+
+
+@router.get("/{project_id}/prompt-artifacts/{artifact_id}")
+def get_project_prompt_artifact(project_id: str, artifact_id: str, request: Request):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    record = get_prompt_artifact_record(project_id, artifact_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Prompt artifact not found")
+    return record
+
+
+@router.post("/{project_id}/prompt-artifacts")
+def upsert_project_prompt_artifact(project_id: str, request: Request, input_data: Dict[str, Any]):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    artifact = upsert_prompt_artifact_record(
+        project_id,
+        {
+            **(input_data or {}),
+            "createdBy": (input_data or {}).get("createdBy") or user_id_from_request(request),
+        },
+    )
+    record_sensitive_project_event(
+        request,
+        event_type="prompt_artifact_upserted",
+        project_id=project_id,
+        metadata={
+            "artifactId": artifact.get("artifactId"),
+            "artifactType": artifact.get("artifactType"),
+            "workflow": artifact.get("workflow"),
+        },
+    )
+    return artifact
+
+
+def _project_name(project_id: str) -> str:
+    return (PROJECTS_DB.get(project_id, {}).get("project", {}) or {}).get("name") or project_id
+
+
+@router.post("/{project_id}/terms/annotate")
+def annotate_project_terms(project_id: str, input_data: Dict[str, Any] | None = None):
+    """Attach controlled-vocabulary identity (termId + canonicalField + sourceLocator)
+    to extracted terms in the project's parsed data, for report and audit linkage."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = _hydrated_project_source(project_id, input_data or {})
+    return annotate_terms_use_case(source_data)
+
+
+@router.post("/{project_id}/kakao/intake-plan")
+def kakao_intake_plan(project_id: str, input_data: Dict[str, Any] | None = None):
+    """KakaoTalk intake → intent menu. Runs the Orchestration Planner and returns
+    both the plan and a KakaoTalk-safe message presenting the workflow choices."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = _hydrated_project_source(project_id, input_data or {})
+    plan = plan_orchestration_use_case(project_id, source_data)
+    kakao_message = build_kakao_intake_plan_message(project_id, _project_name(project_id), plan)
+    record_user_activity_log({
+        "eventType": "kakao_message_preview",
+        "userId": "system",
+        "projectId": project_id,
+        "metadata": {
+            "eventType": "analysis_plan_ready",
+            "readyToSend": kakao_message.get("readyToSend"),
+            "recommendedWorkflow": plan.get("recommendedWorkflow"),
+            "messageMode": "preview_only",
+        },
+    })
+    return {"plan": plan, "kakaoMessage": kakao_message}
+
+
+@router.post("/{project_id}/orchestration/run-workflow")
+def run_orchestration_workflow(project_id: str, input_data: Dict[str, Any] | None = None):
+    """Run only the agents required by a user-selected workflow key.
+
+    When ``channel == 'kakao'`` the response also carries a KakaoTalk-safe
+    completion message so the intake flow can notify the user of the result.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    workflow = input_data.get("workflow")
+    if not workflow:
+        raise HTTPException(status_code=422, detail="Missing 'workflow' selection")
+    source_data = _hydrated_project_source(project_id, input_data)
+    if workflow == "full_pf_review":
+        run = run_and_save_pf_review_use_case(
+            orchestration_repository(), project_id, source_data, input_data.get("options", {}),
+        )
+    else:
+        run = run_workflow_use_case(project_id, source_data, workflow, input_data.get("options", {}))
+
+    if str(input_data.get("channel") or "").lower() == "kakao":
+        message = build_kakao_workflow_result_message(
+            project_id, _project_name(project_id), workflow, run.get("status"),
+        )
+        record_user_activity_log({
+            "eventType": "kakao_message_preview",
+            "userId": "system",
+            "projectId": project_id,
+            "metadata": {"eventType": "workflow_result_ready", "workflow": workflow,
+                         "readyToSend": message.get("readyToSend"), "messageMode": "preview_only"},
+        })
+        if isinstance(run, dict):
+            run = {**run, "kakaoMessage": message}
+    return run
+
+
 @router.post("/{project_id}/orchestrations/pf-review")
 def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
     input_data = input_data or {}
-    source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
-    source_data = attach_persisted_land_evidence(project_id, source_data)
-    source_data = attach_approved_assumption_overrides(project_id, source_data)
-    source_data = attach_active_restructuring_cures(project_id, source_data)
+    source_data = _hydrated_project_source(project_id, input_data)
     return run_and_save_pf_review_use_case(
         orchestration_repository(),
         project_id,
         source_data,
         input_data.get("options", {}),
     )
+
+
+@router.post("/{project_id}/orchestrations/pf-review/async")
+def start_pf_review_orchestration_async(project_id: str, input_data: Dict[str, Any] | None = None):
+    """Enqueue a PF review run and return a job immediately (non-blocking).
+
+    Poll `GET /projects/{id}/jobs/{job_id}` for status/result. In-process MVP
+    queue — see use_cases/async_jobs.py.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    input_data = input_data or {}
+    source_data = _hydrated_project_source(project_id, input_data)
+    job = submit_pf_review_job(
+        orchestration_repository(),
+        project_id,
+        source_data,
+        input_data.get("options", {}),
+        background=True,
+    )
+    return {"job": job}
+
+
+@router.get("/{project_id}/jobs")
+def list_project_jobs(project_id: str, limit: int = 50):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"jobs": get_job_store().list(project_id=project_id, limit=limit)}
+
+
+@router.get("/{project_id}/jobs/{job_id}")
+def get_project_job(project_id: str, job_id: str):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    job = get_job_store().get(job_id)
+    if job is None or job.get("projectId") != project_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 @router.get("/{project_id}/orchestrations")
 def list_project_orchestrations(project_id: str):

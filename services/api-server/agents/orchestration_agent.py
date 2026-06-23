@@ -16,7 +16,14 @@ from agents.risk_register_agent import RiskRegisterAgent
 from core.calculations import (
     calculate_feasibility_metrics,
     calculate_pf_metrics,
+    calculate_return_metrics,
 )
+from agents.stress_test_agent import StressTestAgent
+from agents.credit_enhancement_agent import CreditEnhancementAgent
+from agents.cash_sweep_agent import CashSweepAgent
+from schemas.stress_test import StressTestRequest, StressTranche
+from schemas.credit_enhancement import CreditEnhancementRequest, CreditEnhancementInput
+from schemas.cash_sweep import CashSweepRequest, CashSweepTranche
 from core.risk_assessment import build_basic_risk_matrix
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 
@@ -58,6 +65,8 @@ class OrchestrationAgent:
                 "project": project_data.get("project", {}),
                 "source": "PROJECTS_DB",
             }, artifact_key="project")
+
+            self._run_term_annotation_step(run, project_data)
 
             land_review = self._review_land_readiness(project_data)
             run["artifacts"]["landAgentReview"] = land_review
@@ -209,6 +218,12 @@ class OrchestrationAgent:
 
             run["artifacts"]["pfStructure"] = pf_structure
             self._complete_step(run, "pf_structure_calculation", pf_structure, artifact_key="pfStructure")
+
+            # --- Deck headline engines (surfaced into the run and Phase 11 report) ---
+            self._run_return_metrics_step(run, project_data)
+            self._run_stress_test_step(run, project_data)
+            self._run_credit_enhancement_step(run, project_data, pf_structure)
+            self._run_cash_sweep_step(run, project_data)
 
             market_evidence = MarketEvidenceAgent().review(
                 project_data,
@@ -517,6 +532,259 @@ class OrchestrationAgent:
 
         run["completed_at"] = self._now()
         return run
+
+    # ------------------------------------------------------------------
+    # Intent-driven workflow executor
+    # ------------------------------------------------------------------
+    def run_workflow(
+        self,
+        project_id: str,
+        project_data: Dict[str, Any],
+        workflow: str,
+        options: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Run only the agents required by a selected workflow.
+
+        Lets the Orchestration Planner route a user-chosen intent (land review,
+        feasibility, marketability, returns/stress, PF-structure) to the right
+        agents instead of always running the full 18-step PF review. The full
+        review still delegates to ``run_pf_review``.
+        """
+        options = options or {}
+        if workflow == "full_pf_review":
+            return self.run_pf_review(project_id, project_data, options)
+
+        run: Dict[str, Any] = {
+            "run_id": str(uuid4()),
+            "project_id": project_id,
+            "workflow": workflow,
+            "status": "running",
+            "started_at": self._now(),
+            "completed_at": None,
+            "steps": [],
+            "artifacts": {},
+            "nextActions": [],
+            "errors": [],
+        }
+
+        def step(step_id: str, status: str, detail: Dict[str, Any], artifact_key: str | None = None, artifact: Any = None) -> None:
+            run["steps"].append({"step": step_id, "status": status, "detail": detail, "at": self._now()})
+            if artifact_key and artifact is not None:
+                run["artifacts"][artifact_key] = artifact
+
+        handlers = {
+            "land_review": self._wf_land_review,
+            "feasibility": self._wf_feasibility,
+            "marketability": self._wf_marketability,
+            "returns_stress": self._wf_returns_stress,
+            "pf_structure_review": self._wf_pf_structure_review,
+        }
+        handler = handlers.get(workflow)
+        if handler is None:
+            run["status"] = "error"
+            run["errors"].append({"message": f"Unknown workflow: {workflow}", "type": "ValueError"})
+            run["completed_at"] = self._now()
+            return run
+
+        try:
+            handler(run, project_data, step, options)
+            run["status"] = "completed" if not run["errors"] else "completed_with_warnings"
+        except Exception as exc:  # pragma: no cover - defensive
+            run["status"] = "error"
+            run["errors"].append({"message": str(exc), "type": exc.__class__.__name__})
+        run["completed_at"] = self._now()
+        return run
+
+    def _wf_land_review(self, run, data, step, options) -> None:
+        land = self._review_land_readiness(data)
+        step("land_agent_review", land.get("status", "completed"),
+             {"status": land.get("status"), "summary": land.get("summary")},
+             "landAgentReview", land)
+        run["nextActions"].extend(land.get("nextActions", []) or [])
+
+    def _wf_feasibility(self, run, data, step, options) -> None:
+        dev = DevelopmentFeasibilityAgent().analyze(data)
+        step("development_feasibility_analysis", "completed",
+             {"summary": dev.get("summary"), "pfStatus": dev.get("pfReadiness", {}).get("status")},
+             "developerFeasibility", dev)
+        feas = self._calculate_feasibility(data)
+        step("feasibility_calculation", "completed", {"status": feas.get("status")}, "feasibility", feas)
+        ret = calculate_return_metrics(data.get("feasibility_input", {}) or {})
+        step("return_metrics", "completed", {"summary": ret.get("summary")}, "returnMetrics", ret)
+
+    def _wf_marketability(self, run, data, step, options) -> None:
+        dev = DevelopmentFeasibilityAgent().analyze(data)
+        feas = self._calculate_feasibility(data)
+        market_evidence = MarketEvidenceAgent().review(data, dev, feas)
+        step("market_evidence_reconciliation", market_evidence.get("status", "completed"),
+             {"status": market_evidence.get("status"), "evidenceSummary": market_evidence.get("evidenceSummary")},
+             "marketEvidenceReview", market_evidence)
+        mk_input = self._deep_merge(data, market_evidence.get("marketPayloadPatch", {}))
+        mk_input["marketEvidenceReview"] = market_evidence
+        marketability = MarketabilityAgent().analyze(mk_input)
+        step("marketability_analysis", "completed",
+             {"saleable": marketability.get("isSaleable", marketability.get("applicable"))},
+             "marketabilityAnalysis", marketability)
+
+    def _wf_returns_stress(self, run, data, step, options) -> None:
+        feasibility_input = data.get("feasibility_input", {}) or {}
+        ret = calculate_return_metrics(feasibility_input)
+        step("return_metrics", "completed", {"summary": ret.get("summary")}, "returnMetrics", ret)
+        stress = StressTestAgent().run_stress_test(self._build_stress_request(data)).model_dump()
+        step("stress_test", "completed",
+             {"worstCaseKey": stress.get("worstCaseKey"), "seniorBreakScenarioKey": stress.get("seniorBreakScenarioKey")},
+             "stressTest", stress)
+
+    def _wf_pf_structure_review(self, run, data, step, options) -> None:
+        pf = self._calculate_pf_structure(data)
+        step("pf_structure_calculation", "completed",
+             {"ltv": pf.get("ltv"), "ltc": pf.get("ltc"), "exit_sale_rate": pf.get("exit_sale_rate")},
+             "pfStructure", pf)
+        ce_inputs = [CreditEnhancementInput(**e) for e in (data.get("credit_enhancements") or []) if isinstance(e, dict)]
+        ce_req = CreditEnhancementRequest(baseSeniorLtv=float(pf.get("ltv") or 0.0), enhancements=ce_inputs)
+        ce = CreditEnhancementAgent().evaluate(ce_req).model_dump()
+        step("credit_enhancement", "completed",
+             {"enhancementGrade": ce.get("enhancementGrade"), "adjustedSeniorLtv": ce.get("adjustedSeniorLtv")},
+             "creditEnhancement", ce)
+
+    @staticmethod
+    def _build_stress_request(data: Dict[str, Any]) -> StressTestRequest:
+        fi = data.get("feasibility_input", {}) or {}
+        tranches = []
+        for index, item in enumerate(data.get("pf_structure", []) or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            tranches.append(StressTranche(
+                tranche=str(item.get("tranche") or item.get("name") or f"Tr.{index}"),
+                amount=float(item.get("amount") or 0.0),
+                priority=int(item.get("priority") or index),
+                interestRate=float(item.get("interest_rate") or item.get("interestRate") or 0.0),
+                feeRate=float(item.get("fee_rate") or item.get("feeRate") or 0.0),
+            ))
+        total_cost = float(fi.get("total_cost") or 0.0)
+        land = float(fi.get("land_cost") or 0.0)
+        constr = float(fi.get("construction_cost") or 0.0)
+        fin = float(fi.get("finance_cost") or 0.0)
+        other = max(0.0, total_cost - land - constr - fin) if total_cost > 0 else float(fi.get("other_cost") or 0.0)
+        return StressTestRequest(
+            totalRevenue=float(fi.get("total_revenue") or fi.get("sales_revenue") or 0.0),
+            landCost=land, constructionCost=constr, otherCost=other, financeCost=fin,
+            pfStructure=tranches,
+        )
+
+    def _run_term_annotation_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+        try:
+            from use_cases.term_annotation import annotate_terms_use_case
+
+            term_annotations = annotate_terms_use_case(project_data)
+            project_data["termAnnotations"] = term_annotations
+            run["artifacts"]["termAnnotations"] = term_annotations
+            summary = term_annotations.get("summary", {})
+            output = {
+                "mapped": summary.get("mappedCount"),
+                "distinctTerms": summary.get("distinctTerms"),
+                "distinctCanonicalFields": summary.get("distinctCanonicalFields"),
+                "unmappedCandidates": summary.get("unmappedCandidateCount"),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Term annotation failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "term_annotation", output, artifact_key="termAnnotations")
+
+    def _run_return_metrics_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+        try:
+            inputs = dict(project_data.get("feasibility_input", {}) or {})
+            inputs.setdefault("interest_expense", inputs.get("finance_cost", 0))
+            return_metrics = calculate_return_metrics(inputs)
+            project_data["returnMetrics"] = return_metrics
+            run["artifacts"]["returnMetrics"] = return_metrics
+            metrics = return_metrics.get("metrics", {})
+            output = {
+                "summary": return_metrics.get("summary"),
+                "icr": metrics.get("icr", {}).get("value"),
+                "equityMultiple": metrics.get("equityMultiple", {}).get("value"),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Return metrics failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "return_metrics", output, artifact_key="returnMetrics")
+
+    def _run_stress_test_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+        try:
+            stress = StressTestAgent().run_stress_test(self._build_stress_request(project_data)).model_dump()
+            project_data["stressTest"] = stress
+            run["artifacts"]["stressTest"] = stress
+            base = next((s for s in stress.get("scenarios", []) if s.get("key") == "base"), None)
+            output = {
+                "baseProjectIrr": base.get("projectIrr") if base else None,
+                "worstCaseKey": stress.get("worstCaseKey"),
+                "seniorBreakScenarioKey": stress.get("seniorBreakScenarioKey"),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Stress test failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "stress_test", output, artifact_key="stressTest")
+
+    def _run_credit_enhancement_step(self, run: Dict[str, Any], project_data: Dict[str, Any], pf_structure: Dict[str, Any]) -> None:
+        try:
+            base_senior_ltv = float((pf_structure or {}).get("ltv") or 0.0)
+            base_dscr = ((pf_structure or {}).get("metrics", {}).get("dscr", {}) or {}).get("value")
+            ce_inputs = [
+                CreditEnhancementInput(**e)
+                for e in (project_data.get("credit_enhancements") or [])
+                if isinstance(e, dict)
+            ]
+            credit_enh = CreditEnhancementAgent().evaluate(
+                CreditEnhancementRequest(baseSeniorLtv=base_senior_ltv, baseDscr=base_dscr, enhancements=ce_inputs)
+            ).model_dump()
+            project_data["creditEnhancement"] = credit_enh
+            run["artifacts"]["creditEnhancement"] = credit_enh
+            output = {
+                "enhancementGrade": credit_enh.get("enhancementGrade"),
+                "adjustedSeniorLtv": credit_enh.get("adjustedSeniorLtv"),
+                "activeCount": credit_enh.get("activeCount"),
+                "missingCriticalMeasures": credit_enh.get("missingCriticalMeasures"),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Credit enhancement failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "credit_enhancement_review", output, artifact_key="creditEnhancement")
+
+    def _run_cash_sweep_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+        monthly_ops = project_data.get("monthly_operating_cashflow")
+        if not (isinstance(monthly_ops, list) and monthly_ops):
+            self._complete_step(run, "cash_sweep_simulation", {
+                "status": "skipped",
+                "reason": "monthly_operating_cashflow not provided; cash sweep requires a monthly cash-flow series.",
+            }, artifact_key="cashSweep")
+            return
+        try:
+            tranches = []
+            for index, item in enumerate(project_data.get("pf_structure", []) or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                tranches.append(CashSweepTranche(
+                    tranche=str(item.get("tranche") or item.get("name") or f"Tr.{index}"),
+                    amount=float(item.get("amount") or 0.0),
+                    priority=int(item.get("priority") or index),
+                    interestRate=float(item.get("interest_rate") or item.get("interestRate") or 0.0),
+                    feeRate=float(item.get("fee_rate") or item.get("feeRate") or 0.0),
+                ))
+            cash_sweep = CashSweepAgent().simulate(CashSweepRequest(
+                monthlyOperatingCashflow=[float(x) for x in monthly_ops],
+                tranches=tranches,
+                reserveTarget=float(project_data.get("reserve_target") or 0.0),
+            )).model_dump()
+            project_data["cashSweep"] = cash_sweep
+            run["artifacts"]["cashSweep"] = cash_sweep
+            output = {
+                "totalPrincipalSwept": cash_sweep.get("totalPrincipalSwept"),
+                "endingTotalBalance": cash_sweep.get("endingTotalBalance"),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Cash sweep failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "cash_sweep_simulation", output, artifact_key="cashSweep")
 
     def _review_land_readiness(self, data: Dict[str, Any]) -> Dict[str, Any]:
         land_ledger = data.get("landLedger") or data.get("land_ledger") or {}
@@ -1601,10 +1869,15 @@ class OrchestrationAgent:
     def _agent_name_for_step(self, key: str) -> str:
         return {
             "project_load": "ProjectLoader",
+            "term_annotation": "TermAnnotationAgent",
             "land_agent_review": "LandAgent",
             "development_feasibility_analysis": "DevelopmentFeasibilityAgent",
             "feasibility_calculation": "FeasibilityCalculator",
             "pf_structure_calculation": "PFStructuringCalculator",
+            "return_metrics": "ReturnMetricsEngine",
+            "stress_test": "StressTestAgent",
+            "credit_enhancement_review": "CreditEnhancementAgent",
+            "cash_sweep_simulation": "CashSweepAgent",
             "market_evidence_reconciliation": "MarketEvidenceAgent",
             "marketability_analysis": "MarketabilityAgent",
             "data_quality_review": "DataQualityAgent",

@@ -31,6 +31,8 @@ ALLOWED_NOTIFICATION_EVENTS = {
     "document_upload_requested": "사업자료 업로드 요청",
     "document_analysis_started": "AI 분석 시작",
     "document_analysis_completed": "AI 분석 완료",
+    "analysis_plan_ready": "AI 분석 메뉴 안내",
+    "workflow_result_ready": "선택 분석 결과 안내",
     "risk_review_required": "리스크 검토 필요",
     "handoff_review_required": "에이전트 인계사항 검토 필요",
     "legal_evidence_required": "법무/인허가 증빙 보완 필요",
@@ -318,9 +320,61 @@ def _mobile_action_path(payload: Dict[str, Any], event_type: str) -> str | None:
     if not project_id:
         return None
     event = event_type or "notification"
-    if event in {"document_upload_requested", "document_analysis_started"}:
+    if event in {"document_upload_requested", "document_analysis_started", "analysis_plan_ready"}:
         return f"/project/{project_id}/kakao-intake?source=kakao&event={event}"
     return f"/project/{project_id}/mobile?source=kakao&event={event}"
+
+
+def build_kakao_intake_plan_message(project_id: Any, project_name: Any, plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a KakaoTalk-safe intent menu message from an orchestration plan.
+
+    The body only carries workflow names and a recommendation; detailed inputs
+    and results stay inside REALYTICS. A structured ``intentMenu`` is attached so
+    the Kakao intake page can render selectable workflow buttons.
+    """
+    safe_name = _safe_text(project_name or project_id or "REALYTICS project")
+    available = [w for w in plan.get("workflows", []) if w.get("availableNow")]
+    recommended = next(
+        (w for w in plan.get("workflows", []) if w.get("key") == plan.get("recommendedWorkflow")),
+        None,
+    )
+    body = f"{safe_name} 자료 분석 준비가 완료되었습니다. 진행할 작업을 선택해 주세요"
+    if recommended:
+        body += f" (추천: {recommended.get('nameKo')})"
+    payload = {
+        "eventType": "analysis_plan_ready",
+        "projectId": project_id,
+        "projectName": safe_name,
+        "body": body,
+    }
+    preview = build_safe_kakao_message_preview(payload)
+    preview["intentMenu"] = [
+        {
+            "key": w.get("key"),
+            "nameKo": w.get("nameKo"),
+            "recommended": w.get("key") == plan.get("recommendedWorkflow"),
+            "runWorkflowEndpoint": f"/projects/{project_id}/orchestration/run-workflow",
+        }
+        for w in available
+    ]
+    preview["recommendedWorkflow"] = plan.get("recommendedWorkflow")
+    return preview
+
+
+def build_kakao_workflow_result_message(
+    project_id: Any, project_name: Any, workflow_name: Any, status: Any
+) -> Dict[str, Any]:
+    """Build a KakaoTalk-safe completion notice for a selected workflow run."""
+    safe_name = _safe_text(project_name or project_id or "REALYTICS project")
+    safe_workflow = _safe_text(workflow_name or "선택 분석")
+    body = f"{safe_name} '{safe_workflow}' 분석이 완료되었습니다. 상세 결과는 REALYTICS에서 확인해 주세요."
+    payload = {
+        "eventType": "workflow_result_ready",
+        "projectId": project_id,
+        "projectName": safe_name,
+        "body": body,
+    }
+    return build_safe_kakao_message_preview(payload)
 
 
 def _safe_text(value: Any) -> str:

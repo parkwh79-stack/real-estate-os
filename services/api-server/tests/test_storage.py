@@ -4,11 +4,13 @@ from storage import (
     create_user_session,
     default_state,
     get_evidence_graph_record,
+    get_prompt_artifact_record,
     get_user,
     get_user_session,
     get_risk_register_record,
     list_assumption_override_records,
     list_evidence_graph_records,
+    list_prompt_artifact_records,
     list_land_evidence_records,
     list_restructuring_cure_records,
     list_risk_register_records,
@@ -19,6 +21,7 @@ from storage import (
     storage_backend,
     upsert_assumption_override_record,
     upsert_evidence_graph_record,
+    upsert_prompt_artifact_record,
     upsert_land_evidence_record,
     upsert_restructuring_cure_record,
     upsert_risk_register_record,
@@ -40,6 +43,7 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
         land_evidence={"1": {"official_land_price:pnu-1": {"recordKey": "official_land_price:pnu-1", "pnu": "pnu-1"}}},
         risk_registers={"1": {"run-1": {"runId": "run-1", "status": "blocking", "risks": [{"riskId": "R-1"}]}}},
         evidence_graphs={"1": {"run-1": {"runId": "run-1", "summary": {"nodeCount": 2, "edgeCount": 1}}}},
+        prompt_artifacts={"1": {"pa-1": {"artifactId": "pa-1", "artifactType": "ai_work_order", "body": "work order"}}},
         assumption_overrides={"1": {"ovr-1": {"overrideId": "ovr-1", "checkKey": "sales_revenue_consistency", "status": "active"}}},
         restructuring_cures={"1": {"cure-1": {"cureId": "cure-1", "cureType": "additional_collateral", "status": "active"}}},
         project_snapshots={"1": {"snapshot-run-1": {"snapshotId": "snapshot-run-1", "runId": "run-1"}}},
@@ -56,6 +60,7 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
     assert state["land_evidence"]["1"]["official_land_price:pnu-1"]["pnu"] == "pnu-1"
     assert state["risk_registers"]["1"]["run-1"]["status"] == "blocking"
     assert state["evidence_graphs"]["1"]["run-1"]["summary"]["nodeCount"] == 2
+    assert state["prompt_artifacts"]["1"]["pa-1"]["body"] == "work order"
     assert state["assumption_overrides"]["1"]["ovr-1"]["checkKey"] == "sales_revenue_consistency"
     assert state["restructuring_cures"]["1"]["cure-1"]["cureType"] == "additional_collateral"
     assert state["project_snapshots"]["1"]["snapshot-run-1"]["runId"] == "run-1"
@@ -167,6 +172,18 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
     assert get_evidence_graph_record("1", "run-1")["summary"]["riskNodeCount"] == 1
     assert list_evidence_graph_records("1")[0]["runId"] == "run-1"
 
+    prompt_artifact = upsert_prompt_artifact_record("1", {
+        "artifactId": "pa-work-order",
+        "artifactType": "ai_work_order",
+        "workflow": "full_pf_review",
+        "title": "AI 업무 주문서",
+        "body": "사업수지와 PF 구조를 검토하십시오.",
+        "createdBy": "credit_officer",
+    })
+    assert prompt_artifact["artifactId"] == "pa-work-order"
+    assert get_prompt_artifact_record("1", "pa-work-order")["workflow"] == "full_pf_review"
+    assert list_prompt_artifact_records("1", artifact_type="ai_work_order")[0]["body"].startswith("사업수지")
+
     override = upsert_assumption_override_record("1", {
         "overrideId": "ovr-revenue",
         "checkKey": "sales_revenue_consistency",
@@ -266,6 +283,7 @@ def test_default_state_shape():
     assert state["evidence_graphs"] == {}
     assert state["assumption_overrides"] == {}
     assert state["restructuring_cures"] == {}
+    assert state["glossary_terms"] == {}
     assert state["project_snapshots"] == {}
     assert state["user_activity_logs"] == []
     assert state["identity"]["tenants"] == {}

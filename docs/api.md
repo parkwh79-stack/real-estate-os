@@ -401,6 +401,31 @@ Typed handoff artifacts currently include:
 ### `POST /projects/{project_id}/land-ledger/enrich`
 - **Update**: When `persistEvidence` or `persist` is true, enrichment outputs are saved into `land_evidence` records for downstream legal/PF review.
 
+## Glossary / Canonical Field Map APIs
+
+### `GET /glossary/terms`
+- **Description**: List persisted real estate and PF glossary terms.
+- **Query params**: Optional `q`, `category`, `canonical_field`, and `review_status`.
+- **Response**: `realytics-glossary-term-list-v1` payload with controlled vocabulary records, aliases, definitions, canonical field mappings, source examples, and review status.
+
+### `POST /glossary/terms`
+- **Description**: Create or update a glossary term and append review history.
+- **Request Body**: `{ "termId": "dsra", "displayNameKo": "원리금상환준비계좌", "aliases": ["DSRA"], "canonicalField": "pf_structure.dsra.amount", "reviewStatus": "approved" }`
+- **Validation**: `approved`, `pending_review`, and `needs_revision` automation terms require a `canonicalField`.
+- **Audit**: Emits `glossary_term_upserted` user activity logs.
+
+### `GET /glossary/terms/{term_id}`
+- **Description**: Retrieve one glossary term by stable term ID.
+
+### `GET /glossary/resolve`
+- **Description**: Resolve a source term or alias to an approved glossary term.
+- **Query params**: `term`, optional `include_pending`.
+- **Response**: `realytics-glossary-resolution-v1` with matched term or candidate list.
+
+### `GET /glossary/canonical-field-map`
+- **Description**: Return approved canonical fields mapped to terms and aliases for parser, data-quality, report, and UI standardization.
+- **Response**: `realytics-canonical-field-map-v1`.
+
 ## Auth / Identity APIs
 
 ### `POST /auth/tenants`

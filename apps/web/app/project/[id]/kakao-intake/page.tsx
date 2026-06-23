@@ -8,35 +8,60 @@ import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
+  ClipboardList,
   FileSpreadsheet,
   FileText,
   GitBranch,
+  ListChecks,
   Loader2,
   MessageCircle,
   ShieldCheck,
+  Sparkles,
   Upload,
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 
-type BusyAction = "business" | "land" | "workbook" | "run" | null;
+type BusyAction = string | null;
 
 interface SourceDocument {
   documentType?: string;
   originalFileName?: string;
 }
 
-interface RunResponse {
-  status?: string;
-  run?: {
-    run_id?: string;
-  };
-  run_id?: string;
+interface WorkflowOption {
+  key: string;
+  nameKo: string;
+  description: string;
+  availableNow: boolean;
+  recommended: boolean;
+  missingData: string[];
+}
+
+interface WorkOrderOption {
+  key: string;
+  nameKo: string;
+  description: string;
+  defaultSelected?: boolean;
+}
+
+interface PlanResult {
+  workflows: WorkflowOption[];
+  outputOptions?: WorkOrderOption[];
+  validationOptions?: WorkOrderOption[];
+  recommendedWorkflow: string | null;
+  promptKo: string;
+  summary?: string;
+}
+
+interface IntakePlanResponse {
+  plan: PlanResult;
+  kakaoMessage?: { templateObject?: { text?: string }; intentMenu?: Array<Record<string, unknown>> };
 }
 
 const intakeSteps = [
   "카카오톡에는 파일 원문과 민감정보를 저장하지 않습니다.",
-  "파일은 REALYTICS 서버에 보관되고 parser/agent가 분석합니다.",
-  "카카오톡 답변은 요약과 링크만 제공합니다.",
+  "파일은 REALYTICS 서버에 보관되고 Parser/Agent가 분석합니다.",
+  "카카오톡 알림은 요약과 링크만 제공하고, 상세 검토는 REALYTICS에서 진행합니다.",
 ];
 
 export default function KakaoIntakePage() {
@@ -53,6 +78,8 @@ export default function KakaoIntakePage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [latestRunId, setLatestRunId] = useState<string | null>(null);
+  const [plan, setPlan] = useState<PlanResult | null>(null);
+  const [planPrompt, setPlanPrompt] = useState<string | null>(null);
 
   const refreshDocuments = useCallback(async () => {
     const res = await fetch(`${apiBase}/projects/${projectId}/source-documents`, {
@@ -73,12 +100,6 @@ export default function KakaoIntakePage() {
       return acc;
     }, {});
   }, [documents]);
-
-  const readyCount = [
-    counts.business_plan,
-    counts.land_ledger,
-    counts.feasibility_workbook,
-  ].filter(Boolean).length;
 
   async function runAction(action: BusyAction, work: () => Promise<string>) {
     setBusyAction(action);
@@ -126,7 +147,7 @@ export default function KakaoIntakePage() {
       const body = await postFile("upload", businessPlan);
       return body.status === "host_llm_required"
         ? "사업계획서가 보관되었습니다. 추가 AI 추출 단계가 필요합니다."
-        : "사업계획서가 업로드되고 parser 분석이 완료되었습니다.";
+        : "사업계획서 업로드와 Parser 분석이 완료되었습니다.";
     });
 
   const uploadLandLedger = () =>
@@ -146,35 +167,66 @@ export default function KakaoIntakePage() {
       if (!workbook) return "사업수지 Excel을 먼저 선택하세요.";
       const body = await postFile("feasibility-workbook/validate", workbook);
       const validation = body.validation as { status?: string } | undefined;
-      return `사업수지 Excel이 보관되었습니다. 검증 상태: ${validation?.status ?? "확인 필요"}`;
+      return `사업수지 Excel을 보관했습니다. 검증 상태: ${validation?.status ?? "확인 필요"}`;
     });
 
-  const runAnalysis = () =>
-    runAction("run", async () => {
-      const body = await postJson("orchestrations/pf-review", {
+  async function loadPlan() {
+    setBusyAction("plan");
+    setError(null);
+    setMessage(null);
+    try {
+      const body = (await postJson("kakao/intake-plan", {
         requestedBy: "kakao-intake",
         source: "kakao-mobile-intake",
         eventType,
-      }) as RunResponse;
-      const runId = body.run?.run_id ?? body.run_id ?? null;
-      setLatestRunId(runId);
-      return runId
-        ? `AI 분석이 완료되었습니다. 실행 ID: ${runId}`
-        : "AI 분석이 완료되었습니다.";
-    });
+      })) as unknown as IntakePlanResponse;
+      setPlan(body.plan ?? null);
+      setPlanPrompt(body.kakaoMessage?.templateObject?.text ?? body.plan?.promptKo ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "분석 메뉴를 불러오지 못했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function runWorkflow(workflow: string) {
+    setBusyAction(`run:${workflow}`);
+    setError(null);
+    setMessage(null);
+    try {
+      const body = (await postJson("orchestration/run-workflow", {
+        workflow,
+        channel: "kakao",
+        options: { requestedBy: "kakao-intake", source: "kakao-mobile-intake", eventType },
+      })) as Record<string, unknown>;
+      const status = (body.status as string) ?? "completed";
+      const kakaoText = (body.kakaoMessage as { templateObject?: { text?: string } } | undefined)
+        ?.templateObject?.text;
+      const runId =
+        (body.run as { run_id?: string } | undefined)?.run_id ??
+        (body.run_id as string | undefined) ??
+        null;
+      if (runId) setLatestRunId(runId);
+      setMessage(kakaoText ?? `'${workflow}' 분석이 완료되었습니다. 상태: ${status}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "선택한 분석 실행에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
 
   return (
-    <main className="mx-auto max-w-2xl space-y-4 pb-20">
+    <main className="mx-auto max-w-2xl space-y-4 pb-24">
       <section className="rounded-b-3xl bg-slate-950 px-5 pb-6 pt-5 text-white shadow-sm dark:bg-slate-900">
         <div className="flex items-center gap-2">
           <MessageCircle className="h-5 w-5 text-amber-300" />
           <p className="text-xs font-bold text-slate-300">카카오 접수</p>
         </div>
         <h1 className="mt-3 text-2xl font-black leading-tight">
-          사업자료 업로드 후 AI 분석
+          자료를 올리고 AI 업무를 선택하세요
         </h1>
         <p className="mt-2 text-sm leading-6 text-slate-300">
-          카카오톡에서 받은 링크로 사업계획서와 Excel을 안전하게 접수하고, REALYTICS Agent가 분석한 뒤 요약 결과를 확인합니다.
+          카카오톡에서 받은 링크로 사업자료를 안전하게 접수하고, REALYTICS Agent가 수행할 업무를 모바일에서 바로 선택합니다.
         </p>
         <div className="mt-4 grid grid-cols-3 gap-2">
           <Mini label="사업계획서" ready={Boolean(counts.business_plan)} />
@@ -236,15 +288,60 @@ export default function KakaoIntakePage() {
         />
       </section>
 
+      {plan ? (
+        <section className="space-y-3 px-4">
+          <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold leading-6 text-amber-900 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+            <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
+            {planPrompt ?? "진행할 업무를 선택해 주세요."}
+          </div>
+
+          <MobileOptionPanel title="만들 산출물" icon={<ClipboardList className="h-4 w-4" />} options={plan.outputOptions ?? []} />
+          <MobileOptionPanel title="적용할 검증조건" icon={<CheckCircle2 className="h-4 w-4" />} options={plan.validationOptions ?? []} />
+
+          <div className="space-y-3">
+            {plan.workflows.map((wf) => {
+              const running = busyAction === `run:${wf.key}`;
+              const disabled = !wf.availableNow || busyAction !== null;
+              return (
+                <button
+                  key={wf.key}
+                  type="button"
+                  onClick={() => void runWorkflow(wf.key)}
+                  disabled={disabled}
+                  className="flex w-full items-start gap-3 rounded-3xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900"
+                >
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                    {running ? <Loader2 className="h-5 w-5 animate-spin" /> : <GitBranch className="h-5 w-5" />}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-black text-slate-950 dark:text-white">{wf.nameKo}</p>
+                      {wf.recommended ? (
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-black text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">추천</span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{wf.description}</p>
+                    {!wf.availableNow && wf.missingData.length > 0 ? (
+                      <p className="mt-1 text-xs font-bold text-rose-600 dark:text-rose-300">부족 자료: {wf.missingData.join(", ")}</p>
+                    ) : null}
+                  </div>
+                  {wf.availableNow ? <ArrowRight className="mt-3 h-4 w-4 shrink-0 text-slate-400" /> : null}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
       <section className="sticky bottom-0 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/95">
         <button
           type="button"
-          onClick={() => void runAnalysis()}
-          disabled={busyAction !== null || readyCount === 0}
+          onClick={() => void loadPlan()}
+          disabled={busyAction !== null}
           className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-slate-950 px-4 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-slate-950"
         >
-          {busyAction === "run" ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitBranch className="h-4 w-4" />}
-          AI 통합심사 실행
+          {busyAction === "plan" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ListChecks className="h-4 w-4" />}
+          {plan ? "AI 업무 주문서 새로고침" : "AI 업무 주문서 불러오기"}
         </button>
         <div className="mt-2 grid grid-cols-2 gap-2">
           <Link
@@ -334,6 +431,26 @@ function UploadPanel({
         {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
         {buttonLabel}
       </button>
+    </section>
+  );
+}
+
+function MobileOptionPanel({ title, icon, options }: { title: string; icon: ReactNode; options: WorkOrderOption[] }) {
+  if (!options.length) return null;
+  return (
+    <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex items-center gap-2 text-sm font-black text-slate-950 dark:text-white">
+        {icon}
+        {title}
+      </div>
+      <div className="mt-3 space-y-2">
+        {options.filter((option) => option.defaultSelected).slice(0, 4).map((option) => (
+          <div key={option.key} className="rounded-2xl bg-slate-50 p-3 dark:bg-slate-950/40">
+            <p className="text-sm font-bold text-slate-950 dark:text-white">{option.nameKo}</p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">{option.description}</p>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

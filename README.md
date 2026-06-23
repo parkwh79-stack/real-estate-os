@@ -589,6 +589,7 @@ Notes:
 
 - Architecture and migration plan: [`docs/architecture.md`](docs/architecture.md)
 - Current implementation status: [`docs/product/current-implementation-status.md`](docs/product/current-implementation-status.md)
+- IR deck vs implementation gap: [`docs/product/ir-deck-implementation-gap.md`](docs/product/ir-deck-implementation-gap.md)
 - Product backlog: [`docs/backlog.md`](docs/backlog.md)
 - Phase 11 PF review report: [`docs/product/phase-11-pf-review-report.md`](docs/product/phase-11-pf-review-report.md)
 - Land ledger import/enrichment: [`docs/product/land-ledger-import-and-enrichment.md`](docs/product/land-ledger-import-and-enrichment.md)

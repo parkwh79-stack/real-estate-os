@@ -250,3 +250,74 @@ def test_report_template_editor_api_persists_project_template(monkeypatch):
     assert updated.json()["template"]["history"][0]["version"] == 1
 
     client.delete(f"/projects/{project_id}")
+
+
+def test_report_generation_applies_saved_report_template(monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Templated Report Project", "type": "mixed_use"},
+            "feasibility_input": {"total_revenue": 1000, "total_cost": 800},
+            "pf_structure": [{"tranche": "Tr.A", "amount": 500, "priority": 1}],
+        },
+    ).json()
+    project_id = created["project"]["id"]
+
+    template = client.post(
+        f"/projects/{project_id}/report-templates",
+        json={
+            "templateId": "phase11-template-apply-test",
+            "name": "Template Apply Test",
+            "editedBy": "report-editor",
+            "sections": [
+                {
+                    "sectionKey": "cover",
+                    "title": "표지",
+                    "enabled": True,
+                    "sourceAgents": ["ParserAgent"],
+                    "requiredEvidence": ["사업계획서"],
+                    "templateText": "표지 문구",
+                },
+                {
+                    "sectionKey": "marketability_analysis",
+                    "title": "분양성 검토",
+                    "enabled": True,
+                    "sourceAgents": ["MarketabilityAnalysisAgent"],
+                    "requiredEvidence": ["분양가 비교사례"],
+                    "templateText": "분양성 문구",
+                },
+                {
+                    "sectionKey": "custom_missing_section",
+                    "title": "미매핑 사용자 섹션",
+                    "enabled": True,
+                    "sourceAgents": ["CreditReviewAgent"],
+                },
+                {
+                    "sectionKey": "eod",
+                    "title": "EOD",
+                    "enabled": False,
+                },
+            ],
+        },
+    ).json()["template"]
+
+    generated = client.post(
+        f"/projects/{project_id}/reports/generate",
+        json={"templateId": template["templateId"]},
+    )
+
+    assert generated.status_code == 200
+    body = generated.json()
+    report = body["report"]
+    assert report["appliedTemplate"]["templateId"] == "phase11-template-apply-test"
+    assert report["templateApplication"]["unmappedSections"][0]["templateSectionKey"] == "custom_missing_section"
+    assert report["templateApplication"]["disabledSections"] == ["eod"]
+    assert report["sectionOrder"][0]["title"] == "표지"
+    assert report["sectionOrder"][1]["key"] == "marketAnalysis"
+    assert report["sectionOrder"][1]["requiredEvidence"] == ["분양가 비교사례"]
+    assert body["metadata"]["applied_template_id"] == "phase11-template-apply-test"
+    assert "## 적용 보고서 템플릿" in body["report_markdown"]
+
+    client.delete(f"/projects/{project_id}")

@@ -110,6 +110,31 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert persisted_evidence_graph["nodes"] == run["artifacts"]["evidenceGraph"]["nodes"]
 
 
+def test_orchestration_plan_persists_prompt_artifact():
+    client = TestClient(app)
+    project_id = project_with_discount_triggers(client)
+
+    res = client.post(
+        f"/projects/{project_id}/orchestration/plan",
+        json={},
+        headers={"X-REALYTICS-USER-ID": "planner-user"},
+    )
+
+    assert res.status_code == 200
+    plan = res.json()
+    assert plan["promptDraft"]["body"]
+    assert plan["promptArtifact"]["artifactId"]
+
+    artifacts = client.get(f"/projects/{project_id}/prompt-artifacts").json()
+    assert any(record["artifactId"] == plan["promptArtifact"]["artifactId"] for record in artifacts["records"])
+    artifact = client.get(
+        f"/projects/{project_id}/prompt-artifacts/{plan['promptArtifact']['artifactId']}"
+    ).json()
+    assert artifact["artifactType"] == "ai_work_order"
+    assert artifact["createdBy"] == "planner-user"
+    assert artifact["body"] == plan["promptDraft"]["body"]
+
+
 def test_approval_readiness_gate_blocks_rejected_or_unreviewed_runs():
     run = {
         "handoffs": [

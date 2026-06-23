@@ -12,12 +12,6 @@ interface UploadResponse {
   run?: {
     run_id: string;
   };
-  upload?: {
-    _meta?: {
-      parsing_source?: string;
-      warning?: string;
-    };
-  };
 }
 
 export default function FileUpload({ projectId }: { projectId: string }) {

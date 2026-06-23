@@ -1,15 +1,19 @@
+import Image from "next/image";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   BadgeCheck,
+  BookOpen,
   Building2,
   Landmark,
   MapPin,
   Ruler,
   ShieldCheck,
 } from "lucide-react";
+
+const BLOG_URL = "https://blog.naver.com/babo7910/224295847211";
 
 interface LandLedgerSummary {
   totalParcels?: number;
@@ -128,6 +132,39 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-6 pb-8">
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-900 text-white shadow-sm dark:border-slate-800">
+        <div className="flex flex-col items-center gap-5 p-5 sm:flex-row sm:gap-6">
+          <Image
+            src="/brand/realytics-hero.png"
+            alt="REALYTICS — powered by WAN2"
+            width={240}
+            height={188}
+            priority
+            className="h-28 w-auto rounded-xl object-contain sm:h-36"
+          />
+          <div className="min-w-0 flex-1 text-center sm:text-left">
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-200">
+              REALYTICS · powered by WAN2
+            </p>
+            <h1 className="mt-1 text-2xl font-black leading-tight sm:text-3xl">
+              토지·법규·사업수지·PF 심사를 하나의 AI 운영체계로
+            </h1>
+            <p className="mt-2 text-sm leading-6 text-slate-200">
+              REALYTICS finds the value. PLATFORM9 structures the finance. WAN2 powers the system.
+            </p>
+            <a
+              href={BLOG_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-bold text-white backdrop-blur transition-colors hover:bg-white/20"
+            >
+              <BookOpen className="h-4 w-4" />
+              REALYTICS 블로그 보기
+            </a>
+          </div>
+        </div>
+      </section>
+
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-sm font-semibold text-slate-500">REALYTICS x PLATFORM9</p>

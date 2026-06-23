@@ -5,6 +5,14 @@ from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
 from schemas.scenario import ScenarioSetRequest
 from agents.scenario_engine_agent import ScenarioEngineAgent
 
+
+def _looks_corrupted_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    markers = ["?좎", "?먭", "?섏", "?쒓", "?뱀", "?꾩", "?ㅽ", "梨", "遺꾩", "湲", "諛", "媛"]
+    return any(marker in value for marker in markers)
+
+
 class ReportAgent:
     def __init__(self):
         pass
@@ -20,6 +28,19 @@ class ReportAgent:
         covenants = input_data.get("covenants", {})
         tranches = input_data.get("pf_structure", [])
         expected = input_data.get("expected_results", {})
+
+        # Deck headline engines injected by the orchestration run (may be absent
+        # when the report is generated outside a full PF review run).
+        return_metrics = input_data.get("returnMetrics") or {}
+        stress_test = input_data.get("stressTest") or {}
+        credit_enhancement = input_data.get("creditEnhancement") or {}
+        rm_metrics = return_metrics.get("metrics", {}) if isinstance(return_metrics, dict) else {}
+        stress_scenarios = stress_test.get("scenarios", []) if isinstance(stress_test, dict) else []
+        base_stress = next((s for s in stress_scenarios if s.get("key") == "base"), None)
+
+        def _metric_value(block: Dict[str, Any], key: str):
+            entry = block.get(key, {}) if isinstance(block, dict) else {}
+            return entry.get("value") if isinstance(entry, dict) else None
 
         total_pf = sum(t.get("amount", 0) for t in tranches)
         total_revenue = feasibility.get("total_revenue", 0)
@@ -94,6 +115,15 @@ class ReportAgent:
             "claimPreservation": {
                 "items": self._as_label_items(covenants.get("claim_preservation", [])),
                 "summary": "신탁, 책임준공, 보증 및 covenant를 통한 복합 채권보전 구조입니다.",
+                "creditEnhancement": {
+                    "enhancementGrade": credit_enhancement.get("enhancementGrade"),
+                    "baseSeniorLtv": credit_enhancement.get("baseSeniorLtv"),
+                    "adjustedSeniorLtv": credit_enhancement.get("adjustedSeniorLtv"),
+                    "totalSeniorLtvDeltaPp": credit_enhancement.get("totalSeniorLtvDeltaPp"),
+                    "activeCount": credit_enhancement.get("activeCount"),
+                    "missingCriticalMeasures": credit_enhancement.get("missingCriticalMeasures"),
+                    "reportParagraph": credit_enhancement.get("reportParagraph"),
+                } if credit_enhancement else None,
             },
             "discountTrigger": {
                 "triggers": [
@@ -137,9 +167,29 @@ class ReportAgent:
                     "profitMargin": profit_margin,
                     "developmentProfit": development_profit,
                     "developmentProfitMillion": self._million(development_profit),
+                    "projectIrr": (base_stress.get("projectIrr") if base_stress else _metric_value(rm_metrics, "projectIrr")),
+                    "equityIrr": _metric_value(rm_metrics, "equityIrr"),
+                    "equityMultiple": _metric_value(rm_metrics, "equityMultiple"),
+                    "paybackMonths": (rm_metrics.get("paybackPeriodMonths", {}) or {}).get("value") if isinstance(rm_metrics, dict) else None,
+                    "icr": _metric_value(rm_metrics, "icr"),
                     "unsoldLtvBase": scenario_result.unsoldLtvMatrix.summary["baseCaseLtv"] if scenario_result else None,
                     "unsoldLtvStress": scenario_result.unsoldLtvMatrix.summary["stressCaseLtv"] if scenario_result else None,
                 },
+                "returnMetrics": return_metrics or None,
+                "stressTest": {
+                    "scenarios": [
+                        {
+                            "key": s.get("key"),
+                            "name": s.get("name"),
+                            "projectIrr": s.get("projectIrr"),
+                            "seniorStatus": s.get("seniorStatus"),
+                            "statusLabel": s.get("statusLabel"),
+                        }
+                        for s in stress_scenarios
+                    ],
+                    "worstCaseKey": stress_test.get("worstCaseKey"),
+                    "seniorBreakScenarioKey": stress_test.get("seniorBreakScenarioKey"),
+                } if stress_scenarios else None,
                 "summary": scenario_result.reportFragments.unsoldLtvSummary if scenario_result else "LTV, Exit 분양률, 수익률을 기준으로 대출 회수 가능성을 점검합니다.",
             },
             "exitStrategy": self._structured_exit_strategy(input_data, covenants, scenario_result),
@@ -158,6 +208,7 @@ class ReportAgent:
         }
 
         self._attach_imported_risk_report_sections(sections, input_data.get("riskReportSections") or {})
+        self._normalize_korean_report_labels(sections)
 
         return {
             "template": PHASE_11_TEMPLATE,
@@ -172,6 +223,42 @@ class ReportAgent:
             "sections": sections,
             "qualityChecks": self._quality_checks(sections),
         }
+
+    @staticmethod
+    def _normalize_korean_report_labels(sections: Dict[str, Any]) -> None:
+        claim = sections.get("claimPreservation")
+        if isinstance(claim, dict):
+            claim["summary"] = "신탁, 책임준공, 보증 및 covenant를 통한 복합 채권보전 구조입니다."
+
+        discount = sections.get("discountTrigger", {})
+        for trigger in discount.get("triggers", []) if isinstance(discount, dict) else []:
+            if isinstance(trigger, dict):
+                trigger["condition"] = "목표분양률 미달 시 할인분양을 실행합니다."
+
+        use_of_funds = sections.get("useOfFunds", {})
+        for item in use_of_funds.get("items", []) if isinstance(use_of_funds, dict) else []:
+            if isinstance(item, dict) and _looks_corrupted_text(item.get("item")):
+                item["item"] = "용도 미확정"
+
+        distribution = sections.get("salesRevenueDistribution")
+        if isinstance(distribution, dict) and _looks_corrupted_text(distribution.get("policy")):
+            distribution["policy"] = "대주단 약정 기준에 따른 자금 배분"
+
+        business = sections.get("businessFeasibility")
+        if isinstance(business, dict) and _looks_corrupted_text(business.get("summary")):
+            business["summary"] = "LTV, Exit 분양률, 수익률을 기준으로 대출 회수 가능성을 평가합니다."
+
+        drawdown = sections.get("drawdownConditions")
+        if isinstance(drawdown, dict):
+            subsequent = drawdown.get("subsequent")
+            if isinstance(subsequent, list) and any(_looks_corrupted_text(value) for value in subsequent):
+                drawdown["subsequent"] = ["분양률 및 공정률 정기 보고", "자금집행 증빙 제출"]
+
+        execution = sections.get("fundExecutionOrder")
+        if isinstance(execution, dict) and _looks_corrupted_text(execution.get("repaymentRule")):
+            execution["repaymentRule"] = (
+                "분양수입금은 약정상 waterfall에 따라 선순위 비용, 이자, 원금, 후순위 채권 순으로 충당합니다."
+            )
 
     def generate_report(self, input_data: Dict[str, Any]) -> str:
         """
@@ -275,9 +362,14 @@ class ReportAgent:
                     "name": t.get("tranche", "자료 미확인"),
                     "amount": t.get("amount", 0),
                     "amountMillion": self._million(t.get("amount", 0)),
-                    "interestRate": t.get("interest_rate", 0),
-                    "feeRate": t.get("fee_rate", 0),
-                    "allInCost": t.get("all_in_cost", t.get("interest_rate", 0) + t.get("fee_rate", 0)),
+                    "interestRate": self._rate(t, "interest_rate", "interestRate"),
+                    "feeRate": self._rate(t, "fee_rate", "feeRate"),
+                    "allInCost": self._rate(
+                        t,
+                        "all_in_cost",
+                        "allInCost",
+                        default=self._rate(t, "interest_rate", "interestRate") + self._rate(t, "fee_rate", "feeRate"),
+                    ),
                     "priority": t.get("priority"),
                 }
                 for t in tranches
@@ -458,6 +550,17 @@ class ReportAgent:
     def _million(self, amount: float) -> float:
         return round((amount or 0) / 1_000_000, 2)
 
+    def _rate(self, data: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
+        for key in keys:
+            value = data.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+        return default
+
     def _build_cover(self, project: Dict[str, Any]) -> str:
         name = project.get("name", "Unknown Project")
         date = project.get("review_date", "TBD")
@@ -484,7 +587,10 @@ class ReportAgent:
         md += "| Tranche | 대출금액 | 금리 | 수수료 | All-in Cost | 우선순위 |\n"
         md += "|:---|---:|:---:|:---:|:---:|:---:|\n"
         for t in tranches:
-            md += f"| {t.get('tranche')} | {t.get('amount'):,}원 | {t.get('interest_rate')*100}% | {t.get('fee_rate')*100}% | {t.get('all_in_cost', 0)*100}% | {t.get('priority')}순위 |\n"
+            interest_rate = self._rate(t, "interest_rate", "interestRate")
+            fee_rate = self._rate(t, "fee_rate", "feeRate")
+            all_in_cost = self._rate(t, "all_in_cost", "allInCost", default=interest_rate + fee_rate)
+            md += f"| {t.get('tranche')} | {t.get('amount', 0):,}원 | {interest_rate*100}% | {fee_rate*100}% | {all_in_cost*100}% | {t.get('priority')}순위 |\n"
         return md + "\n"
 
     def _build_claim_preservation(self, covenants: Dict[str, Any]) -> str:

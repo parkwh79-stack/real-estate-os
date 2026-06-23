@@ -15,6 +15,26 @@ def run_pf_review_use_case(
     return OrchestrationAgent().run_pf_review(project_id, project_data, options or {})
 
 
+def plan_orchestration_use_case(
+    project_id: str,
+    project_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return the intent menu (available workflows, missing data, recommendation)."""
+    from agents.orchestration_planner_agent import OrchestrationPlannerAgent
+
+    return OrchestrationPlannerAgent().plan(project_id, project_data)
+
+
+def run_workflow_use_case(
+    project_id: str,
+    project_data: Dict[str, Any],
+    workflow: str,
+    options: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Run only the agents required by a user-selected workflow."""
+    return OrchestrationAgent().run_workflow(project_id, project_data, workflow, options or {})
+
+
 def run_and_save_pf_review_use_case(
     orchestration_repository: OrchestrationRepository,
     project_id: str,

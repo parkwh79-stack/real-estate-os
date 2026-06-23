@@ -11,10 +11,15 @@ AGENT_PROGRESS_SCHEMA_VERSION = "realytics-agent-progress-v1"
 
 PF_REVIEW_STEPS = [
     ("project_load", "Project data load"),
+    ("term_annotation", "Controlled-vocabulary term annotation"),
     ("land_agent_review", "Land acquisition and evidence review"),
     ("development_feasibility_analysis", "Developer feasibility analysis"),
     ("feasibility_calculation", "Feasibility calculation"),
     ("pf_structure_calculation", "PF structure calculation"),
+    ("return_metrics", "Return metrics (IRR/Equity/Payback/ICR)"),
+    ("stress_test", "4-stage stress test"),
+    ("credit_enhancement_review", "Credit enhancement mapping"),
+    ("cash_sweep_simulation", "Cash sweep / reserve simulation"),
     ("market_evidence_reconciliation", "Market evidence reconciliation"),
     ("marketability_analysis", "Marketability analysis"),
     ("data_quality_review", "Data quality review"),

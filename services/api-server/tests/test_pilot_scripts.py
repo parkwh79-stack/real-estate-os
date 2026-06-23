@@ -59,7 +59,7 @@ def test_pilot_run_summary_contains_key_review_sections():
     summary = summarize_run(run)
 
     assert summary["status"] == "completed"
-    assert summary["stepCount"] == 18
+    assert summary["stepCount"] == 23
     assert summary["qualityCheck"]["pass"] is True
     assert "approvalReadinessGate" in summary
     assert "creditReview" in summary
