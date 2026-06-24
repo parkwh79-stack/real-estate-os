@@ -24,6 +24,7 @@ PF_REVIEW_STEPS = [
     ("marketability_analysis", "Marketability analysis"),
     ("data_quality_review", "Data quality review"),
     ("cross_agent_reconciliation", "Cross-agent reconciliation gate"),
+    ("consensus_resolution", "Iterative cross-agent consensus"),
     ("legal_permit_review", "Legal and permit pre-review"),
     ("risk_assessment", "Risk assessment"),
     ("risk_register_generation", "Risk register generation"),

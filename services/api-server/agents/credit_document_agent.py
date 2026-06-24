@@ -67,6 +67,7 @@ class CreditDocumentAgent:
         marketability = artifacts.get("marketabilityAnalysis") or {}
         legal = artifacts.get("legalPermitReview") or {}
         developability = artifacts.get("developabilityScore") or {}
+        consensus = artifacts.get("consensusResolution") or {}
         approval_gate = artifacts.get("approvalReadinessGate") or {}
 
         rm = return_metrics.get("metrics") or {}
@@ -131,6 +132,12 @@ class CreditDocumentAgent:
                 "confidence": credit_review.get("confidence"),
                 "approvalReady": approval_gate.get("pass"),
                 "policyProfile": credit_review.get("policyProfile") or {},
+                "consensus": {
+                    "status": consensus.get("status"),
+                    "rounds": consensus.get("rounds"),
+                    "resolvedCount": (consensus.get("summary") or {}).get("resolvedCount"),
+                    "unresolvedCount": (consensus.get("summary") or {}).get("unresolvedCount"),
+                } if consensus else {},
             },
             "dealSummary": deal_summary,
             "keyMetrics": key_metrics,
@@ -181,6 +188,12 @@ class CreditDocumentAgent:
         if policy.get("lenderName"):
             lines.append(
                 f"- 적용 여신정책: {policy.get('lenderName')} (Hurdle {_pct_str(policy.get('hurdleRate'))})"
+            )
+        consensus = rec.get("consensus") or {}
+        if consensus.get("status"):
+            lines.append(
+                f"- 교차 정합 합의: {consensus.get('status')} ({consensus.get('rounds')}라운드, "
+                f"{consensus.get('resolvedCount')}건 합의 / 미해결 {consensus.get('unresolvedCount')}건)"
             )
         lines.append("")
         lines.append("## 2. 거래 개요")

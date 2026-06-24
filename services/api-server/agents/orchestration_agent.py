@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.ai_connection import resolve_ai_context, safe_ai_context
+from agents.consensus_engine import ConsensusEngine, _set_by_path
 from agents.credit_document_agent import CreditDocumentAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.data_quality_agent import DataQualityAgent
@@ -324,6 +325,48 @@ class OrchestrationAgent:
                 "summary": reconciliation["summary"],
                 "nextActions": reconciliation["nextActions"],
             }, artifact_key="reconciliationGate")
+
+            # Iterative cross-agent consensus: agents re-analyse (patch -> recompute
+            # -> re-reconcile) until their cross-checked numbers agree. Calculations
+            # stay deterministic; a coordinator only sequences/judges the loop.
+            def _reconcile_with(working_pd: Dict[str, Any], _art: Dict[str, Any]) -> Dict[str, Any]:
+                return self._reconcile_agent_outputs(
+                    project_data=working_pd,
+                    land_review=land_review,
+                    developer_feasibility=developer_feasibility,
+                    feasibility=feasibility,
+                    pf_structure=self._calculate_pf_structure(working_pd),
+                    market_evidence=market_evidence,
+                    marketability=marketability,
+                )
+
+            consensus = ConsensusEngine().reach_consensus(project_data, run["artifacts"], _reconcile_with)
+            for patch in consensus.get("patches", []):
+                _set_by_path(project_data, patch["field"], patch["value"])
+            if consensus.get("patches"):
+                # Re-derive the deterministic artifacts that depend on the agreed
+                # assumptions so downstream credit/report use consensus values.
+                pf_structure = self._calculate_pf_structure(project_data)
+                run["artifacts"]["pfStructure"] = pf_structure
+                reconciliation = self._reconcile_agent_outputs(
+                    project_data=project_data,
+                    land_review=land_review,
+                    developer_feasibility=developer_feasibility,
+                    feasibility=feasibility,
+                    pf_structure=pf_structure,
+                    market_evidence=market_evidence,
+                    marketability=marketability,
+                )
+                run["artifacts"]["reconciliationGate"] = reconciliation
+            consensus_artifact = {k: v for k, v in consensus.items() if k != "agreedProjectData"}
+            run["artifacts"]["consensusResolution"] = consensus_artifact
+            self._complete_step(run, "consensus_resolution", {
+                "status": consensus_artifact["status"],
+                "rounds": consensus_artifact["rounds"],
+                "resolvedCount": consensus_artifact["summary"]["resolvedCount"],
+                "unresolvedCount": consensus_artifact["summary"]["unresolvedCount"],
+                "reconciliationStatus": reconciliation["status"],
+            }, artifact_key="consensusResolution")
 
             legal_review = LegalReviewAgent().review(
                 project_data,

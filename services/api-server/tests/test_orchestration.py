@@ -63,6 +63,12 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert run["agentProgress"]["land_agent_review"]["status"] == "completed"
     assert run["artifacts"]["reconciliationGate"]["analysisType"] == "cross_agent_reconciliation_gate_v1"
     assert run["agentProgress"]["cross_agent_reconciliation"]["status"] == "completed"
+    consensus = run["artifacts"]["consensusResolution"]
+    assert consensus["analysisType"] == "consensus_resolution"
+    assert consensus["status"] in {"converged", "partial"}
+    assert consensus["coordinator"] == "deterministic"
+    assert "roundLog" in consensus and isinstance(consensus["roundLog"], list)
+    assert run["agentProgress"]["consensus_resolution"]["status"] == "completed"
     assert run["artifacts"]["dataQualityReview"]["analysisType"] == "data_quality_review"
     assert run["agentProgress"]["data_quality_review"]["status"] == "completed"
     assert run["artifacts"]["evidenceGraph"]["analysisType"] == "evidence_graph"
