@@ -16,6 +16,7 @@ evidence-priority rules, and the underlying calculations stay deterministic.
 """
 
 import copy
+import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -60,6 +61,79 @@ class DeterministicCoordinator:
 
     def rationale(self, resolution: Dict[str, Any]) -> str:
         return resolution.get("rule") or "Adopted by evidence-priority rule."
+
+
+class LLMCoordinator:
+    """LLM-controlled coordinator: the model sequences conflicts and writes the
+    rationale, but never produces or alters numbers — patches still come from the
+    deterministic evidence-priority rules. Any failure (no key, bad output) falls
+    back to deterministic ordering, so the loop always runs.
+    """
+
+    name = "llm"
+    _SYSTEM = (
+        "You are a PF credit-committee coordinator. Given cross-agent reconciliation "
+        "conflicts, decide the ORDER to resolve them and give a one-line Korean rationale "
+        "per conflict. You must NOT compute, invent, or change any numbers — the engine "
+        "applies fixed evidence-priority rules. Respond with JSON only: "
+        '{"order": ["conflictKey", ...], "rationale": {"conflictKey": "..."}, "note": "..."}.'
+    )
+
+    def __init__(self, ai_context: Dict[str, Any], connection: Optional[Any] = None):
+        self.ai_context = ai_context
+        self._connection = connection
+        self._rationale: Dict[str, str] = {}
+        self._fallback = DeterministicCoordinator()
+
+    def _conn(self):
+        if self._connection is None:
+            from agents.ai_connection import AIConnection
+
+            self._connection = AIConnection()
+        return self._connection
+
+    def order_conflicts(self, conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        keys = [c.get("key") for c in conflicts]
+        by_key = {c.get("key"): c for c in conflicts}
+        prompt = json.dumps(
+            {
+                "conflicts": [
+                    {
+                        "key": c.get("key"),
+                        "label": c.get("label"),
+                        "status": c.get("status"),
+                        "leftValue": c.get("leftValue"),
+                        "rightValue": c.get("rightValue"),
+                    }
+                    for c in conflicts
+                ]
+            },
+            ensure_ascii=False,
+        )
+        try:
+            result = self._conn().extract_json(prompt, system=self._SYSTEM, ai_context=self.ai_context)
+            data = result.data if result and result.error is None else None
+            if not isinstance(data, dict):
+                raise ValueError("no coordinator response")
+            raw_order = [k for k in (data.get("order") or []) if k in by_key]
+            # keep it a strict permutation: append any conflicts the model omitted
+            ordered_keys = raw_order + [k for k in keys if k not in raw_order]
+            rationale = data.get("rationale") or {}
+            if isinstance(rationale, dict):
+                self._rationale = {k: str(v) for k, v in rationale.items() if k in by_key}
+            return [by_key[k] for k in ordered_keys]
+        except Exception:
+            return self._fallback.order_conflicts(conflicts)
+
+    def rationale(self, resolution: Dict[str, Any]) -> str:
+        return self._rationale.get(resolution.get("key")) or resolution.get("rule") or "Adopted by evidence-priority rule."
+
+
+def build_consensus_coordinator(ai_context: Optional[Dict[str, Any]] = None, connection: Optional[Any] = None):
+    """Return an LLM coordinator when an AI is available, else the deterministic one."""
+    if ai_context:
+        return LLMCoordinator(ai_context, connection=connection)
+    return DeterministicCoordinator()
 
 
 class ConsensusEngine:

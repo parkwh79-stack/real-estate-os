@@ -4,7 +4,8 @@ from uuid import uuid4
 
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.ai_connection import resolve_ai_context, safe_ai_context
-from agents.consensus_engine import ConsensusEngine, _set_by_path
+from agents.ai_router import describe_selection, select_ai_context
+from agents.consensus_engine import ConsensusEngine, _set_by_path, build_consensus_coordinator
 from agents.credit_document_agent import CreditDocumentAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.data_quality_agent import DataQualityAgent
@@ -340,7 +341,12 @@ class OrchestrationAgent:
                     marketability=marketability,
                 )
 
-            consensus = ConsensusEngine().reach_consensus(project_data, run["artifacts"], _reconcile_with)
+            consensus_ai = select_ai_context(tier="coordination")
+            consensus_coordinator = build_consensus_coordinator(consensus_ai)
+            consensus = ConsensusEngine().reach_consensus(
+                project_data, run["artifacts"], _reconcile_with, coordinator=consensus_coordinator
+            )
+            consensus["aiSelection"] = describe_selection(consensus_ai)
             for patch in consensus.get("patches", []):
                 _set_by_path(project_data, patch["field"], patch["value"])
             if consensus.get("patches"):

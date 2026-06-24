@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from agents.consensus_engine import ConsensusEngine
+from agents.ai_connection import AIExtractionResult
+from agents.consensus_engine import (
+    ConsensusEngine,
+    DeterministicCoordinator,
+    LLMCoordinator,
+    build_consensus_coordinator,
+)
 
 
 def _make_reconcile_fn(artifacts, *, include_readiness=True):
@@ -98,3 +104,67 @@ def test_land_area_not_overridden_without_land_evidence():
     assert result["agreedProjectData"]["land"]["area_sqm"] == 8000.0
     assert any(u["key"] == "land_area_project_vs_land_agent" for u in result["unresolved"])
     assert result["status"] == "partial"
+
+
+class _FakeConn:
+    def __init__(self, data=None, error=None):
+        self._data = data
+        self._error = error
+        self.calls = 0
+
+    def extract_json(self, prompt, *, system, ai_context):
+        self.calls += 1
+        return AIExtractionResult(data=self._data, meta={}, error=self._error)
+
+
+def _conflicts():
+    return [
+        {"key": "land_area_project_vs_land_agent", "label": "면적", "status": "warning"},
+        {"key": "revenue_feasibility_vs_marketability", "label": "매출", "status": "blocking"},
+    ]
+
+
+def test_build_coordinator_falls_back_to_deterministic_without_ai():
+    assert isinstance(build_consensus_coordinator(None), DeterministicCoordinator)
+    assert build_consensus_coordinator({"provider": "openai"}).name == "llm"
+
+
+def test_llm_coordinator_orders_and_explains():
+    conn = _FakeConn(data={
+        "order": ["revenue_feasibility_vs_marketability", "land_area_project_vs_land_agent"],
+        "rationale": {"revenue_feasibility_vs_marketability": "매출 충돌이 여신에 가장 큰 영향"},
+    })
+    coord = LLMCoordinator({"provider": "openai", "model": "gpt-4o"}, connection=conn)
+    ordered = coord.order_conflicts(_conflicts())
+    assert [c["key"] for c in ordered][0] == "revenue_feasibility_vs_marketability"
+    assert conn.calls == 1
+    assert coord.rationale({"key": "revenue_feasibility_vs_marketability", "rule": "r"}) == "매출 충돌이 여신에 가장 큰 영향"
+    # unseen key falls back to its rule text
+    assert coord.rationale({"key": "land_area_project_vs_land_agent", "rule": "rule-text"}) == "rule-text"
+
+
+def test_llm_coordinator_falls_back_on_error():
+    coord = LLMCoordinator({"provider": "openai"}, connection=_FakeConn(error="no key"))
+    ordered = coord.order_conflicts(_conflicts())
+    # deterministic fallback: blocking before warning
+    assert [c["key"] for c in ordered][0] == "revenue_feasibility_vs_marketability"
+
+
+def test_llm_coordinator_omitted_keys_are_appended():
+    conn = _FakeConn(data={"order": ["revenue_feasibility_vs_marketability"]})  # omits land
+    coord = LLMCoordinator({"provider": "openai"}, connection=conn)
+    ordered = coord.order_conflicts(_conflicts())
+    assert {c["key"] for c in ordered} == {
+        "revenue_feasibility_vs_marketability", "land_area_project_vs_land_agent"
+    }
+
+
+def test_consensus_runs_with_llm_coordinator():
+    artifacts = _artifacts(market_complete=True)
+    project_data = {"feasibility_input": {"total_revenue": 130_000_000_000}, "land": {"area_sqm": 9688.0}}
+    coord = LLMCoordinator({"provider": "openai"}, connection=_FakeConn(data={"order": [], "rationale": {}}))
+    result = ConsensusEngine().reach_consensus(
+        project_data, artifacts, _make_reconcile_fn(artifacts, include_readiness=False), coordinator=coord
+    )
+    assert result["coordinator"] == "llm"
+    assert result["status"] == "converged"
