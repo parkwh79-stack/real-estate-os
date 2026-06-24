@@ -674,10 +674,20 @@ class OrchestrationAgent:
         constr = float(fi.get("construction_cost") or 0.0)
         fin = float(fi.get("finance_cost") or 0.0)
         other = max(0.0, total_cost - land - constr - fin) if total_cost > 0 else float(fi.get("other_cost") or 0.0)
+        product_mix = data.get("product_mix") or data.get("productMix") or []
+        sales_collection = next(
+            (
+                str(p.get("defaultCollection") or p.get("default_collection"))
+                for p in product_mix
+                if isinstance(p, dict) and (p.get("defaultCollection") or p.get("default_collection"))
+            ),
+            "10-60-30",
+        )
         return StressTestRequest(
             totalRevenue=float(fi.get("total_revenue") or fi.get("sales_revenue") or 0.0),
             landCost=land, constructionCost=constr, otherCost=other, financeCost=fin,
             pfStructure=tranches,
+            salesCollection=sales_collection,
         )
 
     def _run_term_annotation_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:

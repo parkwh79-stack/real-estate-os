@@ -62,3 +62,46 @@ def test_custom_scenarios_and_report_fragment():
     assert "Stress Test" in result.reportFragment
     assert result.worstCaseKey == "tail"
     assert result.hurdleRate == 0.12
+
+
+def test_sales_collection_template_drives_irr_via_cash_flow_engine():
+    # A more back-loaded collection (everything at closing) ties up PF longer and
+    # lowers the project IRR; proves the IRR comes from the Cash Flow Engine
+    # timing rather than a collection-agnostic uniform spread.
+    installment = StressTestAgent().run_stress_test(_base_request(salesCollection="10-60-30")).scenarios[0]
+    forward = StressTestAgent().run_stress_test(_base_request(salesCollection="forward_sale_closing")).scenarios[0]
+    assert installment.projectIrr is not None and forward.projectIrr is not None
+    assert forward.projectIrr < installment.projectIrr
+    assert installment.cashflowSource == "cash_flow_engine"
+    assert installment.cashflowDiagnostics["salesCollection"] == "10-60-30"
+
+
+def test_engine_cashflow_series_is_produced():
+    from schemas.stress_test import StressTestSchedule
+
+    request = _base_request()
+    schedule = request.schedule or StressTestSchedule()
+    series, diagnostics = StressTestAgent._engine_cashflow(
+        request=request,
+        schedule=schedule,
+        adjusted_construction=request.constructionCost,
+        adjusted_finance=0.0,
+        adjusted_revenue=request.totalRevenue,
+        pf_amount=sum(t.amount for t in request.pfStructure),
+    )
+    assert series is not None and len(series) == schedule.months + 1
+    assert any(value > 0 for value in series)  # collections land in later months
+    assert diagnostics["source"] == "cash_flow_engine"
+    assert diagnostics["rowCount"] == schedule.months + 1
+
+
+def test_fallback_cashflow_diagnostics_when_engine_fails(monkeypatch):
+    def _boom(_request):
+        raise RuntimeError("engine unavailable")
+
+    monkeypatch.setattr("agents.stress_test_agent.run_cash_flow_engine", _boom)
+    base = StressTestAgent().run_stress_test(_base_request()).scenarios[0]
+    assert base.cashflowSource == "fallback_uniform"
+    assert base.cashflowDiagnostics["fallbackReason"] == "cash_flow_engine_error"
+    assert base.cashflowDiagnostics["errorType"] == "RuntimeError"
+    assert base.cashflowDiagnostics["seriesLength"] > 0

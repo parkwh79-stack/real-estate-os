@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List, Optional
 
+from agents.cash_flow_engine import run_cash_flow_engine
 from core.calculations import (
     calculate_irr_annualized,
     calculate_profit_margin,
@@ -80,13 +81,13 @@ class StressTestAgent:
         development_profit = adjusted_revenue - adjusted_total_cost
         profit_margin = calculate_profit_margin(development_profit, adjusted_revenue)
 
-        net_cashflows = self._build_scenario_cashflow(
+        net_cashflows, cashflow_source, cashflow_diagnostics = self._scenario_cashflow(
+            request=request,
             schedule=schedule,
-            land_cost=request.landCost,
-            construction_cost=adjusted_construction,
-            other_cost=request.otherCost,
-            finance_cost=adjusted_finance,
-            revenue=adjusted_revenue,
+            adjusted_construction=adjusted_construction,
+            adjusted_finance=adjusted_finance,
+            adjusted_revenue=adjusted_revenue,
+            pf_amount=pf_amount,
         )
         project_irr = calculate_irr_annualized(net_cashflows, request.periodsPerYear)
         senior_ratio, senior_status = self._senior_status(
@@ -116,6 +117,8 @@ class StressTestAgent:
             seniorRecoveryRatio=round(senior_ratio, 4) if senior_ratio is not None else None,
             seniorStatus=senior_status,
             statusLabel=_SENIOR_STATUS_LABELS.get(senior_status, senior_status),
+            cashflowSource=cashflow_source,
+            cashflowDiagnostics=cashflow_diagnostics,
         )
 
     def _adjusted_finance_cost(
@@ -136,6 +139,114 @@ class StressTestAgent:
         exposure = pf_amount or sum(t.amount for t in sorted_tranches)
         rate_shock = exposure * driver.interestRateDelta * finance_years
         return base_finance + rate_shock
+
+    def _scenario_cashflow(
+        self,
+        request: StressTestRequest,
+        schedule: StressTestSchedule,
+        adjusted_construction: float,
+        adjusted_finance: float,
+        adjusted_revenue: float,
+        pf_amount: float,
+    ) -> tuple[List[float], str, Dict[str, Any]]:
+        """Unlevered project monthly cash flow for the scenario.
+
+        Prefers the real Cash Flow Engine so the IRR reflects an S-curve sales
+        collection and a PF-draw-aware schedule instead of a uniform spread.
+        Falls back to the stylised uniform model if the engine cannot run.
+        """
+        engine_series, engine_diagnostics = self._engine_cashflow(
+            request=request,
+            schedule=schedule,
+            adjusted_construction=adjusted_construction,
+            adjusted_finance=adjusted_finance,
+            adjusted_revenue=adjusted_revenue,
+            pf_amount=pf_amount,
+        )
+        if engine_series is not None:
+            return engine_series, "cash_flow_engine", engine_diagnostics
+        fallback_series = self._build_scenario_cashflow(
+            schedule=schedule,
+            land_cost=request.landCost,
+            construction_cost=adjusted_construction,
+            other_cost=request.otherCost,
+            finance_cost=adjusted_finance,
+            revenue=adjusted_revenue,
+        )
+        diagnostics = {
+            **engine_diagnostics,
+            "source": "fallback_uniform",
+            "seriesLength": len(fallback_series),
+            "salesCollection": request.salesCollection,
+            "periodMonths": schedule.months,
+        }
+        diagnostics.setdefault("fallbackReason", "cash_flow_engine_unavailable")
+        return fallback_series, "fallback_uniform", diagnostics
+
+    @staticmethod
+    def _engine_cashflow(
+        request: StressTestRequest,
+        schedule: StressTestSchedule,
+        adjusted_construction: float,
+        adjusted_finance: float,
+        adjusted_revenue: float,
+        pf_amount: float,
+    ) -> tuple[Optional[List[float]], Dict[str, Any]]:
+        try:
+            months = max(1, schedule.months)
+            start_year = 2026
+            completion_year = start_year + (months // 12)
+            completion_month = (months % 12) + 1
+            engine_request = {
+                "schedule": {
+                    "construction_start": f"{start_year}-01-01",
+                    "completion": f"{completion_year}-{completion_month:02d}-01",
+                },
+                "productMix": [
+                    {"totalSalesRevenue": adjusted_revenue, "defaultCollection": request.salesCollection}
+                ],
+                "sourcesAndUses": {
+                    "cost": {
+                        "landCost": request.landCost,
+                        "directConstructionCost": adjusted_construction,
+                        "financialCost": adjusted_finance,
+                        "otherCost": request.otherCost,
+                    },
+                    "funding": {"pfLoan": pf_amount or sum(t.amount for t in request.pfStructure)},
+                    "revenue": {"totalSalesRevenue": adjusted_revenue},
+                },
+                "pfStructure": [
+                    {"tranche": t.tranche, "amount": t.amount, "drawPriority": t.priority}
+                    for t in request.pfStructure
+                ],
+            }
+            result = run_cash_flow_engine(engine_request)
+            rows = result.get("monthlyCashFlow") or []
+            series = [float(row.get("netCashFlowBeforePfDraw") or 0.0) for row in rows]
+            if not series:
+                return None, {
+                    "source": "fallback_uniform",
+                    "fallbackReason": "cash_flow_engine_empty_series",
+                    "rowCount": len(rows),
+                    "salesCollection": request.salesCollection,
+                    "periodMonths": schedule.months,
+                }
+            return series, {
+                "source": "cash_flow_engine",
+                "rowCount": len(rows),
+                "seriesLength": len(series),
+                "salesCollection": request.salesCollection,
+                "periodMonths": schedule.months,
+            }
+        except Exception as exc:
+            return None, {
+                "source": "fallback_uniform",
+                "fallbackReason": "cash_flow_engine_error",
+                "errorType": exc.__class__.__name__,
+                "errorMessage": str(exc)[:160],
+                "salesCollection": request.salesCollection,
+                "periodMonths": schedule.months,
+            }
 
     @staticmethod
     def _build_scenario_cashflow(

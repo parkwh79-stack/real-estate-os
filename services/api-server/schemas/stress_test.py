@@ -44,6 +44,10 @@ class StressTestRequest(BaseModel):
     unsoldRecoveryHaircut: float = Field(default=0.2, description="Haircut applied to unsold inventory collateral value")
     hurdleRate: float = Field(default=0.12)
     periodsPerYear: int = Field(default=12)
+    salesCollection: str = Field(
+        default="10-60-30",
+        description="Sales collection template key fed to the Cash Flow Engine for realistic PF-draw timing (e.g. 10-60-30, 10-50-40, forward_sale_closing).",
+    )
     schedule: Optional[StressTestSchedule] = None
     scenarios: Optional[List[StressScenarioDriver]] = None
 
@@ -67,6 +71,14 @@ class StressScenarioResult(BaseModel):
     seniorRecoveryRatio: Optional[float]
     seniorStatus: str
     statusLabel: str
+    cashflowSource: str = Field(
+        default="unknown",
+        description="cash_flow_engine when the real engine produced the IRR series, otherwise fallback_uniform.",
+    )
+    cashflowDiagnostics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Diagnostic metadata explaining the source or fallback reason for scenario cash flows.",
+    )
 
 
 class StressTestResult(BaseModel):
