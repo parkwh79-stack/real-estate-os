@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Activity, AlertTriangle, Loader2, RefreshCw } from "lucide-react";
+import { Activity, AlertTriangle, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 
 interface Check {
@@ -23,10 +23,19 @@ interface Monitoring {
   overallStatus?: string;
   checks?: Check[];
   alerts?: Alert[];
+  thresholds?: Record<string, number>;
   summary?: { breachCount?: number; watchCount?: number; alertCount?: number };
 }
 
 const POLL_MS = 30000;
+
+const THRESHOLD_FIELDS: { key: string; label: string; hint: string }[] = [
+  { key: "dscr", label: "DSCR", hint: "≥ 하한 (배수)" },
+  { key: "ltv", label: "LTV", hint: "≤ 상한 (비율)" },
+  { key: "ltc", label: "LTC", hint: "≤ 상한 (비율)" },
+  { key: "exit_sale_rate", label: "Exit 분양률", hint: "≤ 상한 (비율)" },
+  { key: "sales_rate", label: "분양률", hint: "≥ 하한 (비율)" },
+];
 
 const STATUS_CARD: Record<string, string> = {
   ok: "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/20",
@@ -53,6 +62,10 @@ export function CovenantMonitorPanel({ projectId }: { projectId: string }) {
   const [data, setData] = useState<Monitoring | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -77,6 +90,48 @@ export function CovenantMonitorPanel({ projectId }: { projectId: string }) {
     return () => window.clearInterval(interval);
   }, [load]);
 
+  const openEditor = useCallback(() => {
+    const current = data?.thresholds ?? {};
+    setDraft(
+      THRESHOLD_FIELDS.reduce<Record<string, string>>((acc, f) => {
+        acc[f.key] = current[f.key] != null ? String(current[f.key]) : "";
+        return acc;
+      }, {}),
+    );
+    setSavedMsg(null);
+    setEditing(true);
+  }, [data]);
+
+  const saveThresholds = useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    setSavedMsg(null);
+    try {
+      const thresholds: Record<string, number> = {};
+      for (const f of THRESHOLD_FIELDS) {
+        const raw = draft[f.key];
+        if (raw != null && raw.trim() !== "") {
+          const num = Number(raw);
+          if (!Number.isNaN(num) && num > 0) thresholds[f.key] = num;
+        }
+      }
+      const res = await fetch(`${apiBase}/projects/${projectId}/monitoring/thresholds`, {
+        method: "PUT",
+        cache: "no-store",
+        headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+        body: JSON.stringify({ thresholds }),
+      });
+      if (!res.ok) throw new Error(`임계치 저장 실패 (${res.status})`);
+      setSavedMsg("임계치를 저장했습니다.");
+      setEditing(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "임계치를 저장하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }, [draft, projectId, load]);
+
   const overall = data?.overallStatus ?? "no_data";
   const checks = data?.checks ?? [];
   const alerts = data?.alerts ?? [];
@@ -99,6 +154,14 @@ export function CovenantMonitorPanel({ projectId }: { projectId: string }) {
           </span>
           <button
             type="button"
+            onClick={() => (editing ? setEditing(false) : openEditor())}
+            className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2 text-xs font-bold text-slate-700 dark:border-slate-700 dark:text-slate-200"
+            title="임계치 설정"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
             onClick={() => void load()}
             disabled={loading}
             className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2 text-xs font-bold text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"
@@ -109,6 +172,47 @@ export function CovenantMonitorPanel({ projectId }: { projectId: string }) {
       </div>
 
       {error ? <p className="mt-3 text-sm font-bold text-rose-600 dark:text-rose-300">{error}</p> : null}
+      {savedMsg ? <p className="mt-3 text-sm font-bold text-emerald-700 dark:text-emerald-300">{savedMsg}</p> : null}
+
+      {editing ? (
+        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950/40">
+          <p className="text-xs font-bold text-slate-600 dark:text-slate-300">Covenant 임계치 (비워두면 표준 기본값 적용)</p>
+          <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-5">
+            {THRESHOLD_FIELDS.map((f) => (
+              <label key={f.key} className="block">
+                <span className="text-[11px] font-bold text-slate-500">{f.label}</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={draft[f.key] ?? ""}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                  className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
+                />
+                <span className="text-[10px] text-slate-400">{f.hint}</span>
+              </label>
+            ))}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => void saveThresholds()}
+              disabled={saving}
+              className="inline-flex h-8 items-center gap-1 rounded-lg bg-slate-900 px-3 text-xs font-bold text-white disabled:opacity-40 dark:bg-white dark:text-slate-950"
+            >
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              저장
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              className="inline-flex h-8 items-center rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:text-slate-200"
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {checks.length ? (
         <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-5">

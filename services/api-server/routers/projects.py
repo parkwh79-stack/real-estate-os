@@ -70,7 +70,11 @@ from use_cases.orchestration_approval import approve_orchestration_run_by_id_use
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
 from use_cases.async_jobs import submit_pf_review_job, get_job_store, recover_interrupted_jobs
 from use_cases.term_annotation import annotate_terms_use_case
-from use_cases.covenant_monitoring import monitor_covenants_use_case
+from use_cases.covenant_monitoring import (
+    monitor_covenants_use_case,
+    set_monitoring_thresholds_use_case,
+)
+from use_cases.portfolio_monitoring import build_portfolio_monitoring
 from use_cases.developability_score import score_developability_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
@@ -106,6 +110,10 @@ from use_cases.workbook_import_approval import (
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+# Workspace-level monitoring (spans all projects). Kept on its own prefix so the
+# portfolio route does not collide with /projects/{project_id} path matching.
+monitoring_router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
 import json
 
@@ -1866,6 +1874,75 @@ def get_project_monitoring(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, {})
     return monitor_covenants_use_case(source_data)
+
+
+@router.put("/{project_id}/monitoring/thresholds")
+def set_project_monitoring_thresholds(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Persist project-specific covenant thresholds used by live monitoring.
+
+    Accepts {"thresholds": {dscr, ltv, ltc, exit_sale_rate, sales_rate}} — only
+    known keys with positive numeric values are saved; the rest fall back to the
+    standard PF defaults.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    payload = input_data or {}
+    raw = payload.get("thresholds", payload)
+    try:
+        result = set_monitoring_thresholds_use_case(project_repository(), project_id, raw)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Project not found")
+    record_sensitive_project_event(
+        request,
+        event_type="monitoring_thresholds_updated",
+        project_id=project_id,
+        metadata={"overrideKeys": sorted(result.get("overrides", {}).keys())},
+    )
+    return result
+
+
+def _snapshot_history_by_project() -> Dict[str, list[Dict[str, Any]]]:
+    """Group stored snapshots into per-project metric history for trend arrows.
+
+    Uses the snapshot caseComparisonSeed (ltv/ltc/exitSaleRate) — the only
+    metrics persisted per run — mapped onto the covenant metric keys.
+    """
+    history: Dict[str, list[Dict[str, Any]]] = {}
+    for snapshot in project_snapshot_repository().list_all():
+        project_id = snapshot.get("projectId")
+        seed = snapshot.get("caseComparisonSeed") or {}
+        metrics = {}
+        if isinstance(seed.get("ltv"), (int, float)):
+            metrics["ltv"] = seed["ltv"]
+        if isinstance(seed.get("ltc"), (int, float)):
+            metrics["ltc"] = seed["ltc"]
+        if isinstance(seed.get("exitSaleRate"), (int, float)):
+            metrics["exit_sale_rate"] = seed["exitSaleRate"]
+        if not project_id or not metrics:
+            continue
+        history.setdefault(project_id, []).append({
+            "createdAt": snapshot.get("createdAt"),
+            "runId": snapshot.get("runId"),
+            "metrics": metrics,
+        })
+    return history
+
+
+@monitoring_router.get("/portfolio")
+def get_portfolio_monitoring():
+    """Portfolio-wide live PF monitoring: per-project covenant status, a
+    critical-first alert feed, and a trend arrow vs each project's prior run."""
+    history = _snapshot_history_by_project()
+    entries: list[Dict[str, Any]] = []
+    for project_id in list(PROJECTS_DB.keys()):
+        source_data = _hydrated_project_source(project_id, {})
+        entries.append({
+            "projectId": project_id,
+            "name": _project_name(project_id),
+            "monitoring": monitor_covenants_use_case(source_data),
+            "history": history.get(project_id),
+        })
+    return build_portfolio_monitoring(entries)
 
 
 @router.post("/{project_id}/terms/annotate")

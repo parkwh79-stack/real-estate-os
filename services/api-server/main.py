@@ -83,6 +83,7 @@ async def user_activity_middleware(request: Request, call_next):
 
 app.include_router(valuemap.router)
 app.include_router(projects.router)
+app.include_router(projects.monitoring_router)
 app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(glossary.router)

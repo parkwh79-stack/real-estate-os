@@ -1,6 +1,6 @@
 # REALYTICS x PLATFORM9 - IR Deck vs Implementation Gap
 
-Updated: 2026-06-20
+Updated: 2026-06-24
 
 Source deck: `20260504 REALYTICS AI LAB 사업계획(REAL VER V2).pdf` (30 pages, REAL VER V2).
 
@@ -18,7 +18,7 @@ This document maps the deck's promised capabilities to the current codebase. It 
 | Deck Capability | Status | Current Codebase Mapping |
 |---|---|---|
 | REALYTICS land, regulation, feasibility, Cash Flow, Max Minus | Done | `DevelopmentFeasibilityAgent`, `FeasibilityStudyV2`, Cash Flow Engine |
-| PLATFORM9 PF review, Tranche, LTV/LTC/DSCR, Exit sale rate, unsold LTV, Waterfall | Done | Credit Review, Scenario Engine, 22-step PF orchestration |
+| PLATFORM9 PF review, Tranche, LTV/LTC/DSCR, Exit sale rate, unsold LTV, Waterfall | Done | Credit Review, Scenario Engine, 27-step PF orchestration |
 | Phase 11 Hana-style PF review report | Done | Structured 20-section report API, Markdown/HTML/PDF/DOCX export |
 | Project IRR, Equity IRR, Equity Multiple, Payback, ICR | Done | `calculate_return_metrics`, `POST /projects/{id}/returns/calculate` |
 | 4-stage Stress Test: Base/Mild/Severe/Tail | Done | `StressTestAgent`, `POST /projects/{id}/stress-test/run` |
@@ -27,13 +27,13 @@ This document maps the deck's promised capabilities to the current codebase. It 
 | Intent-driven orchestration: "what should we analyze next?" | Partial | `OrchestrationPlannerAgent`, `/orchestration/plan`, `/orchestration/run-workflow`, Kakao intake menu UI |
 | Valuemap live data | Partial / Blocked | Mock adapter exists; live partner/API access is required |
 | VWorld / official land price live connector | Partial / Blocked | URL/API adapter design exists; API keys and production connector policy are required |
-| Developability Score | Planned | Distinct land + regulation composite score is not yet implemented |
+| Developability Score | Done | `DevelopabilityScoreAgent`, in the PF run (step) + Phase 11 report + UI; `GET /projects/{id}/developability-score` |
 | Asset-type simultaneous feasibility comparison | Partial | Asset profiles exist; UI and multi-asset comparison workflow remain |
-| Map Intelligence / 6-layer spatial data OS | Planned | Requires PostGIS and map UI foundation |
-| Real-time PF dashboard / EOD / Covenant monitoring | Planned | Requires async jobs, scheduled monitoring, and covenant event store |
-| Term Sheet draft / IC Memo auto-generation | Planned | Phase 11 report exists; term sheet and IC memo templates remain |
+| Map Intelligence / 6-layer spatial data OS | Planned | PostGIS scaffolded (geometry tables + GIST), but map UI + spatial layers remain |
+| Real-time PF dashboard / EOD / Covenant monitoring | Done | `CovenantMonitoringAgent` (per-project) + portfolio dashboard `GET /monitoring/portfolio`, `/monitoring` page, threshold management, snapshot-driven trend; async job runner underpins it. Scheduled background polling + push alerts remain future |
+| Term Sheet draft / IC Memo auto-generation | Done | `CreditDocumentAgent` + `TermSheetAgent`: stage-specific term sheets (브릿지/본PF), IC Memo, Korean-localized, PDF/DOCX export, UI panel |
 | Public sector review workflows | Planned | HUG/HF/public-land specific review logic remains |
-| Company knowledge / Private AI | Partial | Excel Workbook Learning Agent exists; report-success/failure RAG remains |
+| Company knowledge / Private AI | Partial | Excel Workbook Learning Agent + similar-case RAG over reviewed snapshots (grounding-only, cited) exist; pgvector persistence + legal/document RAG remain |
 | 3-tier monetization | Partial | Product docs exist; billing and entitlement enforcement remain |
 
 ## Implementation Strengths Beyond the Deck
@@ -52,8 +52,8 @@ The current build is stronger than the deck in governance and auditability:
 
 ## Integration Gaps
 
-1. **Stress Test IRR is still stylised.**
-   The current Stress Test builds a simplified monthly cash-flow curve. For lender-grade precision, it should call the real Cash Flow Engine and PF draw/repayment schedule.
+1. ~~Stress Test IRR is still stylised.~~ **RESOLVED 2026-06-23.**
+   StressTestAgent per-scenario Project IRR now comes from the real Cash Flow Engine (scenario-adjusted sales collection + progress-weighted costs + tranche stack), with a stylised fallback and `cashflowSource`/`cashflowDiagnostics` for auditability.
 
 2. ~~Credit Review does not yet consume Return Metrics and Stress Test results.~~ **RESOLVED 2026-06-20.**
    `CreditReviewAgent` now reads `returnMetrics`/`stressTest`: base-case senior break → reject; mild break or negative base IRR → rework; severe/tail break or below-hurdle base IRR → conditional; IRR/ICR/stress added to reasons + summary + approval conditions. Also surfaced in the orchestration UI engine-metrics panel.
@@ -71,7 +71,7 @@ The current build is stronger than the deck in governance and auditability:
 
 | Area | Current | Target |
 |---|---|---|
-| Orchestration | In-process async job runner (baseline, 2026-06-20) | Distributed/DB-backed queue with resumable runs |
+| Orchestration | Durable async job runner + interrupted-run recovery (2026-06-24) | Distributed/DB-backed queue with mid-run pause/resume |
 | Storage | SQLite / local runtime | PostgreSQL + object storage |
 | Spatial data | Minimal | PostGIS + map UI |
 | Documents | Local runtime archive | S3/R2/NAS object storage with metadata DB |
@@ -81,7 +81,9 @@ The current build is stronger than the deck in governance and auditability:
 ## Recommended Next Priorities
 
 1. ~~Feed Return Metrics and Stress Test results into `CreditReviewAgent`.~~ ✅ Done 2026-06-20.
-2. Link Stress Test to the real Cash Flow Engine schedule (precise levered Equity IRR).
-3. Build the Developability Score engine from land + regulation + infrastructure signals.
-4. ~~Add async job runner~~ ✅ baseline done 2026-06-20; next: persisted/distributed queue + mid-run pause/resume + real-time monitoring on top.
-5. Connect live land and market data once API keys/licensing are ready.
+2. ~~Link Stress Test to the real Cash Flow Engine schedule.~~ ✅ Done 2026-06-23.
+3. ~~Build the Developability Score engine.~~ ✅ Done 2026-06-20 (now a PF-run step + report + UI).
+4. ~~Async job runner + real-time monitoring.~~ ✅ Durable async jobs (2026-06-24) + portfolio monitoring dashboard (2026-06-24). Next: scheduled background polling + push alerts + mid-run pause/resume.
+5. **Map Intelligence / GIS** — PostGIS is scaffolded (geometry tables + GIST index); next is the spatial-layer ingest + map UI for the deck's 6-layer spatial OS.
+6. **Public-sector review module** (HUG/HF/public-land specific review logic) — deterministic, no external-key dependency.
+7. Connect live land and market data (Valuemap/VWorld/공시지가) once API keys/licensing are ready (🔒 blocked).

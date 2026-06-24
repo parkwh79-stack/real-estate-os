@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  Activity,
   BarChart3,
   BookMarked,
   BookOpen,
@@ -28,6 +29,7 @@ const navItems = [
   { href: "/cashflow-detail", label: "CF 대시보드", icon: Wallet },
   { href: "/finance", label: "금융구조", icon: Layers },
   { href: "/report", label: "PF 심사보고서", icon: FileCheck },
+  { href: "/monitoring", label: "실시간 모니터링", icon: Activity },
   { href: "/glossary/candidates", label: "용어 검토", icon: BookMarked },
 ];
 

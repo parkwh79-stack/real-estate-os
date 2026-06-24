@@ -2,8 +2,56 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agents.covenant_monitoring_agent import CovenantMonitoringAgent
+from agents.covenant_monitoring_agent import (
+    DEFAULT_THRESHOLDS,
+    CovenantMonitoringAgent,
+)
 from core.calculations import calculate_pf_metrics
+
+ALLOWED_THRESHOLD_KEYS = set(DEFAULT_THRESHOLDS)
+
+
+def normalize_thresholds(raw: Dict[str, Any] | None) -> Dict[str, float]:
+    """Keep only the known covenant keys with positive numeric overrides.
+
+    Unknown keys and non-positive / non-numeric values are dropped (not
+    fabricated into the covenant model). Returns the overrides only — the agent
+    merges them over DEFAULT_THRESHOLDS at evaluation time.
+    """
+    cleaned: Dict[str, float] = {}
+    for key, value in (raw or {}).items():
+        if key not in ALLOWED_THRESHOLD_KEYS:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value <= 0:
+            continue
+        cleaned[key] = float(value)
+    return cleaned
+
+
+def set_monitoring_thresholds_use_case(
+    project_repository,
+    project_id: str,
+    raw_thresholds: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Persist project-specific covenant thresholds under covenants.thresholds.
+
+    Returns the effective thresholds (defaults merged with the saved overrides)
+    so the caller can echo what monitoring will use on the next run.
+    """
+    overrides = normalize_thresholds(raw_thresholds)
+    project = project_repository.update(project_id, {"covenants": {"thresholds": overrides}})
+    if project is None:
+        raise LookupError("Project not found")
+    saved = ((project.get("covenants") or {}).get("thresholds")) or {}
+    return {
+        "schemaVersion": "realytics-monitoring-thresholds-v1",
+        "projectId": project_id,
+        "defaults": dict(DEFAULT_THRESHOLDS),
+        "overrides": overrides,
+        "effective": {**DEFAULT_THRESHOLDS, **{k: float(v) for k, v in saved.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}},
+    }
 
 
 def _sales_rate(project_data: Dict[str, Any]) -> Any:
