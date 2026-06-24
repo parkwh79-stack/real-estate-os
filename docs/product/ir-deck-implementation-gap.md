@@ -29,7 +29,7 @@ This document maps the deck's promised capabilities to the current codebase. It 
 | VWorld / official land price live connector | Partial / Blocked | URL/API adapter design exists; API keys and production connector policy are required |
 | Developability Score | Done | `DevelopabilityScoreAgent`, in the PF run (step) + Phase 11 report + UI; `GET /projects/{id}/developability-score` |
 | Asset-type simultaneous feasibility comparison | Partial | Asset profiles exist; UI and multi-asset comparison workflow remain |
-| Map Intelligence / 6-layer spatial data OS | Planned | PostGIS scaffolded (geometry tables + GIST), but map UI + spatial layers remain |
+| Map Intelligence / 6-layer spatial data OS | Partial | v1 done (2026-06-24): MapLibre + VWorld/OSM base, project parcel GeoJSON overlay, 6-layer availability legend, `GET /projects/{id}/map`, `/project/{id}/map` page. PostGIS scaffolded. Remaining: VWorld cadastral WFS → real polygons, PostGIS persistence, 용도지역/공급 layers. See `docs/product/map-intelligence.md` |
 | Real-time PF dashboard / EOD / Covenant monitoring | Done | `CovenantMonitoringAgent` (per-project) + portfolio dashboard `GET /monitoring/portfolio`, `/monitoring` page, threshold management, snapshot-driven trend; async job runner underpins it. Scheduled background polling + push alerts remain future |
 | Term Sheet draft / IC Memo auto-generation | Done | `CreditDocumentAgent` + `TermSheetAgent`: stage-specific term sheets (브릿지/본PF), IC Memo, Korean-localized, PDF/DOCX export, UI panel |
 | Public sector review workflows | Planned | HUG/HF/public-land specific review logic remains |
@@ -84,6 +84,6 @@ The current build is stronger than the deck in governance and auditability:
 2. ~~Link Stress Test to the real Cash Flow Engine schedule.~~ ✅ Done 2026-06-23.
 3. ~~Build the Developability Score engine.~~ ✅ Done 2026-06-20 (now a PF-run step + report + UI).
 4. ~~Async job runner + real-time monitoring.~~ ✅ Durable async jobs (2026-06-24) + portfolio monitoring dashboard (2026-06-24). Next: scheduled background polling + push alerts + mid-run pause/resume.
-5. **Map Intelligence / GIS** — PostGIS is scaffolded (geometry tables + GIST index); next is the spatial-layer ingest + map UI for the deck's 6-layer spatial OS.
+5. ~~Map Intelligence / GIS map UI.~~ ✅ v1 done 2026-06-24 (MapLibre + VWorld, parcel overlay, 6-layer legend). Next: VWorld cadastral WFS → real polygons by PNU + PostGIS `land_parcels` persistence + 용도지역/공급 layers.
 6. **Public-sector review module** (HUG/HF/public-land specific review logic) — deterministic, no external-key dependency.
 7. Connect live land and market data (Valuemap/VWorld/공시지가) once API keys/licensing are ready (🔒 blocked).

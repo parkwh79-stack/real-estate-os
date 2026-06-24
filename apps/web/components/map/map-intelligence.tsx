@@ -1,0 +1,206 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import "maplibre-gl/dist/maplibre-gl.css";
+import type { Map as MlMap, StyleSpecification } from "maplibre-gl";
+
+type Center = { lng: number; lat: number } | null;
+type Layer = { id: string; label: string; source: string; status: string; featureCount: number | null };
+
+export interface MapIntelligenceData {
+  center: Center;
+  parcelGeoJson: { type: "FeatureCollection"; features: unknown[] };
+  summary?: { parcelCount?: number; locatedParcelCount?: number; hasGeometry?: boolean };
+  layers?: Layer[];
+  dataLimitations?: string[];
+}
+
+const KOREA_CENTER: [number, number] = [127.6, 36.2];
+
+const LAYER_STATUS_LABEL: Record<string, string> = {
+  available: "표시 중",
+  needs_geometry: "형상 필요",
+  needs_data: "데이터 필요",
+  planned: "예정",
+};
+const LAYER_STATUS_TONE: Record<string, string> = {
+  available: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
+  needs_geometry: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
+  needs_data: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
+  planned: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
+};
+
+function baseStyle(vworldKey?: string): StyleSpecification {
+  if (vworldKey) {
+    return {
+      version: 8,
+      sources: {
+        vworld: {
+          type: "raster",
+          tiles: [`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Base/{z}/{y}/{x}.png`],
+          tileSize: 256,
+          attribution: "© VWorld (국토교통부)",
+        },
+      },
+      layers: [{ id: "vworld", type: "raster", source: "vworld" }],
+    };
+  }
+  return {
+    version: 8,
+    sources: {
+      osm: {
+        type: "raster",
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        attribution: "© OpenStreetMap contributors",
+      },
+    },
+    layers: [{ id: "osm", type: "raster", source: "osm" }],
+  };
+}
+
+/** MapLibre GL Map Intelligence — base map (VWorld when keyed, else OSM) with a
+ *  parcel GeoJSON overlay and the deck's spatial layer legend. */
+export function MapIntelligence({ data }: { data: MapIntelligenceData }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<MlMap | null>(null);
+  const [parcelsVisible, setParcelsVisible] = useState(true);
+  const [ready, setReady] = useState(false);
+  const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
+
+  // Init map once.
+  useEffect(() => {
+    let cancelled = false;
+    let map: MlMap | null = null;
+    void (async () => {
+      const maplibregl = (await import("maplibre-gl")).default;
+      if (cancelled || !containerRef.current) return;
+      const center: [number, number] = data.center ? [data.center.lng, data.center.lat] : KOREA_CENTER;
+      map = new maplibregl.Map({
+        container: containerRef.current,
+        style: baseStyle(vworldKey),
+        center,
+        zoom: data.center ? 16 : 6,
+        attributionControl: { compact: true },
+      });
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      map.on("load", () => {
+        if (!map) return;
+        map.addSource("parcels", { type: "geojson", data: data.parcelGeoJson as never });
+        map.addLayer({
+          id: "parcel-fill",
+          type: "fill",
+          source: "parcels",
+          filter: ["==", ["geometry-type"], "Polygon"],
+          paint: { "fill-color": "#6366f1", "fill-opacity": 0.25 },
+        });
+        map.addLayer({
+          id: "parcel-line",
+          type: "line",
+          source: "parcels",
+          filter: ["==", ["geometry-type"], "Polygon"],
+          paint: { "line-color": "#4338ca", "line-width": 2 },
+        });
+        map.addLayer({
+          id: "parcel-point",
+          type: "circle",
+          source: "parcels",
+          filter: ["==", ["geometry-type"], "Point"],
+          paint: { "circle-radius": 7, "circle-color": "#4f46e5", "circle-stroke-color": "#fff", "circle-stroke-width": 2 },
+        });
+        const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
+        const showPopup = (e: maplibregl.MapLayerMouseEvent) => {
+          const f = e.features?.[0];
+          if (!f || !map) return;
+          const p = (f.properties ?? {}) as Record<string, unknown>;
+          const price = p.officialLandPricePerSqm
+            ? `${Number(p.officialLandPricePerSqm).toLocaleString("ko-KR")}원/㎡`
+            : "—";
+          popup
+            .setLngLat(e.lngLat)
+            .setHTML(
+              `<div style="font-size:12px;line-height:1.5">
+                <strong>${p.addressFragment ?? p.pnu ?? "필지"}</strong><br/>
+                PNU ${p.pnu ?? "—"}<br/>
+                지목 ${p.landCategory ?? "—"} · ${p.areaSqm ? `${Number(p.areaSqm).toLocaleString("ko-KR")}㎡` : "—"}<br/>
+                공시지가 ${price}
+              </div>`,
+            )
+            .addTo(map);
+        };
+        map.on("click", "parcel-fill", showPopup);
+        map.on("click", "parcel-point", showPopup);
+        setReady(true);
+      });
+      mapRef.current = map;
+    })();
+    return () => {
+      cancelled = true;
+      map?.remove();
+      mapRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Toggle parcel overlay visibility.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const v = parcelsVisible ? "visible" : "none";
+    for (const id of ["parcel-fill", "parcel-line", "parcel-point"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
+    }
+  }, [parcelsVisible, ready]);
+
+  const layers = data.layers ?? [];
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[1.6fr_0.7fr]">
+      <div className="relative min-h-[520px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+        <div ref={containerRef} className="absolute inset-0" />
+        {!vworldKey ? (
+          <div className="absolute left-3 top-3 z-10 rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
+            OSM 베이스맵 · VWorld 키 설정 시 지적·공시지가 레이어 활성
+          </div>
+        ) : null}
+      </div>
+
+      <aside className="space-y-4">
+        <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-center justify-between">
+            <h3 className="font-black text-slate-950 dark:text-white">공간 레이어</h3>
+            <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+              <input type="checkbox" checked={parcelsVisible} onChange={(e) => setParcelsVisible(e.target.checked)} />
+              필지 오버레이
+            </label>
+          </div>
+          <div className="mt-3 space-y-2">
+            {layers.map((layer) => (
+              <div key={layer.id} className="flex items-center justify-between gap-2 text-sm">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-900 dark:text-white">{layer.label}</p>
+                  <p className="truncate text-[11px] text-slate-400">{layer.source}</p>
+                </div>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${LAYER_STATUS_TONE[layer.status] ?? LAYER_STATUS_TONE.planned}`}>
+                  {LAYER_STATUS_LABEL[layer.status] ?? layer.status}
+                  {typeof layer.featureCount === "number" && layer.featureCount > 0 ? ` (${layer.featureCount})` : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {data.dataLimitations?.length ? (
+          <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-xs leading-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+            <p className="font-bold">데이터 한계</p>
+            <ul className="mt-1 list-disc space-y-1 pl-4">
+              {data.dataLimitations.map((note, i) => (
+                <li key={i}>{note}</li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+      </aside>
+    </div>
+  );
+}

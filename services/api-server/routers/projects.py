@@ -75,6 +75,7 @@ from use_cases.covenant_monitoring import (
     set_monitoring_thresholds_use_case,
 )
 from use_cases.portfolio_monitoring import build_portfolio_monitoring
+from use_cases.map_intelligence import build_project_map_intelligence
 from use_cases.developability_score import score_developability_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
@@ -1874,6 +1875,20 @@ def get_project_monitoring(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, {})
     return monitor_covenants_use_case(source_data)
+
+
+@router.get("/{project_id}/map")
+def get_project_map_intelligence(project_id: str):
+    """Map Intelligence: parcel GeoJSON + the deck's 6-layer spatial availability.
+
+    Deterministic and non-fabricating — parcels with no resolved geometry are
+    returned as unlocated GeoJSON features and flagged; boundaries appear once
+    VWorld/PostGIS supplies the shapes.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source_data = _hydrated_project_source(project_id, {})
+    return build_project_map_intelligence(source_data)
 
 
 @router.put("/{project_id}/monitoring/thresholds")
