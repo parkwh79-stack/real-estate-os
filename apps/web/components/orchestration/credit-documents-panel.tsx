@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Copy, Download, FileText, Loader2, RefreshCw } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { EmptyState } from "../ui/primitives";
+import { MarkdownView } from "../ui/markdown-view";
 
 interface CreditDoc {
   documentType?: string;
@@ -219,9 +220,9 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
             </div>
           </div>
 
-          <pre className="mt-3 max-h-[28rem] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-4 text-xs leading-relaxed text-slate-800 dark:bg-slate-950/40 dark:text-slate-200">
-            {markdown || "내용이 없습니다."}
-          </pre>
+          <div className="mt-3 max-h-[28rem] overflow-auto rounded-lg bg-slate-50 p-4 dark:bg-slate-950/40">
+            {markdown ? <MarkdownView markdown={markdown} /> : <p className="text-sm text-slate-500">내용이 없습니다.</p>}
+          </div>
         </div>
       ) : null}
     </section>
