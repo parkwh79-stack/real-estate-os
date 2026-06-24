@@ -2218,6 +2218,24 @@ def list_project_snapshots(project_id: str):
 
     return list_project_snapshots_use_case(project_snapshot_repository(), project_id)
 
+
+@router.get("/{project_id}/similar-cases/rag")
+def similar_cases_rag(
+    project_id: str,
+    request: Request,
+    q: str | None = None,
+    snapshotId: str | None = None,
+    k: int = 5,
+):
+    """Retrieve relevant prior reviewed cases (institutional-memory RAG) with citations."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    from use_cases.similar_case_rag import retrieve_similar_cases_rag
+
+    corpus = project_snapshot_repository().list_all()
+    return retrieve_similar_cases_rag(corpus, query=q, query_snapshot_id=snapshotId, k=max(1, min(k, 20)))
+
 @router.post("/{project_id}/snapshots/similar")
 def search_project_similar_snapshots(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
