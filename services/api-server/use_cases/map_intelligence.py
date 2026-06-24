@@ -82,6 +82,38 @@ def build_project_map_intelligence(project_data: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def resolve_and_attach_geometry(
+    project_data: Dict[str, Any],
+    resolver,
+    *,
+    limit: int = 50,
+) -> int:
+    """Attach resolved boundary geometry to parcels missing it, in place.
+
+    ``resolver(pnu) -> geometry|None`` is injected (e.g. a VWorld client), so
+    this stays testable with a fake. Only fills parcels that have a PNU and no
+    geometry yet; capped at ``limit``. Returns the count newly resolved. The
+    pure builder then surfaces the boundaries naturally.
+    """
+    parcels = _extract_parcels(project_data)
+    resolved = 0
+    attempted = 0
+    for parcel in parcels:
+        if attempted >= limit:
+            break
+        if _parcel_geometry(parcel) is not None:
+            continue
+        pnu = parcel.get("pnu") or parcel.get("resolvedPnu")
+        if not pnu:
+            continue
+        attempted += 1
+        geometry = resolver(pnu)
+        if isinstance(geometry, dict) and geometry.get("type") and geometry.get("coordinates"):
+            parcel["geometry"] = geometry
+            resolved += 1
+    return resolved
+
+
 def _extract_parcels(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Find the parcel list from the best available source.
 

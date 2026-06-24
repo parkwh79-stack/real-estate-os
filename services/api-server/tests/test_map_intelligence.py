@@ -3,7 +3,8 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from main import app
-from use_cases.map_intelligence import build_project_map_intelligence
+from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
+from integrations.vworld import vworld_configured, vworld_status
 
 
 def _project_with_parcels(geometry=None):
@@ -102,3 +103,36 @@ def test_map_endpoint_returns_payload():
 def test_map_endpoint_404_for_unknown_project():
     client = TestClient(app)
     assert client.get("/projects/__nope__/map").status_code == 404
+
+
+def test_resolve_and_attach_geometry_fills_missing_only():
+    project = _project_with_parcels()
+    poly = {"type": "Polygon", "coordinates": [[[128.5, 35.8], [128.6, 35.8], [128.6, 35.9], [128.5, 35.8]]]}
+    calls = []
+
+    def resolver(pnu):
+        calls.append(pnu)
+        return poly
+
+    resolved = resolve_and_attach_geometry(project, resolver, limit=30)
+    assert resolved == 1
+    assert calls == ["2729011700101230004"]
+    result = build_project_map_intelligence(project)
+    assert result["summary"]["hasGeometry"] is True
+    # a second pass resolves nothing (already has geometry)
+    assert resolve_and_attach_geometry(project, resolver, limit=30) == 0
+
+
+def test_resolve_skips_when_resolver_returns_none():
+    project = _project_with_parcels()
+    resolved = resolve_and_attach_geometry(project, lambda pnu: None, limit=30)
+    assert resolved == 0
+    assert build_project_map_intelligence(project)["summary"]["hasGeometry"] is False
+
+
+def test_vworld_status_is_secret_safe():
+    status = vworld_status({"VWORLD_API_KEY": "SECRET-KEY-VALUE"})
+    assert status["configured"] is True
+    # the key itself is never echoed
+    assert "SECRET-KEY-VALUE" not in str(status)
+    assert vworld_configured({}) is False

@@ -31,6 +31,26 @@ when `NEXT_PUBLIC_VWORLD_API_KEY` is set, otherwise falls back to OpenStreetMap
 raster tiles (with attribution). No key is required to run; VWorld unlocks the
 지적·공시지가·용도지역 layers.
 
+### API keys (gitignored)
+
+- Frontend: `apps/web/.env.local` → `NEXT_PUBLIC_VWORLD_API_KEY` (base map tiles).
+- Backend: `services/api-server/.env` → `VWORLD_API_KEY` (+ `VWORLD_DOMAIN`,
+  default `localhost`). `main.py` loads this `.env` on startup (dependency-free;
+  real environment variables always win). `vworld_status()` reports readiness
+  without ever echoing the key; `/ops/infra-status` surfaces it.
+- The VWorld dev key is domain-restricted and time-limited — regenerate for
+  production and register the deployed domain.
+
+### Live parcel boundaries (VWorld cadastral)
+
+`integrations/vworld.py` `fetch_parcel_geometry_by_pnu(pnu)` calls the VWorld
+data API (`LP_PA_CBND_BUBUN` 연속지적도, GeoJSON, EPSG:4326) and returns the
+parcel boundary geometry — best-effort and non-fabricating (missing key, network
+error, or empty result → `None` + a diagnostic, never a crash or invented shape).
+`GET /projects/{id}/map?resolve_geometry=true` resolves up to 30 parcels missing
+geometry by PNU and reports `geometryResolution { resolvedCount, attemptedCount }`.
+The frontend map page requests this so real boundaries draw when PNUs resolve.
+
 ## Backend
 
 - `use_cases/map_intelligence.py` `build_project_map_intelligence(project_data)`
@@ -61,7 +81,10 @@ raster tiles (with attribution). No key is required to run; VWorld unlocks the
 
 ## Next
 
-- VWorld cadastral WFS/WMS → real parcel polygons by PNU (needs the free key).
-- Persist parcel geometry into PostGIS `land_parcels` and serve from there.
-- Additional layers: 용도지역 polygons, 주변 공급/실거래 heat overlays, radius
-  comparable search (extend the existing `/api/valuemap` endpoint to live data).
+- ~~VWorld cadastral → real parcel polygons by PNU.~~ ✅ Done 2026-06-24
+  (`resolve_geometry=true`). Verified live: PNU 1165010800113730000 → MultiPolygon.
+- Persist resolved geometry into PostGIS `land_parcels` (cache; avoid re-fetching).
+- Additional layers: 용도지역 polygons, 공시지가 choropleth (WMS), 주변 공급/실거래
+  overlays, radius comparable search (extend `/api/valuemap` to live data).
+- PNU resolution for parcels that only have address/lot (geocode → PNU) so more
+  projects get boundaries automatically.

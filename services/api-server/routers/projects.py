@@ -75,7 +75,8 @@ from use_cases.covenant_monitoring import (
     set_monitoring_thresholds_use_case,
 )
 from use_cases.portfolio_monitoring import build_portfolio_monitoring
-from use_cases.map_intelligence import build_project_map_intelligence
+from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
+from integrations.vworld import build_pnu_geometry_resolver, vworld_configured
 from use_cases.developability_score import score_developability_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
@@ -1878,17 +1879,30 @@ def get_project_monitoring(project_id: str):
 
 
 @router.get("/{project_id}/map")
-def get_project_map_intelligence(project_id: str):
+def get_project_map_intelligence(project_id: str, resolve_geometry: bool = False):
     """Map Intelligence: parcel GeoJSON + the deck's 6-layer spatial availability.
 
     Deterministic and non-fabricating — parcels with no resolved geometry are
-    returned as unlocated GeoJSON features and flagged; boundaries appear once
-    VWorld/PostGIS supplies the shapes.
+    returned as unlocated GeoJSON features and flagged. With
+    `resolve_geometry=true` and a configured VWorld key, parcel boundaries are
+    fetched live from the VWorld cadastral layer by PNU (capped, best-effort).
     """
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, {})
-    return build_project_map_intelligence(source_data)
+    geometry_resolution: Dict[str, Any] | None = None
+    if resolve_geometry and vworld_configured():
+        resolver = build_pnu_geometry_resolver()
+        resolved = resolve_and_attach_geometry(source_data, resolver, limit=30)
+        geometry_resolution = {
+            "source": "vworld_cadastral",
+            "resolvedCount": resolved,
+            "attemptedCount": len(getattr(resolver, "diagnostics", [])),
+        }
+    payload = build_project_map_intelligence(source_data)
+    if geometry_resolution is not None:
+        payload["geometryResolution"] = geometry_resolution
+    return payload
 
 
 @router.put("/{project_id}/monitoring/thresholds")

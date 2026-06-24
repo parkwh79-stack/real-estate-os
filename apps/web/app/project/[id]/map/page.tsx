@@ -32,7 +32,10 @@ export default function ProjectMapPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/map`, { cache: "no-store", headers: authHeaders("web") });
+      const res = await fetch(`${apiBase}/projects/${projectId}/map?resolve_geometry=true`, {
+        cache: "no-store",
+        headers: authHeaders("web"),
+      });
       if (!res.ok) throw new Error(`지도 데이터 조회 실패 (${res.status})`);
       setData(await res.json());
     } catch (err) {

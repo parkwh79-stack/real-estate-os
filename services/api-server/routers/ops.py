@@ -17,12 +17,14 @@ def get_infra_status():
 
     from core.oidc import oidc_status
     from db.postgres import status as postgres_status
+    from integrations.vworld import vworld_status
 
     return {
         "schemaVersion": "realytics-infra-status-v1",
         "postgres": postgres_status(),
         "oidc": oidc_status(),
         "objectStorage": {"backend": (os.environ.get("REALYTICS_OBJECT_STORAGE") or "local").strip().lower()},
+        "vworld": vworld_status(),
     }
 
 

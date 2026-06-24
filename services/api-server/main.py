@@ -1,6 +1,31 @@
+import os
 import re
 import time
+from pathlib import Path
 from uuid import uuid4
+
+
+def _load_local_env() -> None:
+    """Load services/api-server/.env into os.environ (dependency-free).
+
+    Dev convenience so local secrets (e.g. VWORLD_API_KEY) are picked up without
+    exporting them by hand. Existing environment variables always win, and the
+    file is gitignored. No-op if absent.
+    """
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_local_env()
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
