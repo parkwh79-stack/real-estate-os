@@ -718,10 +718,18 @@ class OrchestrationAgent:
             agent = CreditDocumentAgent()
             term_sheet = agent.build_term_sheet(project_data, run["artifacts"])
             ic_memo = agent.build_ic_memo(project_data, run["artifacts"])
+            stage_sheets = {
+                "bridge": agent.build_term_sheet(project_data, run["artifacts"], stage="bridge"),
+                "main_pf": agent.build_term_sheet(project_data, run["artifacts"], stage="main_pf"),
+            }
             run["artifacts"]["termSheet"] = term_sheet
+            run["artifacts"]["termSheetStages"] = stage_sheets
             run["artifacts"]["icMemo"] = ic_memo
+            self._add_term_sheet_contribution_handoffs(run, term_sheet)
             output = {
+                "termSheetStage": term_sheet.get("stage"),
                 "termSheetTrancheCount": len(term_sheet.get("facility", {}).get("tranches", [])),
+                "termSheetContributors": [c.get("agent") for c in term_sheet.get("contributions", [])],
                 "icMemoDecision": ic_memo.get("recommendation", {}).get("decisionLabel"),
                 "icMemoApprovalReady": ic_memo.get("recommendation", {}).get("approvalReady"),
             }
@@ -729,6 +737,43 @@ class OrchestrationAgent:
             run["errors"].append({"message": f"Credit document generation failed: {exc}", "type": exc.__class__.__name__})
             output = {"status": "error", "reason": str(exc)}
         self._complete_step(run, "credit_document_generation", output, artifact_key="icMemo")
+
+    def _add_term_sheet_contribution_handoffs(self, run: Dict[str, Any], term_sheet: Dict[str, Any]) -> None:
+        """Record the per-agent contributions to the term sheet as typed handoffs.
+
+        Makes the term sheet's multi-agent division of labour explicit in the run
+        graph: the Land Agent contributes 대지위치·지번·공시지가·면적, the Feasibility
+        Agent contributes 사업수지·한도, etc.
+        """
+        sections = term_sheet.get("sections") or []
+        contributor_handoff = {
+            "LandAgent": "land_to_term_sheet",
+            "DevelopmentFeasibilityAgent": "feasibility_to_term_sheet",
+        }
+        for agent, handoff_type in contributor_handoff.items():
+            owned = [
+                {"label": s.get("label"), "value": s.get("value")}
+                for s in sections
+                if s.get("sourceAgent") == agent
+            ]
+            if not owned:
+                continue
+            evidence_ids: List[str] = []
+            for s in sections:
+                if s.get("sourceAgent") == agent:
+                    evidence_ids.extend((s.get("evidence") or {}).get("evidenceIds") or [])
+            self._add_handoff(
+                run,
+                handoff_type=handoff_type,
+                from_agent=agent,
+                to_agent="TermSheetAgent",
+                payload_schema="TermSheetContributionV1",
+                payload={"stage": term_sheet.get("stage"), "sections": owned},
+                evidence_ids=evidence_ids,
+                assumptions=[
+                    "Term sheet values are indicative; [TBD]/[숫자] placeholders are finalised in negotiation.",
+                ],
+            )
 
     def _run_developability_score_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
         try:

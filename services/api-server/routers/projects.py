@@ -2028,6 +2028,7 @@ def get_project_orchestration_credit_documents(project_id: str, run_id: str, req
         "projectId": project_id,
         "runId": run_id,
         "termSheet": term_sheet,
+        "termSheetStages": artifacts.get("termSheetStages") or {},
         "icMemo": ic_memo,
     }
 
@@ -2043,8 +2044,13 @@ def export_project_credit_document(
     document: str,
     request: Request,
     format: str = "pdf",
+    stage: str | None = None,
 ):
-    """Download a generated Term Sheet or IC Memo as markdown, PDF, or DOCX."""
+    """Download a generated Term Sheet or IC Memo as markdown, PDF, or DOCX.
+
+    For a term sheet, `stage` (bridge / main_pf) selects the financing-stage
+    variant; defaults to the auto-detected stage stored on the run.
+    """
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "report:export")
@@ -2061,7 +2067,13 @@ def export_project_credit_document(
     run = orchestration_repository().get(project_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Orchestration run not found")
-    document_payload = (run.get("artifacts", {}) or {}).get(artifact_key)
+    artifacts = run.get("artifacts", {}) or {}
+    document_payload = artifacts.get(artifact_key)
+    if artifact_key == "termSheet" and stage:
+        normalized_stage = stage.strip().lower()
+        if normalized_stage not in {"bridge", "main_pf"}:
+            raise HTTPException(status_code=400, detail="stage must be 'bridge' or 'main_pf'")
+        document_payload = (artifacts.get("termSheetStages") or {}).get(normalized_stage) or document_payload
     if not document_payload:
         raise HTTPException(status_code=404, detail="Credit document was not generated for this run")
 

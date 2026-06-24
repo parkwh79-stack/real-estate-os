@@ -7,14 +7,19 @@ import { EmptyState } from "../ui/primitives";
 
 interface CreditDoc {
   documentType?: string;
+  stageName?: string;
   markdown?: string;
 }
 interface CreditDocuments {
   termSheet?: CreditDoc | null;
+  termSheetStages?: Record<string, CreditDoc> | null;
   icMemo?: CreditDoc | null;
 }
 
 type TabKey = "icMemo" | "termSheet";
+type StageKey = "main_pf" | "bridge";
+
+const STAGE_LABELS: Record<StageKey, string> = { main_pf: "본PF", bridge: "브릿지론" };
 
 /**
  * Surfaces the lender-facing credit documents (Term Sheet, IC Memo) generated
@@ -25,6 +30,7 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
   const [docs, setDocs] = useState<CreditDocuments | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("icMemo");
+  const [stageSel, setStageSel] = useState<StageKey>("main_pf");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -69,7 +75,8 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
     void load();
   }, [load]);
 
-  const active = tab === "icMemo" ? docs?.icMemo : docs?.termSheet;
+  const termSheetDoc = docs?.termSheetStages?.[stageSel] ?? docs?.termSheet;
+  const active = tab === "icMemo" ? docs?.icMemo : termSheetDoc;
   const markdown = active?.markdown ?? "";
 
   const copy = async () => {
@@ -86,11 +93,12 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
   const download = async (format: "pdf" | "docx") => {
     if (!runId) return;
     const documentSlug = tab === "icMemo" ? "ic-memo" : "term-sheet";
+    const stageParam = tab === "termSheet" ? `&stage=${stageSel}` : "";
     setDownloading(format);
     setError(null);
     try {
       const res = await fetch(
-        `${apiBase}/projects/${projectId}/orchestrations/${runId}/credit-documents/${documentSlug}/export?format=${format}`,
+        `${apiBase}/projects/${projectId}/orchestrations/${runId}/credit-documents/${documentSlug}/export?format=${format}${stageParam}`,
         { cache: "no-store", headers: authHeaders("web") },
       );
       if (!res.ok) throw new Error(`다운로드 실패 (${res.status})`);
@@ -166,6 +174,20 @@ export function CreditDocumentsPanel({ projectId }: { projectId: string }) {
                 거래조건서
               </button>
             </div>
+            {tab === "termSheet" ? (
+              <div className="inline-flex rounded-lg border border-slate-200 p-1 dark:border-slate-700">
+                {(Object.keys(STAGE_LABELS) as StageKey[]).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setStageSel(key)}
+                    className={`rounded-md px-3 py-1 text-xs font-bold ${stageSel === key ? "bg-indigo-600 text-white" : "text-slate-600 dark:text-slate-300"}`}
+                  >
+                    {STAGE_LABELS[key]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <div className="flex items-center gap-2">
               <button
                 type="button"

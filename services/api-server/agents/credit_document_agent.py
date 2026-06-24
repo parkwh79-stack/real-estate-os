@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from agents.term_sheet_agent import TermSheetAgent
+
 TERM_SHEET_SCHEMA_VERSION = "realytics-term-sheet-v1"
 IC_MEMO_SCHEMA_VERSION = "realytics-ic-memo-v1"
 
@@ -45,139 +47,14 @@ class CreditDocumentAgent:
     """
 
     # ------------------------------------------------------------------ Term Sheet
-    def build_term_sheet(self, project_data: Dict[str, Any], artifacts: Dict[str, Any]) -> Dict[str, Any]:
-        project = project_data.get("project") or {}
-        feasibility = project_data.get("feasibility_input") or {}
-        tranches_in = [t for t in (project_data.get("pf_structure") or []) if isinstance(t, dict)]
-        covenants = project_data.get("covenants") or {}
-        pf_structure = artifacts.get("pfStructure") or {}
-        credit_enhancement = artifacts.get("creditEnhancement") or {}
-        cash_sweep = artifacts.get("cashSweep") or {}
-        credit_review = artifacts.get("creditReviewDecision") or {}
-
-        tranches = [
-            {
-                "name": t.get("tranche") or t.get("name") or f"Tranche {idx + 1}",
-                "amount": _num(t.get("amount")),
-                "amountEok": _eok(t.get("amount")),
-                "interestRate": _num(t.get("interest_rate") or t.get("rate")),
-                "feeRate": _num(t.get("fee_rate")),
-                "allInCost": _num(t.get("all_in_cost")),
-                "priority": t.get("priority", idx + 1),
-            }
-            for idx, t in enumerate(tranches_in)
-        ]
-        total_facility = sum(t["amount"] for t in tranches if t["amount"]) or None
-
-        facility = {
-            "totalFacility": total_facility,
-            "totalFacilityEok": _eok(total_facility),
-            "tranches": tranches,
-            "ltv": pf_structure.get("ltv"),
-            "ltc": pf_structure.get("ltc"),
-            "exitSaleRate": pf_structure.get("exit_sale_rate"),
-        }
-
-        security = [str(item) for item in (covenants.get("claim_preservation") or [])]
-        ce_measures = [
-            m.get("label") or m.get("measure") or m.get("type")
-            for m in (credit_enhancement.get("measures") or [])
-            if isinstance(m, dict) and (m.get("active") or m.get("status") == "active")
-        ]
-        ce_measures = [str(m) for m in ce_measures if m]
-
-        term_sheet = {
-            "schemaVersion": TERM_SHEET_SCHEMA_VERSION,
-            "analysisType": "term_sheet",
-            "generatedAt": datetime.now(timezone.utc).isoformat(),
-            "documentType": "거래조건서(Term Sheet)",
-            "status": "draft",
-            "header": {
-                "projectName": project.get("name"),
-                "projectType": project.get("type"),
-                "location": (project_data.get("land") or {}).get("address"),
-                "currency": "KRW",
-            },
-            "parties": {
-                "borrower": (project_data.get("developer_info") or {}).get("name") or project.get("developer"),
-                "contractor": (project_data.get("contractor_info") or {}).get("name") or project.get("contractor"),
-            },
-            "facility": facility,
-            "security": security,
-            "creditEnhancement": {
-                "grade": credit_enhancement.get("enhancementGrade"),
-                "baseSeniorLtv": credit_enhancement.get("baseSeniorLtv"),
-                "adjustedSeniorLtv": credit_enhancement.get("adjustedSeniorLtv"),
-                "activeMeasures": ce_measures,
-                "missingCriticalMeasures": credit_enhancement.get("missingCriticalMeasures") or [],
-            },
-            "cashSweepReserve": {
-                "applied": bool(cash_sweep) and cash_sweep.get("status") != "skipped",
-                "summary": cash_sweep.get("summary") if isinstance(cash_sweep, dict) else None,
-            },
-            "drawdownConditions": [str(x) for x in (covenants.get("drawdown_conditions") or [])],
-            "subsequentConditions": [str(x) for x in (covenants.get("subsequent_conditions") or [])],
-            "repaymentWaterfall": [str(x) for x in (covenants.get("execution_order") or [])],
-            "eodTriggers": [str(x) for x in (covenants.get("eod") or [])]
-            + [str(x) for x in (covenants.get("automatic_eod") or [])],
-            "approvalConditions": [str(x) for x in (credit_review.get("approvalConditions") or [])],
-        }
-        term_sheet["markdown"] = self._term_sheet_markdown(term_sheet)
-        return term_sheet
-
-    def _term_sheet_markdown(self, ts: Dict[str, Any]) -> str:
-        h = ts["header"]
-        f = ts["facility"]
-        ce = ts["creditEnhancement"]
-        lines: List[str] = []
-        lines.append(f"# 거래조건서 (Term Sheet) — {h.get('projectName') or '미상'}")
-        lines.append("")
-        lines.append(f"- 사업유형: {h.get('projectType') or '—'}")
-        lines.append(f"- 소재지: {h.get('location') or '—'}")
-        lines.append(f"- 차주(시행사): {ts['parties'].get('borrower') or '—'}")
-        lines.append(f"- 시공사: {ts['parties'].get('contractor') or '—'}")
-        lines.append("")
-        lines.append("## 1. 여신 한도 및 구조")
-        lines.append(f"- 총 PF 한도: {_eok_str(f.get('totalFacility'))}")
-        lines.append(f"- LTV: {_pct_str(f.get('ltv'))} · LTC: {_pct_str(f.get('ltc'))} · Exit 분양률: {_pct_str(f.get('exitSaleRate'))}")
-        if f.get("tranches"):
-            lines.append("")
-            lines.append("| Tranche | 금액 | 금리 | 수수료 | All-in | 순위 |")
-            lines.append("|---|---|---|---|---|---|")
-            for t in f["tranches"]:
-                lines.append(
-                    f"| {t.get('name')} | {_eok_str(t.get('amount'))} | {_pct_str(t.get('interestRate'))} "
-                    f"| {_pct_str(t.get('feeRate'))} | {_pct_str(t.get('allInCost'))} | {t.get('priority')} |"
-                )
-        lines.append("")
-        lines.append("## 2. 신용보강")
-        lines.append(f"- 신용보강 등급: {ce.get('grade') or '—'}")
-        lines.append(f"- 선순위 LTV: {_pct_str(ce.get('baseSeniorLtv'))} → {_pct_str(ce.get('adjustedSeniorLtv'))} (보강 후)")
-        if ce.get("activeMeasures"):
-            lines.append(f"- 적용 수단: {', '.join(ce['activeMeasures'])}")
-        if ce.get("missingCriticalMeasures"):
-            lines.append(f"- ⚠ 핵심수단 미확보: {', '.join(ce['missingCriticalMeasures'])}")
-        lines.append("")
-        lines.append("## 3. 담보 및 채권보전")
-        lines.extend([f"- {s}" for s in ts["security"]] or ["- —"])
-        lines.append("")
-        lines.append("## 4. 인출선행조건 (CP)")
-        lines.extend([f"- {s}" for s in ts["drawdownConditions"]] or ["- —"])
-        if ts["subsequentConditions"]:
-            lines.append("")
-            lines.append("## 4-1. 인출후행조건")
-            lines.extend([f"- {s}" for s in ts["subsequentConditions"]])
-        lines.append("")
-        lines.append("## 5. 자금집행 순서 (Waterfall)")
-        lines.extend([f"- {s}" for s in ts["repaymentWaterfall"]] or ["- 약정 waterfall에 따름"])
-        lines.append("")
-        lines.append("## 6. 기한이익상실 (EOD)")
-        lines.extend([f"- {s}" for s in ts["eodTriggers"]] or ["- —"])
-        if ts["approvalConditions"]:
-            lines.append("")
-            lines.append("## 7. 승인조건")
-            lines.extend([f"- {s}" for s in ts["approvalConditions"]])
-        return "\n".join(lines)
+    def build_term_sheet(
+        self,
+        project_data: Dict[str, Any],
+        artifacts: Dict[str, Any],
+        stage: str = "auto",
+    ) -> Dict[str, Any]:
+        """Delegate to the multi-agent TermSheetAgent (Land/Feasibility/PF/Credit分업)."""
+        return TermSheetAgent().compose(project_data, artifacts, stage=stage)
 
     # ------------------------------------------------------------------ IC Memo
     def build_ic_memo(self, project_data: Dict[str, Any], artifacts: Dict[str, Any]) -> Dict[str, Any]:
