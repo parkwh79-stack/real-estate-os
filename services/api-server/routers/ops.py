@@ -10,6 +10,22 @@ from use_cases.usage_insights import build_usage_insights, render_optimization_l
 router = APIRouter(prefix="/ops", tags=["ops"])
 
 
+@router.get("/infra-status")
+def get_infra_status():
+    """Production-infra readiness: PostgreSQL, OIDC, and object storage backends."""
+    import os
+
+    from core.oidc import oidc_status
+    from db.postgres import status as postgres_status
+
+    return {
+        "schemaVersion": "realytics-infra-status-v1",
+        "postgres": postgres_status(),
+        "oidc": oidc_status(),
+        "objectStorage": {"backend": (os.environ.get("REALYTICS_OBJECT_STORAGE") or "local").strip().lower()},
+    }
+
+
 @router.get("/credit-policy-profiles")
 def list_credit_policy_profiles_endpoint():
     """List the built-in lender credit policy profiles used by Credit Review."""
