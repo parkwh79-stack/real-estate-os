@@ -4,6 +4,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from agents.term_sheet_agent import TermSheetAgent
+from agents.credit_document_i18n import (
+    localize,
+    risk_title_ko,
+    senior_status_ko,
+    severity_ko,
+    status_ko,
+)
 
 TERM_SHEET_SCHEMA_VERSION = "realytics-term-sheet-v1"
 IC_MEMO_SCHEMA_VERSION = "realytics-ic-memo-v1"
@@ -108,7 +115,13 @@ class CreditDocumentAgent:
 
         stress_summary = {
             "scenarios": [
-                {"key": s.get("key"), "name": s.get("name"), "projectIrr": s.get("projectIrr"), "seniorStatus": s.get("seniorStatus")}
+                {
+                    "key": s.get("key"),
+                    "name": s.get("name"),
+                    "projectIrr": s.get("projectIrr"),
+                    "seniorStatus": s.get("seniorStatus"),
+                    "seniorStatusLabel": s.get("statusLabel") or senior_status_ko(s.get("seniorStatus")),
+                }
                 for s in (stress_test.get("scenarios") or [])
             ],
             "worstCaseKey": stress_test.get("worstCaseKey"),
@@ -142,21 +155,27 @@ class CreditDocumentAgent:
             "dealSummary": deal_summary,
             "keyMetrics": key_metrics,
             "stressSummary": stress_summary,
-            "decisionRationale": [str(r) for r in (credit_review.get("decisionReasons") or [])],
+            "decisionRationale": [localize(str(r)) for r in (credit_review.get("decisionReasons") or [])],
             "keyRisks": [
-                {"title": r.get("title"), "severity": r.get("severity"), "mitigant": r.get("mitigant"), "code": r.get("code")}
+                {
+                    "title": risk_title_ko(r),
+                    "severity": r.get("severity"),
+                    "severityLabel": severity_ko(r.get("severity")),
+                    "mitigant": localize(r.get("mitigant")),
+                    "code": r.get("code"),
+                }
                 for r in (credit_review.get("keyRisks") or [])
             ],
-            "mitigants": [str(m) for m in (credit_review.get("mitigants") or [])],
-            "approvalConditions": [str(c) for c in (credit_review.get("approvalConditions") or [])],
-            "requiredFollowUps": [str(f) for f in (credit_review.get("requiredFollowUps") or [])],
+            "mitigants": [localize(str(m)) for m in (credit_review.get("mitigants") or [])],
+            "approvalConditions": [localize(str(c)) for c in (credit_review.get("approvalConditions") or [])],
+            "requiredFollowUps": [localize(str(f)) for f in (credit_review.get("requiredFollowUps") or [])],
             "requiredWaivers": credit_review.get("requiredWaivers") or [],
             "marketabilityAssessment": {
                 "grade": marketability.get("grade"),
                 "score": marketability.get("score"),
                 "comment": (marketability.get("reportParagraphs") or {}).get("recommendation") if isinstance(marketability.get("reportParagraphs"), dict) else None,
             },
-            "legalStatus": legal.get("status"),
+            "legalStatus": status_ko(legal.get("status")) if legal.get("status") else None,
             "developability": {
                 "grade": developability.get("grade"),
                 "overallScore": developability.get("overallScore"),
@@ -165,11 +184,11 @@ class CreditDocumentAgent:
             "approvalReadiness": {
                 "pass": approval_gate.get("pass"),
                 "blockers": [
-                    (b.get("message") or b.get("reason") or b.get("code")) if isinstance(b, dict) else str(b)
+                    localize((b.get("message") or b.get("reason") or b.get("code")) if isinstance(b, dict) else str(b))
                     for b in (approval_gate.get("blockers") or [])
                 ],
             },
-            "dataLimitations": [str(x) for x in (credit_review.get("dataLimitations") or [])],
+            "dataLimitations": [localize(str(x)) for x in (credit_review.get("dataLimitations") or [])],
         }
         ic_memo["markdown"] = self._ic_memo_markdown(ic_memo)
         return ic_memo
@@ -210,14 +229,14 @@ class CreditDocumentAgent:
             lines.append("| 시나리오 | Project IRR | Senior 상태 |")
             lines.append("|---|---|---|")
             for s in memo["stressSummary"]["scenarios"]:
-                lines.append(f"| {s.get('name') or s.get('key')} | {_pct_str(s.get('projectIrr'))} | {s.get('seniorStatus') or '—'} |")
+                lines.append(f"| {s.get('name') or s.get('key')} | {_pct_str(s.get('projectIrr'))} | {s.get('seniorStatusLabel') or '—'} |")
         else:
             lines.append("- 스트레스 결과 없음")
         lines.append("")
         lines.append("## 5. 주요 리스크 및 완화방안")
         if memo["keyRisks"]:
             for r in memo["keyRisks"]:
-                lines.append(f"- [{r.get('severity') or '—'}] {r.get('title') or r.get('code')} → {r.get('mitigant') or '완화방안 검토 필요'}")
+                lines.append(f"- [{r.get('severityLabel') or '—'}] {r.get('title') or r.get('code')} → {r.get('mitigant') or '완화방안 검토 필요'}")
         else:
             lines.append("- 식별된 주요 리스크 없음")
         lines.append("")

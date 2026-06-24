@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from agents.credit_document_i18n import localize as _localize_condition
 from agents.term_sheet_templates import (
     BOILERPLATE,
     DEFAULT_SECTION_SOURCE_AGENT,
@@ -176,7 +177,7 @@ class TermSheetAgent:
             "repaymentWaterfall": [str(x) for x in (covenants.get("execution_order") or [])],
             "eodTriggers": [str(x) for x in (covenants.get("eod") or [])]
             + [str(x) for x in (covenants.get("automatic_eod") or [])],
-            "approvalConditions": [str(x) for x in (credit_review.get("approvalConditions") or [])],
+            "approvalConditions": [_localize_condition(str(x)) for x in (credit_review.get("approvalConditions") or [])],
         }
         term_sheet["markdown"] = self._markdown(term_sheet)
         return term_sheet
