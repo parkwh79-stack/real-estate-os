@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from schemas.credit_policy import CreditPolicyProfile, resolve_credit_policy
 
 
 CREDIT_REVIEW_SCHEMA_VERSION = "realytics-credit-review-v1"
@@ -10,7 +12,13 @@ CREDIT_REVIEW_SCHEMA_VERSION = "realytics-credit-review-v1"
 class CreditReviewAgent:
     """Produce lender-side credit decision guidance from the consolidated risk register."""
 
-    def decide(self, project_data: Dict[str, Any], artifacts: Dict[str, Any]) -> Dict[str, Any]:
+    def decide(
+        self,
+        project_data: Dict[str, Any],
+        artifacts: Dict[str, Any],
+        policy: Optional[CreditPolicyProfile] = None,
+    ) -> Dict[str, Any]:
+        policy = policy or resolve_credit_policy(project_data)
         risk_register = artifacts.get("riskRegister") or {}
         risk_summary = risk_register.get("summary") or {}
         credit_inputs = risk_register.get("creditReviewInputs") or {}
@@ -22,7 +30,9 @@ class CreditReviewAgent:
         pf_structure = artifacts.get("pfStructure") or {}
         return_metrics = artifacts.get("returnMetrics") or {}
         stress_test = artifacts.get("stressTest") or {}
+        credit_enhancement = artifacts.get("creditEnhancement") or {}
         signals = self._return_stress_signals(return_metrics, stress_test)
+        signals["hurdle"] = policy.hurdleRate
 
         decision = self._decision(
             risk_register=risk_register,
@@ -32,13 +42,24 @@ class CreditReviewAgent:
             marketability=marketability,
             pf_structure=pf_structure,
             signals=signals,
+            policy=policy,
+            credit_enhancement=credit_enhancement,
         )
         approval_conditions = self._approval_conditions(risk_register, legal, data_quality, reconciliation)
         if signals["seniorBreakKeys"]:
             approval_conditions.append(
                 "스트레스 시 Senior 원금 손실 가능 — 추가 신용보강·담보 확보 또는 PF 축소·Equity 확충 필요."
             )
-            approval_conditions = self._dedupe(approval_conditions)[:13]
+        adjusted_senior_ltv = credit_enhancement.get("adjustedSeniorLtv")
+        if (
+            policy.maxAdjustedSeniorLtv is not None
+            and isinstance(adjusted_senior_ltv, (int, float))
+            and adjusted_senior_ltv > policy.maxAdjustedSeniorLtv
+        ):
+            approval_conditions.append(
+                f"보강 후 선순위 LTV {adjusted_senior_ltv:.1%}가 {policy.lenderName} 한도 {policy.maxAdjustedSeniorLtv:.0%}를 초과 — 추가 신용보강·담보 또는 PF 축소 필요."
+            )
+        approval_conditions = self._dedupe(approval_conditions)[:13]
         key_risks = self._key_risks(top_risks)
         mitigants = self._mitigants(risk_register, project_data)
         required_follow_ups = self._required_follow_ups(decision, risk_register, legal, data_quality, reconciliation)
@@ -50,6 +71,16 @@ class CreditReviewAgent:
             "decision": decision,
             "decisionLabel": self._decision_label(decision),
             "status": self._status(decision),
+            "policyProfile": {
+                "profileId": policy.profileId,
+                "lenderName": policy.lenderName,
+                "hurdleRate": policy.hurdleRate,
+                "exitSaleRateReworkThreshold": policy.exitSaleRateReworkThreshold,
+                "criticalRiskCountReworkThreshold": policy.criticalRiskCountReworkThreshold,
+                "marketabilityReworkGrades": policy.marketabilityReworkGrades,
+                "maxAdjustedSeniorLtv": policy.maxAdjustedSeniorLtv,
+                "requireCommitteeForConditional": policy.requireCommitteeForConditional,
+            },
             "confidence": self._confidence(risk_register, data_quality, marketability),
             "summary": {
                 "projectName": (project_data.get("project") or {}).get("name"),
@@ -87,7 +118,7 @@ class CreditReviewAgent:
             "mitigants": mitigants,
             "approvalConditions": approval_conditions,
             "requiredFollowUps": required_follow_ups,
-            "requiredWaivers": self._required_waivers(risk_register, data_quality),
+            "requiredWaivers": self._required_waivers(risk_register, data_quality, policy),
             "creditReviewInputs": credit_inputs,
             "reportParagraphs": self._report_paragraphs(decision, key_risks, approval_conditions, mitigants),
             "humanReview": {
@@ -131,16 +162,21 @@ class CreditReviewAgent:
         marketability: Dict[str, Any],
         pf_structure: Dict[str, Any],
         signals: Dict[str, Any] | None = None,
+        policy: CreditPolicyProfile | None = None,
+        credit_enhancement: Dict[str, Any] | None = None,
     ) -> str:
         signals = signals or {}
+        policy = policy or resolve_credit_policy({})
+        credit_enhancement = credit_enhancement or {}
         risks = risk_register.get("risks") or []
         critical_count = sum(1 for risk in risks if risk.get("severity") == "critical")
         high_count = sum(1 for risk in risks if risk.get("severity") == "high")
         critical_codes = {risk.get("code") for risk in risks if risk.get("severity") == "critical"}
 
         base_irr = signals.get("baseIrr")
-        hurdle = signals.get("hurdle") or 0.12
+        hurdle = signals.get("hurdle") or policy.hurdleRate
         senior_break_keys = signals.get("seniorBreakKeys") or set()
+        rework_grades = set(policy.marketabilityReworkGrades)
 
         if legal.get("status") == "blocking_issue" or data_quality.get("status") == "blocking" or reconciliation.get("status") == "blocking":
             return "rework_required"
@@ -148,7 +184,7 @@ class CreditReviewAgent:
         # base-case project return is negative -> escalate hardest.
         if "base" in senior_break_keys:
             return "reject_recommended"
-        if critical_count >= 3:
+        if critical_count >= policy.criticalRiskCountReworkThreshold:
             return "rework_required"
         if {"SENIOR_SHORTFALL", "STRESS_SENIOR_SHORTFALL"}.intersection(critical_codes):
             return "reject_recommended"
@@ -156,10 +192,17 @@ class CreditReviewAgent:
             return "rework_required"
         if "mild" in senior_break_keys:
             return "rework_required"
-        if pf_structure.get("exit_sale_rate") and pf_structure.get("exit_sale_rate") >= 0.85:
+        if pf_structure.get("exit_sale_rate") and pf_structure.get("exit_sale_rate") >= policy.exitSaleRateReworkThreshold:
             return "rework_required"
-        if marketability.get("grade") in {"D", "E"}:
+        if marketability.get("grade") in rework_grades:
             return "rework_required"
+        adjusted_senior_ltv = credit_enhancement.get("adjustedSeniorLtv")
+        if (
+            policy.maxAdjustedSeniorLtv is not None
+            and isinstance(adjusted_senior_ltv, (int, float))
+            and adjusted_senior_ltv > policy.maxAdjustedSeniorLtv
+        ):
+            return "conditional_approval"
         if risk_register.get("status") in {"blocking", "high_risk"} or high_count:
             return "conditional_approval"
         if data_quality.get("status") == "needs_review" or legal.get("status") == "caution":
@@ -237,7 +280,13 @@ class CreditReviewAgent:
             follow_ups.append("Cross-agent reconciliation gate is blocking and must be resolved.")
         return self._dedupe(follow_ups)[:12]
 
-    def _required_waivers(self, risk_register: Dict[str, Any], data_quality: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _required_waivers(
+        self,
+        risk_register: Dict[str, Any],
+        data_quality: Dict[str, Any],
+        policy: CreditPolicyProfile,
+    ) -> List[Dict[str, Any]]:
+        approver_role = policy.waiverApproverRole
         waivers = []
         for risk in risk_register.get("risks", []):
             if risk.get("severity") in {"critical", "high"} and risk.get("status") != "resolved":
@@ -245,14 +294,14 @@ class CreditReviewAgent:
                     "riskId": risk.get("riskId"),
                     "code": risk.get("code"),
                     "reason": "Required if approval proceeds before this risk is resolved.",
-                    "approverRole": "credit_committee",
+                    "approverRole": approver_role,
                 })
         if data_quality.get("status") == "blocking":
             waivers.append({
                 "riskId": "DQ-BLOCKING",
                 "code": "DATA_QUALITY_BLOCKING",
                 "reason": "Required if final approval relies on unresolved conflicting figures.",
-                "approverRole": "credit_committee",
+                "approverRole": approver_role,
             })
         return waivers[:12]
 

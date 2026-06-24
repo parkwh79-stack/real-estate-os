@@ -3,6 +3,15 @@ from __future__ import annotations
 from agents.credit_document_agent import CreditDocumentAgent
 
 
+MOJIBAKE_MARKERS = ("嫄", "湲", "李", "遺꾩", "?좎", "?ъ", "?먭", "?뱀", "?듭")
+
+
+def _assert_clean_korean_markdown(markdown: str) -> None:
+    assert "억원" in markdown
+    assert "—" in markdown
+    assert not any(marker in markdown for marker in MOJIBAKE_MARKERS)
+
+
 def _project_data():
     return {
         "project": {"name": "본리동 주상복합", "type": "mixed_use", "developer": "WAN2개발"},
@@ -65,6 +74,8 @@ def test_term_sheet_synthesises_facility_and_markdown():
     assert ts["markdown"].startswith("# 거래조건서")
     assert "Tranche A" in ts["markdown"]
     assert "EOD" in ts["markdown"]
+    assert "여신 한도 및 구조" in ts["markdown"]
+    _assert_clean_korean_markdown(ts["markdown"])
 
 
 def test_ic_memo_carries_recommendation_and_metrics():
@@ -79,6 +90,8 @@ def test_ic_memo_carries_recommendation_and_metrics():
     assert memo["approvalReadiness"]["blockers"] == ["토지 등기 증빙 미확보"]
     assert "# 여신심사보고서" in memo["markdown"]
     assert "조건부 승인 가능" in memo["markdown"]
+    assert "핵심 지표" in memo["markdown"]
+    _assert_clean_korean_markdown(memo["markdown"])
 
 
 def test_documents_are_resilient_to_missing_artifacts():

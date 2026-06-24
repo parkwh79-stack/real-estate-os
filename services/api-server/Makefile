@@ -4,7 +4,7 @@ run:
 	uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 test:
-	pytest tests/ -v
+	python -m pytest tests/ -v
 
 build:
 	docker build -t realytics-api .

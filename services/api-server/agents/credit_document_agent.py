@@ -253,6 +253,7 @@ class CreditDocumentAgent:
                 "status": credit_review.get("status"),
                 "confidence": credit_review.get("confidence"),
                 "approvalReady": approval_gate.get("pass"),
+                "policyProfile": credit_review.get("policyProfile") or {},
             },
             "dealSummary": deal_summary,
             "keyMetrics": key_metrics,
@@ -299,6 +300,11 @@ class CreditDocumentAgent:
         lines.append("## 1. 심사 의견")
         lines.append(f"- **여신 의견: {rec.get('decisionLabel') or '—'}** (신뢰도 {_pct_str(rec.get('confidence'))})")
         lines.append(f"- 승인 준비: {'준비완료' if rec.get('approvalReady') else '미충족(조건 잔존)'}")
+        policy = rec.get("policyProfile") or {}
+        if policy.get("lenderName"):
+            lines.append(
+                f"- 적용 여신정책: {policy.get('lenderName')} (Hurdle {_pct_str(policy.get('hurdleRate'))})"
+            )
         lines.append("")
         lines.append("## 2. 거래 개요")
         lines.append(f"- 유형/소재지: {ds.get('projectType') or '—'} / {ds.get('location') or '—'}")

@@ -10,6 +10,17 @@ from use_cases.usage_insights import build_usage_insights, render_optimization_l
 router = APIRouter(prefix="/ops", tags=["ops"])
 
 
+@router.get("/credit-policy-profiles")
+def list_credit_policy_profiles_endpoint():
+    """List the built-in lender credit policy profiles used by Credit Review."""
+    from schemas.credit_policy import list_credit_policy_profiles
+
+    return {
+        "schemaVersion": "realytics-credit-policy-list-v1",
+        "profiles": [profile.model_dump() for profile in list_credit_policy_profiles()],
+    }
+
+
 @router.get("/usage-insights")
 def get_usage_insights(
     request: Request,
