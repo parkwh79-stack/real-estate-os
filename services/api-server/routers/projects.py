@@ -68,7 +68,7 @@ from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
-from use_cases.async_jobs import submit_pf_review_job, get_job_store
+from use_cases.async_jobs import submit_pf_review_job, get_job_store, recover_interrupted_jobs
 from use_cases.term_annotation import annotate_terms_use_case
 from use_cases.covenant_monitoring import monitor_covenants_use_case
 from use_cases.developability_score import score_developability_use_case
@@ -1989,6 +1989,34 @@ def get_project_job(project_id: str, job_id: str):
     if job is None or job.get("projectId") != project_id:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+def _resubmit_pf_review_job(old_job: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Rebuild project_data from a persisted job and re-enqueue it (recovery)."""
+    project_id = old_job.get("projectId")
+    if project_id not in PROJECTS_DB:
+        return None
+    payload = (old_job.get("params") or {}).get("inputData") or {}
+    source_data = _hydrated_project_source(project_id, payload)
+    return submit_pf_review_job(
+        orchestration_repository(),
+        project_id,
+        source_data,
+        payload.get("options", {}),
+        background=True,
+        resume_payload=payload,
+        recovered_from=old_job.get("jobId"),
+    )
+
+
+@router.post("/{project_id}/jobs/recover")
+def recover_project_jobs(project_id: str, request: Request):
+    """Recover this project's interrupted jobs (queued/running left by a restart)."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    return recover_interrupted_jobs(_resubmit_pf_review_job, project_id=project_id)
+
 
 @router.get("/{project_id}/orchestrations")
 def list_project_orchestrations(project_id: str):

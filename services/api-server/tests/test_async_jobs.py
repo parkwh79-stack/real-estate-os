@@ -69,3 +69,39 @@ def test_submit_background_eventually_completes():
             break
         time.sleep(0.05)
     assert store.get(job["jobId"])["status"] == "completed"
+
+
+def test_durable_store_survives_restart(tmp_path):
+    path = tmp_path / "jobs.json"
+    store = JobStore(path=path)
+    job = store.create("pf_review", "p1", {"inputData": {"options": {"requested_by": "x"}}})
+    store.update(job["jobId"], status="running", startedAt="t")
+    # simulate a process restart: a fresh store loads from the same file
+    reloaded = JobStore(path=path)
+    got = reloaded.get(job["jobId"])
+    assert got is not None
+    assert got["status"] == "running"
+    assert got["params"]["inputData"]["options"]["requested_by"] == "x"
+
+
+def test_recover_interrupted_jobs_marks_and_resubmits(tmp_path):
+    from use_cases.async_jobs import recover_interrupted_jobs
+
+    store = JobStore(path=tmp_path / "jobs.json")
+    running = store.create("pf_review", "p1", {"inputData": {}})
+    store.update(running["jobId"], status="running")
+    done = store.create("pf_review", "p1", {})
+    store.update(done["jobId"], status="completed")
+
+    resubmitted_ids = []
+
+    def _fake_resubmit(old_job):
+        new = store.create("pf_review", old_job["projectId"], old_job.get("params"))
+        resubmitted_ids.append(new["jobId"])
+        return new
+
+    result = recover_interrupted_jobs(_fake_resubmit, project_id="p1", store=store)
+    assert running["jobId"] in result["interrupted"]
+    assert done["jobId"] not in result["interrupted"]  # terminal jobs are untouched
+    assert len(result["resubmitted"]) == 1
+    assert store.get(running["jobId"])["status"] == "interrupted"
