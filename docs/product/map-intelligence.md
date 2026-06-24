@@ -79,11 +79,29 @@ The frontend map page requests this so real boundaries draw when PNUs resolve.
   필지 명세 table and the data-limitation notes. Linked from the project home
   ("지도 분석").
 
+## Geometry cache (avoid re-fetching VWorld)
+
+Resolved boundaries are cached by PNU (`db/parcel_geometry_cache.py`) so the map
+does not re-call VWorld for parcels it has already seen:
+
+- **LocalParcelGeometryCache** (default): a dedicated SQLite file under the
+  runtime dir (`REALYTICS_PARCEL_CACHE_FILE` to override). Works today.
+- **PostgresParcelGeometryCache** (gated): upserts into the scaffolded
+  `land_parcels` `geom` column (`ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON,4326))`)
+  and reads it back via `ST_AsGeoJSON`. Used when Postgres is configured and the
+  driver is installed.
+
+`build_caching_resolver(cache, vworld_resolver)` wraps the VWorld resolver
+cache-first: a cache hit skips the VWorld call, a fresh fetch is written back.
+Fail-safe — any cache backend error degrades to a miss, never breaking the map.
+`geometryResolution` on the map payload reports
+`{ cacheBackend, resolvedCount, cacheHits, fetchedFromVworld }`. Verified live:
+2nd load of the same parcel makes **zero** VWorld calls.
+
 ## Next
 
-- ~~VWorld cadastral → real parcel polygons by PNU.~~ ✅ Done 2026-06-24
-  (`resolve_geometry=true`). Verified live: PNU 1165010800113730000 → MultiPolygon.
-- Persist resolved geometry into PostGIS `land_parcels` (cache; avoid re-fetching).
+- Serve geometry straight from PostGIS `land_parcels` for spatial queries (radius
+  / intersect) once Postgres is live; backfill `official_land_price` into the cache.
 - Additional layers: 용도지역 polygons, 공시지가 choropleth (WMS), 주변 공급/실거래
   overlays, radius comparable search (extend `/api/valuemap` to live data).
 - PNU resolution for parcels that only have address/lot (geocode → PNU) so more

@@ -77,6 +77,7 @@ from use_cases.covenant_monitoring import (
 from use_cases.portfolio_monitoring import build_portfolio_monitoring
 from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
 from integrations.vworld import build_pnu_geometry_resolver, vworld_configured
+from db.parcel_geometry_cache import build_parcel_geometry_cache, build_caching_resolver
 from use_cases.developability_score import score_developability_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
@@ -1892,12 +1893,15 @@ def get_project_map_intelligence(project_id: str, resolve_geometry: bool = False
     source_data = _hydrated_project_source(project_id, {})
     geometry_resolution: Dict[str, Any] | None = None
     if resolve_geometry and vworld_configured():
-        resolver = build_pnu_geometry_resolver()
+        cache = build_parcel_geometry_cache()
+        resolver = build_caching_resolver(cache, build_pnu_geometry_resolver(), project_id=project_id)
         resolved = resolve_and_attach_geometry(source_data, resolver, limit=30)
         geometry_resolution = {
             "source": "vworld_cadastral",
+            "cacheBackend": cache.backend,
             "resolvedCount": resolved,
-            "attemptedCount": len(getattr(resolver, "diagnostics", [])),
+            "cacheHits": resolver.stats["cacheHits"],
+            "fetchedFromVworld": resolver.stats["fetched"],
         }
     payload = build_project_map_intelligence(source_data)
     if geometry_resolution is not None:
