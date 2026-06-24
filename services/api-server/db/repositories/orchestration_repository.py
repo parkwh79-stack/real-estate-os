@@ -59,7 +59,7 @@ class OrchestrationRepository:
 
     def list_metadata(self, project_id: str) -> List[Dict[str, Any]]:
         runs = self.orchestration_store.get(project_id, {}).values()
-        return [
+        metadata = [
             {
                 "run_id": run["run_id"],
                 "project_id": run["project_id"],
@@ -73,6 +73,9 @@ class OrchestrationRepository:
             }
             for run in runs
         ]
+        # Newest first so clients that read [0] get the latest run.
+        metadata.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+        return metadata
 
     def get(self, project_id: str, run_id: str) -> Dict[str, Any] | None:
         return self.orchestration_store.get(project_id, {}).get(run_id)

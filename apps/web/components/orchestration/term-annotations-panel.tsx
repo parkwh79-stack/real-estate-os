@@ -14,6 +14,10 @@ interface Annotation {
   sourceField?: string;
   matchType?: string;
   status?: string;
+  sourceLabel?: string | null;
+  evidenceRef?: string | null;
+  sourceUrl?: string | null;
+  evidenceValue?: string | number | boolean | null;
 }
 interface TermAnnotations {
   summary?: {
@@ -128,8 +132,8 @@ export function TermAnnotationsPanel({ projectId }: { projectId: string }) {
                   <tr>
                     <th className="px-3 py-2">표면형</th>
                     <th className="px-3 py-2">표준 용어</th>
-                    <th className="px-3 py-2">Canonical 필드</th>
-                    <th className="px-3 py-2">출처</th>
+                    <th className="px-3 py-2">출처 (자료)</th>
+                    <th className="px-3 py-2">근거값</th>
                     <th className="px-3 py-2">매칭</th>
                   </tr>
                 </thead>
@@ -138,8 +142,21 @@ export function TermAnnotationsPanel({ projectId }: { projectId: string }) {
                     <tr key={`${a.termId}-${a.sourceField}-${index}`} className="border-t border-slate-100 dark:border-slate-800">
                       <td className="px-3 py-2 font-semibold text-slate-900 dark:text-white">{a.surface}</td>
                       <td className="px-3 py-2">{a.displayNameKo ?? a.termId}</td>
-                      <td className="px-3 py-2 font-mono text-slate-500">{a.canonicalField}</td>
-                      <td className="px-3 py-2 font-mono text-slate-400">{a.sourceField}</td>
+                      <td className="px-3 py-2 text-slate-600 dark:text-slate-300" title={`${a.canonicalField ?? ""}${a.evidenceRef ? " · " + a.evidenceRef : ""}`}>
+                        {a.sourceUrl ? (
+                          <a href={`${apiBase}${a.sourceUrl}`} target="_blank" rel="noreferrer" className="text-cyan-700 underline decoration-dotted dark:text-cyan-300">
+                            {a.sourceLabel ?? "원자료"}
+                          </a>
+                        ) : (
+                          <span>{a.sourceLabel ?? "—"}</span>
+                        )}
+                        {a.evidenceRef && a.evidenceRef !== "—" ? (
+                          <span className="ml-1 text-[11px] text-slate-400">· {a.evidenceRef}</span>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2 text-slate-700 dark:text-slate-200" title={a.canonicalField ?? undefined}>
+                        {a.evidenceValue === null || a.evidenceValue === undefined ? "—" : String(a.evidenceValue)}
+                      </td>
                       <td className="px-3 py-2 text-slate-500">{MATCH_LABEL[a.matchType ?? ""] ?? a.matchType}</td>
                     </tr>
                   ))}
@@ -158,7 +175,7 @@ export function TermAnnotationsPanel({ projectId }: { projectId: string }) {
                 {unmapped.slice(0, 15).map((a, index) => (
                   <li key={`${a.sourceField}-${index}`} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-950/40">
                     <span className="font-semibold text-slate-800 dark:text-slate-200">{a.surface}</span>
-                    <span className="ml-2 font-mono text-slate-400">{a.sourceField}</span>
+                    <span className="ml-2 text-slate-500" title={a.sourceField}>{a.sourceLabel ?? "시행사 제공자료"}</span>
                   </li>
                 ))}
               </ul>
