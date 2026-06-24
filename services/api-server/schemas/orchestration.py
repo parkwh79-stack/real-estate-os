@@ -30,6 +30,7 @@ PF_REVIEW_STEPS = [
     ("risk_register_generation", "Risk register generation"),
     ("credit_review_decision", "Credit review decision"),
     ("scenario_restructuring_plan", "Scenario restructuring plan"),
+    ("deal_optimization", "Deal optimization (협의 권고안)"),
     ("developability_score", "Developability score"),
     ("phase11_report_generation", "Phase 11 report generation"),
     ("evidence_graph_generation", "Evidence graph generation"),

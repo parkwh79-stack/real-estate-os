@@ -9,7 +9,9 @@ from agents.consensus_engine import ConsensusEngine, _set_by_path, build_consens
 from agents.credit_document_agent import CreditDocumentAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.data_quality_agent import DataQualityAgent
+from agents.deal_optimization_agent import DealOptimizationAgent
 from agents.developability_score_agent import DevelopabilityScoreAgent
+from schemas.credit_policy import resolve_credit_policy
 from agents.evidence_graph_agent import EvidenceGraphAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
@@ -521,6 +523,8 @@ class OrchestrationAgent:
                 },
             )
 
+            self._run_deal_optimization_step(run, project_data)
+
             self._run_developability_score_step(run, project_data)
 
             report_agent = ReportAgent()
@@ -823,6 +827,22 @@ class OrchestrationAgent:
                     "Term sheet values are indicative; [TBD]/[숫자] placeholders are finalised in negotiation.",
                 ],
             )
+
+    def _run_deal_optimization_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+        try:
+            policy = resolve_credit_policy(project_data)
+            optimization = DealOptimizationAgent().optimize(project_data, run["artifacts"], policy=policy)
+            run["artifacts"]["dealOptimization"] = optimization
+            output = {
+                "verdict": optimization.get("verdict"),
+                "verdictLabel": optimization.get("verdictLabel"),
+                "leverCount": len(optimization.get("levers", [])),
+                "actionCount": len(optimization.get("borrowerActions", [])),
+            }
+        except Exception as exc:
+            run["errors"].append({"message": f"Deal optimization failed: {exc}", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": str(exc)}
+        self._complete_step(run, "deal_optimization", output, artifact_key="dealOptimization")
 
     def _run_developability_score_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
         try:

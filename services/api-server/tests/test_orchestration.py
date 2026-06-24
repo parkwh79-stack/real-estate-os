@@ -63,6 +63,11 @@ def test_pf_review_orchestration_completes_and_saves_report():
     assert run["agentProgress"]["land_agent_review"]["status"] == "completed"
     assert run["artifacts"]["reconciliationGate"]["analysisType"] == "cross_agent_reconciliation_gate_v1"
     assert run["agentProgress"]["cross_agent_reconciliation"]["status"] == "completed"
+    deal_opt = run["artifacts"]["dealOptimization"]
+    assert deal_opt["analysisType"] == "deal_optimization"
+    assert deal_opt["verdict"] in {"approvable", "negotiable_conditional", "not_recommended"}
+    assert "verdictLabel" in deal_opt
+    assert run["agentProgress"]["deal_optimization"]["status"] == "completed"
     consensus = run["artifacts"]["consensusResolution"]
     assert consensus["analysisType"] == "consensus_resolution"
     assert consensus["status"] in {"converged", "partial"}

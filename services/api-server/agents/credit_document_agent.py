@@ -75,6 +75,7 @@ class CreditDocumentAgent:
         legal = artifacts.get("legalPermitReview") or {}
         developability = artifacts.get("developabilityScore") or {}
         consensus = artifacts.get("consensusResolution") or {}
+        deal_optimization = artifacts.get("dealOptimization") or {}
         approval_gate = artifacts.get("approvalReadinessGate") or {}
 
         rm = return_metrics.get("metrics") or {}
@@ -189,6 +190,14 @@ class CreditDocumentAgent:
                 ],
             },
             "dataLimitations": [localize(str(x)) for x in (credit_review.get("dataLimitations") or [])],
+            "dealOptimization": {
+                "verdict": deal_optimization.get("verdict"),
+                "verdictLabel": deal_optimization.get("verdictLabel"),
+                "currentMargin": deal_optimization.get("currentMargin"),
+                "targetMargin": deal_optimization.get("targetMargin"),
+                "borrowerActions": deal_optimization.get("borrowerActions") or [],
+                "summary": deal_optimization.get("summary"),
+            } if deal_optimization else {},
         }
         ic_memo["markdown"] = self._ic_memo_markdown(ic_memo)
         return ic_memo
@@ -214,6 +223,9 @@ class CreditDocumentAgent:
                 f"- 교차 정합 합의: {consensus.get('status')} ({consensus.get('rounds')}라운드, "
                 f"{consensus.get('resolvedCount')}건 합의 / 미해결 {consensus.get('unresolvedCount')}건)"
             )
+        deal = memo.get("dealOptimization") or {}
+        if deal.get("verdictLabel"):
+            lines.append(f"- 협의 판정: {deal.get('verdictLabel')}")
         lines.append("")
         lines.append("## 2. 거래 개요")
         lines.append(f"- 유형/소재지: {ds.get('projectType') or '—'} / {ds.get('location') or '—'}")
@@ -254,4 +266,15 @@ class CreditDocumentAgent:
             lines.append("")
             lines.append("## 9. 데이터 한계")
             lines.extend([f"- {d}" for d in memo["dataLimitations"]])
+        deal = memo.get("dealOptimization") or {}
+        if deal.get("verdictLabel"):
+            lines.append("")
+            lines.append("## 10. 사업자 협의 권고안 (Deal Optimization)")
+            lines.append(f"- **판정: {deal.get('verdictLabel')}**")
+            if deal.get("currentMargin") is not None:
+                lines.append(f"- 현재 개발이익률 {_pct_str(deal.get('currentMargin'))} (목표 {_pct_str(deal.get('targetMargin'))})")
+            for action in deal.get("borrowerActions") or []:
+                lines.append(f"- {action}")
+            if deal.get("summary"):
+                lines.append(f"- {deal.get('summary')}")
         return "\n".join(lines)
