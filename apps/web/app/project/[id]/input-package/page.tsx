@@ -20,6 +20,7 @@ import {
   Upload,
 } from "lucide-react";
 import { authHeaders } from "../../../../lib/auth-client";
+import { SmartIntake } from "../../../../components/intake/smart-intake";
 
 const apiBase = "http://127.0.0.1:8000";
 
@@ -147,27 +148,27 @@ export default function InputPackagePage() {
 
   const packageSlots = [
     {
-      label: "Business plan",
+      label: "사업계획서",
       value: documentTypeCounts.business_plan ?? 0,
       icon: FileText,
     },
     {
-      label: "Land ledger",
+      label: "토지대장",
       value: documentTypeCounts.land_ledger ?? 0,
       icon: FileSpreadsheet,
     },
     {
-      label: "Feasibility workbook",
+      label: "사업수지 워크북",
       value: documentTypeCounts.feasibility_workbook ?? 0,
       icon: FileSpreadsheet,
     },
     {
-      label: "Land evidence",
+      label: "토지 증빙",
       value: landEvidenceCount,
       icon: Database,
     },
     {
-      label: "Approved overrides",
+      label: "승인 오버라이드",
       value: overrideCount,
       icon: FileJson,
     },
@@ -220,47 +221,47 @@ export default function InputPackagePage() {
 
   const uploadBusinessPlan = (runAfterUpload: boolean) =>
     runAction(runAfterUpload ? "business-run" : "business-upload", async () => {
-      if (!businessPlan) return "Select a business plan PDF first.";
+      if (!businessPlan) return "사업계획서 PDF를 먼저 선택하세요.";
       const body = (await postFile(runAfterUpload ? "upload-and-run" : "upload", businessPlan)) as UploadRunResponse;
       if (body.status === "host_llm_required") {
-        return "Uploaded and archived. Host LLM extraction is required before the PF review run.";
+        return "업로드·보관 완료. PF 심사 실행 전 호스트 LLM 추출이 필요합니다.";
       }
       if (body.run?.run_id) {
-        return `Uploaded, parsed, and started PF review run ${body.run.run_id}.`;
+        return `업로드·파싱 완료, PF 심사 실행 시작 (run ${body.run.run_id}).`;
       }
-      return "Business plan uploaded and parsed.";
+      return "사업계획서 업로드·파싱 완료.";
     });
 
   const uploadLandLedger = () =>
     runAction("land-ledger", async () => {
-      if (!landLedger) return "Select a land ledger workbook first.";
+      if (!landLedger) return "토지대장 워크북을 먼저 선택하세요.";
       const analyzed = await postFile("land-ledger/analyze", landLedger);
       await postJson("land-ledger/enrich", {
         landLedger: analyzed.landLedger,
         persist: true,
         persistEvidence: true,
       });
-      return "Land ledger analyzed, enriched, and persisted for the pilot package.";
+      return "토지대장 분석·보강·저장 완료.";
     });
 
   const uploadWorkbook = () =>
     runAction("workbook", async () => {
-      if (!workbook) return "Select a feasibility workbook first.";
+      if (!workbook) return "사업수지 워크북을 먼저 선택하세요.";
       const body = await postFile("feasibility-workbook/validate", workbook);
       const validation = body.validation as { status?: string } | undefined;
-      return `Feasibility workbook archived. Validation status: ${validation?.status ?? "unknown"}.`;
+      return `사업수지 워크북 보관 완료. 검증 상태: ${validation?.status ?? "알 수 없음"}.`;
     });
 
   const saveLandEvidence = () =>
     runAction("land-evidence", async () => {
       await postJson("land-evidence", parseJson(landEvidenceJson));
-      return "Land evidence records saved.";
+      return "토지 증빙 레코드 저장 완료.";
     });
 
   const saveOverride = () =>
     runAction("override", async () => {
       await postJson("assumption-overrides", parseJson(overrideJson));
-      return "Approved assumption override saved.";
+      return "승인된 가정 오버라이드 저장 완료.";
     });
 
   const runPfReview = () =>
@@ -271,7 +272,7 @@ export default function InputPackagePage() {
       });
       const run = body.run as { run_id?: string } | undefined;
       const runId = run?.run_id ?? (body.run_id as string | undefined);
-      return runId ? `PF review run completed: ${runId}.` : "PF review run completed.";
+      return runId ? `PF 심사 실행 완료: ${runId}.` : "PF 심사 실행 완료.";
     });
 
   return (
@@ -280,21 +281,23 @@ export default function InputPackagePage() {
         <Link
           href={`/project/${projectId}`}
           className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
-          aria-label="Back to project"
+          aria-label="프로젝트로 돌아가기"
         >
           <ArrowLeft className="h-4 w-4" />
         </Link>
         <div>
-          <p className="text-sm font-semibold text-slate-500">Project #{projectId}</p>
+          <p className="text-sm font-semibold text-slate-500">프로젝트 #{projectId}</p>
           <h2 className="mt-1 flex items-center gap-2 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
             <PackageCheck className="h-7 w-7 text-indigo-600" />
-            Real Project Input Package
+            자료 입력 (Input Package)
           </h2>
           <p className="mt-1 text-sm text-slate-500">
-            Bundle source documents, land evidence, feasibility workbook, and review overrides before running the pilot workflow.
+            가진 자료를 한 번에 올리면 AI 파서가 자동 분류·보관합니다. PF 심사 실행 전 사업계획서·토지대장·사업수지·토지증빙을 모읍니다.
           </p>
         </div>
       </div>
+
+      <SmartIntake projectId={projectId} />
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {packageSlots.map((slot) => {
@@ -323,11 +326,17 @@ export default function InputPackagePage() {
       {message ? <Notice tone="good" message={message} /> : null}
       {error ? <Notice tone="bad" message={error} /> : null}
 
+      <div className="flex items-center gap-3 pt-2">
+        <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">개별 업로드 (고급) · 유형이 분명할 때</p>
+        <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+      </div>
+
       <section className="grid gap-4 xl:grid-cols-2">
         <UploadCard
           icon={<FileText className="h-5 w-5" />}
-          title="1. Business plan / basic plan PDF"
-          description="Upload parser source material and optionally start a PF review run."
+          title="1. 사업계획서 / 기본계획 PDF"
+          description="파서 원본 자료를 업로드하고, 선택적으로 PF 심사 실행을 시작합니다."
           file={businessPlan}
           accept=".pdf"
           onFile={setBusinessPlan}
@@ -335,14 +344,14 @@ export default function InputPackagePage() {
           <div className="flex flex-col gap-2 sm:flex-row">
             <ActionButton
               icon={<Upload className="h-4 w-4" />}
-              label="Upload and parse"
+              label="업로드 및 파싱"
               busy={busyAction === "business-upload"}
               disabled={!businessPlan || busyAction !== null}
               onClick={() => void uploadBusinessPlan(false)}
             />
             <ActionButton
               icon={<GitBranch className="h-4 w-4" />}
-              label="Upload and run"
+              label="업로드 후 심사 실행"
               busy={busyAction === "business-run"}
               disabled={!businessPlan || busyAction !== null}
               primary
@@ -353,15 +362,15 @@ export default function InputPackagePage() {
 
         <UploadCard
           icon={<FileSpreadsheet className="h-5 w-5" />}
-          title="2. Land ledger workbook"
-          description="Parse parcels, owners, payment records, then persist enrichment-ready land data."
+          title="2. 토지대장 / 토지조서 워크북"
+          description="필지·소유자·지급 기록을 파싱하고 보강 가능한 토지 데이터로 저장합니다."
           file={landLedger}
           accept=".xls,.xlsx"
           onFile={setLandLedger}
         >
           <ActionButton
             icon={<Database className="h-4 w-4" />}
-            label="Analyze and persist"
+            label="분석 및 저장"
             busy={busyAction === "land-ledger"}
             disabled={!landLedger || busyAction !== null}
             primary
@@ -371,15 +380,15 @@ export default function InputPackagePage() {
 
         <UploadCard
           icon={<FileSpreadsheet className="h-5 w-5" />}
-          title="3. Feasibility workbook"
-          description="Archive and validate the formula-driven feasibility workbook before canonical import."
+          title="3. 사업수지 워크북"
+          description="수식 기반 사업수지 워크북을 보관·검증한 뒤 정식 임포트합니다."
           file={workbook}
           accept=".xlsx,.xlsm"
           onFile={setWorkbook}
         >
           <ActionButton
             icon={<FileArchive className="h-4 w-4" />}
-            label="Validate workbook"
+            label="워크북 검증"
             busy={busyAction === "workbook"}
             disabled={!workbook || busyAction !== null}
             primary
@@ -388,7 +397,7 @@ export default function InputPackagePage() {
         </UploadCard>
 
         <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-          <PanelHeader icon={<Database className="h-5 w-5" />} title="4. Land evidence JSON" />
+          <PanelHeader icon={<Database className="h-5 w-5" />} title="4. 토지 증빙 JSON" />
           <textarea
             value={landEvidenceJson}
             onChange={(event) => setLandEvidenceJson(event.target.value)}
@@ -398,7 +407,7 @@ export default function InputPackagePage() {
           <div className="mt-3">
             <ActionButton
               icon={<FileJson className="h-4 w-4" />}
-              label="Save evidence"
+              label="증빙 저장"
               busy={busyAction === "land-evidence"}
               disabled={busyAction !== null}
               primary
@@ -408,7 +417,7 @@ export default function InputPackagePage() {
         </section>
 
         <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 xl:col-span-2">
-          <PanelHeader icon={<FileJson className="h-5 w-5" />} title="5. Data quality override" />
+          <PanelHeader icon={<FileJson className="h-5 w-5" />} title="5. 데이터 품질 오버라이드" />
           <textarea
             value={overrideJson}
             onChange={(event) => setOverrideJson(event.target.value)}
@@ -418,14 +427,14 @@ export default function InputPackagePage() {
           <div className="mt-3 flex flex-col gap-2 sm:flex-row">
             <ActionButton
               icon={<FileJson className="h-4 w-4" />}
-              label="Save override"
+              label="오버라이드 저장"
               busy={busyAction === "override"}
               disabled={busyAction !== null}
               onClick={() => void saveOverride()}
             />
             <ActionButton
               icon={<GitBranch className="h-4 w-4" />}
-              label="Run PF review"
+              label="PF 심사 실행"
               busy={busyAction === "pf-review"}
               disabled={busyAction !== null}
               primary
@@ -438,25 +447,25 @@ export default function InputPackagePage() {
               className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
             >
               <RefreshCw className="h-4 w-4" />
-              Refresh
+              새로고침
             </button>
           </div>
         </section>
       </section>
 
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <PanelHeader icon={<FileArchive className="h-5 w-5" />} title="Archived package files" />
+        <PanelHeader icon={<FileArchive className="h-5 w-5" />} title="보관된 패키지 파일" />
         {documents.length ? (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-sm">
               <thead className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-800">
                 <tr>
-                  <th className="px-3 py-2">Type</th>
-                  <th className="px-3 py-2">File</th>
-                  <th className="px-3 py-2">Size</th>
-                  <th className="px-3 py-2">Validation</th>
-                  <th className="px-3 py-2">Integrity</th>
-                  <th className="px-3 py-2">Uploaded</th>
+                  <th className="px-3 py-2">유형</th>
+                  <th className="px-3 py-2">파일</th>
+                  <th className="px-3 py-2">크기</th>
+                  <th className="px-3 py-2">검증</th>
+                  <th className="px-3 py-2">무결성</th>
+                  <th className="px-3 py-2">업로드</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -475,7 +484,7 @@ export default function InputPackagePage() {
           </div>
         ) : (
           <p className="mt-4 rounded-lg bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-800/70">
-            No archived source documents yet.
+            아직 보관된 원본 문서가 없습니다.
           </p>
         )}
       </section>
@@ -512,7 +521,7 @@ function UploadCard({
           className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-4 file:py-2.5 file:text-sm file:font-semibold file:text-indigo-700 hover:file:bg-indigo-100 dark:file:bg-indigo-950/30 dark:file:text-indigo-300"
         />
       </label>
-      <div className="mt-2 min-h-5 text-xs font-semibold text-slate-500">{file ? file.name : "No file selected"}</div>
+      <div className="mt-2 min-h-5 text-xs font-semibold text-slate-500">{file ? file.name : "선택된 파일 없음"}</div>
       <div className="mt-4">{children}</div>
     </section>
   );

@@ -66,7 +66,7 @@ export default function MarketabilityPage() {
     try {
       const [mapRes, anaRes] = await Promise.all([
         fetch(`${apiBase}/projects/${projectId}/map?resolve_geometry=true`, { cache: "no-store", headers: authHeaders("web") }),
-        fetch(`${apiBase}/projects/${projectId}/marketability/analyze`, {
+        fetch(`${apiBase}/projects/${projectId}/marketability/analyze?live_comparables=true`, {
           method: "POST",
           cache: "no-store",
           headers: { ...authHeaders("web"), "Content-Type": "application/json" },

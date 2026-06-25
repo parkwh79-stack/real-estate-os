@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MlMap, MapLayerMouseEvent, Marker as MlMarker, StyleSpecification } from "maplibre-gl";
 
-type MaplibreModule = typeof import("maplibre-gl");
+type MaplibreApi = Pick<typeof import("maplibre-gl"), "Map" | "Marker" | "NavigationControl" | "Popup">;
 
 export type TxMarker = { lat: number; lng: number; label: string; sublabel?: string; tone?: "trade" | "rent" };
 
@@ -68,7 +68,7 @@ function baseStyle(vworldKey?: string): StyleSpecification {
 export function MapIntelligence({ data, transactions = [] }: { data: MapIntelligenceData; transactions?: TxMarker[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
-  const mlRef = useRef<MaplibreModule | null>(null);
+  const mlRef = useRef<MaplibreApi | null>(null);
   const markersRef = useRef<MlMarker[]>([]);
   const [parcelsVisible, setParcelsVisible] = useState(true);
   const [ready, setReady] = useState(false);
@@ -79,7 +79,11 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
     let cancelled = false;
     let map: MlMap | null = null;
     void (async () => {
-      const maplibregl = await import("maplibre-gl");
+      // maplibre-gl exposes its API on the CJS/UMD default export; fall back to
+      // the namespace for pure-ESM. (Using the namespace alone left .Map
+      // undefined at runtime → blank map.)
+      const mod = await import("maplibre-gl");
+      const maplibregl = ((mod as { default?: MaplibreApi }).default ?? mod) as MaplibreApi;
       mlRef.current = maplibregl;
       if (cancelled || !containerRef.current) return;
       const center: [number, number] = data.center ? [data.center.lng, data.center.lat] : KOREA_CENTER;

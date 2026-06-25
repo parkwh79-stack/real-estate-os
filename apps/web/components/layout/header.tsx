@@ -4,10 +4,10 @@ import {
   Bell,
   BookOpen,
   CircleHelp,
-  Search,
   ShieldCheck,
   UserCircle,
 } from "lucide-react";
+import { HeaderSearch } from "./header-search";
 
 const BLOG_URL = "https://blog.naver.com/babo7910/224295847211";
 
@@ -26,20 +26,13 @@ export function Header() {
               className="h-8 w-auto max-w-[120px] object-contain"
             />
           </Link>
-          <label className="flex h-10 w-full max-w-xl items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">
-            <Search className="h-4 w-4" />
-            <input
-              type="text"
-              placeholder="주소, PNU, 프로젝트 검색"
-              className="w-full bg-transparent text-slate-900 outline-none placeholder:text-slate-400 dark:text-white"
-            />
-          </label>
+          <HeaderSearch />
         </div>
 
         <div className="flex items-center gap-2">
           <div className="hidden items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 md:flex dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300">
             <ShieldCheck className="h-4 w-4" />
-            API mock ready
+            VWorld · 실거래가 연동
           </div>
           <a
             href={BLOG_URL}

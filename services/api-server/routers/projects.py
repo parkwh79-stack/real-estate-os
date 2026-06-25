@@ -78,6 +78,13 @@ from use_cases.portfolio_monitoring import build_portfolio_monitoring
 from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
 from integrations.vworld import build_pnu_geometry_resolver, vworld_configured
 from db.parcel_geometry_cache import build_parcel_geometry_cache, build_caching_resolver
+from integrations.market_data import MolitRtmsConnector
+from agents.document_classifier_agent import classify_document
+from use_cases.market_comparables import (
+    fetch_project_market_comparables,
+    inject_market_comparables,
+    recent_deal_yms,
+)
 from use_cases.developability_score import score_developability_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
@@ -838,6 +845,79 @@ async def upload_business_plan(
         raise HTTPException(status_code=404, detail="Project not found")
     return project
 
+async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, Any]:
+    """Sniff + classify one uploaded file, archive the original, return the plan."""
+    content = await file.read()
+    name = file.filename or "upload"
+    ctype = file.content_type
+    ext = os.path.splitext(name)[1].lower()
+    sheet_names = None
+    json_keys = None
+    if ext in (".xlsx", ".xlsm"):
+        try:
+            import io
+            import openpyxl  # type: ignore
+
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+            sheet_names = list(wb.sheetnames)
+            wb.close()
+        except Exception:
+            pass
+    elif ext == ".json":
+        try:
+            data = json.loads(content.decode("utf-8"))
+            if isinstance(data, dict):
+                json_keys = list(data.keys())
+        except Exception:
+            pass
+
+    classification = classify_document(
+        name, content_type=ctype, size=len(content), sheet_names=sheet_names, json_keys=json_keys
+    )
+    try:
+        archive = upload_archive_repository().archive_upload(project_id, content, name, ctype)
+        save_source_document_metadata_use_case(
+            source_document_repository(),
+            project_id,
+            {
+                **archive,
+                "originalFileName": name,
+                "fileName": name,
+                "documentType": classification["documentType"],
+                "documentLabel": classification["label"],
+                "classifierConfidence": classification["confidence"],
+                "uploadedVia": "smart_intake",
+            },
+        )
+        classification["archiveId"] = archive.get("archiveId")
+        classification["downloadUrl"] = archive.get("downloadUrl")
+        classification["archiveStored"] = True
+    except Exception as exc:  # storing must not break classification
+        classification["archiveStored"] = False
+        classification["archiveError"] = type(exc).__name__
+    return classification
+
+
+@router.post("/{project_id}/intake/classify")
+async def smart_intake_classify(project_id: str, files: list[UploadFile] = File(...)):
+    """스마트 업로드: 여러 자료를 한 번에 받아 파서 에이전트가 문서 유형을 자동
+    분류하고 원본을 보관한다(사업계획서/토지대장/사업수지/토지증빙/시장자료 등)."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    results = [await _classify_intake_file(project_id, f) for f in files]
+    by_type: Dict[str, int] = {}
+    for r in results:
+        by_type[r["documentType"]] = by_type.get(r["documentType"], 0) + 1
+    return {
+        "schemaVersion": "realytics-smart-intake-v1",
+        "projectId": project_id,
+        "count": len(results),
+        "byType": by_type,
+        "needsReviewCount": sum(1 for r in results if r.get("needsReview")),
+        "files": results,
+    }
+
+
 @router.post("/{project_id}/land-ledger/analyze")
 async def analyze_land_ledger_upload(
     project_id: str,
@@ -1389,10 +1469,26 @@ def run_project_scenarios_restructuring(project_id: str, input_data: Dict[str, A
     )
 
 @router.post("/{project_id}/marketability/analyze")
-def analyze_marketability(project_id: str, input_data: Dict[str, Any] | None = None):
+def analyze_marketability(
+    project_id: str,
+    input_data: Dict[str, Any] | None = None,
+    live_comparables: bool = False,
+):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    return analyze_marketability_use_case(PROJECTS_DB[project_id], input_data)
+    source = PROJECTS_DB[project_id]
+    if live_comparables and MolitRtmsConnector().configured():
+        import copy
+
+        source = copy.deepcopy(source)
+        try:
+            records, _diag = fetch_project_market_comparables(
+                source, connector=MolitRtmsConnector(), deal_yms=recent_deal_yms(3)
+            )
+            inject_market_comparables(source, records)
+        except Exception:
+            pass  # live data must never break the on-demand analysis
+    return analyze_marketability_use_case(source, input_data)
 
 @router.get("/{project_id}/source-documents")
 def list_project_source_documents(project_id: str):
