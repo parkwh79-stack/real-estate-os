@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 import { ArrowLeft, BarChart3, Loader2, RefreshCw } from "lucide-react";
 import { authHeaders } from "../../../../lib/auth-client";
 import { MapIntelligence, type MapIntelligenceData, type TxMarker } from "../../../../components/map/map-intelligence";
-import { TransactionsPanel, type TxRecord } from "../../../../components/map/transactions-panel";
+import { TransactionsPanel, type TxRecord, type ComplexRecord } from "../../../../components/map/transactions-panel";
 
 const apiBase = "http://127.0.0.1:8000";
 
@@ -55,6 +55,8 @@ export default function MarketabilityPage() {
   const [mapData, setMapData] = useState<MapIntelligenceData | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [txRecords, setTxRecords] = useState<TxRecord[]>([]);
+  const [complexes, setComplexes] = useState<ComplexRecord[]>([]);
+  const [viewMode, setViewMode] = useState<"complex" | "individual">("complex");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,7 +90,7 @@ export default function MarketabilityPage() {
   const firstPnu = parcels.find((p) => p.properties.pnu)?.properties.pnu;
   const lawdCd = firstPnu && firstPnu.length >= 5 ? firstPnu.slice(0, 5) : undefined;
 
-  const markers: TxMarker[] = useMemo(
+  const individualMarkers: TxMarker[] = useMemo(
     () =>
       txRecords
         .filter((r) => typeof r.lat === "number" && typeof r.lng === "number")
@@ -101,6 +103,22 @@ export default function MarketabilityPage() {
         })),
     [txRecords],
   );
+
+  const complexMarkers: TxMarker[] = useMemo(
+    () =>
+      complexes
+        .filter((c) => typeof c.lat === "number" && typeof c.lng === "number" && c.medianPricePerPy)
+        .map((c) => ({
+          lat: c.lat as number,
+          lng: c.lng as number,
+          tone: "trade" as const,
+          label: manPerPy(c.medianPricePerPy),
+          sublabel: `${c.complexName ?? ""} · ${c.tradeCount ?? 0}건`,
+        })),
+    [complexes],
+  );
+
+  const markers = viewMode === "complex" ? complexMarkers : individualMarkers;
 
   const avgPerPy = useMemo(() => {
     const prices = txRecords.filter((r) => r.dealKind === "trade" && r.pricePerPy).map((r) => r.pricePerPy as number);
@@ -150,6 +168,25 @@ export default function MarketabilityPage() {
 
       <section className="grid gap-4 xl:grid-cols-[1.55fr_0.85fr]">
         <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="inline-flex rounded-lg border border-slate-200 p-0.5 text-xs font-bold dark:border-slate-700">
+              {(["complex", "individual"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setViewMode(mode)}
+                  className={`rounded-md px-3 py-1.5 transition-colors ${
+                    viewMode === mode
+                      ? "bg-slate-900 text-white dark:bg-white dark:text-slate-950"
+                      : "text-slate-600 dark:text-slate-300"
+                  }`}
+                >
+                  {mode === "complex" ? `단지 (${complexMarkers.length})` : `개별 거래 (${individualMarkers.length})`}
+                </button>
+              ))}
+            </div>
+            <span className="text-[11px] text-slate-400">국토부 실거래가 · VWorld 좌표화</span>
+          </div>
           {loading && !mapData ? (
             <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-slate-200 text-sm text-slate-500 dark:border-slate-800">
               <Loader2 className="mr-2 h-5 w-5 animate-spin" /> 지도 로딩 중
@@ -159,14 +196,20 @@ export default function MarketabilityPage() {
           ) : null}
           {markers.length ? (
             <p className="text-xs text-slate-500">
-              지도 위 가격 핀은 국토부 실거래가를 VWorld로 좌표화한 것입니다 ({markers.length}건 표시).{" "}
-              <span className="text-rose-500">●</span> 매매 · <span className="text-sky-500">●</span> 전월세
+              {viewMode === "complex"
+                ? `단지별 중위 평단가 마커 (${complexMarkers.length}개 단지).`
+                : `개별 실거래 가격 핀 (${individualMarkers.length}건). `}
+              {viewMode === "individual" ? (
+                <>
+                  <span className="text-rose-500">●</span> 매매 · <span className="text-sky-500">●</span> 전월세
+                </>
+              ) : null}
             </p>
           ) : null}
         </div>
 
         <div className="space-y-4">
-          <TransactionsPanel lawdCd={lawdCd} geocode onRecords={setTxRecords} />
+          <TransactionsPanel lawdCd={lawdCd} geocode aggregate onRecords={setTxRecords} onComplexes={setComplexes} />
 
           {analysis ? (
             <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">

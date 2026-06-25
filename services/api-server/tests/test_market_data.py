@@ -6,6 +6,7 @@ from main import app
 from integrations.market_data import (
     MolitRtmsConnector,
     ValuemapConnector,
+    aggregate_by_complex,
     attach_coordinates,
     geocode_query_for,
     lawd_cd_from_pnu,
@@ -138,6 +139,29 @@ def test_attach_coordinates_skips_when_no_query_and_on_none():
     located = attach_coordinates(records, lambda a: None, limit=30)
     assert located == 0
     assert "lat" not in records[1]
+
+
+def test_aggregate_by_complex_medians_and_centroid():
+    records = [
+        {"buildingName": "래미안", "umdNm": "서초동", "dealKind": "trade", "pricePerPy": 6000, "transactionDate": "2026-03", "lat": 37.50, "lng": 127.02},
+        {"buildingName": "래미안", "umdNm": "서초동", "dealKind": "trade", "pricePerPy": 8000, "transactionDate": "2026-05", "lat": 37.52, "lng": 127.04},
+        {"buildingName": "래미안", "umdNm": "서초동", "dealKind": "rent", "depositKRW": 700000000, "transactionDate": "2026-04"},
+        {"buildingName": "방배자이", "umdNm": "방배동", "dealKind": "trade", "pricePerPy": 5000, "transactionDate": "2026-02", "lat": 37.48, "lng": 127.00},
+    ]
+    complexes = aggregate_by_complex(records)
+    assert [c["complexName"] for c in complexes] == ["래미안", "방배자이"]  # sorted by tradeCount desc
+    ramian = complexes[0]
+    assert ramian["count"] == 3 and ramian["tradeCount"] == 2
+    assert ramian["medianPricePerPy"] == 7000  # median(6000, 8000)
+    assert ramian["minPricePerPy"] == 6000 and ramian["maxPricePerPy"] == 8000
+    assert ramian["latestDealDate"] == "2026-05"
+    # centroid of the two geocoded members
+    assert round(ramian["lat"], 2) == 37.51 and round(ramian["lng"], 2) == 127.03
+
+
+def test_aggregate_handles_no_trades():
+    complexes = aggregate_by_complex([{"buildingName": "X", "umdNm": "동", "dealKind": "rent", "depositKRW": 1}])
+    assert complexes[0]["medianPricePerPy"] is None and complexes[0]["tradeCount"] == 0
 
 
 def test_lawd_cd_from_pnu():

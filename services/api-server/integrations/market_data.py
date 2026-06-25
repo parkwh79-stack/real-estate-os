@@ -17,6 +17,7 @@ diagnostic. Mock data is always explicitly labelled as such (source=*_mock).
 """
 
 import os
+import statistics
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -308,6 +309,48 @@ def market_data_status(environ: Optional[Dict[str, str]] = None) -> Dict[str, An
         "valuemap": {"configured": ValuemapConnector(environ).configured(), "source": "밸류맵 제휴 API"},
         "supportedAssetTypes": sorted({asset for asset, _ in RTMS_ENDPOINTS}),
     }
+
+
+def aggregate_by_complex(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Group transactions into 단지(complex) summaries (Naver-style markers).
+
+    Groups by 단지명(buildingName)+읍면동, computes median/min/max 평단가 from
+    trade records, a representative coordinate (centroid of geocoded members),
+    and the latest deal date. Sorted by trade count desc."""
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    for record in records:
+        name = record.get("buildingName") or record.get("umdNm") or "기타"
+        groups.setdefault((name, record.get("umdNm")), []).append(record)
+
+    complexes: List[Dict[str, Any]] = []
+    for (name, umd), recs in groups.items():
+        trade_prices = sorted(r["pricePerPy"] for r in recs if r.get("dealKind") == "trade" and r.get("pricePerPy"))
+        coords = [(r["lng"], r["lat"]) for r in recs if _is_num(r.get("lat")) and _is_num(r.get("lng"))]
+        center = None
+        if coords:
+            center = {
+                "lng": sum(c[0] for c in coords) / len(coords),
+                "lat": sum(c[1] for c in coords) / len(coords),
+            }
+        latest = max((r.get("transactionDate") or "" for r in recs), default="")
+        complexes.append({
+            "complexName": name,
+            "umdNm": umd,
+            "count": len(recs),
+            "tradeCount": len(trade_prices),
+            "medianPricePerPy": round(statistics.median(trade_prices)) if trade_prices else None,
+            "minPricePerPy": trade_prices[0] if trade_prices else None,
+            "maxPricePerPy": trade_prices[-1] if trade_prices else None,
+            "latestDealDate": latest or None,
+            "lat": center["lat"] if center else None,
+            "lng": center["lng"] if center else None,
+        })
+    complexes.sort(key=lambda c: (c["tradeCount"] or 0, c["count"]), reverse=True)
+    return complexes
+
+
+def _is_num(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def summarize_transactions(records: List[Dict[str, Any]]) -> Dict[str, Any]:

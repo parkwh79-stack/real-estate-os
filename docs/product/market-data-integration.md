@@ -66,6 +66,12 @@ The map-centric, high-visibility page the deck's Marketability Agent points at:
 pins; `market_data.attach_coordinates` geocodes top-N records with a per-call
 address cache. Reachable from the project home ("시장성 분석").
 
+**단지(complex) view (default):** `market_data.aggregate_by_complex` groups
+transactions by 단지명+읍면동 into per-complex 중위/최소/최대 평단가, a centroid
+coordinate, and the latest deal month. `/api/market/transactions?aggregate=true`
+returns `complexes`; the page toggles 개별/단지 (Naver-style complex markers —
+"중위 X만/평 · 단지명·N건") to cut visual noise from many individual pins.
+
 ## Keys (gitignored)
 
 - `DATA_GO_KR_API_KEY` (or `MOLIT_API_KEY`) — 국토부 실거래가. Separate from the

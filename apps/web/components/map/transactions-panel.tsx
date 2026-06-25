@@ -20,9 +20,22 @@ export type TxRecord = {
   lat?: number;
   lng?: number;
 };
+export type ComplexRecord = {
+  complexName?: string;
+  umdNm?: string;
+  count?: number;
+  tradeCount?: number;
+  medianPricePerPy?: number;
+  minPricePerPy?: number;
+  maxPricePerPy?: number;
+  latestDealDate?: string;
+  lat?: number;
+  lng?: number;
+};
 type TxResponse = {
   summary?: { totalCount?: number; tradeCount?: number; rentCount?: number; avgPricePerPy?: number };
   records?: TxRecord[];
+  complexes?: ComplexRecord[];
   diagnostic?: { status?: string; message?: string };
 };
 
@@ -55,11 +68,15 @@ function defaultDealYm(): string {
 export function TransactionsPanel({
   lawdCd,
   geocode = false,
+  aggregate = false,
   onRecords,
+  onComplexes,
 }: {
   lawdCd?: string;
   geocode?: boolean;
+  aggregate?: boolean;
   onRecords?: (records: TxRecord[]) => void;
+  onComplexes?: (complexes: ComplexRecord[]) => void;
 }) {
   const [manualLawd, setManualLawd] = useState("");
   const [assetType, setAssetType] = useState("apartment");
@@ -71,6 +88,8 @@ export function TransactionsPanel({
 
   const onRecordsRef = useRef(onRecords);
   onRecordsRef.current = onRecords;
+  const onComplexesRef = useRef(onComplexes);
+  onComplexesRef.current = onComplexes;
 
   const effectiveLawd = useMemo(() => lawdCd || manualLawd.trim(), [lawdCd, manualLawd]);
 
@@ -87,17 +106,19 @@ export function TransactionsPanel({
         params.geocode = "true";
         params.geocode_limit = "30";
       }
+      if (aggregate) params.aggregate = "true";
       const res = await fetch(`${apiBase}/api/market/transactions?${new URLSearchParams(params)}`, { cache: "no-store", headers: authHeaders("web") });
       if (!res.ok) throw new Error(`실거래가 조회 실패 (${res.status})`);
       const json = (await res.json()) as TxResponse;
       setData(json);
       onRecordsRef.current?.(json.records ?? []);
+      onComplexesRef.current?.(json.complexes ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "실거래가를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
-  }, [effectiveLawd, dealYm, assetType, dealKind, geocode]);
+  }, [effectiveLawd, dealYm, assetType, dealKind, geocode, aggregate]);
 
   useEffect(() => {
     if (effectiveLawd) void load();

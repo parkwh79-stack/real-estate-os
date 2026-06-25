@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 from integrations.market_data import (
     MolitRtmsConnector,
     ValuemapConnector,
+    aggregate_by_complex,
     attach_coordinates,
     market_data_status,
     summarize_transactions,
@@ -29,6 +30,7 @@ def get_market_transactions(
     num_rows: int = Query(200, ge=1, le=1000),
     geocode: bool = Query(False, description="VWorld로 상위 N건 좌표화(지도 마커용)"),
     geocode_limit: int = Query(30, ge=1, le=60),
+    aggregate: bool = Query(False, description="단지(complex)별 시세 집계 포함"),
 ):
     """국토부 실거래가(MOLIT RTMS) — actual closed transactions for the given
     법정동/월. Public data; each record carries its source for provenance.
@@ -43,13 +45,16 @@ def get_market_transactions(
     geocoded = 0
     if geocode and records and vworld_configured():
         geocoded = attach_coordinates(records, build_geocoder(), limit=geocode_limit)
-    return {
+    response = {
         "schemaVersion": "realytics-market-transactions-v1",
         "query": {"lawdCd": lawd_cd, "dealYm": deal_ym, "assetType": asset_type, "dealKind": deal_kind},
         "summary": {**summarize_transactions(records), "geocodedCount": geocoded},
         "records": records,
         "diagnostic": diagnostic,
     }
+    if aggregate:
+        response["complexes"] = aggregate_by_complex(records)
+    return response
 
 
 @router.get("/comparables")
