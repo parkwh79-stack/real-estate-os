@@ -159,7 +159,9 @@ export function TransactionsPanel({ lawdCd }: { lawdCd?: string }) {
         <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
           {diag.status === "skipped"
             ? "data.go.kr 실거래가 키(DATA_GO_KR_API_KEY)를 설정하면 실제 거래내역이 표시됩니다."
-            : diag.message ?? "표시할 거래가 없습니다."}
+            : diag.status === "forbidden"
+              ? `${diag.message} (다른 자산유형/거래는 매매부터 시도해 보세요.)`
+              : diag.message ?? "표시할 거래가 없습니다."}
         </p>
       ) : null}
 

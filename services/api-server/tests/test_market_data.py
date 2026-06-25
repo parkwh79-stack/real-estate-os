@@ -87,6 +87,18 @@ def test_connector_uses_injected_http_and_key():
     assert "LAWD_CD=11650" in captured["url"] and "DEAL_YMD=202603" in captured["url"]
 
 
+def test_forbidden_when_api_not_subscribed():
+    import urllib.error
+
+    def forbidden_http(url):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    connector = MolitRtmsConnector(environ={"DATA_GO_KR_API_KEY": "K"}, http_get=forbidden_http)
+    records, diag = connector.fetch(lawd_cd="11650", deal_ym="202605", asset_type="officetel", deal_kind="trade")
+    assert records == [] and diag["status"] == "forbidden" and diag["httpStatus"] == 403
+    assert "활용신청" in diag["message"]
+
+
 def test_unsupported_asset_combo():
     connector = MolitRtmsConnector(environ={"DATA_GO_KR_API_KEY": "K"})
     _, diag = connector.fetch(lawd_cd="11650", deal_ym="202603", asset_type="land", deal_kind="rent")

@@ -53,8 +53,18 @@ configured it shows a clear "키 설정 시 실데이터" notice.
 ## Keys (gitignored)
 
 - `DATA_GO_KR_API_KEY` (or `MOLIT_API_KEY`) — 국토부 실거래가. Separate from the
-  VWorld key. Set in `services/api-server/.env`.
+  VWorld key. Set in `services/api-server/.env`. **Use the DECODING (raw) key** —
+  the connector URL-encodes it once via `urlencode`; passing the pre-encoded form
+  double-encodes and fails auth.
 - `VALUEMAP_API_URL` + `VALUEMAP_API_KEY` — 밸류맵 제휴 API (pending spec).
+
+### data.go.kr per-API subscription (활용신청)
+
+Each RTMS service is authorized separately. A key approved for 아파트 매매 returns
+**403** for 아파트 전월세 / 오피스텔 / etc. until you 활용신청 those specific APIs on
+data.go.kr. The connector surfaces this as a `forbidden` diagnostic with an
+actionable Korean message — it is a portal subscription matter, not a code bug.
+Verified live 2026-06-24: 서초구(11650) 아파트 매매 returns real transactions.
 
 ## Next
 

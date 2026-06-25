@@ -17,6 +17,7 @@ diagnostic. Mock data is always explicitly labelled as such (source=*_mock).
 """
 
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -200,6 +201,15 @@ class MolitRtmsConnector:
         url = f"{endpoint}?{urllib.parse.urlencode(params)}"
         try:
             body = self.http_get(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                return [], _diag(
+                    self.source,
+                    "forbidden",
+                    f"해당 실거래가 API 미신청/권한 없음 — data.go.kr에서 '{asset_type}/{deal_kind}' 활용신청이 필요합니다.",
+                    httpStatus=403,
+                )
+            return [], _diag(self.source, "error", f"실거래가 요청 실패: HTTP {exc.code}", httpStatus=exc.code)
         except Exception as exc:  # network/timeout — degrade
             return [], _diag(self.source, "error", f"실거래가 요청 실패: {type(exc).__name__}")
         records = parse_rtms_items(body, asset_type=asset_type, deal_kind=deal_kind, lawd_cd=lawd_cd)
