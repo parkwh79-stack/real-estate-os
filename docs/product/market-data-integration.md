@@ -101,6 +101,15 @@ which flows into Credit Review and the Phase 11 report.
 - Verified live: a 서초구 PNU project pulled 40 실거래가 → all 40 normalized as
   `public_api` comparables (`hasTransactionComparable=true`).
 
+### Surfaced in the lender output (provenance)
+
+The Marketability analysis now carries `comparableProvenance`
+(count / publicApiCount / partnerApiCount / manualCount / hasLiveTransaction /
+sourceLabel), and the IC Memo's `marketabilityAssessment.pricing` block +
+markdown §핵심지표 cite it: e.g. "분양가 적정성: 제안 평당 7,000만 vs 비교 중위
+6,200만 (+12.9%) → 고평가 (국토부 실거래가 40건)". So a credit officer sees the
+pricing judgement *and* that it was made against actual closed transactions.
+
 ## Next
 
 - Wire `transactionComparables` / `listing_comparables` into the PF-run project

@@ -94,6 +94,35 @@ def test_ic_memo_carries_recommendation_and_metrics():
     _assert_clean_korean_markdown(memo["markdown"])
 
 
+def test_ic_memo_surfaces_pricing_against_live_comparables():
+    artifacts = _artifacts()
+    artifacts["marketabilityAnalysis"] = {
+        "grade": "B",
+        "score": 78,
+        "pricing": {
+            "judgement": "high",
+            "proposedPricePerPy": 70_000_000,
+            "comparableMedianPricePerPy": 62_000_000,
+            "premiumToMedian": 0.129,
+        },
+        "comparableProvenance": {
+            "count": 40,
+            "publicApiCount": 40,
+            "hasLiveTransaction": True,
+            "sourceLabel": "국토부 실거래가",
+        },
+    }
+    memo = CreditDocumentAgent().build_ic_memo(_project_data(), artifacts)
+    pricing = memo["marketabilityAssessment"]["pricing"]
+    assert pricing["judgementLabel"] == "고평가"
+    assert pricing["comparableCount"] == 40 and pricing["hasLiveTransaction"] is True
+    assert "국토부 실거래가 40건" in pricing["line"]
+    # the lender-facing markdown cites the live-comparable pricing
+    assert "분양가 적정성" in memo["markdown"]
+    assert "국토부 실거래가 40건" in memo["markdown"]
+    _assert_clean_korean_markdown(memo["markdown"])
+
+
 def test_documents_are_resilient_to_missing_artifacts():
     ts = CreditDocumentAgent().build_term_sheet({}, {})
     memo = CreditDocumentAgent().build_ic_memo({}, {})

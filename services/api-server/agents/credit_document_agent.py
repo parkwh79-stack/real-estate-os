@@ -42,6 +42,57 @@ def _x_str(value: Any) -> str:
     return f"{n:.2f}x" if n is not None else "—"
 
 
+_PRICING_JUDGEMENT_KO = {
+    "underpriced": "저평가(보수적)",
+    "reasonable": "적정",
+    "slightly_high": "다소 높음",
+    "high": "고평가",
+    "excessive": "과도(고평가)",
+    "needs_comparable_data": "비교사례 부족",
+    "needs_proposed_price_basis": "제안가 미산정",
+}
+
+
+def _man(value: Any) -> Optional[int]:
+    """원 → 만원(반올림)."""
+    n = _num(value)
+    return round(n / 10_000) if n else None
+
+
+def _pricing_assessment(marketability: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """분양가 적정성 — 제안 평당 vs 비교 중위, 판정, 그리고 그 근거(국토부 실거래가 N건 등).
+
+    Surfaces the live-comparable evidence in the lender-facing IC Memo so the
+    credit officer can see the pricing was judged against actual transactions."""
+    pricing = marketability.get("pricing") or {}
+    if not pricing:
+        return None
+    provenance = marketability.get("comparableProvenance") or {}
+    judgement = pricing.get("judgement")
+    proposed = pricing.get("proposedPricePerPy")
+    median = pricing.get("comparableMedianPricePerPy")
+    premium = pricing.get("premiumToMedian")
+    source_label = provenance.get("sourceLabel")
+    count = provenance.get("count") or 0
+    line = None
+    if _num(proposed) and _num(median):
+        premium_text = f" ({premium:+.1%})" if isinstance(premium, (int, float)) else ""
+        source_text = f" · {source_label} {count}건" if source_label and count else ""
+        line = f"제안 평당 {_man(proposed):,}만 vs 비교 중위 {_man(median):,}만{premium_text} → {_PRICING_JUDGEMENT_KO.get(judgement, judgement)}{source_text}"
+    return {
+        "judgement": judgement,
+        "judgementLabel": _PRICING_JUDGEMENT_KO.get(judgement, judgement),
+        "proposedPricePerPy": proposed,
+        "comparableMedianPerPy": median,
+        "premiumToMedian": premium,
+        "comparableCount": count,
+        "publicApiCount": provenance.get("publicApiCount"),
+        "sourceLabel": source_label,
+        "hasLiveTransaction": provenance.get("hasLiveTransaction"),
+        "line": line,
+    }
+
+
 class CreditDocumentAgent:
     """Synthesise lender-facing credit documents from a PF review run.
 
@@ -175,6 +226,7 @@ class CreditDocumentAgent:
                 "grade": marketability.get("grade"),
                 "score": marketability.get("score"),
                 "comment": (marketability.get("reportParagraphs") or {}).get("recommendation") if isinstance(marketability.get("reportParagraphs"), dict) else None,
+                "pricing": _pricing_assessment(marketability),
             },
             "legalStatus": status_ko(legal.get("status")) if legal.get("status") else None,
             "developability": {
@@ -235,6 +287,9 @@ class CreditDocumentAgent:
         lines.append(f"- Project IRR {_pct_str(km.get('projectIrr'))} · Equity IRR {_pct_str(km.get('equityIrr'))} · Equity Multiple {_x_str(km.get('equityMultiple'))} · ICR {_x_str(km.get('icr'))}")
         lines.append(f"- LTV {_pct_str(km.get('ltv'))} · LTC {_pct_str(km.get('ltc'))} · Exit 분양률 {_pct_str(km.get('exitSaleRate'))}")
         lines.append(f"- 개발가능성 {km.get('developabilityGrade') or '—'}등급({km.get('developabilityScore') if km.get('developabilityScore') is not None else '—'}점) · 시장성 {km.get('marketabilityGrade') or '—'}등급")
+        _pricing = (memo.get("marketabilityAssessment") or {}).get("pricing") or {}
+        if _pricing.get("line"):
+            lines.append(f"- 분양가 적정성: {_pricing['line']}")
         lines.append("")
         lines.append("## 4. 스트레스 테스트")
         if memo["stressSummary"]["scenarios"]:

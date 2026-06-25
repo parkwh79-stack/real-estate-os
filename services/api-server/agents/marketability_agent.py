@@ -195,6 +195,7 @@ class MarketabilityAgent:
             "comparables": comparables,
             "normalizedComparables": normalized_comparables,
             "comparableSummary": _comparable_summary(normalized_comparables),
+            "comparableProvenance": _comparable_provenance(normalized_comparables),
         }
 
     def _classify_product_type(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1145,6 +1146,22 @@ def _weighted_average_price(product_mix: List[Dict[str, Any]]) -> float:
         return total / total_area
     total_revenue = sum(item.get("totalRevenue") or 0 for item in product_mix)
     return total_revenue / total_area if total_revenue else 0
+
+
+def _comparable_provenance(normalized_comparables: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Provenance of the comparables used for pricing — so the lender-facing
+    output can cite how many came from 국토부 실거래가 vs partner/manual sources."""
+    public_api = sum(1 for c in normalized_comparables if c.get("sourceType") == "public_api")
+    partner_api = sum(1 for c in normalized_comparables if c.get("sourceType") == "partner_api")
+    manual = sum(1 for c in normalized_comparables if c.get("sourceType") == "manual_upload")
+    return {
+        "count": len(normalized_comparables),
+        "publicApiCount": public_api,
+        "partnerApiCount": partner_api,
+        "manualCount": manual,
+        "hasLiveTransaction": public_api > 0,
+        "sourceLabel": "국토부 실거래가" if public_api else ("밸류맵 제휴" if partner_api else "수동 입력"),
+    }
 
 
 def _pricing_judgement(premium: Optional[float]) -> str:
