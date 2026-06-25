@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MlMap, MapLayerMouseEvent, Marker as MlMarker, StyleSpecification } from "maplibre-gl";
-
-type MaplibreApi = Pick<typeof import("maplibre-gl"), "Map" | "Marker" | "NavigationControl" | "Popup">;
 
 export type TxMarker = { lat: number; lng: number; label: string; sublabel?: string; tone?: "trade" | "rent" };
 
@@ -68,25 +67,18 @@ function baseStyle(vworldKey?: string): StyleSpecification {
 export function MapIntelligence({ data, transactions = [] }: { data: MapIntelligenceData; transactions?: TxMarker[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
-  const mlRef = useRef<MaplibreApi | null>(null);
   const markersRef = useRef<MlMarker[]>([]);
   const [parcelsVisible, setParcelsVisible] = useState(true);
   const [cadastralVisible, setCadastralVisible] = useState(false);
   const [ready, setReady] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
   const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
 
   // Init map once.
   useEffect(() => {
-    let cancelled = false;
     let map: MlMap | null = null;
-    void (async () => {
-      // maplibre-gl exposes its API on the CJS/UMD default export; fall back to
-      // the namespace for pure-ESM. (Using the namespace alone left .Map
-      // undefined at runtime → blank map.)
-      const mod = await import("maplibre-gl");
-      const maplibregl = ((mod as { default?: MaplibreApi }).default ?? mod) as MaplibreApi;
-      mlRef.current = maplibregl;
-      if (cancelled || !containerRef.current) return;
+    if (typeof window === "undefined" || !containerRef.current) return;
+    try {
       const center: [number, number] = data.center ? [data.center.lng, data.center.lat] : KOREA_CENTER;
       map = new maplibregl.Map({
         container: containerRef.current,
@@ -96,6 +88,10 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         attributionControl: { compact: true },
       });
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      map.on("error", (e: unknown) => {
+        const msg = (e as { error?: { message?: string } })?.error?.message;
+        if (msg) console.warn("[map]", msg); // tile errors shouldn't blank the map
+      });
       map.on("load", () => {
         if (!map) return;
         // VWorld WMS 편집지적도(lt_c_landinfobasemap) overlay — toggled off by
@@ -163,9 +159,10 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         setReady(true);
       });
       mapRef.current = map;
-    })();
+    } catch (err) {
+      setMapError(err instanceof Error ? err.message : "지도를 초기화하지 못했습니다.");
+    }
     return () => {
-      cancelled = true;
       map?.remove();
       mapRef.current = null;
     };
@@ -192,8 +189,7 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
   // Transaction price markers (Naver-style pills) — rebuilt when data changes.
   useEffect(() => {
     const map = mapRef.current;
-    const maplibregl = mlRef.current;
-    if (!map || !maplibregl || !ready) return;
+    if (!map || !ready) return;
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
     const pts = transactions.filter((t) => Number.isFinite(t.lat) && Number.isFinite(t.lng));
@@ -222,6 +218,11 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
     <div className="grid gap-4 lg:grid-cols-[1.6fr_0.7fr]">
       <div className="relative min-h-[520px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
         <div ref={containerRef} className="absolute inset-0" />
+        {mapError ? (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-rose-50/95 p-4 text-center text-sm font-semibold text-rose-700 dark:bg-rose-950/80 dark:text-rose-200">
+            지도 초기화 오류: {mapError}
+          </div>
+        ) : null}
         {!vworldKey ? (
           <div className="absolute left-3 top-3 z-10 rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
             OSM 베이스맵 · VWorld 키 설정 시 지적·공시지가 레이어 활성
