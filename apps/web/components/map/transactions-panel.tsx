@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, TrendingUp } from "lucide-react";
 import { authHeaders } from "../../lib/auth-client";
 
 const apiBase = "http://127.0.0.1:8000";
 
-type TxRecord = {
+export type TxRecord = {
   address?: string;
   dealType?: string;
+  dealKind?: string;
   areaSqm?: number;
   totalPrice?: number;
   pricePerPy?: number;
@@ -16,6 +17,8 @@ type TxRecord = {
   monthlyRentKRW?: number;
   transactionDate?: string;
   floor?: number;
+  lat?: number;
+  lng?: number;
 };
 type TxResponse = {
   summary?: { totalCount?: number; tradeCount?: number; rentCount?: number; avgPricePerPy?: number };
@@ -47,8 +50,17 @@ function defaultDealYm(): string {
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-/** 주변 실거래가 (국토부 RTMS public API). lawdCd derives from a parcel PNU. */
-export function TransactionsPanel({ lawdCd }: { lawdCd?: string }) {
+/** 주변 실거래가 (국토부 RTMS public API). lawdCd derives from a parcel PNU.
+ *  With `geocode`, records carry lat/lng; `onRecords` surfaces them (e.g. for map pins). */
+export function TransactionsPanel({
+  lawdCd,
+  geocode = false,
+  onRecords,
+}: {
+  lawdCd?: string;
+  geocode?: boolean;
+  onRecords?: (records: TxRecord[]) => void;
+}) {
   const [manualLawd, setManualLawd] = useState("");
   const [assetType, setAssetType] = useState("apartment");
   const [dealKind, setDealKind] = useState<"trade" | "rent">("trade");
@@ -56,6 +68,9 @@ export function TransactionsPanel({ lawdCd }: { lawdCd?: string }) {
   const [data, setData] = useState<TxResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const onRecordsRef = useRef(onRecords);
+  onRecordsRef.current = onRecords;
 
   const effectiveLawd = useMemo(() => lawdCd || manualLawd.trim(), [lawdCd, manualLawd]);
 
@@ -67,16 +82,22 @@ export function TransactionsPanel({ lawdCd }: { lawdCd?: string }) {
     setLoading(true);
     setError(null);
     try {
-      const qs = new URLSearchParams({ lawd_cd: effectiveLawd, deal_ym: dealYm, asset_type: assetType, deal_kind: dealKind });
-      const res = await fetch(`${apiBase}/api/market/transactions?${qs}`, { cache: "no-store", headers: authHeaders("web") });
+      const params: Record<string, string> = { lawd_cd: effectiveLawd, deal_ym: dealYm, asset_type: assetType, deal_kind: dealKind };
+      if (geocode) {
+        params.geocode = "true";
+        params.geocode_limit = "30";
+      }
+      const res = await fetch(`${apiBase}/api/market/transactions?${new URLSearchParams(params)}`, { cache: "no-store", headers: authHeaders("web") });
       if (!res.ok) throw new Error(`실거래가 조회 실패 (${res.status})`);
-      setData((await res.json()) as TxResponse);
+      const json = (await res.json()) as TxResponse;
+      setData(json);
+      onRecordsRef.current?.(json.records ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "실거래가를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
-  }, [effectiveLawd, dealYm, assetType, dealKind]);
+  }, [effectiveLawd, dealYm, assetType, dealKind, geocode]);
 
   useEffect(() => {
     if (effectiveLawd) void load();

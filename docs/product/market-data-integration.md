@@ -45,10 +45,26 @@ agent's existing pricing/absorption logic consumes them directly.
 
 ## Frontend
 
-`components/map/transactions-panel.tsx` on the project map page (`/project/[id]/map`)
-shows 주변 실거래가: asset/deal/month selectors, summary (건수·평균 평단가), and a
+`components/map/transactions-panel.tsx` (used on the map and 시장성 pages) shows
+주변 실거래가: asset/deal/month selectors, summary (건수·평균 평단가), and a
 transaction table. `lawd_cd` is derived from the first parcel's PNU; when no key is
-configured it shows a clear "키 설정 시 실데이터" notice.
+configured it shows a clear "키 설정 시 실데이터" notice. With `geocode`, it requests
+coordinates and surfaces records via `onRecords` (for map pins).
+
+### 시장성 (Marketability) page — `/project/[id]/marketability`
+
+The map-centric, high-visibility page the deck's Marketability Agent points at:
+- Top KPI strip: 시장성 등급(A–E) · 종합점수 · 제안가 적정성 · 주변 평균 평단가 · Exit 분양률.
+- Left: MapLibre map with the parcel boundary **and 국토부 실거래가 가격 마커**
+  (Naver-style price pills — 매매 red, 전월세 blue), geocoded via VWorld
+  (`/api/market/transactions?geocode=true`). When the parcel has no geometry the
+  view fits to the transaction markers.
+- Right: 실거래가 panel + AI 시장성 의견 (요약 · 가격 코멘트 · 권고 · 데이터 한계),
+  from `POST /projects/{id}/marketability/analyze`.
+
+`integrations/vworld.py` `geocode_address` (주소→좌표, best-effort) powers the
+pins; `market_data.attach_coordinates` geocodes top-N records with a per-call
+address cache. Reachable from the project home ("시장성 분석").
 
 ## Keys (gitignored)
 

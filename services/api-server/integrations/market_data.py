@@ -117,6 +117,9 @@ def parse_rtms_items(xml_text: str, *, asset_type: str, deal_kind: str, lawd_cd:
         umd = pick("umdNm")
         jibun = pick("jibun")
         building = pick("aptNm", "offiNm", "mhouseNm", "bldgNm")
+        sgg = pick("estateAgentSggNm")  # 시군구명 (중개사 소재; 통상 물건과 동일 구)
+        if sgg and " " in sgg:  # e.g. "서울 서초구" → 서초구
+            sgg = sgg.split()[-1]
         address = " ".join(part for part in [umd, jibun, building] if part) or umd
 
         record: Dict[str, Any] = {
@@ -130,6 +133,7 @@ def parse_rtms_items(xml_text: str, *, asset_type: str, deal_kind: str, lawd_cd:
             "lawdCd": lawd_cd,
             "umdNm": umd,
             "jibun": jibun,
+            "sggNm": sgg,
             "buildingName": building,
             "address": address,
             "areaSqm": area_sqm,
@@ -254,6 +258,39 @@ class ValuemapConnector:
         # Mapping the partner payload is intentionally deferred to the live spec;
         # never fabricate listings from an unknown response shape.
         return [], _diag(self.source, "spec_pending", "밸류맵 응답 매핑은 제휴 스펙 확정 후 연결됩니다.")
+
+
+def geocode_query_for(record: Dict[str, Any]) -> Optional[str]:
+    """Build a geocodable 지번 address from an RTMS record (시군구 읍면동 지번)."""
+    parts = [record.get("sggNm"), record.get("umdNm"), record.get("jibun")]
+    query = " ".join(p for p in parts if p)
+    return query or None
+
+
+def attach_coordinates(records: List[Dict[str, Any]], geocoder: Callable[[str], Optional[Dict[str, float]]], *, limit: int = 30) -> int:
+    """Geocode up to `limit` records in place (sets lat/lng). Returns count located.
+
+    `geocoder(address)->{lng,lat}|None` is injected (e.g. VWorld) so this is
+    testable offline. Duplicate addresses are geocoded once (cached per call).
+    """
+    cache: Dict[str, Optional[Dict[str, float]]] = {}
+    located = 0
+    attempted = 0
+    for record in records:
+        if attempted >= limit:
+            break
+        query = geocode_query_for(record)
+        if not query:
+            continue
+        attempted += 1
+        if query not in cache:
+            cache[query] = geocoder(query)
+        point = cache[query]
+        if point and "lng" in point and "lat" in point:
+            record["lng"] = point["lng"]
+            record["lat"] = point["lat"]
+            located += 1
+    return located
 
 
 def lawd_cd_from_pnu(pnu: Optional[str]) -> Optional[str]:

@@ -7,6 +7,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 VWORLD_DATA_URL = "https://api.vworld.kr/req/data"
+VWORLD_ADDRESS_URL = "https://api.vworld.kr/req/address"
 # Continuous cadastral map (연속지적도) — parcel boundary polygons keyed by PNU.
 CADASTRAL_LAYER = "LP_PA_CBND_BUBUN"
 
@@ -85,6 +86,63 @@ def fetch_parcel_geometry_by_pnu(
     if geometry is None:
         return None, _diag(pnu, "not_found", "no geometry in VWorld feature")
     return geometry, _diag(pnu, "resolved", "VWorld cadastral boundary")
+
+
+def geocode_address(
+    address: str,
+    *,
+    environ: Optional[Dict[str, str]] = None,
+    addr_type: str = "PARCEL",
+    timeout: float = 8.0,
+) -> Tuple[Optional[Dict[str, float]], Dict[str, Any]]:
+    """Geocode a Korean address to {lng, lat} via the VWorld address API.
+
+    Best-effort & non-fabricating: missing key / network error / not-found →
+    (None, diagnostic). addr_type "PARCEL" for 지번, "ROAD" for 도로명.
+    """
+    env = environ if environ is not None else os.environ
+    key = _api_key(env)
+    if not key:
+        return None, {"address": address, "status": "skipped", "message": "VWorld key not configured"}
+    if not address or not address.strip():
+        return None, {"address": address, "status": "skipped", "message": "empty address"}
+    params = {
+        "service": "address",
+        "request": "getcoord",
+        "version": "2.0",
+        "crs": "epsg:4326",
+        "address": address.strip(),
+        "format": "json",
+        "type": addr_type,
+        "key": key,
+    }
+    url = f"{VWORLD_ADDRESS_URL}?{urllib.parse.urlencode(params)}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return None, {"address": address, "status": "error", "message": f"geocode failed: {type(exc).__name__}"}
+    status = (((payload or {}).get("response") or {}).get("status")) or "UNKNOWN"
+    if status != "OK":
+        return None, {"address": address, "status": "not_found", "message": f"VWorld status {status}"}
+    point = (((payload.get("response") or {}).get("result") or {}).get("point")) or {}
+    try:
+        return {"lng": float(point["x"]), "lat": float(point["y"])}, {"address": address, "status": "ok"}
+    except (KeyError, TypeError, ValueError):
+        return None, {"address": address, "status": "not_found", "message": "no point in response"}
+
+
+def build_geocoder(environ: Optional[Dict[str, str]] = None):
+    """Return geocode(address)->{lng,lat}|None, collecting diagnostics."""
+    diagnostics: List[Dict[str, Any]] = []
+
+    def geocode(address: str) -> Optional[Dict[str, float]]:
+        point, diag = geocode_address(address, environ=environ)
+        diagnostics.append(diag)
+        return point
+
+    geocode.diagnostics = diagnostics  # type: ignore[attr-defined]
+    return geocode
 
 
 def _first_geometry(features: Any) -> Optional[Dict[str, Any]]:

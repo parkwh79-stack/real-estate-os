@@ -6,6 +6,8 @@ from main import app
 from integrations.market_data import (
     MolitRtmsConnector,
     ValuemapConnector,
+    attach_coordinates,
+    geocode_query_for,
     lawd_cd_from_pnu,
     market_data_status,
     parse_rtms_items,
@@ -110,6 +112,32 @@ def test_valuemap_mock_fallback_is_labelled():
     assert diag["status"] == "mock"
     assert all(r["sourceType"] == "partner_api" and r["comparableCategory"] == "listing" for r in records)
     assert all("mock" in r["source"] for r in records)
+
+
+def test_attach_coordinates_geocodes_and_caches():
+    records = parse_rtms_items(_APT_TRADE_XML, asset_type="apartment", deal_kind="trade", lawd_cd="11650")
+    # inject 시군구 so the geocode query is buildable
+    for r in records:
+        r["sggNm"] = "서초구"
+    calls = []
+
+    def fake_geocoder(address):
+        calls.append(address)
+        return {"lng": 127.02, "lat": 37.49}
+
+    located = attach_coordinates(records, fake_geocoder, limit=30)
+    assert located == 2
+    assert records[0]["lat"] == 37.49 and records[0]["lng"] == 127.02
+    assert geocode_query_for(records[0]) == "서초구 서초동 1373"
+    # distinct addresses → two geocode calls (no dupes here)
+    assert len(calls) == 2
+
+
+def test_attach_coordinates_skips_when_no_query_and_on_none():
+    records = [{"umdNm": None, "jibun": None}, {"sggNm": "강남구", "umdNm": "역삼동", "jibun": "1"}]
+    located = attach_coordinates(records, lambda a: None, limit=30)
+    assert located == 0
+    assert "lat" not in records[1]
 
 
 def test_lawd_cd_from_pnu():

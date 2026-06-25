@@ -5,9 +5,11 @@ from fastapi import APIRouter, Query
 from integrations.market_data import (
     MolitRtmsConnector,
     ValuemapConnector,
+    attach_coordinates,
     market_data_status,
     summarize_transactions,
 )
+from integrations.vworld import build_geocoder, vworld_configured
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
@@ -25,9 +27,12 @@ def get_market_transactions(
     asset_type: str = Query("apartment", description="apartment|officetel|row_house|detached_house|land|commercial"),
     deal_kind: str = Query("trade", description="trade(매매)|rent(전월세)"),
     num_rows: int = Query(200, ge=1, le=1000),
+    geocode: bool = Query(False, description="VWorld로 상위 N건 좌표화(지도 마커용)"),
+    geocode_limit: int = Query(30, ge=1, le=60),
 ):
     """국토부 실거래가(MOLIT RTMS) — actual closed transactions for the given
-    법정동/월. Public data; each record carries its source for provenance."""
+    법정동/월. Public data; each record carries its source for provenance.
+    With geocode=true and a VWorld key, top-N records get lat/lng for map pins."""
     records, diagnostic = MolitRtmsConnector().fetch(
         lawd_cd=lawd_cd,
         deal_ym=deal_ym,
@@ -35,10 +40,13 @@ def get_market_transactions(
         deal_kind=deal_kind,
         num_rows=num_rows,
     )
+    geocoded = 0
+    if geocode and records and vworld_configured():
+        geocoded = attach_coordinates(records, build_geocoder(), limit=geocode_limit)
     return {
         "schemaVersion": "realytics-market-transactions-v1",
         "query": {"lawdCd": lawd_cd, "dealYm": deal_ym, "assetType": asset_type, "dealKind": deal_kind},
-        "summary": summarize_transactions(records),
+        "summary": {**summarize_transactions(records), "geocodedCount": geocoded},
         "records": records,
         "diagnostic": diagnostic,
     }

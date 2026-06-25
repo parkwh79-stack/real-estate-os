@@ -2,7 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { Map as MlMap, StyleSpecification } from "maplibre-gl";
+import type { Map as MlMap, MapLayerMouseEvent, Marker as MlMarker, StyleSpecification } from "maplibre-gl";
+
+type MaplibreModule = typeof import("maplibre-gl");
+
+export type TxMarker = { lat: number; lng: number; label: string; sublabel?: string; tone?: "trade" | "rent" };
 
 type Center = { lng: number; lat: number } | null;
 type Layer = { id: string; label: string; source: string; status: string; featureCount: number | null };
@@ -61,9 +65,11 @@ function baseStyle(vworldKey?: string): StyleSpecification {
 
 /** MapLibre GL Map Intelligence — base map (VWorld when keyed, else OSM) with a
  *  parcel GeoJSON overlay and the deck's spatial layer legend. */
-export function MapIntelligence({ data }: { data: MapIntelligenceData }) {
+export function MapIntelligence({ data, transactions = [] }: { data: MapIntelligenceData; transactions?: TxMarker[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
+  const mlRef = useRef<MaplibreModule | null>(null);
+  const markersRef = useRef<MlMarker[]>([]);
   const [parcelsVisible, setParcelsVisible] = useState(true);
   const [ready, setReady] = useState(false);
   const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
@@ -73,7 +79,8 @@ export function MapIntelligence({ data }: { data: MapIntelligenceData }) {
     let cancelled = false;
     let map: MlMap | null = null;
     void (async () => {
-      const maplibregl = (await import("maplibre-gl")).default;
+      const maplibregl = await import("maplibre-gl");
+      mlRef.current = maplibregl;
       if (cancelled || !containerRef.current) return;
       const center: [number, number] = data.center ? [data.center.lng, data.center.lat] : KOREA_CENTER;
       map = new maplibregl.Map({
@@ -109,7 +116,7 @@ export function MapIntelligence({ data }: { data: MapIntelligenceData }) {
           paint: { "circle-radius": 7, "circle-color": "#4f46e5", "circle-stroke-color": "#fff", "circle-stroke-width": 2 },
         });
         const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
-        const showPopup = (e: maplibregl.MapLayerMouseEvent) => {
+        const showPopup = (e: MapLayerMouseEvent) => {
           const f = e.features?.[0];
           if (!f || !map) return;
           const p = (f.properties ?? {}) as Record<string, unknown>;
@@ -151,6 +158,33 @@ export function MapIntelligence({ data }: { data: MapIntelligenceData }) {
       if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
     }
   }, [parcelsVisible, ready]);
+
+  // Transaction price markers (Naver-style pills) — rebuilt when data changes.
+  useEffect(() => {
+    const map = mapRef.current;
+    const maplibregl = mlRef.current;
+    if (!map || !maplibregl || !ready) return;
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+    const pts = transactions.filter((t) => Number.isFinite(t.lat) && Number.isFinite(t.lng));
+    for (const t of pts) {
+      const el = document.createElement("div");
+      const isRent = t.tone === "rent";
+      el.style.cssText = `display:inline-flex;flex-direction:column;align-items:center;padding:3px 7px;border-radius:8px;background:${isRent ? "#0ea5e9" : "#e11d48"};color:#fff;font-size:11px;font-weight:800;white-space:nowrap;box-shadow:0 6px 14px rgba(15,23,42,.28);cursor:default;`;
+      el.innerHTML = `<span>${t.label}</span>${t.sublabel ? `<span style="font-size:9px;font-weight:600;opacity:.9">${t.sublabel}</span>` : ""}`;
+      const marker = new maplibregl.Marker({ element: el, anchor: "bottom" }).setLngLat([t.lng, t.lat]).addTo(map);
+      markersRef.current.push(marker);
+    }
+    // Fit to markers when the parcel has no geometry to anchor the view.
+    if (pts.length && !data.center) {
+      const lngs = pts.map((p) => p.lng);
+      const lats = pts.map((p) => p.lat);
+      map.fitBounds(
+        [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
+        { padding: 64, maxZoom: 15, duration: 600 },
+      );
+    }
+  }, [transactions, ready, data.center]);
 
   const layers = data.layers ?? [];
 
