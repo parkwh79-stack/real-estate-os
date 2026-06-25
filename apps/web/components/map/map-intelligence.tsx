@@ -71,6 +71,7 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
   const mlRef = useRef<MaplibreApi | null>(null);
   const markersRef = useRef<MlMarker[]>([]);
   const [parcelsVisible, setParcelsVisible] = useState(true);
+  const [cadastralVisible, setCadastralVisible] = useState(false);
   const [ready, setReady] = useState(false);
   const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
 
@@ -97,6 +98,24 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       map.on("load", () => {
         if (!map) return;
+        // VWorld WMS 편집지적도(lt_c_landinfobasemap) overlay — toggled off by
+        // default. MapLibre fills {bbox-epsg-3857}; VWorld needs WMS 1.3.0 + EPSG:3857.
+        if (vworldKey) {
+          map.addSource("cadastral-wms", {
+            type: "raster",
+            tiles: [
+              `https://api.vworld.kr/req/wms?service=WMS&request=GetMap&version=1.3.0&layers=lt_c_landinfobasemap&styles=lt_c_landinfobasemap&crs=EPSG:3857&bbox={bbox-epsg-3857}&width=256&height=256&format=image/png&transparent=true&key=${vworldKey}`,
+            ],
+            tileSize: 256,
+          });
+          map.addLayer({
+            id: "cadastral-wms",
+            type: "raster",
+            source: "cadastral-wms",
+            layout: { visibility: "none" },
+            paint: { "raster-opacity": 0.7 },
+          });
+        }
         map.addSource("parcels", { type: "geojson", data: data.parcelGeoJson as never });
         map.addLayer({
           id: "parcel-fill",
@@ -163,6 +182,13 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
     }
   }, [parcelsVisible, ready]);
 
+  // Toggle VWorld WMS 지적도 overlay.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !map.getLayer("cadastral-wms")) return;
+    map.setLayoutProperty("cadastral-wms", "visibility", cadastralVisible ? "visible" : "none");
+  }, [cadastralVisible, ready]);
+
   // Transaction price markers (Naver-style pills) — rebuilt when data changes.
   useEffect(() => {
     const map = mapRef.current;
@@ -212,6 +238,12 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
               필지 오버레이
             </label>
           </div>
+          {vworldKey ? (
+            <label className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+              <input type="checkbox" checked={cadastralVisible} onChange={(e) => setCadastralVisible(e.target.checked)} />
+              VWorld 지적도(편집지적도) 오버레이
+            </label>
+          ) : null}
           <div className="mt-3 space-y-2">
             {layers.map((layer) => (
               <div key={layer.id} className="flex items-center justify-between gap-2 text-sm">
