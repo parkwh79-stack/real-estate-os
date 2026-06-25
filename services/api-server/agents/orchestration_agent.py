@@ -16,6 +16,13 @@ from agents.evidence_graph_agent import EvidenceGraphAgent
 from agents.legal_review_agent import LegalReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.marketability_agent import MarketabilityAgent
+from integrations.market_data import MolitRtmsConnector
+from use_cases.market_comparables import (
+    fetch_project_market_comparables,
+    inject_market_comparables,
+    live_market_comparables_enabled,
+    recent_deal_yms,
+)
 from agents.report_agent import ReportAgent
 from agents.restructuring_agent import RestructuringAgent
 from agents.risk_register_agent import RiskRegisterAgent
@@ -271,6 +278,7 @@ class OrchestrationAgent:
                 market_evidence.get("marketPayloadPatch", {}),
             )
             marketability_input["marketEvidenceReview"] = market_evidence
+            self._maybe_inject_live_market_comparables(run, project_data, marketability_input)
             marketability = MarketabilityAgent().analyze(marketability_input)
             run["artifacts"]["marketabilityAnalysis"] = marketability
             self._complete_step(run, "marketability_analysis", marketability, artifact_key="marketabilityAnalysis")
@@ -682,6 +690,7 @@ class OrchestrationAgent:
              "marketEvidenceReview", market_evidence)
         mk_input = self._deep_merge(data, market_evidence.get("marketPayloadPatch", {}))
         mk_input["marketEvidenceReview"] = market_evidence
+        self._maybe_inject_live_market_comparables(run, data, mk_input)
         marketability = MarketabilityAgent().analyze(mk_input)
         step("marketability_analysis", "completed",
              {"saleable": marketability.get("isSaleable", marketability.get("applicable"))},
@@ -866,6 +875,37 @@ class OrchestrationAgent:
             run["errors"].append({"message": f"Developability score failed: {exc}", "type": exc.__class__.__name__})
             output = {"status": "error", "reason": str(exc)}
         self._complete_step(run, "developability_score", output, artifact_key="developabilityScore")
+
+    def _maybe_inject_live_market_comparables(
+        self,
+        run: Dict[str, Any],
+        project_data: Dict[str, Any],
+        marketability_input: Dict[str, Any],
+    ) -> None:
+        """Gated: pull recent 국토부 실거래가 for the project's 법정동/asset type and
+        add them as Marketability `transactionComparables` so pricing/Exit판단 use
+        real closed transactions. No-op unless REALYTICS_LIVE_MARKET_COMPARABLES is
+        on AND a data.go.kr key is configured. Never breaks the run / fabricates."""
+        if not live_market_comparables_enabled():
+            return
+        connector = MolitRtmsConnector()
+        if not connector.configured():
+            return
+        try:
+            records, diagnostic = fetch_project_market_comparables(
+                project_data, connector=connector, deal_yms=recent_deal_yms(3)
+            )
+            injected = inject_market_comparables(marketability_input, records)
+            run.setdefault("artifacts", {})["liveMarketComparables"] = {
+                "schemaVersion": "realytics-live-market-comparables-v1",
+                "source": "molit_rtms",
+                "injected": injected,
+                "diagnostic": diagnostic,
+            }
+        except Exception as exc:  # external data must never break the credit run
+            run.setdefault("errors", []).append(
+                {"message": f"Live market comparables fetch failed: {exc}", "type": exc.__class__.__name__}
+            )
 
     def _run_return_metrics_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
         try:

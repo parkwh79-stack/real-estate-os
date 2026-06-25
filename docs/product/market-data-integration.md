@@ -82,6 +82,25 @@ data.go.kr. The connector surfaces this as a `forbidden` diagnostic with an
 actionable Korean message — it is a portal subscription matter, not a code bug.
 Verified live 2026-06-24: 서초구(11650) 아파트 매매 returns real transactions.
 
+## Live comparables in the PF review run
+
+`use_cases/market_comparables.py` feeds the credit decision with real
+transactions. During a PF run, `_maybe_inject_live_market_comparables` (in the
+orchestration, just before the Marketability step) derives the project's
+LAWD_CD (parcel PNU) + asset type, fetches recent 실거래가, and injects them into
+`market.transactionComparables` — the slot `MarketabilityAgent` reads. The
+agent then prices 분양가 적정성 / Exit 분양률 against actual closed transactions,
+which flows into Credit Review and the Phase 11 report.
+
+- **Gated by `REALYTICS_LIVE_MARKET_COMPARABLES`** (off by default so tests/CI
+  stay offline and deterministic; set it in the deployment `.env` to enable
+  auto-injection on every run). Also requires `DATA_GO_KR_API_KEY`.
+- Non-fabricating & fail-safe: no flag / no key / no LAWD_CD / no data → nothing
+  injected; any fetch error is recorded in `run.errors` and never breaks the run.
+- The run records a `liveMarketComparables` artifact (injected count + diagnostic).
+- Verified live: a 서초구 PNU project pulled 40 실거래가 → all 40 normalized as
+  `public_api` comparables (`hasTransactionComparable=true`).
+
 ## Next
 
 - Wire `transactionComparables` / `listing_comparables` into the PF-run project

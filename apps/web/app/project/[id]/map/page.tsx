@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Loader2, Map as MapIcon, RefreshCw } from "lucide-react";
 import { authHeaders } from "../../../../lib/auth-client";
-import { MapIntelligence, type MapIntelligenceData } from "../../../../components/map/map-intelligence";
-import { TransactionsPanel } from "../../../../components/map/transactions-panel";
+import { MapIntelligence, type MapIntelligenceData, type TxMarker } from "../../../../components/map/map-intelligence";
+import { TransactionsPanel, type TxRecord } from "../../../../components/map/transactions-panel";
 
 const apiBase = "http://127.0.0.1:8000";
 
@@ -26,6 +26,7 @@ export default function ProjectMapPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const [data, setData] = useState<MapIntelligenceData | null>(null);
+  const [txRecords, setTxRecords] = useState<TxRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,6 +54,21 @@ export default function ProjectMapPage() {
   const parcels = (data?.parcelGeoJson?.features ?? []) as ParcelFeature[];
   const firstPnu = parcels.find((p) => p.properties.pnu)?.properties.pnu;
   const lawdCd = firstPnu && firstPnu.length >= 5 ? firstPnu.slice(0, 5) : undefined;
+
+  const markers: TxMarker[] = useMemo(
+    () =>
+      txRecords
+        .filter((r) => typeof r.lat === "number" && typeof r.lng === "number")
+        .map((r) => ({
+          lat: r.lat as number,
+          lng: r.lng as number,
+          tone: r.dealKind === "rent" ? "rent" : "trade",
+          label: r.dealKind === "rent"
+            ? `${((r.depositKRW ?? 0) / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`
+            : `${((r.totalPrice ?? 0) / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`,
+        })),
+    [txRecords],
+  );
 
   return (
     <div className="space-y-6">
@@ -93,7 +109,7 @@ export default function ProjectMapPage() {
         </div>
       ) : data ? (
         <>
-          <MapIntelligence data={data} />
+          <MapIntelligence data={data} transactions={markers} />
 
           <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
             <div className="border-b border-slate-200 px-5 py-3 dark:border-slate-800">
@@ -143,7 +159,7 @@ export default function ProjectMapPage() {
             )}
           </section>
 
-          <TransactionsPanel lawdCd={lawdCd} />
+          <TransactionsPanel lawdCd={lawdCd} geocode onRecords={setTxRecords} />
         </>
       ) : null}
     </div>
