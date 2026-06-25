@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { ArrowLeft, Loader2, Map as MapIcon, RefreshCw } from "lucide-react";
 import { authHeaders } from "../../../../lib/auth-client";
 import { MapIntelligence, type MapIntelligenceData } from "../../../../components/map/map-intelligence";
+import { TransactionsPanel } from "../../../../components/map/transactions-panel";
 
 const apiBase = "http://127.0.0.1:8000";
 
@@ -50,6 +51,8 @@ export default function ProjectMapPage() {
   }, [load]);
 
   const parcels = (data?.parcelGeoJson?.features ?? []) as ParcelFeature[];
+  const firstPnu = parcels.find((p) => p.properties.pnu)?.properties.pnu;
+  const lawdCd = firstPnu && firstPnu.length >= 5 ? firstPnu.slice(0, 5) : undefined;
 
   return (
     <div className="space-y-6">
@@ -139,6 +142,8 @@ export default function ProjectMapPage() {
               </p>
             )}
           </section>
+
+          <TransactionsPanel lawdCd={lawdCd} />
         </>
       ) : null}
     </div>

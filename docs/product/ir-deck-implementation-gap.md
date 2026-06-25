@@ -25,7 +25,7 @@ This document maps the deck's promised capabilities to the current codebase. It 
 | Credit Enhancement 6-measure mapping | Done | `CreditEnhancementAgent`, `POST /projects/{id}/credit-enhancement/evaluate` |
 | Cash Sweep / Reserve | Done | `CashSweepAgent`, `POST /projects/{id}/cash-sweep/simulate` |
 | Intent-driven orchestration: "what should we analyze next?" | Partial | `OrchestrationPlannerAgent`, `/orchestration/plan`, `/orchestration/run-workflow`, Kakao intake menu UI |
-| Valuemap live data | Partial / Blocked | Mock adapter exists; live partner/API access is required |
+| 실거래가 / Valuemap market data | Partial | 2026-06-24: `integrations/market_data.py` — 국토부 실거래가 공개 OpenAPI connector (매매/전월세, 6 asset types) + 밸류맵 정식 제휴 어댑터 (config-driven, mock fallback pending spec). `/api/market/*` endpoints + 주변 실거래가 panel on the map page. Feeds the Marketability Agent's comparable slots. Needs: data.go.kr key (free) for live 실거래가; Valuemap partnership spec/credentials for live listings. No scraping. See `docs/product/market-data-integration.md` |
 | VWorld / official land price live connector | Partial / Blocked | URL/API adapter design exists; API keys and production connector policy are required |
 | Developability Score | Done | `DevelopabilityScoreAgent`, in the PF run (step) + Phase 11 report + UI; `GET /projects/{id}/developability-score` |
 | Asset-type simultaneous feasibility comparison | Partial | Asset profiles exist; UI and multi-asset comparison workflow remain |
