@@ -40,7 +40,8 @@ function baseStyle(vworldKey?: string): StyleSpecification {
       sources: {
         vworld: {
           type: "raster",
-          tiles: [`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Base/{z}/{y}/{x}.png`],
+          // Same-origin proxy (/api/vworld) — avoids CORS and keeps the key server-side.
+          tiles: ["/api/vworld?kind=base&z={z}&x={x}&y={y}"],
           tileSize: 256,
           attribution: "© VWorld (국토교통부)",
         },
@@ -99,9 +100,8 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         if (vworldKey) {
           map.addSource("cadastral-wms", {
             type: "raster",
-            tiles: [
-              `https://api.vworld.kr/req/wms?service=WMS&request=GetMap&version=1.3.0&layers=lt_c_landinfobasemap&styles=lt_c_landinfobasemap&crs=EPSG:3857&bbox={bbox-epsg-3857}&width=256&height=256&format=image/png&transparent=true&key=${vworldKey}`,
-            ],
+            // Proxied (VWorld WMS has no CORS header → must go same-origin).
+            tiles: ["/api/vworld?kind=wms&bbox={bbox-epsg-3857}"],
             tileSize: 256,
           });
           map.addLayer({
