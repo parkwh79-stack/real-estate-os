@@ -100,6 +100,7 @@ export default function MarketabilityPage() {
           tone: r.dealKind === "rent" ? "rent" : "trade",
           label: r.dealKind === "rent" ? eok(r.depositKRW) : eok(r.totalPrice),
           sublabel: r.dealKind === "rent" ? undefined : manPerPy(r.pricePerPy),
+          value: r.dealKind === "rent" ? undefined : r.pricePerPy,
         })),
     [txRecords],
   );
@@ -114,6 +115,7 @@ export default function MarketabilityPage() {
           tone: "trade" as const,
           label: manPerPy(c.medianPricePerPy),
           sublabel: `${c.complexName ?? ""} · ${c.tradeCount ?? 0}건`,
+          value: c.medianPricePerPy,
         })),
     [complexes],
   );

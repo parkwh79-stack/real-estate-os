@@ -40,6 +40,26 @@ const ROUTES: Record<string, { path: string; kind: "file" | "json" }> = {
   land_evidence: { path: "land-evidence", kind: "json" },
 };
 
+function summarizeResult(type: string, body: Record<string, unknown>): string | undefined {
+  try {
+    if (type === "land_ledger") {
+      const n = (((body.landLedger as Record<string, unknown>)?.summary as Record<string, unknown>)?.parcelCount) as number | undefined;
+      return typeof n === "number" ? `${n}필지` : "임포트 완료";
+    }
+    if (type === "feasibility_workbook" || type === "risk_report_workbook") {
+      const status = ((body.validation as Record<string, unknown>)?.status) as string | undefined;
+      return status ? `검증 ${status}` : "검증 완료";
+    }
+    if (type === "land_evidence") return "증빙 저장";
+    if (type === "business_plan" || type === "basic_architectural_plan") {
+      return body.status === "host_llm_required" ? "LLM 추출 필요" : "파싱 완료";
+    }
+  } catch {
+    /* best-effort */
+  }
+  return "완료";
+}
+
 function confidenceTone(c: number): string {
   if (c >= 0.75) return "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200";
   if (c >= 0.55) return "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200";
@@ -134,7 +154,9 @@ export function SmartIntake({ projectId, onProcessed }: { projectId: string; onP
           });
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "done" } : r)));
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        const summary = summarizeResult(row.type, body);
+        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "done", note: summary } : r)));
       } catch (err) {
         const note = err instanceof Error ? err.message : "오류";
         setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "error", note } : r)));

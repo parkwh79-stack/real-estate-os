@@ -5,7 +5,20 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MlMap, MapLayerMouseEvent, Marker as MlMarker, StyleSpecification } from "maplibre-gl";
 
-export type TxMarker = { lat: number; lng: number; label: string; sublabel?: string; tone?: "trade" | "rent" };
+export type TxMarker = { lat: number; lng: number; label: string; sublabel?: string; tone?: "trade" | "rent"; value?: number };
+
+// 평단가(원/평) 구간별 색 — 시세 색상도. (수도권 기준 대략적 구간)
+const PRICE_TIERS: { max: number; color: string; label: string }[] = [
+  { max: 50_000_000, color: "#16a34a", label: "~5천만" },
+  { max: 100_000_000, color: "#84cc16", label: "5천만~1억" },
+  { max: 150_000_000, color: "#f59e0b", label: "1억~1.5억" },
+  { max: 200_000_000, color: "#f97316", label: "1.5억~2억" },
+  { max: Infinity, color: "#dc2626", label: "2억~" },
+];
+function tierColor(value?: number): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "#e11d48";
+  return PRICE_TIERS.find((t) => value < t.max)?.color ?? "#dc2626";
+}
 
 type Center = { lng: number; lat: number } | null;
 type Layer = { id: string; label: string; source: string; status: string; featureCount: number | null };
@@ -136,7 +149,25 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
           type: "fill",
           source: "parcels",
           filter: ["==", ["geometry-type"], "Polygon"],
-          paint: { "fill-color": "#6366f1", "fill-opacity": 0.25 },
+          paint: {
+            // 공시지가(원/㎡) 색상도 — 값이 있으면 단계색, 없으면(0) 기본 인디고.
+            "fill-color": [
+              "case",
+              ["==", ["coalesce", ["get", "officialLandPricePerSqm"], 0], 0],
+              "#6366f1",
+              [
+                "interpolate",
+                ["linear"],
+                ["get", "officialLandPricePerSqm"],
+                1_000_000, "#16a34a",
+                3_000_000, "#84cc16",
+                6_000_000, "#f59e0b",
+                10_000_000, "#f97316",
+                20_000_000, "#dc2626",
+              ],
+            ],
+            "fill-opacity": 0.45,
+          },
         });
         map.addLayer({
           id: "parcel-line",
@@ -220,8 +251,8 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
     const pts = transactions.filter((t) => Number.isFinite(t.lat) && Number.isFinite(t.lng));
     for (const t of pts) {
       const el = document.createElement("div");
-      const isRent = t.tone === "rent";
-      el.style.cssText = `display:inline-flex;flex-direction:column;align-items:center;padding:3px 7px;border-radius:8px;background:${isRent ? "#0ea5e9" : "#e11d48"};color:#fff;font-size:11px;font-weight:800;white-space:nowrap;box-shadow:0 6px 14px rgba(15,23,42,.28);cursor:default;`;
+      const bg = t.tone === "rent" ? "#0ea5e9" : tierColor(t.value);
+      el.style.cssText = `display:inline-flex;flex-direction:column;align-items:center;padding:3px 7px;border-radius:8px;background:${bg};color:#fff;font-size:11px;font-weight:800;white-space:nowrap;box-shadow:0 6px 14px rgba(15,23,42,.28);cursor:default;`;
       el.innerHTML = `<span>${t.label}</span>${t.sublabel ? `<span style="font-size:9px;font-weight:600;opacity:.9">${t.sublabel}</span>` : ""}`;
       const marker = new maplibregl.Marker({ element: el, anchor: "bottom" }).setLngLat([t.lng, t.lat]).addTo(map);
       markersRef.current.push(marker);
@@ -251,6 +282,19 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         {!vworldKey ? (
           <div className="absolute left-3 top-3 z-10 rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
             OSM 베이스맵 · VWorld 키 설정 시 지적·공시지가 레이어 활성
+          </div>
+        ) : null}
+        {transactions.some((t) => t.tone !== "rent" && typeof t.value === "number") ? (
+          <div className="absolute bottom-3 left-3 z-10 rounded-md bg-white/90 px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
+            <p className="mb-1 font-bold">평단가</p>
+            <div className="flex items-center gap-1.5">
+              {PRICE_TIERS.map((t) => (
+                <span key={t.label} className="flex items-center gap-0.5">
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: t.color }} />
+                  {t.label}
+                </span>
+              ))}
+            </div>
           </div>
         ) : null}
       </div>

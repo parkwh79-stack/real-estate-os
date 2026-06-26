@@ -432,6 +432,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
           <HeaderLink href={`/project/${projectId}/evidence`} icon={<FileSearch className="h-4 w-4" />} label="근거 연결도" />
           <HeaderLink href={`/project/${projectId}/map`} icon={<MapPin className="h-4 w-4" />} label="지도 분석" />
           <HeaderLink href={`/project/${projectId}/marketability`} icon={<BarChart3 className="h-4 w-4" />} label="시장성 분석" />
+          <HeaderLink href={`/project/${projectId}/map-3d`} icon={<Layers className="h-4 w-4" />} label="3D 지도" />
         </div>
       </div>
 

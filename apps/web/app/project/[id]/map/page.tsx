@@ -66,6 +66,7 @@ export default function ProjectMapPage() {
           label: r.dealKind === "rent"
             ? `${((r.depositKRW ?? 0) / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`
             : `${((r.totalPrice ?? 0) / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`,
+          value: r.dealKind === "rent" ? undefined : r.pricePerPy,
         })),
     [txRecords],
   );
