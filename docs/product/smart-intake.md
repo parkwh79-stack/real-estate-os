@@ -34,9 +34,19 @@ files[]}` 반환. 비조작: 보관 실패해도 분류는 반환, 미지원 파
 (`/project/[id]/input-package`) 상단 주력 섹션으로 배치하고, 기존 유형별 업로드는
 "개별 업로드(고급)"로 강등. 페이지 전체 국문화.
 
+## 분류대로 처리 (자동 라우팅) — Done 2026-06-25
+
+스마트 업로드 표의 **"분류대로 처리"** 버튼이 각 파일을 (사용자가 수정 가능한)
+유형대로 기존 파서 엔드포인트에 자동 전송한다 — 백엔드 추가 없이 재사용:
+business_plan/기본설계→`/upload`, land_ledger→`/land-ledger/analyze`,
+feasibility_workbook→`/feasibility-workbook/validate`,
+risk_report_workbook→`/risk-report-workbook/validate`, land_evidence(JSON)→
+`/land-evidence`. market_evidence/unknown은 보관만. 행별 상태(처리중/완료/보관만/
+실패)를 표시하고, 완료 후 입력패키지 상태를 새로고침. 클라이언트가 원본 File을
+보관했다가 재전송하므로 분류→처리가 한 화면에서 끝난다.
+
 ## Next
 
-- 분류 결과의 `suggestedAction`대로 **자동 라우팅**(사업계획서→파싱,
-  토지대장→임포트, 사업수지→검증)을 한 번에 실행하는 "분류대로 처리" 버튼.
+- 처리 결과(파싱/검증 산출물)를 표에 인라인 요약.
 - 유형 수정(override) 결과를 분류기 학습 신호로 (human-gated optimization-log).
 - LLM 보조 분류(모호 케이스, ai_router 게이트).

@@ -297,7 +297,7 @@ export default function InputPackagePage() {
         </div>
       </div>
 
-      <SmartIntake projectId={projectId} />
+      <SmartIntake projectId={projectId} onProcessed={refreshPackageState} />
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {packageSlots.map((slot) => {
