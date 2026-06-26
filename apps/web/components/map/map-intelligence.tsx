@@ -89,6 +89,10 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         attributionControl: { compact: true },
       });
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      // Force a resize after layout settles (container size can be 0 at create time).
+      const mapInstance = map;
+      requestAnimationFrame(() => mapInstance.resize());
+      setTimeout(() => mapInstance.resize(), 400);
       map.on("error", (e: unknown) => {
         const msg = (e as { error?: { message?: string } })?.error?.message;
         if (msg) console.warn("[map]", msg); // tile errors shouldn't blank the map
@@ -216,8 +220,8 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1.6fr_0.7fr]">
-      <div className="relative min-h-[520px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
-        <div ref={containerRef} className="absolute inset-0" />
+      <div className="relative h-[560px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+        <div ref={containerRef} className="h-full w-full" />
         {mapError ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-rose-50/95 p-4 text-center text-sm font-semibold text-rose-700 dark:bg-rose-950/80 dark:text-rose-200">
             지도 초기화 오류: {mapError}
