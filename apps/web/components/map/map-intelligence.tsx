@@ -71,6 +71,7 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
   const markersRef = useRef<MlMarker[]>([]);
   const [parcelsVisible, setParcelsVisible] = useState(true);
   const [cadastralVisible, setCadastralVisible] = useState(false);
+  const [zoningVisible, setZoningVisible] = useState(false);
   const [ready, setReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
@@ -114,6 +115,19 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
             source: "cadastral-wms",
             layout: { visibility: "none" },
             paint: { "raster-opacity": 0.7 },
+          });
+          // VWorld 용도지역(lt_c_uq111) WMS overlay — toggled off by default.
+          map.addSource("zoning-wms", {
+            type: "raster",
+            tiles: ["/api/vworld?kind=wms&layers=lt_c_uq111&bbox={bbox-epsg-3857}"],
+            tileSize: 256,
+          });
+          map.addLayer({
+            id: "zoning-wms",
+            type: "raster",
+            source: "zoning-wms",
+            layout: { visibility: "none" },
+            paint: { "raster-opacity": 0.55 },
           });
         }
         map.addSource("parcels", { type: "geojson", data: data.parcelGeoJson as never });
@@ -190,6 +204,13 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
     map.setLayoutProperty("cadastral-wms", "visibility", cadastralVisible ? "visible" : "none");
   }, [cadastralVisible, ready]);
 
+  // Toggle VWorld WMS 용도지역 overlay.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !map.getLayer("zoning-wms")) return;
+    map.setLayoutProperty("zoning-wms", "visibility", zoningVisible ? "visible" : "none");
+  }, [zoningVisible, ready]);
+
   // Transaction price markers (Naver-style pills) — rebuilt when data changes.
   useEffect(() => {
     const map = mapRef.current;
@@ -244,10 +265,16 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
             </label>
           </div>
           {vworldKey ? (
-            <label className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
-              <input type="checkbox" checked={cadastralVisible} onChange={(e) => setCadastralVisible(e.target.checked)} />
-              VWorld 지적도(편집지적도) 오버레이
-            </label>
+            <div className="mt-2 space-y-1">
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                <input type="checkbox" checked={cadastralVisible} onChange={(e) => setCadastralVisible(e.target.checked)} />
+                VWorld 지적도(편집지적도)
+              </label>
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                <input type="checkbox" checked={zoningVisible} onChange={(e) => setZoningVisible(e.target.checked)} />
+                VWorld 용도지역
+              </label>
+            </div>
           ) : null}
           <div className="mt-3 space-y-2">
             {layers.map((layer) => (

@@ -44,25 +44,32 @@ export async function GET(req: NextRequest) {
     return new Response("bad kind", { status: 400 });
   }
 
+  // 1x1 transparent PNG — returned for any non-image/error so a single bad tile
+  // (e.g. an edge tile VWorld answers 400) never logs a console error or blanks the map.
+  const transparentTile = () =>
+    new Response(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        "base64",
+      ),
+      { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=600" } },
+    );
+
   try {
     const upstream = await fetch(url, {
       headers: { Referer: "http://localhost:3000/" },
       cache: "no-store",
     });
+    const contentType = upstream.headers.get("content-type") || "";
+    if (!upstream.ok || !contentType.startsWith("image/")) {
+      return transparentTile(); // coerce 400/non-image to an empty tile
+    }
     const body = await upstream.arrayBuffer();
     return new Response(body, {
-      status: upstream.status,
-      headers: {
-        "Content-Type": upstream.headers.get("content-type") || "image/png",
-        "Cache-Control": "public, max-age=86400",
-      },
+      status: 200,
+      headers: { "Content-Type": contentType, "Cache-Control": "public, max-age=86400" },
     });
   } catch {
-    // 1x1 transparent PNG so a single failed tile never blanks the map.
-    const transparent = Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
-      "base64",
-    );
-    return new Response(transparent, { status: 200, headers: { "Content-Type": "image/png" } });
+    return transparentTile();
   }
 }
