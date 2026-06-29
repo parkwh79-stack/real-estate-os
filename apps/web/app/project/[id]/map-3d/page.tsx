@@ -1,35 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import Script from "next/script";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Box, Loader2 } from "lucide-react";
+import { ArrowLeft, Box } from "lucide-react";
 import { authHeaders } from "../../../../lib/auth-client";
 
 const apiBase = "http://127.0.0.1:8000";
 const VWORLD_KEY = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
 const SEOUL: [number, number] = [126.9779, 37.5663];
 
-// VWorld WebGL globals (loaded by the SDK script).
-declare global {
-  interface Window {
-    vw?: any; // eslint-disable-line @typescript-eslint/no-explicit-any
-  }
-}
-
 export default function Project3DMapPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
-  const [center, setCenter] = useState<[number, number]>(SEOUL);
-  const [scriptLoaded, setScriptLoaded] = useState(false);
-  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const startedRef = useRef(false);
+  const [center, setCenter] = useState<[number, number] | null>(null);
 
   // Center the 3D map on the project's parcel, if resolvable.
   useEffect(() => {
     void (async () => {
+      let c = SEOUL;
       try {
         const res = await fetch(`${apiBase}/projects/${projectId}/map?resolve_geometry=true`, {
           cache: "no-store",
@@ -37,56 +26,20 @@ export default function Project3DMapPage() {
         });
         if (res.ok) {
           const data = await res.json();
-          if (data?.center?.lng && data?.center?.lat) setCenter([data.center.lng, data.center.lat]);
+          if (data?.center?.lng && data?.center?.lat) c = [data.center.lng, data.center.lat];
         }
       } catch {
         /* fall back to Seoul */
       }
+      setCenter(c);
     })();
   }, [projectId]);
 
-  const startMap = useCallback(() => {
-    const vw = window.vw;
-    if (startedRef.current || !vw || !vw.Map) return false;
-    try {
-      startedRef.current = true;
-      const map = new vw.Map();
-      map.setOption({
-        mapId: "vmap",
-        initPosition: new vw.CameraPosition(
-          new vw.CoordZ(center[0], center[1], 1800),
-          new vw.Direction(0, -55, 0),
-        ),
-        logo: true,
-        navigation: true,
-      });
-      map.setMapId("vmap");
-      map.start();
-      setStatus("ready");
-      return true;
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "3D 지도 초기화 실패");
-      setStatus("error");
-      return true;
-    }
-  }, [center]);
-
-  // Poll for the vw global after the script loads (Cesium loads async).
-  useEffect(() => {
-    if (!scriptLoaded) return;
-    if (startMap()) return;
-    const started = Date.now();
-    const timer = window.setInterval(() => {
-      if (startMap()) {
-        window.clearInterval(timer);
-      } else if (Date.now() - started > 20000) {
-        window.clearInterval(timer);
-        setErrorMsg("VWorld 3D 엔진 로드 시간 초과 (vw 전역 미준비)");
-        setStatus("error");
-      }
-    }, 400);
-    return () => window.clearInterval(timer);
-  }, [scriptLoaded, startMap]);
+  // The VWorld WebGL SDK uses document.write to load Cesium, which the browser
+  // blocks for async-loaded scripts. So we embed a self-contained HTML document
+  // (served by /vworld-3d) in an iframe, where the SDK script runs during the
+  // iframe's own initial parse and document.write works.
+  const iframeSrc = center ? `/vworld-3d?lng=${center[0]}&lat=${center[1]}` : null;
 
   return (
     <div className="space-y-4">
@@ -113,31 +66,13 @@ export default function Project3DMapPage() {
           VWorld 키(NEXT_PUBLIC_VWORLD_API_KEY)가 설정되어야 3D 지도를 표시할 수 있습니다.
         </p>
       ) : (
-        <>
-          <div className="relative h-[640px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
-            <div id="vmap" className="h-full w-full" />
-            {status !== "ready" ? (
-              <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-50/90 text-sm font-semibold text-slate-600 dark:bg-slate-950/80 dark:text-slate-300">
-                {status === "error" ? (
-                  <span className="px-4 text-center text-rose-600 dark:text-rose-300">3D 지도 오류: {errorMsg}</span>
-                ) : (
-                  <span className="flex items-center gap-2">
-                    <Loader2 className="h-5 w-5 animate-spin" /> 3D 엔진 로딩 중…
-                  </span>
-                )}
-              </div>
-            ) : null}
-          </div>
-          <Script
-            src={`https://map.vworld.kr/js/webglMapInit.js.do?version=3.0&apiKey=${VWORLD_KEY}`}
-            strategy="afterInteractive"
-            onLoad={() => setScriptLoaded(true)}
-            onError={() => {
-              setErrorMsg("VWorld 3D 스크립트 로드 실패");
-              setStatus("error");
-            }}
-          />
-        </>
+        <div className="h-[640px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+          {iframeSrc ? (
+            <iframe key={iframeSrc} src={iframeSrc} title="VWorld 3D" className="h-full w-full border-0" />
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-slate-500">위치 확인 중…</div>
+          )}
+        </div>
       )}
     </div>
   );
