@@ -20,6 +20,17 @@ type LookupResponse = {
 
 type Layer = { id: string; label: string; source: string; status: string; featureCount: number | null; detail?: string | null };
 
+type RadiusInfo = { radius: number; avgPerSqm: number | null; medianPerSqm: number | null; count?: number; sampleCount?: number; landDealCount?: number };
+type LandDeal = { address?: string; areaSqm?: number; totalPrice?: number; transactionDate?: string; distanceM: number };
+type RadiusData = { radii: RadiusInfo[]; landDeals: LandDeal[] };
+
+function man(won?: number | null): string {
+  return won ? `${Math.round(won / 10_000).toLocaleString("ko-KR")}만` : "—";
+}
+function eokN(won?: number | null): string {
+  return won ? `${(won / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억` : "—";
+}
+
 const STATUS_LABEL: Record<string, string> = {
   available: "표시 중",
   needs_geometry: "형상 필요",
@@ -55,6 +66,8 @@ export default function AnalysisPage() {
   const [pnu, setPnu] = useState<string>(demoProject.pnu);
   const [hasParcel, setHasParcel] = useState(false);
   const [restrictedRights, setRestrictedRights] = useState<string[]>([]);
+  const [radiusData, setRadiusData] = useState<RadiusData | null>(null);
+  const [selRadius, setSelRadius] = useState(500);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,6 +84,16 @@ export default function AnalysisPage() {
       setPnu(d.pnu ?? demoProject.pnu);
       setHasParcel(Boolean(d.hasParcel));
       setRestrictedRights(Array.isArray(d.restrictedRights) ? d.restrictedRights : []);
+      // 반경별 공시지가·토지 실거래
+      const center = d.center ?? d.map?.center ?? null;
+      const lawd = d.lawdCd ?? demoProject.pnu.slice(0, 5);
+      if (center) {
+        const rqs = new URLSearchParams({ lng: String(center.lng), lat: String(center.lat), lawd_cd: lawd });
+        fetch(`${apiBase}/api/market/land-radius?${rqs}`, { cache: "no-store" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((rd) => setRadiusData(rd))
+          .catch(() => setRadiusData(null));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "대상지 분석 중 오류가 발생했습니다.");
     } finally {
@@ -184,6 +207,67 @@ export default function AnalysisPage() {
               </p>
             )}
           </section>
+
+          {radiusData ? (
+            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+              <h3 className="font-black text-slate-950 dark:text-white">반경별 공시지가 · 토지 실거래</h3>
+              <p className="mb-3 text-[11px] font-semibold text-slate-500">대상지 기준 · 공시지가=VWorld 지적, 토지거래=국토부 (최근 3개월)</p>
+              <div className="inline-flex rounded-lg border border-slate-200 p-0.5 text-xs font-bold dark:border-slate-700">
+                {[500, 1000, 2000].map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setSelRadius(r)}
+                    className={`rounded-md px-3 py-1.5 transition-colors ${
+                      selRadius === r ? "bg-slate-900 text-white dark:bg-white dark:text-slate-950" : "text-slate-600 dark:text-slate-300"
+                    }`}
+                  >
+                    {r >= 1000 ? `${r / 1000}km` : `${r}m`}
+                  </button>
+                ))}
+              </div>
+              {(() => {
+                const info = radiusData.radii.find((x) => x.radius === selRadius);
+                if (!info) return null;
+                return (
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+                      <p className="text-[11px] font-semibold text-slate-500">평균 공시지가</p>
+                      <p className="mt-1 font-black text-slate-950 dark:text-white">{man(info.avgPerSqm)}/㎡</p>
+                    </div>
+                    <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+                      <p className="text-[11px] font-semibold text-slate-500">중위 공시지가</p>
+                      <p className="mt-1 font-black text-slate-950 dark:text-white">{man(info.medianPerSqm)}/㎡</p>
+                    </div>
+                    <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+                      <p className="text-[11px] font-semibold text-slate-500">필지 표본</p>
+                      <p className="mt-1 font-black text-slate-950 dark:text-white">{(info.sampleCount ?? 0).toLocaleString("ko-KR")}/{(info.count ?? 0).toLocaleString("ko-KR")}</p>
+                    </div>
+                    <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
+                      <p className="text-[11px] font-semibold text-slate-500">반경내 토지거래</p>
+                      <p className="mt-1 font-black text-slate-950 dark:text-white">{info.landDealCount ?? 0}건</p>
+                    </div>
+                  </div>
+                );
+              })()}
+              <p className="mt-3 mb-1 text-[11px] font-bold text-slate-500">인근 토지 실거래 (가까운 순)</p>
+              {radiusData.landDeals.length ? (
+                <div className="max-h-56 space-y-1 overflow-y-auto">
+                  {radiusData.landDeals.map((x, i) => (
+                    <div key={i} className={`flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-xs ${x.distanceM <= selRadius ? "bg-emerald-50 dark:bg-emerald-950/30" : "bg-slate-50 dark:bg-slate-800/50"}`}>
+                      <span className="min-w-0 truncate text-slate-700 dark:text-slate-200">{x.address ?? "—"}</span>
+                      <span className="shrink-0 text-slate-500">
+                        {x.distanceM < 1000 ? `${x.distanceM}m` : `${(x.distanceM / 1000).toFixed(1)}km`} · {eokN(x.totalPrice)}
+                        {x.areaSqm ? ` · ${x.areaSqm}㎡` : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400">최근 3개월 인근 토지 실거래가 없습니다.</p>
+              )}
+            </section>
+          ) : null}
 
           <TransactionsPanel lawdCd={lawdCd} geocode aggregate />
         </aside>

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Dict, List
+
 from fastapi import APIRouter, Query
 
 from integrations.market_data import (
@@ -10,7 +12,15 @@ from integrations.market_data import (
     market_data_status,
     summarize_transactions,
 )
-from integrations.vworld import build_geocoder, fetch_parcel_by_point, geocode_address, vworld_configured
+import math
+
+from integrations.vworld import (
+    build_geocoder,
+    fetch_jiga_in_radius,
+    fetch_parcel_by_point,
+    geocode_address,
+    vworld_configured,
+)
 from integrations.market_data import MolitRtmsConnector, lawd_cd_from_pnu
 from use_cases.map_intelligence import build_project_map_intelligence
 from use_cases.market_comparables import recent_deal_yms
@@ -203,6 +213,100 @@ def parcel_lookup(
         "restrictedRights": restricted_rights,
         "map": map_payload,
     }
+
+
+def _haversine_m(lng1: float, lat1: float, lng2: float, lat2: float) -> float:
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _jiga_stats(values: List[float], total: int) -> Dict[str, Any]:
+    if not values:
+        return {"count": total, "sampleCount": 0, "avgPerSqm": None, "medianPerSqm": None, "minPerSqm": None, "maxPerSqm": None}
+    s = sorted(values)
+    return {
+        "count": total or len(values),
+        "sampleCount": len(values),
+        "capped": total > len(values),
+        "avgPerSqm": round(sum(s) / len(s)),
+        "medianPerSqm": round(s[len(s) // 2]),
+        "minPerSqm": round(s[0]),
+        "maxPerSqm": round(s[-1]),
+    }
+
+
+@router.get("/land-radius")
+def land_radius(
+    lng: float = Query(..., description="대상지 경도"),
+    lat: float = Query(..., description="대상지 위도"),
+    lawd_cd: str = Query("", description="실거래가용 법정동코드 5자리"),
+    deal_ym: str = Query("", description="거래년월 YYYYMM (기본: 최근월)"),
+):
+    """대상지로부터 반경 500m/1km/2km의 공시지가 통계와 토지 실거래 사례.
+
+    공시지가는 VWorld 지적 buffer 조회의 `jiga`로 산출, 토지 실거래는 국토부
+    토지 실거래가를 지오코딩→거리계산으로 반경 분류한다."""
+    radii = [500, 1000, 2000]
+
+    # 공시지가 통계 (반경 누적)
+    gongsi = []
+    for radius in radii:
+        values, total, _ = fetch_jiga_in_radius(lng, lat, radius) if vworld_configured() else ([], 0, {})
+        gongsi.append({"radius": radius, **_jiga_stats(values, total)})
+
+    # 토지 실거래 — 시군구 단위로 최근 3개월 조회 후 지오코딩→거리 (토지 거래는 희소)
+    months = [deal_ym] if deal_ym else recent_deal_yms(3)
+    ym = months[0]
+    land_deals: List[Dict[str, Any]] = []
+    records: List[Dict[str, Any]] = []
+    if lawd_cd:
+        for m in months:
+            try:
+                recs, _ = MolitRtmsConnector().fetch(
+                    lawd_cd=lawd_cd, deal_ym=m, asset_type="land", deal_kind="trade", num_rows=200
+                )
+                records.extend(recs)
+            except Exception:
+                pass
+        if records and vworld_configured():
+            attach_coordinates(records, build_geocoder(), limit=60)
+        for r in records:
+            if not (_is_num(r.get("lat")) and _is_num(r.get("lng"))):
+                continue
+            dist = _haversine_m(lng, lat, r["lng"], r["lat"])
+            # Keep all geocoded land deals (raw-land deals are sparse in built-up
+            # areas and RTMS geocodes to the 읍면동 centroid) — the list shows the
+            # nearest with their distance; radius buckets count what falls inside.
+            land_deals.append({
+                "address": r.get("address"),
+                "areaSqm": r.get("areaSqm"),
+                "totalPrice": r.get("totalPrice"),
+                "pricePerPy": r.get("pricePerPy"),
+                "transactionDate": r.get("transactionDate"),
+                "lat": r.get("lat"),
+                "lng": r.get("lng"),
+                "distanceM": round(dist),
+            })
+    land_deals.sort(key=lambda d: d["distanceM"])
+    land_deals = land_deals[:25]
+    for radius in gongsi:
+        radius["landDealCount"] = sum(1 for d in land_deals if d["distanceM"] <= radius["radius"])
+
+    return {
+        "schemaVersion": "realytics-land-radius-v1",
+        "center": {"lng": lng, "lat": lat},
+        "dealYm": ym,
+        "radii": gongsi,
+        "landDeals": land_deals,
+    }
+
+
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 @router.get("/comparables")

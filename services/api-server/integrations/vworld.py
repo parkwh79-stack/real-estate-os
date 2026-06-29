@@ -181,6 +181,63 @@ def fetch_parcel_by_point(
     return geometry, {"status": "resolved", "properties": properties or {}}
 
 
+def fetch_jiga_in_radius(
+    lng: float,
+    lat: float,
+    buffer_m: int,
+    *,
+    environ: Optional[Dict[str, str]] = None,
+    size: int = 1000,
+    timeout: float = 15.0,
+) -> Tuple[List[float], int, Dict[str, Any]]:
+    """개별공시지가(jiga, 원/㎡) of cadastral parcels within `buffer_m` of a point.
+
+    Returns (jiga_values, total_in_radius, diagnostic). `total` may exceed
+    len(values) when capped at `size` (dense areas) — the values are then a
+    representative sample. Non-fabricating: errors → ([], 0, diag)."""
+    env = environ if environ is not None else os.environ
+    key = _api_key(env)
+    if not key:
+        return [], 0, {"status": "skipped", "message": "VWorld key not configured"}
+    params = {
+        "service": "data",
+        "request": "GetFeature",
+        "data": CADASTRAL_LAYER,
+        "key": key,
+        "domain": env.get("VWORLD_DOMAIN") or "localhost",
+        "format": "json",
+        "geometry": "false",
+        "size": str(size),
+        "geomFilter": f"POINT({lng} {lat})",
+        "buffer": str(int(buffer_m)),
+    }
+    url = f"{VWORLD_DATA_URL}?{urllib.parse.urlencode(params)}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return [], 0, {"status": "error", "message": f"VWorld request failed: {type(exc).__name__}"}
+    resp = (payload or {}).get("response") or {}
+    if resp.get("status") != "OK":
+        return [], 0, {"status": resp.get("status", "error")}
+    total = 0
+    try:
+        total = int((resp.get("record") or {}).get("total") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    features = ((resp.get("result") or {}).get("featureCollection") or {}).get("features") or []
+    values: List[float] = []
+    for feature in features:
+        raw = (feature.get("properties") or {}).get("jiga") if isinstance(feature, dict) else None
+        try:
+            v = float(str(raw).replace(",", "")) if raw not in (None, "", "0") else None
+        except (TypeError, ValueError):
+            v = None
+        if v:
+            values.append(v)
+    return values, total, {"status": "ok", "returned": len(features)}
+
+
 def build_geocoder(environ: Optional[Dict[str, str]] = None):
     """Return geocode(address)->{lng,lat}|None, collecting diagnostics."""
     diagnostics: List[Dict[str, Any]] = []
