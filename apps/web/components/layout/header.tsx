@@ -1,12 +1,7 @@
 import Link from "next/link";
-import {
-  Bell,
-  BookOpen,
-  CircleHelp,
-  ShieldCheck,
-  UserCircle,
-} from "lucide-react";
+import { Bell, BookOpen, CircleHelp, ShieldCheck } from "lucide-react";
 import { HeaderSearch } from "./header-search";
+import { HeaderUser } from "./header-user";
 
 const BLOG_URL = "https://blog.naver.com/babo7910/224295847211";
 
@@ -50,13 +45,7 @@ export function Header() {
           >
             <Bell className="h-5 w-5" />
           </button>
-          <div className="hidden items-center gap-2 border-l border-slate-200 pl-3 sm:flex dark:border-slate-800">
-            <UserCircle className="h-8 w-8 text-slate-500" />
-            <div className="text-sm leading-tight">
-              <p className="font-semibold text-slate-900 dark:text-white">심사역 김철수</p>
-              <p className="text-xs text-slate-500">PLATFORM9 Alpha</p>
-            </div>
-          </div>
+          <HeaderUser />
         </div>
       </div>
     </header>

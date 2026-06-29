@@ -21,7 +21,7 @@ function tierColor(value?: number): string {
 }
 
 type Center = { lng: number; lat: number } | null;
-type Layer = { id: string; label: string; source: string; status: string; featureCount: number | null };
+type Layer = { id: string; label: string; source: string; status: string; featureCount: number | null; detail?: string | null };
 
 export interface MapIntelligenceData {
   center: Center;
@@ -322,12 +322,13 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
           ) : null}
           <div className="mt-3 space-y-2">
             {layers.map((layer) => (
-              <div key={layer.id} className="flex items-center justify-between gap-2 text-sm">
+              <div key={layer.id} className="flex items-start justify-between gap-2 text-sm">
                 <div className="min-w-0">
                   <p className="font-semibold text-slate-900 dark:text-white">{layer.label}</p>
                   <p className="truncate text-[11px] text-slate-400">{layer.source}</p>
+                  {layer.detail ? <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">{layer.detail}</p> : null}
                 </div>
-                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${LAYER_STATUS_TONE[layer.status] ?? LAYER_STATUS_TONE.planned}`}>
+                <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${LAYER_STATUS_TONE[layer.status] ?? LAYER_STATUS_TONE.planned}`}>
                   {LAYER_STATUS_LABEL[layer.status] ?? layer.status}
                   {typeof layer.featureCount === "number" && layer.featureCount > 0 ? ` (${layer.featureCount})` : ""}
                 </span>

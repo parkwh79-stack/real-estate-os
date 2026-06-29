@@ -52,12 +52,14 @@ def build_project_map_intelligence(project_data: Dict[str, Any]) -> Dict[str, An
     risk_register = (project_data.get("riskRegister") or {})
     risk_rows = risk_register.get("risks") if isinstance(risk_register, dict) else None
 
+    signals = project_data.get("_layerSignals") if isinstance(project_data.get("_layerSignals"), dict) else None
     layers = _layers(
         located=located,
         priced=priced,
         parcel_count=len(parcels),
         regulation=regulation,
         risk_count=len(risk_rows) if isinstance(risk_rows, list) else 0,
+        signals=signals,
     )
 
     return {
@@ -225,25 +227,39 @@ def _layers(
     parcel_count: int,
     regulation: Dict[str, Any],
     risk_count: int,
+    signals: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     has_zone = bool(regulation.get("zone") or regulation.get("useDistrict"))
     availability = {
         "parcel_boundary": ("available", located) if located else ("needs_geometry", 0),
         "official_land_price": ("available", priced) if priced else ("needs_data", 0),
         "zoning": ("available", 1) if has_zone else ("needs_data", 0),
-        "transactions": ("available", None),  # served by the Valuemap endpoint
+        "transactions": ("available", None),  # served by the market data endpoint
         "supply": ("planned", None),
         "risk": ("available", risk_count) if risk_count else ("needs_data", 0),
     }
+    signals = signals or {}
     layers = []
     for layer_id, label, source in _LAYER_DEFS:
         status, count = availability.get(layer_id, ("planned", None))
+        signal = signals.get(layer_id)
+        # Agent/data-driven override (Marketability supply/transactions, Legal risk).
+        detail = None
+        source_label = source
+        if isinstance(signal, dict):
+            if signal.get("status"):
+                status = signal["status"]
+            if "featureCount" in signal:
+                count = signal["featureCount"]
+            detail = signal.get("detail")
+            source_label = signal.get("source") or source
         layers.append({
             "id": layer_id,
             "label": label,
-            "source": source,
+            "source": source_label,
             "status": status,
             "featureCount": count,
+            "detail": detail,
         })
     return layers
 

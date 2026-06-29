@@ -11,8 +11,11 @@ from integrations.market_data import (
     summarize_transactions,
 )
 from integrations.vworld import build_geocoder, fetch_parcel_by_point, geocode_address, vworld_configured
-from integrations.market_data import lawd_cd_from_pnu
+from integrations.market_data import MolitRtmsConnector, lawd_cd_from_pnu
 from use_cases.map_intelligence import build_project_map_intelligence
+from use_cases.market_comparables import recent_deal_yms
+from agents.marketability_agent import MarketabilityAgent
+from agents.legal_review_agent import LegalReviewAgent
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
@@ -104,7 +107,64 @@ def parcel_lookup(
     }
     if geometry is not None:
         parcel["geometry"] = geometry
-    project_data = {"land_acquisition": [parcel]} if (resolved_pnu or geometry) else {}
+    project_data: dict = {"land_acquisition": [parcel]} if (resolved_pnu or geometry) else {}
+
+    # --- Agent-driven layer signals (실거래/공급 = Marketability, 제한물권 = Legal) ---
+    signals: dict = {}
+    restricted_rights: list = []
+    # 실거래 사례 — live count for the 법정동
+    tx_records: list = []
+    if lawd_cd:
+        try:
+            tx_records, _ = MolitRtmsConnector().fetch(
+                lawd_cd=lawd_cd, deal_ym=recent_deal_yms(1)[0], asset_type="apartment", deal_kind="trade", num_rows=100
+            )
+        except Exception:
+            tx_records = []
+    signals["transactions"] = {
+        "status": "available" if tx_records else "needs_data",
+        "featureCount": len(tx_records) or None,
+        "source": "국토부 실거래가",
+        "detail": f"최근월 {len(tx_records)}건" if tx_records else "활용신청/지역 데이터 필요",
+    }
+    # 주변 공급 — Marketability Agent (경쟁도 estimate from nearby comparables)
+    try:
+        mk = MarketabilityAgent().analyze({
+            "project": {"type": "apartment"},
+            "product_mix": [{"type": "apartment", "units": 1, "exclusiveAreaPy": 30}],
+            "market": {"transactionComparables": tx_records[:30]},
+        })
+        supply = (mk or {}).get("supplyAnalysis") or {}
+        level = supply.get("competitionLevel")
+        signals["supply"] = {
+            "status": "available" if level else "needs_data",
+            "source": "Marketability Agent",
+            "detail": f"경쟁도 {level}" if level else "분양·공급 데이터 연동 시 제공",
+        }
+    except Exception:
+        signals["supply"] = {"status": "needs_data", "source": "Marketability Agent", "detail": "분양·공급 데이터 필요"}
+    # 리스크(제한물권) — Legal Agent land-rights / encumbrance check.
+    # The address tool has no 등기(registry) data, so run the check on registry
+    # evidence only (empty here) → honest "등기 증빙 필요" instead of a false
+    # ownership-share alarm. When a project supplies registry evidence, the
+    # encumbrances (저당권/압류/지상권 등) are listed.
+    has_registry = bool(project_data.get("landEvidence") or project_data.get("land_evidence"))
+    try:
+        legal = LegalReviewAgent().review(project_data if has_registry else {})
+        lr = next((c for c in legal.get("checks", []) if c.get("key") == "land_rights"), None)
+        severity = lr.get("severity") if lr else None
+        if has_registry and lr and severity != "clear":
+            restricted_rights = lr.get("findings") or []
+        signals["risk"] = {
+            "status": "available" if (has_registry and restricted_rights) else "needs_data",
+            "featureCount": len(restricted_rights) or None,
+            "source": "Legal Agent · 등기 제한물권",
+            "detail": "; ".join(restricted_rights[:2]) if restricted_rights else "등기 증빙 첨부 시 저당권·압류·지상권 등 제한물권 자동 점검",
+        }
+    except Exception:
+        signals["risk"] = {"status": "needs_data", "source": "Legal Agent · 등기 제한물권", "detail": "등기 증빙 필요"}
+
+    project_data["_layerSignals"] = signals
     map_payload = build_project_map_intelligence(project_data)
     if not map_payload.get("center") and point:
         map_payload["center"] = {"lng": point["lng"], "lat": point["lat"]}
@@ -117,6 +177,7 @@ def parcel_lookup(
         "pnu": resolved_pnu or None,
         "lawdCd": lawd_cd,
         "hasParcel": geometry is not None,
+        "restrictedRights": restricted_rights,
         "map": map_payload,
     }
 
