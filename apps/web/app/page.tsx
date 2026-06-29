@@ -1,4 +1,3 @@
-import Image from "next/image";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import {
@@ -134,14 +133,9 @@ export default async function DashboardPage() {
     <div className="space-y-6 pb-8">
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-900 text-white shadow-sm dark:border-slate-800">
         <div className="flex flex-col items-center gap-5 p-5 sm:flex-row sm:gap-6">
-          <Image
-            src="/brand/realytics-hero.png"
-            alt="REALYTICS — powered by WAN2"
-            width={240}
-            height={188}
-            priority
-            className="h-28 w-auto rounded-xl object-contain sm:h-36"
-          />
+          <div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-xl bg-white/10 text-3xl font-black tracking-tight ring-1 ring-white/20 sm:h-36 sm:w-36 sm:text-4xl">
+            <span>R<span className="text-indigo-300">Y</span></span>
+          </div>
           <div className="min-w-0 flex-1 text-center sm:text-left">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-200">
               REALYTICS · powered by WAN2

@@ -10,7 +10,9 @@ from integrations.market_data import (
     market_data_status,
     summarize_transactions,
 )
-from integrations.vworld import build_geocoder, vworld_configured
+from integrations.vworld import build_geocoder, fetch_parcel_by_point, geocode_address, vworld_configured
+from integrations.market_data import lawd_cd_from_pnu
+from use_cases.map_intelligence import build_project_map_intelligence
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
@@ -55,6 +57,68 @@ def get_market_transactions(
     if aggregate:
         response["complexes"] = aggregate_by_complex(records)
     return response
+
+
+@router.get("/parcel-lookup")
+def parcel_lookup(
+    address: str = Query("", description="대상지 주소 (동 단위 권장)"),
+    pnu: str = Query("", description="법정동코드/실거래가용 PNU (선택)"),
+):
+    """토지·거래 분석: 주소를 좌표화(VWorld) → 해당 지점의 지적 필지(연속지적도)를
+    가져와 지도 데이터로 반환. 실거래가용 법정동코드도 함께 돌려준다."""
+    geo_status = "skipped"
+    point = None
+    if address.strip() and vworld_configured():
+        # Try the address, then progressively trimmed candidates (drop 일원/번지
+        # suffix, then 읍면동-level) so messy inputs still geocode.
+        raw = address.strip()
+        candidates = [raw]
+        cleaned = raw.replace("일원", "").strip()
+        if cleaned and cleaned != raw:
+            candidates.append(cleaned)
+        tokens = cleaned.split()
+        dong_idx = next((i for i, t in enumerate(tokens) if t.endswith(("동", "리", "가"))), -1)
+        if dong_idx >= 0:
+            candidates.append(" ".join(tokens[: dong_idx + 1]))
+        for cand in dict.fromkeys(candidates):
+            point, gdiag = geocode_address(cand)
+            geo_status = gdiag.get("status", "error")
+            if point:
+                break
+
+    parcel_props: dict = {}
+    geometry = None
+    if point:
+        geometry, pdiag = fetch_parcel_by_point(point["lng"], point["lat"])
+        if pdiag.get("status") == "resolved":
+            parcel_props = pdiag.get("properties") or {}
+
+    resolved_pnu = (parcel_props.get("pnu") or pnu or "").strip()
+    lawd_cd = lawd_cd_from_pnu(resolved_pnu) or lawd_cd_from_pnu(pnu)
+
+    parcel = {
+        "pnu": resolved_pnu or None,
+        "addressFragment": parcel_props.get("addr") or parcel_props.get("jibun") or address or None,
+        "lotNumber": parcel_props.get("jibun"),
+        "landCategory": parcel_props.get("jimok") or parcel_props.get("dgm_nm"),
+    }
+    if geometry is not None:
+        parcel["geometry"] = geometry
+    project_data = {"land_acquisition": [parcel]} if (resolved_pnu or geometry) else {}
+    map_payload = build_project_map_intelligence(project_data)
+    if not map_payload.get("center") and point:
+        map_payload["center"] = {"lng": point["lng"], "lat": point["lat"]}
+
+    return {
+        "schemaVersion": "realytics-parcel-lookup-v1",
+        "address": address,
+        "geocodeStatus": geo_status,
+        "center": map_payload.get("center"),
+        "pnu": resolved_pnu or None,
+        "lawdCd": lawd_cd,
+        "hasParcel": geometry is not None,
+        "map": map_payload,
+    }
 
 
 @router.get("/comparables")

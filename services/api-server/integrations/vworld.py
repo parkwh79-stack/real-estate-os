@@ -132,6 +132,55 @@ def geocode_address(
         return None, {"address": address, "status": "not_found", "message": "no point in response"}
 
 
+def fetch_parcel_by_point(
+    lng: float,
+    lat: float,
+    *,
+    environ: Optional[Dict[str, str]] = None,
+    timeout: float = 8.0,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Fetch the cadastral parcel at a coordinate — returns (geometry, properties).
+
+    Properties carry the parcel's pnu/jibun/addr from the VWorld 연속지적도.
+    Best-effort & non-fabricating."""
+    env = environ if environ is not None else os.environ
+    key = _api_key(env)
+    if not key:
+        return None, {"status": "skipped", "message": "VWorld key not configured"}
+    params = {
+        "service": "data",
+        "request": "GetFeature",
+        "data": CADASTRAL_LAYER,
+        "key": key,
+        "domain": env.get("VWORLD_DOMAIN") or "localhost",
+        "format": "json",
+        "geometry": "true",
+        "crs": "EPSG:4326",
+        "size": "1",
+        "geomFilter": f"POINT({lng} {lat})",
+    }
+    url = f"{VWORLD_DATA_URL}?{urllib.parse.urlencode(params)}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return None, {"status": "error", "message": f"VWorld request failed: {type(exc).__name__}"}
+    status = (((payload or {}).get("response") or {}).get("status")) or "UNKNOWN"
+    if status != "OK":
+        return None, {"status": "not_found", "message": f"VWorld status {status}"}
+    features = (
+        (((payload.get("response") or {}).get("result") or {}).get("featureCollection") or {}).get("features")
+    )
+    if not isinstance(features, list) or not features:
+        return None, {"status": "not_found", "message": "no parcel at point"}
+    feature = features[0]
+    geometry = feature.get("geometry") if isinstance(feature, dict) else None
+    properties = feature.get("properties") if isinstance(feature, dict) else None
+    if not (isinstance(geometry, dict) and geometry.get("type")):
+        return None, {"status": "not_found", "message": "no geometry"}
+    return geometry, {"status": "resolved", "properties": properties or {}}
+
+
 def build_geocoder(environ: Optional[Dict[str, str]] = None):
     """Return geocode(address)->{lng,lat}|None, collecting diagnostics."""
     diagnostics: List[Dict[str, Any]] = []

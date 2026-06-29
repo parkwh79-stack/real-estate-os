@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -40,14 +39,9 @@ export function Sidebar() {
     <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 border-r border-slate-200 bg-white lg:flex lg:flex-col dark:border-slate-800 dark:bg-slate-950">
       <div className="border-b border-slate-200 px-5 py-5 dark:border-slate-800">
         <Link href="/" className="block">
-          <Image
-            src="/brand/realytics-logo.png"
-            alt="REALYTICS — powered by WAN2"
-            width={200}
-            height={64}
-            priority
-            className="h-12 w-auto object-contain"
-          />
+          <span className="text-2xl font-black tracking-tight text-slate-950 dark:text-white">
+            REAL<span className="text-indigo-600">YTICS</span>
+          </span>
           <p className="mt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
             REALYTICS × PLATFORM9 · powered by WAN2
           </p>

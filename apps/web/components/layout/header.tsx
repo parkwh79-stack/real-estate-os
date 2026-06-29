@@ -1,4 +1,3 @@
-import Image from "next/image";
 import Link from "next/link";
 import {
   Bell,
@@ -16,15 +15,8 @@ export function Header() {
     <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6 lg:px-8 dark:border-slate-800 dark:bg-slate-950/90">
       <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <Link href="/" className="shrink-0 lg:hidden" aria-label="REALYTICS 홈">
-            <Image
-              src="/brand/realytics-logo.png"
-              alt="REALYTICS"
-              width={120}
-              height={40}
-              priority
-              className="h-8 w-auto max-w-[120px] object-contain"
-            />
+          <Link href="/" className="shrink-0 text-lg font-black tracking-tight text-slate-950 lg:hidden dark:text-white" aria-label="REALYTICS 홈">
+            REAL<span className="text-indigo-600">YTICS</span>
           </Link>
           <HeaderSearch />
         </div>
