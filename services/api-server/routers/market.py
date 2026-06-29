@@ -99,18 +99,41 @@ def parcel_lookup(
     resolved_pnu = (parcel_props.get("pnu") or pnu or "").strip()
     lawd_cd = lawd_cd_from_pnu(resolved_pnu) or lawd_cd_from_pnu(pnu)
 
+    # 개별공시지가(jiga) is carried on the VWorld 연속지적도 properties.
+    jiga = parcel_props.get("jiga")
+    try:
+        jiga_val = float(str(jiga).replace(",", "")) if jiga not in (None, "") else None
+    except (TypeError, ValueError):
+        jiga_val = None
+    gosi_year = parcel_props.get("gosi_year")
+
     parcel = {
         "pnu": resolved_pnu or None,
         "addressFragment": parcel_props.get("addr") or parcel_props.get("jibun") or address or None,
         "lotNumber": parcel_props.get("jibun"),
         "landCategory": parcel_props.get("jimok") or parcel_props.get("dgm_nm"),
     }
+    if jiga_val:
+        parcel["officialLandPricePerSqm"] = jiga_val
+        parcel["officialLandPriceBaseYear"] = gosi_year
     if geometry is not None:
         parcel["geometry"] = geometry
     project_data: dict = {"land_acquisition": [parcel]} if (resolved_pnu or geometry) else {}
 
     # --- Agent-driven layer signals (실거래/공급 = Marketability, 제한물권 = Legal) ---
     signals: dict = {}
+    # 공시지가 — from VWorld cadastral jiga
+    signals["official_land_price"] = {
+        "status": "available" if jiga_val else "needs_data",
+        "source": "VWorld 개별공시지가",
+        "detail": f"{int(jiga_val):,}원/㎡ ({gosi_year} 기준)" if jiga_val else "공시지가 조회 불가",
+    }
+    # 용도지역 — VWorld 토지이용계획 reference overlay (map toggle)
+    signals["zoning"] = {
+        "status": "available",
+        "source": "VWorld 토지이용계획",
+        "detail": "지도 ‘용도지역’ 레이어 토글로 표시",
+    }
     restricted_rights: list = []
     # 실거래 사례 — live count for the 법정동
     tx_records: list = []
