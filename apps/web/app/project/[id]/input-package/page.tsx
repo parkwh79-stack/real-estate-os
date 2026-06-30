@@ -22,6 +22,7 @@ import {
 import { authHeaders } from "../../../../lib/auth-client";
 import { SmartIntake } from "../../../../components/intake/smart-intake";
 import { FeasibilityExtractReview } from "../../../../components/intake/feasibility-extract-review";
+import { getStoredWorkflowTrack } from "../../../../lib/workflow-track";
 
 const apiBase = "http://127.0.0.1:8000";
 
@@ -138,6 +139,28 @@ export default function InputPackagePage() {
   useEffect(() => {
     void refreshPackageState();
   }, [refreshPackageState]);
+
+  // After "분류대로 처리": chain the finalize pipeline (address->PNU save + run the
+  // track analysis), then jump to the orchestration result when a run started.
+  const handleIntakeProcessed = useCallback(async () => {
+    await refreshPackageState();
+    const track = getStoredWorkflowTrack() || "development";
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/intake/finalize`, {
+        method: "POST",
+        headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+        body: JSON.stringify({ track, run: true }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { analysisRun?: { run_id?: string } };
+      if (body?.analysisRun?.run_id) {
+        router.push(`/project/${projectId}/orchestration?track=${track}`);
+        return;
+      }
+    } catch {
+      /* stay on the input package; documents are already saved */
+    }
+    await refreshPackageState();
+  }, [projectId, router, refreshPackageState]);
 
   const documentTypeCounts = useMemo(() => {
     return documents.reduce<Record<string, number>>((acc, doc) => {
@@ -298,7 +321,7 @@ export default function InputPackagePage() {
         </div>
       </div>
 
-      <SmartIntake projectId={projectId} onProcessed={refreshPackageState} />
+      <SmartIntake projectId={projectId} onProcessed={handleIntakeProcessed} />
 
       <FeasibilityExtractReview projectId={projectId} onApplied={refreshPackageState} />
 

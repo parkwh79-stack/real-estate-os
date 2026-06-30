@@ -209,6 +209,7 @@ export function CommandCenter() {
   const [triageLoading, setTriageLoading] = useState(false);
   const [triageError, setTriageError] = useState<string | null>(null);
   const [selectedTrack, setSelectedTrack] = useState<WorkflowTrack | null>(null);
+  const [finalizing, setFinalizing] = useState(false);
 
   const start = useCallback(async (picked: File[]) => {
     if (!picked.length) return;
@@ -274,6 +275,33 @@ export function CommandCenter() {
     router.push(`/project/${projectId}/${entry}?track=${selectedTrack}`);
   }, [projectId, router, selectedTrack, triage]);
 
+  // "분류대로 처리" completed -> chain the rest automatically: resolve address->PNU,
+  // and (for development/PF) run the PF review, then land on the result.
+  const finalizeAndEnter = useCallback(async () => {
+    if (!projectId) return;
+    const track = (selectedTrack ?? triage?.recommendedTrack ?? "development") as WorkflowTrack;
+    const entry = triage?.tracks.find((item) => item.track === track)?.entryHref || "input-package";
+    setStoredWorkflowTrack(track);
+    setFinalizing(true);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/intake/finalize`, {
+        method: "POST",
+        headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+        body: JSON.stringify({ track, run: true }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { analysisRun?: { run_id?: string } };
+      if (body?.analysisRun?.run_id) {
+        router.push(`/project/${projectId}/orchestration?track=${track}`);
+        return;
+      }
+      router.push(`/project/${projectId}/${entry}?track=${track}`);
+    } catch {
+      router.push(`/project/${projectId}/${entry}?track=${track}`);
+    } finally {
+      setFinalizing(false);
+    }
+  }, [projectId, router, selectedTrack, triage]);
+
   return (
     <main className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-slate-950 px-5 py-12 text-white">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgba(56,189,248,0.12),transparent),radial-gradient(50%_40%_at_80%_100%,rgba(99,102,241,0.12),transparent)]" />
@@ -314,8 +342,19 @@ export function CommandCenter() {
               onSelect={setSelectedTrack}
               onEnter={enterWorkspace}
             />
+            {finalizing ? (
+              <div className="flex items-center gap-3 rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm font-bold text-sky-200">
+                <Loader2 className="h-5 w-5 animate-spin" />
+                자료를 연결하고 (주소→PNU·공시지가) 선택한 트랙의 분석을 실행 중입니다. 잠시 후 결과 화면으로 이동합니다.
+              </div>
+            ) : null}
             <div className="rounded-2xl bg-white p-1 text-slate-900 dark:bg-slate-900 dark:text-white">
-              <SmartIntake projectId={projectId} initialFiles={files} onClassified={(classified) => void runTriage(classified)} />
+              <SmartIntake
+                projectId={projectId}
+                initialFiles={files}
+                onClassified={(classified) => void runTriage(classified)}
+                onProcessed={() => void finalizeAndEnter()}
+              />
             </div>
           </div>
         ) : (

@@ -74,6 +74,7 @@ from use_cases.feasibility_workbook_llm import (
     apply_feasibility_input_use_case,
     extract_feasibility_fields_via_llm,
 )
+from use_cases.intake_finalize import finalize_project_intake_use_case
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
@@ -1068,6 +1069,34 @@ def smart_intake_triage(project_id: str, input_data: Dict[str, Any] | None = Non
         }
     )
     return result
+
+
+@router.post("/{project_id}/intake/finalize")
+def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = None):
+    """After classify+parse: promote identity, resolve address->PNU, and (for
+    development/PF tracks) run the PF review orchestration immediately. Makes
+    '분류대로 처리' a connected pipeline rather than isolated parses."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    payload = input_data or {}
+    track = str(payload.get("track") or "")
+    run = payload.get("run", True)
+
+    finalize = finalize_project_intake_use_case(project_repository(), project_id)
+
+    analysis_run = None
+    if run and track in {"development", "pf"}:
+        source_data = _hydrated_project_source(project_id, {})
+        run_result = run_and_save_pf_review_use_case(
+            orchestration_repository(), project_id, source_data, {}
+        )
+        analysis_run = {
+            "run_id": run_result.get("run_id"),
+            "status": run_result.get("status"),
+            "workflow": run_result.get("workflow"),
+        }
+
+    return {**finalize, "track": track, "analysisRun": analysis_run}
 
 
 @router.post("/{project_id}/land-ledger/analyze")
