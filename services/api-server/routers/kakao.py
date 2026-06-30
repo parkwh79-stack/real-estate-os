@@ -31,7 +31,9 @@ def get_kakao_status():
 def create_kakao_authorize_url(payload: Dict[str, Any] | None = None):
     payload = payload or {}
     nonce = str(payload.get("nonce") or uuid4())
-    redirect_path = str(payload.get("redirectPath") or payload.get("redirect_path") or "/dashboard")
+    redirect_path = str(payload.get("redirectPath") or payload.get("redirect_path") or "/start")
+    if redirect_path in {"/", "/dashboard"} or not redirect_path.startswith("/") or redirect_path.startswith("//") or "://" in redirect_path:
+        redirect_path = "/start"
     state = str(payload.get("state") or create_kakao_oauth_state(
         nonce=nonce,
         redirect_path=redirect_path,
@@ -52,8 +54,10 @@ def create_kakao_authorize_url(payload: Dict[str, Any] | None = None):
 @router.get("/mock-callback")
 def kakao_mock_callback(
     request: Request,
-    redirect_path: str = Query("/dashboard"),
+    redirect_path: str = Query("/start"),
 ):
+    if redirect_path in {"/", "/dashboard"} or not redirect_path.startswith("/") or redirect_path.startswith("//") or "://" in redirect_path:
+        redirect_path = "/start"
     tenant_id = "kakao-workspace"
     upsert_tenant({
         "tenantId": tenant_id,
@@ -116,4 +120,3 @@ def preview_kakao_message(payload: Dict[str, Any], request: Request):
         }
     )
     return preview
-

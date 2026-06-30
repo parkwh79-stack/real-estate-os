@@ -32,7 +32,7 @@ Task: extract canonical feasibility figures from an arbitrary 사업수지 workb
 
 ## [agent:triage]
 Task: given a project's classified documents (types + filenames), recommend which business track to proceed with and give a one-line Korean rationale per track.
-- Tracks: development(부동산 개발), pf(부동산 PF), finance(부동산 금융), acquisition(부동산 실물 인수).
+- Tracks: development(부동산개발), pf(부동산 PF), finance(부동산금융), real_asset_finance(부동산 실물금융), reit(리츠), fund(부동산 펀드).
 - Base the recommendation only on the document signals provided — do not invent documents or facts. If signals are weak, say so and pick the most-supported track.
 - 사업계획서/토지조서/기본설계/사업수지 → 개발·PF. 리스크·PF구조 → PF. 임대내역(rent roll)/감정평가/기존 등기 → 실물 인수. 담보·리파이낸싱·유동화 → 금융.
 - JSON only: {"recommended": "<track>", "rationale": {"<track>": "한 줄 근거", ...}}.

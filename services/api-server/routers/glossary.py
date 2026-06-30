@@ -10,8 +10,10 @@ from use_cases.glossary import (
     canonical_field_map_use_case,
     capture_glossary_candidates_use_case,
     get_glossary_term_use_case,
+    import_term_standard_seed_use_case,
     list_glossary_candidates_use_case,
     list_glossary_terms_use_case,
+    normalize_glossary_surfaces_use_case,
     review_glossary_candidate_use_case,
     resolve_glossary_term_use_case,
     upsert_glossary_term_use_case,
@@ -81,10 +83,68 @@ def resolve_glossary_term(
     return resolve_glossary_term_use_case(term, include_pending=include_pending)
 
 
+@router.post("/normalize")
+def normalize_glossary_terms(request: Request, payload: Dict[str, Any]):
+    context = authorize_request(request, "project:write")
+    actor = (context.get("user") or {}).get("userId") or "anonymous"
+    items = payload.get("items") or payload.get("terms") or []
+    if payload.get("term") or payload.get("surface") or payload.get("rawTerm"):
+        items = [payload]
+    result = normalize_glossary_surfaces_use_case(
+        items,
+        project_id=payload.get("projectId") or payload.get("project_id"),
+        run_id=payload.get("runId") or payload.get("run_id"),
+        min_suggestion_score=float(payload.get("minSuggestionScore") or 0.72),
+    )
+    record_user_activity_log(
+        {
+            "eventType": "glossary_terms_normalized",
+            "userId": actor,
+            "projectId": result.get("projectId"),
+            "runId": result.get("runId"),
+            "method": request.method,
+            "path": request.url.path,
+            "metadata": {
+                "inputCount": result.get("inputCount"),
+                "matchedCount": result.get("matchedCount"),
+                "candidateCount": result.get("candidateCount"),
+            },
+        }
+    )
+    return result
+
+
 @router.get("/canonical-field-map")
 def get_canonical_field_map(request: Request):
     authorize_request(request, "project:read")
     return canonical_field_map_use_case()
+
+
+@router.post("/standard-pack/import")
+def import_term_standard_pack(request: Request, payload: Dict[str, Any]):
+    context = authorize_request(request, "project:write")
+    actor = (context.get("user") or {}).get("userId") or "anonymous"
+    seed_payload = payload.get("seed") or payload
+    result = import_term_standard_seed_use_case(
+        seed_payload,
+        actor=actor,
+        replace_existing=bool(payload.get("replaceExisting") or payload.get("replace_existing")),
+    )
+    record_user_activity_log(
+        {
+            "eventType": "glossary_standard_pack_imported",
+            "userId": actor,
+            "method": request.method,
+            "path": request.url.path,
+            "metadata": {
+                "termCount": result.get("termCount"),
+                "importedCount": result.get("importedCount"),
+                "skippedCount": result.get("skippedCount"),
+                "replaceExisting": result.get("replaceExisting"),
+            },
+        }
+    )
+    return result
 
 
 @router.get("/candidates")

@@ -45,3 +45,8 @@ yarn-error.log*
 # Misc
 .DS_Store
 *.pem
+
+# dev server logs + runtime state (defense-in-depth; runtime also has a nested .gitignore)
+next-dev.log
+**/next-dev.log
+services/api-server/data/runtime/

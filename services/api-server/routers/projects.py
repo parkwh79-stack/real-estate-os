@@ -85,6 +85,7 @@ from integrations.vworld import build_pnu_geometry_resolver, vworld_configured
 from db.parcel_geometry_cache import build_parcel_geometry_cache, build_caching_resolver
 from integrations.market_data import MolitRtmsConnector
 from agents.document_classifier_agent import classify_document
+from agents.intake_triage_agent import triage_intake_documents
 from use_cases.market_comparables import (
     fetch_project_market_comparables,
     inject_market_comparables,
@@ -981,6 +982,58 @@ async def smart_intake_classify(project_id: str, files: list[UploadFile] = File(
         "needsReviewCount": sum(1 for r in results if r.get("needsReview")),
         "files": results,
     }
+
+
+@router.post("/{project_id}/intake/triage")
+def smart_intake_triage(project_id: str, input_data: Dict[str, Any] | None = None):
+    """Recommend the OS business track after SmartIntake classification.
+
+    The recommendation is based only on classified document metadata. It never
+    treats the uploaded material as reviewed/approved evidence.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    payload = input_data or {}
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    result = {
+        "projectId": project_id,
+        "persisted": True,
+        "confidenceBasis": "문서유형별 업무트랙 가중치 × 자동분류 신뢰도 + 파일명 신호를 기준으로 산정합니다. 승인 가능성은 별도 Approval Readiness Gate에서 판단합니다.",
+        **triage_intake_documents(files, ai_context=payload.get("aiContext")),
+    }
+    history_item = {
+        "triageId": str(uuid4()),
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "projectId": project_id,
+        "recommendedTrack": result.get("recommendedTrack"),
+        "recommendationSource": result.get("recommendationSource"),
+        "aiAssisted": result.get("aiAssisted"),
+        "confidenceBasis": result.get("confidenceBasis"),
+        "inputSignals": result.get("inputSignals") or [],
+        "tracks": result.get("tracks") or [],
+        "limitations": result.get("limitations") or [],
+    }
+    project = dict(PROJECTS_DB[project_id])
+    history = list(project.get("intakeTriageHistory") or [])
+    history.append(history_item)
+    project["intakeTriageHistory"] = history[-20:]
+    project["latestIntakeTriage"] = history_item
+    PROJECTS_DB[project_id] = project
+    persist_state()
+    record_user_activity_log(
+        {
+            "eventType": "intake_triage_completed",
+            "userId": "web",
+            "projectId": project_id,
+            "metadata": {
+                "recommendedTrack": result.get("recommendedTrack"),
+                "recommendationSource": result.get("recommendationSource"),
+                "aiAssisted": result.get("aiAssisted"),
+                "fileCount": len(files),
+            },
+        }
+    )
+    return result
 
 
 @router.post("/{project_id}/land-ledger/analyze")

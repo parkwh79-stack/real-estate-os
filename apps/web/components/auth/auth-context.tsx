@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   clearStoredAuthSession,
   getStoredAuthSession,
@@ -154,13 +154,11 @@ export function RequireAuth({
 }) {
   const { status } = useAuth();
   const router = useRouter();
-  const pathname = usePathname();
 
   useEffect(() => {
     if (status !== "unauthenticated") return;
-    const nextPath = pathname && pathname !== "/" ? pathname : "/dashboard";
-    router.replace(`/login?next=${encodeURIComponent(nextPath)}`);
-  }, [status, pathname, router]);
+    router.replace("/login?next=/start");
+  }, [status, router]);
 
   if (status !== "authenticated") {
     return <>{fallback ?? <AuthFallback />}</>;

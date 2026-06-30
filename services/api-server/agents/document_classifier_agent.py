@@ -140,6 +140,7 @@ def classify_document(
         "label": label,
         "suggestedAction": action,
         "confidence": confidence,
+        "confidenceBasis": "파일명 키워드, 확장자, 시트명, JSON 키 신호를 점수화한 자동분류 신뢰도입니다. 문서 내용 검토나 승인 가능성 점수는 아닙니다.",
         "needsReview": confidence < 0.55,
         "reasons": list(dict.fromkeys(reasons))[:6],
         "candidates": [

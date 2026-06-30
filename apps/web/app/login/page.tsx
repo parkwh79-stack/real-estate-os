@@ -355,7 +355,7 @@ export default function LoginPage() {
                 disabled={submitting}
                 className="mt-6 flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 text-base font-bold text-white shadow-lg transition-all hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
               >
-                {submitting ? "DB 연동 처리 중..." : directMode === "login" ? "인증하고 대시보드로 이동" : "안전하게 DB 가입 후 이동"} 
+                {submitting ? "DB 연동 처리 중..." : directMode === "login" ? "인증하고 OS 런처로 이동" : "안전하게 DB 가입 후 OS 런처로 이동"} 
                 <ArrowRight className="h-5 w-5" />
               </button>
             </form>
@@ -373,9 +373,10 @@ export default function LoginPage() {
 }
 
 function resolveNextPath() {
-  if (typeof window === "undefined") return "/dashboard";
+  if (typeof window === "undefined") return "/start";
   const next = new URLSearchParams(window.location.search).get("next");
-  return next && next.startsWith("/") ? next : "/start";
+  if (!next || next === "/" || next === "/dashboard") return "/start";
+  return next.startsWith("/") ? next : "/start";
 }
 
 function Field({

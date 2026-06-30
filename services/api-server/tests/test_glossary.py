@@ -8,7 +8,7 @@ def test_glossary_seed_resolves_korean_alias(monkeypatch, tmp_path):
     monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "glossary.sqlite3"))
     client = TestClient(app)
 
-    terms = client.get("/glossary/terms?q=총분양수입")
+    terms = client.get("/glossary/terms", params={"q": "총분양수입"})
 
     assert terms.status_code == 200
     body = terms.json()
@@ -69,7 +69,7 @@ def test_glossary_seed_resolves_finance_legal_and_real_asset_terms(monkeypatch, 
         ("관리형토지신탁", "management_land_trust", "legal.trust.managementLandTrust"),
         ("기한이익상실", "eod", "legal.eodTriggers"),
         ("Cap Rate", "cap_rate", "real_asset.capRate"),
-        ("선매입", "forward_sale", "real_asset.forwardSale.price"),
+        ("선매각", "forward_sale", "real_asset.forwardSale.price"),
     ]
 
     for query, term_id, canonical_field in cases:
@@ -178,3 +178,99 @@ def test_glossary_candidate_capture_and_approval(monkeypatch, tmp_path):
     assert captured_again.status_code == 200
     assert captured_again.json()["candidates"][0]["status"] == "approved"
     assert captured_again.json()["candidates"][0]["occurrenceCount"] == 2
+
+
+def test_term_standard_v3_seed_import_and_resolution(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "term-standard.sqlite3"))
+    client = TestClient(app)
+
+    seed = {
+        "metadata": {"version": "v3.0", "name": "test seed"},
+        "terms": [
+            {
+                "term_id": "TERM-TEST-0001",
+                "canonical_ko": "Exit 분양률",
+                "canonical_en": "Exit Sales Rate",
+                "abbreviation": "",
+                "category_l1": "분양/Exit",
+                "category_l2": "분양·상환",
+                "definition_ko": "PF 원리금 상환에 필요한 최소 누적 분양률입니다.",
+                "standard_usage_rule": "Exit분양율, Exit분양률은 Exit 분양률로 정규화합니다.",
+                "formula_or_logic": "required_repayment / total_sales_revenue",
+                "synonyms": "Exit분양율|Exit분양률|exit sale rate",
+                "data_type": "metric",
+                "realytics_module": "PLATFORM9",
+                "source_key": "PF_SAMPLE",
+                "source_doc": "sample",
+                "criticality": "high",
+                "confidence": 0.98,
+                "status": "approved",
+                "version": "v3.0",
+                "owner": "REALYTICS AI LAB",
+                "created_at": "2026-06-30T00:00:00+09:00",
+                "updated_at": "2026-06-30T00:00:00+09:00",
+                "agent_module": "PLATFORM9_EXIT_AGENT",
+                "report_section": "9. Sales / Exit / Unsold Analysis",
+                "prompt_template_id": "PT_EXIT_REVIEW",
+                "calculation_required": "Y",
+                "data_source_required": "사업수지; PF 구조",
+                "validation_rule": "0 <= value <= 1",
+                "risk_score": 80,
+                "risk_tier": "HIGH",
+                "production_ready": "Y",
+            }
+        ],
+        "synonym_mapping": {"Exit분양율": "TERM-TEST-0001"},
+    }
+
+    imported = client.post(
+        "/glossary/standard-pack/import",
+        headers={"x-realytics-user-id": "term-admin"},
+        json={"seed": seed, "replaceExisting": True},
+    )
+
+    assert imported.status_code == 200
+    assert imported.json()["importedCount"] == 1
+
+    resolved = client.get("/glossary/resolve", params={"term": "Exit분양율"})
+
+    assert resolved.status_code == 200
+    body = resolved.json()
+    assert body["matched"] is True
+    assert body["term"]["termId"] == "TERM-TEST-0001"
+    assert body["term"]["canonicalField"] == "scenario.exitSalesRate"
+    assert body["term"]["agentModule"] == "PLATFORM9_EXIT_AGENT"
+    assert body["term"]["riskTier"] == "HIGH"
+
+
+def test_glossary_normalize_creates_candidate_for_unmapped_term(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "term-normalize.sqlite3"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/glossary/normalize",
+        headers={"x-realytics-user-id": "parser-agent"},
+        json={
+            "projectId": "project-term-1",
+            "runId": "run-term-1",
+            "items": [
+                {
+                    "surface": "분양 -10%/금리 +1% 동시충격",
+                    "context": "PF Dashboard stress context",
+                    "sourceField": "scenario.stress.memo",
+                    "sourceLocator": {"documentId": "doc-1", "pageNumber": 4},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["matchedCount"] == 0
+    assert body["candidateCount"] == 1
+    candidate = body["results"][0]["candidate"]
+    assert candidate["status"] == "pending_review"
+    assert candidate["projectId"] == "project-term-1"
+    assert candidate["sourceLocator"]["pageNumber"] == 4

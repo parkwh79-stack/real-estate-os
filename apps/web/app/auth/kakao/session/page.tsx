@@ -12,8 +12,9 @@ import {
 
 function safeRedirectPath(value: string | null) {
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("://")) {
-    return "/dashboard";
+    return "/start";
   }
+  if (value === "/" || value === "/dashboard") return "/start";
   return value;
 }
 
@@ -56,7 +57,7 @@ function KakaoSessionConnector() {
         };
         setStoredAuthSession(stored);
         setStatus("success");
-        setMessage("소셜 로그인 세션이 성공적으로 연결되었습니다. 검토 화면으로 이동합니다.");
+        setMessage("소셜 로그인 세션이 성공적으로 연결되었습니다. REALYTICS OS 런처로 이동합니다.");
         window.setTimeout(() => {
           router.replace(redirectPath);
         }, 700);
@@ -84,7 +85,7 @@ function KakaoSessionConnector() {
 function SessionShell({
   status,
   message,
-  redirectPath = "/dashboard",
+  redirectPath = "/start",
 }: {
   status: "loading" | "success" | "error";
   message: string;
@@ -118,7 +119,7 @@ function SessionShell({
             href={redirectPath}
             className="inline-flex h-11 items-center justify-center rounded-xl bg-slate-950 px-4 text-sm font-black text-white dark:bg-white dark:text-slate-950"
           >
-            검토 화면으로 이동
+            OS 런처로 이동
           </Link>
           <Link
             href="/settings"

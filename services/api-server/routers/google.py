@@ -27,9 +27,11 @@ router = APIRouter(prefix="/integrations/google", tags=["google"])
 
 
 def _safe_relative_redirect_path(value: Any) -> str:
-    path = str(value or "/dashboard")
+    path = str(value or "/start")
     if not path.startswith("/") or path.startswith("//") or "://" in path:
-        return "/dashboard"
+        return "/start"
+    if path in {"/", "/dashboard"}:
+        return "/start"
     return path
 
 
@@ -70,7 +72,7 @@ def google_oauth_callback(
     state: str | None = Query(None),
     error: str | None = Query(None),
     error_description: str | None = Query(None),
-    redirect_path: str = Query("/dashboard"),
+    redirect_path: str = Query("/start"),
 ):
     """Google OAuth callback.
 

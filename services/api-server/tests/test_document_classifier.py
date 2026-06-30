@@ -77,3 +77,9 @@ def test_candidates_ranked_and_capped():
     assert r["documentType"] == "feasibility_workbook"
     assert len(r["candidates"]) <= 4
     assert r["candidates"][0]["documentType"] == "feasibility_workbook"
+
+
+def test_classifier_exposes_confidence_basis():
+    r = classify_document("business_plan.pdf", content_type="application/pdf")
+    assert "confidenceBasis" in r
+    assert "자동분류 신뢰도" in r["confidenceBasis"]

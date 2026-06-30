@@ -24,10 +24,14 @@ Backend:
 - Use case: `services/api-server/use_cases/glossary.py`
 - Router: `services/api-server/routers/glossary.py`
 - Storage: `glossary_terms` in JSON runtime state and SQLite table
+- Term-standard v3 import: `POST /glossary/standard-pack/import`
+- Raw term normalization and new-term queue: `POST /glossary/normalize`
+- CLI import: `services/api-server/scripts/import_term_standard_seed.py`
 
 Frontend:
 
 - Korean financial UI term map: `apps/web/lib/financial-terms.ts`
+- Candidate review queues: `/glossary` and `/glossary/candidates`
 
 ## API
 
@@ -37,7 +41,30 @@ Frontend:
 | POST | `/glossary/terms` | Create or update a glossary term with review history. |
 | GET | `/glossary/terms/{term_id}` | Get one glossary term. |
 | GET | `/glossary/resolve?term=...` | Resolve a term or alias to a reviewed glossary term. |
+| POST | `/glossary/normalize` | Batch normalize uploaded/raw terms; exact aliases map automatically and unresolved terms are stored as review candidates. |
 | GET | `/glossary/canonical-field-map` | Return canonical field to approved terms and aliases. |
+| POST | `/glossary/standard-pack/import` | Import a REALYTICS term-standard v3 compatible seed payload. |
+
+## Term Standard v3 DB Direction
+
+The external REALYTICS AI LAB term-standard package is now treated as the preferred DB seed source for production standardization.
+
+Reference assets:
+
+| Asset | Purpose |
+|---|---|
+| `realytics_term_seed_v3.json` | 450-term seed pack with operational metadata. |
+| `realytics_term_standard_v3.sqlite` | Reference SQLite database for terms, synonyms, new-term queue, calculation registry, agent routing, report templates, and prompt/RAG policy. |
+| `realytics_term_standard_v3_postgres_ddl.sql` | Production PostgreSQL DDL reference. |
+
+Runtime import:
+
+```powershell
+cd "services/api-server"
+python scripts\import_term_standard_seed.py "C:\Users\User\Desktop\REALYTICS AI LAB 데이터베이스\realytics_term_seed_v3.json" --replace-existing
+```
+
+See also: `docs/product/term-standard-database-operating-model.md`.
 
 ## Term Schema
 
