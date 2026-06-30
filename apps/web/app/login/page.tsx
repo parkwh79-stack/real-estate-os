@@ -35,11 +35,13 @@ export default function LoginPage() {
       router.replace(resolveNextPath());
     }
 
-    // Fetch real DB stats
+    // Fetch real DB stats. These hero numbers are cosmetic, so a failure (e.g. the
+    // API server momentarily down) must NOT surface a dev error overlay — swallow it.
+    let active = true;
     fetch(`${apiBase}/auth/stats`)
-      .then((res) => res.json())
+      .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data.usersCount !== undefined) {
+        if (active && data && data.usersCount !== undefined) {
           setStats({
             usersCount: data.usersCount,
             dataUsageCount: data.dataUsageCount,
@@ -47,7 +49,12 @@ export default function LoginPage() {
           });
         }
       })
-      .catch((err) => console.error("Failed to fetch stats:", err));
+      .catch(() => {
+        /* API server unreachable — keep default stats, do not raise. */
+      });
+    return () => {
+      active = false;
+    };
   }, [router]);
 
   async function handleKakaoLogin() {

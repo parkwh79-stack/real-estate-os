@@ -35,7 +35,7 @@ TRACKS: Dict[str, Dict[str, Any]] = {
         "label": "금융",
         "title": "부동산 금융",
         "description": "담보, 리파이낸싱, 대출구조, 회수 가능성 중심으로 검토합니다.",
-        "entryHref": "finance",
+        "entryHref": "input-package",
         "menuKeys": ["dashboard", "finance", "cashflow", "report", "monitoring", "glossary"],
     },
     "real_asset_finance": {
@@ -49,14 +49,14 @@ TRACKS: Dict[str, Dict[str, Any]] = {
         "label": "리츠",
         "title": "리츠",
         "description": "편입자산, 배당재원, 임대수익, 감정가, 운용구조와 공시 리스크를 검토합니다.",
-        "entryHref": "finance",
+        "entryHref": "input-package",
         "menuKeys": ["dashboard", "analysis", "finance", "report", "monitoring", "glossary"],
     },
     "fund": {
         "label": "펀드",
         "title": "부동산 펀드",
         "description": "펀드 설정, 투자대상, 대출/에쿼티 구조, 운용·회수 리스크를 검토합니다.",
-        "entryHref": "finance",
+        "entryHref": "input-package",
         "menuKeys": ["dashboard", "finance", "cashflow", "report", "monitoring", "glossary"],
     },
 }

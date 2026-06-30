@@ -1053,7 +1053,7 @@ def smart_intake_triage(project_id: str, input_data: Dict[str, Any] | None = Non
     project["intakeTriageHistory"] = history[-20:]
     project["latestIntakeTriage"] = history_item
     PROJECTS_DB[project_id] = project
-    persist_state()
+    persist_project(project_id)
     record_user_activity_log(
         {
             "eventType": "intake_triage_completed",
@@ -1677,7 +1677,7 @@ def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
     project_copy.setdefault("scenario_results", {})
     project_copy["scenario_results"][result.scenarioSetId] = result.model_dump()
     PROJECTS_DB[project_id] = project_copy
-    persist_state()
+    persist_project(project_id)
 
     return result
 

@@ -72,7 +72,7 @@ const TRACK_META: Record<WorkflowTrack, Pick<TriageTrack, "label" | "title" | "d
     label: "부동산금융",
     title: "부동산금융",
     description: "담보대출, 리파이낸싱, 대출구조, 회수 가능성을 검토합니다.",
-    entryHref: "finance",
+    entryHref: "input-package",
   },
   real_asset_finance: {
     label: "부동산 실물금융",
@@ -84,13 +84,13 @@ const TRACK_META: Record<WorkflowTrack, Pick<TriageTrack, "label" | "title" | "d
     label: "리츠",
     title: "리츠",
     description: "편입자산, 배당재원, 감정가, 운용구조와 공시 리스크를 검토합니다.",
-    entryHref: "finance",
+    entryHref: "input-package",
   },
   fund: {
     label: "부동산 펀드",
     title: "부동산 펀드",
     description: "펀드 설정, 투자대상, 대출약정, 운용과 회수 리스크를 검토합니다.",
-    entryHref: "finance",
+    entryHref: "input-package",
   },
 };
 
