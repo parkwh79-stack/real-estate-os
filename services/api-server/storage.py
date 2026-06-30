@@ -124,6 +124,125 @@ def save_state(
     _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots)
 
 
+# --- Incremental (single-row) persistence ---------------------------------
+# The full save_state() above DELETEs and re-INSERTs every table on each call,
+# so a single project create/upload re-serializes all projects + orchestration
+# runs (with their large artifacts) — ~13s on the pilot DB. The functions below
+# write only the changed row. They are sqlite-only and return False on the json
+# backend so callers can fall back to a full save_state().
+
+def upsert_project_record(project_id: str, payload: Dict[str, Any], project_id_counter: int | None = None) -> bool:
+    """Persist a single project row (sqlite). Returns False on the json backend."""
+    if storage_backend() != "sqlite":
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect_sqlite() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id, payload_json, updated_at) VALUES(?, ?, ?) "
+            "ON CONFLICT(project_id) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+            (str(project_id), json.dumps(payload, ensure_ascii=False), now),
+        )
+        if project_id_counter is not None:
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_id_counter', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(project_id_counter),),
+            )
+        conn.commit()
+    return True
+
+
+def delete_project_record_cascade(project_id: str) -> bool:
+    """Delete a single project and its project-scoped rows (sqlite)."""
+    if storage_backend() != "sqlite":
+        return False
+    pid = str(project_id)
+    with _connect_sqlite() as conn:
+        for table in (
+            "projects",
+            "reports",
+            "orchestrations",
+            "market_evidence",
+            "project_snapshots",
+            "risk_registers",
+            "evidence_graphs",
+            "prompt_artifacts",
+            "assumption_overrides",
+            "restructuring_cures",
+        ):
+            conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
+        conn.commit()
+    return True
+
+
+def upsert_orchestration_run(project_id: str, run_id: str, run: Dict[str, Any]) -> bool:
+    """Persist a single orchestration run row (sqlite)."""
+    if storage_backend() != "sqlite":
+        return False
+    with _connect_sqlite() as conn:
+        conn.execute(
+            "INSERT INTO orchestrations(project_id, run_id, status, started_at, completed_at, payload_json) "
+            "VALUES(?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(project_id, run_id) DO UPDATE SET "
+            "status=excluded.status, started_at=excluded.started_at, "
+            "completed_at=excluded.completed_at, payload_json=excluded.payload_json",
+            (
+                str(project_id),
+                str(run_id),
+                run.get("status"),
+                run.get("started_at"),
+                run.get("completed_at"),
+                json.dumps(run, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return True
+
+
+def upsert_report_record(project_id: str, record: Dict[str, Any]) -> bool:
+    """Persist a single report row (sqlite)."""
+    if storage_backend() != "sqlite":
+        return False
+    with _connect_sqlite() as conn:
+        conn.execute(
+            "INSERT INTO reports(project_id, report_id, version, created_at, payload_json) "
+            "VALUES(?, ?, ?, ?, ?) "
+            "ON CONFLICT(project_id, report_id) DO UPDATE SET "
+            "version=excluded.version, created_at=excluded.created_at, payload_json=excluded.payload_json",
+            (
+                str(project_id),
+                record.get("report_id"),
+                int(record.get("version", 1)),
+                record.get("created_at"),
+                json.dumps(record, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return True
+
+
+def upsert_project_snapshot_record(project_id: str, record: Dict[str, Any]) -> bool:
+    """Persist a single project snapshot row (sqlite)."""
+    if storage_backend() != "sqlite":
+        return False
+    with _connect_sqlite() as conn:
+        conn.execute(
+            "INSERT INTO project_snapshots(project_id, snapshot_id, run_id, created_at, payload_json) "
+            "VALUES(?, ?, ?, ?, ?) "
+            "ON CONFLICT(project_id, snapshot_id) DO UPDATE SET "
+            "run_id=excluded.run_id, created_at=excluded.created_at, payload_json=excluded.payload_json",
+            (
+                str(project_id),
+                record.get("snapshotId") or record.get("snapshot_id"),
+                record.get("runId") or record.get("run_id"),
+                record.get("createdAt") or record.get("created_at"),
+                json.dumps(record, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return True
+
+
 def record_user_activity_log(event: Dict[str, Any]) -> Dict[str, Any]:
     """Append a user/server activity event for troubleshooting and audit review."""
     record = {

@@ -8,9 +8,21 @@ from uuid import uuid4
 class ReportRepository:
     """Repository wrapper for saved report records."""
 
-    def __init__(self, reports_store: Dict[str, List[Dict[str, Any]]], persist: Callable[[], None]):
+    def __init__(
+        self,
+        reports_store: Dict[str, List[Dict[str, Any]]],
+        persist: Callable[[], None],
+        persist_report: Callable[[str, Dict[str, Any]], None] | None = None,
+    ):
         self.reports_store = reports_store
         self.persist = persist
+        self.persist_report = persist_report
+
+    def _persist_record(self, project_id: str, record: Dict[str, Any]) -> None:
+        if self.persist_report is not None:
+            self.persist_report(project_id, record)
+        else:
+            self.persist()
 
     def create(
         self,
@@ -42,7 +54,7 @@ class ReportRepository:
             "exports": [],
         }
         self.reports_store.setdefault(project_id, []).append(record)
-        self.persist()
+        self._persist_record(project_id, record)
         return record
 
     def list_metadata(self, project_id: str) -> List[Dict[str, Any]]:

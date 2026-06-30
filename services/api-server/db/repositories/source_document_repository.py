@@ -6,9 +6,15 @@ from typing import Any, Callable, Dict, List
 class SourceDocumentRepository:
     """Repository wrapper for source document metadata attached to projects."""
 
-    def __init__(self, projects_store: Dict[str, Dict[str, Any]], persist: Callable[[], None]):
+    def __init__(
+        self,
+        projects_store: Dict[str, Dict[str, Any]],
+        persist: Callable[[], None],
+        persist_project: Callable[[str], None] | None = None,
+    ):
         self.projects_store = projects_store
         self.persist = persist
+        self.persist_project = persist_project
 
     def list(self, project_id: str) -> List[Dict[str, Any]]:
         project = self.projects_store.get(project_id, {})
@@ -38,7 +44,10 @@ class SourceDocumentRepository:
         )
         if not already_listed:
             documents.append(upload_meta)
-        self.persist()
+        if self.persist_project is not None:
+            self.persist_project(project_id)
+        else:
+            self.persist()
         return upload_meta
 
     def find_by_archive_id(self, project_id: str, archive_id: str) -> Dict[str, Any] | None:

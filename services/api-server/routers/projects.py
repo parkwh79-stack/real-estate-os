@@ -52,6 +52,11 @@ from storage import (
     load_state,
     record_user_activity_log,
     save_state,
+    upsert_project_record,
+    delete_project_record_cascade,
+    upsert_orchestration_run,
+    upsert_report_record,
+    upsert_project_snapshot_record,
     upsert_assumption_override_record,
     upsert_land_evidence_record,
     upsert_prompt_artifact_record,
@@ -156,6 +161,33 @@ def allocate_project_id() -> str:
     project_id_counter += 1
     return project_id
 
+def persist_project(project_id: str) -> None:
+    """Incrementally persist a single project (or cascade-delete if removed),
+    falling back to a full save_state() on the json backend."""
+    payload = PROJECTS_DB.get(str(project_id))
+    if payload is None:
+        if not delete_project_record_cascade(project_id):
+            persist_state()
+        return
+    if not upsert_project_record(project_id, payload, project_id_counter):
+        persist_state()
+
+def persist_orchestration_run(project_id: str, run_id: str) -> None:
+    """Incrementally persist a single orchestration run, with full-save fallback."""
+    run = (ORCHESTRATIONS_DB.get(str(project_id)) or {}).get(str(run_id))
+    if run is None or not upsert_orchestration_run(project_id, run_id, run):
+        persist_state()
+
+def persist_report(project_id: str, record: Dict[str, Any]) -> None:
+    """Incrementally persist a single report record, with full-save fallback."""
+    if not upsert_report_record(project_id, record):
+        persist_state()
+
+def persist_snapshot(project_id: str, record: Dict[str, Any]) -> None:
+    """Incrementally persist a single project snapshot, with full-save fallback."""
+    if not upsert_project_snapshot_record(project_id, record):
+        persist_state()
+
 def project_repository() -> ProjectRepository:
     return ProjectRepository(
         PROJECTS_DB,
@@ -165,13 +197,14 @@ def project_repository() -> ProjectRepository:
         PROJECT_SNAPSHOTS_DB,
         persist_state,
         allocate_project_id,
+        persist_project=persist_project,
     )
 
 def report_repository() -> ReportRepository:
-    return ReportRepository(REPORTS_DB, persist_state)
+    return ReportRepository(REPORTS_DB, persist_state, persist_report=persist_report)
 
 def source_document_repository() -> SourceDocumentRepository:
-    return SourceDocumentRepository(PROJECTS_DB, persist_state)
+    return SourceDocumentRepository(PROJECTS_DB, persist_state, persist_project=persist_project)
 
 def upload_archive_repository() -> UploadArchiveRepository:
     return UploadArchiveRepository()
@@ -180,7 +213,7 @@ def market_evidence_repository() -> MarketEvidenceRepository:
     return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state)
 
 def project_snapshot_repository() -> ProjectSnapshotRepository:
-    return ProjectSnapshotRepository(PROJECT_SNAPSHOTS_DB, persist_state)
+    return ProjectSnapshotRepository(PROJECT_SNAPSHOTS_DB, persist_state, persist_snapshot=persist_snapshot)
 
 def orchestration_repository() -> OrchestrationRepository:
     return OrchestrationRepository(
@@ -189,6 +222,7 @@ def orchestration_repository() -> OrchestrationRepository:
         market_evidence_repository(),
         project_snapshot_repository(),
         persist_state,
+        persist_run=persist_orchestration_run,
     )
 
 def now_iso() -> str:

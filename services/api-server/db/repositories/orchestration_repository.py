@@ -18,12 +18,20 @@ class OrchestrationRepository:
         market_evidence_repository: MarketEvidenceRepository,
         project_snapshot_repository: ProjectSnapshotRepository,
         persist: Callable[[], None],
+        persist_run: Callable[[str, str], None] | None = None,
     ):
         self.orchestration_store = orchestration_store
         self.report_repository = report_repository
         self.market_evidence_repository = market_evidence_repository
         self.project_snapshot_repository = project_snapshot_repository
         self.persist = persist
+        self.persist_run = persist_run
+
+    def _persist_run(self, project_id: str, run_id: str) -> None:
+        if self.persist_run is not None:
+            self.persist_run(project_id, run_id)
+        else:
+            self.persist()
 
     def save_run(
         self,
@@ -37,7 +45,7 @@ class OrchestrationRepository:
             upsert_risk_register_record(project_id, run["run_id"], run["artifacts"]["riskRegister"])
         if isinstance(run.get("artifacts", {}).get("evidenceGraph"), dict):
             upsert_evidence_graph_record(project_id, run["run_id"], run["artifacts"]["evidenceGraph"])
-        self.persist()
+        self._persist_run(project_id, run["run_id"])
 
         if "phase11Report" in run.get("artifacts", {}):
             report_artifact = run["artifacts"]["phase11Report"]
@@ -48,12 +56,12 @@ class OrchestrationRepository:
                 run["run_id"],
             )
             run["artifacts"]["reportRecord"] = self.report_repository.metadata(report_record)
-            self.persist()
+            self._persist_run(project_id, run["run_id"])
 
         if project_data is not None:
             snapshot = self.project_snapshot_repository.create_from_run(project_id, project_data, run)
             run["artifacts"]["projectSnapshot"] = self.project_snapshot_repository.metadata(snapshot)
-            self.persist()
+            self._persist_run(project_id, run["run_id"])
 
         return run
 

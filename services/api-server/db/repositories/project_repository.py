@@ -18,6 +18,7 @@ class ProjectRepository:
         project_snapshots_store: Dict[str, Any],
         persist: Callable[[], None],
         allocate_project_id: Callable[[], str],
+        persist_project: Callable[[str], None] | None = None,
     ):
         self.projects_store = projects_store
         self.reports_store = reports_store
@@ -26,6 +27,14 @@ class ProjectRepository:
         self.project_snapshots_store = project_snapshots_store
         self.persist = persist
         self.allocate_project_id = allocate_project_id
+        # Optional single-row persistence (fast path); falls back to full persist().
+        self.persist_project = persist_project
+
+    def _persist_one(self, project_id: str) -> None:
+        if self.persist_project is not None:
+            self.persist_project(project_id)
+        else:
+            self.persist()
 
     def list(self) -> list[Dict[str, Any]]:
         return list(self.projects_store.values())
@@ -40,7 +49,7 @@ class ProjectRepository:
         project_id = self.allocate_project_id()
         record = self.normalize(project_id, project_data)
         self.projects_store[project_id] = record
-        self.persist()
+        self._persist_one(project_id)
         return record
 
     def update(self, project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -48,7 +57,7 @@ class ProjectRepository:
         if not existing:
             return None
         self.projects_store[project_id] = self.normalize(project_id, deep_merge(existing, project_data))
-        self.persist()
+        self._persist_one(project_id)
         return self.projects_store[project_id]
 
     def apply_parsed_data(self, project_id: str, parsed_data: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -61,7 +70,7 @@ class ProjectRepository:
         project.update(parsed_data)
         project.setdefault("_meta", {})
         project["_meta"]["updated_at"] = self._now()
-        self.persist()
+        self._persist_one(project_id)
         return project
 
     def delete(self, project_id: str) -> Dict[str, Any] | None:
@@ -72,7 +81,7 @@ class ProjectRepository:
         self.orchestrations_store.pop(project_id, None)
         self.market_evidence_store.pop(project_id, None)
         self.project_snapshots_store.pop(project_id, None)
-        self.persist()
+        self._persist_one(project_id)
         return deleted
 
     def normalize(self, project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:

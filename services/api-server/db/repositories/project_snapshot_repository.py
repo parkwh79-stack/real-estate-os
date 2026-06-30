@@ -14,9 +14,11 @@ class ProjectSnapshotRepository:
         self,
         snapshot_store: Dict[str, Dict[str, Any]],
         persist: Callable[[], None],
+        persist_snapshot: Callable[[str, Dict[str, Any]], None] | None = None,
     ):
         self.snapshot_store = snapshot_store
         self.persist = persist
+        self.persist_snapshot = persist_snapshot
 
     def create_from_run(
         self,
@@ -26,7 +28,10 @@ class ProjectSnapshotRepository:
     ) -> Dict[str, Any]:
         snapshot = build_project_snapshot(project_id, project_data, run)
         self.snapshot_store.setdefault(project_id, {})[snapshot["snapshotId"]] = snapshot
-        self.persist()
+        if self.persist_snapshot is not None:
+            self.persist_snapshot(project_id, snapshot)
+        else:
+            self.persist()
         return snapshot
 
     def list_metadata(self, project_id: str) -> List[Dict[str, Any]]:
