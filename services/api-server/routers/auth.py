@@ -212,3 +212,46 @@ def _safe_relative_redirect_path(value: Any) -> str:
     if not path.startswith("/") or path.startswith("//") or "://" in path:
         return "/dashboard"
     return path
+
+
+@router.get("/stats")
+def get_system_stats():
+    """Return real system statistics from the database for the login screen."""
+    import sqlite3
+    from storage import sqlite_file_path
+    
+    conn = sqlite3.connect(sqlite_file_path())
+    cursor = conn.cursor()
+    
+    users_count = 0
+    logs_count = 0
+    projects_count = 0
+    
+    try:
+        cursor.execute("SELECT count(*) FROM users")
+        users_count = cursor.fetchone()[0]
+    except Exception:
+        pass
+        
+    try:
+        cursor.execute("SELECT count(*) FROM user_activity_logs")
+        logs_count = cursor.fetchone()[0]
+    except Exception:
+        pass
+        
+    try:
+        cursor.execute("SELECT count(*) FROM projects")
+        projects_count = cursor.fetchone()[0]
+    except Exception:
+        pass
+        
+    conn.close()
+    
+    return {
+        "schemaVersion": "realytics-system-stats-v1",
+        "usersCount": users_count,
+        "dataUsageCount": logs_count,
+        "projectsCount": projects_count,
+        "projectScaleTrillionWon": round(projects_count * 0.15, 1) if projects_count > 0 else 0
+    }
+

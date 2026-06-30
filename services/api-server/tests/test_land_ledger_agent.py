@@ -1,4 +1,14 @@
-from agents.land_ledger_agent import LandLedgerAgent, _parse_lot_number
+from pathlib import Path
+
+import openpyxl
+import pytest
+
+from agents.land_ledger_agent import (
+    LandLedgerAgent,
+    LandLedgerParseError,
+    _parse_lot_number,
+    _read_workbook_rows,
+)
 
 
 def test_land_ledger_agent_parses_legacy_bonri_rows_and_builds_qa():
@@ -151,3 +161,43 @@ def test_land_ledger_batch_enrichment_resolves_pnu_price_and_registry_evidence()
     assert enriched["pfSummary"]["status"] == "ready_for_pf_review"
     assert enriched["enrichmentRun"]["status"] == "completed"
     assert any(evidence["evidenceType"] == "official_land_price" for evidence in parcel["evidence"])
+
+
+def _write_ledger_xlsx(path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "토지조서"
+    sheet.append(["용인 토지조서"])
+    sheet.append([])
+    sheet.append(["연번", "지번", "지목", "면적", "매입금액", "지급", "소유자"])
+    sheet.append([])
+    sheet.append([1, "상갈동 13", "대", 1000, 500_000_000, "", "홍길동"])
+    sheet.append([2, "상갈동 14", "대", 2000, 800_000_000, "", "김철수"])
+    workbook.save(str(path))
+
+
+def test_read_workbook_rows_supports_xlsx(tmp_path):
+    xlsx = tmp_path / "ledger.xlsx"
+    _write_ledger_xlsx(xlsx)
+
+    result = LandLedgerAgent().analyze_xls(str(xlsx), {"original_file_name": "ledger.xlsx"})
+
+    assert result["analysisType"] == "land_ledger_import"
+    assert result["summary"]["parcelCount"] == 2
+    assert result["sheetName"] == "토지조서"
+
+
+def test_read_workbook_rows_rejects_empty_file(tmp_path):
+    empty = tmp_path / "empty.xlsx"
+    empty.write_bytes(b"")
+
+    with pytest.raises(LandLedgerParseError):
+        _read_workbook_rows(empty)
+
+
+def test_read_workbook_rows_rejects_corrupt_workbook(tmp_path):
+    corrupt = tmp_path / "corrupt.xlsx"
+    corrupt.write_bytes(b"this is not a real workbook")
+
+    with pytest.raises(LandLedgerParseError):
+        _read_workbook_rows(corrupt)

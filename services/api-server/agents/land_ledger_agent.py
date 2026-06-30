@@ -30,6 +30,54 @@ SUPPORTED_WORKFLOW_STATUSES = [
 ]
 
 
+class LandLedgerParseError(ValueError):
+    """Raised when a land ledger workbook cannot be read (empty/unsupported/corrupt)."""
+
+
+def _read_workbook_rows(workbook_path: Path) -> tuple[List[List[Any]], str]:
+    """Read the first worksheet of a .xls/.xlsx ledger into rows of cell values.
+
+    Supports both legacy .xls (xlrd) and modern .xlsx/.xlsm (openpyxl). Empty
+    cells are normalized to "" to match the existing xlrd-tuned row parsing.
+    Raises LandLedgerParseError (a ValueError) with a Korean message on any
+    read failure so callers can return a graceful 4xx instead of a 500.
+    """
+    suffix = workbook_path.suffix.lower()
+    try:
+        if not workbook_path.exists() or workbook_path.stat().st_size == 0:
+            raise LandLedgerParseError("빈 파일입니다 (0 bytes). 내용이 있는 토지조서 파일을 올려주세요.")
+
+        if suffix in (".xlsx", ".xlsm"):
+            import openpyxl  # lazy: only when an xlsx is uploaded
+
+            workbook = openpyxl.load_workbook(str(workbook_path), read_only=True, data_only=True)
+            try:
+                worksheet = workbook.worksheets[0]
+                rows = [
+                    ["" if cell is None else cell for cell in row]
+                    for row in worksheet.iter_rows(values_only=True)
+                ]
+                sheet_name = worksheet.title
+            finally:
+                workbook.close()
+            return rows, sheet_name
+
+        # Legacy .xls (and unknown suffixes attempted as .xls) via xlrd.
+        book = xlrd.open_workbook(str(workbook_path))
+        sheet = book.sheet_by_index(0)
+        rows = [
+            [sheet.cell_value(row_index, column_index) for column_index in range(sheet.ncols)]
+            for row_index in range(sheet.nrows)
+        ]
+        return rows, sheet.name
+    except LandLedgerParseError:
+        raise
+    except Exception as exc:  # xlrd.XLRDError, openpyxl/zip errors, etc.
+        raise LandLedgerParseError(
+            f"토지조서 워크북을 읽지 못했습니다 ({suffix or '확장자 없음'}): {exc}"
+        ) from exc
+
+
 class LandLedgerAgent:
     """Parse Korean land acquisition ledgers into structured parcel data."""
 
@@ -50,18 +98,16 @@ class LandLedgerAgent:
         source_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         workbook_path = Path(workbook_path)
-        book = xlrd.open_workbook(str(workbook_path))
-        sheet = book.sheet_by_index(0)
-        rows = [
-            [sheet.cell_value(row_index, column_index) for column_index in range(sheet.ncols)]
-            for row_index in range(sheet.nrows)
-        ]
+        rows, sheet_name = _read_workbook_rows(workbook_path)
         return self.analyze_rows(
             rows,
-            sheet_name=sheet.name,
+            sheet_name=sheet_name,
             source_file=(source_info or {}).get("original_file_name") or workbook_path.name,
             source_info=source_info,
         )
+
+    # Backwards-compatible alias for callers that pass either .xls or .xlsx.
+    analyze_workbook = analyze_xls
 
     def analyze_rows(
         self,

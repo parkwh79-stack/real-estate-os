@@ -1,24 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { UserCircle } from "lucide-react";
-import { getStoredAuthSession } from "../../lib/auth-client";
+import { useAuth } from "../auth/auth-context";
 
 const DEFAULT = { name: "게스트 심사역", role: "PLATFORM9 Alpha" };
 
-/** Shows the logged-in member (from the stored auth session), not a hardcoded name. */
+/** Shows the logged-in member (from the shared auth context), not a hardcoded name. */
 export function HeaderUser() {
-  const [u, setU] = useState(DEFAULT);
+  const router = useRouter();
+  const { user, logout } = useAuth();
 
-  useEffect(() => {
-    const stored = getStoredAuthSession();
-    if (stored?.user) {
-      setU({
-        name: stored.user.displayName || stored.user.userId,
-        role: stored.user.role ? `${stored.user.role} · PLATFORM9` : "PLATFORM9 Alpha",
-      });
-    }
-  }, []);
+  const u = user
+    ? {
+        name: user.displayName || user.userId,
+        role: user.role ? `${user.role} · PLATFORM9` : "PLATFORM9 Alpha",
+      }
+    : DEFAULT;
 
   return (
     <div className="hidden items-center gap-2 border-l border-slate-200 pl-3 sm:flex dark:border-slate-800">
@@ -27,6 +25,16 @@ export function HeaderUser() {
         <p className="font-semibold text-slate-900 dark:text-white">{u.name}</p>
         <p className="text-xs text-slate-500">{u.role}</p>
       </div>
+      <button
+        type="button"
+        onClick={() => {
+          logout();
+          router.replace("/login");
+        }}
+        className="ml-2 rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+      >
+        로그아웃
+      </button>
     </div>
   );
 }

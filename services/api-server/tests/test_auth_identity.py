@@ -59,6 +59,53 @@ def test_auth_identity_session_and_me_context():
     assert any(record.get("path") == "/projects/" for record in logs)
 
 
+def test_project_list_scopes_to_authenticated_session_owner():
+    client = TestClient(app)
+
+    for user_id in ["owner-a", "owner-b"]:
+        tenant = f"{user_id}-tenant"
+        client.post("/auth/tenants", json={"tenantId": tenant, "name": tenant})
+        client.post(
+            "/auth/users",
+            json={
+                "userId": user_id,
+                "tenantId": tenant,
+                "displayName": user_id,
+                "role": "analyst",
+            },
+        )
+
+    session_a = client.post(
+        "/auth/session",
+        json={"userId": "owner-a", "tenantId": "owner-a-tenant", "provider": "local-test", "host": "web"},
+    ).json()["session"]["sessionId"]
+    session_b = client.post(
+        "/auth/session",
+        json={"userId": "owner-b", "tenantId": "owner-b-tenant", "provider": "local-test", "host": "web"},
+    ).json()["session"]["sessionId"]
+
+    project_a = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": session_a},
+        json={"project": {"name": "Owner A Project", "type": "mixed_use"}},
+    )
+    assert project_a.status_code == 200
+    assert project_a.json()["_meta"]["createdBy"] == "owner-a"
+
+    project_b = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": session_b},
+        json={"project": {"name": "Owner B Project", "type": "residential"}},
+    )
+    assert project_b.status_code == 200
+
+    projects_for_a = client.get("/projects/", headers={"x-realytics-session-id": session_a})
+    assert projects_for_a.status_code == 200
+    names_for_a = {item["project"]["name"] for item in projects_for_a.json()}
+    assert "Owner A Project" in names_for_a
+    assert "Owner B Project" not in names_for_a
+
+
 def test_auth_me_returns_anonymous_context_when_user_missing():
     client = TestClient(app)
 

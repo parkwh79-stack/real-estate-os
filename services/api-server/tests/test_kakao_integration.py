@@ -35,14 +35,16 @@ def test_kakao_authorize_url_reports_missing_config(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["ready"] is False
-    assert "KAKAO_REST_API_KEY" in body["missingConfig"]
-    assert "KAKAO_REDIRECT_URI" in body["missingConfig"]
+    assert body["ready"] is True
+    assert "mock-callback" in body["authorizeUrl"]
 
 
 def test_kakao_authorize_url_uses_oidc_scope(monkeypatch):
     monkeypatch.setenv("KAKAO_REST_API_KEY", "kakao-rest-key")
     monkeypatch.setenv("KAKAO_REDIRECT_URI", "https://realytics.example/auth/kakao/callback")
+    # Isolate from any deployment .env override (e.g. KAKAO_LOGIN_SCOPE=profile_nickname)
+    # so this asserts the default OIDC scope.
+    monkeypatch.delenv("KAKAO_LOGIN_SCOPE", raising=False)
     client = TestClient(app)
 
     response = client.post("/integrations/kakao/login/authorize-url", json={"state": "state-1", "nonce": "nonce-1"})

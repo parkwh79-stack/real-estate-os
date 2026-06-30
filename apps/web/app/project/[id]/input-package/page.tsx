@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { authHeaders } from "../../../../lib/auth-client";
 import { SmartIntake } from "../../../../components/intake/smart-intake";
+import { FeasibilityExtractReview } from "../../../../components/intake/feasibility-extract-review";
 
 const apiBase = "http://127.0.0.1:8000";
 
@@ -298,6 +299,8 @@ export default function InputPackagePage() {
       </div>
 
       <SmartIntake projectId={projectId} onProcessed={refreshPackageState} />
+
+      <FeasibilityExtractReview projectId={projectId} onApplied={refreshPackageState} />
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {packageSlots.map((slot) => {

@@ -35,16 +35,22 @@ def test_parser_returns_host_llm_request_for_claude_desktop(monkeypatch):
     assert data["host_llm_extraction"]["expected_output"] == "project_data_json"
 
 
-def test_parser_openai_without_key_returns_explicit_mock(monkeypatch):
+def test_parser_openai_without_key_returns_honest_unavailable(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     data = ParserAgent({"provider": "openai", "user_id": "api-user-1"}).extract_project_data(
         "Short business plan text"
     )
 
-    assert data["_meta"]["parsing_source"] == "mock"
+    # No AI provider available -> honest "extraction_unavailable", NO fabricated numbers.
+    assert data["_meta"]["parsing_source"] == "extraction_unavailable"
+    assert data["_meta"]["requiresManualOrLlmExtraction"] is True
     assert data["_meta"]["ai_connection"]["provider"] == "openai"
     assert data["_meta"]["ai_connection"]["user_id"] == "api-user-1"
+    # Critically: no invented financials/project values.
+    assert "feasibility_input" not in data
+    assert "project" not in data
+    assert "pf_structure" not in data
 
 
 def test_gemini_provider_resolves_openai_compatible_base_url(monkeypatch):

@@ -3,6 +3,7 @@ from typing import Any, Dict
 import fitz  # PyMuPDF
 
 from agents.ai_connection import AIConnection, resolve_ai_context
+from agents.agent_policy import system_prompt_for
 
 
 PARSER_AGENT_VERSION = "realytics-parser-v2.4"
@@ -40,7 +41,7 @@ class ParserAgent:
 
         result = self.ai.extract_json(
             prompt,
-            system="You are a precise data extraction assistant. Output only JSON.",
+            system=system_prompt_for("parser", base="You are a precise data extraction assistant. Output only JSON."),
             ai_context=context,
         )
         if result.data is not None:
@@ -349,84 +350,24 @@ class ParserAgent:
 
     def _get_mock_parsed_data(
         self,
-        reason: str = "mock fallback",
+        reason: str = "extraction unavailable",
         ai_context: Dict[str, Any] | None = None,
     ) -> dict:
-        """Return explicit mock data when real AI extraction is unavailable."""
+        """Honest fallback when real AI extraction is unavailable.
+
+        Per AGENTS.md (no fabrication): this returns NO invented project/financial
+        values. It only reports that extraction did not run, so the caller leaves
+        the project's real data untouched instead of injecting plausible-but-fake
+        numbers (the old behaviour silently populated 200B revenue etc.).
+        """
         resolved_context = resolve_ai_context(ai_context or self.ai_context)
         return {
           "_meta": {
-            "parsing_source": "mock",
+            "parsing_source": "extraction_unavailable",
             "confidence": 0.0,
-            "warning": "AI parsing did not use real source extraction.",
+            "warning": "AI 추출을 사용할 수 없어 문서에서 수치를 추출하지 못했습니다. 가짜 값을 생성하지 않습니다.",
             "reason": reason,
+            "requiresManualOrLlmExtraction": True,
             "ai_connection": resolved_context,
           },
-          "project": {
-            "name": "Parsed AI Project",
-            "type": "mixed_use",
-            "review_date": "2026-06-01",
-            "financial_institution": "Mock Bank"
-          },
-          "land": {
-            "address": "Mock Address 123",
-            "area_sqm": 10000.0
-          },
-          "regulation": {
-            "applied_far": 700.0,
-            "applied_bcr": 60.0
-          },
-          "architectural_plan": {
-            "gross_floor_area_sqm": 70000.0,
-            "saleable_area_sqm": 50400.0,
-            "building_coverage_sqm": 6000.0,
-            "unit_count": 500,
-            "parking_count": 650
-          },
-          "sales_assumptions": {
-            "avg_price_per_sqm": 3968254,
-            "other_revenue": 0
-          },
-          "cost_assumptions": {
-            "construction_cost_per_sqm": 1142857
-          },
-          "feasibility_input": {
-            "total_revenue": 200000000000,
-            "total_cost": 150000000000,
-            "land_cost": 50000000000,
-            "construction_cost": 80000000000,
-            "finance_cost": 10000000000,
-            "other_cost": 10000000000
-          },
-          "pf_structure": [
-            {
-              "tranche": "Tranche A",
-              "amount": 100000000000,
-              "interest_rate": 0.05,
-              "fee_rate": 0.01,
-              "priority": 1,
-              "all_in_cost": 0.06
-            }
-          ],
-          "developer_info": {
-            "name": "AI Developer Corp",
-            "credit_rating": "A-",
-            "financials": "Assets 100B"
-          },
-          "contractor_info": {
-            "name": "AI Construction",
-            "credit_rating": "AA-",
-            "order_backlog": "10T",
-            "financials": "Debt Ratio 100%"
-          },
-          "schedule": {
-            "construction_start": "2026-09",
-            "completion": "2029-09"
-          },
-          "covenants": {
-            "claim_preservation": ["Trust first-priority beneficial interest"],
-            "eod": ["Failure to satisfy responsibility completion obligation"],
-            "drawdown_conditions": ["Permit approval completed"],
-            "execution_order": ["1. Taxes", "2. Essential project costs"]
-          }
         }

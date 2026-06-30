@@ -13,7 +13,7 @@ from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
 from agents.parser_provenance import attach_parser_field_provenance
 from agents.risk_report_workbook_importer import import_risk_report_workbook
 
-from core.authz import authorize_request
+from core.authz import authorize_request, identity_context_from_request
 from core.calculations import (
     calculate_cashflow_max_minus,
     build_monthly_cash_flow,
@@ -63,7 +63,12 @@ from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
 from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_case
+from agents.land_ledger_agent import LandLedgerParseError
 from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case, enrich_land_ledger_use_case
+from use_cases.feasibility_workbook_llm import (
+    apply_feasibility_input_use_case,
+    extract_feasibility_fields_via_llm,
+)
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
@@ -189,13 +194,53 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def user_id_from_request(request: Request) -> str:
-    return (
-        request.headers.get("x-realytics-user-id")
-        or request.headers.get("x-user-id")
-        or request.headers.get("x-codex-user-id")
-        or request.query_params.get("user_id")
-        or "anonymous"
-    )
+    context = identity_context_from_request(request)
+    user = context.get("user") or {}
+    return user.get("userId") or "anonymous"
+
+def tenant_id_from_request(request: Request) -> str | None:
+    context = identity_context_from_request(request)
+    user = context.get("user") or {}
+    session = context.get("session") or {}
+    return user.get("tenantId") or session.get("tenantId")
+
+def stamp_project_identity(project_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """Attach persisted user identity to new project records for user-specific dashboards."""
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        return project_data
+
+    user = context.get("user") or {}
+    session = context.get("session") or {}
+    record = dict(project_data)
+    metadata = dict(record.get("_meta") or {})
+    metadata.setdefault("createdBy", user.get("userId"))
+    metadata.setdefault("created_by", user.get("userId"))
+    metadata.setdefault("tenantId", user.get("tenantId") or session.get("tenantId"))
+    metadata.setdefault("tenant_id", user.get("tenantId") or session.get("tenantId"))
+    metadata.setdefault("createdVia", "web")
+    metadata["lastUpdatedBy"] = user.get("userId")
+    metadata["last_updated_by"] = user.get("userId")
+    record["_meta"] = metadata
+    return record
+
+def project_visible_to_identity(project: Dict[str, Any], request: Request) -> bool:
+    """Keep login dashboards scoped to the authenticated user's stored projects."""
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        return True
+
+    user = context.get("user") or {}
+    user_id = user.get("userId")
+    tenant_id = user.get("tenantId")
+    metadata = project.get("_meta") if isinstance(project.get("_meta"), dict) else {}
+    project_owner = metadata.get("createdBy") or metadata.get("created_by") or metadata.get("uploadedBy")
+    project_tenant = metadata.get("tenantId") or metadata.get("tenant_id")
+    if project_owner:
+        return project_owner == user_id
+    if project_tenant:
+        return project_tenant == tenant_id
+    return False
 
 def record_sensitive_project_event(
     request: Request,
@@ -542,8 +587,17 @@ async def parse_uploaded_business_plan(
 async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[str, Any]:
     suffix = os.path.splitext(file.filename or "")[1] or ".xls"
     uploaded_at = now_iso()
+    content = await file.read()
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "empty_file",
+                "message": "빈 파일입니다. 내용이 있는 토지조서 파일을 올려주세요.",
+                "originalFileName": file.filename,
+            },
+        )
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
     archive_meta = archive_source_document_use_case(
@@ -576,6 +630,16 @@ async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[
         ) | {
             "upload": upload_meta
         }
+    except LandLedgerParseError as exc:
+        # Unreadable workbook (empty/unsupported/corrupt): graceful 422 instead of a 500.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "land_ledger_parse_failed",
+                "message": str(exc),
+                "originalFileName": file.filename,
+            },
+        ) from exc
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -779,12 +843,13 @@ def load_fixtures():
 load_fixtures()
 
 @router.get("/")
-def get_projects():
-    return list_projects_use_case(project_repository())
+def get_projects(request: Request):
+    projects = list_projects_use_case(project_repository())
+    return [project for project in projects if project_visible_to_identity(project, request)]
 
 @router.post("/")
-def create_project(project_data: Dict[str, Any]):
-    return create_project_use_case(project_repository(), project_data)
+def create_project(project_data: Dict[str, Any], request: Request):
+    return create_project_use_case(project_repository(), stamp_project_identity(project_data, request))
 
 @router.get("/{project_id}")
 def get_project(project_id: str):
@@ -944,6 +1009,83 @@ async def validate_project_feasibility_workbook(
         raise HTTPException(status_code=404, detail="Project not found")
     result = await validate_uploaded_feasibility_workbook(project_id, file)
     save_source_document_metadata_use_case(source_document_repository(), project_id, result["upload"])
+    return result
+
+
+@router.post("/{project_id}/feasibility-workbook/extract")
+async def extract_project_feasibility_workbook(
+    project_id: str,
+    file: UploadFile = File(...),
+    x_realytics_user_id: str | None = Header(default=None),
+    x_realytics_ai_provider: str | None = Header(default=None),
+):
+    """LLM-extract financial figures from an arbitrary 사업수지 workbook (any layout).
+
+    Returns a reviewable draft with per-field source-cell evidence + detected unit.
+    Does NOT persist — the reviewer applies via /feasibility-workbook/apply-input.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail={"error": "empty_file", "message": "빈 파일입니다."})
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    archive_meta = archive_source_document_use_case(
+        upload_archive_repository(), project_id, content, file.filename, file.content_type
+    )
+    upload_meta = {
+        "originalFileName": file.filename,
+        "originalFileHash": archive_meta["archiveId"],
+        "documentType": "feasibility_workbook",
+        "contentType": file.content_type,
+        "fileSizeBytes": len(content),
+        "uploadedAt": now_iso(),
+        "parserVersion": "feasibility-workbook-llm-extract-v1",
+        **archive_meta,
+    }
+    save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
+    ai_context = resolve_ai_context(
+        {"user_id": x_realytics_user_id, "provider": x_realytics_ai_provider, "host": "api"}
+    )
+    try:
+        draft = extract_feasibility_fields_via_llm(tmp_path, ai_context)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    return {"project_id": project_id, "upload": upload_meta, **draft}
+
+
+@router.post("/{project_id}/feasibility-workbook/apply-input")
+def apply_project_feasibility_input(project_id: str, request: Request, input_data: Dict[str, Any]):
+    """Persist a reviewer-confirmed feasibility_input (from the LLM extract draft)."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "assumption:override")
+    feasibility_input = input_data.get("feasibility_input") or input_data.get("feasibilityInput") or {}
+    try:
+        result = apply_feasibility_input_use_case(
+            project_repository(),
+            project_id,
+            feasibility_input,
+            applied_by=user_id_from_request(request),
+            source_document=input_data.get("sourceDocument"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="feasibility_input_applied",
+        project_id=project_id,
+        metadata={
+            "appliedFields": list((result.get("appliedFields") or {}).keys()),
+            "authorization": authz.get("authorization"),
+        },
+    )
     return result
 
 @router.post("/{project_id}/feasibility-workbook/approve")

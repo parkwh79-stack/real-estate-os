@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Cell,
   Legend,
@@ -22,22 +22,82 @@ import {
 } from "lucide-react";
 import {
   calcIRR,
-  cashFlowAssumptions,
-  demoProject,
   formatEok,
   formatPercent,
 } from "../../lib/platform-data";
+import { ProjectPicker, getStoredSelectedProjectId } from "../../components/project/project-picker";
+import { fetchProjectDetail } from "../../lib/project-client";
 
 const colors = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#7c3aed"];
 
+interface FeasibilityDetail {
+  project?: { id?: string; name?: string };
+  feasibility_input?: {
+    total_revenue?: number;
+    land_cost?: number;
+    construction_cost?: number;
+    finance_cost?: number;
+    other_cost?: number;
+  };
+}
+
+const wonToEok = (v?: number): number => (typeof v === "number" ? Math.round((v / 1e8) * 10) / 10 : 0);
+
+interface Seed {
+  revenue: number;
+  landCost: number;
+  constructionCost: number;
+  financeCost: number;
+  otherCost: number;
+}
+const ZERO_SEED: Seed = { revenue: 0, landCost: 0, constructionCost: 0, financeCost: 0, otherCost: 0 };
+
 export default function FeasibilityPage() {
-  const [revenue, setRevenue] = useState(cashFlowAssumptions.revenue);
-  const [landCost, setLandCost] = useState(cashFlowAssumptions.landCost);
-  const [constructionCost, setConstructionCost] = useState(
-    cashFlowAssumptions.constructionCost,
-  );
-  const [financeCost, setFinanceCost] = useState(cashFlowAssumptions.financeCost);
-  const [otherCost, setOtherCost] = useState(cashFlowAssumptions.otherCost);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [projectName, setProjectName] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string>("");
+  const [seed, setSeed] = useState<Seed>(ZERO_SEED);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [revenue, setRevenue] = useState(0);
+  const [landCost, setLandCost] = useState(0);
+  const [constructionCost, setConstructionCost] = useState(0);
+  const [financeCost, setFinanceCost] = useState(0);
+  const [otherCost, setOtherCost] = useState(0);
+
+  const applySeed = (s: Seed) => {
+    setRevenue(s.revenue);
+    setLandCost(s.landCost);
+    setConstructionCost(s.constructionCost);
+    setFinanceCost(s.financeCost);
+    setOtherCost(s.otherCost);
+  };
+
+  const load = useCallback(async (id: string) => {
+    setSelectedId(id);
+    setLoadError(null);
+    try {
+      const d = await fetchProjectDetail<FeasibilityDetail>(id);
+      const f = d.feasibility_input ?? {};
+      const s: Seed = {
+        revenue: wonToEok(f.total_revenue),
+        landCost: wonToEok(f.land_cost),
+        constructionCost: wonToEok(f.construction_cost),
+        financeCost: wonToEok(f.finance_cost),
+        otherCost: wonToEok(f.other_cost),
+      };
+      setSeed(s);
+      applySeed(s);
+      setProjectName(d.project?.name ?? null);
+      setProjectId(d.project?.id ?? id);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "프로젝트를 불러오지 못했습니다.");
+    }
+  }, []);
+
+  useEffect(() => {
+    const stored = getStoredSelectedProjectId();
+    if (stored) void load(stored);
+  }, [load]);
 
   const totalCost = landCost + constructionCost + financeCost + otherCost;
   const profit = revenue - totalCost;
@@ -58,25 +118,23 @@ export default function FeasibilityPage() {
     [constructionCost, financeCost, landCost, otherCost, profit],
   );
 
-  const reset = () => {
-    setRevenue(cashFlowAssumptions.revenue);
-    setLandCost(cashFlowAssumptions.landCost);
-    setConstructionCost(cashFlowAssumptions.constructionCost);
-    setFinanceCost(cashFlowAssumptions.financeCost);
-    setOtherCost(cashFlowAssumptions.otherCost);
-  };
+  const reset = () => applySeed(seed);
 
   return (
     <div className="space-y-6 pb-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-sm font-semibold text-slate-500">{demoProject.id}</p>
+          <p className="text-sm font-semibold text-slate-500">{projectId || "프로젝트 미선택"}</p>
           <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
             사업성 분석
           </h2>
-          <p className="mt-1 text-sm text-slate-500">{demoProject.name}</p>
+          <p className="mt-1 text-sm text-slate-500">{projectName ?? "심사 프로젝트를 선택하면 사업수지 가정이 채워집니다."}</p>
+          {loadError ? <p className="mt-1 text-sm font-semibold text-rose-600">{loadError}</p> : null}
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="w-72">
+            <ProjectPicker value={selectedId} onChange={(id) => void load(id)} label="프로젝트" />
+          </div>
           <button
             type="button"
             onClick={reset}

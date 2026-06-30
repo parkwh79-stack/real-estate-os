@@ -19,7 +19,7 @@ function safeRedirectPath(value: string | null) {
 
 export default function KakaoSessionPage() {
   return (
-    <Suspense fallback={<SessionShell status="loading" message="카카오 세션을 연결하는 중입니다." />}>
+    <Suspense fallback={<SessionShell status="loading" message="소셜 인증 세션을 연결하는 중입니다." />}>
       <KakaoSessionConnector />
     </Suspense>
   );
@@ -31,14 +31,14 @@ function KakaoSessionConnector() {
   const sessionId = searchParams.get("session_id") || searchParams.get("sessionId");
   const redirectPath = useMemo(() => safeRedirectPath(searchParams.get("redirect")), [searchParams]);
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
-  const [message, setMessage] = useState("카카오 로그인 세션을 REALYTICS에 연결하는 중입니다.");
+  const [message, setMessage] = useState("소셜 로그인 세션을 REALYTICS에 연결하는 중입니다.");
 
   useEffect(() => {
     let active = true;
     async function connect() {
       if (!sessionId) {
         setStatus("error");
-        setMessage("세션 ID가 없습니다. 카카오 로그인 링크를 다시 생성해 주세요.");
+        setMessage("세션 ID가 없습니다. 로그인 링크를 다시 생성해 주세요.");
         return;
       }
       try {
@@ -56,7 +56,7 @@ function KakaoSessionConnector() {
         };
         setStoredAuthSession(stored);
         setStatus("success");
-        setMessage("카카오 로그인 세션이 연결되었습니다. 보던 검토 화면으로 이동합니다.");
+        setMessage("소셜 로그인 세션이 성공적으로 연결되었습니다. 검토 화면으로 이동합니다.");
         window.setTimeout(() => {
           router.replace(redirectPath);
         }, 700);

@@ -20,6 +20,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from agents.agent_policy import system_prompt_for
+
 CONSENSUS_SCHEMA_VERSION = "realytics-consensus-v1"
 
 # Conflicts that require real source evidence (cannot be auto-resolved without
@@ -111,7 +113,11 @@ class LLMCoordinator:
             ensure_ascii=False,
         )
         try:
-            result = self._conn().extract_json(prompt, system=self._SYSTEM, ai_context=self.ai_context)
+            result = self._conn().extract_json(
+                prompt,
+                system=system_prompt_for("consensus", base=self._SYSTEM),
+                ai_context=self.ai_context,
+            )
             data = result.data if result and result.error is None else None
             if not isinstance(data, dict):
                 raise ValueError("no coordinator response")

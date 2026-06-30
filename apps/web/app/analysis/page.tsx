@@ -4,9 +4,34 @@ import { useCallback, useEffect, useState } from "react";
 import { Building2, Loader2, MapPin, Search } from "lucide-react";
 import { MapIntelligence, type MapIntelligenceData } from "../../components/map/map-intelligence";
 import { TransactionsPanel } from "../../components/map/transactions-panel";
-import { demoProject } from "../../lib/platform-data";
+import { ProjectPicker, getStoredSelectedProjectId } from "../../components/project/project-picker";
+import { fetchProjectDetail } from "../../lib/project-client";
+import { apiBase } from "../../lib/auth-client";
 
-const apiBase = "http://127.0.0.1:8000";
+const TYPE_LABEL: Record<string, string> = {
+  mixed_use: "주상복합 개발",
+  logistics: "물류센터 개발",
+  residential: "공동주택 개발",
+  office: "오피스 개발",
+  lodging: "숙박시설 개발",
+  land_feasibility: "토지 사업성",
+};
+
+interface ProjectDetail {
+  project?: { name?: string; type?: string };
+  land?: { address?: string; pnu?: string; area_sqm?: number };
+  regulation?: { applied_far?: number; applied_bcr?: number };
+  architectural_plan?: { gross_floor_area_sqm?: number };
+  expected_results?: { profit_margin?: number };
+}
+
+function sqm(v?: number): string {
+  return typeof v === "number" ? `${v.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}㎡` : "—";
+}
+function pctOf(v?: number, alreadyPercent = false): string {
+  if (typeof v !== "number") return "—";
+  return `${(alreadyPercent ? v : v * 100).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}%`;
+}
 
 type LookupResponse = {
   geocodeStatus?: string;
@@ -60,10 +85,12 @@ function Fact({ label, value, tone }: { label: string; value: string; tone?: "go
 }
 
 export default function AnalysisPage() {
-  const [address, setAddress] = useState(demoProject.address);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [project, setProject] = useState<ProjectDetail | null>(null);
+  const [address, setAddress] = useState("");
   const [mapData, setMapData] = useState<MapIntelligenceData | null>(null);
   const [lawdCd, setLawdCd] = useState<string | undefined>(undefined);
-  const [pnu, setPnu] = useState<string>(demoProject.pnu);
+  const [pnu, setPnu] = useState<string>("");
   const [hasParcel, setHasParcel] = useState(false);
   const [restrictedRights, setRestrictedRights] = useState<string[]>([]);
   const [radiusData, setRadiusData] = useState<RadiusData | null>(null);
@@ -71,23 +98,26 @@ export default function AnalysisPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const analyze = useCallback(async (addr: string) => {
+  const analyze = useCallback(async (addr: string, seedPnu = "") => {
+    if (!addr.trim()) return;
     setLoading(true);
     setError(null);
+    setRadiusData(null);
     try {
-      const qs = new URLSearchParams({ address: addr, pnu: demoProject.pnu });
+      const qs = new URLSearchParams({ address: addr });
+      if (seedPnu) qs.set("pnu", seedPnu);
       const res = await fetch(`${apiBase}/api/market/parcel-lookup?${qs}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`대상지 분석 실패 (${res.status})`);
       const d = (await res.json()) as LookupResponse;
       if (d.map) setMapData(d.map);
-      setLawdCd(d.lawdCd ?? demoProject.pnu.slice(0, 5));
-      setPnu(d.pnu ?? demoProject.pnu);
+      setLawdCd(d.lawdCd ?? ((d.pnu ?? seedPnu).slice(0, 5) || undefined));
+      setPnu(d.pnu ?? seedPnu);
       setHasParcel(Boolean(d.hasParcel));
       setRestrictedRights(Array.isArray(d.restrictedRights) ? d.restrictedRights : []);
       // 반경별 공시지가·토지 실거래
       const center = d.center ?? d.map?.center ?? null;
-      const lawd = d.lawdCd ?? demoProject.pnu.slice(0, 5);
-      if (center) {
+      const lawd = d.lawdCd ?? (d.pnu ?? seedPnu).slice(0, 5);
+      if (center && lawd) {
         const rqs = new URLSearchParams({ lng: String(center.lng), lat: String(center.lat), lawd_cd: lawd });
         fetch(`${apiBase}/api/market/land-radius?${rqs}`, { cache: "no-store" })
           .then((r) => (r.ok ? r.json() : null))
@@ -101,13 +131,39 @@ export default function AnalysisPage() {
     }
   }, []);
 
+  const loadProject = useCallback(
+    async (id: string) => {
+      setSelectedId(id);
+      setError(null);
+      try {
+        const detail = await fetchProjectDetail<ProjectDetail>(id);
+        setProject(detail);
+        const addr = detail.land?.address ?? "";
+        const projPnu = detail.land?.pnu ?? "";
+        setAddress(addr);
+        setPnu(projPnu);
+        if (addr) void analyze(addr, projPnu);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "프로젝트를 불러오지 못했습니다.");
+      }
+    },
+    [analyze],
+  );
+
+  // Open on the previously-selected real project (no demo seed).
   useEffect(() => {
-    void analyze(demoProject.address);
-  }, [analyze]);
+    const stored = getStoredSelectedProjectId();
+    if (stored) void loadProject(stored);
+  }, [loadProject]);
+
+  const assetType = project?.project?.type ? TYPE_LABEL[project.project.type] ?? project.project.type : null;
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:flex-row dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:flex-row md:items-center dark:border-slate-800 dark:bg-slate-900">
+        <div className="md:w-80">
+          <ProjectPicker value={selectedId} onChange={(id) => void loadProject(id)} label="대상 프로젝트" />
+        </div>
         <label className="flex h-11 flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm dark:border-slate-800 dark:bg-slate-950">
           <Search className="h-4 w-4 text-slate-400" />
           <input
@@ -139,8 +195,12 @@ export default function AnalysisPage() {
           {mapData ? (
             <MapIntelligence data={mapData} />
           ) : (
-            <div className="flex min-h-[520px] items-center justify-center rounded-lg border border-slate-200 text-sm text-slate-500 dark:border-slate-800">
-              <Loader2 className="mr-2 h-5 w-5 animate-spin" /> 지도 로딩 중
+            <div className="flex min-h-[520px] items-center justify-center rounded-lg border border-dashed border-slate-300 text-sm text-slate-500 dark:border-slate-700">
+              {loading ? (
+                <span className="inline-flex items-center"><Loader2 className="mr-2 h-5 w-5 animate-spin" /> 지도 로딩 중</span>
+              ) : (
+                "상단에서 심사 프로젝트를 선택하거나 주소를 입력해 대상지를 분석하세요."
+              )}
             </div>
           )}
           <p className="text-xs text-slate-500">
@@ -154,22 +214,26 @@ export default function AnalysisPage() {
           <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <span className="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-bold text-indigo-700 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300">
-                  {demoProject.assetType}
-                </span>
-                <h2 className="mt-3 text-xl font-black text-slate-950 dark:text-white">{demoProject.name}</h2>
-                <p className="mt-1 text-sm text-slate-500">{address}</p>
-                <p className="mt-1 font-mono text-xs text-slate-400">PNU {pnu}</p>
+                {assetType ? (
+                  <span className="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-bold text-indigo-700 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300">
+                    {assetType}
+                  </span>
+                ) : null}
+                <h2 className="mt-3 text-xl font-black text-slate-950 dark:text-white">
+                  {project?.project?.name ?? "프로젝트를 선택하세요"}
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">{address || "—"}</p>
+                <p className="mt-1 font-mono text-xs text-slate-400">PNU {pnu || "—"}</p>
               </div>
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-800">
                 <Building2 className="h-5 w-5 text-slate-600 dark:text-slate-300" />
               </div>
             </div>
             <div className="mt-5 grid grid-cols-2 gap-3">
-              <Fact label="대지면적" value="2,586.8㎡" />
-              <Fact label="계획 용적률" value="760%" tone="good" />
-              <Fact label="예상 연면적" value="19,659㎡" />
-              <Fact label="개발 가능성" value={`${demoProject.pfScore}점`} tone="warn" />
+              <Fact label="대지면적" value={sqm(project?.land?.area_sqm)} />
+              <Fact label="계획 용적률" value={pctOf(project?.regulation?.applied_far, true)} tone="good" />
+              <Fact label="예상 연면적" value={sqm(project?.architectural_plan?.gross_floor_area_sqm)} />
+              <Fact label="예상 수익률" value={pctOf(project?.expected_results?.profit_margin)} tone="warn" />
             </div>
           </section>
 

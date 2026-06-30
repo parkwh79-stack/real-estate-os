@@ -5,12 +5,9 @@ import type { ReactNode } from "react";
 import { CheckCircle2, KeyRound, LogOut, MessageCircle, ShieldCheck, UserRound } from "lucide-react";
 import {
   apiBase,
-  clearStoredAuthSession,
   createLocalPilotSession,
-  getStoredAuthSession,
-  resolveCurrentIdentity,
-  type StoredAuthSession,
 } from "../../lib/auth-client";
+import { useAuth } from "../../components/auth/auth-context";
 
 const roleOptions = [
   { value: "reviewer", label: "심사역 / Reviewer", description: "리스크 검토, 기준값 승인, 보고서 export 권한" },
@@ -61,29 +58,19 @@ export default function SettingsPage() {
   const [email, setEmail] = useState("credit.officer@example.com");
   const [displayName, setDisplayName] = useState("심사 담당자");
   const [role, setRole] = useState("reviewer");
-  const [session, setSession] = useState<StoredAuthSession | null>(null);
+  const { user, session: authSession, permissions, logout: authLogout } = useAuth();
   const [idpStatus, setIdpStatus] = useState<IdpStatus | null>(null);
   const [kakaoStatus, setKakaoStatus] = useState<KakaoStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // The current session comes from the shared auth context. createLocalPilotSession /
+  // logout both dispatch the change event the provider listens to, so this stays in sync.
+  const session =
+    user && authSession ? { user, session: authSession, permissions } : null;
+
   useEffect(() => {
-    const stored = getStoredAuthSession();
-    setSession(stored);
-    if (stored?.session?.sessionId) {
-      resolveCurrentIdentity(stored.session.sessionId)
-        .then((identity) => {
-          if (identity.authenticated) {
-            setSession({
-              user: identity.user,
-              session: identity.session ?? stored.session,
-              permissions: identity.permissions ?? stored.permissions,
-            });
-          }
-        })
-        .catch(() => undefined);
-    }
     fetch(`${apiBase}/auth/idp/status`, { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => setIdpStatus(body as IdpStatus | null))
@@ -101,7 +88,7 @@ export default function SettingsPage() {
     setError(null);
     setNotice(null);
     try {
-      const created = await createLocalPilotSession({
+      await createLocalPilotSession({
         tenantId: tenantId.trim() || "pilot-tenant",
         tenantName: tenantName.trim() || "REALYTICS Pilot Workspace",
         userId: userId.trim() || "credit_officer",
@@ -109,7 +96,6 @@ export default function SettingsPage() {
         displayName: displayName.trim() || userId.trim() || "심사 담당자",
         role,
       });
-      setSession(created);
       setNotice("파일럿 세션이 생성되었습니다. 주요 화면의 API 요청에 세션 ID가 함께 전송됩니다.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "세션 생성에 실패했습니다.");
@@ -119,8 +105,7 @@ export default function SettingsPage() {
   };
 
   const logout = () => {
-    clearStoredAuthSession();
-    setSession(null);
+    authLogout();
     setNotice("브라우저에 저장된 파일럿 세션을 제거했습니다.");
   };
 

@@ -1,5 +1,8 @@
+"use client";
+
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -11,6 +14,9 @@ import {
   MapPin,
   ShieldCheck,
 } from "lucide-react";
+import { apiBase, authHeaders } from "../../lib/auth-client";
+import { useAuth } from "../../components/auth/auth-context";
+import { DashboardIntake } from "../../components/intake/dashboard-intake";
 
 const statusStyle: Record<string, string> = {
   pf_review: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-900",
@@ -85,33 +91,6 @@ interface ProjectSummaryResponse {
   pf_structure?: PfTranche[];
 }
 
-const fallbackProjects: ProjectSummaryResponse[] = [
-  {
-    project: { id: "p-001", name: "Daegu Bondong Mixed-Use PF", status: "pf_review", type: "mixed_use", review_date: "2026-05-15" },
-    land: { address: "Daegu Dalseo-gu Bondong", pnu: "2729011700100010001", area_sqm: 5000 },
-    regulation: { zoning: "commercial", legal_far: 800, legal_bcr: 70, applied_far: 750, applied_bcr: 65 },
-    landLedger: {
-      summary: { totalParcels: 24, missingPnuCount: 0, missingOfficialLandPriceCount: 4 },
-      validation: { status: "needs_enrichment", issueCount: 4 },
-      pfSummary: { pnuCoverageRatio: 0.83, officialLandPriceCoverageRatio: 0.67, registryEvidenceCoverageRatio: 0.25 },
-      landAcquisitionStatus: { acquisitionAreaRatio: 0.92, acquisitionAmountRatio: 0.88, publicLandDetected: true },
-    },
-    pf_structure: [{ amount: 50_000_000_000 }, { amount: 15_000_000_000 }, { amount: 5_000_000_000 }],
-  },
-  {
-    project: { id: "p-004", name: "Simple Land Feasibility", status: "land_review", type: "residential" },
-    land: { address: "Seoul Gangnam-gu Yeoksam-dong", pnu: "1168010100100010001", area_sqm: 1000 },
-    regulation: { zoning: "commercial", legal_far: 800, legal_bcr: 60, applied_far: 780, applied_bcr: 55 },
-    landLedger: {
-      summary: { totalParcels: 9, missingPnuCount: 0, missingOfficialLandPriceCount: 9 },
-      validation: { status: "needs_review", issueCount: 6 },
-      pfSummary: { pnuCoverageRatio: 1, officialLandPriceCoverageRatio: 0, registryEvidenceCoverageRatio: 0 },
-      landAcquisitionStatus: { acquisitionAreaRatio: 0.76, acquisitionAmountRatio: 0.71, publicLandDetected: false },
-    },
-    pf_structure: [],
-  },
-];
-
 function fmtEok(val: number) {
   const eok = val / 100_000_000;
   return eok >= 10000
@@ -135,18 +114,45 @@ function landReadiness(project: ProjectSummaryResponse) {
 }
 
 async function loadProjects() {
-  try {
-    const res = await fetch("http://127.0.0.1:8000/projects", { cache: "no-store" });
-    if (!res.ok) return fallbackProjects;
-    const data = (await res.json()) as ProjectSummaryResponse[];
-    return data.length > 0 ? data : fallbackProjects;
-  } catch {
-    return fallbackProjects;
-  }
+  const res = await fetch(`${apiBase}/projects`, {
+    cache: "no-store",
+    headers: authHeaders("web"),
+  });
+  if (!res.ok) throw new Error(`프로젝트 목록을 불러오지 못했습니다. (${res.status})`);
+  const data = (await res.json()) as ProjectSummaryResponse[];
+  return Array.isArray(data) ? data : [];
 }
 
-export default async function DashboardPage() {
-  const projects = await loadProjects();
+export default function DashboardPage() {
+  const { status } = useAuth();
+  const [projects, setProjects] = useState<ProjectSummaryResponse[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    // RequireAuth (in the Shell) handles redirecting unauthenticated users; here we
+    // just wait until the session is confirmed before loading session-scoped data.
+    if (status !== "authenticated") return;
+
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    loadProjects()
+      .then((items) => {
+        if (!cancelled) setProjects(items);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : "프로젝트 목록을 불러오지 못했습니다.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [status, reloadKey]);
+
   const total = projects.length;
   const reviewing = projects.filter((p) => ["pf_review", "land_review"].includes(p.project?.status ?? "")).length;
   const totalPf = projects.reduce((s, p) => {
@@ -162,20 +168,29 @@ export default async function DashboardPage() {
         <div>
           <p className="text-sm font-semibold text-slate-500">REALYTICS x PLATFORM9</p>
           <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
-            프로젝트 관리
+            심사 시작하기
           </h2>
           <p className="mt-2 text-sm text-slate-500">
-            프로젝트별 PF 검토 상태와 Land Agent의 토지 분석 준비상태를 함께 확인합니다.
+            자료를 한 번에 올려 새 심사를 시작하거나, 아래에서 진행 중인 심사를 이어가세요.
           </p>
         </div>
         <Link
           href="/analysis"
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
         >
           신규 토지 분석 <ArrowRight className="h-4 w-4" />
         </Link>
       </div>
 
+      <DashboardIntake onProjectCreated={() => setReloadKey((k) => k + 1)} />
+
+      {loading ? (
+        <div className="rounded-lg border border-slate-200 bg-white p-6 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <p className="text-sm font-semibold text-slate-900 dark:text-white">사용자 심사 데이터를 불러오는 중입니다.</p>
+          <p className="mt-2 text-sm text-slate-500">로그인 세션 기준으로 DB에 저장된 프로젝트만 조회합니다.</p>
+        </div>
+      ) : (
+      <>
       <section className="grid gap-4 md:grid-cols-4">
         <KpiCard icon={<Briefcase className="h-5 w-5 text-sky-600" />} label="전체 프로젝트" value={`${total}건`} sub={`${reviewing}건 검토중`} />
         <KpiCard icon={<Activity className="h-5 w-5 text-violet-600" />} label="총 PF 검토금액" value={fmtEok(totalPf)} sub="전체 프로젝트 합산" />
@@ -200,7 +215,25 @@ export default async function DashboardPage() {
 
       {projects.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 p-12 text-center dark:border-slate-700">
-          <p className="text-sm text-slate-500">프로젝트가 없거나 API 서버가 오프라인입니다.</p>
+          <p className="text-base font-bold text-slate-950 dark:text-white">아직 저장된 심사 프로젝트가 없습니다.</p>
+          <p className="mt-2 text-sm text-slate-500">
+            사업계획서, 토지조서, 사업수지 Excel을 업로드하면 AI가 문서를 자동 분류하고 프로젝트 DB에 저장합니다.
+          </p>
+          {loadError ? <p className="mt-3 text-sm font-semibold text-rose-600">{loadError}</p> : null}
+          <div className="mt-5 flex flex-wrap justify-center gap-3">
+            <Link
+              href="/analysis"
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
+            >
+              새 분석 시작 <ArrowRight className="h-4 w-4" />
+            </Link>
+            <Link
+              href="/settings"
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              사용자 세션 확인
+            </Link>
+          </div>
         </div>
       ) : (
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -252,6 +285,8 @@ export default async function DashboardPage() {
             );
           })}
         </section>
+      )}
+      </>
       )}
     </div>
   );

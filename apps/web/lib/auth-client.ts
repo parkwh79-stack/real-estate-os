@@ -58,6 +58,7 @@ export function authHeaders(fallbackUserId = "web"): Record<string, string> {
     return {
       "X-REALYTICS-SESSION-ID": stored.session.sessionId,
       "X-REALYTICS-USER-ID": stored.user.userId,
+      ...(stored.user.tenantId ? { "X-REALYTICS-TENANT-ID": stored.user.tenantId } : {}),
     };
   }
   return { "X-REALYTICS-USER-ID": fallbackUserId };
@@ -119,6 +120,46 @@ export async function createLocalPilotSession(input: {
   return stored;
 }
 
+export async function loginLocalPilotSession(input: {
+  tenantId: string;
+  userId: string;
+}) {
+  const usersResponse = await fetch(
+    `${apiBase}/auth/users?tenant_id=${encodeURIComponent(input.tenantId)}&limit=1000`,
+    { cache: "no-store" },
+  ).then(assertOk);
+  const usersBody = await usersResponse.json() as { users?: RealyticsUser[] };
+  const existingUser = (usersBody.users ?? []).find((user) => user.userId === input.userId);
+  if (!existingUser) {
+    throw new Error("등록된 사용자를 찾지 못했습니다. 먼저 회원가입을 진행해 주세요.");
+  }
+
+  const sessionResponse = await fetch(`${apiBase}/auth/session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId: existingUser.userId,
+      tenantId: existingUser.tenantId,
+      provider: "local-pilot",
+      host: "web",
+    }),
+  }).then(assertOk);
+
+  const sessionBody = await sessionResponse.json() as {
+    user: RealyticsUser;
+    session: RealyticsSession;
+  };
+  const me = await resolveCurrentIdentity(sessionBody.session.sessionId);
+  const stored: StoredAuthSession = {
+    user: sessionBody.user,
+    session: sessionBody.session,
+    permissions: me.permissions ?? [],
+  };
+  setStoredAuthSession(stored);
+  return stored;
+}
+
+
 export async function resolveCurrentIdentity(sessionId?: string) {
   const headers: Record<string, string> = {};
   const resolvedSessionId = sessionId ?? getStoredAuthSession()?.session.sessionId;
@@ -142,3 +183,4 @@ async function assertOk(res: Response) {
   }
   return res;
 }
+

@@ -16,6 +16,7 @@ import {
   Upload,
 } from "lucide-react";
 import FileUpload from "../../components/FileUpload";
+import { SmartIntake } from "../../../components/intake/smart-intake";
 import { IntentPlanMenu } from "../../../components/orchestration/intent-plan-menu";
 import { CovenantMonitorPanel } from "../../../components/monitoring/covenant-monitor-panel";
 import { financeTerm, readinessLabel, translateFinancialTerm } from "../../../lib/financial-terms";
@@ -435,6 +436,28 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
           <HeaderLink href={`/project/${projectId}/map-3d`} icon={<Layers className="h-4 w-4" />} label="3D 지도" />
         </div>
       </div>
+
+      <section className="rounded-lg border border-indigo-200 bg-indigo-50/70 p-5 shadow-sm dark:border-indigo-900 dark:bg-indigo-950/20">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-indigo-600 dark:text-indigo-300">AI 자동분류</p>
+            <h3 className="mt-1 text-xl font-black text-slate-950 dark:text-white">사업자료 일괄 업로드</h3>
+            <p className="mt-1 text-sm font-semibold text-slate-600 dark:text-slate-300">
+              사업계획서, 토지조서, 사업수지, 등기·공시지가 증빙을 한 번에 등록합니다.
+            </p>
+          </div>
+          <Link
+            href={`/project/${projectId}/input-package`}
+            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-bold text-white shadow-sm hover:bg-indigo-700"
+          >
+            자료 입력 화면
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        </div>
+        <div className="mt-4">
+          <SmartIntake projectId={projectId} />
+        </div>
+      </section>
 
       <section className="grid gap-3 lg:grid-cols-5">
         {workflowSteps.map((step, index) => (

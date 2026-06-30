@@ -30,7 +30,7 @@ _load_local_env()
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import audit, auth, glossary, kakao, valuemap, projects, ops, market
+from routers import audit, auth, glossary, kakao, google, valuemap, projects, ops, market
 from core.idp import principal_from_request
 from storage import get_user_session, record_user_activity_log
 
@@ -113,8 +113,10 @@ app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(glossary.router)
 app.include_router(kakao.router)
+app.include_router(google.router)
 app.include_router(ops.router)
 app.include_router(market.router)
+
 
 
 _API_LINKS = {

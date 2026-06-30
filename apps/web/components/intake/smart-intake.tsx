@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, FileQuestion, Loader2, PlayCircle, Sparkles, UploadCloud } from "lucide-react";
 import { authHeaders } from "../../lib/auth-client";
 
@@ -81,7 +81,16 @@ const STATUS_TONE: Record<RowStatus, string> = {
 };
 
 /** 스마트 업로드 — 한 번에 올리면 파서 에이전트가 자동 분류하고, "분류대로 처리"로 각 파서에 자동 전송. */
-export function SmartIntake({ projectId, onProcessed }: { projectId: string; onProcessed?: () => void }) {
+export function SmartIntake({
+  projectId,
+  onProcessed,
+  initialFiles,
+}: {
+  projectId: string;
+  onProcessed?: () => void;
+  /** Files to classify automatically on mount (e.g. forwarded from the dashboard drop zone). */
+  initialFiles?: File[];
+}) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
@@ -89,12 +98,11 @@ export function SmartIntake({ projectId, onProcessed }: { projectId: string; onP
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const upload = useCallback(
-    async (fileList: FileList) => {
-      if (!fileList.length) return;
+  const uploadFiles = useCallback(
+    async (arr: File[]) => {
+      if (!arr.length) return;
       setLoading(true);
       setError(null);
-      const arr = Array.from(fileList);
       try {
         const fd = new FormData();
         arr.forEach((f) => fd.append("files", f));
@@ -121,6 +129,18 @@ export function SmartIntake({ projectId, onProcessed }: { projectId: string; onP
     },
     [projectId],
   );
+
+  const upload = useCallback((fileList: FileList) => uploadFiles(Array.from(fileList)), [uploadFiles]);
+
+  // Auto-classify files handed in from a parent (dashboard drop zone) once on mount.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (autoStarted.current) return;
+    if (initialFiles && initialFiles.length) {
+      autoStarted.current = true;
+      void uploadFiles(initialFiles);
+    }
+  }, [initialFiles, uploadFiles]);
 
   const processAll = useCallback(async () => {
     setProcessing(true);
