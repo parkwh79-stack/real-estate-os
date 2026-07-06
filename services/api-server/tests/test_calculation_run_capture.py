@@ -1,0 +1,92 @@
+from use_cases.calculation_run_capture import (
+    scenario_engine_run_payloads,
+    stress_test_run_payload,
+)
+
+
+def _scenario_dump() -> dict:
+    return {
+        "scenarioSetId": "set-1",
+        "waterfallScenarios": [{"scenarioId": "sale_70_disc_10"}, {"scenarioId": "sale_50_disc_20"}],
+        "unsoldLtvMatrix": {
+            "pfAmount": 350_000_000_000,
+            "rows": [
+                {"unsoldLtv": 0.62, "riskLevel": "normal"},
+                {"unsoldLtv": 1.15, "riskLevel": "high"},
+            ],
+        },
+        "trancheRecoveryMatrix": [
+            {"scenarioId": "r1", "recoveryPool": 500.0},
+            {"scenarioId": "r2", "recoveryPool": 300.0},
+        ],
+        "riskFlags": [
+            {"code": "SENIOR_SHORTFALL", "severity": "critical", "message": "선순위 부족"},
+            {"code": "UNSOLD_LTV_BREACH", "severity": "critical", "message": "미분양 LTV 초과"},
+            {"code": "UNSOLD_LTV_HIGH", "severity": "medium", "message": "미분양 LTV 높음"},
+            {"code": "TRIGGER_REQUIRED", "severity": "medium", "message": "트리거 필요"},
+        ],
+    }
+
+
+def test_scenario_payloads_route_blocker_flags_to_their_engines():
+    payloads = {p["engineKey"]: p for p in scenario_engine_run_payloads(_scenario_dump())}
+
+    assert set(payloads) == {"waterfall", "unsold_ltv", "tranche_recovery"}
+    # SENIOR_SHORTFALL -> waterfall run (파일럿 blocker 이력 요구사항)
+    wf_codes = [f["code"] for f in payloads["waterfall"]["result"]["riskFlags"]]
+    assert wf_codes == ["SENIOR_SHORTFALL"]
+    # UNSOLD_LTV_BREACH -> unsold_ltv run
+    ul = payloads["unsold_ltv"]["result"]
+    assert [f["code"] for f in ul["riskFlags"]] == ["UNSOLD_LTV_BREACH", "UNSOLD_LTV_HIGH"]
+    assert ul["summary"]["maxUnsoldLtv"] == 1.15
+    assert ul["summary"]["breachFlagCount"] == 1
+    assert ul["summary"]["pfAmount"] == 350_000_000_000
+    # tranche recovery numeric summary from already-computed rows only
+    tr = payloads["tranche_recovery"]["result"]["summary"]
+    assert tr == {"scenarioCount": 2, "flagCount": 1, "minRecoveryPool": 300.0, "maxRecoveryPool": 500.0}
+    # provenance: every run references the same scenario set section
+    assert payloads["waterfall"]["artifactRef"] == {
+        "type": "scenario_set",
+        "scenarioSetId": "set-1",
+        "section": "waterfallScenarios",
+    }
+
+
+def test_scenario_payloads_engine_filter():
+    payloads = scenario_engine_run_payloads(_scenario_dump(), engines=["unsold_ltv"])
+    assert len(payloads) == 1
+    assert payloads[0]["engineKey"] == "unsold_ltv"
+
+
+def test_stress_payload_counts_discount_stages_and_keeps_flags():
+    dump = {
+        "scenarioCount": 4,
+        "hurdleRate": 0.1,
+        "worstCaseKey": "tail",
+        "seniorBreakScenarioKey": "tail",
+        "firstLossScenarioKey": "severe",
+        "scenarios": [
+            {"key": "base", "discountRate": 0.0},
+            {"key": "mild", "discountRate": 0.0},
+            {"key": "severe", "discountRate": 0.10},
+            {"key": "tail", "discountRate": 0.20},
+        ],
+        "riskFlags": [{"code": "STRESS_SENIOR_SHORTFALL", "severity": "critical"}],
+    }
+
+    payload = stress_test_run_payload(dump)
+
+    assert payload["engineKey"] == "stress_test"
+    summary = payload["result"]["summary"]
+    assert summary["discountStressStageCount"] == 2  # severe(10%) + tail(20%) 할인 스트레스
+    assert summary["scenarioCount"] == 4
+    assert payload["result"]["riskFlags"][0]["code"] == "STRESS_SENIOR_SHORTFALL"
+    assert payload["artifactRef"]["worstCaseKey"] == "tail"
+
+
+def test_empty_dump_yields_zero_summaries_not_errors():
+    payloads = scenario_engine_run_payloads({})
+    assert {p["engineKey"] for p in payloads} == {"waterfall", "unsold_ltv", "tranche_recovery"}
+    for p in payloads:
+        assert p["result"]["riskFlags"] == []
+    assert stress_test_run_payload({})["result"]["summary"]["scenarioCount"] == 0

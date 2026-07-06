@@ -6,6 +6,7 @@ from storage import (
     get_risk_register_record,
     list_deal_state_records,
     upsert_chief_pod_artifact_record,
+    upsert_deal_state_record,
     upsert_evidence_graph_record,
     upsert_risk_register_record,
 )
@@ -241,6 +242,190 @@ def test_deal_state_records_materialize_from_artifacts(tmp_path, monkeypatch):
 
     assumptions = list_deal_state_records(project_id, record_type="assumption")
     assert assumptions[0]["key"] == "assumption:base-case"
+
+
+def test_deal_state_record_review_api_updates_risk_issue(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "deal-state-review.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Deal State Review Project"}}).json()
+    project_id = created["project"]["id"]
+    upsert_risk_register_record(
+        project_id,
+        "run-review",
+        {
+            "risks": [
+                {
+                    "code": "SENIOR_SHORTFALL",
+                    "severity": "critical",
+                    "reviewStatus": "open",
+                    "sourceLocator": {"artifactKey": "scenario-test"},
+                }
+            ],
+        },
+    )
+    risk = next(
+        record
+        for record in list_deal_state_records(project_id, record_type="risk_issue")
+        if record["key"] == "SENIOR_SHORTFALL"
+    )
+
+    res = client.patch(
+        f"/projects/{project_id}/deal-state-records/{risk['recordId']}/review",
+        json={
+            "reviewStatus": "resolved",
+            "reviewedBy": "credit_officer",
+            "comment": "Resolved by senior reduction cure.",
+        },
+        headers={"X-REALYTICS-USER-ID": "credit_officer"},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["record"]["reviewStatus"] == "resolved"
+    assert body["record"]["reviewedBy"] == "credit_officer"
+    assert body["record"]["reviewHistory"][0]["reviewStatus"] == "resolved"
+
+    reviewed = next(
+        record
+        for record in list_deal_state_records(project_id, record_type="risk_issue")
+        if record["key"] == "SENIOR_SHORTFALL"
+    )
+    assert reviewed["reviewStatus"] == "resolved"
+
+    client.delete(f"/projects/{project_id}")
+
+
+def test_report_generation_persists_paragraph_evidence_links(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "paragraph-links.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Paragraph Link Project", "type": "mixed_use"},
+            "land": {"address": "Seoul"},
+            "feasibility_input": {"total_revenue": 100000000000, "total_cost": 80000000000},
+        },
+    ).json()
+    project_id = created["project"]["id"]
+    land_evidence = upsert_deal_state_record(
+        project_id,
+        {
+            "recordType": "evidence",
+            "key": "land.official_land_price",
+            "label": "Official land price evidence",
+            "sourceType": "public_api",
+            "sourceLocator": {"apiRowId": "pnu-1111010100100010001", "evidenceId": "land-price-1"},
+            "confidence": 0.95,
+        },
+    )
+    pf_metric = upsert_deal_state_record(
+        project_id,
+        {
+            "recordType": "metric",
+            "key": "pf_metrics.ltv",
+            "label": "LTV",
+            "value": 0.62,
+            "unit": "ratio",
+            "sourceType": "calculation_run",
+            "calculationRunId": "calc-pf-test",
+            "sourceLocator": {"artifactKey": "pf-structure-test"},
+        },
+    )
+    risk = upsert_deal_state_record(
+        project_id,
+        {
+            "recordType": "risk_issue",
+            "key": "SENIOR_SHORTFALL",
+            "severity": "critical",
+            "reviewStatus": "resolved",
+            "sourceType": "risk_register",
+            "sourceLocator": {"artifactKey": "scenario-stress"},
+        },
+    )
+
+    res = client.post(
+        f"/projects/{project_id}/reports/generate",
+        json={"options": {"format": "json+markdown"}},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    links = body["report"]["paragraphEvidenceLinks"]
+    assert links["schemaVersion"] == "realytics-paragraph-evidence-links-v1"
+    assert links["sectionCount"] >= 1
+    assert body["paragraphEvidenceLinks"]["linkedRecordCount"] >= 2
+    assert body["metadata"]["paragraph_evidence_link_count"] == links["sectionCount"]
+
+    land_link = next(item for item in links["links"] if item["sectionKey"] == "landSecuring")
+    pf_link = next(item for item in links["links"] if item["sectionKey"] in {"financialTerms", "businessFeasibility"})
+    risk_link = next(item for item in links["links"] if item["sectionKey"] in {"exitStrategy", "eodTriggers", "drawdownConditions"})
+
+    assert land_evidence["recordId"] in land_link["evidenceRecordIds"]
+    assert pf_metric["recordId"] in pf_link["metricRecordIds"]
+    assert risk["recordId"] in risk_link["riskIssueRecordIds"]
+
+    client.delete(f"/projects/{project_id}")
+
+
+def test_source_locator_audit_persists_traceability_risks(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "source-locator-audit.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Source Locator Audit Project"}}).json()
+    project_id = created["project"]["id"]
+
+    upsert_deal_state_record(
+        project_id,
+        {
+            "recordType": "metric",
+            "key": "cashflow.maxMinus",
+            "value": -10000000000,
+            "sourceType": "calculation_run",
+            "sourceLocator": {},
+        },
+    )
+    upsert_deal_state_record(
+        project_id,
+        {
+            "recordType": "metric",
+            "key": "pf_metrics.ltv",
+            "value": 0.62,
+            "sourceType": "calculation_run",
+            "sourceLocator": {"calculationRunId": "calc-only-1", "engineKey": "pf_metrics"},
+        },
+    )
+    upsert_deal_state_record(
+        project_id,
+        {
+            "recordType": "evidence",
+            "key": "land.official_land_price",
+            "sourceType": "public_api",
+            "sourceLocator": {"apiRowId": "vworld-row-1"},
+        },
+    )
+
+    res = client.post(
+        f"/projects/{project_id}/deal-state-records/source-locator-audit",
+        headers={"X-REALYTICS-USER-ID": "auditor"},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["missingLocatorCount"] == 1
+    assert body["weakTraceCount"] >= 1
+    assert body["sourceLocatorMissingRisk"]["key"] == "SOURCE_LOCATOR_MISSING"
+    assert body["sourceLocatorMissingRisk"]["reviewStatus"] == "open"
+    assert body["evidenceTraceWeakRisk"]["key"] == "EVIDENCE_TRACE_WEAK"
+    assert body["evidenceTraceWeakRisk"]["reviewStatus"] == "open"
+
+    risks = list_deal_state_records(project_id, record_type="risk_issue")
+    risk_by_key = {record["key"]: record for record in risks}
+    assert risk_by_key["SOURCE_LOCATOR_MISSING"]["sourceLocator"]["artifactKey"] == body["auditId"]
+    assert risk_by_key["EVIDENCE_TRACE_WEAK"]["value"]["weakTraceCount"] >= 1
+
+    client.delete(f"/projects/{project_id}")
 
 
 def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatch):

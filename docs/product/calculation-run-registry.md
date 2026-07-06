@@ -1,6 +1,6 @@
 # Calculation Run Registry
 
-Updated: 2026-07-03
+Updated: 2026-07-03 (scenario/stress engines added)
 
 Project: REALYTICS x PLATFORM9
 
@@ -48,6 +48,15 @@ The following API paths persist calculation runs:
 | `POST /projects/{project_id}/cash-flow/run` | `cash_flow_engine` |
 | `POST /projects/{project_id}/pf/structure` | `pf_metrics` |
 | `POST /projects/{project_id}/returns/calculate` | `return_metrics` |
+| `POST /projects/{project_id}/scenarios/waterfall` | `waterfall` |
+| `POST /projects/{project_id}/scenarios/unsold-ltv-matrix` | `unsold_ltv` |
+| `POST /projects/{project_id}/scenarios/recovery` | `waterfall` + `unsold_ltv` + `tranche_recovery` (full set) |
+| `POST /projects/{project_id}/stress-test/run` | `stress_test` (discount-stress stages 10%/20% 포함) |
+
+Blocker traceability: `SENIOR_SHORTFALL`/`WATERFALL_SHORTFALL`/`STRESS_SENIOR_SHORTFALL`
+flags are routed to the `waterfall` run's `riskIssues`; `UNSOLD_LTV_BREACH`/`UNSOLD_LTV_HIGH`
+to the `unsold_ltv` run; `TRIGGER_REQUIRED` to `tranche_recovery`. Each blocker therefore
+links to a durable `calculationRunId` and its `deal_state_records` rows.
 
 ## First-Class Deal State Records
 
@@ -105,7 +114,7 @@ calculationRunId + engineKey + engineVersion + inputEvidenceIds + assumptionIds
 
 ## Next Hardening
 
-- Persist Waterfall and Unsold LTV scenario runs through the same registry.
+- ~~Persist Waterfall and Unsold LTV scenario runs through the same registry.~~ (Done 2026-07-03 — waterfall / unsold_ltv / tranche_recovery / stress_test)
 - Add UI history panel for calculation run comparison.
 - Link report paragraphs directly to `deal_state_records`.
 - Add reviewer status and source locator completeness filters to `deal_state_records`.

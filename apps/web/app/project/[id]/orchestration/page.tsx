@@ -350,6 +350,13 @@ interface ApprovalReadinessGate {
     dataQualityStatus?: string;
     reconciliationStatus?: string;
     landEvidenceReady?: boolean;
+    dealStateRecordCount?: number;
+    dealStateRiskIssueCount?: number;
+    dealStateBlockingRiskCount?: number;
+    dealStateEvidenceCount?: number;
+    dealStateMetricCount?: number;
+    dealStateAssumptionCount?: number;
+    dealStateSourceLocatorMissingCount?: number;
   };
   gates: ApprovalReadinessGateCheck[];
   blockers: ApprovalReadinessGateCheck[];
@@ -3654,6 +3661,10 @@ function ApprovalReadinessDashboard({
   const unresolvedRiskCount =
     gate?.summary.unresolvedRiskReviewCount ??
     (riskRegister?.risks ?? []).filter(isUnresolvedRisk).length;
+  const dealStateRecordCount = gate?.summary.dealStateRecordCount ?? 0;
+  const dealStateBlockingRiskCount = gate?.summary.dealStateBlockingRiskCount ?? 0;
+  const dealStateLocatorMissingCount = gate?.summary.dealStateSourceLocatorMissingCount ?? 0;
+  const dealStateReady = dealStateRecordCount > 0 && dealStateBlockingRiskCount === 0;
   const landGateCodes = [
     "LAND_PNU_READY",
     "LAND_OFFICIAL_PRICE_READY",
@@ -3699,6 +3710,14 @@ function ApprovalReadinessDashboard({
         : `${unresolvedHandoffCount} handoff review(s) remain unresolved.`,
       meta: `${handoffs.length} total handoff(s)`,
     },
+    {
+      title: "Deal State",
+      status: readinessStatus(dealStateReady, dealStateBlockingRiskCount, dealStateLocatorMissingCount),
+      description: dealStateRecordCount > 0
+        ? `${dealStateRecordCount} record(s), ${dealStateBlockingRiskCount} blocking risk(s), ${dealStateLocatorMissingCount} missing locator(s).`
+        : "Deal State records are not materialized yet.",
+      meta: `Evidence ${gate?.summary.dealStateEvidenceCount ?? 0} / Metric ${gate?.summary.dealStateMetricCount ?? 0} / Assumption ${gate?.summary.dealStateAssumptionCount ?? 0}`,
+    },
   ];
 
   return (
@@ -3723,14 +3742,15 @@ function ApprovalReadinessDashboard({
         </div>
       </div>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-4">
+      <div className="mt-4 grid gap-3 md:grid-cols-5">
         <Mini label="Blocking" value={`${gate?.summary.blockingIssueCount ?? "-"}`} />
         <Mini label="Needs Review" value={`${(gate?.summary.warningCount ?? 0) + unresolvedHandoffCount + unresolvedRiskCount}`} />
         <Mini label="Risk Reviews" value={`${unresolvedRiskCount}`} />
         <Mini label="Handoff Reviews" value={`${unresolvedHandoffCount}`} />
+        <Mini label="Deal State" value={`${dealStateRecordCount || "-"}`} />
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-4">
+      <div className="mt-4 grid gap-3 lg:grid-cols-5">
         {cards.map((card) => (
           <ReadinessCard key={card.title} {...card} />
         ))}

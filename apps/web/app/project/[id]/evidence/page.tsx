@@ -3,8 +3,15 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowLeft, FileSearch, GitBranch, Link2, Loader2, Search } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Database, FileSearch, GitBranch, Loader2, Search } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import {
+  fetchDealStateRecordGroups,
+  formatRecordValue,
+  hasSourceLocator,
+  locatorSummary,
+  type DealStateRecord,
+} from "../../../../lib/deal-state-records";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
 
 type EvidenceGraphSummary = {
@@ -16,42 +23,24 @@ type EvidenceGraphSummary = {
   sourceLocatorCount?: number;
   updatedAt?: string;
 };
-type EvidenceNode = { id?: string; type?: string; label?: string; metadata?: Record<string, unknown> };
-type EvidenceEdge = { from?: string; to?: string; relationship?: string; label?: string };
+
 type EvidenceGraph = {
   graphId?: string;
   runId?: string;
-  summary?: Record<string, number>;
-  nodes?: EvidenceNode[];
-  edges?: EvidenceEdge[];
+  nodes?: Array<{ id?: string; type?: string; label?: string; metadata?: Record<string, unknown> }>;
+  edges?: Array<{ from?: string; to?: string; relationship?: string }>;
   auditWarnings?: string[];
 };
-type NodeFilter = "all" | "risk" | "report" | "claim" | "source";
 
-function nodeId(node: EvidenceNode) {
-  return node.id ?? "";
-}
-function nodeTitle(node: EvidenceNode) {
-  const meta = node.metadata ?? {};
-  return displayText(node.label ?? meta.title ?? meta.riskId ?? meta.sectionKey ?? node.id, "-");
-}
-function nodeMatchesFilter(node: EvidenceNode, filter: NodeFilter) {
-  if (filter === "all") return true;
-  const type = node.type ?? "";
-  if (filter === "risk") return type === "risk";
-  if (filter === "report") return type === "report_section";
-  if (filter === "claim") return type === "claim" || type === "agent_artifact" || type === "calculation";
-  return type === "source_document" || type === "source_locator" || type === "evidence";
-}
-function locatorLike(node: EvidenceNode) {
-  const meta = node.metadata ?? {};
-  return node.type === "source_locator" || meta.source !== undefined || meta.path !== undefined || meta.page !== undefined || meta.cell !== undefined || meta.apiRowId !== undefined;
-}
-function compactDate(value?: string) {
-  if (!value) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" });
-}
+type Filter = "all" | "evidence" | "metric" | "risk_issue" | "assumption" | "weak_locator";
+
+type SourceLocatorAuditResult = {
+  auditId?: string;
+  missingLocatorCount?: number;
+  weakTraceCount?: number;
+  weakParagraphCount?: number;
+};
+
 async function fetchJson<T>(url: string, fallback: T): Promise<T> {
   try {
     const res = await fetch(url, { cache: "no-store", headers: authHeaders("web-auditor") });
@@ -62,63 +51,88 @@ async function fetchJson<T>(url: string, fallback: T): Promise<T> {
   }
 }
 
+function compactDate(value?: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" });
+}
+
 export default function EvidenceGraphAuditorPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const [context, setContext] = useState<WorkspacePageContext | null>(null);
-  const [records, setRecords] = useState<EvidenceGraphSummary[]>([]);
+  const [records, setRecords] = useState<DealStateRecord[]>([]);
+  const [graphs, setGraphs] = useState<EvidenceGraphSummary[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [graph, setGraph] = useState<EvidenceGraph | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState("");
-  const [filter, setFilter] = useState<NodeFilter>("risk");
+  const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
+  const [auditRunning, setAuditRunning] = useState(false);
+  const [auditResult, setAuditResult] = useState<SourceLocatorAuditResult | null>(null);
 
-  const loadList = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
-    const [ctx, body] = await Promise.all([
+    const [ctx, groups, graphList] = await Promise.all([
       fetchWorkspaceContext(projectId, "evidence").catch(() => null),
+      fetchDealStateRecordGroups(projectId, 800).catch(() => ({ metrics: [], risks: [], evidence: [], assumptions: [] })),
       fetchJson<{ records?: EvidenceGraphSummary[] }>(`${apiBase}/projects/${projectId}/evidence-graphs`, { records: [] }),
     ]);
-    if (ctx) setContext(ctx);
-    const nextRecords = body.records ?? [];
-    setRecords(nextRecords);
-    setSelectedRunId((prev) => prev || nextRecords[0]?.runId || "");
+    setContext(ctx);
+    setRecords([...groups.evidence, ...groups.metrics, ...groups.risks, ...groups.assumptions]);
+    const nextGraphs = graphList.records ?? [];
+    setGraphs(nextGraphs);
+    setSelectedRunId((current) => current || nextGraphs[0]?.runId || "");
     setLoading(false);
   }, [projectId]);
 
   const loadGraph = useCallback(async (runId: string) => {
     if (!runId) {
       setGraph(null);
-      setSelectedNodeId("");
       return;
     }
-    setLoading(true);
     const nextGraph = await fetchJson<EvidenceGraph | null>(`${apiBase}/projects/${projectId}/orchestrations/${runId}/evidence-graph`, null);
     setGraph(nextGraph);
-    const preferred = nextGraph?.nodes?.find((node) => node.type === "risk") ?? nextGraph?.nodes?.find((node) => node.type === "report_section") ?? nextGraph?.nodes?.[0];
-    setSelectedNodeId(preferred?.id ?? "");
-    setLoading(false);
   }, [projectId]);
 
   useEffect(() => {
-    void loadList();
-  }, [loadList]);
+    void load();
+  }, [load]);
+
   useEffect(() => {
     void loadGraph(selectedRunId);
   }, [loadGraph, selectedRunId]);
 
-  const nodes = graph?.nodes ?? [];
-  const edges = graph?.edges ?? [];
-  const selectedNode = nodes.find((node) => nodeId(node) === selectedNodeId) ?? null;
-  const connectedEdges = useMemo(() => edges.filter((edge) => edge.from === selectedNodeId || edge.to === selectedNodeId), [edges, selectedNodeId]);
-  const connectedNodeIds = new Set(connectedEdges.flatMap((edge) => [edge.from, edge.to]).filter(Boolean) as string[]);
-  const connectedNodes = nodes.filter((node) => connectedNodeIds.has(nodeId(node)) && nodeId(node) !== selectedNodeId);
-  const sourceLocatorNodes = connectedNodes.filter(locatorLike);
-  const visibleNodes = nodes.filter((node) => {
-    const haystack = `${node.id ?? ""} ${node.type ?? ""} ${nodeTitle(node)} ${JSON.stringify(node.metadata ?? {})}`.toLowerCase();
-    return nodeMatchesFilter(node, filter) && (!query.trim() || haystack.includes(query.toLowerCase()));
+  async function runSourceLocatorAudit() {
+    setAuditRunning(true);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/deal-state-records/source-locator-audit`, {
+        method: "POST",
+        headers: authHeaders("source-locator-auditor"),
+      });
+      if (!res.ok) throw new Error(`Source Locator audit failed (${res.status})`);
+      setAuditResult((await res.json()) as SourceLocatorAuditResult);
+      await load();
+    } finally {
+      setAuditRunning(false);
+    }
+  }
+
+  const counts = useMemo(() => ({
+    evidence: records.filter((record) => record.recordType === "evidence").length,
+    metrics: records.filter((record) => record.recordType === "metric").length,
+    risks: records.filter((record) => record.recordType === "risk_issue").length,
+    assumptions: records.filter((record) => record.recordType === "assumption").length,
+    weakLocators: records.filter((record) => !hasSourceLocator(record)).length,
+  }), [records]);
+
+  const visibleRecords = records.filter((record) => {
+    const haystack = `${record.recordType ?? ""} ${record.key ?? ""} ${record.label ?? ""} ${record.sourceType ?? ""} ${JSON.stringify(record.sourceLocator ?? {})}`.toLowerCase();
+    const matchesFilter = filter === "all"
+      || (filter === "weak_locator" ? !hasSourceLocator(record) : record.recordType === filter);
+    return matchesFilter && (!query.trim() || haystack.includes(query.toLowerCase()));
   });
+
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
 
   return (
@@ -130,148 +144,169 @@ export default function EvidenceGraphAuditorPage() {
           </Link>
           <div>
             <p className="text-sm font-semibold text-slate-500">{projectName}</p>
-            <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">Evidence Graph</h1>
-            <p className="mt-1 text-sm text-slate-500">보고서 문장, 계산값, 리스크가 어느 문서·Excel 셀·API row·Agent 결과에서 왔는지 추적합니다.</p>
+            <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">근거 원장 / Evidence Auditor</h1>
+            <p className="mt-1 text-sm text-slate-500">
+              보고서 문장, 리스크, 계산값, 가정이 어떤 문서·엑셀 셀·API row·Agent 산출물에서 왔는지 `deal_state_records` 기준으로 확인합니다.
+            </p>
           </div>
         </div>
-        <Link href={`/project/${projectId}/chief-orchestration`} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950">
-          <GitBranch className="h-4 w-4" />
-          AI 딜룸으로 이동
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void runSourceLocatorAudit()}
+            disabled={auditRunning}
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
+          >
+            {auditRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
+            근거 위치 감사
+          </button>
+          <Link href={`/project/${projectId}/chief-orchestration`} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950">
+            <GitBranch className="h-4 w-4" />
+            AI 딜룸으로 이동
+          </Link>
+        </div>
       </header>
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Kpi label="노드" value={String(graph?.summary?.nodeCount ?? graph?.nodes?.length ?? 0)} />
-        <Kpi label="연결" value={String(graph?.summary?.edgeCount ?? graph?.edges?.length ?? 0)} />
-        <Kpi label="리스크 노드" value={String(graph?.summary?.riskCount ?? graph?.summary?.riskNodeCount ?? 0)} />
-        <Kpi label="Source locator" value={String(graph?.summary?.sourceLocatorCount ?? 0)} />
+      {auditResult ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+          Source Locator 감사 완료: 누락 {auditResult.missingLocatorCount ?? 0}건, 약한 추적 {auditResult.weakTraceCount ?? 0}건,
+          문단 근거 보강 필요 {auditResult.weakParagraphCount ?? 0}건을 확인했습니다. 결과는 Risk 원장에
+          SOURCE_LOCATOR_MISSING / EVIDENCE_TRACE_WEAK로 저장됩니다.
+        </div>
+      ) : null}
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <Kpi label="증거" value={`${counts.evidence.toLocaleString("ko-KR")}건`} />
+        <Kpi label="계산 지표" value={`${counts.metrics.toLocaleString("ko-KR")}건`} />
+        <Kpi label="리스크" value={`${counts.risks.toLocaleString("ko-KR")}건`} />
+        <Kpi label="가정" value={`${counts.assumptions.toLocaleString("ko-KR")}건`} />
+        <Kpi label="근거 위치 부족" value={`${counts.weakLocators.toLocaleString("ko-KR")}건`} tone={counts.weakLocators ? "warn" : "good"} />
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-2">
-            <FileSearch className="h-5 w-5 text-amber-600" />
-            <h2 className="font-bold text-slate-950 dark:text-white">감사 대상 Graph 선택</h2>
-          </div>
-          <select value={selectedRunId} onChange={(event) => setSelectedRunId(event.target.value)} className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
-            {records.length === 0 ? <option value="">저장된 Evidence Graph 없음</option> : null}
-            {records.map((record) => (
-              <option key={record.runId} value={record.runId}>{record.runId} · {compactDate(record.updatedAt)} · {record.nodeCount ?? 0} nodes</option>
-            ))}
-          </select>
-        </div>
-      </section>
-
-      {loading ? (
-        <div className="flex min-h-[280px] items-center justify-center rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>
-      ) : !graph ? (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-5 text-sm font-semibold leading-6 text-amber-900 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
-          아직 저장된 Evidence Graph가 없습니다. AI 딜룸 또는 PF 심사를 실행하면 graph가 생성되어 서버에 저장됩니다.
-        </div>
-      ) : (
-        <section className="grid gap-4 xl:grid-cols-[0.85fr_1fr_0.9fr]">
-          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="font-bold text-slate-950 dark:text-white">노드 목록</h2>
-              <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500 dark:bg-slate-800">{visibleNodes.length}</span>
-            </div>
-            <div className="mt-3 flex gap-2 overflow-x-auto">
+      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+        <Panel title="Deal State 원장" icon={<Database className="h-5 w-5" />}>
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex gap-2 overflow-x-auto">
               {([
-                ["risk", "리스크"],
-                ["report", "보고서"],
-                ["claim", "계산·판단"],
-                ["source", "근거"],
                 ["all", "전체"],
-              ] as Array<[NodeFilter, string]>).map(([value, label]) => (
-                <button key={value} type="button" onClick={() => setFilter(value)} className={`h-8 shrink-0 rounded-lg px-3 text-xs font-bold ${filter === value ? "bg-slate-950 text-white dark:bg-white dark:text-slate-950" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>{label}</button>
-              ))}
-            </div>
-            <label className="mt-3 flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 dark:border-slate-700">
-              <Search className="h-4 w-4 text-slate-400" />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="리스크 코드, 보고서 섹션, 근거 검색" className="w-full bg-transparent text-sm font-semibold outline-none placeholder:text-slate-400" />
-            </label>
-            <div className="mt-3 max-h-[620px] space-y-2 overflow-y-auto pr-1">
-              {visibleNodes.map((node) => (
-                <button key={node.id} type="button" onClick={() => setSelectedNodeId(nodeId(node))} className={`w-full rounded-lg border p-3 text-left transition-colors ${selectedNodeId === nodeId(node) ? "border-slate-950 bg-slate-50 dark:border-white dark:bg-slate-800" : "border-slate-200 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800"}`}>
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-sm font-bold text-slate-950 dark:text-white">{nodeTitle(node)}</p>
-                    <span className="shrink-0 rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500 dark:bg-slate-800">{displayText(node.type, "node")}</span>
-                  </div>
-                  <p className="mt-1 truncate text-xs text-slate-500">{node.id}</p>
+                ["evidence", "증거"],
+                ["metric", "지표"],
+                ["risk_issue", "리스크"],
+                ["assumption", "가정"],
+                ["weak_locator", "위치 부족"],
+              ] as Array<[Filter, string]>).map(([value, label]) => (
+                <button key={value} type="button" onClick={() => setFilter(value)} className={`h-9 shrink-0 rounded-lg px-3 text-xs font-bold ${filter === value ? "bg-slate-950 text-white dark:bg-white dark:text-slate-950" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>
+                  {label}
                 </button>
               ))}
             </div>
+            <label className="flex h-10 min-w-64 items-center gap-2 rounded-lg border border-slate-200 px-3 dark:border-slate-700">
+              <Search className="h-4 w-4 text-slate-400" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="key, source, locator 검색" className="w-full bg-transparent text-sm font-semibold outline-none placeholder:text-slate-400" />
+            </label>
           </div>
 
-          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <h2 className="font-bold text-slate-950 dark:text-white">선택 노드 상세</h2>
-            {selectedNode ? (
-              <div className="mt-4 space-y-4">
-                <div className="rounded-lg bg-slate-50 p-4 dark:bg-slate-800/70">
-                  <p className="text-xs font-bold uppercase text-slate-500">{displayText(selectedNode.type, "node")}</p>
-                  <p className="mt-2 text-lg font-black text-slate-950 dark:text-white">{nodeTitle(selectedNode)}</p>
-                  <p className="mt-1 break-all text-xs text-slate-500">{selectedNode.id}</p>
-                </div>
-                <MetadataTable metadata={selectedNode.metadata ?? {}} />
-                <div>
-                  <div className="mb-2 flex items-center gap-2"><Link2 className="h-4 w-4 text-slate-500" /><p className="text-sm font-bold text-slate-950 dark:text-white">연결 노드</p></div>
-                  <div className="space-y-2">
-                    {connectedEdges.length === 0 ? <Empty text="연결된 노드가 없습니다." /> : connectedEdges.map((edge, index) => {
-                      const targetId = edge.from === selectedNodeId ? edge.to : edge.from;
-                      const targetNode = nodes.find((node) => nodeId(node) === targetId);
-                      return (
-                        <button key={`${edge.from}-${edge.to}-${index}`} type="button" onClick={() => targetId && setSelectedNodeId(targetId)} className="w-full rounded-lg border border-slate-200 p-3 text-left hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800">
-                          <p className="text-xs font-bold text-slate-500">{edge.relationship ?? "linked"}</p>
-                          <p className="mt-1 text-sm font-bold text-slate-950 dark:text-white">{targetNode ? nodeTitle(targetNode) : targetId}</p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+          <div className="mt-4 max-h-[640px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-800">
+            {loading ? (
+              <Loading text="Deal State 원장을 불러오는 중입니다." />
+            ) : visibleRecords.length ? (
+              <table className="w-full min-w-[920px] text-left text-xs">
+                <thead className="bg-slate-50 text-slate-500 dark:bg-slate-800">
+                  <tr>
+                    <th className="px-3 py-2">유형</th>
+                    <th className="px-3 py-2">Key</th>
+                    <th className="px-3 py-2">값</th>
+                    <th className="px-3 py-2">출처</th>
+                    <th className="px-3 py-2">근거 위치</th>
+                    <th className="px-3 py-2">Run</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRecords.map((record) => (
+                    <tr key={record.recordId ?? `${record.recordType}-${record.key}`} className="border-t border-slate-100 dark:border-slate-800">
+                      <td className="px-3 py-3 font-bold text-slate-700 dark:text-slate-200">{typeLabel(record.recordType)}</td>
+                      <td className="px-3 py-3 font-black text-slate-950 dark:text-white">{displayText(record.key ?? record.label, "-")}</td>
+                      <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{formatRecordValue(record)}</td>
+                      <td className="px-3 py-3 text-slate-500">{displayText(record.sourceType, "-")}</td>
+                      <td className={`px-3 py-3 font-semibold ${hasSourceLocator(record) ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}`}>{locatorSummary(record)}</td>
+                      <td className="px-3 py-3 text-slate-500">{displayText(record.calculationRunId ?? record.evidenceGraphRunId ?? record.riskRegisterRunId, "-")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <Empty text="조건에 맞는 Deal State 레코드가 없습니다. PF 심사나 Chief Pod를 실행하면 자동으로 적재됩니다." />
+            )}
+          </div>
+        </Panel>
+
+        <Panel title="Evidence Graph 원본" icon={<FileSearch className="h-5 w-5" />}>
+          <select value={selectedRunId} onChange={(event) => setSelectedRunId(event.target.value)} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+            {graphs.length === 0 ? <option value="">저장된 Evidence Graph 없음</option> : null}
+            {graphs.map((item) => (
+              <option key={item.runId} value={item.runId}>
+                {item.runId} · {compactDate(item.updatedAt)} · {item.nodeCount ?? 0} nodes
+              </option>
+            ))}
+          </select>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <Kpi label="Graph nodes" value={`${graph?.nodes?.length ?? 0}개`} />
+            <Kpi label="Graph edges" value={`${graph?.edges?.length ?? 0}개`} />
+          </div>
+          <div className="mt-4 max-h-[420px] space-y-2 overflow-auto pr-1">
+            {graph?.nodes?.slice(0, 80).map((node) => (
+              <div key={node.id} className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                <p className="text-xs font-bold text-slate-500">{displayText(node.type, "node")}</p>
+                <p className="mt-1 text-sm font-black text-slate-950 dark:text-white">{displayText(node.label ?? node.id, "-")}</p>
+                <p className="mt-1 break-all text-xs text-slate-500">{node.id}</p>
               </div>
-            ) : <Empty text="왼쪽에서 노드를 선택하세요." />}
+            )) ?? <Empty text="선택된 Evidence Graph가 없습니다." />}
           </div>
-
-          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <h2 className="font-bold text-slate-950 dark:text-white">원천 근거 위치</h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">문서 페이지, Excel 셀, API row, 증빙 ID처럼 감사자가 확인할 수 있는 위치 정보입니다.</p>
-            <div className="mt-4 space-y-3">
-              {sourceLocatorNodes.length === 0 ? <Empty text="이 노드에는 직접 연결된 source locator가 없습니다. Risk Register와 Evidence Graph hardening이 필요합니다." /> : sourceLocatorNodes.map((node) => (
-                <div key={node.id} className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-                  <p className="text-sm font-bold text-slate-950 dark:text-white">{nodeTitle(node)}</p>
-                  <MetadataTable metadata={node.metadata ?? {}} compact />
-                </div>
-              ))}
+          {graph?.auditWarnings?.length ? (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-semibold leading-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+              {graph.auditWarnings.map((warning) => <p key={warning}>- {warning}</p>)}
             </div>
-            {graph.auditWarnings?.length ? (
-              <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs font-semibold leading-5 text-rose-800 dark:border-rose-900 dark:bg-rose-950/20 dark:text-rose-200">
-                {graph.auditWarnings.map((warning) => <p key={warning}>- {warning}</p>)}
-              </div>
-            ) : null}
-          </div>
-        </section>
-      )}
+          ) : null}
+        </Panel>
+      </section>
     </div>
   );
 }
 
-function Kpi({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"><p className="text-sm font-semibold text-slate-500">{label}</p><p className="mt-3 text-2xl font-black tracking-tight text-slate-950 dark:text-white">{value}</p></div>;
+function typeLabel(type?: string) {
+  if (type === "metric") return "지표";
+  if (type === "risk_issue") return "리스크";
+  if (type === "assumption") return "가정";
+  if (type === "evidence") return "증거";
+  return displayText(type, "-");
 }
-function Empty({ text }: { text: string }) {
-  return <p className="rounded-lg bg-slate-50 p-3 text-sm font-semibold text-slate-500 dark:bg-slate-800/70">{text}</p>;
-}
-function MetadataTable({ metadata, compact = false }: { metadata: Record<string, unknown>; compact?: boolean }) {
-  const entries = Object.entries(metadata).filter(([, value]) => value !== undefined && value !== null && value !== "");
-  if (entries.length === 0) return <Empty text="표시할 메타데이터가 없습니다." />;
+
+function Kpi({ label, value, tone }: { label: string; value: string; tone?: "good" | "warn" }) {
+  const color = tone === "good" ? "text-emerald-600" : tone === "warn" ? "text-amber-600" : "text-slate-950 dark:text-white";
   return (
-    <div className={compact ? "mt-2 space-y-1" : "space-y-2"}>
-      {entries.map(([key, value]) => (
-        <div key={key} className="grid grid-cols-[110px_1fr] gap-2 rounded-lg bg-slate-50 p-2 text-xs dark:bg-slate-800/70">
-          <p className="font-bold text-slate-500">{key}</p>
-          <p className="break-words font-semibold text-slate-800 dark:text-slate-200">{typeof value === "object" ? JSON.stringify(value) : displayText(value)}</p>
-        </div>
-      ))}
+    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <p className="text-sm font-semibold text-slate-500">{label}</p>
+      <p className={`mt-2 text-2xl font-black tracking-tight ${color}`}>{value}</p>
     </div>
   );
+}
+
+function Panel({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="mb-4 flex items-center gap-2 text-slate-900 dark:text-white">
+        {icon}
+        <h2 className="text-lg font-black">{title}</h2>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Loading({ text }: { text: string }) {
+  return <div className="flex min-h-[220px] items-center justify-center text-sm font-bold text-slate-500"><Loader2 className="mr-2 h-5 w-5 animate-spin" />{text}</div>;
+}
+
+function Empty({ text }: { text: string }) {
+  return <div className="rounded-lg bg-slate-50 p-5 text-sm font-semibold text-slate-500 dark:bg-slate-800/70">{text}</div>;
 }

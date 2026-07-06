@@ -12,6 +12,7 @@ from schemas.orchestration import (
     PF_REVIEW_STEPS,
     PF_REVIEW_WORKFLOW,
 )
+from storage import upsert_deal_state_record
 
 
 def project_with_discount_triggers(client: TestClient) -> str:
@@ -295,6 +296,139 @@ def test_approval_readiness_gate_clears_land_evidence_blockers_when_ready():
     assert land_gates["LAND_REGISTRY_EVIDENCE_READY"]["pass"] is True
     assert land_gates["LAND_ACQUISITION_READY"]["pass"] is True
     assert gate["summary"]["landEvidenceReady"] is True
+
+
+def test_approval_readiness_gate_reads_deal_state_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-deal-state.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    project_id = "approval-deal-state-project"
+    base_run = {
+        "project_id": project_id,
+        "handoffs": [],
+        "artifacts": {
+            "qualityCheck": {"pass": True},
+            "legalPermitReview": {"status": "clear"},
+            "dataQualityReview": {"status": "clear"},
+            "reconciliationGate": {"status": "clear"},
+            "riskRegister": {"status": "clear", "risks": []},
+            "creditReviewDecision": {"decision": "conditional_approval"},
+            "landAgentReview": {
+                "status": "ready_for_pf_review",
+                "evidenceReadiness": {
+                    "pnuReady": True,
+                    "officialPriceReady": True,
+                    "registryEvidenceReady": True,
+                    "acquisitionReady": True,
+                },
+            },
+            "evidenceGraph": {"summary": {"riskRowsWithoutExplicitEvidenceCount": 0}},
+        },
+    }
+
+    upsert_deal_state_record(project_id, {
+        "recordId": "risk-senior-shortfall",
+        "recordType": "risk_issue",
+        "key": "SENIOR_SHORTFALL",
+        "severity": "critical",
+        "reviewStatus": "open",
+        "sourceType": "scenario_engine",
+        "sourceLocator": {"artifactKey": "scenario-artifact"},
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "metric-ltv",
+        "recordType": "metric",
+        "key": "pf_metrics.ltv",
+        "value": 0.62,
+        "sourceType": "calculation_run",
+        "calculationRunId": "calc-pf-1",
+        "sourceLocator": {"calculationRunId": "calc-pf-1"},
+    })
+
+    gate = OrchestrationAgent()._approval_readiness_gate(base_run)
+    blocker_codes = {item["code"] for item in gate["blockers"]}
+
+    assert "DEAL_STATE_BLOCKING_RISKS_CLEARED" in blocker_codes
+    assert "DEAL_STATE_REQUIRED_EVIDENCE_PRESENT" in blocker_codes
+    assert gate["summary"]["dealStateRecordCount"] == 2
+    assert gate["summary"]["dealStateBlockingRiskCount"] == 1
+
+
+def test_approval_readiness_gate_clears_deal_state_when_records_are_reviewed(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-deal-state-clear.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    project_id = "approval-deal-state-clear-project"
+    for record in [
+        {
+            "recordId": "risk-resolved",
+            "recordType": "risk_issue",
+            "key": "SENIOR_SHORTFALL",
+            "severity": "critical",
+            "reviewStatus": "resolved",
+            "sourceType": "risk_register",
+            "sourceLocator": {"artifactKey": "risk-register"},
+        },
+        {
+            "recordId": "metric-exit",
+            "recordType": "metric",
+            "key": "pf_metrics.exitSaleRate",
+            "value": 0.67,
+            "sourceType": "calculation_run",
+            "calculationRunId": "calc-exit-1",
+            "sourceLocator": {"calculationRunId": "calc-exit-1"},
+        },
+        {
+            "recordId": "evidence-registry",
+            "recordType": "evidence",
+            "key": "registry-pnu-1",
+            "sourceType": "land_evidence",
+            "sourceLocator": {"evidenceId": "registry-pnu-1"},
+        },
+        {
+            "recordId": "assumption-base",
+            "recordType": "assumption",
+            "key": "assumption:base-case",
+            "status": "approved",
+            "sourceType": "assumption_override",
+            "sourceLocator": {"overrideId": "assumption:base-case"},
+        },
+    ]:
+        upsert_deal_state_record(project_id, record)
+
+    run = {
+        "project_id": project_id,
+        "handoffs": [],
+        "artifacts": {
+            "qualityCheck": {"pass": True},
+            "legalPermitReview": {"status": "clear"},
+            "dataQualityReview": {"status": "clear"},
+            "reconciliationGate": {"status": "clear"},
+            "riskRegister": {"status": "clear", "risks": []},
+            "creditReviewDecision": {"decision": "conditional_approval"},
+            "landAgentReview": {
+                "status": "ready_for_pf_review",
+                "evidenceReadiness": {
+                    "pnuReady": True,
+                    "officialPriceReady": True,
+                    "registryEvidenceReady": True,
+                    "acquisitionReady": True,
+                },
+            },
+            "evidenceGraph": {"summary": {"riskRowsWithoutExplicitEvidenceCount": 0}},
+        },
+    }
+
+    gate = OrchestrationAgent()._approval_readiness_gate(run)
+    deal_state_codes = {
+        item["code"]: item
+        for item in gate["gates"]
+        if item["code"].startswith("DEAL_STATE_")
+    }
+
+    assert deal_state_codes["DEAL_STATE_BLOCKING_RISKS_CLEARED"]["pass"] is True
+    assert deal_state_codes["DEAL_STATE_REQUIRED_EVIDENCE_PRESENT"]["pass"] is True
+    assert deal_state_codes["DEAL_STATE_REPORT_GRADE_METRICS_PRESENT"]["pass"] is True
+    assert deal_state_codes["DEAL_STATE_ASSUMPTIONS_REVIEWED"]["pass"] is True
+    assert gate["summary"]["dealStateSourceLocatorMissingCount"] == 0
 
 
 def test_land_readiness_uses_flat_land_evidence_package():

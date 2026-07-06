@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from agents.report_agent import ReportAgent
 from agents.report_export_agent import ReportExportAgent
 from db.repositories.report_repository import ReportRepository
+from storage import list_deal_state_records
 from use_cases.common import deep_merge
 
 REPORT_TEMPLATE_TO_REPORT_SECTION = {
@@ -28,6 +29,24 @@ REPORT_TEMPLATE_TO_REPORT_SECTION = {
     "conditions_precedent_subsequent": "drawdownConditions",
     "eod": "eodTriggers",
     "fund_execution_and_repayment_order": "fundExecutionOrder",
+}
+
+REPORT_SECTION_CATEGORIES = {
+    "landSecuring": "land",
+    "marketAnalysis": "market",
+    "discountTrigger": "market",
+    "businessFeasibility": "feasibility",
+    "summaryCashFlow": "cashflow",
+    "fundingStructure": "cashflow",
+    "useOfFunds": "cashflow",
+    "salesRevenueDistribution": "cashflow",
+    "financialTerms": "pf",
+    "financialStructureDiagram": "pf",
+    "exitStrategy": "risk",
+    "claimPreservation": "risk",
+    "drawdownConditions": "risk",
+    "eodTriggers": "risk",
+    "fundExecutionOrder": "risk",
 }
 
 
@@ -61,6 +80,12 @@ def generate_and_save_pf_report_use_case(
 ) -> Dict[str, Any]:
     """Generate and persist a PF review report through the report repository."""
     generated = generate_pf_report_use_case(project_data, input_data)
+    paragraph_evidence_links = build_paragraph_evidence_links(
+        project_id,
+        generated["structuredReport"],
+    )
+    generated["paragraphEvidenceLinks"] = paragraph_evidence_links
+    generated["structuredReport"]["paragraphEvidenceLinks"] = paragraph_evidence_links
     report_record = report_repository.create(
         project_id,
         generated["structuredReport"],
@@ -69,6 +94,46 @@ def generate_and_save_pf_report_use_case(
     return {
         "generated": generated,
         "reportRecord": report_record,
+    }
+
+
+def build_paragraph_evidence_links(
+    project_id: str,
+    structured_report: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Create report-section evidence links from persisted Deal State records.
+
+    This is intentionally generated server-side at report creation time so the
+    saved report has an auditable paragraph-to-record map instead of relying on
+    a later frontend heuristic.
+    """
+    records = list_deal_state_records(project_id, limit=1000)
+    sections = _report_sections(structured_report)
+    links = [
+        _build_section_link(project_id, section, records)
+        for section in sections
+    ]
+    linked_record_ids = {
+        item.get("recordId")
+        for link in links
+        for item in link.get("linkedRecords", [])
+        if item.get("recordId")
+    }
+    source_locator_ready = sum(
+        1
+        for link in links
+        if (link.get("sourceLocatorCoverage") or {}).get("linkedWithLocator", 0) > 0
+    )
+    return {
+        "schemaVersion": "realytics-paragraph-evidence-links-v1",
+        "projectId": project_id,
+        "linkMethod": "server_deal_state_section_match_v1",
+        "generatedFrom": "deal_state_records",
+        "recordCount": len(records),
+        "sectionCount": len(links),
+        "linkedRecordCount": len(linked_record_ids),
+        "sourceLocatorReadySectionCount": source_locator_ready,
+        "links": links,
     }
 
 
@@ -188,6 +253,221 @@ def _apply_report_template(
     structured_report["templateApplication"] = applied
     structured_report.setdefault("qualityChecks", {})["templateApplied"] = bool(template.get("templateId"))
     structured_report.setdefault("qualityChecks", {})["templateUnmappedSectionCount"] = len(applied["unmappedSections"])
+
+
+def _report_sections(structured_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    section_order = structured_report.get("sectionOrder") or []
+    if section_order:
+        return [
+            {
+                "index": section.get("index") or index,
+                "key": section.get("key") or section.get("reportSectionKey"),
+                "title": section.get("title"),
+                "templateSectionKey": section.get("templateSectionKey"),
+                "sourceAgents": section.get("sourceAgents") or [],
+                "requiredEvidence": section.get("requiredEvidence") or [],
+            }
+            for index, section in enumerate(section_order, start=1)
+        ]
+    sections = structured_report.get("sections") or {}
+    return [
+        {
+            "index": index,
+            "key": key,
+            "title": str(key),
+            "templateSectionKey": None,
+            "sourceAgents": [],
+            "requiredEvidence": [],
+        }
+        for index, key in enumerate(sections.keys(), start=1)
+    ]
+
+
+def _build_section_link(
+    project_id: str,
+    section: Dict[str, Any],
+    records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    section_key = str(section.get("key") or "")
+    paragraph_id = f"section:{section_key or section.get('index') or 'unknown'}"
+    matched = _match_records_for_section(section, records)
+    compact_records = [_compact_deal_state_record(record) for record in matched[:12]]
+    linked_with_locator = len([record for record in compact_records if _has_source_locator(record)])
+    record_type_ids = {
+        "evidence": [],
+        "metric": [],
+        "risk_issue": [],
+        "assumption": [],
+    }
+    for record in compact_records:
+        record_type = record.get("recordType")
+        if record_type in record_type_ids and record.get("recordId"):
+            record_type_ids[record_type].append(record["recordId"])
+    return {
+        "paragraphId": paragraph_id,
+        "projectId": project_id,
+        "sectionKey": section_key,
+        "templateSectionKey": section.get("templateSectionKey"),
+        "title": section.get("title") or section_key,
+        "linkMethod": "server_deal_state_section_match_v1",
+        "sourceAgents": section.get("sourceAgents") or [],
+        "requiredEvidence": section.get("requiredEvidence") or [],
+        "linkedRecordCount": len(compact_records),
+        "evidenceRecordIds": record_type_ids["evidence"],
+        "metricRecordIds": record_type_ids["metric"],
+        "riskIssueRecordIds": record_type_ids["risk_issue"],
+        "assumptionRecordIds": record_type_ids["assumption"],
+        "sourceLocatorCoverage": {
+            "linked": len(compact_records),
+            "linkedWithLocator": linked_with_locator,
+            "missingLocator": max(len(compact_records) - linked_with_locator, 0),
+        },
+        "linkedRecords": compact_records,
+    }
+
+
+def _match_records_for_section(
+    section: Dict[str, Any],
+    records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    query = " ".join(
+        [
+            str(section.get("key") or ""),
+            str(section.get("templateSectionKey") or ""),
+            str(section.get("title") or ""),
+            " ".join(section.get("sourceAgents") or []),
+            " ".join(section.get("requiredEvidence") or []),
+        ]
+    ).lower()
+    category = REPORT_SECTION_CATEGORIES.get(str(section.get("key") or "")) or _section_category(query)
+    keywords = _section_keywords(category)
+    required = [str(item).lower() for item in section.get("requiredEvidence") or []]
+    agents = [str(item).lower() for item in section.get("sourceAgents") or []]
+
+    scored: List[tuple[int, Dict[str, Any]]] = []
+    for record in records:
+        haystack = _record_haystack(record)
+        score = 0
+        if any(item and item in haystack for item in required):
+            score += 8
+        if any(agent and agent in haystack for agent in agents):
+            score += 6
+        score += sum(2 for keyword in keywords if keyword and keyword in haystack)
+        if record.get("recordType") == _preferred_record_type(category):
+            score += 1
+        if score > 0:
+            scored.append((score, record))
+    scored.sort(key=lambda item: (item[0], _has_source_locator(item[1]), str(item[1].get("updatedAt") or "")), reverse=True)
+    return [record for _score, record in scored]
+
+
+def _section_category(query: str) -> str:
+    if any(token in query for token in ["land", "parcel", "pnu", "registry", "official", "acquisition"]):
+        return "land"
+    if any(token in query for token in ["market", "sale", "price", "discount", "presale"]):
+        return "market"
+    if any(token in query for token in ["feasibility", "business", "revenue", "cost", "profit"]):
+        return "feasibility"
+    if any(token in query for token in ["cash", "waterfall", "fund", "useoffunds", "funding"]):
+        return "cashflow"
+    if any(token in query for token in ["financial", "pf", "tranche", "ltv", "ltc", "dscr", "exit"]):
+        return "pf"
+    if any(token in query for token in ["risk", "eod", "condition", "covenant", "legal", "claim", "리스크", "법무", "약정"]):
+        return "risk"
+    return "general"
+
+
+def _section_keywords(category: str) -> List[str]:
+    return {
+        "land": ["land", "parcel", "pnu", "registry", "official", "land_price", "landSecuring".lower(), "토지", "필지", "등기", "공시지가"],
+        "market": ["market", "sale", "price", "comparable", "discount", "marketability", "분양", "시장", "가격", "비교사례"],
+        "feasibility": ["feasibility", "revenue", "cost", "profit", "business", "사업수지", "수익", "비용"],
+        "cashflow": ["cash", "cashflow", "waterfall", "max_minus", "funding", "useoffunds", "현금", "자금", "상환"],
+        "pf": ["pf", "ltv", "ltc", "dscr", "tranche", "exit", "loan", "financial", "금융", "대출", "트랜치"],
+        "risk": [
+            "risk",
+            "legal",
+            "covenant",
+            "eod",
+            "condition",
+            "claim",
+            "shortfall",
+            "breach",
+            "reject",
+            "senior",
+            "mezzanine",
+            "junior",
+            "unsold",
+            "리스크",
+            "법무",
+            "약정",
+            "인출",
+            "부족",
+            "위반",
+        ],
+        "general": [],
+    }.get(category, [])
+
+
+def _preferred_record_type(category: str) -> str | None:
+    return {
+        "land": "evidence",
+        "market": "evidence",
+        "feasibility": "metric",
+        "cashflow": "metric",
+        "pf": "metric",
+        "risk": "risk_issue",
+    }.get(category)
+
+
+def _record_haystack(record: Dict[str, Any]) -> str:
+    parts = [
+        record.get("recordType"),
+        record.get("key"),
+        record.get("label"),
+        record.get("sourceType"),
+        record.get("calculationRunId"),
+        record.get("riskRegisterRunId"),
+        record.get("evidenceGraphRunId"),
+        record.get("evidenceGraphNodeId"),
+        record.get("termId"),
+        record.get("canonicalField"),
+        record.get("reviewStatus"),
+        record.get("severity"),
+        record.get("unit"),
+        record.get("sourceLocator"),
+        record.get("value"),
+    ]
+    return " ".join(str(part) for part in parts if part is not None).lower()
+
+
+def _compact_deal_state_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "recordId": record.get("recordId"),
+        "recordType": record.get("recordType"),
+        "key": record.get("key"),
+        "label": record.get("label"),
+        "value": record.get("value"),
+        "unit": record.get("unit"),
+        "sourceType": record.get("sourceType"),
+        "sourceLocator": record.get("sourceLocator") or {},
+        "calculationRunId": record.get("calculationRunId"),
+        "riskRegisterRunId": record.get("riskRegisterRunId"),
+        "evidenceGraphRunId": record.get("evidenceGraphRunId"),
+        "evidenceGraphNodeId": record.get("evidenceGraphNodeId"),
+        "confidence": record.get("confidence"),
+        "severity": record.get("severity"),
+        "reviewStatus": record.get("reviewStatus"),
+        "termId": record.get("termId"),
+        "canonicalField": record.get("canonicalField"),
+    }
+
+
+def _has_source_locator(record: Dict[str, Any]) -> bool:
+    locator = record.get("sourceLocator") or {}
+    if not isinstance(locator, dict):
+        return False
+    return any(value not in (None, "") for value in locator.values())
 
 
 def _append_template_application_summary(markdown: str, application: Dict[str, Any]) -> str:

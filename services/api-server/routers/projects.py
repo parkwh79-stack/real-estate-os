@@ -55,6 +55,7 @@ from storage import (
     list_risk_register_records,
     list_calculation_run_records,
     list_deal_state_records,
+    upsert_deal_state_record,
     load_state,
     record_user_activity_log,
     list_user_activity_logs,
@@ -91,6 +92,7 @@ from use_cases.feasibility_workbook_llm import (
 )
 from use_cases.intake_finalize import finalize_project_intake_use_case
 from use_cases.parcel_pnu_resolution import resolve_project_parcels_use_case, resolve_address_to_parcel
+from use_cases.calculation_run_capture import scenario_engine_run_payloads, stress_test_run_payload
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
@@ -131,6 +133,7 @@ from use_cases.project_management import (
     update_project_use_case,
 )
 from use_cases.report_generation import export_saved_report_use_case, generate_and_save_pf_report_use_case
+from use_cases.source_locator_completeness import run_source_locator_completeness_audit_use_case
 from use_cases.report_templates import (
     get_report_template_use_case,
     list_report_templates_use_case,
@@ -711,6 +714,36 @@ def _persist_calculation_run(
             },
         },
     )
+
+def _persist_scenario_calculation_runs(
+    project_id: str,
+    scenario_dump: Dict[str, Any],
+    input_data: Dict[str, Any] | None = None,
+    *,
+    engines: list[str] | None = None,
+) -> Dict[str, str]:
+    """Persist Waterfall / Unsold LTV / Tranche Recovery runs from one scenario
+    set. Returns {engineKey: calculationRunId}. Failures never break the API
+    response — the scenario result itself is still returned."""
+    run_ids: Dict[str, str] = {}
+    try:
+        payloads = scenario_engine_run_payloads(scenario_dump, engines=engines)
+    except Exception:
+        return run_ids
+    for payload in payloads:
+        try:
+            run = _persist_calculation_run(
+                project_id,
+                engine_key=payload["engineKey"],
+                result=payload["result"],
+                input_data={**(input_data or {}), "engineVersion": payload["engineVersion"]},
+                artifact_ref=payload["artifactRef"],
+            )
+            run_ids[payload["engineKey"]] = str(run.get("calculationRunId"))
+        except Exception:
+            continue
+    return run_ids
+
 
 def attach_active_restructuring_cures(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
     cures = list_restructuring_cure_records(project_id, status="active")
@@ -1812,6 +1845,92 @@ def list_project_deal_state_records(
         "records": records,
     }
 
+
+@router.patch("/{project_id}/deal-state-records/{record_id}/review")
+def review_project_deal_state_record(
+    project_id: str,
+    record_id: str,
+    payload: Dict[str, Any],
+    request: Request,
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:review")
+    review_status = str(payload.get("reviewStatus") or payload.get("review_status") or "").strip()
+    if review_status not in {"approved", "waived", "needs_revision", "resolved"}:
+        raise HTTPException(status_code=400, detail="reviewStatus must be approved, waived, needs_revision, or resolved")
+    records = list_deal_state_records(project_id, limit=1000)
+    record = next((item for item in records if item.get("recordId") == record_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Deal State record not found")
+
+    reviewer = str(payload.get("reviewedBy") or payload.get("reviewed_by") or identity_context_from_request(request).get("userId") or "reviewer")
+    now = datetime.now(timezone.utc).isoformat()
+    audit_entry = {
+        "reviewStatus": review_status,
+        "reviewedBy": reviewer,
+        "reviewedAt": now,
+        "comment": payload.get("comment"),
+        "waiverReason": payload.get("waiverReason") or payload.get("waiver_reason"),
+    }
+    updated = {
+        **record,
+        "reviewStatus": review_status,
+        "reviewedBy": reviewer,
+        "reviewedAt": now,
+        "comment": payload.get("comment") or record.get("comment"),
+        "waiverReason": payload.get("waiverReason") or payload.get("waiver_reason") or record.get("waiverReason"),
+        "reviewHistory": [*(record.get("reviewHistory") or []), audit_entry],
+    }
+    saved = upsert_deal_state_record(project_id, updated)
+    record_user_activity_log(
+        {
+            "eventType": "deal_state_record_reviewed",
+            "projectId": project_id,
+            "recordId": record_id,
+            "recordType": saved.get("recordType"),
+            "reviewStatus": review_status,
+            "reviewedBy": reviewer,
+            "createdAt": now,
+        }
+    )
+    return {
+        "schemaVersion": "realytics-deal-state-record-review-v1",
+        "projectId": project_id,
+        "record": saved,
+    }
+
+
+@router.post("/{project_id}/deal-state-records/source-locator-audit")
+def audit_project_source_locator_completeness(
+    project_id: str,
+    request: Request,
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:review")
+    actor = identity_context_from_request(request).get("userId") or "source_locator_auditor"
+    result = run_source_locator_completeness_audit_use_case(
+        project_id,
+        report_records=REPORTS_DB.get(project_id, []),
+        actor=str(actor),
+    )
+    record_user_activity_log(
+        {
+            "eventType": "source_locator_completeness_audited",
+            "projectId": project_id,
+            "auditId": result.get("auditId"),
+            "checkedDealStateRecordCount": result.get("checkedDealStateRecordCount"),
+            "missingLocatorCount": result.get("missingLocatorCount"),
+            "weakTraceCount": result.get("weakTraceCount"),
+            "weakParagraphCount": result.get("weakParagraphCount"),
+            "createdAt": result.get("checkedAt"),
+            "userId": actor,
+        }
+    )
+    return result
+
+
 @router.post("/{project_id}/development-feasibility/analyze")
 def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
@@ -2044,7 +2163,19 @@ def run_project_stress_test(project_id: str, input_data: Dict[str, Any] | None =
         raise HTTPException(status_code=404, detail="Project not found")
     req = build_stress_test_request_from_project(PROJECTS_DB[project_id], input_data or {})
     result = StressTestAgent().run_stress_test(req)
-    return result.model_dump()
+    dump = result.model_dump()
+    # Persist as a first-class CalculationRun (covers the discount-stress stages);
+    # STRESS_SENIOR_SHORTFALL / UNSOLD_LTV_BREACH flags become auditable riskIssues.
+    payload = stress_test_run_payload(dump)
+    run = _persist_calculation_run(
+        project_id,
+        engine_key=payload["engineKey"],
+        result=payload["result"],
+        input_data={**(input_data or {}), "engineVersion": payload["engineVersion"]},
+        artifact_ref=payload["artifactRef"],
+    )
+    dump["calculationRunId"] = run.get("calculationRunId")
+    return dump
 
 
 @router.post("/{project_id}/credit-enhancement/evaluate")
@@ -2085,9 +2216,11 @@ def run_project_scenarios_waterfall(project_id: str, input_data: Dict[str, Any])
     req = build_scenario_request_from_project(PROJECTS_DB[project_id], input_data)
     agent = ScenarioEngineAgent()
     result = agent.run_scenario_set(req)
+    run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(), input_data, engines=["waterfall"]).get("waterfall")
     return {
         "scenarioSetId": result.scenarioSetId,
-        "waterfallScenarios": result.waterfallScenarios
+        "waterfallScenarios": result.waterfallScenarios,
+        "calculationRunId": run_id,
     }
 
 
@@ -2098,9 +2231,11 @@ def run_project_scenarios_unsold_ltv(project_id: str, input_data: Dict[str, Any]
     req = build_scenario_request_from_project(PROJECTS_DB[project_id], input_data)
     agent = ScenarioEngineAgent()
     result = agent.run_scenario_set(req)
+    run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(), input_data, engines=["unsold_ltv"]).get("unsold_ltv")
     return {
         "scenarioSetId": result.scenarioSetId,
-        "unsoldLtvMatrix": result.unsoldLtvMatrix
+        "unsoldLtvMatrix": result.unsoldLtvMatrix,
+        "calculationRunId": run_id,
     }
 
 
@@ -2117,11 +2252,16 @@ def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
     # Persist in the project record
     project_copy = dict(project)
     project_copy.setdefault("scenario_results", {})
-    project_copy["scenario_results"][result.scenarioSetId] = result.model_dump()
+    dump = result.model_dump()
+    project_copy["scenario_results"][result.scenarioSetId] = dump
     PROJECTS_DB[project_id] = project_copy
     persist_project(project_id)
 
-    return result
+    # Full scenario set = all three engines get their own CalculationRun so the
+    # SENIOR_SHORTFALL / UNSOLD_LTV_BREACH history is queryable per engine.
+    run_ids = _persist_scenario_calculation_runs(project_id, dump, input_data)
+    dump["calculationRunIds"] = run_ids
+    return dump
 
 @router.post("/{project_id}/scenarios/restructuring")
 def run_project_scenarios_restructuring(project_id: str, input_data: Dict[str, Any] | None = None):
@@ -2397,6 +2537,7 @@ def generate_report(project_id: str, input_data: Dict[str, Any]):
         "template": structured_report["template"],
         "report": structured_report,
         "report_markdown": md_report,
+        "paragraphEvidenceLinks": structured_report.get("paragraphEvidenceLinks"),
         "metadata": report_record["metadata"],
     }
 
