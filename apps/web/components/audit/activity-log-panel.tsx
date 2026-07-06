@@ -1,9 +1,9 @@
 import {
   Activity,
   ArrowDownToLine,
-  Clock3,
+  Bot,
   Download,
-  FileText,
+  KeyRound,
   LogIn,
   Server,
   ShieldCheck,
@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 
+// eslint-disable-next-line turbo/no-undeclared-env-vars
 const apiBase = process.env.REALYTICS_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 interface ActivityLog {
@@ -39,6 +40,8 @@ interface ActivityLogPanelProps {
   limit?: number;
   title?: string;
   description?: string;
+  eventType?: string;
+  showAiBrainAudit?: boolean;
 }
 
 export async function ActivityLogPanel({
@@ -46,9 +49,13 @@ export async function ActivityLogPanel({
   limit = 100,
   title = "User Activity Log",
   description = "Login, API request, document access, and report export events recorded by the audit middleware.",
+  eventType,
+  showAiBrainAudit = true,
 }: ActivityLogPanelProps) {
-  const logs = await loadActivityLogs({ projectId, limit });
+  const logs = await loadActivityLogs({ projectId, limit, eventType });
   const summary = summarizeLogs(logs);
+  const aiBrainLogs = logs.filter((log) => log.eventType === "ai_brain_used");
+  const tokenSummary = summarizeAiBrainTokens(aiBrainLogs);
 
   return (
     <div className="space-y-6">
@@ -69,9 +76,92 @@ export async function ActivityLogPanel({
       <section className="grid gap-4 md:grid-cols-4">
         <AuditMetric icon={<Activity />} label="Total events" value={String(logs.length)} />
         <AuditMetric icon={<UserRound />} label="Users" value={String(summary.userCount)} />
-        <AuditMetric icon={<FileText />} label="Sensitive events" value={String(summary.sensitiveCount)} />
-        <AuditMetric icon={<Clock3 />} label="Slow requests" value={String(summary.slowRequestCount)} />
+        <AuditMetric icon={<Bot />} label="AI Brain 사용" value={String(aiBrainLogs.length)} />
+        <AuditMetric icon={<KeyRound />} label="AI 토큰" value={formatTokenCount(tokenSummary.totalTokens)} />
       </section>
+      {showAiBrainAudit && (
+        <section className="rounded-lg border border-sky-200 bg-sky-50/70 p-5 shadow-sm dark:border-sky-900/60 dark:bg-sky-950/20">
+          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-sm font-bold text-sky-700 dark:text-sky-200">AI Brain Used Audit</p>
+              <h3 className="mt-1 text-xl font-black text-slate-950 dark:text-white">에이전트별 AI 사용 이력</h3>
+              <p className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">
+                어떤 Agent가 어떤 provider/model/key 출처로 판단했는지와 tokenUsage를 확인합니다. API Key 원문은 저장하지 않습니다.
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center text-xs font-bold text-slate-600 dark:text-slate-300">
+              <div className="rounded-lg bg-white px-3 py-2 dark:bg-slate-900">
+                <p>Prompt</p>
+                <p className="mt-1 text-lg text-slate-950 dark:text-white">{formatTokenCount(tokenSummary.promptTokens)}</p>
+              </div>
+              <div className="rounded-lg bg-white px-3 py-2 dark:bg-slate-900">
+                <p>Completion</p>
+                <p className="mt-1 text-lg text-slate-950 dark:text-white">{formatTokenCount(tokenSummary.completionTokens)}</p>
+              </div>
+              <div className="rounded-lg bg-white px-3 py-2 dark:bg-slate-900">
+                <p>Total</p>
+                <p className="mt-1 text-lg text-slate-950 dark:text-white">{formatTokenCount(tokenSummary.totalTokens)}</p>
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 overflow-x-auto rounded-lg border border-sky-100 bg-white dark:border-slate-800 dark:bg-slate-950/60">
+            <table className="w-full min-w-[980px] text-left text-sm">
+              <thead className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-800">
+                <tr>
+                  <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3">Agent</th>
+                  <th className="px-4 py-3">Provider / Model</th>
+                  <th className="px-4 py-3">Brain Source</th>
+                  <th className="px-4 py-3">Key</th>
+                  <th className="px-4 py-3">Token Usage</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Prompt Hash</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {aiBrainLogs.map((log) => {
+                  const metadata = log.metadata ?? {};
+                  const usage = asRecord(metadata.tokenUsage);
+                  return (
+                    <tr key={log.eventId ?? `${log.createdAt}-${metadata.promptHash}`} className="align-top">
+                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300">{formatDate(log.createdAt)}</td>
+                      <td className="px-4 py-3 font-bold text-slate-950 dark:text-white">{asText(metadata.agentId) || "AIConnection"}</td>
+                      <td className="px-4 py-3">
+                        <p className="font-semibold text-slate-800 dark:text-slate-100">{asText(metadata.provider) || "-"}</p>
+                        <p className="mt-1 text-xs text-slate-500">{asText(metadata.model) || "-"}</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                          {formatBrainSource(asText(metadata.brainSource))}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs font-semibold text-slate-600 dark:text-slate-300">{asText(metadata.keyMode) || "no_key"}</td>
+                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+                        {formatUsage(usage)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <AiStatusPill status={asText(metadata.status)} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <code className="block max-w-[180px] truncate rounded bg-slate-50 px-2 py-1 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {asText(metadata.promptHash) || "-"}
+                        </code>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {aiBrainLogs.length === 0 && (
+                  <tr>
+                    <td className="px-4 py-8 text-center text-sm text-slate-500" colSpan={8}>
+                      아직 기록된 AI Brain 사용 이벤트가 없습니다. LLM-capable Agent가 실행되면 여기에 provider, model, key source, tokenUsage가 표시됩니다.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="grid gap-4 xl:grid-cols-[1fr_2fr]">
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -160,9 +250,10 @@ export async function ActivityLogPanel({
   );
 }
 
-async function loadActivityLogs({ projectId, limit }: { projectId?: string; limit: number }) {
+async function loadActivityLogs({ projectId, limit, eventType }: { projectId?: string; limit: number; eventType?: string }) {
   const params = new URLSearchParams({ limit: String(limit) });
   if (projectId) params.set("project_id", projectId);
+  if (eventType) params.set("event_type", eventType);
 
   try {
     const res = await fetch(`${apiBase}/audit/user-activity?${params.toString()}`, {
@@ -204,6 +295,19 @@ function summarizeLogs(logs: ActivityLog[]) {
   };
 }
 
+function summarizeAiBrainTokens(logs: ActivityLog[]) {
+  return logs.reduce(
+    (acc, log) => {
+      const usage = asRecord(log.metadata?.tokenUsage);
+      acc.promptTokens += asNumber(usage.promptTokens);
+      acc.completionTokens += asNumber(usage.completionTokens);
+      acc.totalTokens += asNumber(usage.totalTokens);
+      return acc;
+    },
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  );
+}
+
 function AuditMetric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -220,11 +324,23 @@ function AuditMetric({ icon, label, value }: { icon: ReactNode; label: string; v
 
 function EventIcon({ eventType }: { eventType?: string }) {
   const className = "h-4 w-4";
+  if (eventType === "ai_brain_used") return <Bot className={className} />;
   if (eventType === "login") return <LogIn className={className} />;
   if (eventType === "api_request") return <Server className={className} />;
   if (eventType === "source_document_download") return <ArrowDownToLine className={className} />;
   if (eventType?.startsWith("report_export")) return <Download className={className} />;
   return <Activity className={className} />;
+}
+
+function AiStatusPill({ status }: { status?: string }) {
+  const normalized = status || "unknown";
+  const className =
+    normalized === "success"
+      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200"
+      : normalized === "fallback_used"
+        ? "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-200"
+        : "bg-rose-50 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200";
+  return <span className={`rounded px-2 py-1 text-xs font-bold ${className}`}>{formatEventType(normalized)}</span>;
 }
 
 function StatusPill({ statusCode }: { statusCode?: number }) {
@@ -270,4 +386,39 @@ function formatDate(value?: string) {
 
 function formatEventType(eventType?: string) {
   return (eventType ?? "unknown").replaceAll("_", " ");
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function asText(value: unknown): string {
+  return typeof value === "string" ? value : value === undefined || value === null ? "" : String(value);
+}
+
+function asNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function formatTokenCount(value: number) {
+  return value > 0 ? value.toLocaleString("ko-KR") : "-";
+}
+
+function formatUsage(usage: Record<string, unknown>) {
+  const prompt = asNumber(usage.promptTokens);
+  const completion = asNumber(usage.completionTokens);
+  const total = asNumber(usage.totalTokens);
+  if (!prompt && !completion && !total) return "n/a";
+  return `P ${formatTokenCount(prompt)} / C ${formatTokenCount(completion)} / T ${formatTokenCount(total)}`;
+}
+
+function formatBrainSource(value: string) {
+  const labels: Record<string, string> = {
+    user_profile: "사용자 API",
+    request_override: "요청별 API",
+    system_fallback: "시스템 fallback",
+    tenant_policy: "조직 정책",
+    deterministic_fallback: "계산/규칙 fallback",
+  };
+  return labels[value] ?? (value.replaceAll("_", " ") || "-");
 }

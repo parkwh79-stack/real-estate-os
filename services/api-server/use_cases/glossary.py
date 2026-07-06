@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+from core.text_normalization import build_term_surface_record, normalize_match_text
 from storage import (
     get_glossary_term_candidate_record,
     get_glossary_term_record,
@@ -39,7 +40,9 @@ ALLOWED_REVIEW_STATUSES = {
 }
 
 STATUSES_REQUIRING_CANONICAL_FIELD = {"approved", "pending_review", "needs_revision"}
-CANDIDATE_REVIEW_STATUSES = {"approved", "rejected", "needs_revision", "merged"}
+# Candidate resolutions mirror the AI triage decisions: new-term(approved),
+# same-as(merged), free-text(free_text), reject(rejected), plus needs_revision.
+CANDIDATE_REVIEW_STATUSES = {"approved", "rejected", "needs_revision", "merged", "free_text"}
 
 _CANONICAL_FIELD_HINTS = {
     "ltv": "pf_metrics.ltv",
@@ -254,6 +257,14 @@ def normalize_glossary_surfaces_use_case(
         nearest, score = _nearest_term(surface, approved)
         candidate_payload = {
             "surface": surface,
+            "termSurface": build_term_surface_record(
+                surface,
+                source_field=raw.get("sourceField"),
+                source_locator=raw.get("sourceLocator") or {},
+                canonical_field=raw.get("canonicalField"),
+                match_type="fuzzy_suggestion" if score >= min_suggestion_score else "unmapped",
+                confidence=round(score, 4),
+            ),
             "projectId": project_id or raw.get("projectId"),
             "runId": run_id or raw.get("runId"),
             "sourceField": raw.get("sourceField"),
@@ -340,6 +351,14 @@ def capture_glossary_candidates_use_case(
             upsert_glossary_term_candidate_record(
                 {
                     "surface": surface,
+                    "termSurface": build_term_surface_record(
+                        surface,
+                        source_field=annotation.get("sourceField"),
+                        source_locator=annotation.get("sourceLocator") or {},
+                        canonical_field=annotation.get("canonicalField"),
+                        match_type=annotation.get("matchType") or "unmapped_candidate",
+                        confidence=annotation.get("confidence"),
+                    ),
                     "projectId": project_id,
                     "runId": run_id,
                     "sourceField": annotation.get("sourceField"),
@@ -356,6 +375,63 @@ def capture_glossary_candidates_use_case(
         "runId": run_id,
         "capturedCount": len(captured),
         "candidates": captured,
+    }
+
+
+def capture_unmapped_term_surface_candidates_use_case(
+    term_surfaces: list[Dict[str, Any]],
+    *,
+    project_id: str | None = None,
+    run_id: str | None = None,
+    source: str = "evidence_graph",
+) -> Dict[str, Any]:
+    """Route unmapped DB-to-Pod term surfaces into the glossary review queue.
+
+    Only surfaces without both a standard ``termId`` and ``canonicalField`` are
+    considered. Exact approved aliases are resolved by the normalize use case;
+    genuinely new expressions become pending glossary candidates.
+    """
+    items: list[Dict[str, Any]] = []
+    for surface in term_surfaces or []:
+        if not isinstance(surface, dict):
+            continue
+        if surface.get("termId") and surface.get("canonicalField"):
+            continue
+        raw_text = str(surface.get("rawText") or surface.get("surface") or "").strip()
+        if not raw_text:
+            continue
+        items.append(
+            {
+                "surface": raw_text,
+                "sourceField": surface.get("sourceField"),
+                "sourceLocator": surface.get("sourceLocator") or {},
+                "canonicalField": surface.get("canonicalField"),
+                "context": surface.get("contextExcerpt") or surface.get("sourceField") or source,
+                "category": surface.get("category") or _candidate_category(surface.get("sourceField")),
+                "projectId": project_id,
+                "runId": run_id,
+            }
+        )
+    normalized = normalize_glossary_surfaces_use_case(
+        items,
+        project_id=project_id,
+        run_id=run_id,
+    )
+    return {
+        "schemaVersion": GLOSSARY_CANDIDATE_CAPTURE_SCHEMA_VERSION,
+        "source": source,
+        "projectId": project_id,
+        "runId": run_id,
+        "surfaceCount": len(term_surfaces or []),
+        "unmappedSurfaceCount": len(items),
+        "matchedCount": normalized.get("matchedCount", 0),
+        "capturedCount": normalized.get("candidateCount", 0),
+        "results": normalized.get("results", []),
+        "candidates": [
+            result.get("candidate")
+            for result in normalized.get("results", [])
+            if result.get("candidate")
+        ],
     }
 
 
@@ -403,6 +479,37 @@ def review_glossary_candidate_use_case(
             "reviewReason": payload.get("reason") or "approved from glossary candidate queue",
         }
         term = upsert_glossary_term_use_case(term_payload, actor=actor)
+
+    elif status == "merged":
+        # Same-as: fold the candidate surface into an EXISTING term as an alias so
+        # the next normalize() resolves it exactly instead of re-queueing it.
+        target_term_id = payload.get("termId") or candidate.get("suggestedTermId")
+        if not target_term_id:
+            raise ValueError("termId is required to merge a candidate into an existing term")
+        existing = get_glossary_term_record(str(target_term_id))
+        if not existing:
+            raise KeyError(f"target glossary term not found: {target_term_id}")
+        merged_aliases = _distinct_strings([*(existing.get("aliases") or []), candidate.get("surface")])
+        source_examples = list(existing.get("sourceExamples") or [])
+        source_examples.append(
+            {
+                "surface": candidate.get("surface"),
+                "sourceField": candidate.get("sourceField"),
+                "sourceLocator": candidate.get("sourceLocator"),
+                "projectId": candidate.get("projectId"),
+                "runId": candidate.get("runId"),
+            }
+        )
+        term = upsert_glossary_term_use_case(
+            {
+                **existing,
+                "aliases": merged_aliases,
+                "sourceExamples": source_examples,
+                "reviewReason": payload.get("reason")
+                or f"merged candidate '{candidate.get('surface')}' as alias",
+            },
+            actor=actor,
+        )
 
     updated = update_glossary_term_candidate_status_record(
         candidate_id,
@@ -720,7 +827,7 @@ def _distinct_strings(values: list[Any]) -> list[str]:
 
 
 def _normalize_match_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().lower().replace("-", "_").split())
+    return normalize_match_text(value)
 
 
 def _candidate_category(source_field: Any) -> str:

@@ -144,6 +144,22 @@ The glossary now covers three practical domains.
 4. Evidence Graph nodes should carry `termId` and `canonicalField` when a claim depends on a glossary-controlled term.
 5. Organization-specific wording can be added as aliases, but it must map to a canonical field or be explicitly marked `free_text`.
 6. Legal terms must preserve source locators, because the system cannot treat a legal/security condition as complete without evidence.
+7. DB-to-Pod handoff must use canonical fields and term IDs. Pods may render Korean labels, but they should not branch business logic on raw Korean labels or ad hoc English translations.
+8. Matching surfaces must be Unicode-normalized before lookup. The original document text remains stored as evidence, while the normalized surface is used only for alias matching.
+
+## Encoding and Label Policy
+
+REALYTICS should treat Korean financial terminology as first-class business data, not as code comments or scattered UI strings.
+
+| Layer | Policy |
+|---|---|
+| Source evidence | Preserve original Korean text, document page, Excel cell, API row, and file hash. |
+| Matching/indexing | Use UTF-8-safe Unicode normalization, remove BOM/zero-width markers, and attempt reversible mojibake repair only for matching. |
+| DB canonical fields | Store stable English machine fields, such as `land.area_sqm` or `pf_metrics.ltv`. |
+| UI/report labels | Render Korean display labels from glossary/financial term maps. |
+| Agent/Pod logic | Consume `canonicalField`, `termId`, datatype, unit, confidence, and source locator. |
+
+If text is already replaced with `???` or the replacement character, the system cannot reconstruct the original term. That case should become a Data Quality issue with source-file encoding review, not an automatic mapping.
 
 ## Agent Rule
 

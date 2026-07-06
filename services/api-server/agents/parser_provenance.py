@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional
+
+from core.text_normalization import build_term_surface_record
 
 
 PARSER_FIELD_PROVENANCE_SCHEMA_VERSION = "realytics-parser-field-provenance-v1"
@@ -27,6 +30,63 @@ MARKET_ONLY_PATH_PREFIXES = (
     "sales_assumptions.productMix",
 )
 
+_INDEX_RE = re.compile(r"\[\d+\]")
+
+PARSER_FIELD_TERM_MAP: Dict[str, Dict[str, str]] = {
+    "land.address": {"termId": "project_site", "canonicalField": "land.address"},
+    "land.pnu": {"termId": "pnu", "canonicalField": "land.pnu"},
+    "land.area_sqm": {"termId": "land_area_sqm", "canonicalField": "land.area_sqm"},
+    "land.officialLandPricePerSqm": {
+        "termId": "official_land_price",
+        "canonicalField": "landEvidence.officialLandPrice.pricePerSqm",
+    },
+    "landEvidence.officialLandPrice.pricePerSqm": {
+        "termId": "official_land_price",
+        "canonicalField": "landEvidence.officialLandPrice.pricePerSqm",
+    },
+    "regulation.applied_far": {"termId": "floor_area_ratio", "canonicalField": "regulation.applied_far"},
+    "regulation.legal_far": {"termId": "floor_area_ratio", "canonicalField": "regulation.applied_far"},
+    "regulation.applied_bcr": {"termId": "building_coverage_ratio", "canonicalField": "regulation.applied_bcr"},
+    "regulation.legal_bcr": {"termId": "building_coverage_ratio", "canonicalField": "regulation.applied_bcr"},
+    "architectural_plan.gross_floor_area_sqm": {
+        "termId": "gross_floor_area_sqm",
+        "canonicalField": "architectural_plan.gross_floor_area_sqm",
+    },
+    "architectural_plan.unit_count": {"termId": "unit_count", "canonicalField": "architectural_plan.unit_count"},
+    "sales_assumptions.avg_price_per_sqm": {
+        "termId": "sales_price_per_py",
+        "canonicalField": "sales_assumptions.avgPricePerPy",
+    },
+    "cost_assumptions.construction_cost_per_sqm": {
+        "termId": "construction_cost",
+        "canonicalField": "feasibility_input.construction_cost",
+    },
+    "feasibility_input.total_revenue": {
+        "termId": "total_sales_revenue",
+        "canonicalField": "feasibility_input.total_revenue",
+    },
+    "feasibility_input.total_cost": {
+        "termId": "total_project_cost",
+        "canonicalField": "feasibility_input.total_cost",
+    },
+    "feasibility_input.land_cost": {"termId": "land_cost", "canonicalField": "feasibility_input.land_cost"},
+    "feasibility_input.construction_cost": {
+        "termId": "construction_cost",
+        "canonicalField": "feasibility_input.construction_cost",
+    },
+    "feasibility_input.finance_cost": {
+        "termId": "finance_cost",
+        "canonicalField": "feasibility_input.finance_cost",
+    },
+    "schedule.completion": {"termId": "completion", "canonicalField": "schedule.completion"},
+    "contractor_info.name": {"termId": "contractor", "canonicalField": "contractor.name"},
+    "developer_info.name": {"termId": "developer_borrower", "canonicalField": "developer.name"},
+    "covenants.claim_preservation": {"termId": "covenant", "canonicalField": "legal.covenants"},
+    "covenants.drawdown_conditions": {"termId": "covenant", "canonicalField": "legal.covenants"},
+    "covenants.execution_order": {"termId": "waterfall", "canonicalField": "cashFlow.waterfall"},
+    "covenants.eod": {"termId": "eod", "canonicalField": "legal.eodTriggers"},
+}
+
 
 def attach_parser_field_provenance(
     parsed_data: Dict[str, Any],
@@ -45,8 +105,11 @@ def attach_parser_field_provenance(
         source_locators = {}
 
     fields = []
+    term_surfaces = []
     for path, value in _iter_non_market_leaf_fields(parsed_data):
         locator = _locator_for_path(parsed_data, source_locators, path)
+        term_surface = _term_surface_for_path(path, value, parsed_data, locator)
+        term_surfaces.append(term_surface)
         fields.append(
             {
                 "path": path,
@@ -56,6 +119,9 @@ def attach_parser_field_provenance(
                 "sourceLocator": locator or {},
                 "locatorStatus": "located" if locator else "missing",
                 "locatorPrecision": _locator_precision(locator),
+                "termId": term_surface.get("termId"),
+                "canonicalField": term_surface.get("canonicalField"),
+                "termSurface": term_surface,
             }
         )
 
@@ -76,8 +142,16 @@ def attach_parser_field_provenance(
         "sourceDocument": upload_meta or {},
         "coverage": coverage,
         "fields": fields,
+        "termSurfaces": term_surfaces,
         "missingFields": [
-            {"path": field["path"], "domain": field["domain"], "valuePreview": field["valuePreview"]}
+            {
+                "path": field["path"],
+                "domain": field["domain"],
+                "valuePreview": field["valuePreview"],
+                "termId": field.get("termId"),
+                "canonicalField": field.get("canonicalField"),
+                "termSurface": field.get("termSurface"),
+            }
             for field in fields
             if field["locatorStatus"] == "missing"
         ],
@@ -97,6 +171,7 @@ def attach_parser_field_provenance(
         for field in fields
         if field["locatorStatus"] == "located"
     }
+    parsed_data["parser_term_surfaces"] = term_surfaces
     parsed_data["parser_locator_coverage"] = coverage
     return parsed_data
 
@@ -253,6 +328,78 @@ def _coverage_status(field_count: int, located_count: int) -> str:
 
 def _is_market_only_path(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in MARKET_ONLY_PATH_PREFIXES)
+
+
+def _term_surface_for_path(
+    path: str,
+    value: Any,
+    parsed_data: Dict[str, Any],
+    locator: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    term = _term_metadata_for_path(path, value, parsed_data)
+    source_locator = locator or {
+        "fieldName": path,
+        "path": path,
+        "sourceType": "parsed_field_path",
+    }
+    surface = _surface_text_for_path(path, value, term)
+    return build_term_surface_record(
+        surface,
+        source_field=path,
+        source_locator=source_locator,
+        term_id=term.get("termId"),
+        canonical_field=term.get("canonicalField"),
+        match_type=term.get("matchType", "parser_field_map" if term else "unmapped_parser_field"),
+        confidence=float(term.get("confidence", 0.7 if term else 0.0)),
+    )
+
+
+def _term_metadata_for_path(path: str, value: Any, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_path = _normalize_indexed_path(path)
+    if normalized_path == "pf_structure[].tranche":
+        return _tranche_term_metadata(value)
+    if normalized_path in {"pf_structure[].amount", "pf_structure[].all_in_cost"}:
+        parent = _get_path(parsed_data, _parent_list_record_path(path))
+        tranche = (parent.get("tranche") or parent.get("name")) if isinstance(parent, dict) else None
+        tranche_term = _tranche_term_metadata(tranche)
+        if normalized_path.endswith(".all_in_cost"):
+            return {"termId": "all_in_cost", "canonicalField": "pf_structure.tranches.allInCost", "confidence": 0.86}
+        if tranche_term.get("termId") == "senior_tranche":
+            return {"termId": "senior_tranche", "canonicalField": "pf_structure.tranches.senior.amount", "confidence": 0.86}
+        if tranche_term.get("termId") == "mezzanine_tranche":
+            return {"termId": "mezzanine_tranche", "canonicalField": "pf_structure.tranches.mezzanine.amount", "confidence": 0.86}
+        if tranche_term.get("termId") == "junior_tranche":
+            return {"termId": "junior_tranche", "canonicalField": "pf_structure.tranches.junior.amount", "confidence": 0.86}
+        return {"termId": "pf_total_amount", "canonicalField": "pf_structure.amount.sum", "confidence": 0.65}
+    if normalized_path.startswith("covenants."):
+        root = normalized_path.split("[", 1)[0]
+        return PARSER_FIELD_TERM_MAP.get(root, {})
+    return PARSER_FIELD_TERM_MAP.get(normalized_path, {})
+
+
+def _tranche_term_metadata(value: Any) -> Dict[str, Any]:
+    text = str(value or "").strip().lower()
+    if any(token in text for token in ("tr.a", "tra", "senior", "선순위", "a tranche")):
+        return {"termId": "senior_tranche", "canonicalField": "pf_structure.tranches.senior.amount", "confidence": 0.88}
+    if any(token in text for token in ("tr.b", "trb", "mezz", "mezzanine", "중순위", "b tranche")):
+        return {"termId": "mezzanine_tranche", "canonicalField": "pf_structure.tranches.mezzanine.amount", "confidence": 0.88}
+    if any(token in text for token in ("tr.c", "trc", "junior", "후순위", "c tranche")):
+        return {"termId": "junior_tranche", "canonicalField": "pf_structure.tranches.junior.amount", "confidence": 0.88}
+    return {"termId": "pf_total_amount", "canonicalField": "pf_structure.amount.sum", "confidence": 0.55}
+
+
+def _surface_text_for_path(path: str, value: Any, term: Dict[str, Any]) -> str:
+    if path.endswith(".tranche") and value not in (None, ""):
+        return str(value)
+    return str(term.get("termId") or path.rsplit(".", 1)[-1])
+
+
+def _normalize_indexed_path(path: str) -> str:
+    return _INDEX_RE.sub("[]", path)
+
+
+def _parent_list_record_path(path: str) -> str:
+    return path.rsplit(".", 1)[0]
 
 
 def _empty(value: Any) -> bool:

@@ -1,4 +1,10 @@
-from agents.ai_connection import resolve_ai_context, OPENAI_COMPATIBLE_PROVIDERS
+from agents.ai_audit import build_ai_brain_used_audit_event
+from agents.ai_connection import (
+    AIConnection,
+    OPENAI_COMPATIBLE_PROVIDERS,
+    _normalize_token_usage,
+    resolve_ai_context,
+)
 from agents.parser_agent import ParserAgent
 
 
@@ -63,6 +69,91 @@ def test_gemini_provider_resolves_openai_compatible_base_url(monkeypatch):
     assert context["model"] == "gemini-2.5-flash"
     assert context["direct_model_call"] is True
     assert context["requires_api_key"] is None
+
+
+def test_explicit_api_key_enables_openai_compatible_provider(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    context = resolve_ai_context({"provider": "groq", "api_key": "user-key", "model": "llama-3.3-70b-versatile"})
+
+    assert context["provider"] == "groq"
+    assert context["model"] == "llama-3.3-70b-versatile"
+    assert context["direct_model_call"] is True
+    assert context["requires_api_key"] is None
+
+
+def test_ai_brain_used_audit_event_redacts_keys_and_hashes_prompt():
+    event = build_ai_brain_used_audit_event(
+        context={
+            "provider": "gemini",
+            "runtime_provider": "openai_compatible",
+            "model": "gemini-2.5-flash",
+            "api_key": "secret-user-key",
+            "user_id": "u-1",
+            "tenant_id": "t-1",
+            "project_id": "p-1",
+            "agent_id": "ParserAgent",
+            "selection_source": "user_ai_profile",
+            "direct_model_call": True,
+        },
+        prompt="extract this",
+        system="system",
+        status="success",
+    )
+
+    assert event["eventType"] == "ai_brain_used"
+    assert event["userId"] == "u-1"
+    assert event["projectId"] == "p-1"
+    metadata = event["metadata"]
+    assert metadata["provider"] == "gemini"
+    assert metadata["model"] == "gemini-2.5-flash"
+    assert metadata["brainSource"] == "user_profile"
+    assert metadata["keyMode"] == "byok"
+    assert metadata["promptHash"]
+    assert metadata["aiContext"]["api_key"] == "[redacted]"
+    assert "secret-user-key" not in str(event)
+
+
+def test_ai_connection_records_ai_brain_used_event(monkeypatch):
+    records = []
+    monkeypatch.setattr("agents.ai_connection.record_ai_brain_used", lambda event: records.append(event))
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    result = AIConnection().extract_json(
+        "prompt",
+        system="system",
+        ai_context={"provider": "groq", "user_id": "u-2", "project_id": "p-2", "agent_id": "IntakeTriageAgent"},
+    )
+
+    assert result.data is None
+    assert records
+    assert records[0]["eventType"] == "ai_brain_used"
+    assert records[0]["projectId"] == "p-2"
+    assert records[0]["metadata"]["agentId"] == "IntakeTriageAgent"
+    assert records[0]["metadata"]["status"] == "fallback_used"
+
+
+def test_token_usage_normalizes_openai_and_anthropic_shapes():
+    class OpenAIUsage:
+        prompt_tokens = 12
+        completion_tokens = 8
+        total_tokens = 20
+
+    assert _normalize_token_usage(OpenAIUsage(), provider="openai_compatible") == {
+        "provider": "openai_compatible",
+        "promptTokens": 12,
+        "completionTokens": 8,
+        "totalTokens": 20,
+    }
+    assert _normalize_token_usage(
+        {"input_tokens": 10, "output_tokens": 7},
+        provider="anthropic",
+    ) == {
+        "provider": "anthropic",
+        "promptTokens": 10,
+        "completionTokens": 7,
+        "totalTokens": 17,
+    }
 
 
 def test_groq_provider_requires_key_when_missing(monkeypatch):

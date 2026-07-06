@@ -17,13 +17,17 @@ from integrations.kakao import (
 )
 from storage import (
     create_user_session,
+    delete_user_ai_profile,
+    get_user_ai_profile,
     get_user,
     get_user_session,
     list_users,
     record_user_activity_log,
+    upsert_user_ai_profile,
     upsert_tenant,
     upsert_user,
 )
+from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -120,6 +124,88 @@ def get_identity_context(request: Request):
         "limitations": [
             "Header/session based identity is an MVP control. Bearer-token identity is available when REALYTICS_IDP_MODE is configured.",
         ],
+    }
+
+
+@router.get("/ai-profile")
+def get_ai_profile(request: Request):
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Login required")
+    user = context["user"]
+    profile = get_user_ai_profile(user["userId"], include_secret=False)
+    ai_context = build_user_ai_context(
+        user_id=user["userId"],
+        tenant_id=user.get("tenantId"),
+        host="web",
+    )
+    return {
+        "schemaVersion": "realytics-user-ai-profile-v1",
+        "profile": profile,
+        "effectiveAi": safe_user_ai_context_summary(ai_context),
+        "fallbackPolicy": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "description": "개인 API Key가 없으면 시스템에 설정된 무료/기본 Gemini 프로필을 사용합니다. 시스템 키도 없으면 deterministic fallback으로 전환합니다.",
+        },
+        "secretPolicy": "API Key는 응답에 평문으로 반환하지 않습니다. 로컬 MVP는 암호화 저장하며 운영 배포는 Secret Manager로 교체해야 합니다.",
+    }
+
+
+@router.post("/ai-profile")
+def save_ai_profile(request: Request, payload: Dict[str, Any]):
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Login required")
+    user = context["user"]
+    profile = upsert_user_ai_profile(
+        {
+            **payload,
+            "userId": user["userId"],
+            "tenantId": user.get("tenantId"),
+        }
+    )
+    record_user_activity_log(
+        {
+            "eventType": "ai_profile_updated",
+            "userId": user["userId"],
+            "metadata": {
+                "tenantId": user.get("tenantId"),
+                "provider": profile.get("provider"),
+                "model": profile.get("model"),
+                "apiKeyConfigured": profile.get("apiKeyConfigured"),
+                "allowSystemFallback": profile.get("allowSystemFallback"),
+            },
+        }
+    )
+    ai_context = build_user_ai_context(user_id=user["userId"], tenant_id=user.get("tenantId"), host="web")
+    return {
+        "schemaVersion": "realytics-user-ai-profile-v1",
+        "profile": profile,
+        "effectiveAi": safe_user_ai_context_summary(ai_context),
+    }
+
+
+@router.delete("/ai-profile")
+def remove_ai_profile(request: Request):
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Login required")
+    user = context["user"]
+    deleted = delete_user_ai_profile(user["userId"])
+    record_user_activity_log(
+        {
+            "eventType": "ai_profile_deleted",
+            "userId": user["userId"],
+            "metadata": {"tenantId": user.get("tenantId"), "deleted": deleted},
+        }
+    )
+    ai_context = build_user_ai_context(user_id=user["userId"], tenant_id=user.get("tenantId"), host="web")
+    return {
+        "schemaVersion": "realytics-user-ai-profile-v1",
+        "deleted": deleted,
+        "profile": None,
+        "effectiveAi": safe_user_ai_context_summary(ai_context),
     }
 
 
@@ -254,4 +340,3 @@ def get_system_stats():
         "projectsCount": projects_count,
         "projectScaleTrillionWon": round(projects_count * 0.15, 1) if projects_count > 0 else 0
     }
-

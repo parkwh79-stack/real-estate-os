@@ -34,6 +34,9 @@ def test_canonical_field_match_from_source_locator():
     assert ltv["matchType"] == "canonical_field"
     assert ltv["sourceLocator"]["pageNumber"] == 12
     assert ltv["status"] == "mapped"
+    assert ltv["rawText"] == "pf_metrics.ltv"
+    assert ltv["normalizedSurface"] == "pf_metrics.ltv"
+    assert ltv["textQualityFlags"]["isUnicodeNormalized"] is True
 
 
 def test_alias_text_match_in_covenants_and_tranche():
@@ -56,6 +59,7 @@ def test_unmapped_candidate_emitted_for_unknown_covenant():
     unmapped = [a for a in result["annotations"] if a["status"] == "unmapped_candidate"]
     assert any("XYZ" in a["surface"] for a in unmapped)
     assert all(a["termId"] is None for a in unmapped)
+    assert all("rawText" in a and "normalizedSurface" in a and "textQualityFlags" in a for a in unmapped)
 
 
 def test_pending_terms_ignored_and_summary():

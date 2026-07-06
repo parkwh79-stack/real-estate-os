@@ -1,44 +1,74 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { Map as MlMap, MapLayerMouseEvent, Marker as MlMarker, StyleSpecification } from "maplibre-gl";
+import type {
+  GeoJSONSource,
+  Map as MlMap,
+  MapLayerMouseEvent,
+  Marker as MlMarker,
+  StyleSpecification,
+} from "maplibre-gl";
 
-export type TxMarker = { lat: number; lng: number; label: string; sublabel?: string; tone?: "trade" | "rent"; value?: number };
-
-// 평단가(원/평) 구간별 색 — 시세 색상도. (수도권 기준 대략적 구간)
-const PRICE_TIERS: { max: number; color: string; label: string }[] = [
-  { max: 50_000_000, color: "#16a34a", label: "~5천만" },
-  { max: 100_000_000, color: "#84cc16", label: "5천만~1억" },
-  { max: 150_000_000, color: "#f59e0b", label: "1억~1.5억" },
-  { max: 200_000_000, color: "#f97316", label: "1.5억~2억" },
-  { max: Infinity, color: "#dc2626", label: "2억~" },
-];
-function tierColor(value?: number): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "#e11d48";
-  return PRICE_TIERS.find((t) => value < t.max)?.color ?? "#dc2626";
-}
+export type TxMarker = {
+  lat: number;
+  lng: number;
+  label: string;
+  sublabel?: string;
+  tone?: "trade" | "rent";
+  value?: number;
+};
 
 type Center = { lng: number; lat: number } | null;
 type Layer = { id: string; label: string; source: string; status: string; featureCount: number | null; detail?: string | null };
+type ParcelProperties = {
+  pnu?: string;
+  addressFragment?: string;
+  lotNumber?: string;
+  landCategory?: string;
+  areaSqm?: number;
+  areaPy?: number;
+  officialLandPricePerSqm?: number;
+  officialLandPriceBaseYear?: string;
+  owner?: string;
+  selected?: boolean;
+};
+type ParcelFeature = GeoJSON.Feature<GeoJSON.Geometry | null, ParcelProperties> & { id?: string | number };
+type ParcelFeatureCollection = GeoJSON.FeatureCollection<GeoJSON.Geometry | null, ParcelProperties>;
 
 export interface MapIntelligenceData {
   center: Center;
-  parcelGeoJson: { type: "FeatureCollection"; features: unknown[] };
-  summary?: { parcelCount?: number; locatedParcelCount?: number; hasGeometry?: boolean };
+  parcelGeoJson: ParcelFeatureCollection;
+  summary?: { parcelCount?: number; locatedParcelCount?: number; pricedParcelCount?: number; hasGeometry?: boolean };
   layers?: Layer[];
   dataLimitations?: string[];
+  geometryResolution?: {
+    source?: string;
+    cacheBackend?: string;
+    resolvedCount?: number;
+    cacheHits?: number;
+    fetchedFromVworld?: number;
+  };
 }
 
 const KOREA_CENTER: [number, number] = [127.6, 36.2];
 
+const PRICE_TIERS: { max: number; color: string; label: string }[] = [
+  { max: 50_000_000, color: "#16a34a", label: "5천만 이하" },
+  { max: 100_000_000, color: "#84cc16", label: "5천만~1억" },
+  { max: 150_000_000, color: "#f59e0b", label: "1억~1.5억" },
+  { max: 200_000_000, color: "#f97316", label: "1.5억~2억" },
+  { max: Infinity, color: "#dc2626", label: "2억 이상" },
+];
+
 const LAYER_STATUS_LABEL: Record<string, string> = {
-  available: "표시 중",
-  needs_geometry: "형상 필요",
-  needs_data: "데이터 필요",
+  available: "표시 가능",
+  needs_geometry: "경계 필요",
+  needs_data: "자료 필요",
   planned: "예정",
 };
+
 const LAYER_STATUS_TONE: Record<string, string> = {
   available: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
   needs_geometry: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
@@ -53,10 +83,9 @@ function baseStyle(vworldKey?: string): StyleSpecification {
       sources: {
         vworld: {
           type: "raster",
-          // Same-origin proxy (/api/vworld) — avoids CORS and keeps the key server-side.
           tiles: ["/api/vworld?kind=base&z={z}&x={x}&y={y}"],
           tileSize: 256,
-          attribution: "© VWorld (국토교통부)",
+          attribution: "VWorld",
         },
       },
       layers: [{ id: "vworld", type: "raster", source: "vworld" }],
@@ -69,15 +98,89 @@ function baseStyle(vworldKey?: string): StyleSpecification {
         type: "raster",
         tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
         tileSize: 256,
-        attribution: "© OpenStreetMap contributors",
+        attribution: "OpenStreetMap contributors",
       },
     },
     layers: [{ id: "osm", type: "raster", source: "osm" }],
   };
 }
 
-/** MapLibre GL Map Intelligence — base map (VWorld when keyed, else OSM) with a
- *  parcel GeoJSON overlay and the deck's spatial layer legend. */
+function tierColor(value?: number): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "#e11d48";
+  return PRICE_TIERS.find((tier) => value < tier.max)?.color ?? "#dc2626";
+}
+
+function parcelKey(feature: ParcelFeature, index: number): string {
+  const p = feature.properties ?? {};
+  return String(feature.id ?? p.pnu ?? p.lotNumber ?? p.addressFragment ?? `parcel-${index}`);
+}
+
+function parcelLabel(feature: ParcelFeature, index: number): string {
+  const p = feature.properties ?? {};
+  return p.addressFragment ?? p.lotNumber ?? p.pnu ?? `필지 ${index + 1}`;
+}
+
+function formatWon(value?: number): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("ko-KR") : "미확인";
+}
+
+function formatArea(value?: number): string {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString("ko-KR")}㎡` : "미확인";
+}
+
+function isLocated(feature: ParcelFeature): boolean {
+  return Boolean(feature.geometry);
+}
+
+function cloneWithSelection(data: ParcelFeatureCollection, selectedIds: Set<string>): ParcelFeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: data.features.map((feature, index) => ({
+      ...feature,
+      id: feature.id ?? parcelKey(feature, index),
+      properties: {
+        ...(feature.properties ?? {}),
+        selected: selectedIds.has(parcelKey(feature, index)),
+      },
+    })),
+  };
+}
+
+function collectCoordinates(geometry: GeoJSON.Geometry | null | undefined): [number, number][] {
+  if (!geometry) return [];
+  if (!("coordinates" in geometry)) return [];
+  const points: [number, number][] = [];
+  const walk = (node: unknown) => {
+    if (
+      Array.isArray(node) &&
+      node.length === 2 &&
+      typeof node[0] === "number" &&
+      typeof node[1] === "number"
+    ) {
+      points.push([node[0], node[1]]);
+      return;
+    }
+    if (Array.isArray(node)) node.forEach(walk);
+  };
+  walk(geometry.coordinates);
+  return points;
+}
+
+function fitFeatures(map: MlMap, features: ParcelFeature[]) {
+  const coords = features.flatMap((feature) => collectCoordinates(feature.geometry));
+  if (!coords.length) return false;
+  const lngs = coords.map((coord) => coord[0]);
+  const lats = coords.map((coord) => coord[1]);
+  map.fitBounds(
+    [
+      [Math.min(...lngs), Math.min(...lats)],
+      [Math.max(...lngs), Math.max(...lats)],
+    ],
+    { padding: 80, maxZoom: 18, duration: 600 },
+  );
+  return true;
+}
+
 export function MapIntelligence({ data, transactions = [] }: { data: MapIntelligenceData; transactions?: TxMarker[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
@@ -87,9 +190,24 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
   const [zoningVisible, setZoningVisible] = useState(false);
   const [ready, setReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
   const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
 
-  // Init map once.
+  const parcelFeatures = useMemo(() => data.parcelGeoJson.features as ParcelFeature[], [data.parcelGeoJson.features]);
+  const allParcelIds = useMemo(() => parcelFeatures.map(parcelKey), [parcelFeatures]);
+  const locatedParcelIds = useMemo(
+    () => parcelFeatures.map((feature, index) => ({ feature, id: parcelKey(feature, index) })).filter((item) => isLocated(item.feature)).map((item) => item.id),
+    [parcelFeatures],
+  );
+  const selectedGeoJson = useMemo(() => cloneWithSelection(data.parcelGeoJson, selectedIds), [data.parcelGeoJson, selectedIds]);
+  const selectedCount = selectedIds.size;
+  const locatedSelectedCount = parcelFeatures.filter((feature, index) => selectedIds.has(parcelKey(feature, index)) && isLocated(feature)).length;
+
+  useEffect(() => {
+    if (!selectedIds.size && allParcelIds.length) setSelectedIds(new Set(allParcelIds));
+  }, [allParcelIds, selectedIds.size]);
+
   useEffect(() => {
     let map: MlMap | null = null;
     if (typeof window === "undefined" || !containerRef.current) return;
@@ -103,22 +221,17 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         attributionControl: { compact: true },
       });
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-      // Force a resize after layout settles (container size can be 0 at create time).
-      const mapInstance = map;
-      requestAnimationFrame(() => mapInstance.resize());
-      setTimeout(() => mapInstance.resize(), 400);
-      map.on("error", (e: unknown) => {
-        const msg = (e as { error?: { message?: string } })?.error?.message;
-        if (msg) console.warn("[map]", msg); // tile errors shouldn't blank the map
+      requestAnimationFrame(() => map?.resize());
+      setTimeout(() => map?.resize(), 400);
+      map.on("error", (event: unknown) => {
+        const message = (event as { error?: { message?: string } })?.error?.message;
+        if (message) console.warn("[map]", message);
       });
       map.on("load", () => {
         if (!map) return;
-        // VWorld WMS 편집지적도(lt_c_landinfobasemap) overlay — toggled off by
-        // default. MapLibre fills {bbox-epsg-3857}; VWorld needs WMS 1.3.0 + EPSG:3857.
         if (vworldKey) {
           map.addSource("cadastral-wms", {
             type: "raster",
-            // Proxied (VWorld WMS has no CORS header → must go same-origin).
             tiles: ["/api/vworld?kind=wms&bbox={bbox-epsg-3857}"],
             tileSize: 256,
           });
@@ -129,7 +242,6 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
             layout: { visibility: "none" },
             paint: { "raster-opacity": 0.7 },
           });
-          // VWorld 용도지역(lt_c_uq111) WMS overlay — toggled off by default.
           map.addSource("zoning-wms", {
             type: "raster",
             tiles: ["/api/vworld?kind=wms&layers=lt_c_uq111&bbox={bbox-epsg-3857}"],
@@ -143,30 +255,36 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
             paint: { "raster-opacity": 0.55 },
           });
         }
-        map.addSource("parcels", { type: "geojson", data: data.parcelGeoJson as never });
+        map.addSource("parcels", { type: "geojson", data: selectedGeoJson as unknown as GeoJSON.GeoJSON });
         map.addLayer({
           id: "parcel-fill",
           type: "fill",
           source: "parcels",
           filter: ["==", ["geometry-type"], "Polygon"],
           paint: {
-            // 공시지가(원/㎡) 색상도 — 값이 있으면 단계색, 없으면(0) 기본 인디고.
             "fill-color": [
               "case",
+              ["==", ["get", "selected"], true],
+              "#0ea5e9",
               ["==", ["coalesce", ["get", "officialLandPricePerSqm"], 0], 0],
               "#6366f1",
               [
                 "interpolate",
                 ["linear"],
                 ["get", "officialLandPricePerSqm"],
-                1_000_000, "#16a34a",
-                3_000_000, "#84cc16",
-                6_000_000, "#f59e0b",
-                10_000_000, "#f97316",
-                20_000_000, "#dc2626",
+                1_000_000,
+                "#16a34a",
+                3_000_000,
+                "#84cc16",
+                6_000_000,
+                "#f59e0b",
+                10_000_000,
+                "#f97316",
+                20_000_000,
+                "#dc2626",
               ],
-            ],
-            "fill-opacity": 0.45,
+            ] as never,
+            "fill-opacity": ["case", ["==", ["get", "selected"], true], 0.58, 0.28] as never,
           },
         });
         map.addLayer({
@@ -174,31 +292,36 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
           type: "line",
           source: "parcels",
           filter: ["==", ["geometry-type"], "Polygon"],
-          paint: { "line-color": "#4338ca", "line-width": 2 },
+          paint: {
+            "line-color": ["case", ["==", ["get", "selected"], true], "#0284c7", "#4338ca"] as never,
+            "line-width": ["case", ["==", ["get", "selected"], true], 3, 1.5] as never,
+          },
         });
         map.addLayer({
           id: "parcel-point",
           type: "circle",
           source: "parcels",
           filter: ["==", ["geometry-type"], "Point"],
-          paint: { "circle-radius": 7, "circle-color": "#4f46e5", "circle-stroke-color": "#fff", "circle-stroke-width": 2 },
+          paint: {
+            "circle-radius": ["case", ["==", ["get", "selected"], true], 8, 5] as never,
+            "circle-color": ["case", ["==", ["get", "selected"], true], "#0ea5e9", "#4f46e5"] as never,
+            "circle-stroke-color": "#fff",
+            "circle-stroke-width": 2,
+          },
         });
         const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
-        const showPopup = (e: MapLayerMouseEvent) => {
-          const f = e.features?.[0];
-          if (!f || !map) return;
-          const p = (f.properties ?? {}) as Record<string, unknown>;
-          const price = p.officialLandPricePerSqm
-            ? `${Number(p.officialLandPricePerSqm).toLocaleString("ko-KR")}원/㎡`
-            : "—";
+        const showPopup = (event: MapLayerMouseEvent) => {
+          const feature = event.features?.[0];
+          if (!feature || !map) return;
+          const p = (feature.properties ?? {}) as Record<string, unknown>;
           popup
-            .setLngLat(e.lngLat)
+            .setLngLat(event.lngLat)
             .setHTML(
-              `<div style="font-size:12px;line-height:1.5">
-                <strong>${p.addressFragment ?? p.pnu ?? "필지"}</strong><br/>
-                PNU ${p.pnu ?? "—"}<br/>
-                지목 ${p.landCategory ?? "—"} · ${p.areaSqm ? `${Number(p.areaSqm).toLocaleString("ko-KR")}㎡` : "—"}<br/>
-                공시지가 ${price}
+              `<div style="font-size:12px;line-height:1.55">
+                <strong>${p.addressFragment ?? p.lotNumber ?? p.pnu ?? "필지"}</strong><br/>
+                PNU ${p.pnu ?? "미확인"}<br/>
+                지목 ${p.landCategory ?? "미확인"} · 면적 ${p.areaSqm ? Number(p.areaSqm).toLocaleString("ko-KR") + "㎡" : "미확인"}<br/>
+                공시지가 ${p.officialLandPricePerSqm ? Number(p.officialLandPricePerSqm).toLocaleString("ko-KR") + "원/㎡" : "미확인"}
               </div>`,
             )
             .addTo(map);
@@ -218,61 +341,93 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Toggle parcel overlay visibility.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    const v = parcelsVisible ? "visible" : "none";
+    const source = map.getSource("parcels") as GeoJSONSource | undefined;
+    source?.setData(selectedGeoJson as unknown as GeoJSON.GeoJSON);
+  }, [selectedGeoJson, ready]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const visibility = parcelsVisible ? "visible" : "none";
     for (const id of ["parcel-fill", "parcel-line", "parcel-point"]) {
-      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
     }
   }, [parcelsVisible, ready]);
 
-  // Toggle VWorld WMS 지적도 overlay.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const filter = showOnlySelected
+      ? ["all", ["==", ["get", "selected"], true]]
+      : null;
+    for (const id of ["parcel-fill", "parcel-line", "parcel-point"]) {
+      if (map.getLayer(id)) map.setFilter(id, filter as never);
+    }
+  }, [showOnlySelected, ready]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready || !map.getLayer("cadastral-wms")) return;
     map.setLayoutProperty("cadastral-wms", "visibility", cadastralVisible ? "visible" : "none");
   }, [cadastralVisible, ready]);
 
-  // Toggle VWorld WMS 용도지역 overlay.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready || !map.getLayer("zoning-wms")) return;
     map.setLayoutProperty("zoning-wms", "visibility", zoningVisible ? "visible" : "none");
   }, [zoningVisible, ready]);
 
-  // Transaction price markers (Naver-style pills) — rebuilt when data changes.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    markersRef.current.forEach((m) => m.remove());
+    markersRef.current.forEach((marker) => marker.remove());
     markersRef.current = [];
-    const pts = transactions.filter((t) => Number.isFinite(t.lat) && Number.isFinite(t.lng));
-    for (const t of pts) {
-      const el = document.createElement("div");
-      const bg = t.tone === "rent" ? "#0ea5e9" : tierColor(t.value);
-      el.style.cssText = `display:inline-flex;flex-direction:column;align-items:center;padding:3px 7px;border-radius:8px;background:${bg};color:#fff;font-size:11px;font-weight:800;white-space:nowrap;box-shadow:0 6px 14px rgba(15,23,42,.28);cursor:default;`;
-      el.innerHTML = `<span>${t.label}</span>${t.sublabel ? `<span style="font-size:9px;font-weight:600;opacity:.9">${t.sublabel}</span>` : ""}`;
-      const marker = new maplibregl.Marker({ element: el, anchor: "bottom" }).setLngLat([t.lng, t.lat]).addTo(map);
+    const points = transactions.filter((tx) => Number.isFinite(tx.lat) && Number.isFinite(tx.lng));
+    for (const tx of points) {
+      const element = document.createElement("div");
+      const bg = tx.tone === "rent" ? "#0ea5e9" : tierColor(tx.value);
+      element.style.cssText = `display:inline-flex;flex-direction:column;align-items:center;padding:3px 7px;border-radius:8px;background:${bg};color:#fff;font-size:11px;font-weight:800;white-space:nowrap;box-shadow:0 6px 14px rgba(15,23,42,.28);`;
+      element.innerHTML = `<span>${tx.label}</span>${tx.sublabel ? `<span style="font-size:9px;font-weight:600;opacity:.9">${tx.sublabel}</span>` : ""}`;
+      const marker = new maplibregl.Marker({ element, anchor: "bottom" }).setLngLat([tx.lng, tx.lat]).addTo(map);
       markersRef.current.push(marker);
     }
-    // Fit to markers when the parcel has no geometry to anchor the view.
-    if (pts.length && !data.center) {
-      const lngs = pts.map((p) => p.lng);
-      const lats = pts.map((p) => p.lat);
+    if (points.length && !data.center) {
+      const lngs = points.map((point) => point.lng);
+      const lats = points.map((point) => point.lat);
       map.fitBounds(
-        [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
+        [
+          [Math.min(...lngs), Math.min(...lats)],
+          [Math.max(...lngs), Math.max(...lats)],
+        ],
         { padding: 64, maxZoom: 15, duration: 600 },
       );
     }
   }, [transactions, ready, data.center]);
 
+  const fitSelected = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const selected = parcelFeatures.filter((feature, index) => selectedIds.has(parcelKey(feature, index)));
+    if (!fitFeatures(map, selected)) fitFeatures(map, parcelFeatures);
+  };
+
+  const toggleParcel = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const layers = data.layers ?? [];
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[1.6fr_0.7fr]">
-      <div className="relative h-[560px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+    <div className="grid gap-4 xl:grid-cols-[1.55fr_0.85fr]">
+      <div className="relative h-[620px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
         <div ref={containerRef} className="h-full w-full" />
         {mapError ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-rose-50/95 p-4 text-center text-sm font-semibold text-rose-700 dark:bg-rose-950/80 dark:text-rose-200">
@@ -281,41 +436,86 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         ) : null}
         {!vworldKey ? (
           <div className="absolute left-3 top-3 z-10 rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
-            OSM 베이스맵 · VWorld 키 설정 시 지적·공시지가 레이어 활성
+            OSM 기본지도 · VWorld 키가 있으면 지적도/용도지역 레이어가 활성화됩니다.
           </div>
         ) : null}
-        {transactions.some((t) => t.tone !== "rent" && typeof t.value === "number") ? (
-          <div className="absolute bottom-3 left-3 z-10 rounded-md bg-white/90 px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
-            <p className="mb-1 font-bold">평단가</p>
-            <div className="flex items-center gap-1.5">
-              {PRICE_TIERS.map((t) => (
-                <span key={t.label} className="flex items-center gap-0.5">
-                  <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: t.color }} />
-                  {t.label}
-                </span>
-              ))}
-            </div>
+        <div className="absolute bottom-3 left-3 z-10 rounded-md bg-white/90 px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
+          <p className="mb-1 font-bold">공시지가 색상</p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {PRICE_TIERS.map((tier) => (
+              <span key={tier.label} className="flex items-center gap-0.5">
+                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: tier.color }} />
+                {tier.label}
+              </span>
+            ))}
           </div>
-        ) : null}
+        </div>
       </div>
 
       <aside className="space-y-4">
         <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="font-black text-slate-950 dark:text-white">필지 선택</h3>
+              <p className="mt-1 text-xs font-semibold text-slate-500">
+                선택 {selectedCount}/{allParcelIds.length}필지 · 경계 확인 {locatedSelectedCount}/{selectedCount || allParcelIds.length}필지
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={fitSelected}
+              className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              선택 필지 보기
+            </button>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold">
+            <button type="button" className="rounded-md bg-slate-900 px-2 py-1.5 text-white dark:bg-white dark:text-slate-950" onClick={() => setSelectedIds(new Set(allParcelIds))}>
+              전체 선택
+            </button>
+            <button type="button" className="rounded-md border border-slate-200 px-2 py-1.5 text-slate-700 dark:border-slate-700 dark:text-slate-200" onClick={() => setSelectedIds(new Set())}>
+              전체 해제
+            </button>
+            <button type="button" className="rounded-md border border-slate-200 px-2 py-1.5 text-slate-700 dark:border-slate-700 dark:text-slate-200" onClick={() => setSelectedIds(new Set(locatedParcelIds))}>
+              경계 있는 필지만
+            </button>
+            <button type="button" className="rounded-md border border-slate-200 px-2 py-1.5 text-slate-700 dark:border-slate-700 dark:text-slate-200" onClick={() => setShowOnlySelected((value) => !value)}>
+              {showOnlySelected ? "전체 표시" : "선택만 표시"}
+            </button>
+          </div>
+          <div className="mt-3 max-h-[270px] space-y-1 overflow-auto rounded-md border border-slate-100 p-2 dark:border-slate-800">
+            {parcelFeatures.map((feature, index) => {
+              const id = parcelKey(feature, index);
+              const props = feature.properties ?? {};
+              return (
+                <label key={id} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-950/50">
+                  <input type="checkbox" className="mt-1" checked={selectedIds.has(id)} onChange={() => toggleParcel(id)} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-bold text-slate-900 dark:text-white">{parcelLabel(feature, index)}</span>
+                    <span className="block truncate text-[11px] text-slate-500">PNU {props.pnu ?? "미확인"} · {isLocated(feature) ? "경계 확인" : "경계 미확인"}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div className="flex items-center justify-between">
             <h3 className="font-black text-slate-950 dark:text-white">공간 레이어</h3>
             <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
-              <input type="checkbox" checked={parcelsVisible} onChange={(e) => setParcelsVisible(e.target.checked)} />
+              <input type="checkbox" checked={parcelsVisible} onChange={(event) => setParcelsVisible(event.target.checked)} />
               필지 오버레이
             </label>
           </div>
           {vworldKey ? (
             <div className="mt-2 space-y-1">
               <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                <input type="checkbox" checked={cadastralVisible} onChange={(e) => setCadastralVisible(e.target.checked)} />
-                VWorld 지적도(편집지적도)
+                <input type="checkbox" checked={cadastralVisible} onChange={(event) => setCadastralVisible(event.target.checked)} />
+                VWorld 지적도
               </label>
               <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                <input type="checkbox" checked={zoningVisible} onChange={(e) => setZoningVisible(e.target.checked)} />
+                <input type="checkbox" checked={zoningVisible} onChange={(event) => setZoningVisible(event.target.checked)} />
                 VWorld 용도지역
               </label>
             </div>

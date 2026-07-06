@@ -11,6 +11,37 @@ def test_evidence_graph_agent_links_report_sections_claims_and_evidence():
                 "originalFileHash": "hash-1",
             }
         },
+        "parser_term_surfaces": [
+            {
+                "rawText": "총분양수입",
+                "normalizedSurface": "총분양수입",
+                "textQualityFlags": {"isUnicodeNormalized": True},
+                "termId": "total_sales_revenue",
+                "canonicalField": "feasibility_input.total_revenue",
+                "sourceField": "feasibility_input.total_revenue",
+                "sourceLocator": {
+                    "pageNumber": 3,
+                    "fieldName": "feasibility_input.total_revenue",
+                    "sourceType": "document_page",
+                },
+                "matchType": "parser_field_map",
+                "confidence": 0.7,
+            },
+            {
+                "rawText": "용적률",
+                "normalizedSurface": "용적률",
+                "textQualityFlags": {"isUnicodeNormalized": True},
+                "termId": "floor_area_ratio",
+                "canonicalField": "regulation.applied_far",
+                "sourceField": "regulation.applied_far",
+                "sourceLocator": {
+                    "fieldName": "regulation.applied_far",
+                    "sourceType": "parsed_field_path",
+                },
+                "matchType": "parser_field_map",
+                "confidence": 0.7,
+            },
+        ],
     }
     run = {
         "project_id": "p-1",
@@ -70,6 +101,31 @@ def test_evidence_graph_agent_links_report_sections_claims_and_evidence():
                     "qualityChecks": {"isComplete": True},
                 }
             },
+            "dataQualityReview": {
+                "analysisType": "data_quality_review",
+                "status": "needs_review",
+                "checks": [
+                    {
+                        "key": "sales_revenue_consistency",
+                        "termSurfaces": [
+                            {
+                                "rawText": "Total sales revenue consistency",
+                                "normalizedSurface": "total sales revenue consistency",
+                                "textQualityFlags": {"isUnicodeNormalized": True},
+                                "termId": "total_sales_revenue",
+                                "canonicalField": "feasibility_input.total_revenue",
+                                "sourceField": "dataQualityReview.checks.sales_revenue_consistency",
+                                "sourceLocator": {
+                                    "path": "dataQualityReview.checks.sales_revenue_consistency",
+                                    "sourceType": "agent_artifact",
+                                },
+                                "matchType": "data_quality_check",
+                                "confidence": 0.9,
+                            }
+                        ],
+                    }
+                ],
+            },
         },
     }
 
@@ -79,15 +135,26 @@ def test_evidence_graph_agent_links_report_sections_claims_and_evidence():
     assert graph["summary"]["sourceDocumentCount"] == 1
     assert graph["summary"]["claimCount"] >= 2
     assert graph["summary"]["riskCount"] == 1
-    assert graph["summary"]["sourceLocatorCount"] == 1
+    assert graph["summary"]["sourceLocatorCount"] >= 3
+    assert graph["summary"]["termSurfaceCount"] >= 3
+    assert graph["summary"]["glossaryTermCount"] >= 2
     assert graph["summary"]["riskRowsWithSourceLocatorCount"] == 1
     assert graph["summary"]["riskRowsWithoutExplicitEvidenceCount"] == 0
     assert any(node["id"] == "evidence:comp-1" for node in graph["nodes"])
     assert any(node["id"] == "risk:R-MKT-001" for node in graph["nodes"])
     assert any(node["id"] == "locator:R-MKT-001:market-sheet:B12" for node in graph["nodes"])
+    assert any(node["type"] == "term_surface" and node["metadata"]["canonicalField"] == "feasibility_input.total_revenue" for node in graph["nodes"])
+    assert any(
+        node["type"] == "source_locator"
+        and node["metadata"].get("sourceType") == "parsed_field_path"
+        and node["metadata"].get("fieldName") == "regulation.applied_far"
+        for node in graph["nodes"]
+    )
     assert any(edge["from"] == "artifact:marketabilityAnalysis" and edge["to"] == "risk:R-MKT-001" for edge in graph["edges"])
     assert any(edge["from"] == "risk:R-MKT-001" and edge["to"] == "evidence:comp-1" for edge in graph["edges"])
     assert any(edge["from"] == "source:archive-1" and edge["to"] == "risk:R-MKT-001" for edge in graph["edges"])
+    assert any(edge["relation"] == "matches_term" and edge["to"] == "term:total_sales_revenue" for edge in graph["edges"])
+    assert any(edge["relation"] == "maps_to_field" and edge["to"] == "canonical_field:feasibility_input.total_revenue" for edge in graph["edges"])
     risk = run["artifacts"]["riskRegister"]["risks"][0]
     assert risk["evidenceGraphLinks"]["riskNodeId"] == "risk:R-MKT-001"
     assert "claim:marketabilityAnalysis:score" in risk["evidenceGraphLinks"]["claimNodeIds"]

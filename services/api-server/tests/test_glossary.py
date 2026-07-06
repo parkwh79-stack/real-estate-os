@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
+import unicodedata
 
 from main import app
+from use_cases.glossary import capture_unmapped_term_surface_candidates_use_case
 
 
 def test_glossary_seed_resolves_korean_alias(monkeypatch, tmp_path):
@@ -20,6 +22,32 @@ def test_glossary_seed_resolves_korean_alias(monkeypatch, tmp_path):
     assert resolved.status_code == 200
     assert resolved.json()["matched"] is True
     assert resolved.json()["term"]["termId"] == "total_sales_revenue"
+
+
+def test_glossary_resolution_normalizes_korean_unicode_surfaces(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "glossary-normalized.sqlite3"))
+    client = TestClient(app)
+
+    nfd_surface = "\ufeff" + unicodedata.normalize("NFD", "총분양수입") + "\u200b"
+    resolved = client.get("/glossary/resolve", params={"term": nfd_surface})
+
+    assert resolved.status_code == 200
+    assert resolved.json()["matched"] is True
+    assert resolved.json()["term"]["canonicalField"] == "feasibility_input.total_revenue"
+
+
+def test_glossary_resolution_repairs_common_utf8_mojibake(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "glossary-mojibake.sqlite3"))
+    client = TestClient(app)
+
+    mojibake_surface = "총분양수입".encode("utf-8").decode("latin1")
+    resolved = client.get("/glossary/resolve", params={"term": mojibake_surface})
+
+    assert resolved.status_code == 200
+    assert resolved.json()["matched"] is True
+    assert resolved.json()["term"]["canonicalField"] == "feasibility_input.total_revenue"
 
 
 def test_glossary_upsert_and_canonical_field_map(monkeypatch, tmp_path):
@@ -128,6 +156,10 @@ def test_glossary_candidate_capture_and_approval(monkeypatch, tmp_path):
     assert candidate["status"] == "pending_review"
     assert candidate["projectId"] == "project-1"
     assert candidate["occurrenceCount"] == 1
+    assert candidate["termSurface"]["rawText"] == "임대차확약"
+    assert candidate["termSurface"]["normalizedSurface"] == "임대차확약"
+    assert candidate["termSurface"]["sourceField"] == "legal.conditions[0]"
+    assert "textQualityFlags" in candidate["termSurface"]
 
     listed = client.get("/glossary/candidates", params={"status": "pending_review", "project_id": "project-1"})
     assert listed.status_code == 200
@@ -274,3 +306,151 @@ def test_glossary_normalize_creates_candidate_for_unmapped_term(monkeypatch, tmp
     assert candidate["status"] == "pending_review"
     assert candidate["projectId"] == "project-term-1"
     assert candidate["sourceLocator"]["pageNumber"] == 4
+
+
+def test_unmapped_term_surfaces_are_captured_as_glossary_candidates(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "term-surface-candidates.sqlite3"))
+
+    result = capture_unmapped_term_surface_candidates_use_case(
+        [
+            {
+                "rawText": "총분양수입",
+                "normalizedSurface": "총분양수입",
+                "termId": "total_sales_revenue",
+                "canonicalField": "feasibility_input.total_revenue",
+                "sourceField": "feasibility_input.total_revenue",
+                "sourceLocator": {"pageNumber": 1, "sourceType": "document_page"},
+            },
+            {
+                "rawText": "입주확약서 제출 조건",
+                "normalizedSurface": "입주확약서 제출 조건",
+                "termId": None,
+                "canonicalField": None,
+                "sourceField": "covenants.drawdown_conditions[0]",
+                "sourceLocator": {"pageNumber": 9, "sourceType": "document_page"},
+            },
+        ],
+        project_id="p-term-surface",
+        run_id="run-term-surface",
+        source="test",
+    )
+
+    assert result["surfaceCount"] == 2
+    assert result["unmappedSurfaceCount"] == 1
+    assert result["capturedCount"] == 1
+    candidate = result["candidates"][0]
+    assert candidate["surface"] == "입주확약서 제출 조건"
+    assert candidate["projectId"] == "p-term-surface"
+    assert candidate["runId"] == "run-term-surface"
+    assert candidate["termSurface"]["rawText"] == "입주확약서 제출 조건"
+    assert candidate["sourceLocator"]["pageNumber"] == 9
+
+
+def test_glossary_candidate_merge_registers_alias_on_existing_term(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "glossary-merge.sqlite3"))
+    client = TestClient(app)
+
+    created = client.post(
+        "/glossary/terms",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={
+            "termId": "trust_beneficiary",
+            "preferredTerm": "우선수익권",
+            "canonicalField": "legal.security.trustBeneficiary",
+            "category": "legal",
+            "reviewStatus": "approved",
+        },
+    )
+    assert created.status_code == 200
+
+    captured = client.post(
+        "/glossary/candidates/capture",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={
+            "projectId": "project-9",
+            "runId": "run-9",
+            "annotations": [
+                {
+                    "surface": "본건 신탁 우선수익 지정분",
+                    "status": "unmapped_candidate",
+                    "sourceField": "legal.conditions[1]",
+                    "confidence": 0.0,
+                }
+            ],
+        },
+    )
+    assert captured.status_code == 200
+    candidate = captured.json()["candidates"][0]
+
+    merged = client.post(
+        f"/glossary/candidates/{candidate['candidateId']}/review",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={"status": "merged", "termId": "trust_beneficiary"},
+    )
+
+    assert merged.status_code == 200
+    body = merged.json()
+    assert body["candidate"]["status"] == "merged"
+    # The merge must LEARN: the surface becomes an alias on the target term...
+    assert "본건 신탁 우선수익 지정분" in body["term"]["aliases"]
+    assert body["term"]["termId"] == "trust_beneficiary"
+    # ...so the next normalize/resolve maps it exactly instead of re-queueing.
+    resolved = client.get("/glossary/resolve", params={"term": "본건 신탁 우선수익 지정분"})
+    assert resolved.status_code == 200
+    assert resolved.json()["matched"] is True
+    assert resolved.json()["term"]["termId"] == "trust_beneficiary"
+
+
+def test_glossary_candidate_merge_requires_target_term(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "glossary-merge-missing.sqlite3"))
+    client = TestClient(app)
+
+    captured = client.post(
+        "/glossary/candidates/capture",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={
+            "annotations": [
+                {"surface": "완전히 새로운 표현", "status": "unmapped_candidate", "confidence": 0.0}
+            ],
+        },
+    )
+    candidate = captured.json()["candidates"][0]
+
+    # No termId and no AI suggestion -> merge must be rejected, not guessed.
+    merged = client.post(
+        f"/glossary/candidates/{candidate['candidateId']}/review",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={"status": "merged"},
+    )
+    assert merged.status_code == 400
+
+
+def test_glossary_candidate_free_text_resolution(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "glossary-freetext.sqlite3"))
+    client = TestClient(app)
+
+    captured = client.post(
+        "/glossary/candidates/capture",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={
+            "annotations": [
+                {"surface": "본건은 시공사 귀책으로 한한다", "status": "unmapped_candidate", "confidence": 0.0}
+            ],
+        },
+    )
+    candidate = captured.json()["candidates"][0]
+
+    resolved = client.post(
+        f"/glossary/candidates/{candidate['candidateId']}/review",
+        headers={"x-realytics-user-id": "term-reviewer"},
+        json={"status": "free_text"},
+    )
+
+    assert resolved.status_code == 200
+    body = resolved.json()
+    assert body["candidate"]["status"] == "free_text"
+    assert body["term"] is None  # free text never creates/edits a canonical term

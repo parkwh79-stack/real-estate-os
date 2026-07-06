@@ -20,15 +20,17 @@ type RowStatus = "idle" | "processing" | "done" | "skipped" | "error";
 type Row = { id: string; file: File; c: Classified; type: string; status: RowStatus; note?: string };
 
 const TYPE_OPTIONS: { value: string; label: string }[] = [
-  { value: "business_plan", label: "사업계획서 / IR" },
-  { value: "basic_architectural_plan", label: "기본설계 도서" },
+  { value: "business_plan", label: "사업계획서 / IM" },
+  { value: "basic_architectural_plan", label: "건축 기본계획" },
   { value: "land_ledger", label: "토지대장 / 토지조서" },
-  { value: "feasibility_workbook", label: "사업수지 / 현금흐름 워크북" },
-  { value: "risk_report_workbook", label: "리스크 보고서 워크북" },
+  { value: "feasibility_workbook", label: "사업수지 / Cash Flow Excel" },
+  { value: "risk_report_workbook", label: "리스크 보고서 Excel" },
   { value: "land_evidence", label: "토지 증빙" },
   { value: "market_evidence", label: "시장·거래 증빙" },
   { value: "unknown", label: "미분류" },
 ];
+
+const TYPE_LABEL = Object.fromEntries(TYPE_OPTIONS.map((item) => [item.value, item.label])) as Record<string, string>;
 
 const ROUTES: Record<string, { path: string; kind: "file" | "json" }> = {
   business_plan: { path: "upload", kind: "file" },
@@ -43,7 +45,7 @@ const STATUS_LABEL: Record<RowStatus, string> = {
   idle: "보관됨",
   processing: "처리 중",
   done: "처리 완료",
-  skipped: "보관만 됨",
+  skipped: "보관만 함",
   error: "실패",
 };
 
@@ -70,15 +72,39 @@ function summarizeResult(type: string, body: Record<string, unknown>): string | 
       return body.status === "host_llm_required" ? "LLM 추출 필요" : "파싱 완료";
     }
   } catch {
-    /* best-effort */
+    /* best-effort summary */
   }
   return "완료";
+}
+
+async function enrichLandLedgerAfterAnalyze(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!body.landLedger) return body;
+  const enrichRes = await fetch(`${apiBase}/projects/${projectId}/land-ledger/enrich`, {
+    method: "POST",
+    headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      landLedger: body.landLedger,
+      persist: true,
+      persistEvidence: true,
+      options: {
+        autoResolvePnuFromAddress: true,
+        useLiveConnectors: true,
+        mode: "smart_intake_auto_enrichment",
+      },
+    }),
+  });
+  if (!enrichRes.ok) throw new Error(`PNU/evidence enrichment HTTP ${enrichRes.status}`);
+  return (await enrichRes.json().catch(() => body)) as Record<string, unknown>;
 }
 
 function confidenceTone(confidence: number): string {
   if (confidence >= 0.75) return "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200";
   if (confidence >= 0.55) return "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200";
   return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200";
+}
+
+function confidenceBasis(row: Classified) {
+  return row.reasons?.[0] || row.confidenceBasis || "파일명, 확장자, 문서 제목, 표 구조, 키워드 신호 기준";
 }
 
 export function SmartIntake({
@@ -150,7 +176,7 @@ export function SmartIntake({
       if (row.status === "done") continue;
       const route = ROUTES[row.type];
       if (!route) {
-        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "skipped" } : r)));
+        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "skipped", note: "자동 처리 경로 없음" } : r)));
         continue;
       }
       setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "processing" } : r)));
@@ -175,7 +201,10 @@ export function SmartIntake({
           });
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        let body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (row.type === "land_ledger") {
+          body = await enrichLandLedgerAfterAnalyze(projectId, body);
+        }
         setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "done", note: summarizeResult(row.type, body) } : r)));
       } catch (err) {
         const note = err instanceof Error ? err.message : "오류";
@@ -197,7 +226,7 @@ export function SmartIntake({
         <div>
           <h2 className="font-black text-slate-950 dark:text-white">스마트 업로드 (AI 자동 분류)</h2>
           <p className="text-xs font-semibold text-slate-500">
-            자료를 종류 구분 없이 올리면 parser agent가 자동 분류하고, 분류대로 처리할 수 있게 각 파서에 연결합니다.
+            자료를 종류 구분 없이 올리면 Parser Agent가 자동 분류하고, 분류된 경로에 맞춰 각 Agent에 전달합니다.
           </p>
         </div>
       </div>
@@ -259,7 +288,7 @@ export function SmartIntake({
             </button>
           </div>
           <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-            <table className="w-full min-w-[720px] text-sm">
+            <table className="w-full min-w-[760px] text-sm">
               <thead className="bg-slate-50 text-left text-xs font-bold text-slate-500 dark:bg-slate-950/40">
                 <tr>
                   <th className="px-3 py-2">파일</th>
@@ -282,13 +311,13 @@ export function SmartIntake({
                         <span className="truncate">{row.c.filename}</span>
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{row.c.label}</td>
+                    <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{TYPE_LABEL[row.c.documentType] ?? row.c.label}</td>
                     <td className="px-3 py-2">
                       <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${confidenceTone(row.c.confidence)}`}>
                         {Math.round(row.c.confidence * 100)}%
                       </span>
                       <p className="mt-1 max-w-[220px] text-[11px] leading-4 text-slate-400">
-                        {(row.c.reasons?.[0] || row.c.confidenceBasis || "파일명, 확장자, 시트명 신호 기준").slice(0, 90)}
+                        {confidenceBasis(row.c).slice(0, 90)}
                       </p>
                     </td>
                     <td className="px-3 py-2">

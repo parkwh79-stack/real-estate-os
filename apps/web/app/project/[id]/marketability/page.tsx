@@ -1,17 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useParams } from "next/navigation";
-import { ArrowLeft, BarChart3, Loader2, RefreshCw } from "lucide-react";
-import { authHeaders } from "../../../../lib/auth-client";
-import { MapIntelligence, type MapIntelligenceData, type TxMarker } from "../../../../components/map/map-intelligence";
-import { TransactionsPanel, type TxRecord, type ComplexRecord } from "../../../../components/map/transactions-panel";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { AlertTriangle, ArrowLeft, BarChart3, Database, Loader2, RefreshCw, TrendingUp } from "lucide-react";
+import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
 
-const apiBase = "http://127.0.0.1:8000";
-
-type ParcelFeature = { properties: { pnu?: string } };
-type Analysis = {
+type MarketAnalysis = {
   applicable?: boolean;
   productType?: string;
   assetClass?: string;
@@ -19,229 +15,304 @@ type Analysis = {
   score?: number;
   summary?: string;
   dataStatus?: string;
-  pricing?: { judgement?: string; comment?: string; pricePerPy?: number; comparableMedianPerPy?: number };
-  exitSaleRate?: { baseSaleRate?: number; requiredSaleRate?: number };
+  pricing?: {
+    judgement?: string;
+    pricingComment?: string;
+    comment?: string;
+    proposedPricePerPy?: number;
+    comparableMedianPricePerPy?: number;
+    comparableMedianPerPy?: number;
+    premiumToMedian?: number;
+  };
+  exitSaleRate?: { base?: number; baseSaleRate?: number; requiredSaleRate?: number };
+  riskFlags?: Array<{ code?: string; message?: string; severity?: string }>;
   recommendations?: string[];
   dataLimitations?: string[];
+  dataSources?: Array<Record<string, unknown>>;
+  comparableSummary?: Record<string, unknown>;
 };
 
-const GRADE_TONE: Record<string, string> = {
-  A: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
-  B: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200",
-  C: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
-  D: "bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200",
-  E: "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200",
-};
-
-function manPerPy(won?: number): string {
-  return won ? `${Math.round(won / 10_000).toLocaleString("ko-KR")}만/평` : "—";
-}
-function eok(won?: number): string {
-  return won ? `${(won / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억` : "—";
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function Kpi({ label, value, tone }: { label: string; value: ReactNode; tone?: string }) {
-  return (
-    <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <p className="text-[11px] font-bold text-slate-500">{label}</p>
-      <p className={`mt-1 text-lg font-black ${tone ?? "text-slate-950 dark:text-white"}`}>{value}</p>
-    </div>
-  );
+function asArray<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function formatManPerPy(value: unknown) {
+  const n = Number(value ?? 0);
+  return n ? `${Math.round(n / 10_000).toLocaleString("ko-KR")}만원/평` : "미확인";
+}
+
+function formatPct(value: unknown) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "미확인";
+  return `${(n * 100).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}%`;
+}
+
+function riskLabel(code?: string) {
+  if (code === "NO_COMPARABLE_DATA") return "비교사례 부족";
+  if (code === "PROPOSED_PRICE_BASIS_MISSING") return "제안 분양가 기준 부족";
+  if (code === "PRICE_PREMIUM_HIGH") return "제안가 프리미엄 높음";
+  if (code === "EXIT_RATE_HIGH") return "Exit 분양률 높음";
+  return displayText(code, "Risk");
 }
 
 export default function MarketabilityPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
-  const [mapData, setMapData] = useState<MapIntelligenceData | null>(null);
-  const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [txRecords, setTxRecords] = useState<TxRecord[]>([]);
-  const [complexes, setComplexes] = useState<ComplexRecord[]>([]);
-  const [viewMode, setViewMode] = useState<"complex" | "individual">("complex");
+  const [context, setContext] = useState<WorkspacePageContext | null>(null);
+  const [analysis, setAnalysis] = useState<MarketAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (runLive = false) => {
     setLoading(true);
     setError(null);
     try {
-      const [mapRes, anaRes] = await Promise.all([
-        fetch(`${apiBase}/projects/${projectId}/map?resolve_geometry=true`, { cache: "no-store", headers: authHeaders("web") }),
-        fetch(`${apiBase}/projects/${projectId}/marketability/analyze?live_comparables=true`, {
-          method: "POST",
-          cache: "no-store",
-          headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-          body: "{}",
-        }),
-      ]);
-      if (mapRes.ok) setMapData(await mapRes.json());
-      if (anaRes.ok) setAnalysis(await anaRes.json());
+      const ctxPromise = fetchWorkspaceContext(projectId, "marketability");
+      const analysisPromise = runLive
+        ? fetch(`${apiBase}/projects/${projectId}/marketability/analyze?live_comparables=true`, {
+            method: "POST",
+            cache: "no-store",
+            headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+            body: "{}",
+          }).then((res) => (res.ok ? res.json() : null))
+        : Promise.resolve(null);
+      const [ctx, liveAnalysis] = await Promise.all([ctxPromise, analysisPromise]);
+      setContext(ctx);
+      const pageData = asRecord(ctx.pageData);
+      const storedAnalysis = asRecord(pageData.marketability) as MarketAnalysis;
+      setAnalysis((liveAnalysis as MarketAnalysis | null) ?? (Object.keys(storedAnalysis).length ? storedAnalysis : null));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "시장성 데이터를 불러오지 못했습니다.");
+      setError(err instanceof Error ? err.message : "시장성 저장 상태를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
-    void load();
+    void load(false);
   }, [load]);
 
-  const parcels = (mapData?.parcelGeoJson?.features ?? []) as ParcelFeature[];
-  const firstPnu = parcels.find((p) => p.properties.pnu)?.properties.pnu;
-  const lawdCd = firstPnu && firstPnu.length >= 5 ? firstPnu.slice(0, 5) : undefined;
+  async function runMarketPod() {
+    setRunning(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/run-pod`, {
+        method: "POST",
+        headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+        body: JSON.stringify({ podKey: "market_product" }),
+      });
+      if (!res.ok) throw new Error(`Market-Product Pod 실행 실패 (${res.status})`);
+      await load(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Market-Product Pod 실행에 실패했습니다.");
+    } finally {
+      setRunning(false);
+    }
+  }
 
-  const individualMarkers: TxMarker[] = useMemo(
-    () =>
-      txRecords
-        .filter((r) => typeof r.lat === "number" && typeof r.lng === "number")
-        .map((r) => ({
-          lat: r.lat as number,
-          lng: r.lng as number,
-          tone: r.dealKind === "rent" ? "rent" : "trade",
-          label: r.dealKind === "rent" ? eok(r.depositKRW) : eok(r.totalPrice),
-          sublabel: r.dealKind === "rent" ? undefined : manPerPy(r.pricePerPy),
-          value: r.dealKind === "rent" ? undefined : r.pricePerPy,
-        })),
-    [txRecords],
-  );
+  const pageData = asRecord(context?.pageData);
+  const marketEvidence = asRecord(pageData.marketEvidence);
+  const market = asRecord(pageData.market);
+  const sources = asArray<Record<string, unknown>>(analysis?.dataSources);
+  const riskFlags = asArray<{ code?: string; message?: string; severity?: string }>(analysis?.riskFlags);
+  const dataLimitations = asArray<string>(analysis?.dataLimitations);
+  const recommendations = asArray<string>(analysis?.recommendations);
+  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
+  const pricing = analysis?.pricing ?? {};
+  const proposed = pricing.proposedPricePerPy;
+  const median = pricing.comparableMedianPricePerPy ?? pricing.comparableMedianPerPy;
+  const exitRate = analysis?.exitSaleRate?.base ?? analysis?.exitSaleRate?.baseSaleRate ?? analysis?.exitSaleRate?.requiredSaleRate;
 
-  const complexMarkers: TxMarker[] = useMemo(
-    () =>
-      complexes
-        .filter((c) => typeof c.lat === "number" && typeof c.lng === "number" && c.medianPricePerPy)
-        .map((c) => ({
-          lat: c.lat as number,
-          lng: c.lng as number,
-          tone: "trade" as const,
-          label: manPerPy(c.medianPricePerPy),
-          sublabel: `${c.complexName ?? ""} · ${c.tradeCount ?? 0}건`,
-          value: c.medianPricePerPy,
-        })),
-    [complexes],
-  );
+  const comparableCount = useMemo(() => {
+    const candidates = [
+      market.transactionComparables,
+      market.presaleComparables,
+      market.listingComparables,
+      marketEvidence.transactionComparables,
+      marketEvidence.presaleComparables,
+      marketEvidence.listingComparables,
+      analysis?.comparableSummary?.count,
+    ];
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) return candidate.length;
+      const n = Number(candidate);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 0;
+  }, [analysis, market, marketEvidence]);
 
-  const markers = viewMode === "complex" ? complexMarkers : individualMarkers;
-
-  const avgPerPy = useMemo(() => {
-    const prices = txRecords.filter((r) => r.dealKind === "trade" && r.pricePerPy).map((r) => r.pricePerPy as number);
-    return prices.length ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length) : undefined;
-  }, [txRecords]);
+  const hasProposedPriceBasis = Number(proposed) > 0;
+  const sourceQuality = sources.length > 0
+    ? "출처 메타데이터 있음"
+    : Object.keys(marketEvidence).length > 0
+      ? "저장 근거 있음"
+      : "근거 보강 필요";
+  const pricingGap = !hasProposedPriceBasis
+    ? "제안 분양가 기준이 부족합니다. 분양면적 기준인지, 계약면적 기준인지, VAT 포함 여부를 먼저 확인해야 합니다."
+    : comparableCount === 0
+      ? "비교사례가 부족합니다. 실거래가, 분양사례, 임대료, 수동 비교사례를 보강해야 합니다."
+      : "제안 분양가와 비교사례를 함께 검토할 수 있습니다.";
 
   return (
-    <div className="space-y-5">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Link href={`/project/${projectId}`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-300">
+    <div className="space-y-6 pb-8">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <Link href={`/project/${projectId}`} className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300" aria-label="프로젝트로 돌아가기">
             <ArrowLeft className="h-4 w-4" />
           </Link>
-          <div className="flex items-center gap-2">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-950">
-              <BarChart3 className="h-5 w-5" />
-            </div>
-            <div>
-              <h1 className="text-xl font-black text-slate-950 dark:text-white">시장성 분석 (Marketability)</h1>
-              <p className="text-xs font-semibold text-slate-500">지도 · 실거래가 · 분양가 적정성 · Exit 분양률</p>
-            </div>
+          <div>
+            <p className="text-sm font-semibold text-slate-500">{projectName}</p>
+            <h1 className="mt-1 flex items-center gap-2 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
+              <BarChart3 className="h-7 w-7 text-indigo-600" />
+              시장·분양성 분석
+            </h1>
+            <p className="mt-1 text-sm text-slate-500">
+              시장성 Agent가 비교사례, 실거래가, 제안 분양가 기준, 흡수율, Exit 분양률을 검토합니다. 출처가 없으면 확정 판단하지 않습니다.
+            </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => void load()}
-          disabled={loading}
-          className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm font-bold text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          새로고침
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => void load(true)} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+            <RefreshCw className="h-4 w-4" />
+            Live 분석
+          </button>
+          <button type="button" onClick={() => void runMarketPod()} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-bold text-white disabled:opacity-50">
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <TrendingUp className="h-4 w-4" />}
+            Market-Product Pod 실행
+          </button>
+        </div>
       </header>
 
-      {error ? <p className="text-sm font-bold text-rose-600 dark:text-rose-300">{error}</p> : null}
-
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
-        <Kpi
-          label="시장성 등급"
-          value={<span className={`inline-flex rounded-full px-2.5 py-0.5 text-sm ${GRADE_TONE[analysis?.grade ?? ""] ?? "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>{analysis?.grade ?? "—"}</span>}
-        />
-        <Kpi label="종합점수" value={typeof analysis?.score === "number" ? analysis.score.toFixed(0) : "—"} />
-        <Kpi label="제안가 적정성" value={analysis?.pricing?.judgement ?? "—"} />
-        <Kpi label="주변 평균 평단가" value={manPerPy(avgPerPy)} tone="text-sky-700 dark:text-sky-300" />
-        <Kpi label="Exit 분양률(기준)" value={analysis?.exitSaleRate?.baseSaleRate != null ? `${Math.round(analysis.exitSaleRate.baseSaleRate * 100)}%` : "—"} />
-      </section>
-
-      <section className="grid gap-4 xl:grid-cols-[1.55fr_0.85fr]">
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="inline-flex rounded-lg border border-slate-200 p-0.5 text-xs font-bold dark:border-slate-700">
-              {(["complex", "individual"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setViewMode(mode)}
-                  className={`rounded-md px-3 py-1.5 transition-colors ${
-                    viewMode === mode
-                      ? "bg-slate-900 text-white dark:bg-white dark:text-slate-950"
-                      : "text-slate-600 dark:text-slate-300"
-                  }`}
-                >
-                  {mode === "complex" ? `단지 (${complexMarkers.length})` : `개별 거래 (${individualMarkers.length})`}
-                </button>
-              ))}
-            </div>
-            <span className="text-[11px] text-slate-400">국토부 실거래가 · VWorld 좌표화</span>
-          </div>
-          {loading && !mapData ? (
-            <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-slate-200 text-sm text-slate-500 dark:border-slate-800">
-              <Loader2 className="mr-2 h-5 w-5 animate-spin" /> 지도 로딩 중
-            </div>
-          ) : mapData ? (
-            <MapIntelligence data={mapData} transactions={markers} />
-          ) : null}
-          {markers.length ? (
-            <p className="text-xs text-slate-500">
-              {viewMode === "complex"
-                ? `단지별 중위 평단가 마커 (${complexMarkers.length}개 단지).`
-                : `개별 실거래 가격 핀 (${individualMarkers.length}건). `}
-              {viewMode === "individual" ? (
-                <>
-                  <span className="text-rose-500">●</span> 매매 · <span className="text-sky-500">●</span> 전월세
-                </>
-              ) : null}
-            </p>
-          ) : null}
+      {loading ? (
+        <div className="flex min-h-[240px] items-center justify-center rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-500 dark:border-slate-800 dark:bg-slate-900">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+          시장성 저장 상태를 불러오는 중입니다.
         </div>
+      ) : (
+        <>
+          {error ? <Notice>{error}</Notice> : null}
 
-        <div className="space-y-4">
-          <TransactionsPanel lawdCd={lawdCd} geocode aggregate onRecords={setTxRecords} onComplexes={setComplexes} />
+          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+            <Kpi label="분양성 등급" value={analysis?.grade ?? "미실행"} />
+            <Kpi label="분양성 Score" value={typeof analysis?.score === "number" ? analysis.score.toFixed(0) : "미확인"} />
+            <Kpi label="제안 분양가" value={formatManPerPy(proposed)} />
+            <Kpi label="비교사례 중앙값" value={formatManPerPy(median)} />
+            <Kpi label="Exit 분양률" value={formatPct(exitRate)} />
+          </section>
 
-          {analysis ? (
-            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-              <h2 className="font-black text-slate-950 dark:text-white">AI 시장성 의견</h2>
-              {analysis.applicable === false ? (
-                <p className="mt-2 text-sm text-slate-500">분양 대상 자산이 아니거나 시장성 분석 대상이 아닙니다.</p>
+          <section className={`rounded-lg border p-4 text-sm font-semibold ${!hasProposedPriceBasis || comparableCount === 0 ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100" : "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100"}`}>
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-black">가격 근거 진단</p>
+                <p className="mt-1">{pricingGap}</p>
+              </div>
+            </div>
+          </section>
+
+          <section className="grid gap-4 lg:grid-cols-[1fr_0.9fr]">
+            <Panel title="AI 시장성 의견">
+              {analysis ? (
+                <>
+                  <InfoRow label="상품유형" value={displayText(analysis.productType ?? analysis.assetClass, "미확인")} />
+                  <InfoRow label="데이터 상태" value={displayText(analysis.dataStatus, "미확인")} />
+                  <InfoRow label="가격 판단" value={displayText(pricing.judgement, "근거 부족")} />
+                  <InfoRow label="출처 상태" value={sourceQuality} />
+                  <p className="mt-4 rounded-lg bg-slate-50 p-4 text-sm leading-6 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200">
+                    {displayText(analysis.summary ?? pricing.pricingComment ?? pricing.comment, "아직 저장된 시장성 분석 문단이 없습니다. Market-Product Pod를 실행하세요.")}
+                  </p>
+                </>
               ) : (
-                <>
-                  {analysis.summary ? <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">{analysis.summary}</p> : null}
-                  {analysis.pricing?.comment ? (
-                    <p className="mt-2 rounded-lg bg-slate-50 p-3 text-sm text-slate-700 dark:bg-slate-950/40 dark:text-slate-200">{analysis.pricing.comment}</p>
-                  ) : null}
-                  {analysis.recommendations?.length ? (
-                    <ul className="mt-3 list-disc space-y-1 pl-4 text-sm text-slate-700 dark:text-slate-300">
-                      {analysis.recommendations.slice(0, 5).map((rec, i) => (
-                        <li key={i}>{rec}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {analysis.dataLimitations?.length ? (
-                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-                      {analysis.dataLimitations.join(" · ")}
-                    </p>
-                  ) : null}
-                </>
+                <Empty icon={<AlertTriangle />} text="아직 저장된 시장성 분석이 없습니다. Live 분석 또는 Market-Product Pod를 실행하세요." />
               )}
-            </section>
-          ) : null}
-        </div>
-      </section>
+            </Panel>
+            <Panel title="근거와 한계">
+              <InfoRow label="비교사례" value={`${comparableCount.toLocaleString("ko-KR")}건`} />
+              <InfoRow label="제안가 기준" value={hasProposedPriceBasis ? "확보" : "부족"} />
+              <InfoRow label="Data source" value={sources.length ? `${sources.length}건` : sourceQuality} />
+              <InfoRow label="Risk flags" value={`${riskFlags.length}건`} />
+              {dataLimitations.length ? (
+                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+                  {dataLimitations.join(" / ")}
+                </div>
+              ) : null}
+            </Panel>
+          </section>
+
+          <section className="grid gap-4 lg:grid-cols-2">
+            <Panel title="Risk Flags">
+              {riskFlags.length ? (
+                <div className="space-y-2">
+                  {riskFlags.slice(0, 8).map((risk, index) => (
+                    <div key={`${risk.code}-${index}`} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-900 dark:bg-amber-950/30">
+                      <p className="font-black text-amber-900 dark:text-amber-100">{riskLabel(risk.code)}</p>
+                      <p className="mt-1 text-xs leading-5 text-amber-800 dark:text-amber-200">{displayText(risk.message, "시장성 검토 리스크가 있습니다.")}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty icon={<AlertTriangle />} text="표시할 Risk Flag가 없습니다. 단, 근거 데이터가 없으면 확정 판단으로 보지 않습니다." />
+              )}
+            </Panel>
+            <Panel title="권고사항">
+              {recommendations.length ? (
+                <ol className="space-y-2 text-sm font-semibold leading-6 text-slate-700 dark:text-slate-200">
+                  {recommendations.slice(0, 8).map((item, index) => (
+                    <li key={`${item}-${index}`}>{index + 1}. {item}</li>
+                  ))}
+                </ol>
+              ) : (
+                <Empty icon={<Database />} text="권고사항을 생성하려면 비교사례, 제안 분양가 기준, 상품 구성 자료가 필요합니다." />
+              )}
+            </Panel>
+          </section>
+        </>
+      )}
     </div>
   );
+}
+
+function Kpi({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <p className="text-xs font-bold text-slate-500">{label}</p>
+      <p className="mt-2 text-xl font-black text-slate-950 dark:text-white">{value}</p>
+    </div>
+  );
+}
+
+function Panel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <h2 className="mb-4 text-lg font-black text-slate-950 dark:text-white">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-slate-100 py-3 text-sm last:border-0 dark:border-slate-800">
+      <span className="font-semibold text-slate-500">{label}</span>
+      <span className="text-right font-black text-slate-950 dark:text-white">{value}</span>
+    </div>
+  );
+}
+
+function Empty({ icon, text }: { icon: ReactNode; text: string }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-800/70">
+      <span className="mt-0.5 h-4 w-4">{icon}</span>
+      {text}
+    </div>
+  );
+}
+
+function Notice({ children }: { children: ReactNode }) {
+  return <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{children}</div>;
 }

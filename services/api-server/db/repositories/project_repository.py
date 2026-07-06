@@ -64,14 +64,21 @@ class ProjectRepository:
         project = self.projects_store.get(project_id)
         if not project:
             return None
-        if "project" not in parsed_data:
-            parsed_data["project"] = {}
-        parsed_data["project"]["id"] = project_id
-        project.update(parsed_data)
-        project.setdefault("_meta", {})
-        project["_meta"]["updated_at"] = self._now()
+        incoming = dict(parsed_data or {})
+        existing_project = project.get("project") if isinstance(project.get("project"), dict) else {}
+        incoming_project = incoming.get("project") if isinstance(incoming.get("project"), dict) else {}
+        merged_project = deep_merge(existing_project, incoming_project)
+        merged_project["id"] = project_id
+        if not merged_project.get("name"):
+            merged_project["name"] = existing_project.get("name") or project.get("projectName") or f"Project {project_id}"
+        incoming["project"] = merged_project
+        merged = deep_merge(project, incoming)
+        merged["id"] = project_id
+        merged.setdefault("_meta", {})
+        merged["_meta"]["updated_at"] = self._now()
+        self.projects_store[project_id] = merged
         self._persist_one(project_id)
-        return project
+        return merged
 
     def delete(self, project_id: str) -> Dict[str, Any] | None:
         deleted = self.projects_store.pop(project_id, None)

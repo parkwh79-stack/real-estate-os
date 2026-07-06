@@ -20,6 +20,24 @@ def _num(value: Any) -> Optional[float]:
     return None
 
 
+def _as_evidence_map(value: Any) -> Dict[str, Any]:
+    """Merge dict/list-shaped land evidence into a single lookup map."""
+    if isinstance(value, dict):
+        return value
+    merged: Dict[str, Any] = {}
+    if not isinstance(value, list):
+        return merged
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        evidence_type = str(row.get("evidenceType") or row.get("evidence_type") or "").strip()
+        if evidence_type:
+            merged[evidence_type] = row
+        for key, item in row.items():
+            merged.setdefault(key, item)
+    return merged
+
+
 class DevelopabilityScoreAgent:
     """Composite developability score from land + regulation + feasibility + market signals.
 
@@ -80,7 +98,7 @@ class DevelopabilityScoreAgent:
 
     def _land_readiness(self, data: Dict[str, Any]) -> Dict[str, Any]:
         land = data.get("land") or {}
-        evidence = data.get("landEvidence") or {}
+        evidence = _as_evidence_map(data.get("landEvidence") or data.get("land_evidence") or {})
         signals = {
             "PNU": bool(land.get("pnu") or evidence.get("pnu")),
             "공시지가": bool(evidence.get("officialLandPrice") or evidence.get("official_land_price")),

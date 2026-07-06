@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from agents.orchestration_agent import OrchestrationAgent
 from main import app
+from routers import projects
 
 
 def test_land_evidence_upsert_and_list_api():
@@ -114,6 +115,115 @@ def test_land_ledger_enrich_can_persist_land_evidence_records():
     )
     assert listed.status_code == 200
     assert any(record["evidenceType"] == "official_land_price" for record in listed.json()["records"])
+
+
+def test_land_ledger_enrich_derives_legal_dong_code_from_project_pnu():
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Auto PNU ledger test"}})
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+    update = client.put(
+        f"/projects/{project_id}",
+        json={"land": {"pnu": "2729011700100010000"}},
+    )
+    assert update.status_code == 200
+
+    enriched = client.post(
+        f"/projects/{project_id}/land-ledger/enrich",
+        headers={"x-realytics-user-id": "land-analyst"},
+        json={
+            "persist": True,
+            "persistEvidence": True,
+            "landLedger": {
+                "parcels": [
+                    {
+                        "sequence": 1,
+                        "addressFragment": "본리동 123-4",
+                        "normalizedLotNumber": "123-4",
+                        "mainLotNo": 123,
+                        "subLotNo": 4,
+                        "isMountain": False,
+                        "areaSqm": 100,
+                        "areaPy": 30.25,
+                        "owners": [],
+                    }
+                ]
+            },
+            "options": {"mode": "unit_test_auto_project_pnu"},
+        },
+    )
+
+    assert enriched.status_code == 200
+    body = enriched.json()
+    parcel = body["landLedger"]["parcels"][0]
+    assert parcel["pnu"] == "2729011700101230004"
+    assert body["persistedLandEvidenceCount"] >= 1
+
+    listed = client.get(
+        f"/projects/{project_id}/land-evidence",
+        headers={"x-realytics-user-id": "land-analyst"},
+        params={"pnu": "2729011700101230004"},
+    )
+    assert listed.status_code == 200
+    assert any(record["evidenceType"] == "pnu_resolution" for record in listed.json()["records"])
+
+
+def test_land_ledger_enrich_resolves_pnu_from_vworld_address_lookup(monkeypatch):
+    client = TestClient(app)
+    created = client.post("/projects/", json={
+        "project": {"name": "VWorld PNU ledger test"},
+        "land": {"address": "경기도용인시기흥구상갈동13번지일대"},
+    })
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+    captured = []
+
+    def _fake_resolve(address):
+        captured.append(address)
+        assert address == "경기도 용인시 기흥구 상갈동 13"
+        return {
+            "status": "resolved",
+            "pnu": "4146311100100130000",
+            "addressFragment": "경기도 용인시 기흥구 상갈동 13",
+            "officialLandPricePerSqm": 1234000,
+            "officialLandPriceBaseYear": 2026,
+            "landCategory": "대",
+            "areaSqm": 330.0,
+        }
+
+    monkeypatch.setattr(projects, "resolve_address_to_parcel", _fake_resolve)
+
+    enriched = client.post(
+        f"/projects/{project_id}/land-ledger/enrich",
+        headers={"x-realytics-user-id": "land-analyst"},
+        json={
+            "persist": True,
+            "persistEvidence": True,
+            "landLedger": {
+                "parcels": [
+                    {
+                        "sequence": 1,
+                        "addressFragment": "13",
+                        "normalizedLotNumber": "13",
+                        "mainLotNo": 13,
+                        "subLotNo": 0,
+                        "isMountain": False,
+                        "areaSqm": 330.0,
+                        "owners": [],
+                    }
+                ]
+            },
+            "options": {"mode": "unit_test_vworld_address_pnu"},
+        },
+    )
+
+    assert enriched.status_code == 200
+    body = enriched.json()
+    parcel = body["landLedger"]["parcels"][0]
+    assert captured == ["경기도 용인시 기흥구 상갈동 13"]
+    assert parcel["pnu"] == "4146311100100130000"
+    assert parcel["officialLandPricePerSqm"] == 1234000
+    assert body["persistedLandEvidenceCount"] >= 3
 
 
 def test_land_acquisition_status_record_clears_acquisition_gate():

@@ -6,7 +6,7 @@ import { useAuth } from "../auth/auth-context";
 
 const DEFAULT = { name: "게스트 심사역", role: "PLATFORM9 Alpha" };
 
-/** Shows the logged-in member (from the shared auth context), not a hardcoded name. */
+/** Shows the logged-in member from the shared auth context, not a hardcoded name. */
 export function HeaderUser() {
   const router = useRouter();
   const { user, logout } = useAuth();

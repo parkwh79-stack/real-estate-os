@@ -23,6 +23,7 @@ from use_cases.market_comparables import (
     live_market_comparables_enabled,
     recent_deal_yms,
 )
+from use_cases.glossary import capture_unmapped_term_surface_candidates_use_case
 from agents.report_agent import ReportAgent
 from agents.restructuring_agent import RestructuringAgent
 from agents.risk_register_agent import RiskRegisterAgent
@@ -550,10 +551,26 @@ class OrchestrationAgent:
 
             evidence_graph = EvidenceGraphAgent().build(project_data, run)
             run["artifacts"]["evidenceGraph"] = evidence_graph
+            glossary_candidate_capture = capture_unmapped_term_surface_candidates_use_case(
+                [
+                    node.get("metadata") or {}
+                    for node in evidence_graph.get("nodes", [])
+                    if node.get("type") == "term_surface"
+                ],
+                project_id=project_id,
+                run_id=run["run_id"],
+                source="evidence_graph.term_surface",
+            )
+            run["artifacts"]["glossaryCandidateCapture"] = glossary_candidate_capture
             self._complete_step(run, "evidence_graph_generation", {
                 "schemaVersion": evidence_graph["schemaVersion"],
                 "summary": evidence_graph["summary"],
                 "auditWarnings": evidence_graph["auditWarnings"],
+                "glossaryCandidateCapture": {
+                    "unmappedSurfaceCount": glossary_candidate_capture.get("unmappedSurfaceCount"),
+                    "capturedCount": glossary_candidate_capture.get("capturedCount"),
+                    "matchedCount": glossary_candidate_capture.get("matchedCount"),
+                },
             }, artifact_key="evidenceGraph")
 
             structure_results = None

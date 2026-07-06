@@ -35,3 +35,20 @@ def test_attach_parser_field_provenance_covers_non_market_fields_without_fabrica
     assert "market.comparables[0].pricePerPy" not in result["parser_field_source_locators"]
     assert result["parser_field_source_locators"]["pf_structure[0].amount"]["sourceType"] == "document_page"
     assert any(field["path"] == "regulation.applied_far" for field in provenance["missingFields"])
+    assert result["parser_term_surfaces"]
+
+    revenue_field = next(field for field in provenance["fields"] if field["path"] == "feasibility_input.total_revenue")
+    assert revenue_field["termId"] == "total_sales_revenue"
+    assert revenue_field["canonicalField"] == "feasibility_input.total_revenue"
+    assert revenue_field["termSurface"]["rawText"] == "total_sales_revenue"
+    assert revenue_field["termSurface"]["normalizedSurface"] == "total_sales_revenue"
+    assert "textQualityFlags" in revenue_field["termSurface"]
+
+    senior_amount = next(field for field in provenance["fields"] if field["path"] == "pf_structure[0].amount")
+    assert senior_amount["termId"] == "senior_tranche"
+    assert senior_amount["canonicalField"] == "pf_structure.tranches.senior.amount"
+    assert senior_amount["termSurface"]["sourceLocator"]["sourceType"] == "document_page"
+
+    missing_regulation = next(field for field in provenance["missingFields"] if field["path"] == "regulation.applied_far")
+    assert missing_regulation["termSurface"]["canonicalField"] == "regulation.applied_far"
+    assert missing_regulation["termSurface"]["sourceLocator"]["sourceType"] == "parsed_field_path"

@@ -1,10 +1,10 @@
 # Evidence Graph Agent
 
-Updated: 2026-06-08
+Updated: 2026-07-02
 
 ## Purpose
 
-Evidence Graph Agent links report sections, claims, calculated numbers, agent artifacts, handoffs, evidence IDs, source documents, and project inputs into an auditable graph.
+Evidence Graph Agent links report sections, claims, calculated numbers, agent artifacts, handoffs, evidence IDs, source documents, standardized term surfaces, and project inputs into an auditable graph.
 
 Its purpose is not to write another report. Its purpose is to answer:
 
@@ -24,7 +24,7 @@ Current graph output:
 
 | Field | Description |
 |---|---|
-| `nodes` | Source documents, evidence IDs, agent artifacts, handoffs, claims, risk rows, source locators, report sections, and agents |
+| `nodes` | Source documents, evidence IDs, agent artifacts, handoffs, claims, risk rows, source locators, term surfaces, glossary terms, canonical fields, report sections, and agents |
 | `edges` | Relationships such as `supports`, `derived_claim`, `used_in_report`, `created`, and `sent_to` |
 | `summary` | Node/edge counts, claim count, evidence count, report section count, unlinked section count |
 | `unlinkedReportSections` | Report sections without mapped supporting artifacts |
@@ -43,7 +43,59 @@ Current graph output:
 | `claim` | A calculated or judged value such as LTV, Exit sale rate, marketability score |
 | `risk` | Risk Register row such as `R-MKT-001` or `R-LAND-001` |
 | `source_locator` | Excel cell, document page/table row, API record path, or agent artifact path |
+| `term_surface` | Raw/normalized business term surface from Parser, Data Quality, or Pod artifact metadata |
+| `glossary_term` | Approved standard term such as `total_sales_revenue` or `senior_tranche` |
+| `canonical_field` | Standard operational field such as `feasibility_input.total_revenue` |
 | `report_section` | Phase 11 report section |
+
+## Term Surface Links
+
+Evidence Graph now promotes DB-to-Pod term-surface payloads into first-class graph nodes.
+
+Inputs:
+
+- `project_data.parser_term_surfaces`
+- `_meta.parserFieldProvenance.termSurfaces`
+- artifact-level `termSurfaceMetadata`
+- nested `termSurface` / `termSurfaces` emitted by Data Quality, Parser provenance, Term Annotation, and Chief Pod artifacts
+
+Each term surface node preserves:
+
+```json
+{
+  "rawText": "총분양수입",
+  "normalizedSurface": "총분양수입",
+  "textQualityFlags": {"isUnicodeNormalized": true},
+  "termId": "total_sales_revenue",
+  "canonicalField": "feasibility_input.total_revenue",
+  "sourceField": "feasibility_input.total_revenue",
+  "sourceLocator": {"pageNumber": 3, "sourceType": "document_page"},
+  "matchType": "parser_field_map",
+  "confidence": 0.7
+}
+```
+
+Relationships:
+
+| Edge | Meaning |
+|---|---|
+| `project:current -> term_surface` | Parser field provenance produced a term surface. |
+| `artifact:{key} -> term_surface` | Data Quality or a Chief Pod artifact produced a term surface. |
+| `term_surface -> glossary_term` | The raw/normalized surface matched an approved standard term. |
+| `term_surface -> canonical_field` | The surface maps to an operational canonical field. |
+| `term_surface -> source_locator` | The parser, Excel, API, evidence, or artifact locator for this surface. |
+| `glossary_term -> canonical_field` | The approved term maps to the canonical field. |
+
+Important rule:
+
+If a parser field has no page, Excel cell, API row, or evidence locator, Evidence Graph keeps the term surface with `sourceType: parsed_field_path`. It does not fabricate document evidence.
+
+Unmapped surface handling:
+
+- If a `term_surface` node has no approved `termId` and no `canonicalField`, orchestration calls the glossary normalization layer after graph generation.
+- Exact approved aliases are matched automatically and do not create duplicate candidates.
+- New or low-confidence surfaces are saved as `glossary_term_candidates` with project ID, run ID, source field, source locator, and text-quality flags.
+- The PF review run keeps the capture result in `artifacts.glossaryCandidateCapture` so reviewers can see how many unmapped terms were routed to the review queue.
 
 ## Risk Register Links
 
@@ -137,13 +189,13 @@ Frontend:
 
 - The graph is deterministic and rule-based.
 - It maps report sections to artifact-level support, not exact sentence offsets yet.
-- It captures evidence IDs, source documents, source locators, and risk-row links when present, but it cannot invent missing evidence.
+- It captures evidence IDs, source documents, source locators, term surfaces, canonical field links, and risk-row links when present, but it cannot invent missing evidence.
 - Excel cell-level and PDF page/table/row locators depend on upstream parsers producing field locators.
 
 ## Next Steps
 
-1. Add field-level parser locators for land, regulation, cost, schedule, PF, and covenant fields.
-2. Add report sentence IDs so each sentence can link to claims and evidence.
-3. Connect graph claims to snapshot diff and similar-case search.
-4. Add graph query APIs for source locator, risk node, report section, and claim lookups.
-5. Add visual graph layout and source-locator query APIs for larger audits.
+1. Add report sentence IDs so each sentence can link to claims, term surfaces, and evidence.
+2. Add graph query APIs for term surface, canonical field, source locator, risk node, report section, and claim lookups.
+3. Connect graph claims and term surfaces to snapshot diff and similar-case search.
+4. Add visual graph layout and source-locator query APIs for larger audits.
+5. Add UI deep links from `term_surface` nodes to the glossary candidate review screen.

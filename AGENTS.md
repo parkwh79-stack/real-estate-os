@@ -33,6 +33,13 @@ evolve; **the invariants do not.**
 6. **Korean, lender-facing output.** Credit documents (IC Memo / Term Sheet) are
    localized via `agents/credit_document_i18n.py`. A term sheet is the lender's
    indicative conditions to the borrower.
+7. **Transparent progressive implementation.** Fast experiments are allowed,
+   including stubs, mocks, placeholders, and sample data in prototype lanes.
+   They must be visibly marked and must never be presented as production-ready.
+   Production-critical areas such as financial calculation, PF review,
+   evidence, approval, permission, audit, report export, and AI Brain usage
+   records require stricter implementation, persistence, evidence, tests, and
+   review gates.
 
 ## 2. Architecture map
 
@@ -69,12 +76,71 @@ full-run orchestration test.
 2. **Keep the relevant doc current.** Behavior/architecture changes update the
    matching `docs/product/*.md` (or this AGENTS.md / `docs/architecture.md`).
    Validation runs are written up under `docs/product/`.
-3. **Tests stay green.** Run `pytest` for the API and `tsc`/`lint` for the web;
+3. **Use the REALYTICS SDD gate for major features.** Before treating a feature
+   as production-ready, connect Spec -> Screen Policy -> API Contract ->
+   DB/Repository -> Agent/Pod workflow -> Test -> Audit/Monitoring. See
+   `docs/product/realytics-sdd-fullstack-operating-standard.md`.
+4. **Tests stay green.** Run `pytest` for the API and `tsc`/`lint` for the web;
    add tests for new behavior. Do not commit on a red suite.
-4. **Respect the invariants in §1.** If a change would touch them, stop and raise
+5. **Respect the invariants in §1.** If a change would touch them, stop and raise
    it — do not quietly change the framework.
 
-## 5. Dev commands
+## 5. Progressive Stub / Placeholder / Mock Rule
+
+REALYTICS OS uses progressive implementation. Do not block every uncertainty,
+but do not disguise experiments as production deal-review logic.
+
+Implementation lanes:
+
+1. **Level 1. Prototype Lane**: fast UI/UX exploration, demo workflow, sample
+   project data, placeholder UI, and local state are allowed. Mark with
+   `PROTOTYPE-ONLY:` where user confusion is possible. Do not label as
+   production-ready.
+2. **Level 2. Controlled Implementation Lane**: partial but useful pilot work is
+   allowed with `TODO-SDD:`, documented missing behavior, a test or manual QA
+   path, source-of-truth decision, and backlog item.
+3. **Level 3. Production-Critical Lane**: stubs are not allowed unless explicitly
+   approved and registered. This lane includes business feasibility, Cash Flow /
+   Max Minus, LTV / LTC / DSCR / ICR, Exit sale rate, Tranche / Waterfall,
+   Evidence ID / Source Locator, approval / waive / override, permission,
+   authentication, audit log, report export, and AI Brain usage records.
+
+Proceed without asking for low-risk details such as UI copy, temporary layout,
+non-critical filter defaults, demo data display, internal component naming, or
+Storybook drafts.
+
+Proceed with a documented assumption for medium-risk details such as temporary
+API field names, temporary schema, sample project data, screen state
+distinctions, or empty states.
+
+Ask clarification before presenting work as production-ready when the decision
+affects calculation formulas, permission policy, approval status, evidence
+standards, report-grade text, PF review results, DB source of truth, external
+API standards, or what an LLM is allowed to decide.
+
+Required markers for incomplete implementation:
+
+- `TODO-SDD:`
+- `STUB-ONLY:`
+- `PROTOTYPE-ONLY:`
+- `MOCK-DATA:`
+- `NEEDS-DOMAIN-DECISION:`
+- `NEEDS-HUMAN-CLARIFICATION:`
+
+Forbidden in production-critical paths:
+
+- Hard-coded financial metrics.
+- Fake Evidence IDs.
+- Fake source locators.
+- Mock-only APIs presented as real.
+- Skipped DB persistence presented as real workflow state.
+- Agent/Pod workflow that only logs to console.
+- Always-true permission checks.
+- Console-only audit logs.
+- LLM output used as authoritative calculation.
+- Incomplete behavior hidden behind TODO comments without backlog registration.
+
+## 6. Dev commands
 
 ```bash
 # API tests

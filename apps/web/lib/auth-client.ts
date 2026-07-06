@@ -26,6 +26,7 @@ export interface StoredAuthSession {
 }
 
 const STORAGE_KEY = "realytics.auth.session.v1";
+const TRANSIENT_AI_SECRET_PREFIX = "realytics.ai.session.";
 
 export function getStoredAuthSession(): StoredAuthSession | null {
   if (typeof window === "undefined") return null;
@@ -49,7 +50,24 @@ export function setStoredAuthSession(value: StoredAuthSession) {
 export function clearStoredAuthSession() {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(STORAGE_KEY);
+  clearTransientAiSecrets();
   window.dispatchEvent(new CustomEvent("realytics-auth-session-changed"));
+}
+
+export function clearTransientAiSecrets() {
+  if (typeof window === "undefined") return;
+  for (let i = window.localStorage.length - 1; i >= 0; i -= 1) {
+    const key = window.localStorage.key(i);
+    if (key?.startsWith(TRANSIENT_AI_SECRET_PREFIX)) {
+      window.localStorage.removeItem(key);
+    }
+  }
+  for (let i = window.sessionStorage.length - 1; i >= 0; i -= 1) {
+    const key = window.sessionStorage.key(i);
+    if (key?.startsWith(TRANSIENT_AI_SECRET_PREFIX)) {
+      window.sessionStorage.removeItem(key);
+    }
+  }
 }
 
 export function authHeaders(fallbackUserId = "web"): Record<string, string> {
@@ -183,4 +201,3 @@ async function assertOk(res: Response) {
   }
   return res;
 }
-

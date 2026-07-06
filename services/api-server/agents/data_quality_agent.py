@@ -3,9 +3,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
+from core.text_normalization import build_term_surface_record
+
 
 DATA_QUALITY_SCHEMA_VERSION = "realytics-data-quality-v1"
 SQM_TO_PY = 0.3025
+
+_CHECK_TERM_MAP: Dict[str, Dict[str, str]] = {
+    "land_area_consistency": {"termId": "land_area_sqm", "canonicalField": "land.area_sqm"},
+    "gross_floor_area_consistency": {"termId": "gross_floor_area_sqm", "canonicalField": "architectural_plan.gross_floor_area_sqm"},
+    "sales_revenue_consistency": {"termId": "total_sales_revenue", "canonicalField": "feasibility_input.total_revenue"},
+    "pf_amount_consistency": {"termId": "pf_total_amount", "canonicalField": "pf_structure.amount.sum"},
+    "unit_count_consistency": {"termId": "unit_count", "canonicalField": "architectural_plan.unit_count"},
+    "sqm_py_conversion_consistency": {"termId": "land_area_sqm", "canonicalField": "land.area_sqm"},
+    "schedule_sequence_consistency": {"termId": "completion", "canonicalField": "schedule.completion"},
+    "tranche_structure_quality": {"termId": "senior_tranche", "canonicalField": "pf_structure.tranches.senior.amount"},
+}
 
 
 class DataQualityAgent:
@@ -30,6 +43,7 @@ class DataQualityAgent:
             self._tranche_total_check(project_data),
         ]
         checks = [check for check in checks if check is not None]
+        checks = [self._attach_term_surface_metadata(check) for check in checks]
         checks, applied_overrides = self._apply_approved_overrides(
             checks,
             project_data.get("approvedAssumptionOverrides")
@@ -409,6 +423,53 @@ class DataQualityAgent:
 
     def _missing(self, key: str, label: str, message: str, metadata: Any) -> Dict[str, Any]:
         return {"key": key, "label": label, "category": self._category(key), "status": "missing_data", "severity": "low", "message": message, "metadata": metadata}
+
+    def _attach_term_surface_metadata(self, check: Dict[str, Any]) -> Dict[str, Any]:
+        term = _CHECK_TERM_MAP.get(str(check.get("key"))) or {}
+        canonical_field = term.get("canonicalField")
+        term_id = term.get("termId")
+        surfaces: List[Dict[str, Any]] = [
+            build_term_surface_record(
+                check.get("label"),
+                source_field=f"dataQualityReview.checks[{check.get('key')}].label",
+                term_id=term_id,
+                canonical_field=canonical_field,
+                match_type="data_quality_check_label",
+                confidence=0.9 if canonical_field else 0.0,
+            ),
+            build_term_surface_record(
+                check.get("message"),
+                source_field=f"dataQualityReview.checks[{check.get('key')}].message",
+                term_id=term_id,
+                canonical_field=canonical_field,
+                match_type="data_quality_check_message",
+                confidence=0.75 if canonical_field else 0.0,
+            ),
+        ]
+        metadata = check.get("metadata")
+        if isinstance(metadata, dict):
+            for index, value_row in enumerate(metadata.get("values") or []):
+                if not isinstance(value_row, dict):
+                    continue
+                source_field = str(value_row.get("source") or "")
+                if not source_field:
+                    continue
+                surfaces.append(
+                    build_term_surface_record(
+                        source_field,
+                        source_field=f"dataQualityReview.checks[{check.get('key')}].metadata.values[{index}].source",
+                        term_id=term_id if source_field == canonical_field else None,
+                        canonical_field=source_field,
+                        match_type="data_quality_source_field",
+                        confidence=0.85,
+                    )
+                )
+        return {
+            **check,
+            "termId": check.get("termId") or term_id,
+            "canonicalField": check.get("canonicalField") or canonical_field,
+            "termSurfaces": surfaces,
+        }
 
     def _category(self, key: str) -> str:
         if "land" in key:

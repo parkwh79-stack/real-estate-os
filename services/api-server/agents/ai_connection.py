@@ -1,7 +1,10 @@
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict
+
+from agents.ai_audit import build_ai_brain_used_audit_event, record_ai_brain_used
 
 
 CLAUDE_API_ALIASES = {"anthropic", "claude", "claude_api"}
@@ -122,19 +125,30 @@ def resolve_ai_context(
     )
     resolved_host = host or requested.get("host") or os.environ.get("REALYTICS_AI_HOST") or "api"
 
+    explicit_api_key = requested.get("api_key") or requested.get("apiKey")
+
     base = {
         "host": resolved_host,
         "provider": provider,
         "user_id": str(resolved_user_id),
+        "tenant_id": requested.get("tenant_id") or requested.get("tenantId"),
+        "project_id": requested.get("project_id") or requested.get("projectId"),
+        "deal_id": requested.get("deal_id") or requested.get("dealId"),
+        "run_id": requested.get("run_id") or requested.get("runId"),
+        "agent_id": requested.get("agent_id") or requested.get("agentId"),
+        "input_evidence_ids": requested.get("input_evidence_ids") or requested.get("inputEvidenceIds"),
+        "output_finding_ids": requested.get("output_finding_ids") or requested.get("outputFindingIds"),
+        "selection_source": requested.get("selection_source"),
         "base_url": None,
         "api_key_env": None,
+        "api_key": explicit_api_key,
         "supports_json_mode": False,
         "is_local": False,
     }
 
     if provider == "anthropic":
         model = requested.get("model") or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-6"
-        direct = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        direct = bool(explicit_api_key or os.environ.get("ANTHROPIC_API_KEY"))
         base.update({
             "runtime_provider": "anthropic",
             "model": model,
@@ -169,7 +183,7 @@ def resolve_ai_context(
             os.environ.get("REALYTICS_LLM_MODEL") if is_local else None
         )
         model = requested.get("model") or env_model or spec.get("default_model") or "unknown"
-        has_key = bool(api_key_env and os.environ.get(api_key_env))
+        has_key = bool(explicit_api_key or (api_key_env and os.environ.get(api_key_env)))
         # Local endpoints are usable once a base_url is configured, even without a key.
         direct = (is_local and bool(base_url)) or (not is_local and has_key)
         requires_api_key = None
@@ -209,12 +223,15 @@ class AIConnection:
         ai_context: Dict[str, Any] | None = None,
     ) -> AIExtractionResult:
         context = resolve_ai_context(ai_context)
+        started_at = datetime.now(timezone.utc).isoformat()
         provider = context["provider"]
 
         if provider == "anthropic":
-            return self._extract_with_anthropic(prompt, system, context)
+            result = self._extract_with_anthropic(prompt, system, context)
+            self._audit_extract_json(prompt, system, context, result, started_at)
+            return result
         if provider == "claude_desktop":
-            return AIExtractionResult(
+            result = AIExtractionResult(
                 data=None,
                 meta=context,
                 error=(
@@ -222,14 +239,42 @@ class AIConnection:
                     "Claude Desktop UI model internally; return a host_llm_extraction request instead."
                 ),
             )
+            self._audit_extract_json(prompt, system, context, result, started_at)
+            return result
         if provider in OPENAI_COMPATIBLE_PROVIDERS:
-            return self._extract_with_openai_compatible(prompt, system, context)
+            result = self._extract_with_openai_compatible(prompt, system, context)
+            self._audit_extract_json(prompt, system, context, result, started_at)
+            return result
 
-        return AIExtractionResult(
+        result = AIExtractionResult(
             data=None,
             meta=context,
             error=f"Unsupported AI provider: {provider}",
         )
+        self._audit_extract_json(prompt, system, context, result, started_at)
+        return result
+
+    def _audit_extract_json(
+        self,
+        prompt: str,
+        system: str,
+        context: Dict[str, Any],
+        result: AIExtractionResult,
+        started_at: str,
+    ) -> None:
+        status = "success" if result.data is not None else "failed"
+        if result.error and not context.get("direct_model_call"):
+            status = "fallback_used"
+        event = build_ai_brain_used_audit_event(
+            context={**context, **(result.meta or {})},
+            prompt=prompt,
+            system=system,
+            status=status,
+            error=result.error,
+            token_usage=(result.meta or {}).get("token_usage"),
+            started_at=started_at,
+        )
+        record_ai_brain_used(event)
 
     def _extract_with_openai_compatible(
         self,
@@ -244,7 +289,7 @@ class AIConnection:
         prefer a local base_url so PF data never leaves the network.
         """
         api_key_env = context.get("api_key_env")
-        api_key = os.environ.get(api_key_env) if api_key_env else None
+        api_key = context.get("api_key") or (os.environ.get(api_key_env) if api_key_env else None)
         base_url = context.get("base_url")
         is_local = context.get("is_local")
 
@@ -284,7 +329,11 @@ class AIConnection:
             content = response.choices[0].message.content or "{}"
             return AIExtractionResult(
                 data=_load_json_object(content),
-                meta={**context, "parsing_runtime": f"openai_compatible:{context['provider']}"},
+                meta={
+                    **context,
+                    "parsing_runtime": f"openai_compatible:{context['provider']}",
+                    "token_usage": _normalize_token_usage(getattr(response, "usage", None), provider="openai_compatible"),
+                },
             )
         except Exception as exc:
             return AIExtractionResult(data=None, meta=context, error=str(exc))
@@ -295,7 +344,7 @@ class AIConnection:
         system: str,
         context: Dict[str, Any],
     ) -> AIExtractionResult:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = context.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             return AIExtractionResult(
                 data=None,
@@ -322,10 +371,44 @@ class AIConnection:
             )
             return AIExtractionResult(
                 data=_load_json_object(content),
-                meta={**context, "parsing_runtime": "anthropic.messages"},
+                meta={
+                    **context,
+                    "parsing_runtime": "anthropic.messages",
+                    "token_usage": _normalize_token_usage(getattr(response, "usage", None), provider="anthropic"),
+                },
             )
         except Exception as exc:
             return AIExtractionResult(data=None, meta=context, error=str(exc))
+
+
+def _usage_value(usage: Any, *names: str) -> int | None:
+    for name in names:
+        value = None
+        if isinstance(usage, dict):
+            value = usage.get(name)
+        else:
+            value = getattr(usage, name, None)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None
+
+
+def _normalize_token_usage(usage: Any, *, provider: str) -> Dict[str, Any]:
+    """Normalize provider-specific token usage into one audit-safe shape."""
+    if not usage:
+        return {}
+    prompt_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
+    completion_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
+    total_tokens = _usage_value(usage, "total_tokens")
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    result = {
+        "provider": provider,
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
+        "totalTokens": total_tokens,
+    }
+    return {key: value for key, value in result.items() if value is not None}
 
 
 def _load_json_object(content: str) -> Dict[str, Any]:

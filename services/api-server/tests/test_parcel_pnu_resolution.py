@@ -1,0 +1,148 @@
+from use_cases.parcel_pnu_resolution import (
+    _address_prefix,
+    _candidate_address,
+    resolve_project_parcels_use_case,
+)
+
+
+class _FakeRepo:
+    def __init__(self, project):
+        self.project = project
+        self.updates = []
+
+    def get(self, pid):
+        return self.project
+
+    def update(self, pid, payload):
+        self.updates.append(payload)
+        self.project = {**self.project, **payload}
+        return self.project
+
+
+def _resolver(address):
+    table = {
+        "경기도 용인시 기흥구 상갈동 13": ("4146310300100130000", 1466000.0),
+        "경기도 용인시 기흥구 상갈동 14-2": ("4146310300100140002", 1350000.0),
+        "경기도 용인시 기흥구 보라동 62": ("4146310400100620000", 990000.0),
+    }
+    if address in table:
+        pnu, jiga = table[address]
+        return {
+            "status": "resolved",
+            "pnu": pnu,
+            "officialLandPricePerSqm": jiga,
+            "officialLandPriceBaseYear": "2025",
+        }
+    return {"status": "parcel_unresolved"}
+
+
+def test_address_prefix_extraction():
+    assert _address_prefix("경기도 용인시 기흥구 상갈동 13") == "경기도 용인시 기흥구 상갈동"
+    assert _address_prefix("대구광역시 달서구 본동 743 일원") == "대구광역시 달서구 본동"
+    assert _address_prefix("") == ""
+
+
+def test_candidate_address_uses_prefix_and_swaps_dong():
+    prefix = "경기도 용인시 기흥구 상갈동"
+    assert _candidate_address({"lotNumber": "14-2"}, prefix) == "경기도 용인시 기흥구 상갈동 14-2"
+    # 다른 동 필지는 prefix의 동을 교체
+    assert (
+        _candidate_address({"dong": "보라동", "lotNumber": "62"}, prefix)
+        == "경기도 용인시 기흥구 보라동 62"
+    )
+
+
+def test_batch_resolves_each_parcel_with_provenance():
+    repo = _FakeRepo(
+        {
+            "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+            "land_acquisition": [
+                {"addressFragment": "상갈동 13", "dong": "상갈동", "lotNumber": "13"},
+                {"addressFragment": "상갈동 14-2", "dong": "상갈동", "lotNumber": "14-2"},
+                {"addressFragment": "상갈동 9999", "dong": "상갈동", "lotNumber": "9999"},
+            ],
+        }
+    )
+
+    result = resolve_project_parcels_use_case(repo, "77", resolver=_resolver)
+
+    assert result["resolvedCount"] == 2
+    statuses = [row["status"] for row in result["results"]]
+    assert statuses == ["resolved", "resolved", "unresolved"]
+    parcels = repo.project["land_acquisition"]
+    assert parcels[0]["pnu"] == "4146310300100130000"
+    assert parcels[1]["pnu"] == "4146310300100140002"
+    assert parcels[1]["officialLandPricePerSqm"] == 1350000.0
+    assert parcels[1]["pnuResolution"]["status"] == "resolved"
+    # 실패 필지는 시도 주소·사유가 남고 PNU는 지어내지 않음
+    assert "pnu" not in parcels[2]
+    assert parcels[2]["pnuResolution"]["status"] == "unresolved"
+    assert repo.updates, "must persist once"
+
+
+def test_batch_skips_already_resolved_and_respects_limit():
+    repo = _FakeRepo(
+        {
+            "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+            "land_acquisition": [
+                {"addressFragment": "상갈동 13", "lotNumber": "13", "pnu": "existing"},
+                {"addressFragment": "상갈동 14-2", "lotNumber": "14-2"},
+                {"addressFragment": "보라동 62", "dong": "보라동", "lotNumber": "62"},
+            ],
+        }
+    )
+
+    result = resolve_project_parcels_use_case(repo, "77", resolver=_resolver, limit=1)
+
+    assert result["results"][0]["status"] == "already_resolved"
+    assert result["attemptedCount"] == 1
+    assert result["results"][2]["status"] == "skipped_limit"
+
+
+def test_lot_mismatch_rejects_wrong_parcel_pnu():
+    """지오코더가 동 단위로 폴백해 이웃 필지를 반환하면 PNU를 붙이지 않는다."""
+
+    def _fallback_resolver(address):
+        # 어떤 지번을 물어도 상갈동 1번지 필지를 반환하는 잘못된 폴백 상황
+        return {
+            "status": "resolved",
+            "pnu": "4146310300100010000",
+            "lotNumber": "1",
+            "officialLandPricePerSqm": 127600.0,
+        }
+
+    repo = _FakeRepo(
+        {
+            "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+            "land_acquisition": [{"addressFragment": "상갈동 99999", "dong": "상갈동", "lotNumber": "99999"}],
+        }
+    )
+
+    result = resolve_project_parcels_use_case(repo, "77", resolver=_fallback_resolver)
+
+    row = result["results"][0]
+    assert row["status"] == "unresolved"
+    assert "lot_mismatch" in row["reason"]
+    assert "pnu" not in repo.project["land_acquisition"][0]
+
+
+def test_matching_lot_is_verified():
+    def _resolver_with_lot(address):
+        return {
+            "status": "resolved",
+            "pnu": "4146310300100130000",
+            "lotNumber": "13",
+            "officialLandPricePerSqm": 1466000.0,
+        }
+
+    repo = _FakeRepo(
+        {
+            "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+            "land_acquisition": [{"addressFragment": "상갈동 13", "lotNumber": "13"}],
+        }
+    )
+
+    result = resolve_project_parcels_use_case(repo, "77", resolver=_resolver_with_lot)
+
+    assert result["resolvedCount"] == 1
+    assert repo.project["land_acquisition"][0]["pnuResolution"]["lotVerification"] == "verified"

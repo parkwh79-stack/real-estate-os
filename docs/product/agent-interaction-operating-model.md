@@ -46,6 +46,48 @@ Orchestration Agent
   -> human review gates
 ```
 
+## 1.1.1 Current Chief Pod Execution Contract
+
+As of 2026-07-01, the Chief Deal Orchestrator is no longer only a planning board. Each selected Pod writes a durable `chief_pod_artifact` record and also maps its result into standard downstream artifact keys.
+
+For the pilot PF track, the intended step-by-step execution is:
+
+```text
+Land-Legal Pod
+  -> landAgentReview
+  -> legalPermitReview
+  -> developabilityScore
+  -> landLedgerEnrichment or landLedgerEnrichmentError
+
+Market-Product Pod
+  -> marketEvidenceReview
+  -> marketabilityAnalysis
+  -> liveMarketComparables when configured
+
+Feasibility-Cashflow Pod
+  -> developerFeasibility
+  -> feasibility
+  -> returnMetrics
+  -> cashFlowRunResult
+
+PF-Credit Pod
+  -> pfStructure
+  -> scenariosEvaluation when product mix and PF structure are ready
+  -> riskRegister
+  -> creditReviewDecision
+```
+
+Land evidence gaps should not prevent the Land-Legal Pod from running, because that Pod is responsible for identifying and requesting missing PNU, official land price, cadastral, registry, and encumbrance evidence. The same gap may still block the PF-Credit Pod and approval readiness gate.
+
+The Orchestrator must therefore distinguish:
+
+| State | Meaning |
+|---|---|
+| `planned` | Enough input exists to run the Pod and produce a diagnostic artifact. |
+| `completed` | The Pod wrote an artifact, even if that artifact says `needs_review`. |
+| `blocked` | A downstream decision cannot run because a prerequisite evidence class is missing. |
+| `needs_recalculation` | A prior Pod changed an assumption and the Event Bus marked this Pod for rerun. |
+
 The system must answer three questions:
 
 1. What did each agent complete?

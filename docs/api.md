@@ -273,6 +273,26 @@ The `phase-11-pf-review` template returns these `report.sections` keys:
 - **Description**: Download a previously created report export artifact.
 - **Response**: File response with the export content and content disposition header.
 
+### `POST /projects/{project_id}/chief-orchestration/plan`
+- **Description**: Build the Chief Deal Orchestrator AI Deal Room plan without running approval-sensitive pod analysis. The endpoint hydrates the project with persisted land evidence, approved assumption overrides, and active restructuring cures, then returns the Shared Deal State Graph, Missing Input Register, six Agent Pod plans, track-specific Chief Task Graph, Cross-Agent Reconciliation conflicts, four scenario conclusions, AI Risk Committee opinions, and Decision Gate.
+- **Request Body**: Optional `{ "analysisPurpose": "pf_credit_review", "workflowTrack": "development|pf|finance|real_asset_finance|reit|fund", "project_data": {...} }`.
+- **Response**: `realytics-chief-deal-orchestration-v1` payload with `sharedDealStateGraph`, `agentPods`, `podRuns`, `taskGraph`, `scenarioConclusions`, `riskCommittee`, `decisionGate`, `reportStudioOutputs`, and `learningLoopEvents`. `taskGraph` includes `workflowTrack`, `trackWorkflow`, `executionStages`, `recommendedRunOrder`, dependency `edges`, and track-specific `recalculationRules`. `scenarioConclusions` returns Base, Downside, Upside, and Kill Case metrics; `riskCommittee` returns Devil's Advocate, Credit, Legal/Compliance, Market Stress, Construction Risk, Lender Persona, and IC Judge opinions.
+- **Note**: This is the planning layer for the target AI Deal Room. It does not replace `POST /projects/{project_id}/orchestrations/pf-review`; pod-level execution is available through the run-pod endpoint below.
+
+### `POST /projects/{project_id}/chief-orchestration/run-pod`
+- **Description**: Execute one Chief Deal Orchestrator pod and persist its full domain artifact into the first-class `chief_pod_artifacts` store. The project-level `chief_orchestration_state.podRuns[].artifactKeys` keeps only the reference key. The current implementation connects pods to existing domain logic: Land-Legal runs legal/permit and developability scoring, Market-Product runs marketability analysis, Cost-Schedule and Feasibility-Cashflow run development feasibility and cash-flow readiness, PF-Credit calculates PF metrics, and Public-Policy reuses developability/regulation evidence until dedicated policy agents are added.
+- **Request Body**: `{ "podKey": "land_legal", "workflowTrack": "pf", "options": { "forceTrigger": "legal_product_infeasible" } }`.
+- **Response**: Updated `realytics-chief-deal-orchestration-v1` payload. The target pod's `podRuns[].artifactKeys` points to persisted artifacts, while Event Bus recalculation triggers are stored in `learningLoopEvents` and target pod `recalculationEvents`.
+
+### `GET /projects/{project_id}/chief-orchestration/artifacts`
+- **Description**: List persisted Chief Deal Orchestrator pod artifacts for audit/review.
+- **Query Params**: Optional `pod_key=land_legal`.
+- **Response**: `realytics-chief-pod-artifact-list-v1` payload with artifact records containing `artifactKey`, `podKey`, `createdAt`, `schemaVersion`, and `result`.
+
+### `GET /projects/{project_id}/chief-orchestration/artifacts/{artifact_key}`
+- **Description**: Read one persisted Chief Deal Orchestrator pod artifact by key.
+- **Response**: `realytics-chief-pod-artifact-v1` record with full `result` payload.
+
 ### `POST /projects/{project_id}/orchestrations/pf-review`
 - **Description**: Run the MVP PF review orchestration workflow synchronously.
 - **Request Body**: `{ "project_data": {...}, "options": { "user_id": "user-123", "ai_context": { "provider": "claude_desktop" } } }`

@@ -24,11 +24,29 @@ def test_resolve_no_address_returns_no_address():
     assert resolve_address_to_parcel("")["status"] == "no_address"
 
 
-def test_finalize_no_address_does_not_persist():
+def test_finalize_no_address_does_not_persist(monkeypatch):
+    import use_cases.address_mining as mining
+
+    monkeypatch.setattr(mining, "mine_project_address", lambda pid, p, **kw: None)
     repo = _FakeRepo({"project": {"id": "1"}, "land": {}})
     result = finalize_project_intake_use_case(repo, "1")
     assert result["persisted"] is False
     assert result["parcel"]["status"] == "no_address"
+    assert result["intakeReadinessPlan"]["track"] == "development"
+    assert result["intakeReadinessPlan"]["trackWorkflow"]["label"] == "부동산 개발"
+
+
+def test_finalize_returns_selected_track_workflow(monkeypatch):
+    import use_cases.address_mining as mining
+
+    monkeypatch.setattr(mining, "mine_project_address", lambda pid, p, **kw: None)
+    repo = _FakeRepo({"project": {"id": "2"}, "land": {}})
+    result = finalize_project_intake_use_case(repo, "2", track="pf")
+    plan = result["intakeReadinessPlan"]
+    assert plan["track"] == "pf"
+    assert plan["trackWorkflow"]["label"] == "부동산 PF"
+    step_keys = {step["key"] for step in plan["trackWorkflow"]["steps"]}
+    assert {"source_reconciliation", "waterfall_recovery", "credit_decision"} <= step_keys
 
 
 def test_finalize_saves_pnu_when_resolved(monkeypatch):

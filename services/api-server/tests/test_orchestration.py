@@ -5,7 +5,13 @@ from fastapi.testclient import TestClient
 
 from agents.orchestration_agent import OrchestrationAgent
 from main import app
-from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
+from schemas.orchestration import (
+    AgentHandoffEnvelope,
+    AgentProgress,
+    ChiefDealOrchestrationPlan,
+    PF_REVIEW_STEPS,
+    PF_REVIEW_WORKFLOW,
+)
 
 
 def project_with_discount_triggers(client: TestClient) -> str:
@@ -174,6 +180,37 @@ def test_orchestration_plan_persists_prompt_artifact():
     assert artifact["artifactType"] == "ai_work_order"
     assert artifact["createdBy"] == "planner-user"
     assert artifact["body"] == plan["promptDraft"]["body"]
+
+
+def test_chief_deal_orchestration_plan_endpoint_returns_ai_deal_room_contract():
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Chief Deal Test", "status": "draft"},
+            "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf"}],
+            "land": {"pnu": "1111010100100010000"},
+            "feasibility_input": {"total_revenue": 1000, "total_cost": 800},
+        },
+        headers={"X-REALYTICS-USER-ID": "chief-user"},
+    )
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+
+    res = client.post(
+        f"/projects/{project_id}/chief-orchestration/plan",
+        json={"analysisPurpose": "pf_credit_review"},
+        headers={"X-REALYTICS-USER-ID": "chief-user"},
+    )
+
+    assert res.status_code == 200
+    plan = res.json()
+    ChiefDealOrchestrationPlan.model_validate(plan)
+    assert plan["analysisPurpose"] == "pf_credit_review"
+    assert len(plan["agentPods"]) == 6
+    assert plan["taskGraph"]["nodes"]
+    assert "missingInputRegister" in plan["sharedDealStateGraph"]
+    assert plan["decisionGate"]["decision"] in {"PASS", "CONDITIONAL_PASS", "HOLD", "FAIL"}
 
 
 def test_approval_readiness_gate_blocks_rejected_or_unreviewed_runs():

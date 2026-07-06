@@ -1,0 +1,160 @@
+---
+description: REALYTICS x PLATFORM9 SDD and Agent operating rules
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# REALYTICS SDD Rules
+
+Read `AGENTS.md` first. For major feature work, also read
+`docs/product/realytics-sdd-fullstack-operating-standard.md`.
+
+## Non-negotiable Rules
+
+1. Financial and credit calculations are deterministic. LLMs may classify,
+   review, summarize, and draft; they must not invent evidence, produce final
+   numbers, or approve credit.
+2. Preserve source provenance. Claims, metrics, risk rows, report text, and
+   approval gates should carry evidence IDs or source locators.
+3. Use canonical fields and the term standard database between DB and Agent
+   Pods. Do not branch business logic on raw Korean labels or ad hoc English
+   translations.
+4. Do not treat mock-only UI state as production data. Project pages should read
+   from the Shared Deal State Graph, page context API, or explicit server
+   endpoint.
+5. Every significant change must update `docs/backlog.md` and the relevant
+   `docs/product/*.md`.
+6. Use progressive implementation: prototypes are allowed, but unfinished work
+   must be marked and must not be presented as production-ready.
+
+## SDD Gate
+
+Before marking work as done, connect:
+
+```text
+Spec -> Screen Policy -> API Contract -> DB/Repository -> Agent/Pod -> Test -> Audit/Monitoring
+```
+
+If any link is intentionally missing, document it as a limitation or next step.
+
+## Progressive Stub Control Rule
+
+Do not silently create stubs for major REALYTICS workflows. Stubs, mocks, and
+placeholders are allowed only inside the correct implementation lane.
+
+### Level 1. Prototype Lane
+
+Allowed for quick experiments:
+
+- UI layout
+- empty state screen
+- design-system component draft
+- Storybook draft
+- temporary route wiring
+- non-critical chart dummy
+- onboarding text
+- demo sample project
+
+Required:
+
+- mark user-facing temporary behavior with `PROTOTYPE-ONLY:` or `MOCK-DATA:`
+- do not label as production-ready
+
+### Level 2. Controlled Implementation Lane
+
+Allowed for internal pilot work:
+
+- temporary adapter
+- partial repository
+- limited API contract
+- manual verification path
+- feature flag
+
+Required:
+
+- `TODO-SDD:` marker for incomplete parts
+- missing production behavior documented
+- backlog or Stub Registry Item
+- test path or manual QA path
+
+### Level 3. Production-Critical Lane
+
+Ask clarification before stubbing or shipping incomplete behavior if the change
+affects:
+
+- project/deal state source of truth
+- evidence/source locator
+- uploaded document storage
+- business feasibility calculation
+- Cash Flow / Max Minus
+- LTV / LTC / DSCR / ICR / Exit sale rate
+- Tranche / Waterfall
+- PF review or approval gate
+- report/export
+- permission/authentication
+- audit log
+- AI Brain usage record
+- DB/repository persistence
+
+Forbidden in production-critical paths:
+
+- hard-coded financial numbers
+- fake evidence IDs
+- fake source locators
+- always-true permission checks
+- console-only audit logs
+- mock API presented as real
+- report export placeholder presented as deliverable
+- LLM output stored as final calculation
+
+## Clarification Rule
+
+Do not stop for every uncertainty.
+
+Proceed without asking for low-risk details:
+
+- UI copy
+- temporary layout
+- non-critical filter default
+- demo data display
+- internal component naming
+- Storybook draft
+
+Proceed with a documented assumption for medium-risk details:
+
+- temporary API response field name
+- temporary schema
+- screen state distinction
+- sample project data
+- temporary empty state
+
+Ask clarification before production-ready implementation for high-risk details:
+
+- calculation formula
+- permission policy
+- approval status
+- evidence standard
+- report-grade text
+- PF review result
+- DB source of truth
+- external API standard
+- LLM decision boundary
+
+## Stub / Mock / Placeholder Check
+
+- [ ] Implementation lane is clear: Prototype / Controlled / Production-Critical.
+- [ ] Prototype stubs are visibly marked.
+- [ ] Controlled or Production-Critical stubs are registered in backlog.
+- [ ] No hard-coded financial calculation is presented as real.
+- [ ] No fake Evidence ID or source locator is used.
+- [ ] No permission check is implemented as always-true.
+- [ ] No audit event is implemented only as console.log.
+- [ ] Prototype-only features are not marked production-ready.
+
+## Required Checks
+
+- API: run relevant `pytest` tests from `services/api-server`.
+- Web: run `npm run check-types` and relevant eslint checks from `apps/web`.
+- Avoid committing runtime files, secrets, uploaded user documents, `.runtime`,
+  caches, or `__pycache__`.

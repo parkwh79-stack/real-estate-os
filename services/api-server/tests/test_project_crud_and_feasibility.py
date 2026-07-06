@@ -2,7 +2,13 @@ from fastapi.testclient import TestClient
 
 from main import app
 from routers import projects
-from storage import get_risk_register_record
+from storage import (
+    get_risk_register_record,
+    list_deal_state_records,
+    upsert_chief_pod_artifact_record,
+    upsert_evidence_graph_record,
+    upsert_risk_register_record,
+)
 
 
 def test_project_crud_create_update_delete_cascades_runtime_records(monkeypatch):
@@ -52,6 +58,33 @@ def test_project_crud_create_update_delete_cascades_runtime_records(monkeypatch)
     assert client.get(f"/projects/{project_id}").status_code == 404
 
 
+def test_apply_parsed_data_preserves_existing_project_identity(monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Upload Identity Project", "type": "mixed_use"},
+            "land": {"address": "기존 주소"},
+        },
+    ).json()
+    project_id = created["project"]["id"]
+
+    result = projects.project_repository().apply_parsed_data(
+        project_id,
+        {
+            "project": {"id": project_id},
+            "land": {"pnu": "2729011700101230004"},
+        },
+    )
+
+    assert result is not None
+    assert result["project"]["name"] == "Upload Identity Project"
+    assert result["project"]["type"] == "mixed_use"
+    assert result["land"]["address"] == "기존 주소"
+    assert result["land"]["pnu"] == "2729011700101230004"
+
+
 def test_feasibility_calculate_endpoint_uses_project_defaults_and_overrides(monkeypatch):
     monkeypatch.setattr(projects, "persist_state", lambda: None)
     client = TestClient(app)
@@ -82,6 +115,132 @@ def test_feasibility_calculate_endpoint_uses_project_defaults_and_overrides(monk
     assert override_result.json()["status"] in {"weak", "thin"}
 
     client.delete(f"/projects/{project_id}")
+
+
+def test_calculation_run_registry_persists_metrics(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "calculation-registry.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Calculation Registry Project"},
+            "feasibility_input": {
+                "total_revenue": 100000000000,
+                "total_cost": 80000000000,
+                "finance_cost": 5000000000,
+            },
+        },
+    ).json()
+    project_id = created["project"]["id"]
+
+    res = client.post(
+        f"/projects/{project_id}/pf/structure",
+        json={
+            "tranches": [{"name": "senior", "amount": 50000000000}],
+            "total_revenue": 100000000000,
+            "total_cost": 80000000000,
+            "finance_cost": 5000000000,
+            "inputEvidenceIds": ["evidence:unit-test"],
+            "assumptionIds": ["assumption:unit-test"],
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["calculationRunId"]
+
+    runs_res = client.get(f"/projects/{project_id}/calculation-runs?engine_key=pf_metrics")
+    assert runs_res.status_code == 200
+    runs = runs_res.json()["records"]
+    assert any(run["calculationRunId"] == body["calculationRunId"] for run in runs)
+
+    metrics_res = client.get(
+        f"/projects/{project_id}/deal-state-records?record_type=metric&calculation_run_id={body['calculationRunId']}"
+    )
+    assert metrics_res.status_code == 200
+    metric_keys = {row["key"] for row in metrics_res.json()["records"]}
+    assert "pf_metrics.ltv" in metric_keys
+
+    evidence_res = client.get(
+        f"/projects/{project_id}/deal-state-records?record_type=evidence&calculation_run_id={body['calculationRunId']}"
+    )
+    assert evidence_res.status_code == 200
+    assert evidence_res.json()["records"][0]["key"] == "evidence:unit-test"
+
+    client.delete(f"/projects/{project_id}")
+
+
+def test_deal_state_records_materialize_from_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "deal-state-artifacts.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    project_id = "artifact-materialization-project"
+
+    upsert_risk_register_record(
+        project_id,
+        "run-risk",
+        {
+            "registerId": "risk-register-test",
+            "risks": [
+                {
+                    "code": "TEST_RISK",
+                    "severity": "high",
+                    "sourceLocator": {"documentId": "doc-1", "page": 3},
+                }
+            ],
+        },
+    )
+    upsert_evidence_graph_record(
+        project_id,
+        "run-graph",
+        {
+            "graphId": "graph-test",
+            "nodes": [
+                {
+                    "id": "source-1",
+                    "type": "source_locator",
+                    "label": "사업계획서 p.3",
+                    "metadata": {"documentId": "doc-1", "page": 3},
+                },
+                {
+                    "id": "ltv-node",
+                    "type": "metric",
+                    "metadata": {"key": "ltv", "value": 0.62, "unit": "ratio"},
+                },
+            ],
+            "edges": [],
+        },
+    )
+    upsert_chief_pod_artifact_record(
+        project_id,
+        {
+            "artifactKey": "artifact-pf-credit-test",
+            "podKey": "pf_credit",
+            "artifactType": "pod_result",
+            "result": {
+                "metrics": {"seniorRecoveryRatio": 0.98},
+                "riskFlags": [{"code": "ARTIFACT_RISK", "severity": "medium"}],
+                "evidenceIds": ["evidence:auto-supplement"],
+                "assumptionIds": ["assumption:base-case"],
+            },
+        },
+    )
+
+    risks = list_deal_state_records(project_id, record_type="risk_issue")
+    risk_keys = {record["key"] for record in risks}
+    assert {"TEST_RISK", "ARTIFACT_RISK"}.issubset(risk_keys)
+    assert next(record for record in risks if record["key"] == "TEST_RISK")["sourceLocator"]["page"] == 3
+
+    metrics = list_deal_state_records(project_id, record_type="metric")
+    metric_keys = {record["key"] for record in metrics}
+    assert "ltv" in metric_keys
+    assert "pf_credit.seniorRecoveryRatio" in metric_keys
+
+    evidence = list_deal_state_records(project_id, record_type="evidence")
+    evidence_keys = {record["key"] for record in evidence}
+    assert {"source-1", "evidence:auto-supplement"}.issubset(evidence_keys)
+
+    assumptions = list_deal_state_records(project_id, record_type="assumption")
+    assert assumptions[0]["key"] == "assumption:base-case"
 
 
 def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatch):

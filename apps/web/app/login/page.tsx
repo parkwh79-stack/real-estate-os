@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, CheckCircle2, ShieldAlert, TrendingUp, Database, Users } from "lucide-react";
+import { ArrowRight, BrainCircuit, CheckCircle2, Database, KeyRound, ShieldAlert, Sparkles, TrendingUp, Users } from "lucide-react";
 import Image from "next/image";
 import { apiBase, createLocalPilotSession, getStoredAuthSession, loginLocalPilotSession } from "../../lib/auth-client";
 
@@ -187,6 +187,17 @@ export default function LoginPage() {
               회원가입 및 로그인이 되어 있지 않은 미인증 사용자는 서비스 보안 정책에 의해 주요 기능 화면으로 이동할 수 없으며, 모든 접근이 본 로그인 페이지로 철저히 제한됩니다.
             </p>
           </div>
+
+          <div className="mt-4 max-w-lg rounded-2xl border border-sky-400/30 bg-sky-500/10 p-5 text-sm leading-6 text-sky-100 backdrop-blur-xl">
+            <div className="flex items-center gap-2 font-bold text-sky-300">
+              <BrainCircuit className="h-5 w-5 shrink-0" />
+              <span>AI 두뇌 선택 안내</span>
+            </div>
+            <p className="mt-2 text-slate-300">
+              별도 API Key가 없어도 기본 Gemini 무료 fallback으로 문서분류와 1차 판단을 시작할 수 있습니다.
+              더 높은 품질, 더 큰 한도, 조직별 모델 통제를 원하면 로그인 후 개인 또는 조직의 AI API Key를 입력하세요.
+            </p>
+          </div>
         </div>
 
         {/* Bottom Content: Live Statistics Dashboard */}
@@ -239,6 +250,37 @@ export default function LoginPage() {
             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 shadow-sm dark:bg-emerald-950/40 dark:text-emerald-300">
               <CheckCircle2 className="h-4 w-4" /> DB 연동
             </span>
+          </div>
+
+          <div className="mt-6 overflow-hidden rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-violet-50 p-5 shadow-sm dark:border-sky-900/50 dark:from-sky-950/30 dark:via-slate-900 dark:to-violet-950/30">
+            <div className="flex items-start gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-sky-300 shadow-lg dark:bg-white dark:text-slate-950">
+                <BrainCircuit className="h-6 w-6" />
+              </div>
+              <div>
+                <p className="text-sm font-black text-slate-950 dark:text-white">REALYTICS AI Brain</p>
+                <p className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">
+                  API Key가 없으면 시스템 기본 Gemini 무료 fallback으로 시작합니다. 더 나은 분석 품질과 한도를 원하면 로그인 후 AI 설정에서 OpenAI, Claude, Gemini, Groq, OpenRouter, DeepSeek, Local LLM API Key를 입력하세요.
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300 sm:grid-cols-3">
+              <div className="rounded-xl border border-white/70 bg-white/80 p-3 dark:border-slate-800 dark:bg-slate-950/50">
+                <Sparkles className="mb-2 h-4 w-4 text-sky-500" />
+                기본 제공: Gemini 무료 fallback
+              </div>
+              <div className="rounded-xl border border-white/70 bg-white/80 p-3 dark:border-slate-800 dark:bg-slate-950/50">
+                <KeyRound className="mb-2 h-4 w-4 text-violet-500" />
+                개인 API Key: 로그인 후 입력
+              </div>
+              <div className="rounded-xl border border-white/70 bg-white/80 p-3 dark:border-slate-800 dark:bg-slate-950/50">
+                <ShieldAlert className="mb-2 h-4 w-4 text-emerald-500" />
+                로그아웃 시 브라우저 임시 키 삭제
+              </div>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
+              보안 원칙: API Key는 코드, GitHub, 로그, 감사 화면에 기록하지 않습니다. 서버 저장 방식은 Secret Manager 전환 전까지 파일럿용 암호화 저장으로만 사용하며, 민감 프로젝트는 세션용 키 또는 사내 Local LLM 사용을 권장합니다.
+            </p>
           </div>
 
           <div className="mt-8 grid grid-cols-2 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">

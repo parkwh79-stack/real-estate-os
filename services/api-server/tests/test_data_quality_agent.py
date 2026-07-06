@@ -48,6 +48,13 @@ def test_data_quality_agent_detects_revenue_pf_and_area_conflicts():
     assert "sales_revenue_consistency" in keys
     assert "pf_amount_consistency" in keys
     assert "sqm_py_conversion_consistency" in keys
+    sales_check = next(check for check in result["checks"] if check["key"] == "sales_revenue_consistency")
+    assert sales_check["termId"] == "total_sales_revenue"
+    assert sales_check["canonicalField"] == "feasibility_input.total_revenue"
+    assert sales_check["termSurfaces"]
+    assert sales_check["termSurfaces"][0]["rawText"] == "Total sales revenue consistency"
+    assert sales_check["termSurfaces"][0]["normalizedSurface"] == "total sales revenue consistency"
+    assert "textQualityFlags" in sales_check["termSurfaces"][0]
 
 
 def test_data_quality_agent_passes_clear_consistent_numbers():
@@ -81,6 +88,7 @@ def test_data_quality_agent_passes_clear_consistent_numbers():
     assert result["summary"]["blockingCount"] == 0
     assert not result["blockingIssues"]
     assert any(check["key"] == "sales_revenue_consistency" and check["status"] == "clear" for check in result["checks"])
+    assert all("termSurfaces" in check for check in result["checks"])
 
 
 def test_data_quality_agent_applies_approved_assumption_override():

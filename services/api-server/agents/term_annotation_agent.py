@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from core.text_normalization import build_term_surface_record, normalize_match_text
+
 TERM_ANNOTATION_SCHEMA_VERSION = "realytics-term-annotation-v1"
 
 # Free-text, term-bearing fields worth scanning for controlled-vocabulary surfaces
@@ -30,7 +32,7 @@ _TEXT_SCAN_ROOTS = (
 
 
 def _norm(value: Any) -> str:
-    return " ".join(str(value or "").strip().lower().replace("-", "_").split())
+    return normalize_match_text(value)
 
 
 class TermAnnotationAgent:
@@ -135,6 +137,13 @@ class TermAnnotationAgent:
                                                      locator=locator, match_type="alias_text", confidence=0.85))
             if not matched_any and self._should_emit_unmapped(field_path):
                 annotations.append({
+                    **build_term_surface_record(
+                        str(text)[:120],
+                        source_field=field_path,
+                        source_locator=source_locators.get(field_path) or {"fieldName": field_path, "sourceType": "parsed_field_path"},
+                        match_type="none",
+                        confidence=0.0,
+                    ),
                     "surface": str(text)[:120],
                     "termId": None,
                     "canonicalField": None,
@@ -240,6 +249,15 @@ class TermAnnotationAgent:
     def _annotation(term: Dict[str, Any], *, surface: str, source_field: str,
                     locator: Any, match_type: str, confidence: float) -> Dict[str, Any]:
         return {
+            **build_term_surface_record(
+                surface,
+                source_field=source_field,
+                source_locator=locator,
+                term_id=term.get("termId"),
+                canonical_field=term.get("canonicalField"),
+                match_type=match_type,
+                confidence=confidence,
+            ),
             "surface": surface,
             "termId": term.get("termId"),
             "preferredTerm": term.get("preferredTerm"),

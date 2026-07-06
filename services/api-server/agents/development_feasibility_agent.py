@@ -633,10 +633,16 @@ class DevelopmentFeasibilityAgent:
             "loan_maturity": "Loan maturity",
         }
         return [
-            {"key": key, "label": labels.get(key, key), "planned_date": value}
+            {"key": key, "label": labels.get(key, key), "planned_date": self._schedule_date_value(value)}
             for key, value in schedule.items()
             if value
         ]
+
+    @staticmethod
+    def _schedule_date_value(value: Any) -> str:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"M{int(value)}"
+        return str(value)
 
     def _scenarios_v2(self, sensitivity: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows = []

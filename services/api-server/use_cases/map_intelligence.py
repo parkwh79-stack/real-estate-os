@@ -5,33 +5,27 @@ from typing import Any, Dict, List, Optional
 
 MAP_INTELLIGENCE_SCHEMA_VERSION = "realytics-map-intelligence-v1"
 
-# The deck's 6-layer spatial OS. Each layer reports whether it has live data on
-# this project (deterministic — derived from what is actually present), never a
-# fabricated polygon. Geometry-bearing layers stay "needs_geometry" until a
-# VWorld cadastral fetch / PostGIS land_parcels row supplies the shape.
+# Six-layer spatial OS. All layers are derived from actual stored data or live
+# connector output. Parcel geometry is never fabricated: parcels without a real
+# VWorld/PostGIS shape remain unlocated GeoJSON features.
 _LAYER_DEFS = [
     ("parcel_boundary", "필지 경계", "VWorld 지적도 / PostGIS land_parcels"),
-    ("official_land_price", "공시지가", "공공데이터포털 · 토지대장"),
+    ("official_land_price", "공시지가", "공공데이터포털 / VWorld / 수동 증빙"),
     ("zoning", "용도지역", "VWorld 토지이용계획"),
-    ("transactions", "실거래 사례", "실거래가 / Valuemap"),
+    ("transactions", "실거래·시세", "국토부 실거래가 / Valuemap"),
     ("supply", "주변 공급", "분양/공급 데이터"),
     ("risk", "리스크", "Risk Register"),
 ]
 
 
 def build_project_map_intelligence(project_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Assemble a project's spatial intelligence: a parcel GeoJSON
-    FeatureCollection plus the deck's 6-layer availability map.
+    """Build project-level spatial intelligence as GeoJSON + layer readiness."""
 
-    Deterministic and non-fabricating: a parcel with no resolved geometry
-    becomes a GeoJSON Feature with ``geometry: null`` (a valid "unlocated"
-    feature) and is flagged in dataLimitations — the boundary appears only once
-    VWorld/PostGIS supplies the shape. No coordinates are invented.
-    """
     parcels = _extract_parcels(project_data)
     features: List[Dict[str, Any]] = []
     located = 0
     priced = 0
+
     for index, parcel in enumerate(parcels):
         geometry = _parcel_geometry(parcel)
         properties = _parcel_properties(parcel)
@@ -39,28 +33,21 @@ def build_project_map_intelligence(project_data: Dict[str, Any]) -> Dict[str, An
             located += 1
         if properties.get("officialLandPricePerSqm") is not None:
             priced += 1
-        features.append({
-            "type": "Feature",
-            "id": properties.get("pnu") or properties.get("addressFragment") or f"parcel-{index}",
-            "geometry": geometry,
-            "properties": properties,
-        })
+        features.append(
+            {
+                "type": "Feature",
+                "id": properties.get("pnu") or properties.get("addressFragment") or f"parcel-{index}",
+                "geometry": geometry,
+                "properties": properties,
+            }
+        )
 
     feature_collection = {"type": "FeatureCollection", "features": features}
     center = _center_of(features)
     regulation = project_data.get("regulation") or {}
-    risk_register = (project_data.get("riskRegister") or {})
+    risk_register = project_data.get("riskRegister") or {}
     risk_rows = risk_register.get("risks") if isinstance(risk_register, dict) else None
-
     signals = project_data.get("_layerSignals") if isinstance(project_data.get("_layerSignals"), dict) else None
-    layers = _layers(
-        located=located,
-        priced=priced,
-        parcel_count=len(parcels),
-        regulation=regulation,
-        risk_count=len(risk_rows) if isinstance(risk_rows, list) else 0,
-        signals=signals,
-    )
 
     return {
         "schemaVersion": MAP_INTELLIGENCE_SCHEMA_VERSION,
@@ -79,7 +66,14 @@ def build_project_map_intelligence(project_data: Dict[str, Any]) -> Dict[str, An
             "appliedFar": regulation.get("applied_far") or regulation.get("appliedFar"),
             "appliedBcr": regulation.get("applied_bcr") or regulation.get("appliedBcr"),
         },
-        "layers": layers,
+        "layers": _layers(
+            located=located,
+            priced=priced,
+            parcel_count=len(parcels),
+            regulation=regulation,
+            risk_count=len(risk_rows) if isinstance(risk_rows, list) else 0,
+            signals=signals,
+        ),
         "dataLimitations": _data_limitations(len(parcels), located, priced),
     }
 
@@ -90,13 +84,12 @@ def resolve_and_attach_geometry(
     *,
     limit: int = 50,
 ) -> int:
-    """Attach resolved boundary geometry to parcels missing it, in place.
+    """Attach real parcel boundary geometry to missing parcels in-place.
 
-    ``resolver(pnu) -> geometry|None`` is injected (e.g. a VWorld client), so
-    this stays testable with a fake. Only fills parcels that have a PNU and no
-    geometry yet; capped at ``limit``. Returns the count newly resolved. The
-    pure builder then surfaces the boundaries naturally.
+    ``resolver(pnu) -> geometry|None`` is injected so the function stays
+    testable. Only parcels with a PNU and no existing geometry are attempted.
     """
+
     parcels = _extract_parcels(project_data)
     resolved = 0
     attempted = 0
@@ -117,12 +110,8 @@ def resolve_and_attach_geometry(
 
 
 def _extract_parcels(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Find the parcel list from the best available source.
+    """Find parcels from the richest available source."""
 
-    Priority: land ledger import (richest — area/지목/공시지가), then the flat
-    land-evidence package, then the land-acquisition list (pnu/owner/area), then
-    a top-level parcels list. Returns the first non-empty source.
-    """
     for source in (
         project_data.get("land_ledger"),
         project_data.get("landLedger"),
@@ -133,10 +122,11 @@ def _extract_parcels(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(source, dict):
             parcels = source.get("parcels")
             if isinstance(parcels, list) and parcels:
-                return [p for p in parcels if isinstance(p, dict)]
+                return [parcel for parcel in parcels if isinstance(parcel, dict)]
+
     for acquisition in (project_data.get("land_acquisition"), project_data.get("landAcquisition")):
         if isinstance(acquisition, list) and acquisition:
-            return [p for p in acquisition if isinstance(p, dict)]
+            return [parcel for parcel in acquisition if isinstance(parcel, dict)]
     return []
 
 
@@ -159,18 +149,14 @@ def _parcel_properties(parcel: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _parcel_geometry(parcel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Return GeoJSON geometry if the parcel carries a resolved shape; else None.
-
-    Accepts an embedded GeoJSON ``geometry`` (from VWorld/PostGIS) or a single
-    representative point via ``centroid`` / ``lng``+``lat``. Never fabricated.
-    """
     geometry = parcel.get("geometry")
     if isinstance(geometry, dict) and geometry.get("type") and geometry.get("coordinates"):
         return geometry
     centroid = parcel.get("centroid")
-    if isinstance(centroid, (list, tuple)) and len(centroid) == 2 and all(_is_num(c) for c in centroid):
+    if isinstance(centroid, (list, tuple)) and len(centroid) == 2 and all(_is_num(value) for value in centroid):
         return {"type": "Point", "coordinates": [float(centroid[0]), float(centroid[1])]}
-    lng, lat = parcel.get("lng") or parcel.get("longitude"), parcel.get("lat") or parcel.get("latitude")
+    lng = parcel.get("lng") or parcel.get("longitude")
+    lat = parcel.get("lat") or parcel.get("latitude")
     if _is_num(lng) and _is_num(lat):
         return {"type": "Point", "coordinates": [float(lng), float(lat)]}
     return None
@@ -180,15 +166,12 @@ def _center_of(features: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
     points: List[List[float]] = []
     for feature in features:
         geometry = feature.get("geometry")
-        if not isinstance(geometry, dict):
-            continue
-        points.extend(_geometry_points(geometry))
+        if isinstance(geometry, dict):
+            points.extend(_geometry_points(geometry))
     if not points:
         return None
-    # Bounding-box midpoint — a stable initial map center, robust to how densely
-    # a ring is sampled (a mean-of-vertices would skew toward repeated points).
-    lngs = [p[0] for p in points]
-    lats = [p[1] for p in points]
+    lngs = [point[0] for point in points]
+    lats = [point[1] for point in points]
     return {"lng": (min(lngs) + max(lngs)) / 2, "lat": (min(lats) + max(lats)) / 2}
 
 
@@ -197,6 +180,7 @@ def _geometry_points(geometry: Dict[str, Any]) -> List[List[float]]:
     gtype = geometry.get("type")
     if gtype == "Point" and _coord_pair(coords):
         return [coords]
+
     points: List[List[float]] = []
 
     def walk(node: Any) -> None:
@@ -234,18 +218,18 @@ def _layers(
         "parcel_boundary": ("available", located) if located else ("needs_geometry", 0),
         "official_land_price": ("available", priced) if priced else ("needs_data", 0),
         "zoning": ("available", 1) if has_zone else ("needs_data", 0),
-        "transactions": ("available", None),  # served by the market data endpoint
+        "transactions": ("available", None),
         "supply": ("planned", None),
         "risk": ("available", risk_count) if risk_count else ("needs_data", 0),
     }
+
     signals = signals or {}
     layers = []
     for layer_id, label, source in _LAYER_DEFS:
         status, count = availability.get(layer_id, ("planned", None))
-        signal = signals.get(layer_id)
-        # Agent/data-driven override (Marketability supply/transactions, Legal risk).
         detail = None
         source_label = source
+        signal = signals.get(layer_id)
         if isinstance(signal, dict):
             if signal.get("status"):
                 status = signal["status"]
@@ -253,28 +237,30 @@ def _layers(
                 count = signal["featureCount"]
             detail = signal.get("detail")
             source_label = signal.get("source") or source
-        layers.append({
-            "id": layer_id,
-            "label": label,
-            "source": source_label,
-            "status": status,
-            "featureCount": count,
-            "detail": detail,
-        })
+        layers.append(
+            {
+                "id": layer_id,
+                "label": label,
+                "source": source_label,
+                "status": status,
+                "featureCount": count,
+                "detail": detail,
+            }
+        )
     return layers
 
 
 def _data_limitations(parcel_count: int, located: int, priced: int) -> List[str]:
     limitations: List[str] = []
     if parcel_count == 0:
-        limitations.append("토지대장/필지 데이터가 없어 지도 레이어를 구성할 수 없습니다.")
+        limitations.append("저장된 필지 데이터가 없어 지도 레이어를 구성할 수 없습니다.")
         return limitations
     if located == 0:
         limitations.append(
-            f"{parcel_count}개 필지의 경계 형상이 아직 없습니다 — VWorld 지적도 연동(키) 또는 PostGIS land_parcels 적재 시 표시됩니다."
+            f"{parcel_count}개 필지의 경계 도형이 아직 없습니다. VWorld 지적도 연동 또는 PostGIS land_parcels 적재 후 표시됩니다."
         )
     elif located < parcel_count:
-        limitations.append(f"{parcel_count}개 중 {located}개 필지에만 형상이 있습니다.")
+        limitations.append(f"{parcel_count}개 중 {located}개 필지에만 경계 도형이 있습니다.")
     if priced < parcel_count:
         limitations.append(f"{parcel_count}개 중 {priced}개 필지에만 공시지가가 있습니다.")
     return limitations

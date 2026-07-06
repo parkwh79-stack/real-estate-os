@@ -128,6 +128,7 @@ class EvidenceGraphAgent:
                 builder.add_edge(evidence_node, node_id, "supports", f"Evidence {evidence_id} supports handoff.")
 
         self._add_claim_nodes(builder, artifacts)
+        self._add_term_surface_nodes(builder, project_data, artifacts)
         self._add_risk_nodes(builder, artifacts)
         self._add_report_section_nodes(builder, artifacts)
         self._add_glossary_term_nodes(builder, artifacts)
@@ -158,6 +159,7 @@ class EvidenceGraphAgent:
                 "claimCount": sum(1 for node in nodes if node["type"] == "claim"),
                 "riskCount": len(risk_nodes),
                 "sourceLocatorCount": len(source_locator_nodes),
+                "termSurfaceCount": sum(1 for node in nodes if node["type"] == "term_surface"),
                 "glossaryTermCount": sum(1 for node in nodes if node["type"] == "glossary_term"),
                 "riskRowsWithSourceLocatorCount": len(risk_rows_with_source_locators),
                 "reportSectionCount": len(section_nodes),
@@ -169,6 +171,110 @@ class EvidenceGraphAgent:
             "unlinkedReportSections": unlinked_sections,
             "auditWarnings": self._audit_warnings(unlinked_sections, nodes, risks_without_explicit_evidence),
         }
+
+    def _add_term_surface_nodes(
+        self,
+        builder: "_GraphBuilder",
+        project_data: Dict[str, Any],
+        artifacts: Dict[str, Any],
+    ) -> None:
+        """Promote parser/agent term-surface payloads into graph nodes.
+
+        A term surface is the DB-to-Pod terminology boundary record:
+        raw text, normalized matching surface, text-quality flags, termId,
+        canonicalField, sourceField, sourceLocator, matchType, and confidence.
+        This keeps Korean/PF vocabulary standardization auditable without
+        fabricating document evidence when only a parsed field path is known.
+        """
+        for index, surface in enumerate(project_data.get("parser_term_surfaces") or []):
+            if not isinstance(surface, dict):
+                continue
+            node_id = self._term_surface_node_id("parser", surface, index)
+            builder.add_node(node_id, "term_surface", surface.get("rawText") or surface.get("sourceField") or f"parser:{index}", surface)
+            builder.add_edge("project:current", node_id, "has_term_surface", "Parser field provenance produced this term surface.")
+            self._link_term_surface(builder, node_id, surface)
+
+        parser_summary = ((project_data.get("_meta") or {}).get("parserFieldProvenance") or {})
+        for index, surface in enumerate(parser_summary.get("termSurfaces") or []):
+            if not isinstance(surface, dict):
+                continue
+            node_id = self._term_surface_node_id("parser_meta", surface, index)
+            builder.add_node(node_id, "term_surface", surface.get("rawText") or surface.get("sourceField") or f"parser_meta:{index}", surface)
+            builder.add_edge("project:current", node_id, "has_term_surface", "Parser provenance summary produced this term surface.")
+            self._link_term_surface(builder, node_id, surface)
+
+        for artifact_key, artifact in artifacts.items():
+            if artifact_key == "evidenceGraph" or not isinstance(artifact, dict):
+                continue
+            for index, surface in enumerate(self._collect_term_surfaces(artifact)):
+                if not isinstance(surface, dict):
+                    continue
+                node_id = self._term_surface_node_id(f"artifact:{artifact_key}", surface, index)
+                builder.add_node(node_id, "term_surface", surface.get("rawText") or surface.get("sourceField") or f"{artifact_key}:{index}", {
+                    **surface,
+                    "artifactKey": artifact_key,
+                })
+                builder.add_edge(f"artifact:{artifact_key}", node_id, "has_term_surface", f"{artifact_key} produced this term surface.")
+                self._link_term_surface(builder, node_id, surface)
+
+    def _link_term_surface(self, builder: "_GraphBuilder", node_id: str, surface: Dict[str, Any]) -> None:
+        term_id = surface.get("termId")
+        canonical_field = surface.get("canonicalField")
+        source_locator = surface.get("sourceLocator")
+        source_field = surface.get("sourceField")
+
+        if term_id:
+            term_node = f"term:{term_id}"
+            builder.add_node(term_node, "glossary_term", str(term_id), {
+                "termId": term_id,
+                "canonicalField": canonical_field,
+            })
+            builder.add_edge(node_id, term_node, "matches_term", f"Term surface maps to glossary term {term_id}.")
+
+        if canonical_field:
+            field_node = f"canonical_field:{canonical_field}"
+            builder.add_node(field_node, "canonical_field", str(canonical_field), {"canonicalField": canonical_field})
+            builder.add_edge(node_id, field_node, "maps_to_field", f"Term surface maps to canonical field {canonical_field}.")
+            if term_id:
+                builder.add_edge(f"term:{term_id}", field_node, "maps_to_field", f"{term_id} maps to canonical field {canonical_field}.")
+
+        if isinstance(source_locator, dict):
+            locator_id = source_locator.get("locatorId") or source_locator.get("source") or source_locator.get("path") or source_field
+            if locator_id:
+                locator_node = f"locator:term_surface:{self._safe_id(str(locator_id))}"
+                builder.add_node(locator_node, "source_locator", str(source_field or locator_id), source_locator)
+                builder.add_edge(node_id, locator_node, "located_at", "Term surface source locator.")
+
+    def _collect_term_surfaces(self, value: Any) -> List[Dict[str, Any]]:
+        surfaces: List[Dict[str, Any]] = []
+
+        def visit(node: Any) -> None:
+            if isinstance(node, dict):
+                candidate = node.get("termSurface")
+                if isinstance(candidate, dict):
+                    surfaces.append(candidate)
+                for key in ("termSurfaces", "termSurfaceMetadata", "parser_term_surfaces"):
+                    items = node.get(key)
+                    if isinstance(items, list):
+                        surfaces.extend(item for item in items if isinstance(item, dict))
+                for child_key, child in node.items():
+                    if child_key in {"termSurface", "termSurfaces", "termSurfaceMetadata", "parser_term_surfaces"}:
+                        continue
+                    visit(child)
+            elif isinstance(node, list):
+                for item in node:
+                    visit(item)
+
+        visit(value)
+        return surfaces
+
+    def _term_surface_node_id(self, scope: str, surface: Dict[str, Any], index: int) -> str:
+        parts = [
+            scope,
+            str(surface.get("canonicalField") or surface.get("termId") or "unmapped"),
+            str(surface.get("sourceField") or surface.get("rawText") or index),
+        ]
+        return "term_surface:" + self._safe_id(":".join(parts))
 
     def _add_claim_nodes(self, builder: "_GraphBuilder", artifacts: Dict[str, Any]) -> None:
         for artifact_key, path, label in CLAIM_PATHS:

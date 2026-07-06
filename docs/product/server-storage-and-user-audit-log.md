@@ -226,11 +226,15 @@ Store:
 - calculation nodes
 - risk nodes
 - report section nodes
+- term surface nodes
+- glossary term nodes
+- canonical field nodes
 - edges
 
 Purpose:
 
 Reviewers and auditors can trace any report sentence, number, or risk row back to a document page, Excel cell, API record, or Agent output.
+Term surface nodes also let reviewers trace how a Korean or English business phrase was normalized into a controlled vocabulary term and canonical field.
 
 Current implementation:
 
@@ -238,6 +242,7 @@ Current implementation:
 - SQLite table: `evidence_graphs`.
 - PF review orchestration automatically upserts the `evidenceGraph` artifact by `projectId + runId`.
 - Persisted metadata includes graph ID, node count, edge count, risk node count, source locator count, and update time.
+- Parser/Data Quality/Chief Pod term-surface payloads are promoted into graph nodes with `rawText`, `normalizedSurface`, `textQualityFlags`, `termId`, `canonicalField`, `sourceField`, and `sourceLocator`.
 - APIs:
   - `GET /projects/{project_id}/evidence-graphs`
   - `GET /projects/{project_id}/orchestrations/{run_id}/evidence-graph`

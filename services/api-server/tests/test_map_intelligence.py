@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from integrations.vworld import vworld_configured, vworld_status
 from main import app
 from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
-from integrations.vworld import vworld_configured, vworld_status
 
 
 def _project_with_parcels(geometry=None):
@@ -26,21 +26,21 @@ def _project_with_parcels(geometry=None):
 
 def test_unlocated_parcel_is_valid_feature_with_null_geometry():
     result = build_project_map_intelligence(_project_with_parcels())
-    fc = result["parcelGeoJson"]
-    assert fc["type"] == "FeatureCollection"
-    assert len(fc["features"]) == 1
-    feature = fc["features"][0]
-    assert feature["geometry"] is None  # not fabricated
+    feature_collection = result["parcelGeoJson"]
+    assert feature_collection["type"] == "FeatureCollection"
+    assert len(feature_collection["features"]) == 1
+    feature = feature_collection["features"][0]
+    assert feature["geometry"] is None
     assert feature["properties"]["pnu"] == "2729011700101230004"
     assert feature["properties"]["officialLandPricePerSqm"] == 3150000
     assert result["summary"]["hasGeometry"] is False
     assert result["center"] is None
-    # boundary layer waits for geometry; price/zoning are live
+
     layers = {layer["id"]: layer for layer in result["layers"]}
     assert layers["parcel_boundary"]["status"] == "needs_geometry"
     assert layers["official_land_price"]["status"] == "available"
     assert layers["zoning"]["status"] == "available"
-    assert any("경계 형상" in note for note in result["dataLimitations"])
+    assert any("경계 도형" in note for note in result["dataLimitations"])
 
 
 def test_polygon_geometry_makes_layer_available_and_centers():
@@ -86,7 +86,7 @@ def test_no_parcels_reports_limitation():
     result = build_project_map_intelligence({})
     assert result["summary"]["parcelCount"] == 0
     assert result["parcelGeoJson"]["features"] == []
-    assert any("토지대장" in note for note in result["dataLimitations"])
+    assert any("필지 데이터" in note for note in result["dataLimitations"])
 
 
 def test_map_endpoint_returns_payload():
@@ -98,6 +98,7 @@ def test_map_endpoint_returns_payload():
     assert body["schemaVersion"] == "realytics-map-intelligence-v1"
     assert body["parcelGeoJson"]["type"] == "FeatureCollection"
     assert isinstance(body["layers"], list) and len(body["layers"]) == 6
+    assert {layer["label"] for layer in body["layers"]} >= {"필지 경계", "공시지가", "용도지역"}
 
 
 def test_map_endpoint_404_for_unknown_project():
@@ -119,7 +120,6 @@ def test_resolve_and_attach_geometry_fills_missing_only():
     assert calls == ["2729011700101230004"]
     result = build_project_map_intelligence(project)
     assert result["summary"]["hasGeometry"] is True
-    # a second pass resolves nothing (already has geometry)
     assert resolve_and_attach_geometry(project, resolver, limit=30) == 0
 
 
@@ -130,9 +130,30 @@ def test_resolve_skips_when_resolver_returns_none():
     assert build_project_map_intelligence(project)["summary"]["hasGeometry"] is False
 
 
+def test_resolve_limit_can_cover_large_multi_parcel_map():
+    project = {
+        "land_ledger": {
+            "parcels": [
+                {"pnu": f"414631030010001{index:04d}", "addressFragment": f"상갈동 {index}", "lotNumber": str(index)}
+                for index in range(112)
+            ]
+        }
+    }
+    calls = []
+    geometry = {"type": "Point", "coordinates": [127.1, 37.2]}
+
+    def resolver(pnu):
+        calls.append(pnu)
+        return geometry
+
+    assert resolve_and_attach_geometry(project, resolver, limit=150) == 112
+    assert len(calls) == 112
+    result = build_project_map_intelligence(project)
+    assert result["summary"]["locatedParcelCount"] == 112
+
+
 def test_vworld_status_is_secret_safe():
     status = vworld_status({"VWORLD_API_KEY": "SECRET-KEY-VALUE"})
     assert status["configured"] is True
-    # the key itself is never echoed
     assert "SECRET-KEY-VALUE" not in str(status)
     assert vworld_configured({}) is False

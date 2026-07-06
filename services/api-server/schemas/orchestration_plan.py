@@ -38,6 +38,9 @@ class WorkOrderPromptDraft(BaseModel):
 class OrchestrationPlanResult(BaseModel):
     analysisType: str = "orchestration_plan_v1"
     projectId: Optional[str] = None
+    workflowTrack: Optional[str] = None
+    trackLabel: Optional[str] = None
+    trackWorkflow: Optional[Dict[str, Any]] = None
     dataAvailability: Dict[str, bool]
     workflows: List[WorkflowOption]
     outputOptions: List[WorkOrderOutputOption] = Field(default_factory=list)

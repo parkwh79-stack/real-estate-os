@@ -80,6 +80,8 @@ JSONB_STORE_TABLES: List[str] = [
     "land_evidence",
     "risk_registers",
     "evidence_graphs",
+    "chief_pod_artifacts",
+    "pod_ai_reviews",
     "prompt_artifacts",
     "assumption_overrides",
     "restructuring_cures",

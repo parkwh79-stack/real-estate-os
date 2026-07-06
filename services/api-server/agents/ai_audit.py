@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable
+
+SECRET_KEYS = {"api_key", "apikey", "token", "secret", "password"}
+
+
+def _safe_context(context: Dict[str, Any] | None) -> Dict[str, Any]:
+    safe: Dict[str, Any] = {}
+    for key, value in (context or {}).items():
+        if any(secret in key.lower() for secret in SECRET_KEYS):
+            safe[key] = "[redacted]"
+        elif isinstance(value, dict):
+            safe[key] = _safe_context(value)
+        else:
+            safe[key] = value
+    return safe
+
+
+def brain_source_from_context(context: Dict[str, Any] | None) -> str:
+    source = (context or {}).get("selection_source")
+    if source == "explicit_request_override":
+        return "request_override"
+    if source == "user_ai_profile":
+        return "user_profile"
+    if source in {"system_free_fallback", "user_ai_profile_without_key_system_fallback"}:
+        return "system_fallback"
+    if source == "tenant_policy":
+        return "tenant_policy"
+    if not (context or {}).get("direct_model_call"):
+        return "deterministic_fallback"
+    return "request_override" if (context or {}).get("api_key") else "system_fallback"
+
+
+def key_mode_from_context(context: Dict[str, Any] | None) -> str:
+    if (context or {}).get("api_key"):
+        return "byok"
+    if (context or {}).get("direct_model_call"):
+        return "system_key"
+    return "no_key"
+
+
+def prompt_hash(prompt: str, system: str = "") -> str:
+    digest = hashlib.sha256()
+    digest.update((system or "").encode("utf-8", errors="ignore"))
+    digest.update(b"\n---prompt---\n")
+    digest.update((prompt or "").encode("utf-8", errors="ignore"))
+    return digest.hexdigest()
+
+
+def _list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def build_ai_brain_used_audit_event(
+    *,
+    context: Dict[str, Any],
+    prompt: str,
+    system: str,
+    agent_id: str | None = None,
+    project_id: str | None = None,
+    deal_id: str | None = None,
+    run_id: str | None = None,
+    status: str = "success",
+    error: str | None = None,
+    token_usage: Dict[str, Any] | None = None,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+    input_evidence_ids: Iterable[str] | None = None,
+    output_finding_ids: Iterable[str] | None = None,
+) -> Dict[str, Any]:
+    safe_context = _safe_context(context)
+    completed = completed_at or datetime.now(timezone.utc).isoformat()
+    started = started_at or completed
+    effective_deal_id = str(deal_id or project_id or context.get("deal_id") or context.get("project_id") or "")
+    metadata = {
+        "schemaVersion": "realytics-ai-brain-used-audit-v1",
+        "dealId": effective_deal_id or None,
+        "agentId": agent_id or context.get("agent_id") or "AIConnection",
+        "tenantId": context.get("tenant_id") or context.get("tenantId"),
+        "provider": safe_context.get("provider"),
+        "runtimeProvider": safe_context.get("runtime_provider"),
+        "model": safe_context.get("model"),
+        "brainSource": brain_source_from_context(context),
+        "keyMode": key_mode_from_context(context),
+        "promptHash": prompt_hash(prompt, system),
+        "inputEvidenceIds": list(input_evidence_ids or _list(context.get("inputEvidenceIds") or context.get("input_evidence_ids"))),
+        "outputFindingIds": list(output_finding_ids or _list(context.get("outputFindingIds") or context.get("output_finding_ids"))),
+        "tokenUsage": token_usage or {},
+        "startedAt": started,
+        "completedAt": completed,
+        "status": status,
+        "error": error,
+        "aiContext": safe_context,
+    }
+    return {
+        "eventType": "ai_brain_used",
+        "createdAt": completed,
+        "userId": context.get("user_id") or context.get("userId") or "anonymous",
+        "projectId": str(project_id or context.get("project_id") or effective_deal_id or "") or None,
+        "runId": run_id or context.get("run_id") or context.get("runId"),
+        "metadata": metadata,
+    }
+
+
+def record_ai_brain_used(event: Dict[str, Any]) -> Dict[str, Any] | None:
+    try:
+        from storage import record_user_activity_log
+
+        return record_user_activity_log(event)
+    except Exception:
+        # AI audit must never break an Agent run.
+        return None

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState, type RefObject } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -9,14 +9,15 @@ import {
   CheckCircle2,
   Landmark,
   Layers3,
+  LogOut,
   Loader2,
   ShieldCheck,
   Sparkles,
   UploadCloud,
   Wallet,
 } from "lucide-react";
-import { apiBase, authHeaders } from "../../lib/auth-client";
-import { setStoredWorkflowTrack, type WorkflowTrack } from "../../lib/workflow-track";
+import { apiBase, authHeaders, clearStoredAuthSession } from "../../lib/auth-client";
+import { getTrackWorkflowDefinition, setStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
 import { SmartIntake } from "../intake/smart-intake";
 
 type Phase = "idle" | "creating" | "ready" | "error";
@@ -57,39 +58,39 @@ type TriageResult = {
 
 const TRACK_META: Record<WorkflowTrack, Pick<TriageTrack, "label" | "title" | "description" | "entryHref">> = {
   development: {
-    label: "부동산개발",
-    title: "부동산개발",
-    description: "토지, 인허가, 사업수지, 분양수입, 개발가능성을 먼저 검토합니다.",
+    label: TRACK_LABELS.development,
+    title: TRACK_LABELS.development,
+    description: "토지, 인허가, 사업수지, 분양수입, 개발 가능성을 먼저 검토합니다.",
     entryHref: "input-package",
   },
   pf: {
-    label: "부동산 PF",
-    title: "부동산 PF",
-    description: "PF 구조, Tranche, 상환재원, Exit 분양률, 심사보고서를 검토합니다.",
-    entryHref: "orchestration",
+    label: TRACK_LABELS.pf,
+    title: TRACK_LABELS.pf,
+    description: "PF 구조, Tranche, 상환재원, Exit 분양률, 심사보고서 작성 가능성을 검토합니다.",
+    entryHref: "chief-orchestration",
   },
   finance: {
-    label: "부동산금융",
-    title: "부동산금융",
+    label: TRACK_LABELS.finance,
+    title: TRACK_LABELS.finance,
     description: "담보대출, 리파이낸싱, 대출구조, 회수 가능성을 검토합니다.",
     entryHref: "input-package",
   },
   real_asset_finance: {
-    label: "부동산 실물금융",
-    title: "부동산 실물금융",
+    label: TRACK_LABELS.real_asset_finance,
+    title: TRACK_LABELS.real_asset_finance,
     description: "임대료, NOI, Cap Rate, 실물자산 인수와 담보가치를 검토합니다.",
     entryHref: "input-package",
   },
   reit: {
-    label: "리츠",
-    title: "리츠",
+    label: TRACK_LABELS.reit,
+    title: TRACK_LABELS.reit,
     description: "편입자산, 배당재원, 감정가, 운용구조와 공시 리스크를 검토합니다.",
     entryHref: "input-package",
   },
   fund: {
-    label: "부동산 펀드",
-    title: "부동산 펀드",
-    description: "펀드 설정, 투자대상, 대출약정, 운용과 회수 리스크를 검토합니다.",
+    label: TRACK_LABELS.fund,
+    title: TRACK_LABELS.fund,
+    description: "펀드 설정, 투자대상, 대출/에쿼티 구조, 운용·회수 리스크를 검토합니다.",
     entryHref: "input-package",
   },
 };
@@ -101,6 +102,17 @@ const TRACK_ICONS: Record<WorkflowTrack, typeof Building2> = {
   real_asset_finance: BarChart3,
   reit: Layers3,
   fund: Wallet,
+};
+
+const DOCUMENT_TYPE_LABEL: Record<string, string> = {
+  business_plan: "사업계획서 / IM",
+  basic_architectural_plan: "건축 기본계획",
+  land_ledger: "토지대장 / 토지조서",
+  feasibility_workbook: "사업수지 / Cash Flow Excel",
+  risk_report_workbook: "리스크 보고서 Excel",
+  land_evidence: "토지 증빙",
+  market_evidence: "시장·거래 증빙",
+  unknown: "미분류",
 };
 
 function deriveProjectName(files: File[]): string {
@@ -143,21 +155,21 @@ function buildLocalTriage(classified: Classified[], fallbackReason: string): Tri
     for (const [track, weight] of Object.entries(docWeights) as Array<[WorkflowTrack, number]>) {
       const add = Number((weight * confidence).toFixed(3));
       scores[track] += add;
-      reasons[track].push(`${item.label || item.documentType}: 문서유형 가중치 ${weight} x 분류 신뢰도 ${Math.round(confidence * 100)}%`);
+      reasons[track].push(`${DOCUMENT_TYPE_LABEL[item.documentType] ?? item.label ?? item.documentType}: 가중치 ${weight} x 분류 신뢰도 ${Math.round(confidence * 100)}%`);
     }
 
     const name = item.filename.toLowerCase();
     if (name.includes("pf")) {
       scores.pf += 2;
-      reasons.pf.push("파일명에 PF 포함");
+      reasons.pf.push("파일명에 PF 신호 포함");
     }
     if (name.includes("reit") || name.includes("리츠")) {
       scores.reit += 3;
-      reasons.reit.push("파일명에 리츠/REIT 포함");
+      reasons.reit.push("파일명에 리츠/REIT 신호 포함");
     }
     if (name.includes("fund") || name.includes("펀드")) {
       scores.fund += 3;
-      reasons.fund.push("파일명에 펀드/Fund 포함");
+      reasons.fund.push("파일명에 펀드/Fund 신호 포함");
     }
   }
 
@@ -174,8 +186,8 @@ function buildLocalTriage(classified: Classified[], fallbackReason: string): Tri
         recommended: track === recommendedTrack,
         rationale:
           track === recommendedTrack
-            ? "업로드된 문서유형과 파일명 신호 기준으로 가장 관련성이 높습니다."
-            : "일부 관련 신호가 있으나 추천 트랙보다 점수가 낮습니다.",
+            ? "업로드 문서유형, 파일명 신호, 분류 신뢰도를 기준으로 가장 관련성이 높습니다."
+            : "일부 관련 신호는 있으나 추천 트랙보다 근거가 약합니다.",
         reasons: reasons[track].slice(0, 5),
       };
     })
@@ -187,11 +199,11 @@ function buildLocalTriage(classified: Classified[], fallbackReason: string): Tri
     aiAssisted: false,
     persisted: false,
     fallbackReason,
-    confidenceBasis: "문서유형별 업무트랙 가중치 x 문서분류 신뢰도 + 파일명 키워드 신호",
+    confidenceBasis: "문서유형별 업무트랙 가중치 x 자동분류 신뢰도 + 파일명 키워드 신호",
     tracks,
     limitations: [
-      "서버 트랙 저장이 실패해 브라우저에서 임시 추천을 계산했습니다. 워크스페이스 진입 후 다시 실행하면 DB에 저장됩니다.",
-      "신뢰도는 라우팅 신뢰도이며 사업성 또는 승인 가능성 신뢰도가 아닙니다.",
+      "서버 트랙 추론이 실패해 브라우저에서 임시 추천을 계산했습니다. 워크스페이스 진입 후 다시 실행하면 DB에 저장됩니다.",
+      "신뢰도는 업무트랙 추천 신뢰도이며, 승인 가능성이나 투자 적정성 신뢰도가 아닙니다.",
     ],
   };
 }
@@ -259,7 +271,7 @@ export function CommandCenter() {
         const fallback = buildLocalTriage(classified, reason);
         setTriage(fallback);
         setSelectedTrack(fallback.recommendedTrack);
-        setTriageError(`트랙 저장은 아직 완료되지 않았습니다. 현재 화면은 업로드 문서 신호를 기준으로 만든 임시 추천입니다. (${reason})`);
+        setTriageError(`서버 트랙 추론이 아직 완료되지 않아 문서 신호 기반 임시 추천을 표시합니다. (${reason})`);
       } finally {
         setTriageLoading(false);
       }
@@ -269,34 +281,25 @@ export function CommandCenter() {
 
   const enterWorkspace = useCallback(() => {
     if (!projectId || !selectedTrack) return;
-    const track = triage?.tracks.find((item) => item.track === selectedTrack);
-    const entry = track?.entryHref || "input-package";
     setStoredWorkflowTrack(selectedTrack);
-    router.push(`/project/${projectId}/${entry}?track=${selectedTrack}`);
-  }, [projectId, router, selectedTrack, triage]);
+    router.push(`/project/${projectId}/chief-orchestration?track=${selectedTrack}`);
+  }, [projectId, router, selectedTrack]);
 
-  // "분류대로 처리" completed -> chain the rest automatically: resolve address->PNU,
-  // and (for development/PF) run the PF review, then land on the result.
   const finalizeAndEnter = useCallback(async () => {
     if (!projectId) return;
     const track = (selectedTrack ?? triage?.recommendedTrack ?? "development") as WorkflowTrack;
-    const entry = triage?.tracks.find((item) => item.track === track)?.entryHref || "input-package";
     setStoredWorkflowTrack(track);
     setFinalizing(true);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/intake/finalize`, {
         method: "POST",
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-        body: JSON.stringify({ track, run: true }),
+        body: JSON.stringify({ track, run: false }),
       });
-      const body = (await res.json().catch(() => ({}))) as { analysisRun?: { run_id?: string } };
-      if (body?.analysisRun?.run_id) {
-        router.push(`/project/${projectId}/orchestration?track=${track}`);
-        return;
-      }
-      router.push(`/project/${projectId}/${entry}?track=${track}`);
+      await res.json().catch(() => ({}));
+      router.push(`/project/${projectId}/chief-orchestration?track=${track}`);
     } catch {
-      router.push(`/project/${projectId}/${entry}?track=${track}`);
+      router.push(`/project/${projectId}/chief-orchestration?track=${track}`);
     } finally {
       setFinalizing(false);
     }
@@ -305,6 +308,17 @@ export function CommandCenter() {
   return (
     <main className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-slate-950 px-5 py-12 text-white">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgba(56,189,248,0.12),transparent),radial-gradient(50%_40%_at_80%_100%,rgba(99,102,241,0.12),transparent)]" />
+      <button
+        type="button"
+        onClick={() => {
+          clearStoredAuthSession();
+          router.replace("/login?next=/start");
+        }}
+        className="absolute right-5 top-5 z-20 inline-flex h-9 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/80 px-3 text-xs font-bold text-slate-300 backdrop-blur hover:border-sky-500 hover:text-white"
+      >
+        <LogOut className="h-4 w-4" />
+        다른 계정으로 로그인
+      </button>
 
       <div className="relative z-10 w-full max-w-3xl">
         <div className="mb-8 flex flex-col items-center text-center">
@@ -319,7 +333,8 @@ export function CommandCenter() {
             자료를 올리면 <span className="bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent">AI가 분석을 시작</span>합니다
           </h1>
           <p className="mt-3 max-w-xl text-sm leading-6 text-slate-400">
-            사업계획서, 토지조서, 사업수지, 임대내역 등 여러 자료를 한 번에 올리세요. AI가 문서를 자동 분류하고 진행할 업무를 추천합니다.
+            사업계획서, 토지조서, 사업수지, 임대내역 등 여러 자료를 한 번에 올리세요.
+            AI가 문서를 자동 분류하고 진행할 업무 트랙을 추천합니다.
           </p>
         </div>
 
@@ -345,7 +360,7 @@ export function CommandCenter() {
             {finalizing ? (
               <div className="flex items-center gap-3 rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm font-bold text-sky-200">
                 <Loader2 className="h-5 w-5 animate-spin" />
-                자료를 연결하고 (주소→PNU·공시지가) 선택한 트랙의 분석을 실행 중입니다. 잠시 후 결과 화면으로 이동합니다.
+                자료를 연결하고 주소·PNU 보강 가능성을 확인 중입니다. 다음 화면에서 부족자료와 보강 순서를 안내합니다.
               </div>
             ) : null}
             <div className="rounded-2xl bg-white p-1 text-slate-900 dark:bg-slate-900 dark:text-white">
@@ -371,7 +386,7 @@ export function CommandCenter() {
 
         <div className="mt-8 flex items-center justify-center gap-2 text-xs text-slate-500">
           <ShieldCheck className="h-4 w-4" />
-          업로드 자료는 세션 기준으로 안전하게 보관되며, AI는 근거 있는 추출만 수행합니다.
+          업로드 자료는 세션 기준으로 보관되며, AI는 근거 있는 추출만 수행합니다.
           <Sparkles className="h-4 w-4 text-sky-500/70" />
         </div>
       </div>
@@ -388,7 +403,7 @@ function DropZone({
 }: {
   phase: Phase;
   dragOver: boolean;
-  inputRef: React.RefObject<HTMLInputElement | null>;
+  inputRef: RefObject<HTMLInputElement | null>;
   onDragOver: (value: boolean) => void;
   onStart: (files: File[]) => void;
 }) {
@@ -468,12 +483,12 @@ function TrackTriagePanel({
           <p className="text-xs font-bold uppercase tracking-[0.16em] text-sky-300">AI Track Triage</p>
           <h2 className="mt-1 text-xl font-black">이 자료로 무엇을 진행하시겠습니까?</h2>
           <p className="mt-2 text-sm leading-6 text-slate-400">
-            AI가 문서분류 결과를 근거로 부동산개발, PF, 부동산금융, 실물금융, 리츠, 펀드 중 적합한 트랙을 추천합니다.
+            AI가 문서분류 결과를 근거로 부동산 개발, PF, 부동산 금융, 실물금융, 리츠, 펀드 중 적합한 트랙을 추천합니다.
           </p>
         </div>
         {triage ? (
           <div className="space-y-2 rounded-lg border border-slate-700 px-3 py-2 text-xs font-bold text-slate-300">
-            <p>추천 방식: {triage.aiAssisted ? "LLM 보조" : triage.recommendationSource === "local_fallback" ? "로컬 임시 규칙" : "서버 결정론 규칙"}</p>
+            <p>추천 방식: {triage.aiAssisted ? "LLM 보조" : triage.recommendationSource === "local_fallback" ? "로컬 임시 규칙" : "서버 결정 규칙"}</p>
             <p className="font-semibold leading-5 text-slate-400">
               신뢰도 근거: {triage.confidenceBasis ?? "문서유형별 업무트랙 가중치, 자동분류 신뢰도, 파일명 신호 기준입니다. 승인 가능성은 별도 Gate에서 판단합니다."}
             </p>
@@ -497,6 +512,7 @@ function TrackTriagePanel({
             {tracks.map((track) => {
               const Icon = TRACK_ICONS[track.track];
               const selected = selectedTrack === track.track;
+              const workflow = getTrackWorkflowDefinition(track.track);
               return (
                 <button
                   key={track.track}
@@ -514,7 +530,7 @@ function TrackTriagePanel({
                         <Icon className="h-5 w-5" />
                       </div>
                       <div>
-                        <p className="text-base font-black">{track.title}</p>
+                        <p className="text-base font-black">{TRACK_LABELS[track.track]}</p>
                         <p className="text-xs font-semibold text-slate-400">신뢰도 {Math.round(track.confidence * 100)}%</p>
                       </div>
                     </div>
@@ -525,6 +541,17 @@ function TrackTriagePanel({
                     ) : null}
                   </div>
                   <p className="mt-3 text-sm leading-6 text-slate-300">{track.description}</p>
+                  <div className="mt-3 rounded-lg border border-slate-700/70 bg-slate-950/50 p-3">
+                    <p className="text-[11px] font-black uppercase tracking-wide text-sky-300">선택 시 오케스트레이션</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-300">{workflow.decisionQuestion}</p>
+                    <ol className="mt-2 space-y-1 text-xs leading-5 text-slate-500">
+                      {workflow.steps.slice(0, 3).map((step, index) => (
+                        <li key={step.key}>
+                          {index + 1}. {step.title}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
                   <p className="mt-3 text-xs leading-5 text-slate-500">{track.rationale}</p>
                   {track.reasons.length ? (
                     <ul className="mt-3 space-y-1 text-xs leading-5 text-slate-500">
@@ -547,7 +574,7 @@ function TrackTriagePanel({
               disabled={!selectedTrack}
               className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-white px-4 text-sm font-black text-slate-950 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              선택 트랙으로 입장 <ArrowRight className="h-4 w-4" />
+              선택 트랙 워크스페이스로 이동 <ArrowRight className="h-4 w-4" />
             </button>
           </div>
         </>

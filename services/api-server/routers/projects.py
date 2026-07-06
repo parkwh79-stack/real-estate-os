@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response
+from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response, Query
 from fastapi.responses import FileResponse
 from typing import Dict, Any
 from datetime import datetime, timezone
 import base64
 import tempfile
 import os
+import re
 from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
 from agents.feasibility_workbook_importer import import_feasibility_study_from_workbook
@@ -41,7 +42,10 @@ from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
 from storage import (
     get_evidence_graph_record,
+    get_chief_pod_artifact_record,
     get_prompt_artifact_record,
+    list_chief_pod_artifact_records,
+    list_recalculation_event_records,
     get_risk_register_record,
     list_evidence_graph_records,
     list_assumption_override_records,
@@ -49,8 +53,11 @@ from storage import (
     list_prompt_artifact_records,
     list_restructuring_cure_records,
     list_risk_register_records,
+    list_calculation_run_records,
+    list_deal_state_records,
     load_state,
     record_user_activity_log,
+    list_user_activity_logs,
     save_state,
     upsert_project_record,
     delete_project_record_cascade,
@@ -59,11 +66,19 @@ from storage import (
     upsert_project_snapshot_record,
     upsert_assumption_override_record,
     upsert_land_evidence_record,
+    upsert_chief_pod_artifact_record,
+    upsert_recalculation_event_record,
     upsert_prompt_artifact_record,
     upsert_restructuring_cure_record,
     upsert_risk_register_record,
+    upsert_calculation_run_record,
 )
 from use_cases.cash_flow import run_cash_flow_use_case
+from use_cases.chief_deal_orchestration import (
+    plan_chief_deal_orchestration_use_case,
+    run_chief_deal_all_pods_use_case,
+    run_chief_deal_pod_use_case,
+)
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
@@ -75,19 +90,21 @@ from use_cases.feasibility_workbook_llm import (
     extract_feasibility_fields_via_llm,
 )
 from use_cases.intake_finalize import finalize_project_intake_use_case
+from use_cases.parcel_pnu_resolution import resolve_project_parcels_use_case, resolve_address_to_parcel
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
 from use_cases.async_jobs import submit_pf_review_job, get_job_store, recover_interrupted_jobs
 from use_cases.term_annotation import annotate_terms_use_case
+from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
 from use_cases.covenant_monitoring import (
     monitor_covenants_use_case,
     set_monitoring_thresholds_use_case,
 )
 from use_cases.portfolio_monitoring import build_portfolio_monitoring
 from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
-from integrations.vworld import build_pnu_geometry_resolver, vworld_configured
+from integrations.vworld import build_pnu_geometry_resolver, vworld_configured, vworld_status
 from db.parcel_geometry_cache import build_parcel_geometry_cache, build_caching_resolver
 from integrations.market_data import MolitRtmsConnector
 from agents.document_classifier_agent import classify_document
@@ -240,6 +257,28 @@ def tenant_id_from_request(request: Request) -> str | None:
     session = context.get("session") or {}
     return user.get("tenantId") or session.get("tenantId")
 
+def ai_context_from_request(
+    request: Request,
+    *,
+    explicit_provider: str | None = None,
+    explicit_user_id: str | None = None,
+    payload_ai_context: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    context = identity_context_from_request(request)
+    user = context.get("user") or {}
+    session = context.get("session") or {}
+    override = dict(payload_ai_context or {})
+    if explicit_provider:
+        override["provider"] = explicit_provider
+    user_id = user.get("userId") or explicit_user_id or "anonymous"
+    tenant_id = user.get("tenantId") or session.get("tenantId")
+    return build_user_ai_context(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        host="api",
+        override=override,
+    )
+
 def stamp_project_identity(project_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
     """Attach persisted user identity to new project records for user-specific dashboards."""
     context = identity_context_from_request(request)
@@ -365,6 +404,157 @@ def land_evidence_records_from_ledger(land_ledger: Dict[str, Any]) -> list[Dict[
             })
     return records
 
+def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, Any], options: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Build best-effort, source-backed enrichment options for an uploaded land ledger.
+
+    The function is intentionally conservative. It never fabricates PNU, price,
+    or registry evidence. It only adds:
+    - legalDongCode derived from an already stored project PNU; or
+    - pnuResolutions resolved through VWorld address -> parcel lookup.
+    Official land price/cadastral live adapters remain governed by
+    LandDataConnectorRouter config and explicit options.
+    """
+    merged = dict(options or {})
+    project = PROJECTS_DB.get(project_id) or {}
+    project_pnu = str(((project.get("land") or {}).get("pnu") or "")).strip()
+    if not merged.get("legalDongCode") and len(project_pnu) >= 10 and project_pnu[:10].isdigit():
+        merged["legalDongCode"] = project_pnu[:10]
+        merged.setdefault("pnuResolverSource", "project_land_pnu_legal_dong_code")
+
+    if "autoResolvePnuFromAddress" not in merged and "auto_resolve_pnu_from_address" not in merged:
+        # When a confirmed legal dong code is already available, deterministic
+        # legal-dong + lot-number PNU generation is safer and faster than a
+        # best-effort address geocode. Use VWorld address lookup by default
+        # only when we need to discover the legal dong/PNU from project address.
+        merged["autoResolvePnuFromAddress"] = not bool(merged.get("legalDongCode") or merged.get("legal_dong_code"))
+
+    if not (merged.get("autoResolvePnuFromAddress") or merged.get("auto_resolve_pnu_from_address")):
+        return merged
+
+    project_base_address = _legal_dong_base_address((project.get("land") or {}).get("address"))
+    parcels = land_ledger.get("parcels") or []
+    max_parcels = int(merged.get("autoResolvePnuLimit") or merged.get("auto_resolve_pnu_limit") or 150)
+    pnu_resolutions = list(merged.get("pnuResolutions") or merged.get("pnu_resolutions") or [])
+    official_land_prices = list(merged.get("officialLandPrices") or merged.get("official_land_prices") or [])
+    cadastral_records = list(merged.get("cadastralCharacteristics") or merged.get("cadastral_characteristics") or [])
+    diagnostics: list[Dict[str, Any]] = []
+    seen_keys = {
+        str(record.get("pnu") or record.get("resolvedPnu") or record.get("parcelKey") or "")
+        for record in pnu_resolutions
+        if isinstance(record, dict)
+    }
+
+    for parcel in parcels[:max_parcels]:
+        if parcel.get("pnu") or parcel.get("resolvedPnu"):
+            continue
+        address = _parcel_lookup_address(parcel, project_base_address)
+        if not address:
+            diagnostics.append({
+                "connector": "vworld_address_pnu",
+                "status": "skipped_missing_address",
+                "sequence": parcel.get("sequence"),
+            })
+            continue
+
+        resolved = resolve_address_to_parcel(address)
+        if resolved.get("status") == "resolved" and resolved.get("pnu"):
+            key = str(resolved["pnu"])
+            if key not in seen_keys:
+                pnu_resolutions.append({
+                    "parcelKey": parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"),
+                    "sequence": parcel.get("sequence"),
+                    "addressFragment": address,
+                    "pnu": resolved["pnu"],
+                    "resolvedPnu": resolved["pnu"],
+                    "resolvedLegalAddress": resolved.get("addressFragment") or address,
+                    "matchConfidence": 0.92 if project_base_address else 0.85,
+                    "matchMethod": "vworld_address_to_parcel_lookup",
+                    "candidateCount": 1,
+                    "sourceName": "VWorld parcel lookup",
+                    "sourceType": "public_api",
+                    "sourceUrlOrEvidenceId": "vworld:address-to-parcel",
+                    "baseDate": None,
+                })
+                seen_keys.add(key)
+            if resolved.get("officialLandPricePerSqm"):
+                official_land_prices.append({
+                    "pnu": resolved["pnu"],
+                    "parcelKey": parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"),
+                    "pricePerSqm": resolved.get("officialLandPricePerSqm"),
+                    "baseYear": resolved.get("officialLandPriceBaseYear"),
+                    "baseDate": resolved.get("officialLandPriceBaseDate"),
+                    "sourceName": "VWorld cadastral jiga",
+                    "sourceType": "public_api",
+                    "sourceUrlOrEvidenceId": "vworld:LP_PA_CBND_BUBUN:jiga",
+                    "confidence": 0.95,
+                    "fetchedAt": now_iso(),
+                })
+            cadastral_records.append({
+                "pnu": resolved["pnu"],
+                "parcelKey": parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"),
+                "landCategory": resolved.get("landCategory"),
+                "areaSqm": resolved.get("areaSqm"),
+                "sourceName": "VWorld cadastral parcel",
+                "sourceType": "public_api",
+                "sourceUrlOrEvidenceId": "vworld:LP_PA_CBND_BUBUN",
+                "fetchedAt": now_iso(),
+            })
+            diagnostics.append({
+                "connector": "vworld_address_pnu",
+                "status": "resolved",
+                "sequence": parcel.get("sequence"),
+                "addressFragment": address,
+                "pnu": resolved["pnu"],
+            })
+        else:
+            diagnostics.append({
+                "connector": "vworld_address_pnu",
+                "status": resolved.get("status") or "unresolved",
+                "sequence": parcel.get("sequence"),
+                "addressFragment": address,
+            })
+
+    if pnu_resolutions:
+        merged["pnuResolutions"] = pnu_resolutions
+    if official_land_prices:
+        merged["officialLandPrices"] = official_land_prices
+    if cadastral_records:
+        merged["cadastralCharacteristics"] = cadastral_records
+    if diagnostics:
+        merged["autoPnuDiagnostics"] = diagnostics
+    return merged
+
+
+def _legal_dong_base_address(address: Any) -> str | None:
+    text = str(address or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace("일원", "").replace("일대", "")
+    text = re.sub(r"\d+\s*(?:-\s*\d+)?\s*번지?.*$", "", text).strip()
+    text = re.sub(r"(?<=[가-힣])(도|특별시|광역시|특별자치시|특별자치도|시|군|구|읍|면|동|리|가)(?=[가-힣])", r"\1 ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or None
+
+
+def _parcel_lookup_address(parcel: Dict[str, Any], project_base_address: str | None) -> str | None:
+    raw = str(
+        parcel.get("addressFragment")
+        or parcel.get("normalizedLotNumber")
+        or parcel.get("rawLotNumber")
+        or ""
+    ).strip()
+    if not raw:
+        return None
+    if any("\uac00" <= char <= "\ud7a3" for char in raw):
+        return raw
+    lot = raw
+    if (parcel.get("isMountain") or parcel.get("is_mountain")) and not lot.startswith("산"):
+        lot = f"산 {lot}"
+    if project_base_address:
+        return f"{project_base_address} {lot}".strip()
+    return lot
+
 def persisted_land_evidence_package(project_id: str) -> Dict[str, Any]:
     records = list_land_evidence_records(project_id)
     by_type: Dict[str, list[Dict[str, Any]]] = {}
@@ -463,6 +653,64 @@ def attach_approved_assumption_overrides(project_id: str, project_data: Dict[str
     if isinstance(enriched_project["sourceMetadata"], dict):
         enriched_project["sourceMetadata"]["approvedAssumptionOverrideCount"] = len(overrides)
     return enriched_project
+
+
+def _metric_rows_from_result(result: Dict[str, Any], *, prefix: str = "") -> list[Dict[str, Any]]:
+    rows: list[Dict[str, Any]] = []
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    for key, metric in metrics.items():
+        if isinstance(metric, dict):
+            rows.append({
+                "key": f"{prefix}{key}",
+                "value": metric.get("value"),
+                "unit": metric.get("unit"),
+                "label": metric.get("label") or key,
+                "status": metric.get("status"),
+            })
+        else:
+            rows.append({"key": f"{prefix}{key}", "value": metric})
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    for key, value in summary.items():
+        if isinstance(value, (int, float)):
+            rows.append({"key": f"{prefix}summary.{key}", "value": value})
+    for key, value in result.items():
+        if key in {"metrics", "summary", "riskFlags", "risk_flags", "riskIssues", "monthlyCashFlow", "cashflows"}:
+            continue
+        if isinstance(value, (int, float)):
+            rows.append({"key": f"{prefix}{key}", "value": value})
+    return rows
+
+
+def _risk_rows_from_result(result: Dict[str, Any]) -> list[Dict[str, Any]]:
+    risks = result.get("riskFlags") or result.get("risk_flags") or result.get("riskIssues") or []
+    return [risk for risk in risks if isinstance(risk, dict)]
+
+
+def _persist_calculation_run(
+    project_id: str,
+    *,
+    engine_key: str,
+    result: Dict[str, Any],
+    input_data: Dict[str, Any] | None = None,
+    artifact_ref: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    input_data = input_data or {}
+    return upsert_calculation_run_record(
+        project_id,
+        {
+            "engineKey": engine_key,
+            "engineVersion": input_data.get("engineVersion") or f"{engine_key}-v1",
+            "inputEvidenceIds": input_data.get("inputEvidenceIds") or input_data.get("evidenceIds") or [],
+            "assumptionIds": input_data.get("assumptionIds") or [],
+            "outputMetrics": _metric_rows_from_result(result, prefix=f"{engine_key}."),
+            "riskIssues": _risk_rows_from_result(result),
+            "artifactRef": artifact_ref or {},
+            "inputDigest": {
+                "keys": sorted(str(key) for key in input_data.keys()),
+                "source": input_data.get("source") or input_data.get("sourceName") or "api_request",
+            },
+        },
+    )
 
 def attach_active_restructuring_cures(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
     cures = list_restructuring_cure_records(project_id, status="active")
@@ -599,9 +847,14 @@ async def parse_uploaded_business_plan(
     }
 
     try:
-        agent = ParserAgent(ai_context)
+        parser_ai_context = {
+            **ai_context,
+            "project_id": project_id,
+            "agent_id": "ParserAgent",
+        }
+        agent = ParserAgent(parser_ai_context)
         text = agent.parse_document(tmp_path)
-        parsed_data = agent.extract_project_data(text, ai_context)
+        parsed_data = agent.extract_project_data(text, parser_ai_context)
         parsed_data.setdefault("_meta", {})
         parsed_data["_meta"]["upload"] = upload_meta
         parsed_data["_meta"]["parser_version"] = PARSER_AGENT_VERSION
@@ -916,6 +1169,7 @@ def delete_project(project_id: str):
 @router.post("/{project_id}/upload")
 async def upload_business_plan(
     project_id: str,
+    request: Request,
     file: UploadFile = File(...),
     x_realytics_user_id: str | None = Header(default=None),
     x_realytics_ai_provider: str | None = Header(default=None),
@@ -923,13 +1177,12 @@ async def upload_business_plan(
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    ai_context = resolve_ai_context(
-        {
-            "user_id": x_realytics_user_id,
-            "provider": x_realytics_ai_provider,
-            "host": "api",
-        },
+    ai_context = ai_context_from_request(
+        request,
+        explicit_provider=x_realytics_ai_provider,
+        explicit_user_id=x_realytics_user_id,
     )
+    ai_context = {**ai_context, "project_id": project_id, "agent_id": "ParserAgent"}
     parsed_data = await parse_uploaded_business_plan(project_id, file, ai_context)
     if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
         upload_meta = parsed_data.get("_meta", {}).get("upload")
@@ -1020,7 +1273,7 @@ async def smart_intake_classify(project_id: str, files: list[UploadFile] = File(
 
 
 @router.post("/{project_id}/intake/triage")
-def smart_intake_triage(project_id: str, input_data: Dict[str, Any] | None = None):
+def smart_intake_triage(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Recommend the OS business track after SmartIntake classification.
 
     The recommendation is based only on classified document metadata. It never
@@ -1034,7 +1287,14 @@ def smart_intake_triage(project_id: str, input_data: Dict[str, Any] | None = Non
         "projectId": project_id,
         "persisted": True,
         "confidenceBasis": "문서유형별 업무트랙 가중치 × 자동분류 신뢰도 + 파일명 신호를 기준으로 산정합니다. 승인 가능성은 별도 Approval Readiness Gate에서 판단합니다.",
-        **triage_intake_documents(files, ai_context=payload.get("aiContext")),
+        **triage_intake_documents(
+            files,
+            ai_context={
+                **ai_context_from_request(request, payload_ai_context=payload.get("aiContext")),
+                "project_id": project_id,
+                "agent_id": "IntakeTriageAgent",
+            },
+        ),
     }
     history_item = {
         "triageId": str(uuid4()),
@@ -1073,19 +1333,23 @@ def smart_intake_triage(project_id: str, input_data: Dict[str, Any] | None = Non
 
 @router.post("/{project_id}/intake/finalize")
 def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = None):
-    """After classify+parse: promote identity, resolve address->PNU, and (for
-    development/PF tracks) run the PF review orchestration immediately. Makes
-    '분류대로 처리' a connected pipeline rather than isolated parses."""
+    """After classify+parse: promote identity, resolve address->PNU, and return
+    a step-by-step readiness plan.
+
+    PF review does not run by default. The user must explicitly trigger a review
+    after source documents, land evidence, market evidence, feasibility inputs,
+    and risk/cure decisions are sufficiently prepared.
+    """
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     payload = input_data or {}
     track = str(payload.get("track") or "")
-    run = payload.get("run", True)
+    run = payload.get("run", False)
 
-    finalize = finalize_project_intake_use_case(project_repository(), project_id)
+    finalize = finalize_project_intake_use_case(project_repository(), project_id, track=track)
 
     analysis_run = None
-    if run and track in {"development", "pf"}:
+    if run is True and track in {"development", "pf"}:
         source_data = _hydrated_project_source(project_id, {})
         run_result = run_and_save_pf_review_use_case(
             orchestration_repository(), project_id, source_data, {}
@@ -1110,10 +1374,89 @@ async def analyze_land_ledger_upload(
     upload_meta = ledger.get("upload")
     if isinstance(upload_meta, dict):
         save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
+
+    # Persist the parsed ledger onto the project so parcels are actually usable
+    # downstream (batch PNU resolution, land pod, map) — previously the analysis
+    # was returned to the caller and dropped.
+    ledger_payload = {k: v for k, v in ledger.items() if k != "upload"}
+    update_payload: Dict[str, Any] = {"landLedger": ledger_payload}
+    parcels = ledger_payload.get("parcels") or []
+    if parcels and not (PROJECTS_DB[project_id].get("land_acquisition") or []):
+        update_payload["land_acquisition"] = parcels
+    project_repository().update(project_id, update_payload)
+
     return {
         "project_id": project_id,
         "landLedger": ledger,
-        "note": "PNU and official land price enrichment require external connectors after ledger import.",
+        "persisted": True,
+        "note": "필지가 프로젝트에 저장되었습니다. /land/parcels/resolve로 지번별 PNU·공시지가를 일괄 해석할 수 있습니다.",
+    }
+
+
+@router.post("/{project_id}/land/parcels/resolve")
+def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """토지조서의 모든 필지에 대해 지번별 PNU·공시지가를 VWorld로 일괄 해석·저장."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    payload = input_data or {}
+    try:
+        limit = max(1, min(500, int(payload.get("limit") or 150)))
+    except (TypeError, ValueError):
+        limit = 150
+    result = resolve_project_parcels_use_case(project_repository(), project_id, limit=limit)
+    project_after = PROJECTS_DB.get(project_id) or {}
+    parcels: list[Dict[str, Any]] = []
+    land_ledger = project_after.get("landLedger") or project_after.get("land_ledger")
+    if isinstance(land_ledger, dict) and isinstance(land_ledger.get("parcels"), list):
+        parcels.extend([parcel for parcel in land_ledger["parcels"] if isinstance(parcel, dict)])
+    if isinstance(project_after.get("land_acquisition"), list):
+        seen_keys = {
+            str(parcel.get("pnu") or parcel.get("resolvedPnu") or parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"))
+            for parcel in parcels
+        }
+        for parcel in project_after["land_acquisition"]:
+            if not isinstance(parcel, dict):
+                continue
+            key = str(parcel.get("pnu") or parcel.get("resolvedPnu") or parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"))
+            if key in seen_keys:
+                continue
+            parcels.append(parcel)
+            seen_keys.add(key)
+    persisted_evidence: list[Dict[str, Any]] = []
+    if payload.get("persistEvidence", True):
+        for record in land_evidence_records_from_ledger({"parcels": parcels}):
+            persisted_evidence.append(upsert_land_evidence_record(project_id, record))
+    unresolved_count = len([
+        row for row in result.get("results") or []
+        if row.get("status") in {"unresolved", "no_address", "skipped_limit"}
+    ])
+    record_sensitive_project_event(
+        request,
+        event_type="parcel_pnu_batch_resolved",
+        project_id=project_id,
+        metadata={
+            "resolvedCount": result.get("resolvedCount"),
+            "attemptedCount": result.get("attemptedCount"),
+            "totalParcels": result.get("totalParcels"),
+            "unresolvedCount": unresolved_count,
+            "persistedLandEvidenceCount": len(persisted_evidence),
+        },
+    )
+    return {
+        **result,
+        "summary": {
+            "attemptedCount": result.get("attemptedCount"),
+            "resolvedCount": result.get("resolvedCount"),
+            "unresolvedCount": unresolved_count,
+            "totalParcels": result.get("totalParcels"),
+            "limit": limit,
+            "persistedLandEvidenceCount": len(persisted_evidence),
+            "source": "VWorld address-to-parcel lookup",
+        },
+        "persistedLandEvidenceCount": len(persisted_evidence),
+        "persistedLandEvidence": persisted_evidence,
+        "vworld": vworld_status(),
     }
 
 @router.post("/{project_id}/feasibility-workbook/validate")
@@ -1131,6 +1474,7 @@ async def validate_project_feasibility_workbook(
 @router.post("/{project_id}/feasibility-workbook/extract")
 async def extract_project_feasibility_workbook(
     project_id: str,
+    request: Request,
     file: UploadFile = File(...),
     x_realytics_user_id: str | None = Header(default=None),
     x_realytics_ai_provider: str | None = Header(default=None),
@@ -1163,9 +1507,12 @@ async def extract_project_feasibility_workbook(
         **archive_meta,
     }
     save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
-    ai_context = resolve_ai_context(
-        {"user_id": x_realytics_user_id, "provider": x_realytics_ai_provider, "host": "api"}
+    ai_context = ai_context_from_request(
+        request,
+        explicit_provider=x_realytics_ai_provider,
+        explicit_user_id=x_realytics_user_id,
     )
+    ai_context = {**ai_context, "project_id": project_id, "agent_id": "FeasibilityWorkbookLLMAgent"}
     try:
         draft = extract_feasibility_fields_via_llm(tmp_path, ai_context)
     finally:
@@ -1308,7 +1655,15 @@ def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | Non
     if not land_ledger:
         raise HTTPException(status_code=400, detail="landLedger payload or saved project landLedger is required")
 
-    enriched = enrich_land_ledger_use_case(land_ledger, input_data.get("options", {}))
+    options = land_ledger_auto_enrichment_options(
+        project_id,
+        land_ledger,
+        input_data.get("options", {}),
+    )
+    enriched = enrich_land_ledger_use_case(land_ledger, options)
+    if options.get("autoPnuDiagnostics"):
+        enriched.setdefault("enrichmentRun", {})
+        enriched["enrichmentRun"]["autoPnuDiagnostics"] = options["autoPnuDiagnostics"]
     if input_data.get("persist", False):
         project = dict(PROJECTS_DB[project_id])
         project["landLedger"] = enriched
@@ -1324,12 +1679,14 @@ def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | Non
         "landLedger": enriched,
         "persistedLandEvidenceCount": len(persisted_evidence),
         "persistedLandEvidence": persisted_evidence,
-        "note": "PNU/official price/registry enrichment uses provided connector records or legalDongCode; no official price or registry status is fabricated without source evidence.",
+        "vworld": vworld_status(),
+        "note": "PNU is resolved from VWorld address/parcel lookup when VWORLD_API_KEY is configured, or generated only from confirmed legalDongCode plus normalized lot fields. Official price/registry status is never fabricated without source evidence.",
     }
 
 @router.post("/{project_id}/upload-and-run")
 async def upload_business_plan_and_run_pf_review(
     project_id: str,
+    request: Request,
     file: UploadFile = File(...),
     x_realytics_user_id: str | None = Header(default=None),
     x_realytics_ai_provider: str | None = Header(default=None),
@@ -1337,13 +1694,12 @@ async def upload_business_plan_and_run_pf_review(
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    ai_context = resolve_ai_context(
-        {
-            "user_id": x_realytics_user_id or "web",
-            "provider": x_realytics_ai_provider,
-            "host": "api",
-        },
+    ai_context = ai_context_from_request(
+        request,
+        explicit_provider=x_realytics_ai_provider,
+        explicit_user_id=x_realytics_user_id or "web",
     )
+    ai_context = {**ai_context, "project_id": project_id, "agent_id": "ParserAgent"}
     parsed_data = await parse_uploaded_business_plan(project_id, file, ai_context)
     if parsed_data.get("_meta", {}).get("parsing_source") == "host_llm_required":
         upload_meta = parsed_data.get("_meta", {}).get("upload")
@@ -1381,17 +1737,18 @@ async def upload_business_plan_and_run_pf_review(
     }
 
 @router.post("/{project_id}/ai/connection/resolve")
-def resolve_project_ai_connection(project_id: str, input_data: Dict[str, Any] | None = None):
+def resolve_project_ai_connection(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     input_data = input_data or {}
+    ai_context = ai_context_from_request(
+        request,
+        explicit_user_id=input_data.get("user_id"),
+        payload_ai_context=input_data.get("ai_context", input_data),
+    )
     return {
         "project_id": project_id,
-        "ai_connection": resolve_ai_context(
-            input_data.get("ai_context", input_data),
-            user_id=input_data.get("user_id"),
-            host=input_data.get("host") or "api",
-        ),
+        "ai_connection": safe_user_ai_context_summary(ai_context),
         "note": (
             "Claude Desktop hosts MCP tool calls. Direct Claude extraction inside the API "
             "requires ANTHROPIC_API_KEY."
@@ -1404,7 +1761,56 @@ def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
         raise HTTPException(status_code=404, detail="Project not found")
     project_feasibility = PROJECTS_DB[project_id].get("feasibility_input", {})
     source_data = deep_merge(project_feasibility, input_data or {})
-    return calculate_feasibility_metrics(source_data)
+    result = calculate_feasibility_metrics(source_data)
+    run = _persist_calculation_run(project_id, engine_key="feasibility", result=result, input_data=input_data)
+    return {**result, "calculationRunId": run["calculationRunId"]}
+
+
+@router.get("/{project_id}/calculation-runs")
+def list_project_calculation_runs(
+    project_id: str,
+    request: Request,
+    engine_key: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    records = list_calculation_run_records(project_id, engine_key=engine_key, limit=limit)
+    return {
+        "schemaVersion": "realytics-calculation-run-list-v1",
+        "projectId": project_id,
+        "engineKey": engine_key,
+        "count": len(records),
+        "records": records,
+    }
+
+
+@router.get("/{project_id}/deal-state-records")
+def list_project_deal_state_records(
+    project_id: str,
+    request: Request,
+    record_type: str | None = None,
+    calculation_run_id: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    records = list_deal_state_records(
+        project_id,
+        record_type=record_type,
+        calculation_run_id=calculation_run_id,
+        limit=limit,
+    )
+    return {
+        "schemaVersion": "realytics-deal-state-record-list-v1",
+        "projectId": project_id,
+        "recordType": record_type,
+        "calculationRunId": calculation_run_id,
+        "count": len(records),
+        "records": records,
+    }
 
 @router.post("/{project_id}/development-feasibility/analyze")
 def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] | None = None):
@@ -1421,13 +1827,16 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
     result = build_monthly_cash_flow(input_data)
     result["cashflows"] = cfs
     result["legacy_max_minus"] = max_minus
-    return result
+    run = _persist_calculation_run(project_id, engine_key="cashflow", result=result, input_data=input_data)
+    return {**result, "calculationRunId": run["calculationRunId"]}
 
 @router.post("/{project_id}/cash-flow/run")
 def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    return run_cash_flow_use_case(PROJECTS_DB[project_id], input_data)
+    result = run_cash_flow_use_case(PROJECTS_DB[project_id], input_data)
+    run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data=input_data)
+    return {**result, "calculationRunId": run["calculationRunId"]}
 
 @router.post("/{project_id}/pf/structure")
 def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
@@ -1445,13 +1854,15 @@ def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
         "debt_service": input_data.get("debt_service", 0),
     }
     result = calculate_pf_metrics(source_data)
-    return {
+    response = {
         **result,
         "ltv": result["metrics"]["ltv"]["value"],
         "ltc": result["metrics"]["ltc"]["value"],
         "dscr": result["metrics"]["dscr"]["value"],
         "exit_sale_rate": result["metrics"]["exit_sale_rate"]["value"],
     }
+    run = _persist_calculation_run(project_id, engine_key="pf_metrics", result=response, input_data=input_data)
+    return {**response, "calculationRunId": run["calculationRunId"]}
 
 @router.post("/{project_id}/returns/calculate")
 def calculate_returns(project_id: str, input_data: Dict[str, Any] | None = None):
@@ -1465,7 +1876,9 @@ def calculate_returns(project_id: str, input_data: Dict[str, Any] | None = None)
         raise HTTPException(status_code=404, detail="Project not found")
     feasibility = PROJECTS_DB[project_id].get("feasibility_input", {})
     source_data = deep_merge(feasibility, input_data or {})
-    return calculate_return_metrics(source_data)
+    result = calculate_return_metrics(source_data)
+    run = _persist_calculation_run(project_id, engine_key="return_metrics", result=result, input_data=input_data)
+    return {**result, "calculationRunId": run["calculationRunId"]}
 
 @router.post("/{project_id}/risk/assess")
 def assess_risk(project_id: str, input_data: Dict[str, Any]):
@@ -1746,7 +2159,17 @@ def analyze_marketability(
             inject_market_comparables(source, records)
         except Exception:
             pass  # live data must never break the on-demand analysis
-    return analyze_marketability_use_case(source, input_data)
+    result = analyze_marketability_use_case(source, input_data)
+    if (input_data or {}).get("persist"):
+        project = dict(PROJECTS_DB[project_id])
+        project["marketability"] = result
+        project["marketabilityAnalysis"] = result
+        if live_comparables and isinstance(source, dict) and source.get("market"):
+            project["market"] = source.get("market")
+        updated = update_project_use_case(project_repository(), project_id, project)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Project not found")
+    return result
 
 @router.get("/{project_id}/source-documents")
 def list_project_source_documents(project_id: str):
@@ -2117,13 +2540,437 @@ def _hydrated_project_source(project_id: str, input_data: Dict[str, Any]) -> Dic
     return source_data
 
 
+def _project_display_name(project_id: str, project_data: Dict[str, Any]) -> str:
+    project = project_data.get("project") if isinstance(project_data.get("project"), dict) else {}
+    stored_name = (
+        project.get("name")
+        or project.get("projectName")
+        or project_data.get("projectName")
+    )
+    if stored_name and not _looks_like_corrupted_korean(stored_name):
+        return stored_name
+    inferred_name = _infer_project_name_from_source_documents(project_data)
+    return inferred_name or stored_name or f"프로젝트 {project_id}"
+
+
+def _looks_like_corrupted_korean(value: Any) -> bool:
+    text = str(value or "")
+    if not text:
+        return False
+    hangul_count = sum(1 for char in text if "\uac00" <= char <= "\ud7a3")
+    cjk_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    replacement_count = text.count("�") + text.count("?")
+    return hangul_count == 0 and (cjk_count >= 3 or replacement_count >= 3)
+
+
+def _infer_project_name_from_source_documents(project_data: Dict[str, Any]) -> str | None:
+    documents = list(project_data.get("source_documents") or [])
+    upload_meta = (project_data.get("_meta") or {}).get("upload")
+    if isinstance(upload_meta, dict):
+        documents.append(upload_meta)
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        filename = str(document.get("originalFileName") or document.get("fileName") or "")
+        if not any("\uac00" <= char <= "\ud7a3" for char in filename):
+            continue
+        parenthesized = re.findall(r"\(([^()]{4,80})\)", filename)
+        for candidate in parenthesized:
+            if any("\uac00" <= char <= "\ud7a3" for char in candidate):
+                return candidate.strip()
+        stem = re.sub(r"\.[^.]+$", "", filename).strip()
+        stem = re.sub(r"^\d{6,8}[-_\s]*", "", stem)
+        stem = re.sub(r"^(사업계획서|사업계획|검토보고서|토지조서|토지대장)[-_()\s]*", "", stem)
+        if len(stem) >= 4:
+            return stem[:80].strip()
+    return None
+
+
+def _summarize_source_documents(documents: list[Dict[str, Any]]) -> Dict[str, Any]:
+    by_type: Dict[str, int] = {}
+    for document in documents:
+        doc_type = document.get("documentType") or document.get("document_type") or "source_document"
+        by_type[doc_type] = by_type.get(doc_type, 0) + 1
+    return {
+        "count": len(documents),
+        "byType": by_type,
+        "latestUploadedAt": max(
+            [str(document.get("uploadedAt") or document.get("uploaded_at") or "") for document in documents],
+            default=None,
+        ) or None,
+    }
+
+
+def _summarize_land_ledger(project_data: Dict[str, Any]) -> Dict[str, Any]:
+    ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
+    parcels = ledger.get("parcels") if isinstance(ledger, dict) else []
+    parcels = parcels if isinstance(parcels, list) else []
+    pnu_count = sum(1 for parcel in parcels if isinstance(parcel, dict) and (parcel.get("pnu") or parcel.get("resolvedPnu")))
+    return {
+        "present": bool(parcels),
+        "parcelCount": len(parcels),
+        "pnuCount": pnu_count,
+        "needsPnuEnrichment": bool(parcels) and pnu_count < len(parcels),
+        "status": ledger.get("status") if isinstance(ledger, dict) else None,
+    }
+
+
+def _summarize_land_evidence(records: list[Dict[str, Any]]) -> Dict[str, Any]:
+    by_type: Dict[str, int] = {}
+    for record in records:
+        evidence_type = record.get("evidenceType") or record.get("evidence_type") or "land_evidence"
+        by_type[evidence_type] = by_type.get(evidence_type, 0) + 1
+    return {
+        "count": len(records),
+        "byType": by_type,
+        "hasOfficialLandPrice": by_type.get("official_land_price", 0) > 0,
+        "hasRegistryEvidence": by_type.get("registry_record", 0) > 0,
+        "hasPnuResolution": by_type.get("pnu_resolution", 0) > 0,
+    }
+
+
+def _summarize_chief_artifacts(records: list[Dict[str, Any]]) -> Dict[str, Any]:
+    by_pod: Dict[str, int] = {}
+    latest_by_pod: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        pod_key = record.get("podKey") or record.get("pod_key") or "unknown"
+        by_pod[pod_key] = by_pod.get(pod_key, 0) + 1
+        if pod_key not in latest_by_pod:
+            latest_by_pod[pod_key] = {
+                "artifactKey": record.get("artifactKey"),
+                "artifactType": (record.get("result") or {}).get("artifactType"),
+                "createdAt": record.get("createdAt"),
+            }
+    return {
+        "count": len(records),
+        "byPod": by_pod,
+        "latestByPod": latest_by_pod,
+    }
+
+
+def _persist_shared_deal_state_graph(project_id: str, plan: Dict[str, Any], *, source: str = "workspace_context") -> Dict[str, Any]:
+    project_data = PROJECTS_DB.get(project_id)
+    if not project_data:
+        return {}
+    graph = plan.get("sharedDealStateGraph") or {}
+    task_graph = plan.get("taskGraph") or {}
+    record = {
+        "schemaVersion": "realytics-shared-deal-state-graph-record-v1",
+        "projectId": project_id,
+        "projectName": _project_display_name(project_id, project_data),
+        "workflowTrack": task_graph.get("workflowTrack"),
+        "analysisPurpose": plan.get("analysisPurpose"),
+        "updatedAt": now_iso(),
+        "updatedBy": source,
+        "graph": graph,
+        "summary": {
+            "evidenceCount": len(graph.get("evidenceVault") or []),
+            "assumptionCount": len(graph.get("assumptionBook") or []),
+            "metricCount": len(graph.get("metrics") or []),
+            "missingInputCount": len(graph.get("missingInputRegister") or []),
+            "podCount": len(plan.get("agentPods") or []),
+            "decision": (plan.get("decisionGate") or {}).get("decision"),
+        },
+    }
+    state = project_data.setdefault("chief_orchestration_state", {})
+    state["sharedDealStateGraph"] = record
+    project_data["sharedDealStateGraph"] = record
+    persist_project(project_id)
+    return record
+
+
+def _normalize_workspace_page(page: str) -> str:
+    normalized = (page or "overview").replace("-", "_")
+    aliases = {
+        "input": "input_package",
+        "intake": "input_package",
+        "input_package": "input_package",
+        "land_review": "land",
+        "land_legal": "land",
+        "map": "map",
+        "map_3d": "map",
+        "market": "marketability",
+        "market_product": "marketability",
+        "cash_flow": "cashflow",
+        "finance_structure": "pf",
+        "pf_credit": "pf",
+        "pf_structure": "pf",
+        "risk": "risk",
+        "risk_register": "risk",
+        "evidence_graph": "evidence",
+    }
+    return aliases.get(normalized, normalized)
+
+
+WORKSPACE_PAGE_DATA_CONTRACTS: Dict[str, Dict[str, Any]] = {
+    "overview": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "overview",
+        "sourceOfTruth": ["projects", "chief_orchestration_state", "chief_pod_artifacts"],
+        "requiredPageDataFields": ["sourceDocumentSummary", "landLedgerSummary", "landEvidenceSummary", "chiefArtifactSummary", "agentPods", "podRuns", "taskGraph"],
+    },
+    "input_package": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "input_package",
+        "sourceOfTruth": ["source_documents", "projects.landLedger", "land_evidence", "assumption_overrides", "chief_orchestration_state"],
+        "requiredPageDataFields": ["sourceDocumentSummary", "sourceDocuments", "landLedgerSummary", "landEvidenceSummary", "landEvidenceRecords", "assumptionOverrides", "missingInputRegister", "recommendedActions"],
+    },
+    "land": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "land",
+        "sourceOfTruth": ["projects.land", "projects.landLedger", "land_evidence", "chief_pod_artifacts.land_legal"],
+        "requiredPageDataFields": ["land", "landLedger", "landLedgerSummary", "landEvidenceSummary", "landEvidenceRecords", "pnuValidation"],
+    },
+    "map": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "map",
+        "sourceOfTruth": ["projects.land", "projects.landLedger", "land_evidence", "map_intelligence"],
+        "requiredPageDataFields": ["land", "landLedger", "landLedgerSummary", "landEvidenceSummary", "landEvidenceRecords", "mapDataEndpoint"],
+    },
+    "marketability": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "marketability",
+        "sourceOfTruth": ["projects.market", "projects.marketability", "projects.marketEvidence", "chief_pod_artifacts.market_product"],
+        "requiredPageDataFields": ["market", "marketability", "marketEvidence", "sourceDocumentSummary", "chiefArtifactSummary"],
+    },
+    "feasibility": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "feasibility",
+        "sourceOfTruth": ["projects.feasibility", "projects.developmentFeasibility", "projects.productMix", "chief_pod_artifacts.feasibility_cashflow"],
+        "requiredPageDataFields": ["feasibility", "developmentFeasibility", "cashFlow", "productMix", "chiefArtifactSummary"],
+    },
+    "cashflow": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "cashflow",
+        "sourceOfTruth": ["projects.cashFlow", "projects.cashFlowRunResult", "chief_pod_artifacts.feasibility_cashflow"],
+        "requiredPageDataFields": ["feasibility", "developmentFeasibility", "cashFlow", "productMix", "chiefArtifactSummary"],
+    },
+    "pf": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "pf",
+        "sourceOfTruth": ["projects.pfStructure", "projects.riskRegister", "projects.creditReviewDecision", "chief_pod_artifacts.pf_credit"],
+        "requiredPageDataFields": ["pfStructure", "riskRegister", "creditReviewDecision", "latestPfCreditArtifact", "chiefArtifacts"],
+    },
+    "risk": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "risk",
+        "sourceOfTruth": ["projects.riskRegister", "projects.creditReviewDecision", "chief_pod_artifacts.pf_credit", "evidence_graphs"],
+        "requiredPageDataFields": ["riskRegister", "creditReviewDecision", "latestPfCreditArtifact", "chiefArtifacts"],
+    },
+    "evidence": {
+        "contractVersion": "realytics-workspace-page-data-contract-v1",
+        "page": "evidence",
+        "sourceOfTruth": ["evidence_graphs", "source_documents", "land_evidence", "chief_pod_artifacts"],
+        "requiredPageDataFields": ["sourceDocumentSummary", "landEvidenceSummary", "chiefArtifactSummary", "evidenceGraphEndpoint", "sourceDocuments", "landEvidenceRecords"],
+    },
+}
+
+
+def _workspace_page_data_contract(page: str) -> Dict[str, Any]:
+    normalized = _normalize_workspace_page(page)
+    return WORKSPACE_PAGE_DATA_CONTRACTS.get(normalized, WORKSPACE_PAGE_DATA_CONTRACTS["overview"])
+
+
+def _latest_chief_artifact_for_pod(chief_artifacts: list[Dict[str, Any]], pod_key: str) -> Dict[str, Any]:
+    for record in chief_artifacts:
+        if record.get("podKey") == pod_key:
+            result = record.get("result") if isinstance(record.get("result"), dict) else {}
+            return {
+                "artifactKey": record.get("artifactKey"),
+                "runId": record.get("runId"),
+                "podKey": record.get("podKey"),
+                "artifactType": result.get("artifactType") or record.get("artifactType"),
+                "createdAt": record.get("createdAt"),
+                "updatedAt": record.get("updatedAt"),
+            }
+    return {}
+
+
+def _workspace_page_data(
+    *,
+    project_id: str,
+    page: str,
+    source_data: Dict[str, Any],
+    plan: Dict[str, Any],
+    source_documents: list[Dict[str, Any]],
+    land_evidence_records: list[Dict[str, Any]],
+    assumption_overrides: list[Dict[str, Any]],
+    chief_artifacts: list[Dict[str, Any]],
+) -> Dict[str, Any]:
+    normalized_page = _normalize_workspace_page(page)
+    land_ledger = source_data.get("landLedger") or source_data.get("land_ledger")
+    common = {
+        "sourceDocumentSummary": _summarize_source_documents(source_documents),
+        "landLedgerSummary": _summarize_land_ledger(source_data),
+        "landEvidenceSummary": _summarize_land_evidence(land_evidence_records),
+        "assumptionOverrideCount": len(assumption_overrides),
+        "chiefArtifactSummary": _summarize_chief_artifacts(chief_artifacts),
+    }
+
+    if normalized_page == "input_package":
+        return {
+            **common,
+            "sourceDocuments": source_documents,
+            "landEvidenceRecords": land_evidence_records,
+            "assumptionOverrides": assumption_overrides,
+            "missingInputRegister": (plan.get("sharedDealStateGraph") or {}).get("missingInputRegister") or [],
+            "recommendedActions": [
+                "업로드 문서를 자동분류한 뒤 프로젝트 DB에 원본과 메타데이터를 저장합니다.",
+                "토지조서가 있으면 PNU, 공시지가, 등기/제한물권 증빙 보강을 먼저 실행합니다.",
+                "시장·분양성 근거와 사업수지/CF가 준비된 뒤 PF-Credit Pod를 실행합니다.",
+            ],
+        }
+
+    if normalized_page in {"land", "map"}:
+        return {
+            **common,
+            "land": source_data.get("land") or {},
+            "landLedger": land_ledger or {},
+            "landEvidenceRecords": land_evidence_records,
+            "pnuValidation": {
+                "required": True,
+                "ready": not common["landLedgerSummary"]["needsPnuEnrichment"],
+                "pnuCount": common["landLedgerSummary"]["pnuCount"],
+                "parcelCount": common["landLedgerSummary"]["parcelCount"],
+            },
+            "mapDataEndpoint": f"/projects/{project_id}/map?resolve_geometry=true&geometry_limit=150",
+        }
+
+    if normalized_page == "marketability":
+        return {
+            **common,
+            "market": source_data.get("market") or {},
+            "marketability": source_data.get("marketability") or source_data.get("marketabilityAnalysis") or {},
+            "marketEvidence": source_data.get("marketEvidence") or source_data.get("market_evidence") or {},
+        }
+
+    if normalized_page in {"feasibility", "cashflow"}:
+        return {
+            **common,
+            "feasibility": source_data.get("feasibility") or source_data.get("feasibilityInput") or {},
+            "developmentFeasibility": source_data.get("developmentFeasibility") or {},
+            "cashFlow": source_data.get("cashFlow") or source_data.get("cashFlowRunResult") or {},
+            "productMix": source_data.get("productMix") or source_data.get("product_mix") or [],
+        }
+
+    if normalized_page in {"pf", "risk"}:
+        return {
+            **common,
+            "pfStructure": source_data.get("pfStructure") or source_data.get("pf_structure") or {},
+            "riskRegister": source_data.get("riskRegister") or {},
+            "creditReviewDecision": source_data.get("creditReviewDecision") or {},
+            "latestPfCreditArtifact": _latest_chief_artifact_for_pod(chief_artifacts, "pf_credit"),
+            "chiefArtifacts": chief_artifacts,
+        }
+
+    if normalized_page == "evidence":
+        return {
+            **common,
+            "sourceDocuments": source_documents,
+            "landEvidenceRecords": land_evidence_records,
+            "evidenceGraphEndpoint": f"/projects/{project_id}/evidence-graphs",
+            "evidenceGraphDetailEndpointTemplate": f"/projects/{project_id}/orchestrations/{{run_id}}/evidence-graph",
+        }
+
+    return {
+        **common,
+        "agentPods": plan.get("agentPods") or [],
+        "podRuns": plan.get("podRuns") or [],
+        "taskGraph": plan.get("taskGraph") or {},
+        "chiefArtifacts": chief_artifacts,
+    }
+
+
+@router.get("/{project_id}/workspace/context")
+def get_project_workspace_context(
+    project_id: str,
+    request: Request,
+    page: str = "overview",
+    track: str | None = None,
+):
+    """Return page-specific REALYTICS OS context backed by the shared deal memory.
+
+    Each workspace page gets its own data slice, but all slices are derived from
+    the same hydrated project, Evidence Vault, Assumption Book, pod artifacts,
+    and persisted Shared Deal State Graph.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+
+    source_data = _hydrated_project_source(project_id, {})
+    if track:
+        source_data["workflowTrack"] = track
+    options = {"workflowTrack": track}
+    plan = plan_chief_deal_orchestration_use_case(project_id, source_data, options)
+    shared_graph_record = _persist_shared_deal_state_graph(project_id, plan, source="workspace_context")
+    source_documents = list_source_documents_use_case(source_document_repository(), project_id)
+    land_evidence_records = list_land_evidence_records(project_id)
+    assumption_overrides = list_assumption_override_records(project_id)
+    chief_artifacts = list_chief_pod_artifact_records(project_id)
+    project_record = source_data.get("project") if isinstance(source_data.get("project"), dict) else {}
+
+    context = {
+        "schemaVersion": "realytics-workspace-page-context-v1",
+        "projectId": project_id,
+        "page": page,
+        "normalizedPage": _normalize_workspace_page(page),
+        "pageDataContract": _workspace_page_data_contract(page),
+        "workflowTrack": (plan.get("taskGraph") or {}).get("workflowTrack") or track,
+        "projectMemory": {
+            "projectId": project_id,
+            "projectName": _project_display_name(project_id, source_data),
+            "project": project_record,
+            "status": project_record.get("status") or source_data.get("status"),
+            "sourceDocumentCount": len(source_documents),
+            "landEvidenceCount": len(land_evidence_records),
+            "assumptionOverrideCount": len(assumption_overrides),
+            "chiefArtifactCount": len(chief_artifacts),
+            "updatedAt": (source_data.get("_meta") or {}).get("updatedAt") or shared_graph_record.get("updatedAt"),
+        },
+        "dealStateGraph": shared_graph_record,
+        "evidenceVault": (plan.get("sharedDealStateGraph") or {}).get("evidenceVault") or [],
+        "assumptionBook": (plan.get("sharedDealStateGraph") or {}).get("assumptionBook") or [],
+        "missingInputRegister": (plan.get("sharedDealStateGraph") or {}).get("missingInputRegister") or [],
+        "taskGraph": plan.get("taskGraph") or {},
+        "agentPods": plan.get("agentPods") or [],
+        "podRuns": plan.get("podRuns") or [],
+        "decisionGate": plan.get("decisionGate") or {},
+        "pageData": _workspace_page_data(
+            project_id=project_id,
+            page=page,
+            source_data=source_data,
+            plan=plan,
+            source_documents=source_documents,
+            land_evidence_records=land_evidence_records,
+            assumption_overrides=assumption_overrides,
+            chief_artifacts=chief_artifacts,
+        ),
+    }
+    record_sensitive_project_event(
+        request,
+        event_type="workspace_page_context_loaded",
+        project_id=project_id,
+        metadata={
+            "page": page,
+            "workflowTrack": context.get("workflowTrack"),
+            "sourceDocumentCount": len(source_documents),
+            "missingInputCount": len(context.get("missingInputRegister") or []),
+        },
+    )
+    return context
+
+
 @router.post("/{project_id}/orchestration/plan")
 def plan_orchestration(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Intent router: inspect available materials and return the workflow menu,
     missing data, and a recommended default before any agents run."""
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    source_data = _hydrated_project_source(project_id, input_data or {})
+    payload = input_data or {}
+    source_data = _hydrated_project_source(project_id, payload)
+    if payload.get("track"):
+        source_data["workflowTrack"] = payload.get("track")
     plan = plan_orchestration_use_case(project_id, source_data)
     prompt_artifact = persist_work_order_prompt_artifact(
         project_id,
@@ -2149,6 +2996,258 @@ def plan_orchestration(project_id: str, request: Request, input_data: Dict[str, 
             },
         )
     return plan
+
+
+@router.post("/{project_id}/chief-orchestration/plan")
+def plan_chief_deal_orchestration(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Chief Deal Orchestrator: build the AI Deal Room plan.
+
+    This endpoint does not run pod agents. It creates a Shared Deal State Graph,
+    Missing Input Register, Agent Pod plan, scenario placeholders, and a
+    preliminary decision gate so the user can see what the orchestrator will do
+    before any approval-sensitive analysis is treated as final.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    payload = input_data or {}
+    source_data = _hydrated_project_source(project_id, payload)
+    workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
+    if workflow_track:
+        source_data["workflowTrack"] = workflow_track
+    options = {
+        "analysisPurpose": payload.get("analysisPurpose") or payload.get("analysis_purpose"),
+        "workflowTrack": workflow_track,
+    }
+    plan = plan_chief_deal_orchestration_use_case(project_id, source_data, options)
+    _persist_shared_deal_state_graph(project_id, plan, source="chief_orchestration_plan")
+    record_sensitive_project_event(
+        request,
+        event_type="chief_orchestration_plan_created",
+        project_id=project_id,
+        metadata={
+            "analysisPurpose": plan.get("analysisPurpose"),
+            "workflowTrack": (plan.get("taskGraph") or {}).get("workflowTrack"),
+            "podCount": len(plan.get("agentPods") or []),
+            "missingInputCount": len((plan.get("sharedDealStateGraph") or {}).get("missingInputRegister") or []),
+            "decision": (plan.get("decisionGate") or {}).get("decision"),
+        },
+    )
+    return plan
+
+
+def _persist_chief_recalculation_event(project_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    persisted = upsert_recalculation_event_record(project_id, event)
+    record_user_activity_log(
+        {
+            "eventType": "chief_recalculation_triggered",
+            "projectId": project_id,
+            "runId": persisted.get("runId"),
+            "metadata": {
+                "eventId": persisted.get("eventId"),
+                "trigger": persisted.get("trigger"),
+                "sourcePod": persisted.get("sourcePod"),
+                "targetPods": persisted.get("targetPods"),
+                "status": persisted.get("status"),
+            },
+        }
+    )
+    return persisted
+
+
+@router.post("/{project_id}/chief-orchestration/run-pod")
+def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Chief Deal Orchestrator: execute a single agent pod and trigger downstream events."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    payload = input_data or {}
+    pod_key = payload.get("podKey")
+    if not pod_key:
+        raise HTTPException(status_code=400, detail="podKey is required")
+    options = payload.get("options") or {}
+    workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
+    if workflow_track:
+        options = {**options, "workflowTrack": workflow_track}
+
+    project_data = PROJECTS_DB[project_id]
+    try:
+        plan = run_chief_deal_pod_use_case(
+            project_id,
+            pod_key,
+            project_data,
+            options,
+            artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
+            event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    _persist_shared_deal_state_graph(project_id, plan, source=f"chief_pod:{pod_key}")
+    upsert_project_record(project_id, project_data)
+
+    record_sensitive_project_event(
+        request,
+        event_type="chief_orchestration_pod_executed",
+        project_id=project_id,
+        metadata={
+            "podKey": pod_key,
+            "status": "completed",
+            "trigger": options.get("trigger"),
+        },
+    )
+    return plan
+
+
+@router.post("/{project_id}/chief-orchestration/run-all-pods")
+def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Chief Deal Orchestrator: execute the selected track's pod graph in order."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    payload = input_data or {}
+    options = payload.get("options") or {}
+    workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
+    if workflow_track:
+        options = {**options, "workflowTrack": workflow_track}
+
+    project_data = PROJECTS_DB[project_id]
+    plan = run_chief_deal_all_pods_use_case(
+        project_id,
+        project_data,
+        options,
+        artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
+        event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+    )
+
+    _persist_shared_deal_state_graph(project_id, plan, source="chief_pod:run_all")
+    upsert_project_record(project_id, project_data)
+
+    run_all_summary = plan.get("runAllSummary") or {}
+    record_sensitive_project_event(
+        request,
+        event_type="chief_orchestration_all_pods_executed",
+        project_id=project_id,
+        metadata={
+            "workflowTrack": run_all_summary.get("workflowTrack"),
+            "status": run_all_summary.get("status"),
+            "requestedPodCount": run_all_summary.get("requestedPodCount"),
+            "completedCount": run_all_summary.get("completedCount"),
+            "blockedCount": run_all_summary.get("blockedCount"),
+        },
+    )
+    return plan
+
+
+@router.get("/{project_id}/chief-orchestration/artifacts")
+def list_chief_deal_artifacts(project_id: str, request: Request, pod_key: str | None = None):
+    """List persisted Chief Deal Room pod artifacts for audit/review."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    state = PROJECTS_DB[project_id].get("chief_orchestration_state") or {}
+    records = list_chief_pod_artifact_records(project_id, pod_key=pod_key)
+    if not records:
+        artifacts = state.get("artifacts") or {}
+        records = [
+            artifact
+            for artifact in artifacts.values()
+            if isinstance(artifact, dict) and (not pod_key or artifact.get("podKey") == pod_key)
+        ]
+        records.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+    return {
+        "schemaVersion": "realytics-chief-pod-artifact-list-v1",
+        "projectId": project_id,
+        "podKey": pod_key,
+        "records": records,
+    }
+
+
+@router.get("/{project_id}/chief-orchestration/recalculation-events")
+def list_chief_deal_recalculation_events(
+    project_id: str,
+    request: Request,
+    run_id: str | None = None,
+    source_pod: str | None = None,
+    target_pod: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+):
+    """List persisted Event Bus recalculation triggers for the Deal Room."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    safe_limit = max(1, min(500, int(limit or 100)))
+    records = list_recalculation_event_records(
+        project_id,
+        run_id=run_id,
+        source_pod=source_pod,
+        target_pod=target_pod,
+        status=status,
+        limit=safe_limit,
+    )
+    return {
+        "schemaVersion": "realytics-recalculation-event-list-v1",
+        "projectId": project_id,
+        "count": len(records),
+        "records": records,
+    }
+
+
+@router.get("/{project_id}/chief-orchestration/events")
+def list_chief_deal_events(project_id: str, request: Request, limit: int = 100):
+    """Event Bus history: recalculation triggers + learning-loop events for audit.
+
+    Combines the in-project orchestration state (fast, current) with the durable
+    activity log (queryable across restarts/state rebuilds)."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    limit = max(1, min(500, limit))
+
+    state = PROJECTS_DB[project_id].get("chief_orchestration_state") or {}
+    state_events = [e for e in (state.get("learningLoopEvents") or []) if isinstance(e, dict)]
+
+    durable = list_recalculation_event_records(project_id, limit=limit)
+    if not durable:
+        durable = [
+            {
+                "eventId": (row.get("metadata") or {}).get("eventId") or row.get("eventId"),
+                "eventType": "recalculation_triggered",
+                "trigger": (row.get("metadata") or {}).get("trigger"),
+                "sourcePod": (row.get("metadata") or {}).get("sourcePod"),
+                "targetPods": (row.get("metadata") or {}).get("targetPods"),
+                "timestamp": (row.get("metadata") or {}).get("timestamp") or row.get("createdAt"),
+                "durable": True,
+            }
+            for row in list_user_activity_logs(project_id=project_id, event_type="chief_recalculation_triggered", limit=limit)
+        ]
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for event in [*state_events, *durable]:
+        key = str(event.get("eventId") or f"{event.get('trigger')}:{event.get('timestamp') or event.get('createdAt')}")
+        merged.setdefault(key, event)
+    events = sorted(merged.values(), key=lambda e: str(e.get("timestamp") or e.get("createdAt") or ""), reverse=True)[:limit]
+    return {
+        "schemaVersion": "realytics-chief-orchestration-events-v1",
+        "projectId": project_id,
+        "count": len(events),
+        "events": events,
+    }
+
+
+@router.get("/{project_id}/chief-orchestration/artifacts/{artifact_key:path}")
+def get_chief_deal_artifact(project_id: str, artifact_key: str, request: Request):
+    """Read a persisted Chief Deal Room pod artifact by key."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    record = get_chief_pod_artifact_record(project_id, artifact_key)
+    if not record:
+        record = ((PROJECTS_DB[project_id].get("chief_orchestration_state") or {}).get("artifacts") or {}).get(artifact_key)
+    if not record:
+        raise HTTPException(status_code=404, detail="Chief pod artifact not found")
+    return record
 
 
 @router.get("/{project_id}/prompt-artifacts")
@@ -2234,7 +3333,11 @@ def get_project_monitoring(project_id: str):
 
 
 @router.get("/{project_id}/map")
-def get_project_map_intelligence(project_id: str, resolve_geometry: bool = False):
+def get_project_map_intelligence(
+    project_id: str,
+    resolve_geometry: bool = False,
+    geometry_limit: int = Query(30, ge=0, le=300),
+):
     """Map Intelligence: parcel GeoJSON + the deck's 6-layer spatial availability.
 
     Deterministic and non-fabricating — parcels with no resolved geometry are
@@ -2249,10 +3352,11 @@ def get_project_map_intelligence(project_id: str, resolve_geometry: bool = False
     if resolve_geometry and vworld_configured():
         cache = build_parcel_geometry_cache()
         resolver = build_caching_resolver(cache, build_pnu_geometry_resolver(), project_id=project_id)
-        resolved = resolve_and_attach_geometry(source_data, resolver, limit=30)
+        resolved = resolve_and_attach_geometry(source_data, resolver, limit=geometry_limit)
         geometry_resolution = {
             "source": "vworld_cadastral",
             "cacheBackend": cache.backend,
+            "requestedLimit": geometry_limit,
             "resolvedCount": resolved,
             "cacheHits": resolver.stats["cacheHits"],
             "fetchedFromVworld": resolver.stats["fetched"],

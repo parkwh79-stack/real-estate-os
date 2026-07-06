@@ -3,14 +3,17 @@ from pathlib import Path
 from storage import (
     create_user_session,
     default_state,
+    get_chief_pod_artifact_record,
     get_evidence_graph_record,
     get_prompt_artifact_record,
     get_user,
     get_user_session,
     get_risk_register_record,
     list_assumption_override_records,
+    list_chief_pod_artifact_records,
     list_evidence_graph_records,
     list_prompt_artifact_records,
+    list_recalculation_event_records,
     list_land_evidence_records,
     list_restructuring_cure_records,
     list_risk_register_records,
@@ -20,8 +23,10 @@ from storage import (
     save_state,
     storage_backend,
     upsert_assumption_override_record,
+    upsert_chief_pod_artifact_record,
     upsert_evidence_graph_record,
     upsert_prompt_artifact_record,
+    upsert_recalculation_event_record,
     upsert_land_evidence_record,
     upsert_restructuring_cure_record,
     upsert_risk_register_record,
@@ -43,6 +48,7 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
         land_evidence={"1": {"official_land_price:pnu-1": {"recordKey": "official_land_price:pnu-1", "pnu": "pnu-1"}}},
         risk_registers={"1": {"run-1": {"runId": "run-1", "status": "blocking", "risks": [{"riskId": "R-1"}]}}},
         evidence_graphs={"1": {"run-1": {"runId": "run-1", "summary": {"nodeCount": 2, "edgeCount": 1}}}},
+        chief_pod_artifacts={"1": {"artifact:land_legal:test": {"artifactKey": "artifact:land_legal:test", "podKey": "land_legal", "result": {"artifactType": "land_legal_pod_result"}}}},
         prompt_artifacts={"1": {"pa-1": {"artifactId": "pa-1", "artifactType": "ai_work_order", "body": "work order"}}},
         assumption_overrides={"1": {"ovr-1": {"overrideId": "ovr-1", "checkKey": "sales_revenue_consistency", "status": "active"}}},
         restructuring_cures={"1": {"cure-1": {"cureId": "cure-1", "cureType": "additional_collateral", "status": "active"}}},
@@ -60,6 +66,7 @@ def test_json_state_storage_round_trip(tmp_path, monkeypatch):
     assert state["land_evidence"]["1"]["official_land_price:pnu-1"]["pnu"] == "pnu-1"
     assert state["risk_registers"]["1"]["run-1"]["status"] == "blocking"
     assert state["evidence_graphs"]["1"]["run-1"]["summary"]["nodeCount"] == 2
+    assert state["chief_pod_artifacts"]["1"]["artifact:land_legal:test"]["podKey"] == "land_legal"
     assert state["prompt_artifacts"]["1"]["pa-1"]["body"] == "work order"
     assert state["assumption_overrides"]["1"]["ovr-1"]["checkKey"] == "sales_revenue_consistency"
     assert state["restructuring_cures"]["1"]["cure-1"]["cureType"] == "additional_collateral"
@@ -107,6 +114,7 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
     assert storage_backend() == "sqlite"
     assert state["project_id_counter"] == 3
     assert state["projects"]["1"]["project"]["name"] == "SQLite Project"
+
     assert state["reports"]["1"][0]["report_id"] == "r-1"
     assert state["orchestrations"]["1"]["run-1"]["status"] == "completed"
     assert state["market_evidence"]["1"]["run-1:ev-1"]["evidenceType"] == "sale_comparable"
@@ -171,6 +179,15 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
     assert evidence_graph["nodeCount"] == 3
     assert get_evidence_graph_record("1", "run-1")["summary"]["riskNodeCount"] == 1
     assert list_evidence_graph_records("1")[0]["runId"] == "run-1"
+
+    chief_artifact = upsert_chief_pod_artifact_record("1", {
+        "artifactKey": "artifact:land_legal:test",
+        "podKey": "land_legal",
+        "result": {"artifactType": "land_legal_pod_result", "summary": {"status": "reviewed"}},
+    })
+    assert chief_artifact["artifactType"] == "land_legal_pod_result"
+    assert get_chief_pod_artifact_record("1", "artifact:land_legal:test")["podKey"] == "land_legal"
+    assert list_chief_pod_artifact_records("1", pod_key="land_legal")[0]["result"]["summary"]["status"] == "reviewed"
 
     prompt_artifact = upsert_prompt_artifact_record("1", {
         "artifactId": "pa-work-order",
@@ -245,6 +262,49 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
     assert cures[0]["riskCodes"] == ["UNSOLD_LTV_BREACH"]
 
 
+def test_json_recalculation_event_storage_round_trip(tmp_path, monkeypatch):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("REALYTICS_STATE_FILE", str(state_path))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "json")
+
+    saved = upsert_recalculation_event_record(
+        "p-json",
+        {
+            "eventId": "event:finance_cost_changed:1",
+            "eventType": "recalculation_triggered",
+            "trigger": "finance_cost_changed",
+            "sourcePod": "cost_schedule",
+            "targetPods": ["feasibility_cashflow", "pf_credit"],
+        },
+    )
+
+    records = list_recalculation_event_records("p-json", target_pod="pf_credit")
+    assert records == [saved]
+    assert records[0]["status"] == "pending_recalculation"
+
+
+def test_sqlite_recalculation_event_storage_round_trip(tmp_path, monkeypatch):
+    db_path = tmp_path / "events.sqlite3"
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(db_path))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+
+    saved = upsert_recalculation_event_record(
+        "p-sql",
+        {
+            "eventId": "event:market_price_unsupported:1",
+            "eventType": "recalculation_triggered",
+            "trigger": "market_price_unsupported",
+            "sourcePod": "market_product",
+            "targetPods": ["market_product", "feasibility_cashflow"],
+        },
+    )
+
+    records = list_recalculation_event_records("p-sql", source_pod="market_product")
+    assert records == [saved]
+    loaded = load_state()
+    assert loaded["recalculation_events"]["p-sql"][saved["eventId"]]["trigger"] == "market_price_unsupported"
+
+
 def test_sqlite_state_load_migrates_legacy_json_state(tmp_path, monkeypatch):
     json_path = tmp_path / "state.json"
     db_path = tmp_path / "realytics.sqlite3"
@@ -281,6 +341,8 @@ def test_default_state_shape():
     assert state["land_evidence"] == {}
     assert state["risk_registers"] == {}
     assert state["evidence_graphs"] == {}
+    assert state["chief_pod_artifacts"] == {}
+    assert state["recalculation_events"] == {}
     assert state["assumption_overrides"] == {}
     assert state["restructuring_cures"] == {}
     assert state["glossary_terms"] == {}

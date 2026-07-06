@@ -10,6 +10,7 @@ from schemas.orchestration_plan import (
     WorkOrderValidationOption,
     WorkflowOption,
 )
+from use_cases.track_workflows import get_track_workflow_definition, normalize_workflow_track
 
 
 def _truthy(value: Any) -> bool:
@@ -31,6 +32,10 @@ class OrchestrationPlannerAgent:
     analysis_type = "orchestration_plan_v1"
 
     def plan(self, project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+        workflow_track = normalize_workflow_track(
+            str(project_data.get("workflowTrack") or project_data.get("track") or "")
+        )
+        track_workflow = get_track_workflow_definition(workflow_track)
         feasibility = project_data.get("feasibility_input", {}) or {}
 
         has_feasibility = bool(
@@ -122,6 +127,9 @@ class OrchestrationPlannerAgent:
         available_names = [workflow.nameKo for workflow in workflows if workflow.availableNow]
         result = OrchestrationPlanResult(
             projectId=project_id,
+            workflowTrack=workflow_track,
+            trackLabel=track_workflow["label"],
+            trackWorkflow=track_workflow,
             dataAvailability=availability,
             workflows=workflows,
             outputOptions=self._output_options(recommended),
