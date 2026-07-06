@@ -33,6 +33,15 @@ type Parcel = {
   trusted?: boolean;
   pnu?: string;
   resolvedPnu?: string;
+  officialLandPricePerSqm?: number;
+  officialLandPriceBaseYear?: string | number;
+  pnuResolution?: {
+    status?: string;
+    lotVerification?: string;
+    reason?: string;
+    attemptedAddress?: string;
+    resolvedAddress?: string;
+  };
 };
 
 type LandEvidenceRecord = {
@@ -268,6 +277,7 @@ export default function LandAnalysisPage() {
                       <th className="px-3 py-2">면적</th>
                       <th className="px-3 py-2">매입금액</th>
                       <th className="px-3 py-2">PNU</th>
+                      <th className="px-3 py-2">공시지가(원/㎡)</th>
                       <th className="px-3 py-2">상태</th>
                     </tr>
                   </thead>
@@ -283,10 +293,29 @@ export default function LandAnalysisPage() {
                           <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{formatSqm(parcel.areaSqm)}</td>
                           <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{formatKrw(parcel.totalContractAmount)}</td>
                           <td className="px-3 py-3 font-mono text-xs text-slate-600 dark:text-slate-300">{pnu || "미해석"}</td>
+                          <td className="px-3 py-3 text-slate-600 dark:text-slate-300">
+                            {typeof parcel.officialLandPricePerSqm === "number"
+                              ? `${parcel.officialLandPricePerSqm.toLocaleString("ko-KR")}${parcel.officialLandPriceBaseYear ? ` (${parcel.officialLandPriceBaseYear})` : ""}`
+                              : "—"}
+                          </td>
                           <td className="px-3 py-3">
-                            <span className={`rounded-md px-2 py-1 text-xs font-bold ${pnu ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-200"}`}>
-                              {pnu ? "PNU 확보" : "PNU 보강 필요"}
-                            </span>
+                            {(() => {
+                              // 지번 대조 가드 결과까지 반영: 검증됨 / 지번 미대조 / lot_mismatch 거부 / 미해석
+                              const res = parcel.pnuResolution;
+                              if (pnu && res?.lotVerification === "verified") {
+                                return <span className="rounded-md bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200">PNU 확보 · 지번 검증됨</span>;
+                              }
+                              if (pnu) {
+                                return <span className="rounded-md bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200" title={res?.lotVerification === "unverified" ? "해석은 됐으나 지번 문자열 대조가 불가한 케이스" : undefined}>PNU 확보{res?.lotVerification === "unverified" ? " · 지번 미대조" : ""}</span>;
+                              }
+                              if (res?.status === "unresolved" && (res.reason || "").includes("lot_mismatch")) {
+                                return <span className="rounded-md bg-rose-50 px-2 py-1 text-xs font-bold text-rose-700 dark:bg-rose-950/30 dark:text-rose-200" title={`시도 주소: ${res.attemptedAddress ?? "-"} — 해석된 지번이 달라 오필지 PNU 부착을 차단했습니다`}>지번 불일치 거부</span>;
+                              }
+                              if (res?.status === "unresolved") {
+                                return <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-bold text-amber-700 dark:bg-amber-950/30 dark:text-amber-200" title={res.reason ?? undefined}>해석 실패</span>;
+                              }
+                              return <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-bold text-amber-700 dark:bg-amber-950/30 dark:text-amber-200">PNU 보강 필요</span>;
+                            })()}
                           </td>
                         </tr>
                       );
