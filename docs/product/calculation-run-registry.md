@@ -151,6 +151,6 @@ calculationRunId + engineKey + engineVersion + inputEvidenceIds + assumptionIds 
 
 - ~~Persist Waterfall and Unsold LTV scenario runs through the same registry.~~ (Done 2026-07-03 — waterfall / unsold_ltv / tranche_recovery / stress_test)
 - ~~Add UI history panel for calculation run comparison.~~ (Done 2026-07-06 — `/project/{id}/risk` 하단 계산 실행 이력·비교 패널: 엔진별 run 목록 + 두 run 지표 delta·blocker diff)
-- Link report paragraphs directly to `deal_state_records`.
+- ~~Link report paragraphs directly to `deal_state_records`.~~ (Done — `build_paragraph_evidence_links` runs at report creation (`report_generation.py`) and saves `paragraphEvidenceLinks` (section→record map with per-type record ids + source-locator coverage) onto the report; `/project/{id}/report` surfaces it as the 근거 원장. Verified live on 585: 49 deal-state records → 20 sections, 15 linked, 31 unique records, 15 source-locator-ready.)
 - Add reviewer status and source locator completeness filters to `deal_state_records`.
 - Add PostgreSQL migration file for enterprise deployment.
