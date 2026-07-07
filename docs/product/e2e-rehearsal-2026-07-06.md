@@ -40,6 +40,27 @@
   `deal_state_records`가 0이므로 문단 근거 링크도 0. 계산을 실행한 프로젝트(585: 49건)에서는
   정상 동작함(별도 검증 완료). 자료만으로는 근거 원장이 채워지지 않는다는 정상 동작.
 
+## 확장 리허설 — 사업수지/계산 체인 (같은 날)
+
+토지조서에 이어 사업수지 워크북 경로로 계산 체인이 근거 원장까지 채우는지 검증.
+
+- **LLM 워크북 추출 제약**: 실제 `19.12.11 본리동 주상복합 사업수지 (PF검토용).xlsx`를
+  `/feasibility-workbook/extract`에 넣으니 Gemini 키가 **429 쿼터 초과**로 `llm_unavailable`.
+  외부 제약(무료 티어 소진)이라 LLM 추출은 지금 실행 불가 — 비조작 원칙대로 아무 수치도
+  지어내지 않고 빈 후보로 정직하게 반환.
+- **계산 체인은 결정론 데이터로 검증**: 같은 사업의 구조화 데이터
+  (`data/examples/daegu_bondong_mixed_use_pf.json`, 본동 주상복합)로 프로젝트를 만들고
+  feasibility/calculate → cashflow/calculate → pf/structure → scenarios/recovery →
+  stress-test/run 전부 200. 결과:
+  - **계산 run 7건** — feasibility, cashflow, pf_metrics, waterfall, unsold_ltv,
+    tranche_recovery, discount_stress (레지스트리 확장이 전 엔진 캡처 확인).
+  - **deal_state_records 51건** (metric 48 + risk_issue 3), completeness 51/51 locator 보유.
+  - **리포트 생성**: 20 섹션, **근거 링크 46건**, locator-ready 15 섹션 — 계산을 돌린
+    프로젝트에서는 문단→record 근거 링크가 실제로 채워짐(토지조서만 올린 프로젝트의 0건과 대비).
+
+이로써 이번 세션의 조각(계산 레지스트리·deal_state 필터·근거 링크·자동 보강)이 실데이터로
+end-to-end 연결됨을 실증. 남은 것은 LLM 쿼터(운영 키/유료 전환)와 다필지 PNU 정밀도.
+
 ## 결론
 
 자료 1개(토지조서)만으로 업로드→9필지 persist→지도 렌더→6 Pod 자동 실행→리포트까지
