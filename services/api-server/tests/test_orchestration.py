@@ -15,13 +15,31 @@ from schemas.orchestration import (
 from storage import upsert_calculation_run_record, upsert_deal_state_record
 
 
+_DISCOUNT_TRIGGER_EXAMPLE = (
+    Path(__file__).resolve().parents[1] / "data" / "examples" / "daegu_bondong_mixed_use_pf.json"
+)
+
+
 def project_with_discount_triggers(client: TestClient) -> str:
+    """A project id whose covenants carry discount triggers.
+
+    Hermetic: reuse a runtime project if one exists, otherwise seed one from the
+    Daegu Bondong example (which defines covenants.discount_triggers). Previously
+    this depended on the developer's runtime SQLite already holding such a
+    project, so it broke whenever the seed drifted (StopIteration).
+    """
     projects = client.get("/projects/").json()
-    return next(
-        item["project"]["id"]
-        for item in projects
-        if item.get("covenants", {}).get("discount_triggers")
+    existing = next(
+        (item["project"]["id"] for item in projects if item.get("covenants", {}).get("discount_triggers")),
+        None,
     )
+    if existing is not None:
+        return existing
+
+    with _DISCOUNT_TRIGGER_EXAMPLE.open("r", encoding="utf-8") as fp:
+        payload = json.load(fp)
+    created = client.post("/projects/", json=payload).json()
+    return created.get("id") or created["project"]["id"]
 
 
 def _approval_ready_base_run(project_id: str) -> dict:
@@ -49,7 +67,11 @@ def _approval_ready_base_run(project_id: str) -> dict:
     }
 
 
-def test_pf_review_orchestration_completes_and_saves_report():
+def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
+    # Force the deterministic consensus coordinator so this test verifies the
+    # deterministic path regardless of any AI provider key in the dev .env
+    # (with a key present the orchestrator legitimately picks the LLM coordinator).
+    monkeypatch.setattr("agents.orchestration_agent.select_ai_context", lambda **kwargs: None)
     client = TestClient(app)
     project_id = project_with_discount_triggers(client)
 
