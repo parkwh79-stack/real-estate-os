@@ -40,7 +40,7 @@ def test_chief_orchestration_endpoints():
         json={
             "podKey": "land_legal",
             "workflowTrack": "pf",
-            "options": {"forceTrigger": "legal_product_infeasible"}
+            "options": {"forceTrigger": "legal_product_infeasible", "podAiReviewMode": "deterministic"}
         }
     )
     assert res_run.status_code == 200
@@ -60,6 +60,18 @@ def test_chief_orchestration_endpoints():
     assert artifacts[0]["podKey"] == "land_legal"
     assert artifacts[0]["result"]["artifactType"] == "land_legal_pod_result"
     assert "legalPermitReview" in artifacts[0]["result"]
+    assert artifacts[0]["podAiReviewId"]
+
+    reviews_res = client.get(f"/projects/{project_id}/chief-orchestration/pod-ai-reviews?pod_key=land_legal")
+    assert reviews_res.status_code == 200
+    reviews = reviews_res.json()["records"]
+    assert reviews
+    assert reviews[0]["podKey"] == "land_legal"
+    assert reviews[0]["sourceArtifactKey"] == artifacts[0]["artifactKey"]
+
+    review_res = client.get(f"/projects/{project_id}/chief-orchestration/pod-ai-reviews/{reviews[0]['reviewId']}")
+    assert review_res.status_code == 200
+    assert review_res.json()["agentId"] == "LandLegalPodAIReviewer"
 
     events_res = client.get(f"/projects/{project_id}/chief-orchestration/recalculation-events?source_pod=land_legal")
     assert events_res.status_code == 200
@@ -86,7 +98,7 @@ def test_chief_orchestration_endpoints():
 
     res_all = client.post(
         f"/projects/{project_id}/chief-orchestration/run-all-pods",
-        json={"workflowTrack": "pf"},
+        json={"workflowTrack": "pf", "options": {"podAiReviewMode": "deterministic"}},
     )
     assert res_all.status_code == 200
     all_body = res_all.json()

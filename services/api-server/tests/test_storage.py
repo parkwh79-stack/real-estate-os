@@ -5,6 +5,7 @@ from storage import (
     default_state,
     get_chief_pod_artifact_record,
     get_evidence_graph_record,
+    get_pod_ai_review_record,
     get_prompt_artifact_record,
     get_user,
     get_user_session,
@@ -12,6 +13,7 @@ from storage import (
     list_assumption_override_records,
     list_chief_pod_artifact_records,
     list_evidence_graph_records,
+    list_pod_ai_review_records,
     list_prompt_artifact_records,
     list_recalculation_event_records,
     list_land_evidence_records,
@@ -25,6 +27,7 @@ from storage import (
     upsert_assumption_override_record,
     upsert_chief_pod_artifact_record,
     upsert_evidence_graph_record,
+    upsert_pod_ai_review_record,
     upsert_prompt_artifact_record,
     upsert_recalculation_event_record,
     upsert_land_evidence_record,
@@ -188,6 +191,19 @@ def test_sqlite_state_storage_round_trip(tmp_path, monkeypatch):
     assert chief_artifact["artifactType"] == "land_legal_pod_result"
     assert get_chief_pod_artifact_record("1", "artifact:land_legal:test")["podKey"] == "land_legal"
     assert list_chief_pod_artifact_records("1", pod_key="land_legal")[0]["result"]["summary"]["status"] == "reviewed"
+
+    pod_ai_review = upsert_pod_ai_review_record("1", {
+        "podKey": "land_legal",
+        "sourceArtifactKey": "artifact:land_legal:test",
+        "agentId": "LandLegalPodAIReviewer",
+        "reviewStatus": "needs_human_review",
+        "reviewMode": "deterministic_fallback_review",
+        "findings": [{"findingId": "finding-1", "category": "missing_evidence", "severity": "high", "message": "공시지가 증빙 필요"}],
+    })
+    assert pod_ai_review["reviewId"]
+    assert get_pod_ai_review_record("1", pod_ai_review["reviewId"])["podKey"] == "land_legal"
+    reviews = list_pod_ai_review_records("1", pod_key="land_legal", review_status="needs_human_review")
+    assert reviews[0]["sourceArtifactKey"] == "artifact:land_legal:test"
 
     prompt_artifact = upsert_prompt_artifact_record("1", {
         "artifactId": "pa-work-order",

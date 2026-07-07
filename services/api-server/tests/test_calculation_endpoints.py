@@ -127,3 +127,139 @@ def test_scenario_restructuring_endpoint_returns_cure_plan():
     assert body["unsoldLtvFix"]["status"] == "action_required"
     assert body["unsoldLtvFix"]["requiredPfReductionOrEquityIncrease"] > 0
     assert body["approvalPath"]["currentStatus"] in {"rework_required", "conditional_approval_candidate"}
+
+
+def test_discount_stress_endpoint_persists_calculation_run_and_metrics():
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Discount Stress Registry Test", "type": "mixed_use"},
+            "feasibility_input": {
+                "total_revenue": 120_000_000_000,
+                "land_cost": 30_000_000_000,
+                "construction_cost": 45_000_000_000,
+                "finance_cost": 5_000_000_000,
+                "total_cost": 90_000_000_000,
+            },
+            "pf_structure": [
+                {"tranche": "Senior", "amount": 95_000_000_000, "priority": 1, "interestRate": 0.06, "feeRate": 0.01}
+            ],
+        },
+    )
+    project_id = created.json()["project"]["id"]
+
+    res = client.post(
+        f"/projects/{project_id}/stress-test/run",
+        json={
+            "pfAmount": 95_000_000_000,
+            "inputEvidenceIds": ["evidence:discount-stress-input"],
+            "assumptionIds": ["assumption:discount-stress-base"],
+            "sourceLocator": {"documentId": "stress-input", "page": 4},
+        },
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    run_id = body["calculationRunId"]
+    assert run_id
+
+    runs_res = client.get(f"/projects/{project_id}/calculation-runs?engine_key=discount_stress")
+    assert runs_res.status_code == 200
+    runs = runs_res.json()["records"]
+    run = next(record for record in runs if record["calculationRunId"] == run_id)
+    assert run["engineKey"] == "discount_stress"
+    assert run["engineVersion"] == "discount_stress_v1"
+    assert run["inputEvidenceIds"] == ["evidence:discount-stress-input"]
+    assert run["assumptionIds"] == ["assumption:discount-stress-base"]
+    assert run["sourceLocator"] == {"documentId": "stress-input", "page": 4}
+
+    metrics_res = client.get(f"/projects/{project_id}/deal-state-records?record_type=metric&calculation_run_id={run_id}")
+    assert metrics_res.status_code == 200
+    metrics = metrics_res.json()["records"]
+    metric_keys = {row["key"] for row in metrics}
+    assert "discount_stress.summary.discountStressStageCount" in metric_keys
+    discount10 = next(row for row in metrics if row["key"] == "discount_stress.discount10.exitSaleRate")
+    assert discount10["value"] == 0.6
+    assert discount10["sourceLocator"]["sourceType"] == "discount_stress_scenario"
+
+    client.delete(f"/projects/{project_id}")
+
+
+def test_recovery_scenario_persists_engine_runs_and_risk_locators():
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Scenario Engine Registry Test", "type": "mixed_use"},
+            "feasibility_input": {"total_revenue": 120_000_000_000, "total_cost": 90_000_000_000},
+            "pf_structure": [
+                {"tranche": "Senior", "amount": 100_000_000_000, "priority": 1, "interestRate": 0.06, "feeRate": 0.01},
+                {"tranche": "Mezzanine", "amount": 20_000_000_000, "priority": 2, "interestRate": 0.08, "feeRate": 0.02},
+            ],
+        },
+    )
+    project_id = created.json()["project"]["id"]
+
+    res = client.post(
+        f"/projects/{project_id}/scenarios/recovery",
+        json={
+            "scenarioSetId": "calculation-run-registry-test",
+            "productMix": [
+                {"type": "Apartment", "units": 100, "avgUnitPrice": 1_200_000_000, "totalRevenue": 120_000_000_000}
+            ],
+            "pfStructure": [
+                {"tranche": "Senior", "amount": 100_000_000_000, "priority": 1, "interestRate": 0.06, "feeRate": 0.01},
+                {"tranche": "Mezzanine", "amount": 20_000_000_000, "priority": 2, "interestRate": 0.08, "feeRate": 0.02},
+            ],
+            "scenarioDrivers": {
+                "saleRates": [0.4, 0.5, 0.7],
+                "discountRates": [0.0, 0.1, 0.2],
+            },
+            "inputEvidenceIds": ["evidence:scenario-input"],
+            "assumptionIds": ["assumption:scenario-base"],
+        },
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    run_ids = body["calculationRunIds"]
+    assert {"waterfall", "unsold_ltv", "tranche_recovery"} <= set(run_ids)
+
+    for engine_key, run_id in run_ids.items():
+        runs_res = client.get(f"/projects/{project_id}/calculation-runs?engine_key={engine_key}")
+        assert runs_res.status_code == 200
+        run = next(record for record in runs_res.json()["records"] if record["calculationRunId"] == run_id)
+        assert run["engineVersion"] == "calculation_scenario_engine_v1"
+        assert run["inputEvidenceIds"] == ["evidence:scenario-input"]
+        assert run["assumptionIds"] == ["assumption:scenario-base"]
+        assert run["sourceLocator"]["scenarioSetId"] == "calculation-run-registry-test"
+
+    tranche_metrics_res = client.get(
+        f"/projects/{project_id}/deal-state-records?record_type=metric&calculation_run_id={run_ids['tranche_recovery']}"
+    )
+    assert tranche_metrics_res.status_code == 200
+    tranche_metrics = tranche_metrics_res.json()["records"]
+    senior_metric = next(row for row in tranche_metrics if row["key"] == "tranche_recovery.senior")
+    assert 0 <= senior_metric["value"] <= 1
+    assert senior_metric["sourceLocator"]["sourceType"] == "scenario_tranche_recovery_row"
+
+    waterfall_risks_res = client.get(
+        f"/projects/{project_id}/deal-state-records?record_type=risk_issue&calculation_run_id={run_ids['waterfall']}"
+    )
+    assert waterfall_risks_res.status_code == 200
+    waterfall_risks = waterfall_risks_res.json()["records"]
+    senior_shortfall = next(row for row in waterfall_risks if row["key"] == "SENIOR_SHORTFALL")
+    assert senior_shortfall["sourceLocator"]["sourceType"] == "scenario_waterfall_row"
+    assert "waterfallScenarios" in senior_shortfall["sourceLocator"]["path"]
+
+    unsold_risks_res = client.get(
+        f"/projects/{project_id}/deal-state-records?record_type=risk_issue&calculation_run_id={run_ids['unsold_ltv']}"
+    )
+    assert unsold_risks_res.status_code == 200
+    unsold_risks = unsold_risks_res.json()["records"]
+    unsold_breach = next(row for row in unsold_risks if row["key"] == "UNSOLD_LTV_BREACH")
+    assert unsold_breach["sourceLocator"]["sourceType"] == "scenario_matrix_cell"
+    assert "unsoldLtvMatrix" in unsold_breach["sourceLocator"]["path"]
+
+    client.delete(f"/projects/{project_id}")

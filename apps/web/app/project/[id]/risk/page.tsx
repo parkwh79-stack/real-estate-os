@@ -12,6 +12,7 @@ import {
   type DealStateRecord,
 } from "../../../../lib/deal-state-records";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
+import { CalculationRunHistoryPanel } from "../../../../components/calculation/calculation-run-history-panel";
 
 type ReviewStatus = "approved" | "waived" | "needs_revision" | "resolved";
 type RiskAssessment = { overall?: Record<string, unknown> };
@@ -260,6 +261,8 @@ export default function RiskReviewPage() {
               </div>
             </Panel>
           </section>
+
+          <CalculationRunHistoryPanel projectId={projectId} />
         </>
       )}
     </div>

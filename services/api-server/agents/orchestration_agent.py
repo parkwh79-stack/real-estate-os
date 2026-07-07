@@ -24,6 +24,7 @@ from use_cases.market_comparables import (
     recent_deal_yms,
 )
 from use_cases.glossary import capture_unmapped_term_surface_candidates_use_case
+from use_cases.approval_readiness_gate import build_deal_state_approval_readiness
 from agents.report_agent import ReportAgent
 from agents.restructuring_agent import RestructuringAgent
 from agents.risk_register_agent import RiskRegisterAgent
@@ -1598,8 +1599,13 @@ class OrchestrationAgent:
                 severity="warning",
             ))
 
-        deal_state_context = self._deal_state_approval_context(run)
-        gates.extend(deal_state_context["gates"])
+        project_id = run.get("project_id") or run.get("projectId")
+        deal_state_context = (
+            build_deal_state_approval_readiness(str(project_id))
+            if project_id
+            else self._deal_state_approval_context(run)
+        )
+        gates.extend(deal_state_context.get("gates", []))
 
         blockers = [gate for gate in gates if not gate["pass"] and gate["severity"] == "blocking"]
         warnings = [gate for gate in gates if not gate["pass"] and gate["severity"] == "warning"]
@@ -1607,6 +1613,7 @@ class OrchestrationAgent:
         return {
             "schemaVersion": "realytics-approval-readiness-gate-v1",
             "analysisType": "approval_readiness_gate",
+            "decisionBasis": "deal_state_records",
             "pass": readiness_pass,
             "status": "ready_for_approval" if readiness_pass else "not_ready_for_approval",
             "gateType": "approval_readiness",
@@ -1630,8 +1637,14 @@ class OrchestrationAgent:
                 "dealStateEvidenceCount": deal_state_context["evidenceCount"],
                 "dealStateMetricCount": deal_state_context["metricCount"],
                 "dealStateAssumptionCount": deal_state_context["assumptionCount"],
+                "dealStateActiveAssumptionOverrideCount": deal_state_context["activeAssumptionOverrideCount"],
+                "dealStateLatestCalculationRunCount": deal_state_context["latestCalculationRunCount"],
+                "dealStateLatestMetricCount": deal_state_context["latestMetricCount"],
+                "dealStateStaleMetricCount": deal_state_context["staleMetricCount"],
                 "dealStateSourceLocatorMissingCount": deal_state_context["sourceLocatorMissingCount"],
+                "dealStateOpenTraceabilityRiskCount": deal_state_context.get("openTraceabilityRiskCount", 0),
             },
+            "dealStateApproval": deal_state_context,
             "gates": gates,
             "blockers": blockers,
             "warnings": warnings,
@@ -1648,121 +1661,32 @@ class OrchestrationAgent:
 
     def _deal_state_approval_context(self, run: Dict[str, Any]) -> Dict[str, Any]:
         project_id = run.get("project_id") or run.get("projectId")
-        context = {
-            "recordCount": 0,
-            "riskIssueCount": 0,
-            "blockingRiskCount": 0,
-            "evidenceCount": 0,
-            "metricCount": 0,
-            "assumptionCount": 0,
-            "sourceLocatorMissingCount": 0,
-            "gates": [],
-        }
         if not project_id:
-            return context
-
-        try:
-            from storage import list_deal_state_records
-
-            records = list_deal_state_records(str(project_id), limit=1000)
-        except Exception as exc:
-            context["gates"].append(self._approval_readiness_check(
-                "DEAL_STATE_RECORDS_READABLE",
-                False,
-                f"Deal State records could not be read: {exc}",
-                severity="warning",
-            ))
-            return context
-
-        risk_records = [record for record in records if record.get("recordType") == "risk_issue"]
-        evidence_records = [record for record in records if record.get("recordType") == "evidence"]
-        metric_records = [record for record in records if record.get("recordType") == "metric"]
-        assumption_records = [record for record in records if record.get("recordType") == "assumption"]
-        missing_locator_records = [record for record in records if not self._has_source_locator(record)]
-        blocking_risks = [
-            record for record in risk_records
-            if self._is_blocking_deal_state_risk(record)
-        ]
-        unreviewed_blocking_risks = [
-            record for record in blocking_risks
-            if str(record.get("reviewStatus") or record.get("status") or "open").lower()
-            not in {"approved", "waived", "resolved"}
-        ]
-        report_grade_metrics = [
-            record for record in metric_records
-            if record.get("calculationRunId") or record.get("sourceType") in {"calculation_run", "chief_pod_artifact"}
-        ]
-        approved_assumptions = [
-            record for record in assumption_records
-            if str(record.get("reviewStatus") or record.get("approvalStatus") or record.get("status") or "").lower()
-            in {"approved", "active", "resolved"}
-        ]
-
-        context.update({
-            "recordCount": len(records),
-            "riskIssueCount": len(risk_records),
-            "blockingRiskCount": len(unreviewed_blocking_risks),
-            "evidenceCount": len(evidence_records),
-            "metricCount": len(metric_records),
-            "assumptionCount": len(assumption_records),
-            "sourceLocatorMissingCount": len(missing_locator_records),
-        })
-        has_deal_state_records = bool(records)
-
-        context["gates"].extend([
-            self._approval_readiness_check(
-                "DEAL_STATE_RECORDS_PRESENT",
-                bool(records),
-                "Deal State records must exist before treating the project as approval-ready.",
-                severity="warning",
-            ),
-            self._approval_readiness_check(
-                "DEAL_STATE_BLOCKING_RISKS_CLEARED",
-                not unreviewed_blocking_risks,
-                f"{len(unreviewed_blocking_risks)} blocking Deal State risk issue(s) remain open.",
-                severity="blocking",
-            ),
-            self._approval_readiness_check(
-                "DEAL_STATE_REQUIRED_EVIDENCE_PRESENT",
-                not has_deal_state_records or bool(evidence_records),
-                "At least one source-backed evidence record must be present in Deal State.",
-                severity="blocking",
-            ),
-            self._approval_readiness_check(
-                "DEAL_STATE_REPORT_GRADE_METRICS_PRESENT",
-                not has_deal_state_records or bool(report_grade_metrics),
-                "Report-grade metrics must come from a CalculationRun or persisted Chief Pod artifact.",
-                severity="blocking",
-            ),
-            self._approval_readiness_check(
-                "DEAL_STATE_ASSUMPTIONS_REVIEWED",
-                not assumption_records or bool(approved_assumptions),
-                "Assumptions are present but no approved or active assumption record is available.",
-                severity="warning",
-            ),
-            self._approval_readiness_check(
-                "DEAL_STATE_SOURCE_LOCATORS_ATTACHED",
-                len(missing_locator_records) == 0,
-                f"{len(missing_locator_records)} Deal State record(s) lack source locators.",
-                severity="warning",
-            ),
-        ])
-        return context
-
-    def _has_source_locator(self, record: Dict[str, Any]) -> bool:
-        locator = record.get("sourceLocator") or record.get("source_locator")
-        if not isinstance(locator, dict):
-            return False
-        return any(value is not None and value != "" for value in locator.values())
-
-    def _is_blocking_deal_state_risk(self, record: Dict[str, Any]) -> bool:
-        severity = str(record.get("severity") or record.get("riskLevel") or record.get("grade") or "").lower()
-        code = str(record.get("key") or record.get("code") or "").upper()
-        if severity in {"blocking", "critical"}:
-            return True
-        if any(token in code for token in ("SENIOR_SHORTFALL", "UNSOLD_LTV_BREACH", "REJECT", "BLOCKING")):
-            return True
-        return False
+            return {
+                "schemaVersion": "realytics-deal-state-approval-readiness-v1",
+                "basis": "deal_state_records",
+                "projectId": None,
+                "readable": False,
+                "recordCount": 0,
+                "riskIssueCount": 0,
+                "blockingRiskCount": 0,
+                "evidenceCount": 0,
+                "metricCount": 0,
+                "assumptionCount": 0,
+                "activeAssumptionOverrideCount": 0,
+                "latestCalculationRunCount": 0,
+                "latestMetricCount": 0,
+                "staleMetricCount": 0,
+                "sourceLocatorMissingCount": 0,
+                "openTraceabilityRiskCount": 0,
+                "gates": [],
+                "pass": False,
+                "status": "not_ready",
+                "blockers": [],
+                "warnings": [],
+                "requiredActions": [],
+            }
+        return build_deal_state_approval_readiness(str(project_id))
 
     def _unresolved_handoff_reviews(self, run: Dict[str, Any]) -> List[Dict[str, Any]]:
         unresolved = []
@@ -1807,12 +1731,15 @@ class OrchestrationAgent:
             "LAND_EVIDENCE_READY": "Attach parcel-level PNU, official land price, acquisition, and registry evidence.",
             "RISK_SOURCE_LOCATORS_ATTACHED": "Attach evidence IDs, document locators, Excel cells, API records, or scenario matrix locators to risk rows.",
             "UNSOLD_LTV_RESTRUCTURING_REQUIRED": "Reduce PF exposure, increase equity, add collateral, or attach forward-sale/bulk-sale/refinancing evidence for the unsold LTV cure.",
+            "DEAL_STATE_RECORDS_READABLE": "Repair Deal State storage access before approval readiness can be evaluated.",
             "DEAL_STATE_RECORDS_PRESENT": "Run the required Agent Pods so metrics, risks, evidence, and assumptions are materialized into Deal State.",
             "DEAL_STATE_BLOCKING_RISKS_CLEARED": "Approve, waive, resolve, or cure blocking Deal State risk issues before approval.",
             "DEAL_STATE_REQUIRED_EVIDENCE_PRESENT": "Attach or auto-supplement source-backed evidence records before approval.",
-            "DEAL_STATE_REPORT_GRADE_METRICS_PRESENT": "Run deterministic calculation engines or Chief Pods so report-grade metrics are persisted.",
-            "DEAL_STATE_ASSUMPTIONS_REVIEWED": "Approve or activate the assumptions used for report-grade analysis.",
+            "DEAL_STATE_REPORT_GRADE_METRICS_PRESENT": "Run deterministic calculation engines so report-grade metrics are persisted.",
+            "DEAL_STATE_CORE_METRICS_LATEST": "Rerun downstream calculations or refresh stale metrics so the approval gate uses the latest CalculationRun per engine.",
+            "DEAL_STATE_ASSUMPTION_OVERRIDES_APPROVED": "Approve the relevant assumption or create an active assumption override for unresolved data-quality conflicts.",
             "DEAL_STATE_SOURCE_LOCATORS_ATTACHED": "Attach document page, Excel cell, API row, evidence ID, or Agent artifact locators to Deal State records.",
+            "DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT": "Resolve SOURCE_LOCATOR_MISSING or EVIDENCE_TRACE_WEAK risks before approval.",
         }
         actions = [
             action_by_code.get(gate["code"], gate["message"])

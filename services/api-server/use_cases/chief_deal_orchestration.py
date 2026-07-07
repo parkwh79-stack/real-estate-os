@@ -8,6 +8,7 @@ from agents.orchestration_agent import OrchestrationAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.risk_register_agent import RiskRegisterAgent
 from agents.scenario_engine_agent import ScenarioEngineAgent
+from agents.pod_ai_reviewer_agent import PodAIReviewerAgent
 from schemas.scenario import ScenarioSetRequest
 from schemas.orchestration import (
     AgentPodPlan,
@@ -470,6 +471,7 @@ def plan_chief_deal_orchestration_use_case(
                     status=status,
                     progressPercent=stored_run.get("progressPercent", 0),
                     artifactKeys=stored_run.get("artifactKeys") or [],
+                    podAiReviewIds=stored_run.get("podAiReviewIds") or [],
                     handoffIds=stored_run.get("handoffIds") or [],
                     recalculationEvents=stored_run.get("recalculationEvents") or [],
                 )
@@ -523,6 +525,7 @@ def run_chief_deal_pod_use_case(
     options: Dict[str, Any] | None = None,
     *,
     artifact_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    review_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     event_sink: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     """Execute a single agent pod, update its state, run the Event Bus triggers,
@@ -588,6 +591,28 @@ def run_chief_deal_pod_use_case(
         "result": artifact,
     }
     persisted_artifact = artifact_sink(artifact_record) if artifact_sink else artifact_record
+    pod_ai_review_ref: Dict[str, Any] | None = None
+    if pod_key == "land_legal":
+        pod_ai_review = PodAIReviewerAgent().review_pod(
+            project_id=project_id,
+            pod_key=pod_key,
+            source_artifact=persisted_artifact,
+            source_artifact_key=artifact_key,
+            project_data=project_data,
+            options=options,
+        )
+        persisted_review = review_sink(pod_ai_review) if review_sink else pod_ai_review
+        pod_ai_review_ref = {
+            "reviewId": persisted_review.get("reviewId"),
+            "reviewStatus": persisted_review.get("reviewStatus"),
+            "reviewMode": persisted_review.get("reviewMode"),
+            "agentId": persisted_review.get("agentId"),
+            "confidence": persisted_review.get("confidence"),
+        }
+        persisted_artifact["podAiReviewId"] = persisted_review.get("reviewId")
+        persisted_artifact["podAiReview"] = pod_ai_review_ref
+        if artifact_sink is not None:
+            persisted_artifact = artifact_sink(persisted_artifact)
     artifacts[artifact_key] = {
         "artifactKey": artifact_key,
         "podKey": pod_key,
@@ -596,11 +621,15 @@ def run_chief_deal_pod_use_case(
         "termSurfaceCount": len(term_surface_metadata),
         "schemaVersion": "realytics-chief-pod-artifact-ref-v1",
     }
+    if pod_ai_review_ref:
+        artifacts[artifact_key]["podAiReview"] = pod_ai_review_ref
+        artifacts[artifact_key]["podAiReviewId"] = pod_ai_review_ref.get("reviewId")
     pod_runs[pod_key] = {
         "podKey": pod_key,
         "status": "completed",
         "progressPercent": 100,
         "artifactKeys": [artifact_key],
+        "podAiReviewIds": [pod_ai_review_ref["reviewId"]] if pod_ai_review_ref and pod_ai_review_ref.get("reviewId") else [],
         "handoffIds": [f"handoff:{pod_key}:{now}"],
         "recalculationEvents": pod_runs.get(pod_key, {}).get("recalculationEvents") or [],
     }
@@ -665,6 +694,7 @@ def run_chief_deal_all_pods_use_case(
     options: Dict[str, Any] | None = None,
     *,
     artifact_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    review_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     event_sink: Callable[[Dict[str, Any]], None] | None = None,
     max_recalculation_rounds: int = 2,
 ) -> Dict[str, Any]:
@@ -703,6 +733,7 @@ def run_chief_deal_all_pods_use_case(
                 project_data,
                 options,
                 artifact_sink=artifact_sink,
+                review_sink=review_sink,
                 event_sink=event_sink,
             )
             auto_supplements.extend(last_plan.get("autoSupplements") or [])
@@ -769,6 +800,7 @@ def run_chief_deal_all_pods_use_case(
                     project_data,
                     options,
                     artifact_sink=artifact_sink,
+                    review_sink=review_sink,
                     event_sink=event_sink,
                 )
                 recalculation_rows.append(

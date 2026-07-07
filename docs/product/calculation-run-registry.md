@@ -23,6 +23,7 @@ Each calculation run stores:
 - `outputMetrics`
 - `riskIssues`
 - `artifactRef`
+- `sourceLocator`
 - `inputDigest`
 - `createdAt`
 - `updatedAt`
@@ -57,6 +58,38 @@ Blocker traceability: `SENIOR_SHORTFALL`/`WATERFALL_SHORTFALL`/`STRESS_SENIOR_SH
 flags are routed to the `waterfall` run's `riskIssues`; `UNSOLD_LTV_BREACH`/`UNSOLD_LTV_HIGH`
 to the `unsold_ltv` run; `TRIGGER_REQUIRED` to `tranche_recovery`. Each blocker therefore
 links to a durable `calculationRunId` and its `deal_state_records` rows.
+
+Operational note: `POST /projects/{project_id}/stress-test/run` now persists under
+the report-grade engine key `discount_stress` with engine version
+`discount_stress_v1`. Older notes may refer to the workflow name
+`stress_test`, but the durable `calculation_runs.engineKey` is
+`discount_stress`.
+
+Scenario-engine risk rows preserve their explicit source locator when available:
+
+- Waterfall shortfall risks keep the scenario waterfall row locator.
+- Unsold LTV breach/high risks keep the matrix-cell locator.
+- Calculation-run metrics and risk issues inherit the run `sourceLocator` when a more specific locator is not available.
+
+This is required for pilot blockers such as `SENIOR_SHORTFALL` and `UNSOLD_LTV_BREACH` to trace back to the exact calculation row or matrix cell.
+
+## Automatic Deal-State Materialization
+
+The CalculationRun registry automatically materializes selected outputs into
+`deal_state_records` so Evidence, Risk, Report Studio, and Approval Readiness
+screens can read one shared ledger.
+
+| Engine | Calculation Output | Deal State Record |
+|---|---|---|
+| `waterfall` | Senior tranche shortfall risk flag | `risk_issue:SENIOR_SHORTFALL` |
+| `unsold_ltv` | Unsold LTV breach risk flag | `risk_issue:UNSOLD_LTV_BREACH` |
+| `tranche_recovery` | Conservative senior recovery ratio across the recovery matrix | `metric:tranche_recovery.senior` |
+| `discount_stress` | 10% discount stress sale-rate/Exit assumption | `metric:discount_stress.discount10.exitSaleRate` |
+
+The tranche recovery metric is derived from already-computed recovery matrix
+rows by taking the minimum observed senior recovery ratio. The discount-stress
+Exit sale rate is derived from the scenario row whose `discountRate` is 10%.
+No new financial calculation is invented during materialization.
 
 ## First-Class Deal State Records
 
@@ -109,13 +142,15 @@ LLM outputs must not replace deterministic calculation outputs.
 LLMs may explain, challenge, classify, or draft narrative around a calculation, but the final numeric value must reference:
 
 ```text
-calculationRunId + engineKey + engineVersion + inputEvidenceIds + assumptionIds
+calculationRunId + engineKey + engineVersion + inputEvidenceIds + assumptionIds + sourceLocator
 ```
 
 ## Next Hardening
 
+- ~~Persist scenario/stress engines with report-grade keys and risk source locators.~~ (Done 2026-07-06 — waterfall / unsold_ltv / tranche_recovery / discount_stress)
+
 - ~~Persist Waterfall and Unsold LTV scenario runs through the same registry.~~ (Done 2026-07-03 — waterfall / unsold_ltv / tranche_recovery / stress_test)
-- Add UI history panel for calculation run comparison.
+- ~~Add UI history panel for calculation run comparison.~~ (Done 2026-07-06 — `/project/{id}/risk` 하단 계산 실행 이력·비교 패널: 엔진별 run 목록 + 두 run 지표 delta·blocker diff)
 - Link report paragraphs directly to `deal_state_records`.
 - Add reviewer status and source locator completeness filters to `deal_state_records`.
 - Add PostgreSQL migration file for enterprise deployment.

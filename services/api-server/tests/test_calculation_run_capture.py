@@ -16,8 +16,20 @@ def _scenario_dump() -> dict:
             ],
         },
         "trancheRecoveryMatrix": [
-            {"scenarioId": "r1", "recoveryPool": 500.0},
-            {"scenarioId": "r2", "recoveryPool": 300.0},
+            {
+                "scenarioId": "r1",
+                "saleRate": 0.7,
+                "discountRate": 0.0,
+                "recoveryPool": 500.0,
+                "tranches": [{"tranche": "Senior", "recoveryRatio": 1.0}],
+            },
+            {
+                "scenarioId": "r2",
+                "saleRate": 0.5,
+                "discountRate": 0.2,
+                "recoveryPool": 300.0,
+                "tranches": [{"tranche": "Senior", "recoveryRatio": 0.72}],
+            },
         ],
         "riskFlags": [
             {"code": "SENIOR_SHORTFALL", "severity": "critical", "message": "선순위 부족"},
@@ -44,6 +56,8 @@ def test_scenario_payloads_route_blocker_flags_to_their_engines():
     # tranche recovery numeric summary from already-computed rows only
     tr = payloads["tranche_recovery"]["result"]["summary"]
     assert tr == {"scenarioCount": 2, "flagCount": 1, "minRecoveryPool": 300.0, "maxRecoveryPool": 500.0}
+    assert payloads["tranche_recovery"]["result"]["metrics"]["senior"]["value"] == 0.72
+    assert payloads["tranche_recovery"]["result"]["metrics"]["senior"]["sourceLocator"]["sourceType"] == "scenario_tranche_recovery_row"
     # provenance: every run references the same scenario set section
     assert payloads["waterfall"]["artifactRef"] == {
         "type": "scenario_set",
@@ -68,20 +82,23 @@ def test_stress_payload_counts_discount_stages_and_keeps_flags():
         "scenarios": [
             {"key": "base", "discountRate": 0.0},
             {"key": "mild", "discountRate": 0.0},
-            {"key": "severe", "discountRate": 0.10},
-            {"key": "tail", "discountRate": 0.20},
+            {"key": "severe", "discountRate": 0.10, "saleRate": 0.60, "seniorRecoveryRatio": 0.95},
+            {"key": "tail", "discountRate": 0.20, "saleRate": 0.45, "seniorRecoveryRatio": 0.80},
         ],
         "riskFlags": [{"code": "STRESS_SENIOR_SHORTFALL", "severity": "critical"}],
     }
 
     payload = stress_test_run_payload(dump)
 
-    assert payload["engineKey"] == "stress_test"
+    assert payload["engineKey"] == "discount_stress"
+    assert payload["engineVersion"] == "discount_stress_v1"
     summary = payload["result"]["summary"]
     assert summary["discountStressStageCount"] == 2  # severe(10%) + tail(20%) 할인 스트레스
     assert summary["scenarioCount"] == 4
     assert payload["result"]["riskFlags"][0]["code"] == "STRESS_SENIOR_SHORTFALL"
     assert payload["artifactRef"]["worstCaseKey"] == "tail"
+    assert payload["result"]["metrics"]["discount10.exitSaleRate"]["value"] == 0.60
+    assert payload["result"]["metrics"]["discount10.exitSaleRate"]["sourceLocator"]["sourceType"] == "discount_stress_scenario"
 
 
 def test_empty_dump_yields_zero_summaries_not_errors():
@@ -90,3 +107,4 @@ def test_empty_dump_yields_zero_summaries_not_errors():
     for p in payloads:
         assert p["result"]["riskFlags"] == []
     assert stress_test_run_payload({})["result"]["summary"]["scenarioCount"] == 0
+    assert stress_test_run_payload({})["engineKey"] == "discount_stress"

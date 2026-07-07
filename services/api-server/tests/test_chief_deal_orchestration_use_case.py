@@ -127,9 +127,14 @@ def test_run_chief_deal_pod_recalculation_triggers():
     }
     
     persisted_artifacts = {}
+    persisted_reviews = {}
 
     def artifact_sink(record):
         persisted_artifacts[record["artifactKey"]] = record
+        return record
+
+    def review_sink(record):
+        persisted_reviews[record["reviewId"]] = record
         return record
 
     # Run land_legal pod
@@ -137,8 +142,9 @@ def test_run_chief_deal_pod_recalculation_triggers():
         "p_run",
         "land_legal",
         project_data,
-        {"forceTrigger": "legal_product_infeasible"},
+        {"forceTrigger": "legal_product_infeasible", "podAiReviewMode": "deterministic"},
         artifact_sink=artifact_sink,
+        review_sink=review_sink,
     )
     
     runs = {run["podKey"]: run for run in plan["podRuns"]}
@@ -163,6 +169,9 @@ def test_run_chief_deal_pod_recalculation_triggers():
     assert state["artifacts"][artifact_key]["termSurfaceCount"] >= 1
     assert artifact_key in persisted_artifacts
     assert persisted_artifacts[artifact_key]["result"]["artifactType"] == "land_legal_pod_result"
+    assert persisted_artifacts[artifact_key]["podAiReviewId"] in persisted_reviews
+    assert runs["land_legal"]["podAiReviewIds"] == [persisted_artifacts[artifact_key]["podAiReviewId"]]
+    assert persisted_reviews[persisted_artifacts[artifact_key]["podAiReviewId"]]["agentId"] == "LandLegalPodAIReviewer"
     assert persisted_artifacts[artifact_key]["termSurfaceMetadata"]
     pnu_surface = next(item for item in persisted_artifacts[artifact_key]["termSurfaceMetadata"] if item["canonicalField"] == "land.pnu")
     assert pnu_surface["rawText"] == "PNU"
@@ -202,7 +211,7 @@ def test_land_pod_runs_with_land_ledger_even_when_land_evidence_is_missing():
         "p_land_gap",
         "land_legal",
         project_data,
-        {"workflowTrack": "pf"},
+        {"workflowTrack": "pf", "podAiReviewMode": "deterministic"},
         artifact_sink=lambda record: persisted_artifacts.setdefault(record["artifactKey"], record),
     )
     updated_runs = {run["podKey"]: run for run in updated["podRuns"]}
@@ -234,7 +243,7 @@ def test_run_all_pods_executes_track_order_and_reports_summary():
     plan = run_chief_deal_all_pods_use_case(
         "p_run_all",
         project_data,
-        {"workflowTrack": "pf"},
+        {"workflowTrack": "pf", "podAiReviewMode": "deterministic"},
         artifact_sink=lambda record: artifacts.setdefault(record["artifactKey"], record),
     )
 

@@ -12,7 +12,7 @@ from schemas.orchestration import (
     PF_REVIEW_STEPS,
     PF_REVIEW_WORKFLOW,
 )
-from storage import upsert_deal_state_record
+from storage import upsert_calculation_run_record, upsert_deal_state_record
 
 
 def project_with_discount_triggers(client: TestClient) -> str:
@@ -22,6 +22,31 @@ def project_with_discount_triggers(client: TestClient) -> str:
         for item in projects
         if item.get("covenants", {}).get("discount_triggers")
     )
+
+
+def _approval_ready_base_run(project_id: str) -> dict:
+    return {
+        "project_id": project_id,
+        "handoffs": [],
+        "artifacts": {
+            "qualityCheck": {"pass": True},
+            "legalPermitReview": {"status": "clear"},
+            "dataQualityReview": {"status": "clear"},
+            "reconciliationGate": {"status": "clear"},
+            "riskRegister": {"status": "clear", "risks": []},
+            "creditReviewDecision": {"decision": "conditional_approval"},
+            "landAgentReview": {
+                "status": "ready_for_pf_review",
+                "evidenceReadiness": {
+                    "pnuReady": True,
+                    "officialPriceReady": True,
+                    "registryEvidenceReady": True,
+                    "acquisitionReady": True,
+                },
+            },
+            "evidenceGraph": {"summary": {"riskRowsWithoutExplicitEvidenceCount": 0}},
+        },
+    }
 
 
 def test_pf_review_orchestration_completes_and_saves_report():
@@ -427,8 +452,109 @@ def test_approval_readiness_gate_clears_deal_state_when_records_are_reviewed(tmp
     assert deal_state_codes["DEAL_STATE_BLOCKING_RISKS_CLEARED"]["pass"] is True
     assert deal_state_codes["DEAL_STATE_REQUIRED_EVIDENCE_PRESENT"]["pass"] is True
     assert deal_state_codes["DEAL_STATE_REPORT_GRADE_METRICS_PRESENT"]["pass"] is True
-    assert deal_state_codes["DEAL_STATE_ASSUMPTIONS_REVIEWED"]["pass"] is True
+    assert deal_state_codes["DEAL_STATE_ASSUMPTION_OVERRIDES_APPROVED"]["pass"] is True
+    assert gate["decisionBasis"] == "deal_state_records"
+    assert gate["dealStateApproval"]["basis"] == "deal_state_records"
     assert gate["summary"]["dealStateSourceLocatorMissingCount"] == 0
+
+
+def test_approval_readiness_gate_blocks_stale_calculation_metrics(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-stale-metric.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    project_id = "approval-stale-metric-project"
+
+    old_run = upsert_calculation_run_record(project_id, {
+        "calculationRunId": "calc:pf_metrics:old",
+        "engineKey": "pf_metrics",
+        "engineVersion": "pf_metrics-v1",
+        "createdAt": "2026-07-01T00:00:00+00:00",
+        "sourceLocator": {"calculationRunId": "calc:pf_metrics:old", "engineKey": "pf_metrics"},
+        "outputMetrics": [
+            {
+                "key": "pf_metrics.ltv",
+                "value": 0.72,
+                "sourceLocator": {"calculationRunId": "calc:pf_metrics:old", "engineKey": "pf_metrics"},
+            }
+        ],
+    })
+    upsert_calculation_run_record(project_id, {
+        "calculationRunId": "calc:pf_metrics:new",
+        "engineKey": "pf_metrics",
+        "engineVersion": "pf_metrics-v1",
+        "createdAt": "2026-07-02T00:00:00+00:00",
+        "sourceLocator": {"calculationRunId": "calc:pf_metrics:new", "engineKey": "pf_metrics"},
+        "outputMetrics": [],
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "evidence-price",
+        "recordType": "evidence",
+        "key": "evidence:price",
+        "sourceType": "manual_evidence",
+        "sourceLocator": {"evidenceId": "evidence:price"},
+    })
+    assert old_run["calculationRunId"] == "calc:pf_metrics:old"
+
+    run = _approval_ready_base_run(project_id)
+    gate = OrchestrationAgent()._approval_readiness_gate(run)
+    deal_state_codes = {
+        item["code"]: item
+        for item in gate["gates"]
+        if item["code"].startswith("DEAL_STATE_")
+    }
+
+    assert deal_state_codes["DEAL_STATE_CORE_METRICS_LATEST"]["pass"] is False
+    assert "DEAL_STATE_CORE_METRICS_LATEST" in {item["code"] for item in gate["blockers"]}
+    assert gate["summary"]["dealStateStaleMetricCount"] == 1
+
+
+def test_approval_readiness_gate_blocks_open_source_locator_audit_risks(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-source-locator-risk.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    project_id = "approval-source-locator-risk-project"
+
+    upsert_calculation_run_record(project_id, {
+        "calculationRunId": "calc:discount_stress:latest",
+        "engineKey": "discount_stress",
+        "engineVersion": "discount_stress_v1",
+        "sourceLocator": {"calculationRunId": "calc:discount_stress:latest", "engineKey": "discount_stress"},
+        "outputMetrics": [
+            {
+                "key": "discount_stress.discount10.exitSaleRate",
+                "value": 0.6,
+                "sourceLocator": {
+                    "calculationRunId": "calc:discount_stress:latest",
+                    "engineKey": "discount_stress",
+                    "path": "scenarios[key=severe].saleRate",
+                },
+            }
+        ],
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "evidence-market",
+        "recordType": "evidence",
+        "key": "evidence:market",
+        "sourceType": "manual_evidence",
+        "sourceLocator": {"evidenceId": "evidence:market"},
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "risk_issue:SOURCE_LOCATOR_MISSING",
+        "recordType": "risk_issue",
+        "key": "SOURCE_LOCATOR_MISSING",
+        "severity": "high",
+        "reviewStatus": "open",
+        "sourceType": "source_locator_audit",
+        "sourceLocator": {"artifactKey": "source-locator-audit"},
+    })
+
+    gate = OrchestrationAgent()._approval_readiness_gate(_approval_ready_base_run(project_id))
+    deal_state_codes = {
+        item["code"]: item
+        for item in gate["gates"]
+        if item["code"].startswith("DEAL_STATE_")
+    }
+
+    assert deal_state_codes["DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT"]["pass"] is False
+    assert "DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT" in {item["code"] for item in gate["blockers"]}
 
 
 def test_land_readiness_uses_flat_land_evidence_package():

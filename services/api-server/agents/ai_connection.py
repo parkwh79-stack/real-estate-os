@@ -274,7 +274,9 @@ class AIConnection:
             token_usage=(result.meta or {}).get("token_usage"),
             started_at=started_at,
         )
-        record_ai_brain_used(event)
+        stored = record_ai_brain_used(event)
+        if stored and isinstance(result.meta, dict):
+            result.meta["ai_brain_used_event_id"] = stored.get("eventId")
 
     def _extract_with_openai_compatible(
         self,

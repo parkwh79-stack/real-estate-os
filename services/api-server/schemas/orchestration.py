@@ -9,6 +9,7 @@ PF_REVIEW_WORKFLOW = "pf-review"
 AGENT_HANDOFF_SCHEMA_VERSION = "realytics-agent-handoff-v1"
 AGENT_PROGRESS_SCHEMA_VERSION = "realytics-agent-progress-v1"
 CHIEF_DEAL_ORCHESTRATION_SCHEMA_VERSION = "realytics-chief-deal-orchestration-v1"
+POD_AI_REVIEW_SCHEMA_VERSION = "realytics-pod-ai-review-v1"
 
 PF_REVIEW_STEPS = [
     ("project_load", "Project data load"),
@@ -112,6 +113,84 @@ class AgentProgress(BaseModel):
     updated_at: str = Field(..., alias="updatedAt")
 
 
+class PodAIReviewFinding(BaseModel):
+    """Evidence-aware reviewer finding attached to a Chief Pod artifact."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    finding_id: str = Field(..., alias="findingId")
+    category: Literal[
+        "missing_evidence",
+        "source_locator_gap",
+        "data_quality",
+        "recalculation_needed",
+        "risk_note",
+        "handoff",
+        "guardrail",
+    ]
+    severity: Literal["info", "medium", "high", "blocking"] = "medium"
+    message: str
+    evidence_ids: List[str] = Field(default_factory=list, alias="evidenceIds")
+    source_locators: List[Dict[str, Any]] = Field(default_factory=list, alias="sourceLocators")
+    recommended_action: Optional[str] = Field(None, alias="recommendedAction")
+
+
+class PodAIReviewHandoff(BaseModel):
+    """Traceable handoff suggested by a Pod AI reviewer."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    handoff_id: str = Field(..., alias="handoffId")
+    from_agent: str = Field(..., alias="fromAgent")
+    to_agent: str = Field(..., alias="toAgent")
+    handoff_type: Literal["blocker", "work_order", "recalculation", "report_note", "review_request"] = Field(
+        ...,
+        alias="handoffType",
+    )
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    evidence_ids: List[str] = Field(default_factory=list, alias="evidenceIds")
+    confidence: Optional[float] = Field(None, ge=0, le=1)
+
+
+class PodAIReview(BaseModel):
+    """Persisted evidence-aware AI reviewer output for a Chief Orchestrator Pod.
+
+    The reviewer may challenge, explain, or request evidence, but it must not
+    create report-grade financial calculations or source facts.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: str = Field(POD_AI_REVIEW_SCHEMA_VERSION, alias="schemaVersion")
+    review_id: str = Field(..., alias="reviewId")
+    project_id: str = Field(..., alias="projectId")
+    run_id: Optional[str] = Field(None, alias="runId")
+    pod_key: str = Field(..., alias="podKey")
+    source_artifact_key: Optional[str] = Field(None, alias="sourceArtifactKey")
+    source_artifact_keys: List[str] = Field(default_factory=list, alias="sourceArtifactKeys")
+    agent_id: str = Field(..., alias="agentId")
+    review_mode: Literal["llm_evidence_aware_review", "deterministic_fallback_review"] = Field(
+        ...,
+        alias="reviewMode",
+    )
+    review_status: Literal["pass", "warning", "blocking", "needs_human_review"] = Field(
+        "warning",
+        alias="reviewStatus",
+    )
+    confidence: Optional[float] = Field(None, ge=0, le=1)
+    findings: List[PodAIReviewFinding] = Field(default_factory=list)
+    handoffs: List[PodAIReviewHandoff] = Field(default_factory=list)
+    report_fragments: Dict[str, str] = Field(default_factory=dict, alias="reportFragments")
+    input_evidence_ids: List[str] = Field(default_factory=list, alias="inputEvidenceIds")
+    input_assumption_ids: List[str] = Field(default_factory=list, alias="inputAssumptionIds")
+    source_locators: List[Dict[str, Any]] = Field(default_factory=list, alias="sourceLocators")
+    guardrails: List[str] = Field(default_factory=list)
+    ai_brain_used: Dict[str, Any] = Field(default_factory=dict, alias="aiBrainUsed")
+    ai_brain_used_event_id: Optional[str] = Field(None, alias="aiBrainUsedEventId")
+    created_at: str = Field(..., alias="createdAt")
+    updated_at: str = Field(..., alias="updatedAt")
+
+
 class DealStateValue(BaseModel):
     """A material value stored in the Shared Deal State Graph."""
 
@@ -191,6 +270,7 @@ class AgentPodRun(BaseModel):
     status: Literal["planned", "running", "completed", "blocked", "failed", "needs_recalculation"] = "planned"
     progress_percent: int = Field(0, ge=0, le=100, alias="progressPercent")
     artifact_keys: List[str] = Field(default_factory=list, alias="artifactKeys")
+    pod_ai_review_ids: List[str] = Field(default_factory=list, alias="podAiReviewIds")
     handoff_ids: List[str] = Field(default_factory=list, alias="handoffIds")
     recalculation_events: List[Dict[str, Any]] = Field(default_factory=list, alias="recalculationEvents")
 

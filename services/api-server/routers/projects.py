@@ -43,8 +43,10 @@ from db.repositories.upload_archive_repository import UploadArchiveRepository
 from storage import (
     get_evidence_graph_record,
     get_chief_pod_artifact_record,
+    get_pod_ai_review_record,
     get_prompt_artifact_record,
     list_chief_pod_artifact_records,
+    list_pod_ai_review_records,
     list_recalculation_event_records,
     get_risk_register_record,
     list_evidence_graph_records,
@@ -68,6 +70,7 @@ from storage import (
     upsert_assumption_override_record,
     upsert_land_evidence_record,
     upsert_chief_pod_artifact_record,
+    upsert_pod_ai_review_record,
     upsert_recalculation_event_record,
     upsert_prompt_artifact_record,
     upsert_restructuring_cure_record,
@@ -663,13 +666,16 @@ def _metric_rows_from_result(result: Dict[str, Any], *, prefix: str = "") -> lis
     metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
     for key, metric in metrics.items():
         if isinstance(metric, dict):
-            rows.append({
+            row = {
                 "key": f"{prefix}{key}",
                 "value": metric.get("value"),
                 "unit": metric.get("unit"),
                 "label": metric.get("label") or key,
                 "status": metric.get("status"),
-            })
+            }
+            if metric.get("sourceLocator") or metric.get("source_locator"):
+                row["sourceLocator"] = metric.get("sourceLocator") or metric.get("source_locator")
+            rows.append(row)
         else:
             rows.append({"key": f"{prefix}{key}", "value": metric})
     summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
@@ -698,6 +704,12 @@ def _persist_calculation_run(
     artifact_ref: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     input_data = input_data or {}
+    source_locator = (
+        input_data.get("sourceLocator")
+        or input_data.get("source_locator")
+        or artifact_ref
+        or {"engineKey": engine_key}
+    )
     return upsert_calculation_run_record(
         project_id,
         {
@@ -708,9 +720,11 @@ def _persist_calculation_run(
             "outputMetrics": _metric_rows_from_result(result, prefix=f"{engine_key}."),
             "riskIssues": _risk_rows_from_result(result),
             "artifactRef": artifact_ref or {},
+            "sourceLocator": source_locator,
             "inputDigest": {
                 "keys": sorted(str(key) for key in input_data.keys()),
                 "source": input_data.get("source") or input_data.get("sourceName") or "api_request",
+                "sourceLocator": source_locator,
             },
         },
     )
@@ -3219,6 +3233,7 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
             project_data,
             options,
             artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
+            review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
             event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
         )
     except ValueError as e:
@@ -3258,6 +3273,7 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         project_data,
         options,
         artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
+        review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
         event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
     )
 
@@ -3302,6 +3318,49 @@ def list_chief_deal_artifacts(project_id: str, request: Request, pod_key: str | 
         "podKey": pod_key,
         "records": records,
     }
+
+
+@router.get("/{project_id}/chief-orchestration/pod-ai-reviews")
+def list_chief_deal_pod_ai_reviews(
+    project_id: str,
+    request: Request,
+    pod_key: str | None = None,
+    review_status: str | None = None,
+    source_artifact_key: str | None = None,
+    limit: int = 100,
+):
+    """List persisted Pod AI Reviewer records for Chief Deal Room audit/review."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    safe_limit = max(1, min(500, int(limit or 100)))
+    records = list_pod_ai_review_records(
+        project_id,
+        pod_key=pod_key,
+        review_status=review_status,
+        source_artifact_key=source_artifact_key,
+        limit=safe_limit,
+    )
+    return {
+        "schemaVersion": "realytics-pod-ai-review-list-v1",
+        "projectId": project_id,
+        "podKey": pod_key,
+        "reviewStatus": review_status,
+        "count": len(records),
+        "records": records,
+    }
+
+
+@router.get("/{project_id}/chief-orchestration/pod-ai-reviews/{review_id:path}")
+def get_chief_deal_pod_ai_review(project_id: str, review_id: str, request: Request):
+    """Read a persisted Pod AI Reviewer record by ID."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    record = get_pod_ai_review_record(project_id, review_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Pod AI review not found")
+    return record
 
 
 @router.get("/{project_id}/chief-orchestration/recalculation-events")

@@ -49,6 +49,7 @@ def default_state() -> Dict[str, Any]:
         "risk_registers": {},
         "evidence_graphs": {},
         "chief_pod_artifacts": {},
+        "pod_ai_reviews": {},
         "recalculation_events": {},
         "calculation_runs": {},
         "deal_state_records": {},
@@ -114,6 +115,7 @@ def save_state(
     assumption_overrides: Dict[str, Any] | None = None,
     restructuring_cures: Dict[str, Any] | None = None,
     glossary_term_candidates: Dict[str, Any] | None = None,
+    pod_ai_reviews: Dict[str, Any] | None = None,
 ) -> None:
     market_evidence = market_evidence or {}
     project_snapshots = project_snapshots or {}
@@ -121,6 +123,7 @@ def save_state(
     risk_registers = risk_registers or _load_existing_risk_registers()
     evidence_graphs = evidence_graphs or _load_existing_evidence_graphs()
     chief_pod_artifacts = chief_pod_artifacts or _load_existing_chief_pod_artifacts()
+    pod_ai_reviews = pod_ai_reviews or _load_existing_pod_ai_reviews()
     prompt_artifacts = prompt_artifacts or _load_existing_prompt_artifacts()
     assumption_overrides = assumption_overrides or _load_existing_assumption_overrides()
     restructuring_cures = restructuring_cures or _load_existing_restructuring_cures()
@@ -129,7 +132,7 @@ def save_state(
         user_activity_logs = _load_existing_user_activity_logs()
     identity = _load_existing_identity_records()
     if storage_backend() == "json":
-        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity, glossary_term_candidates=glossary_term_candidates)
+        _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity, glossary_term_candidates=glossary_term_candidates, pod_ai_reviews=pod_ai_reviews)
         return
     _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots)
 
@@ -177,6 +180,7 @@ def delete_project_record_cascade(project_id: str) -> bool:
             "risk_registers",
             "evidence_graphs",
             "chief_pod_artifacts",
+            "pod_ai_reviews",
             "prompt_artifacts",
             "assumption_overrides",
             "restructuring_cures",
@@ -886,6 +890,112 @@ def list_chief_pod_artifact_records(
     return sorted(records, key=lambda item: item.get("createdAt") or "", reverse=True)[:limit]
 
 
+def upsert_pod_ai_review_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a Pod AI Reviewer output as a first-class audit record."""
+    now = datetime.now(timezone.utc).isoformat()
+    review_id = record.get("reviewId") or record.get("review_id") or f"pod-ai-review:{record.get('podKey') or record.get('pod_key') or 'pod'}:{uuid4()}"
+    normalized = {
+        **record,
+        "schemaVersion": record.get("schemaVersion") or "realytics-pod-ai-review-v1",
+        "projectId": project_id,
+        "reviewId": str(review_id),
+        "podKey": record.get("podKey") or record.get("pod_key"),
+        "sourceArtifactKey": record.get("sourceArtifactKey") or record.get("source_artifact_key"),
+        "agentId": record.get("agentId") or record.get("agent_id") or "PodAIReviewerAgent",
+        "reviewStatus": record.get("reviewStatus") or record.get("review_status") or "warning",
+        "createdAt": record.get("createdAt") or record.get("created_at") or now,
+        "updatedAt": now,
+    }
+
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("pod_ai_reviews", {})
+        state["pod_ai_reviews"].setdefault(project_id, {})[normalized["reviewId"]] = normalized
+        _save_json_state_from_state(state)
+        return normalized
+
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO pod_ai_reviews(
+                project_id, review_id, pod_key, source_artifact_key, agent_id,
+                review_status, ai_brain_used_event_id, created_at, updated_at, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, review_id) DO UPDATE SET
+                pod_key=excluded.pod_key,
+                source_artifact_key=excluded.source_artifact_key,
+                agent_id=excluded.agent_id,
+                review_status=excluded.review_status,
+                ai_brain_used_event_id=excluded.ai_brain_used_event_id,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                project_id,
+                normalized["reviewId"],
+                normalized.get("podKey"),
+                normalized.get("sourceArtifactKey"),
+                normalized.get("agentId"),
+                normalized.get("reviewStatus"),
+                normalized.get("aiBrainUsedEventId"),
+                normalized.get("createdAt"),
+                normalized.get("updatedAt"),
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return normalized
+
+
+def get_pod_ai_review_record(project_id: str, review_id: str) -> Dict[str, Any] | None:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        return state.get("pod_ai_reviews", {}).get(project_id, {}).get(review_id)
+    with _connect_sqlite() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM pod_ai_reviews WHERE project_id = ? AND review_id = ?",
+            (project_id, review_id),
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def list_pod_ai_review_records(
+    project_id: str,
+    *,
+    pod_key: str | None = None,
+    review_status: str | None = None,
+    source_artifact_key: str | None = None,
+    limit: int = 100,
+) -> list[Dict[str, Any]]:
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        records = list(state.get("pod_ai_reviews", {}).get(project_id, {}).values())
+    else:
+        query = "SELECT payload_json FROM pod_ai_reviews WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if pod_key:
+            query += " AND pod_key = ?"
+            params.append(pod_key)
+        if review_status:
+            query += " AND review_status = ?"
+            params.append(review_status)
+        if source_artifact_key:
+            query += " AND source_artifact_key = ?"
+            params.append(source_artifact_key)
+        query += " ORDER BY updated_at DESC, review_id DESC LIMIT ?"
+        params.append(limit)
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if pod_key:
+        records = [record for record in records if record.get("podKey") == pod_key]
+    if review_status:
+        records = [record for record in records if record.get("reviewStatus") == review_status]
+    if source_artifact_key:
+        records = [record for record in records if record.get("sourceArtifactKey") == source_artifact_key]
+    return sorted(records, key=lambda item: item.get("updatedAt") or item.get("createdAt") or "", reverse=True)[:limit]
+
+
 def upsert_deal_state_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
     """Persist one Evidence/Assumption/Metric/RiskIssue as a queryable first-class row."""
     now = datetime.now(timezone.utc).isoformat()
@@ -981,6 +1091,10 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
     now = datetime.now(timezone.utc).isoformat()
     engine_key = record.get("engineKey") or record.get("engine_key") or record.get("calculationType") or "calculation"
     run_id = record.get("calculationRunId") or record.get("calculation_run_id") or f"calc:{engine_key}:{uuid4()}"
+    run_source_locator = record.get("sourceLocator") or record.get("source_locator") or {
+        "calculationRunId": str(run_id),
+        "engineKey": engine_key,
+    }
     normalized = {
         **record,
         "schemaVersion": record.get("schemaVersion") or "realytics-calculation-run-v1",
@@ -994,6 +1108,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
         "outputMetrics": record.get("outputMetrics") or record.get("output_metrics") or [],
         "riskIssues": record.get("riskIssues") or record.get("risk_issues") or [],
         "artifactRef": record.get("artifactRef") or record.get("artifact_ref") or {},
+        "sourceLocator": run_source_locator,
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
@@ -1035,6 +1150,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
     for metric in normalized.get("outputMetrics") or []:
         if isinstance(metric, dict):
             key = metric.get("key") or metric.get("metricKey")
+            metric_source_locator = metric.get("sourceLocator") or metric.get("source_locator") or run_source_locator
             upsert_deal_state_record(
                 project_id,
                 {
@@ -1043,12 +1159,19 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                     "recordType": "metric",
                     "calculationRunId": normalized["calculationRunId"],
                     "sourceType": "calculation_run",
-                    "sourceLocator": {"calculationRunId": normalized["calculationRunId"], "engineKey": normalized["engineKey"]},
+                    "sourceLocator": metric_source_locator,
                 },
             )
     for risk in normalized.get("riskIssues") or []:
         if isinstance(risk, dict):
             code = risk.get("code") or risk.get("riskCode")
+            risk_locators = risk.get("sourceLocators") or risk.get("source_locators") or []
+            risk_source_locator = (
+                risk.get("sourceLocator")
+                or risk.get("source_locator")
+                or (risk_locators[0] if isinstance(risk_locators, list) and risk_locators else None)
+                or run_source_locator
+            )
             upsert_deal_state_record(
                 project_id,
                 {
@@ -1058,7 +1181,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                     "key": code,
                     "calculationRunId": normalized["calculationRunId"],
                     "sourceType": "calculation_run",
-                    "sourceLocator": {"calculationRunId": normalized["calculationRunId"], "engineKey": normalized["engineKey"]},
+                    "sourceLocator": risk_source_locator,
                 },
             )
     for assumption_id in normalized.get("assumptionIds") or []:
@@ -2015,6 +2138,7 @@ def _save_json_state(
     recalculation_events: Dict[str, Any] | None = None,
     calculation_runs: Dict[str, Any] | None = None,
     deal_state_records: Dict[str, Any] | None = None,
+    pod_ai_reviews: Dict[str, Any] | None = None,
 ) -> None:
     path = state_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2030,6 +2154,7 @@ def _save_json_state(
         "risk_registers": risk_registers,
         "evidence_graphs": evidence_graphs,
         "chief_pod_artifacts": chief_pod_artifacts,
+        "pod_ai_reviews": pod_ai_reviews or (_load_json_state() or default_state()).get("pod_ai_reviews", {}),
         "recalculation_events": recalculation_events or (_load_json_state() or default_state()).get("recalculation_events", {}),
         "calculation_runs": calculation_runs or (_load_json_state() or default_state()).get("calculation_runs", {}),
         "deal_state_records": deal_state_records or (_load_json_state() or default_state()).get("deal_state_records", {}),
@@ -2161,6 +2286,23 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             ON chief_pod_artifacts(project_id, pod_key, created_at);
         CREATE INDEX IF NOT EXISTS idx_chief_pod_artifacts_project_updated
             ON chief_pod_artifacts(project_id, updated_at);
+        CREATE TABLE IF NOT EXISTS pod_ai_reviews (
+            project_id TEXT NOT NULL,
+            review_id TEXT NOT NULL,
+            pod_key TEXT,
+            source_artifact_key TEXT,
+            agent_id TEXT,
+            review_status TEXT,
+            ai_brain_used_event_id TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, review_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pod_ai_reviews_project_pod
+            ON pod_ai_reviews(project_id, pod_key, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_pod_ai_reviews_project_status
+            ON pod_ai_reviews(project_id, review_status, updated_at);
         CREATE TABLE IF NOT EXISTS recalculation_events (
             project_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
@@ -2425,6 +2567,12 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         ):
             chief_pod_artifacts.setdefault(row["project_id"], {})[row["artifact_key"]] = json.loads(row["payload_json"])
 
+        pod_ai_reviews: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, review_id, payload_json FROM pod_ai_reviews ORDER BY project_id, updated_at, review_id"
+        ):
+            pod_ai_reviews.setdefault(row["project_id"], {})[row["review_id"]] = json.loads(row["payload_json"])
+
         recalculation_events: Dict[str, Any] = {}
         for row in conn.execute(
             "SELECT project_id, event_id, payload_json FROM recalculation_events ORDER BY project_id, created_at, event_id"
@@ -2487,7 +2635,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         }
 
     has_identity_records = any(identity.get(key) for key in ("tenants", "users", "sessions"))
-    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not chief_pod_artifacts and not recalculation_events and not prompt_artifacts and not assumption_overrides and not restructuring_cures and not glossary_terms and not glossary_term_candidates and not metadata and not has_identity_records:
+    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not chief_pod_artifacts and not pod_ai_reviews and not recalculation_events and not prompt_artifacts and not assumption_overrides and not restructuring_cures and not glossary_terms and not glossary_term_candidates and not metadata and not has_identity_records:
         return None
 
     return _normalize_state({
@@ -2501,6 +2649,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         "risk_registers": risk_registers,
         "evidence_graphs": evidence_graphs,
         "chief_pod_artifacts": chief_pod_artifacts,
+        "pod_ai_reviews": pod_ai_reviews,
         "recalculation_events": recalculation_events,
         "prompt_artifacts": prompt_artifacts,
         "assumption_overrides": assumption_overrides,
@@ -2797,6 +2946,7 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("risk_registers", {})
     normalized.setdefault("evidence_graphs", {})
     normalized.setdefault("chief_pod_artifacts", {})
+    normalized.setdefault("pod_ai_reviews", {})
     normalized.setdefault("recalculation_events", {})
     normalized.setdefault("calculation_runs", {})
     normalized.setdefault("deal_state_records", {})
@@ -2839,6 +2989,7 @@ def _save_json_state_from_state(state: Dict[str, Any]) -> None:
         recalculation_events=state.get("recalculation_events", {}),
         calculation_runs=state.get("calculation_runs", {}),
         deal_state_records=state.get("deal_state_records", {}),
+        pod_ai_reviews=state.get("pod_ai_reviews", {}),
     )
 
 
@@ -2923,6 +3074,22 @@ def _load_existing_chief_pod_artifacts() -> Dict[str, Any]:
         ):
             artifacts.setdefault(row["project_id"], {})[row["artifact_key"]] = json.loads(row["payload_json"])
         return artifacts
+
+
+def _load_existing_pod_ai_reviews() -> Dict[str, Any]:
+    if storage_backend() == "json":
+        state = _load_json_state()
+        return (state or {}).get("pod_ai_reviews", {})
+    path = sqlite_file_path()
+    if not path.exists():
+        return {}
+    with _connect_sqlite() as conn:
+        reviews: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT project_id, review_id, payload_json FROM pod_ai_reviews ORDER BY project_id, updated_at, review_id"
+        ):
+            reviews.setdefault(row["project_id"], {})[row["review_id"]] = json.loads(row["payload_json"])
+        return reviews
 
 
 def _load_existing_prompt_artifacts() -> Dict[str, Any]:

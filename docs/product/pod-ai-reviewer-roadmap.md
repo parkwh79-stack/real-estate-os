@@ -2,7 +2,7 @@
 
 Updated: 2026-07-02  
 Project: REALYTICS x PLATFORM9  
-Status: Planned  
+Status: In Progress
 Owner: REALYTICS AI LAB / PLATFORM9  
 
 ---
@@ -16,6 +16,31 @@ This document defines the implementation path for **Pod AI Reviewer**.
 ---
 
 ## 2. Current State
+
+### 2026-07-06 Implementation Update
+
+Implemented:
+
+- Backend `PodAIReview`, `PodAIReviewFinding`, and `PodAIReviewHandoff` schema added in `services/api-server/schemas/orchestration.py`.
+- JSON/SQLite persistence added as first-class `pod_ai_reviews` records.
+- PostgreSQL bootstrap already includes `pod_ai_reviews` in the JSONB store list.
+- Generic `PodAIReviewerAgent` added.
+- Land-Legal Pod now creates a deterministic Pod artifact and a linked Pod AI Review record.
+- Chief Pod artifact keeps a lightweight `podAiReviewId` / `podAiReview` reference.
+- Chief Pod run response now exposes `podAiReviewIds`.
+- API endpoints added:
+  - `GET /projects/{project_id}/chief-orchestration/pod-ai-reviews`
+  - `GET /projects/{project_id}/chief-orchestration/pod-ai-reviews/{review_id}`
+- `AIConnection.extract_json` now attaches `ai_brain_used_event_id` to result metadata when the audit row is persisted.
+
+Still pending:
+
+- Chief Deal Room UI panel for Pod AI Review status and findings.
+- Market-Product Pod AI Review.
+- PF-Credit Pod AI Review.
+- Cost-Schedule, Feasibility-Cashflow, and Public-Policy Pod AI Review.
+- AI Risk Committee integration using Pod AI Review findings.
+- ReportStudio paragraph generation with Pod AI Review evidence links.
 
 Current backend inventory:
 
