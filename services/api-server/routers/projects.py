@@ -57,6 +57,7 @@ from storage import (
     list_risk_register_records,
     list_calculation_run_records,
     list_deal_state_records,
+    _deal_state_record_has_source_locator,
     upsert_deal_state_record,
     load_state,
     record_user_activity_log,
@@ -1839,8 +1840,23 @@ def list_project_deal_state_records(
     request: Request,
     record_type: str | None = None,
     calculation_run_id: str | None = None,
+    review_status: str | None = None,
+    missing_locator: bool | None = None,
     limit: int = Query(200, ge=1, le=1000),
 ):
+    """List Deal State records.
+
+    Filters for the reviewer remediation workflow:
+      - ``review_status``: exact match; ``unreviewed`` matches records with no
+        reviewStatus set yet.
+      - ``missing_locator=true``: only records lacking a usable source locator
+        (the "근거 위치 부족" set the reviewer needs to supplement);
+        ``false`` returns only records that already have a locator.
+
+    The response always carries a project-wide ``completenessSummary`` computed
+    over the record-type scope (ignoring the locator/review filters) so the UI
+    can show "N of M records need a source locator" alongside the filtered view.
+    """
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
@@ -1848,14 +1864,36 @@ def list_project_deal_state_records(
         project_id,
         record_type=record_type,
         calculation_run_id=calculation_run_id,
+        review_status=review_status,
+        missing_locator=missing_locator,
         limit=limit,
     )
+    # Completeness summary over the same record-type scope, independent of the
+    # locator/review filters, so the badge total does not shift as the reviewer
+    # narrows the view.
+    scope = list_deal_state_records(
+        project_id,
+        record_type=record_type,
+        calculation_run_id=calculation_run_id,
+        limit=1000,
+    )
+    with_locator = [r for r in scope if _deal_state_record_has_source_locator(r)]
+    reviewed = [r for r in scope if r.get("reviewStatus")]
     return {
         "schemaVersion": "realytics-deal-state-record-list-v1",
         "projectId": project_id,
         "recordType": record_type,
         "calculationRunId": calculation_run_id,
+        "reviewStatus": review_status,
+        "missingLocator": missing_locator,
         "count": len(records),
+        "completenessSummary": {
+            "scopeCount": len(scope),
+            "withSourceLocatorCount": len(with_locator),
+            "missingSourceLocatorCount": len(scope) - len(with_locator),
+            "reviewedCount": len(reviewed),
+            "unreviewedCount": len(scope) - len(reviewed),
+        },
         "records": records,
     }
 

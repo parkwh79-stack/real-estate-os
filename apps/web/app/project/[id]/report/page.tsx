@@ -134,6 +134,11 @@ export default function ReportPreviewPage() {
     () => [...dealState.risks, ...dealState.metrics, ...dealState.evidence, ...dealState.assumptions],
     [dealState],
   );
+  const [missingLocatorOnly, setMissingLocatorOnly] = useState(false);
+  const visibleRecords = useMemo(
+    () => (missingLocatorOnly ? allRecords.filter((record) => !hasSourceLocator(record)) : allRecords),
+    [allRecords, missingLocatorOnly],
+  );
   const paragraphLinks = report?.report?.paragraphEvidenceLinks ?? report?.paragraphEvidenceLinks;
 
   const loadData = useCallback(async () => {
@@ -301,8 +306,28 @@ export default function ReportPreviewPage() {
             <Kpi label="리스크" value={`${dealState.risks.length}건`} />
             <Kpi label="증거" value={`${dealState.evidence.length}건`} />
             <Kpi label="가정" value={`${dealState.assumptions.length}건`} />
-            <Kpi label="근거 위치 부족" value={`${sourceLocatorMissing}건`} />
+            <button
+              type="button"
+              onClick={() => setMissingLocatorOnly((v) => !v)}
+              aria-pressed={missingLocatorOnly}
+              title="클릭하면 근거 위치가 부족한 record만 필터링합니다"
+              className={`rounded-lg border p-3 text-left transition-colors ${
+                missingLocatorOnly
+                  ? "border-amber-400 bg-amber-50 ring-1 ring-amber-300 dark:border-amber-600 dark:bg-amber-950/30"
+                  : "border-slate-200 hover:border-amber-300 hover:bg-amber-50/40 dark:border-slate-800 dark:hover:bg-amber-950/20"
+              }`}
+            >
+              <p className="text-xs font-semibold text-slate-500">근거 위치 부족 {missingLocatorOnly ? "· 필터중" : ""}</p>
+              <p className="mt-1 text-lg font-black text-amber-700 dark:text-amber-300">{sourceLocatorMissing}건</p>
+            </button>
           </div>
+
+          {missingLocatorOnly ? (
+            <div className="mt-3 flex items-center justify-between rounded-md bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+              <span>근거 위치가 부족한 record {visibleRecords.length}건만 표시 중 — 문서/셀/API 위치를 보강하세요.</span>
+              <button type="button" onClick={() => setMissingLocatorOnly(false)} className="underline">전체 보기</button>
+            </div>
+          ) : null}
           <div className="mt-4 max-h-72 overflow-auto rounded-lg border border-slate-200 dark:border-slate-800">
             <table className="w-full min-w-[760px] text-left text-xs">
               <thead className="bg-slate-50 text-slate-500 dark:bg-slate-800">
@@ -314,7 +339,7 @@ export default function ReportPreviewPage() {
                 </tr>
               </thead>
               <tbody>
-                {allRecords.slice(0, 80).map((record) => (
+                {visibleRecords.slice(0, 80).map((record) => (
                   <tr key={record.recordId ?? `${record.recordType}-${record.key}`} className="border-t border-slate-100 dark:border-slate-800">
                     <td className="px-3 py-2 font-bold text-slate-700 dark:text-slate-200">{recordTypeLabel(record.recordType)}</td>
                     <td className="px-3 py-2 font-black text-slate-950 dark:text-white">{record.key ?? record.label ?? "-"}</td>

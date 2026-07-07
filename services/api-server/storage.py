@@ -1055,11 +1055,21 @@ def upsert_deal_state_record(project_id: str, record: Dict[str, Any]) -> Dict[st
     return normalized
 
 
+def _deal_state_record_has_source_locator(record: Dict[str, Any]) -> bool:
+    """True when the record carries a usable source locator (any non-empty value)."""
+    locator = record.get("sourceLocator") or record.get("source_locator")
+    if not isinstance(locator, dict):
+        return False
+    return any(value not in (None, "", [], {}) for value in locator.values())
+
+
 def list_deal_state_records(
     project_id: str,
     *,
     record_type: str | None = None,
     calculation_run_id: str | None = None,
+    review_status: str | None = None,
+    missing_locator: bool | None = None,
     limit: int = 200,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 200), 1000))
@@ -1083,6 +1093,17 @@ def list_deal_state_records(
         records = [record for record in records if record.get("recordType") == record_type]
     if calculation_run_id:
         records = [record for record in records if record.get("calculationRunId") == calculation_run_id]
+    if review_status is not None:
+        # "unreviewed" matches records with no explicit reviewStatus set yet.
+        if review_status == "unreviewed":
+            records = [r for r in records if not r.get("reviewStatus")]
+        else:
+            records = [r for r in records if r.get("reviewStatus") == review_status]
+    if missing_locator is not None:
+        records = [
+            r for r in records
+            if _deal_state_record_has_source_locator(r) != bool(missing_locator)
+        ]
     return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)[:limit]
 
 
