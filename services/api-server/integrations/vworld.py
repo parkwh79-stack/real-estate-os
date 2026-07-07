@@ -125,11 +125,93 @@ def geocode_address(
     status = (((payload or {}).get("response") or {}).get("status")) or "UNKNOWN"
     if status != "OK":
         return None, {"address": address, "status": "not_found", "message": f"VWorld status {status}"}
-    point = (((payload.get("response") or {}).get("result") or {}).get("point")) or {}
+    resp = payload.get("response") or {}
+    point = ((resp.get("result") or {}).get("point")) or {}
+    structure = (resp.get("refined") or {}).get("structure") or {}
+    diag = {"address": address, "status": "ok", "structure": structure}
     try:
-        return {"lng": float(point["x"]), "lat": float(point["y"])}, {"address": address, "status": "ok"}
+        return {"lng": float(point["x"]), "lat": float(point["y"])}, diag
     except (KeyError, TypeError, ValueError):
         return None, {"address": address, "status": "not_found", "message": "no point in response"}
+
+
+def resolve_legal_dong_code(address: str, *, environ: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The 10-digit 법정동코드 for an address, via the VWorld geocoder's parsed
+    structure (``refined.structure.level4LC`` is a 19-digit PNU; its first 10
+    digits are the legal-dong code). Returns None when VWorld cannot parse it —
+    never fabricated. Used to construct per-지번 PNUs precisely.
+    """
+    _, diag = geocode_address(address, environ=environ)
+    level4lc = str((diag.get("structure") or {}).get("level4LC") or "").strip()
+    return level4lc[:10] if len(level4lc) >= 10 and level4lc[:10].isdigit() else None
+
+
+def build_pnu(legal_dong_code_10: str, lot_number: str, *, mountain: bool = False) -> Optional[str]:
+    """Compose a 19-digit PNU from a 10-digit legal-dong code + a 지번.
+
+    PNU = legalDong(10) + 산여부(1: 1 일반, 2 산) + 본번(4) + 부번(4). Returns None
+    when the inputs are not well-formed (no fabrication of a malformed PNU).
+    """
+    if not (legal_dong_code_10 and legal_dong_code_10.isdigit() and len(legal_dong_code_10) == 10):
+        return None
+    raw = str(lot_number or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("산"):
+        mountain = True
+        raw = raw[1:].strip()
+    parts = raw.split("-", 1)
+    try:
+        bon = int(parts[0])
+        bu = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+    except (ValueError, TypeError):
+        return None
+    if bon > 9999 or bu > 9999 or bon < 0 or bu < 0:
+        return None
+    return f"{legal_dong_code_10}{'2' if mountain else '1'}{bon:04d}{bu:04d}"
+
+
+def fetch_parcel_by_pnu(
+    pnu: str,
+    *,
+    environ: Optional[Dict[str, str]] = None,
+    timeout: float = 8.0,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Look up a parcel's attributes (pnu/jibun/addr/jiga) by an exact PNU via the
+    VWorld cadastral data layer (attrFilter, no geometry). Returns (properties,
+    diag); status 'resolved' only when VWorld confirms the PNU exists —
+    'not_found' means the 지번 is not in the current cadastre (e.g. merged/
+    renumbered), never a fabricated match."""
+    env = environ if environ is not None else os.environ
+    key = _api_key(env)
+    if not key:
+        return None, {"status": "skipped", "message": "VWorld key not configured"}
+    if not pnu:
+        return None, {"status": "skipped", "message": "missing PNU"}
+    params = {
+        "service": "data",
+        "request": "GetFeature",
+        "data": CADASTRAL_LAYER,
+        "key": key,
+        "domain": env.get("VWORLD_DOMAIN") or "localhost",
+        "format": "json",
+        "geometry": "false",
+        "size": "1",
+        "attrFilter": f"pnu:=:{pnu}",
+    }
+    url = f"{VWORLD_DATA_URL}?{urllib.parse.urlencode(params)}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return None, {"status": "error", "message": f"VWorld request failed: {type(exc).__name__}"}
+    resp = (payload or {}).get("response") or {}
+    if resp.get("status") != "OK":
+        return None, {"status": "not_found" if resp.get("status") == "NOT_FOUND" else "error", "pnu": pnu}
+    features = ((resp.get("result") or {}).get("featureCollection") or {}).get("features") or []
+    if not features:
+        return None, {"status": "not_found", "pnu": pnu}
+    return (features[0].get("properties") or {}), {"status": "resolved", "pnu": pnu}
 
 
 def fetch_parcel_by_point(

@@ -41,6 +41,7 @@ type Parcel = {
     reason?: string;
     attemptedAddress?: string;
     resolvedAddress?: string;
+    constructedPnu?: string;
   };
 };
 
@@ -310,6 +311,9 @@ export default function LandAnalysisPage() {
                               }
                               if (res?.status === "unresolved" && (res.reason || "").includes("lot_mismatch")) {
                                 return <span className="rounded-md bg-rose-50 px-2 py-1 text-xs font-bold text-rose-700 dark:bg-rose-950/30 dark:text-rose-200" title={`시도 주소: ${res.attemptedAddress ?? "-"} — 해석된 지번이 달라 오필지 PNU 부착을 차단했습니다`}>지번 불일치 거부</span>;
+                              }
+                              if (res?.status === "unresolved" && res.reason === "not_in_current_cadastre") {
+                                return <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300" title={`구성 PNU ${res.constructedPnu ?? "-"} — 현 지적도에 없는 지번(재개발 합병·재번지 추정). 옛 토지조서 지번일 수 있어 대사가 필요합니다`}>현 지적도에 없음</span>;
                               }
                               if (res?.status === "unresolved") {
                                 return <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-bold text-amber-700 dark:bg-amber-950/30 dark:text-amber-200" title={res.reason ?? undefined}>해석 실패</span>;

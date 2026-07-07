@@ -1,6 +1,7 @@
 from use_cases.parcel_pnu_resolution import (
     _address_prefix,
     _candidate_address,
+    _pnu_lookup_to_result,
     resolve_project_parcels_use_case,
 )
 
@@ -173,3 +174,72 @@ def test_duplicate_parcel_in_both_lists_resolved_once_and_synced():
     # Both list copies received the PNU.
     assert repo.project["land_acquisition"][0]["pnu"] == "2729011400100010003"
     assert repo.project["landLedger"]["parcels"][0]["pnu"] == "2729011400100010003"
+
+
+def test_pnu_construction_precise_resolution_and_honest_not_found():
+    """정밀 해석: 법정동코드+지번으로 PNU를 구성해 VWorld에서 확인.
+    현 지적도에 없는 지번(재개발 합병 등)은 조작 없이 not_in_current_cadastre."""
+    repo = _FakeRepo(
+        {
+            "land": {"address": "대구광역시 달서구 본리동 1-3"},
+            "land_acquisition": [
+                {"addressFragment": "본리 1-3", "dong": "본리동", "lotNumber": "1-3"},
+                {"addressFragment": "본리 1-4", "dong": "본리동", "lotNumber": "1-4"},
+            ],
+        }
+    )
+
+    # VWorld cadastre only has 1-3 (…0003); 1-4 (…0004) was merged/renumbered.
+    cadastre = {
+        "2729011400100010003": {"pnu": "2729011400100010003", "jibun": "1-3", "jiga": "3216000"},
+    }
+
+    def _dong_code(addr):
+        return "2729011400"
+
+    def _lookup(pnu):
+        props = cadastre.get(pnu)
+        if props:
+            return _pnu_lookup_to_result(props)
+        return {"status": "not_found"}
+
+    result = resolve_project_parcels_use_case(
+        repo, "1", dong_code_resolver=_dong_code, pnu_lookup=_lookup
+    )
+
+    assert result["resolvedCount"] == 1
+    by_lot = {r["parcel"]: r for r in result["results"]}
+    assert by_lot["본리 1-3"]["status"] == "resolved"
+    assert by_lot["본리 1-3"]["pnu"] == "2729011400100010003"
+    assert by_lot["본리 1-3"]["method"] == "pnu_construction"
+    assert by_lot["본리 1-4"]["status"] == "unresolved"
+    assert by_lot["본리 1-4"]["reason"] == "not_in_current_cadastre"
+    assert by_lot["본리 1-4"]["constructedPnu"] == "2729011400100010004"
+    # Resolved parcel got PNU + jiga; never a fabricated neighbor PNU.
+    p13 = repo.project["land_acquisition"][0]
+    assert p13["pnu"] == "2729011400100010003"
+    assert p13["officialLandPricePerSqm"] == 3216000.0
+    assert p13["pnuResolution"]["lotVerification"] == "verified"
+    assert "pnu" not in repo.project["land_acquisition"][1]
+
+
+def test_pnu_construction_falls_back_to_address_when_no_dong_code():
+    """법정동코드를 얻지 못하면 주소 resolver 폴백."""
+    repo = _FakeRepo(
+        {
+            "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+            "land_acquisition": [{"addressFragment": "상갈동 13", "lotNumber": "13"}],
+        }
+    )
+    calls = {"resolver": 0}
+
+    def _resolver(address):
+        calls["resolver"] += 1
+        return {"status": "resolved", "pnu": "4146310300100130000", "lotNumber": "13", "officialLandPricePerSqm": 1466000.0}
+
+    result = resolve_project_parcels_use_case(
+        repo, "1", resolver=_resolver, dong_code_resolver=lambda a: None, pnu_lookup=lambda p: {"status": "not_found"}
+    )
+
+    assert calls["resolver"] == 1  # fell back to address resolver
+    assert result["resolvedCount"] == 1

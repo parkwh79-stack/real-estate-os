@@ -127,22 +127,61 @@ def _grouped_parcels(project: Dict[str, Any]) -> "List[List[Dict[str, Any]]]":
     return [groups[key] for key in order]
 
 
+def _pnu_lookup_to_result(props: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a VWorld cadastral property bag into the resolver result shape."""
+    jiga = props.get("jiga")
+    try:
+        jiga_val = float(str(jiga).replace(",", "")) if jiga not in (None, "", "0") else None
+    except (TypeError, ValueError):
+        jiga_val = None
+    return {
+        "status": "resolved",
+        "pnu": (props.get("pnu") or "").strip() or None,
+        "officialLandPricePerSqm": jiga_val,
+        "officialLandPriceBaseYear": props.get("gosi_year") or props.get("stdrYear"),
+        "lotNumber": props.get("jibun"),
+        "landCategory": props.get("jimok") or props.get("dgm_nm"),
+        "addressFragment": props.get("addr") or props.get("jibun"),
+    }
+
+
 def resolve_project_parcels_use_case(
     project_repository,
     project_id: str,
     *,
     resolver: Optional[Callable[[str], Dict[str, Any]]] = None,
+    dong_code_resolver: Optional[Callable[[str], Optional[str]]] = None,
+    pnu_lookup: Optional[Callable[[str], Dict[str, Any]]] = None,
     limit: int = 30,
 ) -> Dict[str, Any]:
     """Resolve a PNU + 공시지가 for every parcel that lacks one (up to ``limit``).
 
-    Mutates the parcel dicts in place (they live inside the project payload) and
-    persists once via the repository. Returns a per-parcel result summary.
+    Primary (precise) strategy: geocode the 동 once to obtain its 10-digit
+    법정동코드, then construct each parcel's PNU from its 지번 and verify it against
+    VWorld's cadastre — no geocode→point→point-in-polygon ambiguity, so a wrong
+    neighbor parcel is never attached. A 지번 that isn't in the current cadastre
+    (e.g. merged/renumbered in redevelopment) stays honestly unresolved.
+
+    Legacy fallback: when a caller injects only ``resolver`` (address→parcel), or
+    when the 법정동코드 cannot be determined, the per-address resolver is used with
+    the lot-match guard.
+
+    Mutates the parcel dicts in place and persists once. Returns a summary.
     """
+    # Legacy mode preserves the address-resolver path for callers/tests that
+    # inject only `resolver` (no construction tools) — keeps them offline & stable.
+    legacy_mode = resolver is not None and dong_code_resolver is None and pnu_lookup is None
     if resolver is None:
         from use_cases.intake_finalize import resolve_address_to_parcel
 
         resolver = resolve_address_to_parcel
+    if not legacy_mode:
+        from integrations.vworld import fetch_parcel_by_pnu, resolve_legal_dong_code, build_pnu
+
+        dong_code_resolver = dong_code_resolver or (lambda addr: resolve_legal_dong_code(addr))
+        pnu_lookup = pnu_lookup or (
+            lambda pnu: (lambda props, diag: _pnu_lookup_to_result(props) if diag.get("status") == "resolved" else {"status": diag.get("status", "not_found")})(*fetch_parcel_by_pnu(pnu))
+        )
 
     project = project_repository.get(project_id)
     if not project:
@@ -150,6 +189,18 @@ def resolve_project_parcels_use_case(
 
     prefix = _address_prefix(str((project.get("land") or {}).get("address") or ""))
     now = datetime.now(timezone.utc).isoformat()
+
+    # Determine the 법정동코드 once (construction mode only).
+    legal_dong_code: Optional[str] = None
+    if not legacy_mode and prefix:
+        # Geocode the dong prefix; append the first parcel lot to help VWorld parse.
+        first_lot = ""
+        for grp in _grouped_parcels(project):
+            first_lot = _parcel_lot(grp[0])
+            if first_lot:
+                break
+        probe = f"{prefix} {first_lot}".strip() if first_lot else prefix
+        legal_dong_code = dong_code_resolver(probe) or dong_code_resolver(prefix)
 
     results: List[Dict[str, Any]] = []
     resolved_count = 0
@@ -171,6 +222,47 @@ def resolve_project_parcels_use_case(
             results.append({"parcel": label, "status": "skipped_limit"})
             continue
 
+        # --- Primary: precise PNU construction from the 법정동코드 + 지번 ---------
+        if not legacy_mode and legal_dong_code:
+            from integrations.vworld import build_pnu
+
+            constructed = build_pnu(legal_dong_code, _parcel_lot(head))
+            if constructed:
+                attempted += 1
+                changed = True
+                looked_up = pnu_lookup(constructed)
+                if looked_up.get("status") == "resolved":
+                    patch: Dict[str, Any] = {
+                        "pnu": looked_up.get("pnu") or constructed,
+                        "pnuResolution": {
+                            "status": "resolved",
+                            "constructedPnu": constructed,
+                            "source": "VWorld 지적도 PNU 직접조회 (법정동코드+지번)",
+                            "resolvedAt": now,
+                            "lotVerification": "verified",
+                        },
+                    }
+                    if looked_up.get("officialLandPricePerSqm"):
+                        patch["officialLandPricePerSqm"] = looked_up["officialLandPricePerSqm"]
+                        patch["officialLandPriceBaseYear"] = looked_up.get("officialLandPriceBaseYear")
+                        patch["officialLandPriceSource"] = "VWorld 개별공시지가 (공공 API)"
+                    _apply(group, patch)
+                    resolved_count += 1
+                    results.append({
+                        "parcel": label, "status": "resolved", "pnu": patch["pnu"],
+                        "officialLandPricePerSqm": looked_up.get("officialLandPricePerSqm"),
+                        "method": "pnu_construction",
+                    })
+                else:
+                    # The 지번 does not exist in the current cadastre (commonly
+                    # merged/renumbered in redevelopment). Honest, not fabricated.
+                    reason = "not_in_current_cadastre" if looked_up.get("status") == "not_found" else looked_up.get("status", "lookup_failed")
+                    _apply(group, {"pnuResolution": {"status": "unresolved", "constructedPnu": constructed, "reason": reason, "attemptedAt": now}})
+                    results.append({"parcel": label, "status": "unresolved", "constructedPnu": constructed, "reason": reason, "method": "pnu_construction"})
+                continue
+            # build_pnu failed (malformed 지번) → fall through to address resolver.
+
+        # --- Fallback: address geocode → point → parcel (with lot-match guard) ----
         address = _candidate_address(head, prefix)
         if not address.strip():
             results.append({"parcel": label, "status": "no_address"})
