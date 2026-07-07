@@ -626,7 +626,7 @@ def run_chief_deal_pod_use_case(
     }
     persisted_artifact = artifact_sink(artifact_record) if artifact_sink else artifact_record
     pod_ai_review_ref: Dict[str, Any] | None = None
-    if pod_key in {"land_legal", "market_product"}:
+    if pod_key in {"land_legal", "market_product", "pf_credit"}:
         pod_ai_review = PodAIReviewerAgent().review_pod(
             project_id=project_id,
             pod_key=pod_key,

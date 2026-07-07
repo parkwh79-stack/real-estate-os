@@ -57,9 +57,31 @@ Implemented:
   - `GET /projects/{project_id}/chief-orchestration/pod-ai-reviews/{review_id}`
 - `AIConnection.extract_json` now attaches `ai_brain_used_event_id` to result metadata when the audit row is persisted.
 
+### 2026-07-06 Live verification + PF-Credit + Approval Gate wiring
+
+Verified live that Land-Legal and Market-Product Pod AI Reviews run and produce
+evidence-aware findings (market_product → `proposed_price_basis_missing`,
+`rent_cap_rate_evidence_missing`; land_legal → 7 findings incl. blocking
+`data_quality`). Verification surfaced two gaps, both now closed:
+
+- **PF-Credit Pod AI Reviewer** (`_pf_credit_findings`): routes the deterministic
+  scenario-engine flags into reviewer findings — `SENIOR_SHORTFALL` /
+  `STRESS_SENIOR_SHORTFALL` / `WATERFALL_SHORTFALL` → blocking `risk_note` +
+  `recalculation_needed`; `UNSOLD_LTV_BREACH` → `risk_note`; `TRIGGER_REQUIRED` /
+  mezzanine shortfall → `risk_note`; and flags missing PF structure /
+  covenant·EOD·CP terms / un-run scenarios as `missing_evidence`. Wired into the
+  Chief pod review set (`land_legal`, `market_product`, `pf_credit`); agent id
+  `PFCreditPodAIReviewer`. It never re-decides PASS/FAIL — the deterministic
+  credit decision is carried as `context` only.
+- **Approval Readiness Gate ← Pod AI Review**: `build_deal_state_approval_readiness`
+  adds a `POD_AI_REVIEW_BLOCKERS_CLEARED` gate that blocks readiness when the
+  latest per-pod review has an unresolved **blocking** finding — but only in
+  deterministic-grounded categories (`missing_evidence`, `source_locator_gap`,
+  `data_quality`, `risk_note`, `recalculation_needed`). An LLM opinion alone
+  (e.g. `guardrail`) never gates PASS/FAIL, per the invariant.
+
 Still pending:
 
-- PF-Credit Pod AI Review.
 - Cost-Schedule, Feasibility-Cashflow, and Public-Policy Pod AI Review.
 - AI Risk Committee integration using Pod AI Review findings.
 - ReportStudio paragraph generation with Pod AI Review evidence links.

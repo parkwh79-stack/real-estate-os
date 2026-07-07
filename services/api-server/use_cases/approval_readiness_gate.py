@@ -15,11 +15,23 @@ from storage import (
     list_assumption_override_records,
     list_calculation_run_records,
     list_deal_state_records,
+    list_pod_ai_review_records,
 )
 
 RESOLVED_REVIEW_STATUSES = {"approved", "waived", "resolved"}
 APPROVED_ASSUMPTION_STATUSES = {"approved", "active", "resolved"}
 TRACEABILITY_RISK_CODES = {"SOURCE_LOCATOR_MISSING", "EVIDENCE_TRACE_WEAK"}
+# Pod AI Review finding categories that are grounded in deterministic signals
+# (evidence gaps, source-locator gaps, data-quality, and scenario-engine risk
+# flags). Only these can block readiness — per the invariant that an LLM opinion
+# alone must never gate PASS/FAIL. Advisory categories (guardrail, info) never block.
+DETERMINISTIC_REVIEW_CATEGORIES = {
+    "missing_evidence",
+    "source_locator_gap",
+    "data_quality",
+    "risk_note",
+    "recalculation_needed",
+}
 
 
 def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
@@ -87,6 +99,27 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         not in RESOLVED_REVIEW_STATUSES
     ]
 
+    # Pod AI Review blockers — count only deterministic-grounded blocking findings
+    # from the latest review per pod (never gate on an LLM opinion alone).
+    try:
+        pod_ai_reviews = list_pod_ai_review_records(str(project_id), limit=200)
+    except Exception:
+        pod_ai_reviews = []
+    latest_review_by_pod: Dict[str, Dict[str, Any]] = {}
+    for review in pod_ai_reviews:
+        pod_key = str(review.get("podKey") or "")
+        current = latest_review_by_pod.get(pod_key)
+        if current is None or str(review.get("updatedAt") or "") >= str(current.get("updatedAt") or ""):
+            latest_review_by_pod[pod_key] = review
+    pod_ai_review_blockers = [
+        {"podKey": pod_key, "finding": finding}
+        for pod_key, review in latest_review_by_pod.items()
+        if str(review.get("reviewStatus") or "").lower() not in RESOLVED_REVIEW_STATUSES
+        for finding in (review.get("findings") or [])
+        if str(finding.get("severity") or "").lower() == "blocking"
+        and str(finding.get("category") or "") in DETERMINISTIC_REVIEW_CATEGORIES
+    ]
+
     has_records = bool(records)
     has_assumption_requirement = bool(assumption_records) or _has_data_quality_or_assumption_risk(risk_records)
 
@@ -107,6 +140,11 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         "sampleBlockingRiskKeys": _sample_keys(unreviewed_blocking_risks),
         "sampleStaleMetricKeys": _sample_keys(stale_metrics),
         "sampleMissingLocatorKeys": _sample_keys(missing_locator_records),
+        "podAiReviewBlockerCount": len(pod_ai_review_blockers),
+        "podAiReviewBlockerSummary": [
+            {"podKey": b["podKey"], "category": b["finding"].get("category"), "message": str(b["finding"].get("message") or "")[:120]}
+            for b in pod_ai_review_blockers[:8]
+        ],
     })
 
     context["gates"].extend([
@@ -156,6 +194,12 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
             "DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT",
             not has_records or not open_traceability_risks,
             f"{len(open_traceability_risks)} open source-locator completeness risk issue(s) remain.",
+            "blocking",
+        ),
+        _gate(
+            "POD_AI_REVIEW_BLOCKERS_CLEARED",
+            not pod_ai_review_blockers,
+            f"{len(pod_ai_review_blockers)} unresolved blocking Pod AI Review finding(s) (evidence/scenario-grounded) remain.",
             "blocking",
         ),
     ])

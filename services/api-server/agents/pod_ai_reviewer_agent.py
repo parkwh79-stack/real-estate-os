@@ -195,6 +195,8 @@ class PodAIReviewerAgent:
         if pod_key == "market_product":
             document_facts = _document_market_facts(source_artifact, project_data)
             findings.extend(_market_product_findings(source_artifact, source_artifact_key, project_data, options))
+        if pod_key == "pf_credit":
+            findings.extend(_pf_credit_findings(source_artifact, source_artifact_key, project_data))
         if not evidence_ids:
             findings.append(_finding(
                 "missing_evidence",
@@ -404,6 +406,110 @@ def _market_product_findings(
     if source_artifact_key:
         for item in findings:
             item["sourceLocators"].append({"sourceType": "chief_pod_artifact", "artifactKey": source_artifact_key})
+    return findings
+
+
+def _pf_credit_findings(
+    source_artifact: Dict[str, Any],
+    source_artifact_key: str | None,
+    project_data: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Evidence-aware review of the PF-Credit pod.
+
+    Reads the deterministic signals the pod already produced — the scenario
+    engine's risk flags (SENIOR_SHORTFALL / UNSOLD_LTV_BREACH / tranche recovery
+    triggers), the PF structure, and covenant/EOD/CP terms — and turns them into
+    reviewer findings + recommended actions. It never re-decides PASS/FAIL and
+    never invents numbers; it routes existing deterministic flags and flags
+    genuinely-missing evidence.
+    """
+    findings: List[Dict[str, Any]] = []
+    scenarios = _first_dict_value(source_artifact, {"scenariosEvaluation", "scenarios_evaluation"})
+    pf_structure = _first_dict_value(source_artifact, {"pfStructure", "pf_structure"})
+    credit_review = _first_dict_value(source_artifact, {"creditReviewDecision", "credit_review_decision"})
+    # Risk flag codes surfaced anywhere in the pod artifact (scenario/credit/risk
+    # register). Collect the `code` values themselves — not the `riskFlags` list
+    # wrapper — so nested {"code": "SENIOR_SHORTFALL"} entries are matched.
+    codes = set(_collect_values(source_artifact, {"code"}))
+
+    def has(prefixes: tuple) -> bool:
+        return any(str(c).startswith(prefixes) for c in codes)
+
+    # 1. Senior principal shortfall (base or stressed waterfall).
+    if has(("SENIOR_SHORTFALL", "STRESS_SENIOR_SHORTFALL", "WATERFALL_SHORTFALL")):
+        findings.append(_finding(
+            "risk_note",
+            "blocking",
+            "선순위 원금 부족(Senior shortfall)이 Waterfall/스트레스 시나리오에서 감지되었습니다. 회수 재원이 선순위 원리금을 충당하지 못합니다.",
+            recommended_action="PF 감액, 자본 확충, 추가 담보, 선분양/대량매각, 리파이낸싱 등 회수 재원 보강 증빙을 첨부한 뒤 Waterfall/Recovery를 재계산하세요.",
+        ))
+        findings.append(_finding(
+            "recalculation_needed",
+            "high",
+            "선순위 회수 구조 변경(감액/담보/보증) 시 Waterfall·Tranche Recovery·Stress를 다시 실행해야 합니다.",
+            recommended_action="pf_credit Pod를 회수 재원 보강 후 재실행하여 CalculationRun 이력을 갱신하세요.",
+        ))
+    # 2. Unsold LTV breach.
+    if has(("UNSOLD_LTV_BREACH",)):
+        findings.append(_finding(
+            "risk_note",
+            "high",
+            "미분양 담보 LTV 한도 초과(Unsold LTV breach)가 감지되었습니다.",
+            recommended_action="PF 감액, 추가 담보/보강, 선분양 계약, 대량매각(bulk sale) 근거로 미분양 LTV를 한도 내로 낮추는 증빙이 필요합니다.",
+        ))
+    elif has(("UNSOLD_LTV_HIGH",)):
+        findings.append(_finding(
+            "risk_note",
+            "medium",
+            "미분양 담보 LTV가 경고 수준입니다(한도 임박).",
+            recommended_action="분양률 가정과 미분양 담보 평가 근거를 재확인하세요.",
+        ))
+    # 3. Tranche recovery trigger / shortfall.
+    if has(("TRIGGER_REQUIRED", "MEZZANINE_SHORTFALL")):
+        findings.append(_finding(
+            "risk_note",
+            "high",
+            "Tranche 회수 시나리오에서 트리거 조건 또는 중순위 이하 회수 부족이 감지되었습니다.",
+            recommended_action="Cash Sweep/조기상환 트리거, 준공·분양 연동 트리거 조항을 Term Sheet에서 확인하고 회수 시나리오 근거를 첨부하세요.",
+        ))
+    # 4. PF structure presence (loan amount, tranches, rate, fees, priority).
+    tranche_count = _list_count(pf_structure.get("tranches") if isinstance(pf_structure, dict) else None)
+    if not pf_structure or tranche_count == 0:
+        findings.append(_finding(
+            "missing_evidence",
+            "high",
+            "PF 구조(대출금액·Tranche·금리·수수료·상환순위)가 pod 산출물에 없습니다. 신용 판단을 evidence-ready로 볼 수 없습니다.",
+            recommended_action="PF Term Sheet 또는 대출조건표를 업로드하여 Tranche/우선순위/금리를 확정하세요.",
+        ))
+    # 5. Covenant / EOD / CP terms.
+    covenants = project_data.get("covenants") or project_data.get("covenant") or {}
+    cp = project_data.get("conditions_precedent") or project_data.get("conditionsPrecedent")
+    eod = (covenants.get("events_of_default") if isinstance(covenants, dict) else None) or project_data.get("events_of_default")
+    if not covenants and not cp and not eod:
+        findings.append(_finding(
+            "missing_evidence",
+            "medium",
+            "Covenant / EOD(기한이익상실) / CP(선행조건) 조항 근거가 확인되지 않습니다.",
+            recommended_action="대출약정 초안의 covenant·EOD·CP 조항을 첨부하여 트리거/상환/통제 조건을 검토 가능하게 하세요.",
+        ))
+    # 6. Scenario evaluation missing entirely — cannot assess senior recovery.
+    if not scenarios:
+        findings.append(_finding(
+            "missing_evidence",
+            "high",
+            "시나리오 평가(Waterfall/미분양 LTV/Tranche 회수)가 실행되지 않아 선순위 회수 안전성을 판단할 수 없습니다.",
+            recommended_action="사업수지·PF 구조 확정 후 시나리오 엔진을 실행하여 회수 근거를 생성하세요.",
+        ))
+
+    # Attach the deterministic credit decision + scenario set as provenance.
+    scenario_set_id = scenarios.get("scenarioSetId") if isinstance(scenarios, dict) else None
+    for item in findings:
+        if scenario_set_id:
+            item["sourceLocators"].append({"sourceType": "scenario_set", "scenarioSetId": scenario_set_id})
+        if source_artifact_key:
+            item["sourceLocators"].append({"sourceType": "chief_pod_artifact", "artifactKey": source_artifact_key})
+        if isinstance(credit_review, dict) and credit_review.get("decision"):
+            item.setdefault("context", {})["deterministicCreditDecision"] = credit_review.get("decision")
     return findings
 
 
