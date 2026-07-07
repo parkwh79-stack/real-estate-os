@@ -97,6 +97,36 @@ def _iter_parcel_lists(project: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
     return lists
 
 
+def _parcel_identity(parcel: Dict[str, Any]) -> tuple:
+    """Stable identity for a parcel so the same 지번 stored in both
+    land_acquisition and landLedger.parcels is resolved once, not twice."""
+    lot_key = _lot_key(_parcel_lot(parcel))
+    dong = str(parcel.get("dong") or "").strip()
+    if lot_key is not None:
+        return ("lot", dong, lot_key)
+    return ("frag", str(parcel.get("addressFragment") or "").strip())
+
+
+def _grouped_parcels(project: Dict[str, Any]) -> "List[List[Dict[str, Any]]]":
+    """Group every parcel dict (across both lists) by identity, preserving order.
+
+    Returns a list of groups; each group is the set of dict objects that refer to
+    the same physical parcel, so resolving once can be written back to all of them.
+    """
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    order: List[tuple] = []
+    for parcels in _iter_parcel_lists(project):
+        for parcel in parcels:
+            if not isinstance(parcel, dict):
+                continue
+            key = _parcel_identity(parcel)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(parcel)
+    return [groups[key] for key in order]
+
+
 def resolve_project_parcels_use_case(
     project_repository,
     project_id: str,
@@ -126,98 +156,69 @@ def resolve_project_parcels_use_case(
     attempted = 0
     changed = False
 
-    for parcels in _iter_parcel_lists(project):
-        for parcel in parcels:
-            if not isinstance(parcel, dict):
-                continue
-            if parcel.get("pnu"):
-                results.append(
-                    {
-                        "parcel": parcel.get("addressFragment") or _parcel_lot(parcel),
-                        "status": "already_resolved",
-                        "pnu": parcel.get("pnu"),
-                    }
-                )
-                continue
-            if attempted >= limit:
-                results.append(
-                    {"parcel": parcel.get("addressFragment") or _parcel_lot(parcel), "status": "skipped_limit"}
-                )
-                continue
+    def _apply(group: List[Dict[str, Any]], patch: Dict[str, Any]) -> None:
+        for member in group:
+            member.update(patch)
 
-            address = _candidate_address(parcel, prefix)
-            if not address.strip():
-                results.append({"parcel": parcel.get("addressFragment"), "status": "no_address"})
-                continue
+    for group in _grouped_parcels(project):
+        head = group[0]
+        label = head.get("addressFragment") or _parcel_lot(head)
+        if any(p.get("pnu") for p in group):
+            existing = next((p.get("pnu") for p in group if p.get("pnu")), None)
+            results.append({"parcel": label, "status": "already_resolved", "pnu": existing})
+            continue
+        if attempted >= limit:
+            results.append({"parcel": label, "status": "skipped_limit"})
+            continue
 
-            attempted += 1
-            resolved = resolver(address)
-            # Geocoders can silently fall back to dong-level coordinates and
-            # return a NEIGHBORING parcel — attaching a wrong PNU to lender data
-            # is fabrication. Reject when the resolved 지번 contradicts the
-            # requested one; flag "unverified" when it cannot be compared.
-            lot_check = (
-                _resolved_lot_matches(_parcel_lot(parcel), resolved.get("lotNumber"))
-                if resolved.get("status") == "resolved"
-                else None
-            )
-            if resolved.get("status") == "resolved" and lot_check is False:
-                parcel["pnuResolution"] = {
-                    "status": "unresolved",
-                    "attemptedAddress": address,
-                    "reason": f"lot_mismatch(resolved 지번={resolved.get('lotNumber')})",
-                    "attemptedAt": now,
-                }
-                changed = True
-                results.append(
-                    {
-                        "parcel": parcel.get("addressFragment") or _parcel_lot(parcel),
-                        "status": "unresolved",
-                        "address": address,
-                        "reason": f"lot_mismatch(resolved 지번={resolved.get('lotNumber')})",
-                    }
-                )
-                continue
-            if resolved.get("status") == "resolved":
-                parcel["pnu"] = resolved["pnu"]
-                if resolved.get("officialLandPricePerSqm"):
-                    parcel["officialLandPricePerSqm"] = resolved["officialLandPricePerSqm"]
-                    parcel["officialLandPriceBaseYear"] = resolved.get("officialLandPriceBaseYear")
-                    parcel["officialLandPriceSource"] = "VWorld 연속지적도 (공공 API)"
-                parcel["pnuResolution"] = {
+        address = _candidate_address(head, prefix)
+        if not address.strip():
+            results.append({"parcel": label, "status": "no_address"})
+            continue
+
+        attempted += 1
+        resolved = resolver(address)
+        # Geocoders can silently fall back to dong-level coordinates and return a
+        # NEIGHBORING parcel — attaching a wrong PNU to lender data is fabrication.
+        # Reject when the resolved 지번 contradicts the requested one; flag
+        # "unverified" when it cannot be compared.
+        lot_check = (
+            _resolved_lot_matches(_parcel_lot(head), resolved.get("lotNumber"))
+            if resolved.get("status") == "resolved"
+            else None
+        )
+        changed = True
+        if resolved.get("status") == "resolved" and lot_check is False:
+            reason = f"lot_mismatch(resolved 지번={resolved.get('lotNumber')})"
+            _apply(group, {"pnuResolution": {"status": "unresolved", "attemptedAddress": address, "reason": reason, "attemptedAt": now}})
+            results.append({"parcel": label, "status": "unresolved", "address": address, "reason": reason})
+        elif resolved.get("status") == "resolved":
+            patch: Dict[str, Any] = {
+                "pnu": resolved["pnu"],
+                "pnuResolution": {
                     "status": "resolved",
                     "resolvedAddress": address,
                     "source": "VWorld 연속지적도 (공공 API)",
                     "resolvedAt": now,
                     "lotVerification": "verified" if lot_check else "unverified",
-                }
-                resolved_count += 1
-                changed = True
-                results.append(
-                    {
-                        "parcel": parcel.get("addressFragment") or _parcel_lot(parcel),
-                        "status": "resolved",
-                        "address": address,
-                        "pnu": resolved["pnu"],
-                        "officialLandPricePerSqm": resolved.get("officialLandPricePerSqm"),
-                    }
-                )
-            else:
-                parcel["pnuResolution"] = {
-                    "status": "unresolved",
-                    "attemptedAddress": address,
-                    "reason": resolved.get("status"),
-                    "attemptedAt": now,
-                }
-                changed = True
-                results.append(
-                    {
-                        "parcel": parcel.get("addressFragment") or _parcel_lot(parcel),
-                        "status": "unresolved",
-                        "address": address,
-                        "reason": resolved.get("status"),
-                    }
-                )
+                },
+            }
+            if resolved.get("officialLandPricePerSqm"):
+                patch["officialLandPricePerSqm"] = resolved["officialLandPricePerSqm"]
+                patch["officialLandPriceBaseYear"] = resolved.get("officialLandPriceBaseYear")
+                patch["officialLandPriceSource"] = "VWorld 연속지적도 (공공 API)"
+            _apply(group, patch)
+            resolved_count += 1
+            results.append({
+                "parcel": label,
+                "status": "resolved",
+                "address": address,
+                "pnu": resolved["pnu"],
+                "officialLandPricePerSqm": resolved.get("officialLandPricePerSqm"),
+            })
+        else:
+            _apply(group, {"pnuResolution": {"status": "unresolved", "attemptedAddress": address, "reason": resolved.get("status"), "attemptedAt": now}})
+            results.append({"parcel": label, "status": "unresolved", "address": address, "reason": resolved.get("status")})
 
     if changed:
         update_payload: Dict[str, Any] = {}
@@ -235,6 +236,6 @@ def resolve_project_parcels_use_case(
         "addressPrefix": prefix or None,
         "resolvedCount": resolved_count,
         "attemptedCount": attempted,
-        "totalParcels": sum(len(lst) for lst in _iter_parcel_lists(project)),
+        "totalParcels": len(_grouped_parcels(project)),
         "results": results,
     }

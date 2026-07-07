@@ -653,7 +653,9 @@ class ReportAgent:
         else:
             md += "| 자금 집행 항목 | 금액(원) | 비고 |\n|:---|---:|:---|\n"
             for u in uses:
-                md += f"| {u.get('item')} | {u.get('amount'):,} | 사업계획 기준 |\n"
+                amount = u.get("amount")
+                amount_str = f"{amount:,}" if isinstance(amount, (int, float)) else "-"
+                md += f"| {u.get('item')} | {amount_str} | 사업계획 기준 |\n"
         return md + "\n"
 
     def _build_land_acquisition(self, data: Dict[str, Any]) -> str:
@@ -662,9 +664,19 @@ class ReportAgent:
         if not lands:
             md += "데이터 없음.\n"
         else:
-            md += "| 소유자 | 지분율 | 면적(㎡) | 제한물권 및 특이사항 |\n|:---:|:---:|:---:|:---|\n"
+            md += "| 소유자/필지 | 지분율 | 면적(㎡) | 제한물권 및 특이사항 |\n|:---:|:---:|:---:|:---|\n"
             for l in lands:
-                md += f"| {l.get('owner')} | {l.get('share')*100}% | {l.get('area_sqm'):,} | {l.get('mortgage')} |\n"
+                # Parsed 토지조서 parcels may lack owner/share and use camelCase
+                # areaSqm; format defensively so a real ledger never breaks the report.
+                owner = l.get("owner") or l.get("addressFragment") or l.get("lotNumber") or "-"
+                share = l.get("share")
+                share_str = f"{share * 100:g}%" if isinstance(share, (int, float)) else "-"
+                area = l.get("area_sqm")
+                if area is None:
+                    area = l.get("areaSqm")
+                area_str = f"{area:,.1f}" if isinstance(area, (int, float)) else "-"
+                mortgage = l.get("mortgage") or l.get("landCategory") or "-"
+                md += f"| {owner} | {share_str} | {area_str} | {mortgage} |\n"
         return md + "\n"
 
     def _build_project_schedule(self, data: Dict[str, Any]) -> str:

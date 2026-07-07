@@ -176,3 +176,28 @@ def test_report_export_rejects_unsupported_format():
         json={"format": "xlsx"},
     )
     assert res.status_code == 400
+
+
+def test_report_land_acquisition_tolerates_parsed_ledger_parcels():
+    """실제 토지조서 파싱 필지(share/owner/area_sqm 없이 camelCase areaSqm만)로도
+    보고서 생성이 크래시하지 않아야 한다 (통합 리허설에서 발견한 500 회귀 방지)."""
+    agent = ReportAgent()
+    data = {
+        "land_acquisition": [
+            {"addressFragment": "본리 1-3", "dong": "본리동", "lotNumber": "1-3", "areaSqm": 735.5, "landCategory": "대"},
+            {"addressFragment": "본리 1-4", "lotNumber": "1-4"},  # area/share 전부 없음
+        ]
+    }
+    section = agent._build_land_acquisition(data)
+    assert "사업부지 확보 현황" in section
+    assert "본리 1-3" in section
+    assert "735.5" in section
+    # share/area 없는 필지도 '-'로 안전 렌더
+    assert "본리 1-4" in section
+
+
+def test_report_use_of_funds_tolerates_missing_amount():
+    agent = ReportAgent()
+    section = agent._build_use_of_funds({"use_of_funds": [{"item": "토지비"}]})
+    assert "자금 사용 용도" in section
+    assert "토지비" in section

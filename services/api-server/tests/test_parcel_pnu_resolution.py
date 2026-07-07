@@ -146,3 +146,30 @@ def test_matching_lot_is_verified():
 
     assert result["resolvedCount"] == 1
     assert repo.project["land_acquisition"][0]["pnuResolution"]["lotVerification"] == "verified"
+
+
+def test_duplicate_parcel_in_both_lists_resolved_once_and_synced():
+    """같은 필지가 land_acquisition과 landLedger.parcels 양쪽에 있어도 1회만 시도하고
+    결과를 양쪽에 반영한다 (통합 리허설에서 발견한 이중 카운팅 버그 회귀 방지)."""
+    shared = {"addressFragment": "본리 1-3", "dong": "본리동", "lotNumber": "1-3"}
+    repo = _FakeRepo(
+        {
+            "land": {"address": "대구광역시 달서구 본리동 1-3"},
+            "land_acquisition": [dict(shared)],
+            "landLedger": {"parcels": [dict(shared)]},
+        }
+    )
+
+    def _r(address):
+        return {"status": "resolved", "pnu": "2729011400100010003", "lotNumber": "1-3", "officialLandPricePerSqm": 3216000.0}
+
+    result = resolve_project_parcels_use_case(repo, "99", resolver=_r)
+
+    # One physical parcel -> counted once, attempted once.
+    assert result["totalParcels"] == 1
+    assert result["attemptedCount"] == 1
+    assert result["resolvedCount"] == 1
+    assert len(result["results"]) == 1
+    # Both list copies received the PNU.
+    assert repo.project["land_acquisition"][0]["pnu"] == "2729011400100010003"
+    assert repo.project["landLedger"]["parcels"][0]["pnu"] == "2729011400100010003"
