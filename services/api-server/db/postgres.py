@@ -131,6 +131,80 @@ def ensure_schema(conn) -> None:
     conn.commit()
 
 
+# --- State document store --------------------------------------------------
+# Dual-backend v1: the whole application state is persisted as a single JSONB
+# document row in `app_state`, mirroring the JSON-file backend but on Postgres
+# (durable, network-shared, backup-friendly). This is the safe env-switch step;
+# native per-first-class-table persistence (using the 0001 schema) is a later
+# deployment optimization. Connection is injectable so the mapping is unit-
+# testable without a live database or the psycopg driver.
+
+APP_STATE_TABLE = "app_state"
+APP_STATE_ROW_ID = "singleton"
+
+APP_STATE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {APP_STATE_TABLE} ("
+    "id TEXT PRIMARY KEY, document JSONB NOT NULL, "
+    "updated_at TIMESTAMPTZ DEFAULT now());"
+)
+
+
+def _ensure_app_state_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(APP_STATE_DDL)
+    conn.commit()
+
+
+def save_state_document(state: Dict[str, Any], *, conn=None) -> None:
+    """Persist the entire state dict as one JSONB row (upsert). Opens/owns a
+    connection when one is not injected."""
+    import json as _json
+
+    owns = conn is None
+    if owns:
+        conn = connect()
+    try:
+        _ensure_app_state_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {APP_STATE_TABLE}(id, document, updated_at) "
+                f"VALUES (%s, %s::jsonb, now()) "
+                f"ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document, updated_at = now()",
+                (APP_STATE_ROW_ID, _json.dumps(state, ensure_ascii=False)),
+            )
+        conn.commit()
+    finally:
+        if owns:
+            conn.close()
+
+
+def load_state_document(*, conn=None) -> Optional[Dict[str, Any]]:
+    """Read the state document, or None when it has not been written yet.
+
+    Accepts JSONB (driver returns a dict) or a JSON string, so it works across
+    psycopg configurations and the unit-test fakes."""
+    import json as _json
+
+    owns = conn is None
+    if owns:
+        conn = connect()
+    try:
+        _ensure_app_state_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT document FROM {APP_STATE_TABLE} WHERE id = %s",
+                (APP_STATE_ROW_ID,),
+            )
+            row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        document = row[0]
+        return _json.loads(document) if isinstance(document, (str, bytes, bytearray)) else document
+    finally:
+        if owns:
+            conn.close()
+
+
 def status() -> Dict[str, Any]:
     dsn = build_dsn()
     driver_available = True
@@ -144,4 +218,5 @@ def status() -> Dict[str, Any]:
         "driverInstalled": driver_available,
         "postgisBootstrap": POSTGIS_BOOTSTRAP_SQL,
         "tableCount": len(JSONB_STORE_TABLES) + 1,
+        "stateStore": {"mode": "state_document_v1", "table": APP_STATE_TABLE},
     }

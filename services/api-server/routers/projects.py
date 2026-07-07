@@ -3262,6 +3262,16 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
     workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
     if workflow_track:
         options = {**options, "workflowTrack": workflow_track}
+    payload_ai_context = (
+        options.get("ai_context")
+        or options.get("aiContext")
+        or payload.get("ai_context")
+        or payload.get("aiContext")
+    )
+    options = {
+        **options,
+        "ai_context": ai_context_from_request(request, payload_ai_context=payload_ai_context),
+    }
 
     project_data = PROJECTS_DB[project_id]
     try:
@@ -3304,6 +3314,16 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
     workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
     if workflow_track:
         options = {**options, "workflowTrack": workflow_track}
+    payload_ai_context = (
+        options.get("ai_context")
+        or options.get("aiContext")
+        or payload.get("ai_context")
+        or payload.get("aiContext")
+    )
+    options = {
+        **options,
+        "ai_context": ai_context_from_request(request, payload_ai_context=payload_ai_context),
+    }
 
     project_data = PROJECTS_DB[project_id]
     plan = run_chief_deal_all_pods_use_case(

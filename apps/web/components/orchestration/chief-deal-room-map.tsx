@@ -64,8 +64,46 @@ interface AgentPodRun {
   status: PodStatus;
   progressPercent: number;
   artifactKeys?: string[];
+  podAiReviewIds?: string[];
   handoffIds?: string[];
   recalculationEvents?: Array<Record<string, unknown>>;
+}
+
+interface PodAIReviewFinding {
+  findingId?: string;
+  category?: string;
+  severity?: "info" | "medium" | "high" | "blocking";
+  message?: string;
+  evidenceIds?: string[];
+  sourceLocators?: Array<Record<string, unknown>>;
+  recommendedAction?: string;
+}
+
+interface PodAIReviewHandoff {
+  handoffId?: string;
+  fromAgent?: string;
+  toAgent?: string;
+  handoffType?: string;
+  payload?: Record<string, unknown>;
+  evidenceIds?: string[];
+  confidence?: number;
+}
+
+interface PodAIReview {
+  reviewId: string;
+  podKey: PodKey;
+  sourceArtifactKey?: string;
+  agentId?: string;
+  reviewMode?: "llm_evidence_aware_review" | "deterministic_fallback_review";
+  reviewStatus?: "pass" | "warning" | "blocking" | "needs_human_review";
+  confidence?: number;
+  findings?: PodAIReviewFinding[];
+  handoffs?: PodAIReviewHandoff[];
+  reportFragments?: Record<string, string>;
+  documentFacts?: Record<string, unknown>;
+  aiBrainUsed?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 interface DealStateValue {
@@ -399,6 +437,16 @@ function asText(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function asRecordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function asCount(value: unknown) {
+  if (value === null || value === undefined || value === "") return "0";
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toLocaleString("ko-KR") : cleanText(value, "0");
+}
+
 function hasTrigger(podKey: PodKey) {
   return podKey === "land_legal" || podKey === "market_product" || podKey === "feasibility_cashflow";
 }
@@ -437,6 +485,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [executionProgress, setExecutionProgress] = useState(0);
   const [supplements, setSupplements] = useState<AutoSupplementAttempt[] | null>(null);
   const [recalculationEvents, setRecalculationEvents] = useState<RecalculationEvent[]>([]);
+  const [podAiReviews, setPodAiReviews] = useState<PodAIReview[]>([]);
 
   const loadRecalculationEvents = useCallback(async () => {
     try {
@@ -450,6 +499,21 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setRecalculationEvents(records as RecalculationEvent[]);
     } catch {
       setRecalculationEvents([]);
+    }
+  }, [projectId]);
+
+  const loadPodAiReviews = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/pod-ai-reviews?limit=100`, {
+        cache: "no-store",
+        headers: authHeaders("web"),
+      });
+      if (!res.ok) return;
+      const body = await res.json().catch(() => ({}));
+      const records = Array.isArray(body.records) ? body.records : [];
+      setPodAiReviews(records as PodAIReview[]);
+    } catch {
+      setPodAiReviews([]);
     }
   }, [projectId]);
 
@@ -473,13 +537,13 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       });
       if (!res.ok) throw new Error(`Chief Deal Room 계획을 불러오지 못했습니다. (${res.status})`);
       setPlan((await res.json()) as ChiefDealOrchestrationPlan);
-      await loadRecalculationEvents();
+      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Chief Deal Room 계획을 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
-  }, [projectId, loadRecalculationEvents]);
+  }, [projectId, loadRecalculationEvents, loadPodAiReviews]);
 
   const runPod = useCallback(async (podKey: PodKey, forceTrigger?: string): Promise<boolean> => {
     setExecutingPodKey(podKey);
@@ -508,7 +572,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
-      await loadRecalculationEvents();
+      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
       setError(null);
       return true;
     } catch (err) {
@@ -519,7 +583,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setExecutingPodKey(null);
       setExecutionProgress(0);
     }
-  }, [projectId, track, loadRecalculationEvents]);
+  }, [projectId, track, loadRecalculationEvents, loadPodAiReviews]);
 
   const runAllPods = useCallback(async () => {
     setExecutingAll(true);
@@ -547,7 +611,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
-      await loadRecalculationEvents();
+      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "전체 Pod 실행 중 오류가 발생했습니다.");
@@ -556,7 +620,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setExecutingAll(false);
       setExecutionProgress(0);
     }
-  }, [projectId, track, loadRecalculationEvents]);
+  }, [projectId, track, loadRecalculationEvents, loadPodAiReviews]);
 
   useEffect(() => {
     void loadPlan();
@@ -569,6 +633,35 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     }
     return map;
   }, [plan]);
+
+  const podAiReviewsById = useMemo(() => {
+    const map = new Map<string, PodAIReview>();
+    for (const review of podAiReviews) {
+      map.set(review.reviewId, review);
+    }
+    return map;
+  }, [podAiReviews]);
+
+  const latestReviewByPod = useMemo(() => {
+    const map = new Map<PodKey, PodAIReview>();
+    for (const review of podAiReviews) {
+      const existing = map.get(review.podKey);
+      const reviewTime = String(review.updatedAt ?? review.createdAt ?? "");
+      const existingTime = String(existing?.updatedAt ?? existing?.createdAt ?? "");
+      if (!existing || reviewTime >= existingTime) {
+        map.set(review.podKey, review);
+      }
+    }
+    return map;
+  }, [podAiReviews]);
+
+  const reviewForPod = useCallback((podKey: PodKey, run?: AgentPodRun) => {
+    for (const reviewId of run?.podAiReviewIds ?? []) {
+      const review = podAiReviewsById.get(reviewId);
+      if (review) return review;
+    }
+    return latestReviewByPod.get(podKey);
+  }, [latestReviewByPod, podAiReviewsById]);
 
   const currentTrack = track ?? plan?.taskGraph?.workflowTrack ?? "development";
   const workflow = getTrackWorkflowDefinition(currentTrack);
@@ -683,11 +776,14 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {plan.agentPods.map((pod) => {
                   const meta = POD_META[pod.podKey] ?? POD_META.land_legal;
+                  const run = runsByPod.get(pod.podKey);
+                  const podAiReview = reviewForPod(pod.podKey, run);
                   return (
                     <PodCard
                       key={pod.podKey}
                       pod={pod}
-                      run={runsByPod.get(pod.podKey)}
+                      run={run}
+                      podAiReview={podAiReview}
                       meta={meta}
                       onRun={runPod}
                       executingPodKey={executingPodKey}
@@ -874,6 +970,7 @@ function TaskGraphPanel({ taskGraph }: { taskGraph?: ChiefDealOrchestrationPlan[
 function PodCard({
   pod,
   run,
+  podAiReview,
   meta,
   onRun,
   executingPodKey,
@@ -881,6 +978,7 @@ function PodCard({
 }: {
   pod: AgentPodPlan;
   run?: AgentPodRun;
+  podAiReview?: PodAIReview;
   meta: (typeof POD_META)[PodKey];
   onRun: (podKey: PodKey, forceTrigger?: string) => Promise<boolean | void>;
   executingPodKey: PodKey | null;
@@ -936,6 +1034,11 @@ function PodCard({
             );
           })}
         </div>
+        {podAiReview ? (
+          <PodAIReviewPanel review={podAiReview} />
+        ) : pod.podKey === "land_legal" && status === "completed" ? (
+          <NoPodAIReviewNotice />
+        ) : null}
       </div>
 
       <div className="mt-4 border-t border-slate-200/40 pt-2.5 dark:border-slate-800/40">
@@ -992,6 +1095,187 @@ function PodCard({
   );
 }
 
+const REVIEW_STATUS_LABEL: Record<string, string> = {
+  pass: "통과",
+  warning: "주의",
+  blocking: "차단",
+  needs_human_review: "검토 필요",
+};
+
+const REVIEW_STATUS_TONE: Record<string, string> = {
+  pass: "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200",
+  warning: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200",
+  blocking: "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200",
+  needs_human_review: "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200",
+};
+
+const FINDING_SEVERITY_LABEL: Record<string, string> = {
+  info: "정보",
+  medium: "주의",
+  high: "높음",
+  blocking: "차단",
+};
+
+function PodAIReviewPanel({ review }: { review: PodAIReview }) {
+  const status = review.reviewStatus ?? "needs_human_review";
+  const findings = review.findings ?? [];
+  const handoffs = review.handoffs ?? [];
+  const missingEvidenceFindings = findings.filter((finding) => {
+    const category = String(finding.category ?? "").toLowerCase();
+    const message = String(finding.message ?? "").toLowerCase();
+    return category.includes("missing") || category.includes("evidence") || message.includes("evidence") || message.includes("근거") || message.includes("증빙");
+  });
+  const nextActions = findings
+    .map((finding) => cleanText(finding.recommendedAction, ""))
+    .filter((item) => item && item !== "-")
+    .slice(0, 2);
+  const aiBrain = review.aiBrainUsed ?? {};
+  const selectionSource = cleanText(aiBrain.selectionSource ?? aiBrain.selection_source, "기본 AI");
+  const model = cleanText(aiBrain.model ?? aiBrain.model_name ?? aiBrain.modelName, review.reviewMode === "deterministic_fallback_review" ? "규칙 기반" : "AI Reviewer");
+  const confidence = typeof review.confidence === "number" ? `${Math.round(review.confidence * 100)}%` : "-";
+  const documentFacts = review.documentFacts ?? {};
+  const showDocumentFacts = Boolean(documentFacts.hasDocumentMarketEvidence || Number(documentFacts.factCount ?? 0) > 0);
+
+  return (
+    <section className="mt-3 rounded-lg border border-slate-200/70 bg-white/75 p-2.5 text-[11px] shadow-sm dark:border-slate-700/70 dark:bg-slate-950/45">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="inline-flex items-center gap-1.5 font-black text-slate-900 dark:text-white">
+          <Sparkles className="h-3.5 w-3.5 text-sky-500" />
+          AI Review
+        </div>
+        <span className={`rounded-full border px-2 py-0.5 font-black ${REVIEW_STATUS_TONE[status] ?? REVIEW_STATUS_TONE.needs_human_review}`}>
+          {REVIEW_STATUS_LABEL[status] ?? cleanText(status, "검토 필요")}
+        </span>
+      </div>
+
+      <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+        <div className="rounded-md bg-slate-50 px-2 py-1 font-semibold text-slate-600 dark:bg-slate-900/70 dark:text-slate-300">
+          신뢰도 {confidence}
+        </div>
+        <div className="rounded-md bg-slate-50 px-2 py-1 font-semibold text-slate-600 dark:bg-slate-900/70 dark:text-slate-300">
+          Brain {selectionSource} · {model}
+        </div>
+      </div>
+
+      {showDocumentFacts ? (
+        <DocumentMarketFactsPanel facts={documentFacts} />
+      ) : null}
+
+      {findings.length ? (
+        <div className="mt-2 space-y-1.5">
+          <p className="font-black text-slate-800 dark:text-slate-100">왜 막혔나 / 주요 판단</p>
+          {findings.slice(0, 3).map((finding, index) => (
+            <div key={finding.findingId ?? `${review.reviewId}-finding-${index}`} className="rounded-md border border-slate-200/70 bg-slate-50 px-2 py-1.5 dark:border-slate-700 dark:bg-slate-900/60">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="rounded bg-slate-200 px-1.5 py-0.5 font-black text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                  {FINDING_SEVERITY_LABEL[finding.severity ?? ""] ?? cleanText(finding.severity, "검토")}
+                </span>
+                <span className="font-bold text-slate-600 dark:text-slate-300">{cleanText(finding.category, "review")}</span>
+              </div>
+              <p className="mt-1 leading-5 text-slate-700 dark:text-slate-200">{cleanText(finding.message, "근거와 가정 확인이 필요합니다.")}</p>
+              {finding.sourceLocators?.length ? (
+                <p className="mt-1 truncate font-mono text-[10px] text-slate-500">
+                  source: {finding.sourceLocators.map((item) => cleanText(item, "")).filter(Boolean).slice(0, 2).join(", ")}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 rounded-md bg-emerald-50 px-2 py-1.5 font-semibold text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
+          차단 finding은 없습니다. 다만 보고서 확정 전에는 evidence/source locator를 다시 확인하세요.
+        </p>
+      )}
+
+      {missingEvidenceFindings.length ? (
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/35 dark:text-amber-100">
+          <div className="inline-flex items-center gap-1 font-black">
+            <AlertTriangle className="h-3 w-3" />
+            부족 근거 {missingEvidenceFindings.length}건
+          </div>
+          <p className="mt-1 leading-5">{cleanText(missingEvidenceFindings[0]?.recommendedAction ?? missingEvidenceFindings[0]?.message, "문서 페이지, 엑셀 셀, API row 또는 등기/공시지가 증빙을 연결해야 합니다.")}</p>
+        </div>
+      ) : null}
+
+      {nextActions.length ? (
+        <div className="mt-2 rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 text-sky-900 dark:border-sky-900 dark:bg-sky-950/35 dark:text-sky-100">
+          <p className="font-black">다음 조치</p>
+          <ul className="mt-1 space-y-1">
+            {nextActions.map((action, index) => (
+              <li key={`${review.reviewId}-action-${index}`} className="flex gap-1.5 leading-5">
+                <ArrowRight className="mt-0.5 h-3 w-3 shrink-0" />
+                <span>{action}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {handoffs.length ? (
+        <div className="mt-2 rounded-md bg-slate-50 px-2 py-1.5 dark:bg-slate-900/70">
+          <p className="font-black text-slate-800 dark:text-slate-100">Handoff</p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {handoffs.slice(0, 3).map((handoff, index) => (
+              <span key={handoff.handoffId ?? `${review.reviewId}-handoff-${index}`} className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-bold text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
+                {cleanText(handoff.fromAgent, review.agentId ?? "PodAIReviewer")} → {cleanText(handoff.toAgent, "다음 Agent")} · {cleanText(handoff.handoffType, "review")}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function DocumentMarketFactsPanel({ facts }: { facts: Record<string, unknown> }) {
+  const sourceDocument = asRecordValue(facts.sourceDocument);
+  const fileName = cleanText(
+    sourceDocument.originalFileName ?? sourceDocument.fileName ?? sourceDocument.name,
+    "업로드 사업계획서 / IM",
+  );
+  const status = cleanText(facts.reconciliationStatus, "검증 전");
+  const issueCount = asCount(facts.issueCount);
+  const sourceLocatorCount = asCount(facts.sourceLocatorCount);
+
+  return (
+    <div className="mt-2 rounded-md border border-cyan-200 bg-cyan-50 px-2 py-1.5 text-cyan-950 dark:border-cyan-900 dark:bg-cyan-950/30 dark:text-cyan-100">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-black">문서 파싱 근거</p>
+        <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-black dark:bg-slate-950/70">
+          검증 상태 {status}
+        </span>
+      </div>
+      <p className="mt-1 truncate font-semibold text-cyan-800 dark:text-cyan-200">{fileName}</p>
+      <div className="mt-2 grid grid-cols-2 gap-1.5 md:grid-cols-4">
+        <MiniMarketFact label="상품구성" value={`${asCount(facts.productMixCount)}건`} />
+        <MiniMarketFact label="매각/분양 사례" value={`${asCount(facts.saleComparableCount)}건`} />
+        <MiniMarketFact label="임대 사례" value={`${asCount(facts.rentComparableCount)}건`} />
+        <MiniMarketFact label="제안 평당가" value={safeNumber(facts.proposedPricePerPy)} />
+      </div>
+      <p className="mt-2 text-[10px] font-semibold opacity-75">
+        검토 이슈 {issueCount}건 · Source locator {sourceLocatorCount}건
+      </p>
+    </div>
+  );
+}
+
+function MiniMarketFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded bg-white/80 px-2 py-1 dark:bg-slate-950/60">
+      <p className="text-[10px] font-bold opacity-70">{label}</p>
+      <p className="mt-0.5 font-black">{value}</p>
+    </div>
+  );
+}
+
+function NoPodAIReviewNotice() {
+  return (
+    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] font-semibold leading-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/35 dark:text-amber-100">
+      Land-Legal Pod 결과는 있으나 AI Review 레코드가 아직 없습니다. Pod를 다시 실행하면 evidence-aware reviewer가 finding, missing evidence, handoff를 저장합니다.
+    </div>
+  );
+}
+
 function RunAllSummaryPanel({ summary }: { summary: NonNullable<ChiefDealOrchestrationPlan["runAllSummary"]> }) {
   const blocked = summary.blockedCount > 0;
   return (
@@ -1028,6 +1312,7 @@ function RunAllSummaryPanel({ summary }: { summary: NonNullable<ChiefDealOrchest
   );
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function EventBusPanel({ events }: { events: ChiefDealOrchestrationPlan["learningLoopEvents"] }) {
   return (
     <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">

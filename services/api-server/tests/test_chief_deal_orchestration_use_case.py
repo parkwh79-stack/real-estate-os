@@ -222,6 +222,93 @@ def test_land_pod_runs_with_land_ledger_even_when_land_evidence_is_missing():
     assert "landAgentReview" in persisted_artifacts[artifact_key]["result"]
 
 
+def test_market_product_pod_persists_ai_review_for_market_evidence_gaps():
+    from use_cases.chief_deal_orchestration import run_chief_deal_pod_use_case
+
+    project_data = {
+        "project": {"id": "p_market_gap", "name": "Market gap test", "type": "apartment"},
+        "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "bp1"}],
+        "land": {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000},
+        "landEvidence": [{"evidenceType": "official_land_price", "pnu": "1111010100100010000", "evidenceId": "ev-land-1"}],
+        "regulation": {"zoning": "residential"},
+        "legal": {"permitStatus": "pending"},
+        "market": {},
+        "product_mix": [{"type": "apartment", "units": 100, "totalRevenue": 100000000000}],
+        "document_market_evidence": {
+            "sourceDocument": {"originalFileName": "business.pdf", "documentType": "business_plan", "archiveId": "bp1"},
+            "parserVersion": "realytics-parser-v2.4-test",
+            "proposedPricePerPy": 40_000_000,
+            "productMix": [
+                {
+                    "type": "apartment",
+                    "units": 100,
+                    "contractAreaPy": 30,
+                    "pricePerPy": 40_000_000,
+                    "totalRevenue": 120_000_000_000,
+                    "evidenceId": "bp-p12-table3-row1",
+                    "sourceLocator": {"document": "business.pdf", "pageNumber": 12, "table": "table-3", "row": "row-1"},
+                }
+            ],
+            "manualComparables": [
+                {
+                    "name": "Comparable A",
+                    "pricePerPy": 30_000_000,
+                    "sourceName": "Uploaded IM",
+                    "sourceType": "manual_upload",
+                    "baseDate": "2026-01-01",
+                    "collectedAt": "2026-07-01T00:00:00Z",
+                    "licenseOrUsageNote": "internal upload",
+                    "confidence": 0.8,
+                    "evidenceId": "bp-p20-table2-row1",
+                    "sourceLocator": {"document": "business.pdf", "pageNumber": 20, "table": "table-2", "row": "row-1"},
+                }
+            ],
+        },
+        "feasibility_input": {"total_revenue": 100000000000, "total_cost": 80000000000},
+        "schedule": {"completionMonth": 36},
+        "pf_structure": [{"tranche": "Senior", "amount": 50000000000}],
+    }
+    persisted_artifacts = {}
+    persisted_reviews = {}
+
+    def artifact_sink(record):
+        persisted_artifacts[record["artifactKey"]] = record
+        return record
+
+    def review_sink(record):
+        persisted_reviews[record["reviewId"]] = record
+        return record
+
+    plan = run_chief_deal_pod_use_case(
+        "p_market_gap",
+        "market_product",
+        project_data,
+        {"workflowTrack": "pf", "podAiReviewMode": "deterministic"},
+        artifact_sink=artifact_sink,
+        review_sink=review_sink,
+    )
+
+    runs = {run["podKey"]: run for run in plan["podRuns"]}
+    artifact_key = runs["market_product"]["artifactKeys"][0]
+    review_id = runs["market_product"]["podAiReviewIds"][0]
+    review = persisted_reviews[review_id]
+
+    result = persisted_artifacts[artifact_key]["result"]
+    assert result["artifactType"] == "market_product_pod_result"
+    assert result["documentParsedMarketFacts"]["hasDocumentMarketEvidence"] is True
+    assert result["documentParsedMarketFacts"]["productMixCount"] == 1
+    assert result["documentParsedMarketFacts"]["saleComparableCount"] == 1
+    assert result["documentMarketReconciliation"]["status"] in {"needs_review", "needs_evidence"}
+    assert persisted_artifacts[artifact_key]["podAiReviewId"] == review_id
+    assert review["agentId"] == "MarketProductPodAIReviewer"
+    assert review["podKey"] == "market_product"
+    assert review["documentFacts"]["hasDocumentMarketEvidence"] is True
+    assert review["documentFacts"]["sourceDocument"]["originalFileName"] == "business.pdf"
+    categories = {finding["category"] for finding in review["findings"]}
+    assert "document_market_reconciliation_needs_review" in categories
+    assert review["handoffs"]
+
+
 def test_run_all_pods_executes_track_order_and_reports_summary():
     from use_cases.chief_deal_orchestration import run_chief_deal_all_pods_use_case
 

@@ -82,7 +82,7 @@ def safe_user_ai_context_summary(context: Dict[str, Any]) -> Dict[str, Any]:
         "runtimeProvider": safe.get("runtime_provider"),
         "model": safe.get("model"),
         "directModelCall": safe.get("direct_model_call"),
-        "requiresApiKey": safe.get("requires_api_key"),
+        "requiresApiKey": context.get("requires_api_key"),
         "selectionSource": safe.get("selection_source"),
         "host": safe.get("host"),
     }

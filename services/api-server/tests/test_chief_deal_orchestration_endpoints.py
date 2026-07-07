@@ -68,6 +68,7 @@ def test_chief_orchestration_endpoints():
     assert reviews
     assert reviews[0]["podKey"] == "land_legal"
     assert reviews[0]["sourceArtifactKey"] == artifacts[0]["artifactKey"]
+    assert (reviews[0].get("aiBrainUsed") or {}).get("selection_source")
 
     review_res = client.get(f"/projects/{project_id}/chief-orchestration/pod-ai-reviews/{reviews[0]['reviewId']}")
     assert review_res.status_code == 200

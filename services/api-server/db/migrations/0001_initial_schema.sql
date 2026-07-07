@@ -367,6 +367,17 @@ CREATE TABLE IF NOT EXISTS async_jobs (
 CREATE INDEX IF NOT EXISTS idx_async_jobs_project ON async_jobs(project_id);
 
 -- ---------------------------------------------------------------------------
+-- Application state document (dual-backend v1: whole state as one JSONB row).
+-- Native per-first-class-table persistence is the later optimization; this row
+-- lets the Postgres backend work end-to-end today (mirrors the JSON-file store).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_state (
+    id         TEXT PRIMARY KEY,
+    document   JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
 -- Map Intelligence: parcel-level spatial store (PostGIS)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS land_parcels (

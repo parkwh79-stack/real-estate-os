@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -25,6 +26,17 @@ def storage_backend() -> str:
     if os.environ.get("REALYTICS_STATE_FILE") and not os.environ.get("REALYTICS_SQLITE_FILE"):
         return "json"
     return "sqlite"
+
+
+def _use_document_store() -> bool:
+    """True for the whole-state document backends (JSON file or Postgres).
+
+    Both read/write the full state via `_load_json_state()` /
+    `_save_json_state()`; only the persistence target differs (file vs the
+    Postgres `app_state` JSONB row). The sqlite backend keeps its per-table
+    incremental fast path and is never a document store.
+    """
+    return storage_backend() in ("json", "postgres")
 
 
 def state_file_path() -> Path:
@@ -70,7 +82,7 @@ def default_state() -> Dict[str, Any]:
 
 
 def load_state() -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         return _load_json_state()
 
     state = _load_sqlite_state()
@@ -131,7 +143,7 @@ def save_state(
     if user_activity_logs is None:
         user_activity_logs = _load_existing_user_activity_logs()
     identity = _load_existing_identity_records()
-    if storage_backend() == "json":
+    if _use_document_store():
         _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity, glossary_term_candidates=glossary_term_candidates, pod_ai_reviews=pod_ai_reviews)
         return
     _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots)
@@ -276,7 +288,7 @@ def record_user_activity_log(event: Dict[str, Any]) -> Dict[str, Any]:
         "requestId": event.get("requestId") or event.get("request_id"),
         "metadata": event.get("metadata") or {},
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         logs = state.get("user_activity_logs", [])
         logs.append(record)
@@ -339,7 +351,7 @@ def list_user_activity_logs(
     event_type: str | None = None,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 100), 1000))
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         logs = list(state.get("user_activity_logs", []))
         logs = _filter_user_activity_logs(logs, user_id=user_id, project_id=project_id, event_type=event_type)
@@ -386,7 +398,7 @@ def upsert_land_evidence_record(project_id: str, record: Dict[str, Any]) -> Dict
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("land_evidence", {})
         state["land_evidence"].setdefault(project_id, {})[normalized["recordKey"]] = normalized
@@ -444,7 +456,7 @@ def list_land_evidence_records(
     pnu: str | None = None,
     evidence_type: str | None = None,
 ) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("land_evidence", {}).get(project_id, {}).values())
     else:
@@ -634,7 +646,7 @@ def upsert_risk_register_record(
     normalized.setdefault("reviewSummary", {})
     normalized["riskCount"] = len(normalized.get("risks") or [])
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("risk_registers", {})
         state["risk_registers"].setdefault(project_id, {})[run_id] = normalized
@@ -673,7 +685,7 @@ def upsert_risk_register_record(
 
 
 def get_risk_register_record(project_id: str, run_id: str) -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         return state.get("risk_registers", {}).get(project_id, {}).get(run_id)
     with _connect_sqlite() as conn:
@@ -685,7 +697,7 @@ def get_risk_register_record(project_id: str, run_id: str) -> Dict[str, Any] | N
 
 
 def list_risk_register_records(project_id: str) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("risk_registers", {}).get(project_id, {}).values())
     else:
@@ -727,7 +739,7 @@ def upsert_evidence_graph_record(
     normalized["riskNodeCount"] = int(summary.get("riskNodeCount") or len([node for node in nodes if node.get("type") == "risk"]))
     normalized["sourceLocatorCount"] = int(summary.get("sourceLocatorCount") or len([node for node in nodes if node.get("type") == "source_locator"]))
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("evidence_graphs", {})
         state["evidence_graphs"].setdefault(project_id, {})[run_id] = normalized
@@ -770,7 +782,7 @@ def upsert_evidence_graph_record(
 
 
 def get_evidence_graph_record(project_id: str, run_id: str) -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         return state.get("evidence_graphs", {}).get(project_id, {}).get(run_id)
     with _connect_sqlite() as conn:
@@ -782,7 +794,7 @@ def get_evidence_graph_record(project_id: str, run_id: str) -> Dict[str, Any] | 
 
 
 def list_evidence_graph_records(project_id: str) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("evidence_graphs", {}).get(project_id, {}).values())
     else:
@@ -815,7 +827,7 @@ def upsert_chief_pod_artifact_record(project_id: str, record: Dict[str, Any]) ->
         "updatedAt": now,
     }
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("chief_pod_artifacts", {})
         state["chief_pod_artifacts"].setdefault(project_id, {})[normalized["artifactKey"]] = normalized
@@ -855,7 +867,7 @@ def upsert_chief_pod_artifact_record(project_id: str, record: Dict[str, Any]) ->
 
 
 def get_chief_pod_artifact_record(project_id: str, artifact_key: str) -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         return state.get("chief_pod_artifacts", {}).get(project_id, {}).get(artifact_key)
     with _connect_sqlite() as conn:
@@ -872,7 +884,7 @@ def list_chief_pod_artifact_records(
     pod_key: str | None = None,
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("chief_pod_artifacts", {}).get(project_id, {}).values())
     else:
@@ -907,7 +919,7 @@ def upsert_pod_ai_review_record(project_id: str, record: Dict[str, Any]) -> Dict
         "updatedAt": now,
     }
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("pod_ai_reviews", {})
         state["pod_ai_reviews"].setdefault(project_id, {})[normalized["reviewId"]] = normalized
@@ -949,7 +961,7 @@ def upsert_pod_ai_review_record(project_id: str, record: Dict[str, Any]) -> Dict
 
 
 def get_pod_ai_review_record(project_id: str, review_id: str) -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         return state.get("pod_ai_reviews", {}).get(project_id, {}).get(review_id)
     with _connect_sqlite() as conn:
@@ -968,7 +980,7 @@ def list_pod_ai_review_records(
     source_artifact_key: str | None = None,
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("pod_ai_reviews", {}).get(project_id, {}).values())
     else:
@@ -1017,7 +1029,7 @@ def upsert_deal_state_record(project_id: str, record: Dict[str, Any]) -> Dict[st
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("deal_state_records", {})
         state["deal_state_records"].setdefault(project_id, {})[normalized["recordId"]] = normalized
@@ -1073,7 +1085,7 @@ def list_deal_state_records(
     limit: int = 200,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 200), 1000))
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("deal_state_records", {}).get(project_id, {}).values())
     else:
@@ -1134,7 +1146,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
         "updatedAt": now,
     }
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("calculation_runs", {})
         state["calculation_runs"].setdefault(project_id, {})[normalized["calculationRunId"]] = normalized
@@ -1239,7 +1251,7 @@ def list_calculation_run_records(
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 100), 500))
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("calculation_runs", {}).get(project_id, {}).values())
     else:
@@ -1283,7 +1295,7 @@ def upsert_recalculation_event_record(project_id: str, event: Dict[str, Any]) ->
         "updatedAt": now,
     }
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("recalculation_events", {})
         state["recalculation_events"].setdefault(project_id, {})[normalized["eventId"]] = normalized
@@ -1335,7 +1347,7 @@ def list_recalculation_event_records(
     status: str | None = None,
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("recalculation_events", {}).get(project_id, {}).values())
     else:
@@ -1388,7 +1400,7 @@ def upsert_prompt_artifact_record(project_id: str, record: Dict[str, Any]) -> Di
         "updatedAt": now,
     }
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("prompt_artifacts", {})
         state["prompt_artifacts"].setdefault(project_id, {})[normalized["artifactId"]] = normalized
@@ -1427,7 +1439,7 @@ def upsert_prompt_artifact_record(project_id: str, record: Dict[str, Any]) -> Di
 
 
 def get_prompt_artifact_record(project_id: str, artifact_id: str) -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         return state.get("prompt_artifacts", {}).get(project_id, {}).get(artifact_id)
     with _connect_sqlite() as conn:
@@ -1444,7 +1456,7 @@ def list_prompt_artifact_records(
     artifact_type: str | None = None,
     workflow: str | None = None,
 ) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("prompt_artifacts", {}).get(project_id, {}).values())
     else:
@@ -1503,7 +1515,7 @@ def upsert_assumption_override_record(project_id: str, record: Dict[str, Any]) -
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("assumption_overrides", {})
         project_records = state["assumption_overrides"].setdefault(project_id, {})
@@ -1552,7 +1564,7 @@ def list_assumption_override_records(
     status: str | None = None,
     check_key: str | None = None,
 ) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("assumption_overrides", {}).get(project_id, {}).values())
     else:
@@ -1702,7 +1714,7 @@ def upsert_restructuring_cure_record(project_id: str, record: Dict[str, Any]) ->
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("restructuring_cures", {})
         state["restructuring_cures"].setdefault(project_id, {})[normalized["cureId"]] = normalized
@@ -1746,7 +1758,7 @@ def list_restructuring_cure_records(
     status: str | None = None,
     cure_type: str | None = None,
 ) -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("restructuring_cures", {}).get(project_id, {}).values())
     else:
@@ -1778,7 +1790,7 @@ def upsert_tenant(record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedAt": now,
         "metadata": record.get("metadata") or {},
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("identity", default_state()["identity"])
         existing = state["identity"].setdefault("tenants", {}).get(tenant["tenantId"], {})
@@ -1829,7 +1841,7 @@ def upsert_user(record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedAt": now,
         "metadata": record.get("metadata") or {},
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("identity", default_state()["identity"])
         existing = state["identity"].setdefault("users", {}).get(user["userId"], {})
@@ -1884,7 +1896,7 @@ def create_user_session(record: Dict[str, Any]) -> Dict[str, Any]:
         "expiresAt": record.get("expiresAt") or record.get("expires_at"),
         "metadata": record.get("metadata") or {},
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("identity", default_state()["identity"])
         state["identity"].setdefault("sessions", {})[session["sessionId"]] = session
@@ -1919,7 +1931,7 @@ def create_user_session(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_user(user_id: str) -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         return state.get("identity", {}).get("users", {}).get(user_id)
     with _connect_sqlite() as conn:
@@ -1928,7 +1940,7 @@ def get_user(user_id: str) -> Dict[str, Any] | None:
 
 
 def get_user_session(session_id: str) -> Dict[str, Any] | None:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         return state.get("identity", {}).get("sessions", {}).get(session_id)
     with _connect_sqlite() as conn:
@@ -1938,7 +1950,7 @@ def get_user_session(session_id: str) -> Dict[str, Any] | None:
 
 def list_users(*, tenant_id: str | None = None, limit: int = 100) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 100), 1000))
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         users = list(state.get("identity", {}).get("users", {}).values())
         if tenant_id:
@@ -1997,7 +2009,7 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
         "metadata": record.get("metadata") or existing.get("metadata") or {},
     }
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("user_ai_profiles", {})[user_id] = profile
         _save_json_state_from_state(state)
@@ -2045,7 +2057,7 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
 def get_user_ai_profile(user_id: str, *, include_secret: bool = False) -> Dict[str, Any] | None:
     if not user_id:
         return None
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         profile = state.get("user_ai_profiles", {}).get(user_id)
     else:
@@ -2062,7 +2074,7 @@ def get_user_ai_profile(user_id: str, *, include_secret: bool = False) -> Dict[s
 def delete_user_ai_profile(user_id: str) -> bool:
     if not user_id:
         return False
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         removed = state.setdefault("user_ai_profiles", {}).pop(user_id, None) is not None
         _save_json_state_from_state(state)
@@ -2129,6 +2141,11 @@ def _decrypt_secret(ciphertext: str) -> str | None:
 
 
 def _load_json_state() -> Dict[str, Any] | None:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        document = postgres.load_state_document()
+        return _normalize_state(document) if document else None
     path = state_file_path()
     if not path.exists():
         return None
@@ -2189,6 +2206,11 @@ def _save_json_state(
         "identity": identity or default_state()["identity"],
         "user_ai_profiles": user_ai_profiles or (_load_json_state() or default_state()).get("user_ai_profiles", {}),
     })
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        postgres.save_state_document(payload)
+        return
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     tmp_path.replace(path)
@@ -3015,7 +3037,7 @@ def _save_json_state_from_state(state: Dict[str, Any]) -> None:
 
 
 def _load_existing_user_activity_logs() -> list[Dict[str, Any]]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("user_activity_logs", [])
     path = sqlite_file_path()
@@ -3034,7 +3056,7 @@ def _load_existing_user_activity_logs() -> list[Dict[str, Any]]:
 
 
 def _load_existing_land_evidence_records() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("land_evidence", {})
     path = sqlite_file_path()
@@ -3050,7 +3072,7 @@ def _load_existing_land_evidence_records() -> Dict[str, Any]:
 
 
 def _load_existing_risk_registers() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("risk_registers", {})
     path = sqlite_file_path()
@@ -3066,7 +3088,7 @@ def _load_existing_risk_registers() -> Dict[str, Any]:
 
 
 def _load_existing_evidence_graphs() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("evidence_graphs", {})
     path = sqlite_file_path()
@@ -3082,7 +3104,7 @@ def _load_existing_evidence_graphs() -> Dict[str, Any]:
 
 
 def _load_existing_chief_pod_artifacts() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("chief_pod_artifacts", {})
     path = sqlite_file_path()
@@ -3098,7 +3120,7 @@ def _load_existing_chief_pod_artifacts() -> Dict[str, Any]:
 
 
 def _load_existing_pod_ai_reviews() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("pod_ai_reviews", {})
     path = sqlite_file_path()
@@ -3114,7 +3136,7 @@ def _load_existing_pod_ai_reviews() -> Dict[str, Any]:
 
 
 def _load_existing_prompt_artifacts() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("prompt_artifacts", {})
     path = sqlite_file_path()
@@ -3130,7 +3152,7 @@ def _load_existing_prompt_artifacts() -> Dict[str, Any]:
 
 
 def _load_existing_assumption_overrides() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("assumption_overrides", {})
     path = sqlite_file_path()
@@ -3146,7 +3168,7 @@ def _load_existing_assumption_overrides() -> Dict[str, Any]:
 
 
 def _load_existing_restructuring_cures() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("restructuring_cures", {})
     path = sqlite_file_path()
@@ -3162,7 +3184,7 @@ def _load_existing_restructuring_cures() -> Dict[str, Any]:
 
 
 def _load_existing_glossary_term_candidates() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("glossary_term_candidates", {})
     path = sqlite_file_path()
@@ -3320,7 +3342,7 @@ def upsert_glossary_term_candidate_record(record: Dict[str, Any]) -> Dict[str, A
         "updatedAt": now,
         "reviewHistory": list((existing or {}).get("reviewHistory") or []),
     }
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("glossary_term_candidates", {})
         state["glossary_term_candidates"][candidate_id] = normalized
@@ -3418,7 +3440,7 @@ def upsert_glossary_term_record(record: Dict[str, Any]) -> Dict[str, Any]:
     record["createdAt"] = record.get("createdAt") or record["updatedAt"]
     record["version"] = int(record.get("version") or 1)
 
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("glossary_terms", {})
         state["glossary_terms"][term_id] = record
@@ -3451,7 +3473,7 @@ def upsert_glossary_term_record(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _load_existing_glossary_terms() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or {}).get("glossary_terms", {})
     path = sqlite_file_path()
@@ -3488,7 +3510,7 @@ def _glossary_candidate_id(
 
 
 def _load_existing_identity_records() -> Dict[str, Any]:
-    if storage_backend() == "json":
+    if _use_document_store():
         state = _load_json_state()
         return (state or default_state()).get("identity", default_state()["identity"])
     path = sqlite_file_path()

@@ -6,6 +6,7 @@ from core.calculations import calculate_pf_metrics
 from core.text_normalization import build_term_surface_record
 from agents.orchestration_agent import OrchestrationAgent
 from agents.credit_review_agent import CreditReviewAgent
+from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.risk_register_agent import RiskRegisterAgent
 from agents.scenario_engine_agent import ScenarioEngineAgent
 from agents.pod_ai_reviewer_agent import PodAIReviewerAgent
@@ -68,6 +69,39 @@ def _cross_agent_reconciliation(project_data: Dict[str, Any], missing: List[Miss
             ["Market-Product Pod", "PF-Credit Pod"],
             {"totalRevenue": total_revenue},
         )
+
+    market_evidence_review = project_data.get("marketEvidenceReview") or project_data.get("market_evidence_review") or {}
+    if isinstance(market_evidence_review, dict):
+        review_status = str(market_evidence_review.get("status") or "").lower()
+        issues = market_evidence_review.get("issues") if isinstance(market_evidence_review.get("issues"), list) else []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            code = str(issue.get("code") or "DOCUMENT_MARKET_EVIDENCE_NEEDS_REVIEW")
+            severity = "high" if str(issue.get("severity") or "").lower() in {"warning", "error", "high", "blocking"} else "medium"
+            add(
+                code,
+                "market",
+                severity,
+                str(issue.get("message") or "Uploaded business plan / IM market evidence requires reconciliation before marketability scoring."),
+                ["ParserAgent", "Market Evidence Agent", "Market-Product Pod"],
+                ["Marketability Analysis Agent", "Feasibility-Cashflow Pod", "PF-Credit Pod"],
+                {
+                    "marketEvidenceStatus": market_evidence_review.get("status"),
+                    "issue": issue,
+                    "evidenceSummary": market_evidence_review.get("evidenceSummary") or {},
+                },
+            )
+        if review_status in {"needs_review", "needs_evidence", "blocking", "blocked"} and not issues:
+            add(
+                "DOCUMENT_MARKET_EVIDENCE_RECONCILIATION_OPEN",
+                "market",
+                "high",
+                "Uploaded business plan / IM market evidence exists, but reconciliation is still open.",
+                ["ParserAgent", "Market Evidence Agent"],
+                ["Marketability Analysis Agent", "Feasibility-Cashflow Pod"],
+                {"marketEvidenceStatus": market_evidence_review.get("status")},
+            )
 
     parcel_area = _number((land_ledger.get("summary") or {}).get("totalAreaSqm")) if isinstance(land_ledger, dict) else None
     project_area = _number(land.get("areaSqm") or land.get("landAreaSqm") or land.get("area_sqm"))
@@ -592,7 +626,7 @@ def run_chief_deal_pod_use_case(
     }
     persisted_artifact = artifact_sink(artifact_record) if artifact_sink else artifact_record
     pod_ai_review_ref: Dict[str, Any] | None = None
-    if pod_key == "land_legal":
+    if pod_key in {"land_legal", "market_product"}:
         pod_ai_review = PodAIReviewerAgent().review_pod(
             project_id=project_id,
             pod_key=pod_key,
@@ -914,18 +948,27 @@ def _execute_pod_artifact(
     if pod_key == "market_product":
         workflow_run = _run_domain_workflow(project_id, "marketability", project_data, options)
         workflow_artifacts = workflow_run.get("artifacts") or {}
+        market_evidence_review = workflow_artifacts.get("marketEvidenceReview")
+        if not isinstance(market_evidence_review, dict):
+            market_evidence_review = MarketEvidenceAgent().review(project_data)
+            workflow_artifacts["marketEvidenceReview"] = market_evidence_review
+        document_market_facts = _document_market_fact_summary(project_data, market_evidence_review)
+        document_market_reconciliation = _document_market_reconciliation_summary(market_evidence_review)
         artifact = {
             "artifactType": "market_product_pod_result",
             "domainWorkflow": _workflow_summary(workflow_run),
             "standardArtifacts": workflow_artifacts,
-            "marketEvidenceReview": workflow_artifacts.get("marketEvidenceReview"),
+            "documentParsedMarketFacts": document_market_facts,
+            "documentMarketReconciliation": document_market_reconciliation,
+            "marketEvidenceReview": market_evidence_review,
             "marketabilityAnalysis": workflow_artifacts.get("marketabilityAnalysis") or analyze_marketability_use_case(project_data, options),
         }
         if workflow_artifacts.get("liveMarketComparables"):
             artifact["liveMarketComparables"] = workflow_artifacts["liveMarketComparables"]
             project_data["liveMarketComparables"] = workflow_artifacts["liveMarketComparables"]
-        if artifact.get("marketEvidenceReview"):
-            project_data["marketEvidenceReview"] = artifact["marketEvidenceReview"]
+        project_data["documentParsedMarketFacts"] = document_market_facts
+        project_data["documentMarketReconciliation"] = document_market_reconciliation
+        project_data["marketEvidenceReview"] = market_evidence_review
         project_data["marketability"] = artifact["marketabilityAnalysis"]
         project_data["marketabilityAnalysis"] = artifact["marketabilityAnalysis"]
         return artifact
@@ -1038,6 +1081,107 @@ def _workflow_summary(run: Dict[str, Any]) -> Dict[str, Any]:
         "artifactKeys": sorted((run.get("artifacts") or {}).keys()),
         "errorCount": len(run.get("errors") or []),
     }
+
+
+def _document_market_evidence_payload(project_data: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ("document_market_evidence", "documentMarketEvidence", "market_evidence", "marketEvidence"):
+        value = project_data.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _document_market_fact_summary(project_data: Dict[str, Any], market_evidence_review: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    document_evidence = _document_market_evidence_payload(project_data)
+    evidence_summary = (market_evidence_review or {}).get("evidenceSummary") if isinstance(market_evidence_review, dict) else {}
+    evidence_summary = evidence_summary if isinstance(evidence_summary, dict) else {}
+    source_document = document_evidence.get("sourceDocument") if isinstance(document_evidence.get("sourceDocument"), dict) else {}
+    product_mix = document_evidence.get("productMix") or document_evidence.get("product_mix") or []
+    fact_count = 0
+    for key in (
+        "productMix",
+        "product_mix",
+        "comparables",
+        "manualComparables",
+        "manual_comparables",
+        "transactionComparables",
+        "transaction_comparables",
+        "presaleComparables",
+        "presale_comparables",
+        "listingComparables",
+        "listing_comparables",
+        "rentComparables",
+        "rent_comparables",
+    ):
+        fact_count += _list_count(document_evidence.get(key))
+    if document_evidence.get("proposedPricePerPy") not in (None, ""):
+        fact_count += 1
+    if document_evidence.get("demandLevel"):
+        fact_count += 1
+    if document_evidence.get("upcomingSupplyUnits") not in (None, ""):
+        fact_count += 1
+
+    return {
+        "schemaVersion": "realytics-document-market-facts-v1",
+        "hasDocumentMarketEvidence": bool(document_evidence),
+        "sourceDocument": source_document,
+        "parserVersion": document_evidence.get("parserVersion"),
+        "productMixCount": _list_count(product_mix),
+        "saleComparableCount": _sale_comparable_count(document_evidence),
+        "rentComparableCount": _list_count(document_evidence.get("rentComparables") or document_evidence.get("rent_comparables")),
+        "sourceMetadataCount": evidence_summary.get("sourceMetadataCount"),
+        "evidenceRecordCount": evidence_summary.get("evidenceRecordCount"),
+        "sourceLocatorCount": evidence_summary.get("sourceLocatorCount"),
+        "fieldLocatorCoverage": evidence_summary.get("fieldLocatorCoverage"),
+        "proposedPricePerPy": document_evidence.get("proposedPricePerPy") or document_evidence.get("proposed_price_per_py"),
+        "demandLevel": document_evidence.get("demandLevel") or document_evidence.get("demand_level"),
+        "upcomingSupplyUnits": document_evidence.get("upcomingSupplyUnits") or document_evidence.get("upcoming_supply_units"),
+        "reconciliationStatus": (market_evidence_review or {}).get("status") if isinstance(market_evidence_review, dict) else None,
+        "issueCount": len((market_evidence_review or {}).get("issues") or []) if isinstance(market_evidence_review, dict) else 0,
+        "factCount": fact_count,
+    }
+
+
+def _document_market_reconciliation_summary(market_evidence_review: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(market_evidence_review, dict):
+        return {
+            "schemaVersion": "realytics-document-market-reconciliation-v1",
+            "status": "not_run",
+            "issues": [],
+            "pricingChecks": [],
+            "rentChecks": [],
+            "evidenceSummary": {},
+        }
+    return {
+        "schemaVersion": "realytics-document-market-reconciliation-v1",
+        "status": market_evidence_review.get("status"),
+        "evidenceSummary": market_evidence_review.get("evidenceSummary") or {},
+        "pricingChecks": market_evidence_review.get("pricingChecks") or [],
+        "rentChecks": market_evidence_review.get("rentChecks") or [],
+        "issues": market_evidence_review.get("issues") or [],
+        "agentMessages": market_evidence_review.get("agentMessages") or {},
+    }
+
+
+def _list_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _sale_comparable_count(document_evidence: Dict[str, Any]) -> int:
+    return sum(
+        _list_count(document_evidence.get(key))
+        for key in (
+            "comparables",
+            "manualComparables",
+            "manual_comparables",
+            "transactionComparables",
+            "transaction_comparables",
+            "presaleComparables",
+            "presale_comparables",
+            "listingComparables",
+            "listing_comparables",
+        )
+    )
 
 
 def _pod_term_surface_metadata(pod_key: str, artifact: Dict[str, Any]) -> List[Dict[str, Any]]:

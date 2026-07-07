@@ -25,10 +25,20 @@ Enterprise deployment moves to PostgreSQL + PostGIS.
 - **Provisioning**: `db/postgres.py :: schema_ddl()` loads this file so the app's
   `ensure_schema()` and a manually-run migration provision identical tables (one
   source of truth). Configure via `REALYTICS_DATABASE_URL` or `REALYTICS_PG_*`.
-- **Remaining wiring (deployment step)**: route `storage.py` load/save to the
-  Postgres connector and adapt the read path to accept `dict`/`datetime` values
-  the driver returns for `JSONB`/`TIMESTAMPTZ` columns (SQLite returns strings).
-  Then run a one-time data copy from the SQLite file into Postgres.
+- **Dual-backend wiring (done, v1)**: `REALYTICS_STORAGE_BACKEND=postgres`
+  activates the Postgres backend; the default stays SQLite (safe, rollback-easy).
+  `storage.py` routes the whole-state document read/write through
+  `db/postgres.py` (`load_state_document`/`save_state_document`) into the
+  `app_state` JSONB row — the same document model as the JSON-file backend, but
+  durable/network-shared on Postgres. The document-store branches (`json` and
+  `postgres`) share one code path via `_use_document_store()`; the sqlite
+  per-table incremental fast path is untouched. Verified offline with a fake
+  connection (psycopg is not installed here); live verification needs
+  `pip install "psycopg[binary]"` + a running Postgres.
+- **Next optimization (v2)**: native per-first-class-table persistence using
+  the 0001 schema (JSONB per store + typed key columns) instead of one document
+  row — so enterprise ad-hoc SQL/GIN queries hit indexed columns. Then a
+  one-time data copy from the SQLite file into Postgres.
 
 To run the migration manually:
 

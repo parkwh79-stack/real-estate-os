@@ -1,6 +1,6 @@
 # Pod AI Reviewer Roadmap
 
-Updated: 2026-07-02  
+Updated: 2026-07-07
 Project: REALYTICS x PLATFORM9  
 Status: In Progress
 Owner: REALYTICS AI LAB / PLATFORM9  
@@ -16,6 +16,30 @@ This document defines the implementation path for **Pod AI Reviewer**.
 ---
 
 ## 2. Current State
+
+### 2026-07-07 Implementation Update
+
+Implemented:
+
+- Chief Deal Room UI now reads persisted Pod AI Reviews and displays each Pod card's review status, confidence, AI Brain, findings, missing evidence, next actions, and handoffs.
+- Market-Product Pod now creates and stores a linked `pod_ai_reviews` record after deterministic market/product artifact execution.
+- Market-Product Pod artifact now exposes `documentParsedMarketFacts` from uploaded business plans / IM documents and `documentMarketReconciliation` from `MarketEvidenceAgent`.
+- Market-Product Pod AI Review now stores `documentFacts`, flags document-market reconciliation issues, and hands them back to Chief Deal Orchestrator before feasibility / PF handoff.
+- Chief Deal Room UI now shows parsed document market facts inside the Pod AI Review card, including source document, product mix count, sale comparable count, rent comparable count, proposed price per py, reconciliation status, issue count, and source locator count.
+- Market-Product deterministic guardrails now distinguish:
+  - no comparable data,
+  - thin comparable data,
+  - proposed price-per-py basis missing,
+  - rent / NOI / Cap Rate evidence missing for real-asset finance / REIT / fund tracks,
+  - weak marketability judgement basis.
+- Pod run responses expose `podAiReviewIds` for Market-Product as well as Land-Legal.
+
+Still pending:
+
+- PF-Credit Pod AI Review.
+- Cost-Schedule, Feasibility-Cashflow, and Public-Policy Pod AI Review.
+- AI Risk Committee integration using Pod AI Review findings.
+- ReportStudio paragraph generation with Pod AI Review evidence links.
 
 ### 2026-07-06 Implementation Update
 
@@ -35,8 +59,6 @@ Implemented:
 
 Still pending:
 
-- Chief Deal Room UI panel for Pod AI Review status and findings.
-- Market-Product Pod AI Review.
 - PF-Credit Pod AI Review.
 - Cost-Schedule, Feasibility-Cashflow, and Public-Policy Pod AI Review.
 - AI Risk Committee integration using Pod AI Review findings.
