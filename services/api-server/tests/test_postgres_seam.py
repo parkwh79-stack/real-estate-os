@@ -45,6 +45,33 @@ def test_schema_ddl_has_postgis_and_spatial_table():
     assert any("USING GIST(geom)" in s for s in ddl)
 
 
+def test_schema_ddl_mirrors_all_sqlite_stores():
+    """The migration must cover every persisted store, not a generic subset."""
+    joined = "\n".join(postgres.schema_ddl())
+    # Tables that back the calculation registry, deal-state review, audit, and
+    # identity — the ones the earlier generic JSONB stub omitted.
+    for table in (
+        "calculation_runs",
+        "deal_state_records",
+        "recalculation_events",
+        "user_activity_logs",
+        "tenants",
+        "users",
+        "sessions",
+        "user_ai_profiles",
+        "metadata",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table} " in joined, table
+    # Typed columns the reviewer filters rely on must exist on deal_state_records.
+    assert "review_status" in joined
+    # Every statement is terminated (loader split is clean).
+    assert all(s.rstrip().endswith(";") for s in postgres.schema_ddl())
+
+
+def test_initial_migration_file_exists():
+    assert postgres.INITIAL_SCHEMA_FILE.exists()
+
+
 def test_connect_without_config_errors(monkeypatch):
     _clear(monkeypatch)
     import pytest

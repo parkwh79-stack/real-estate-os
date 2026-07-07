@@ -10,8 +10,14 @@ unit-tested for config/DSN/DDL without a live database.
 """
 
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
+
+# Authoritative schema lives in a versioned .sql migration so a DBA and the app
+# share one source of truth (faithful mirror of storage._ensure_sqlite_schema).
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+INITIAL_SCHEMA_FILE = MIGRATIONS_DIR / "0001_initial_schema.sql"
 
 
 def postgres_configured() -> bool:
@@ -92,31 +98,29 @@ JSONB_STORE_TABLES: List[str] = [
 ]
 
 
+def _split_sql_statements(sql: str) -> List[str]:
+    """Split a .sql file into executable statements, dropping comments/blank lines."""
+    lines = [line for line in sql.splitlines() if not line.lstrip().startswith("--")]
+    body = "\n".join(lines)
+    return [f"{stmt.strip()};" for stmt in body.split(";") if stmt.strip()]
+
+
 def schema_ddl() -> List[str]:
-    """All DDL statements to bootstrap a fresh PostgreSQL/PostGIS database."""
-    statements: List[str] = [POSTGIS_BOOTSTRAP_SQL]
-    for table in JSONB_STORE_TABLES:
-        statements.append(
-            f"CREATE TABLE IF NOT EXISTS {table} ("
-            "id TEXT PRIMARY KEY, "
-            "project_id TEXT, "
-            "payload JSONB NOT NULL, "
-            "updated_at TIMESTAMPTZ DEFAULT now()"
-            ");"
-        )
-        statements.append(f"CREATE INDEX IF NOT EXISTS idx_{table}_project ON {table}(project_id);")
-    # Spatial table for parcel-level land geometry (Map Intelligence foundation).
-    statements.append(
-        "CREATE TABLE IF NOT EXISTS land_parcels ("
-        "pnu TEXT PRIMARY KEY, "
-        "project_id TEXT, "
-        "official_land_price NUMERIC, "
-        "geom geometry(MultiPolygon, 4326), "
-        "payload JSONB"
-        ");"
-    )
-    statements.append("CREATE INDEX IF NOT EXISTS idx_land_parcels_geom ON land_parcels USING GIST(geom);")
-    return statements
+    """All DDL statements to bootstrap a fresh PostgreSQL/PostGIS database.
+
+    Loads the authoritative versioned migration (0001_initial_schema.sql) so the
+    app's ensure_schema() and a manually-run migration provision identical tables
+    — a faithful, typed mirror of the SQLite stores (not a generic JSONB stub).
+    """
+    if INITIAL_SCHEMA_FILE.exists():
+        return _split_sql_statements(INITIAL_SCHEMA_FILE.read_text(encoding="utf-8"))
+    # Fallback (should not happen in a packaged deploy): minimal spatial bootstrap.
+    return [
+        POSTGIS_BOOTSTRAP_SQL,
+        "CREATE TABLE IF NOT EXISTS land_parcels (pnu TEXT PRIMARY KEY, project_id TEXT, "
+        "official_land_price NUMERIC, geom geometry(MultiPolygon, 4326), payload JSONB);",
+        "CREATE INDEX IF NOT EXISTS idx_land_parcels_geom ON land_parcels USING GIST(geom);",
+    ]
 
 
 def ensure_schema(conn) -> None:
