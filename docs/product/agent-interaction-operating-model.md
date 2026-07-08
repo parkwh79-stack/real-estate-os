@@ -208,6 +208,42 @@ Required persisted entities:
 | Report exports | Markdown, JSON, HTML, PDF, DOCX artifacts and hashes. |
 | Historical review cases | Prior reviewed projects for benchmarking and RAG/comparable analysis. |
 
+### Parsed Fact Store
+
+As of the current implementation, uploaded business plans and IM documents do
+not flow directly into downstream Pods as loose JSON only. Parser outputs are
+also persisted as `deal_state_records` with `recordType="parsed_fact"`.
+
+Each `parsed_fact` row carries:
+
+| Field | Purpose |
+|---|---|
+| `rawText` | Evidence-facing raw parser surface. |
+| `normalizedSurface` | Unicode-safe matching surface for glossary/canonical-field mapping. |
+| `textQualityFlags` | UTF-8, mojibake, replacement-character, zero-width diagnostics. |
+| `termId` | Approved or candidate glossary term ID. |
+| `canonicalField` / `factKey` | The shared field each Pod should reason about. |
+| `value` / `normalizedValue` | Extracted value and normalized comparable value. |
+| `sourceLocator` | Document page, Excel cell, API row, evidence ID, or document-only locator. |
+| `locatorStatus` | `located`, `document_only`, `missing`, or related status. |
+| `targetPods` | Pods expected to validate or consume the fact. |
+| `validationStatus` | `parsed`, `needs_review`, or `needs_source_locator`. |
+
+Operating rule:
+
+```text
+Parser Agent
+  -> persists parsed_fact candidates
+  -> Chief Deal Orchestrator loads parsed facts into Shared Deal State
+  -> Cross-Agent Reconciliation checks conflicts and weak locators
+  -> Each Pod validates only the parsed facts relevant to its domain
+  -> Human reviewer approves/overrides only when needed
+```
+
+This prevents early parsing from becoming a silent final assumption. It also
+lets Market-Product, Land-Legal, Feasibility-Cashflow, and PF-Credit Pods share
+the same candidate values, source locators, and term normalization boundary.
+
 Target historical comparison:
 
 ```text

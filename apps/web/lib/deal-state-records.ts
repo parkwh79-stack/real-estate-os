@@ -2,7 +2,7 @@
 
 import { apiBase, authHeaders } from "./auth-client";
 
-export type DealStateRecordType = "metric" | "risk_issue" | "evidence" | "assumption";
+export type DealStateRecordType = "metric" | "risk_issue" | "evidence" | "assumption" | "parsed_fact";
 
 export type DealStateRecord = {
   recordId?: string;
@@ -56,13 +56,14 @@ export async function fetchDealStateRecords(
 }
 
 export async function fetchDealStateRecordGroups(projectId: string, limit = 500) {
-  const [metrics, risks, evidence, assumptions] = await Promise.all([
+  const [metrics, risks, evidence, assumptions, parsedFacts] = await Promise.all([
     fetchDealStateRecords(projectId, { recordType: "metric", limit, actor: "web-auditor" }),
     fetchDealStateRecords(projectId, { recordType: "risk_issue", limit, actor: "web-auditor" }),
     fetchDealStateRecords(projectId, { recordType: "evidence", limit, actor: "web-auditor" }),
     fetchDealStateRecords(projectId, { recordType: "assumption", limit, actor: "web-auditor" }),
+    fetchDealStateRecords(projectId, { recordType: "parsed_fact", limit, actor: "web-auditor" }),
   ]);
-  return { metrics, risks, evidence, assumptions };
+  return { metrics, risks, evidence, assumptions, parsedFacts };
 }
 
 export function hasSourceLocator(record: DealStateRecord) {

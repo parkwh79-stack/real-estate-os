@@ -96,6 +96,7 @@ from use_cases.feasibility_workbook_llm import (
 )
 from use_cases.intake_finalize import finalize_project_intake_use_case
 from use_cases.parcel_pnu_resolution import resolve_project_parcels_use_case, resolve_address_to_parcel
+from use_cases.parsed_facts import parsed_fact_package, persist_parsed_facts
 from use_cases.calculation_run_capture import scenario_engine_run_payloads, stress_test_run_payload
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
@@ -640,6 +641,26 @@ def attach_persisted_land_evidence(project_id: str, project_data: Dict[str, Any]
             }
     return enriched_project
 
+
+def persisted_parsed_fact_package(project_id: str) -> Dict[str, Any]:
+    return parsed_fact_package(project_id)
+
+
+def attach_persisted_parsed_facts(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    package = persisted_parsed_fact_package(project_id)
+    if not package.get("recordCount"):
+        return project_data
+    enriched_project = dict(project_data)
+    enriched_project["parsedFacts"] = package.get("records") or []
+    enriched_project["parsedFactsSummary"] = package.get("summary") or {}
+    enriched_project["parsedFactPackage"] = {
+        key: value
+        for key, value in package.items()
+        if key != "records"
+    }
+    return enriched_project
+
+
 def attach_approved_assumption_overrides(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
     overrides = list_assumption_override_records(project_id, status="active")
     if not overrides:
@@ -915,6 +936,13 @@ async def parse_uploaded_business_plan(
             upload_meta=upload_meta,
             parser_version=PARSER_AGENT_VERSION,
         )
+        parsed_fact_result = persist_parsed_facts(project_id, parsed_data)
+        parsed_data["_meta"]["parsedFactStore"] = {
+            key: value
+            for key, value in parsed_fact_result.items()
+            if key != "records"
+        }
+        parsed_data["parsedFactsSummary"] = parsed_fact_result.get("summary") or {}
 
         return parsed_data
     finally:
@@ -2728,6 +2756,7 @@ def download_report_export(project_id: str, report_id: str, export_id: str, requ
 def _hydrated_project_source(project_id: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
     source_data = deep_merge(PROJECTS_DB[project_id], (input_data or {}).get("project_data", {}))
     source_data = attach_persisted_land_evidence(project_id, source_data)
+    source_data = attach_persisted_parsed_facts(project_id, source_data)
     source_data = attach_approved_assumption_overrides(project_id, source_data)
     source_data = attach_active_restructuring_cures(project_id, source_data)
     return source_data
@@ -2987,6 +3016,7 @@ def _workspace_page_data(
     plan: Dict[str, Any],
     source_documents: list[Dict[str, Any]],
     land_evidence_records: list[Dict[str, Any]],
+    parsed_fact_package_data: Dict[str, Any],
     assumption_overrides: list[Dict[str, Any]],
     chief_artifacts: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -2996,6 +3026,8 @@ def _workspace_page_data(
         "sourceDocumentSummary": _summarize_source_documents(source_documents),
         "landLedgerSummary": _summarize_land_ledger(source_data),
         "landEvidenceSummary": _summarize_land_evidence(land_evidence_records),
+        "parsedFactSummary": parsed_fact_package_data.get("summary") or {},
+        "parsedFactCount": parsed_fact_package_data.get("recordCount") or 0,
         "assumptionOverrideCount": len(assumption_overrides),
         "chiefArtifactSummary": _summarize_chief_artifacts(chief_artifacts),
     }
@@ -3004,6 +3036,7 @@ def _workspace_page_data(
         return {
             **common,
             "sourceDocuments": source_documents,
+            "parsedFacts": parsed_fact_package_data.get("records") or [],
             "landEvidenceRecords": land_evidence_records,
             "assumptionOverrides": assumption_overrides,
             "missingInputRegister": (plan.get("sharedDealStateGraph") or {}).get("missingInputRegister") or [],
@@ -3099,6 +3132,7 @@ def get_project_workspace_context(
     shared_graph_record = _persist_shared_deal_state_graph(project_id, plan, source="workspace_context")
     source_documents = list_source_documents_use_case(source_document_repository(), project_id)
     land_evidence_records = list_land_evidence_records(project_id)
+    parsed_fact_package_data = persisted_parsed_fact_package(project_id)
     assumption_overrides = list_assumption_override_records(project_id)
     chief_artifacts = list_chief_pod_artifact_records(project_id)
     project_record = source_data.get("project") if isinstance(source_data.get("project"), dict) else {}
@@ -3136,6 +3170,7 @@ def get_project_workspace_context(
             plan=plan,
             source_documents=source_documents,
             land_evidence_records=land_evidence_records,
+            parsed_fact_package_data=parsed_fact_package_data,
             assumption_overrides=assumption_overrides,
             chief_artifacts=chief_artifacts,
         ),

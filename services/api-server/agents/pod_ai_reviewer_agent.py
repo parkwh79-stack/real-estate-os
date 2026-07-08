@@ -197,6 +197,12 @@ class PodAIReviewerAgent:
             findings.extend(_market_product_findings(source_artifact, source_artifact_key, project_data, options))
         if pod_key == "pf_credit":
             findings.extend(_pf_credit_findings(source_artifact, source_artifact_key, project_data))
+        if pod_key == "cost_schedule":
+            findings.extend(_cost_schedule_findings(source_artifact, source_artifact_key, project_data))
+        if pod_key == "feasibility_cashflow":
+            findings.extend(_feasibility_cashflow_findings(source_artifact, source_artifact_key, project_data))
+        if pod_key == "public_policy":
+            findings.extend(_public_policy_findings(source_artifact, source_artifact_key, project_data))
         if not evidence_ids:
             findings.append(_finding(
                 "missing_evidence",
@@ -510,6 +516,221 @@ def _pf_credit_findings(
             item["sourceLocators"].append({"sourceType": "chief_pod_artifact", "artifactKey": source_artifact_key})
         if isinstance(credit_review, dict) and credit_review.get("decision"):
             item.setdefault("context", {})["deterministicCreditDecision"] = credit_review.get("decision")
+    return findings
+
+
+def _attach_pod_provenance(findings: List[Dict[str, Any]], source_artifact_key: str | None, extra: Dict[str, Any] | None = None) -> None:
+    for item in findings:
+        if source_artifact_key:
+            item["sourceLocators"].append({"sourceType": "chief_pod_artifact", "artifactKey": source_artifact_key})
+        if extra:
+            item["sourceLocators"].append(dict(extra))
+
+
+def _cost_schedule_findings(
+    source_artifact: Dict[str, Any],
+    source_artifact_key: str | None,
+    project_data: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Cost-Schedule reviewer: route the deterministic engine-readiness signals.
+
+    This pod does not emit nested {"code": ...} risk flags — the reliable signal
+    is ``engineReadiness`` (blockingFields / canRunCashFlow). Empty costBreakdown
+    / schedule are routed as missing evidence, not zero cost. Nothing is invented.
+    """
+    findings: List[Dict[str, Any]] = []
+    readiness = _first_dict_value(source_artifact, {"engineReadiness", "downstreamEngineReadiness"})
+    blocking_fields = [str(f) for f in (readiness.get("blockingFields") or []) if f] if isinstance(readiness, dict) else []
+    cost_breakdown = _first_dict_value(source_artifact, {"costBreakdown"})
+    schedule = _first_dict_value(source_artifact, {"schedule"})
+
+    if blocking_fields or not cost_breakdown:
+        detail = ", ".join(blocking_fields[:6]) if blocking_fields else "costBreakdown 미첨부"
+        findings.append(_finding(
+            "missing_evidence",
+            "high",
+            f"공사비·간접비·금융비용을 포함한 총사업비 근거가 이 Pod 산출물에 확정되어 있지 않습니다(누락: {detail}). 비용 구조가 확정되지 않으면 사업수지·PF 회수 판단을 evidence-ready로 볼 수 없습니다.",
+            recommended_action="도급계약·공사비 내역·간접비 내역·금융비용 산정표 또는 사업수지 Excel을 첨부하여 constructionCost/financeCost/otherCost/totalCost를 소스로케이터와 함께 확정하세요.",
+        ))
+    if not schedule:
+        findings.append(_finding(
+            "missing_evidence",
+            "medium",
+            "사업일정(토지잔금·인허가·착공·분양·준공·입주)과 공정률 근거가 없어 준공 시점 및 공정 지연 위험을 판단할 수 없습니다.",
+            recommended_action="사업일정표·공정표·분양일정을 첨부하여 준공(completion)과 공정률을 확정하세요. 일정이 확정되어야 월별 현금흐름·Max Minus 산정이 가능합니다.",
+        ))
+    if isinstance(readiness, dict) and readiness.get("canRunCashFlow") is False:
+        findings.append(_finding(
+            "recalculation_needed",
+            "high",
+            "비용·일정 입력이 현금흐름 엔진 실행 요건(수입·비용·일정)을 충족하지 못해(canRunCashFlow=false) 하류 Cash Flow / 시나리오 산출이 아직 실행 가능한 상태가 아닙니다.",
+            recommended_action="engineReadiness.blockingFields에 표시된 항목을 보강한 뒤 사업수지·현금흐름 엔진을 실행하여 하류 계산을 재생성하세요.",
+        ))
+    # Contractor risk / VE are not produced by any agent yet — flag honestly.
+    findings.append(_finding(
+        "missing_evidence",
+        "medium",
+        "Cost-Schedule Pod가 계획상 산출하기로 한 시공사 리스크(contractor_risk)와 VE/스펙 최적화(ve_options) 근거가 산출물에 존재하지 않습니다. 현재 Pod는 개발 타당성 계산만 수행합니다.",
+        recommended_action="시공사 신용·책임준공·도급조건 자료와 VE 대안 근거를 별도 증빙으로 첨부하고, 해당 리스크는 사람이 직접 검토하세요.",
+    ))
+    _attach_pod_provenance(findings, source_artifact_key)
+    return findings
+
+
+def _feasibility_cashflow_findings(
+    source_artifact: Dict[str, Any],
+    source_artifact_key: str | None,
+    project_data: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Feasibility-Cashflow reviewer: route Max Minus / IRR / PF-readiness signals.
+
+    Reads the values the cash-flow engine and feasibility agent already produced
+    (never recomputes maxMinus/IRR, never re-decides PASS/FAIL)."""
+    findings: List[Dict[str, Any]] = []
+    codes = set(_collect_values(source_artifact, {"code"}))
+
+    def has(prefixes: tuple) -> bool:
+        return any(str(c).startswith(prefixes) for c in codes)
+
+    cashflow = _first_dict_value(source_artifact, {"cashFlowRunResult"})
+    summary = cashflow.get("summary") if isinstance(cashflow.get("summary"), dict) else {}
+    status = str(summary.get("status") or "")
+    returns = _first_dict_value(source_artifact, {"returnMetrics"})
+    return_metrics = returns.get("metrics") if isinstance(returns.get("metrics"), dict) else {}
+    project_irr = return_metrics.get("projectIrr") if isinstance(return_metrics.get("projectIrr"), dict) else {}
+    pf_readiness = _first_dict_value(source_artifact, {"pfReadiness"})
+    data_quality = _first_dict_value(source_artifact, {"dataQuality"})
+    missing_fields = [str(f) for f in (data_quality.get("missingFields") or []) if f] if isinstance(data_quality, dict) else []
+    cashflow_error = _first_dict_value(source_artifact, {"cashFlowRunError"})
+    logistics = _first_dict_value(source_artifact, {"logisticsAnalysis"})
+    logistics_flags = [str(f) for f in (logistics.get("riskFlags") or []) if f] if isinstance(logistics, dict) else []
+
+    max_minus_breach = has(("MAX_MINUS_EXCEEDS_PF_LIMIT",)) or status == "pf_limit_shortfall"
+    if max_minus_breach:
+        findings.append(_finding(
+            "risk_note", "blocking",
+            "최대 순현금 부족(Max Minus)이 가용 PF 한도를 초과합니다. 사업 기간 중 자금 부족을 조달로 충당할 수 없습니다.",
+            recommended_action="PF 한도 증액, 자본 확충, 분양 대금 회수 스케줄(선분양/중도금) 개선 근거를 첨부한 뒤 Cash Flow 엔진을 재실행하세요.",
+        ))
+        findings.append(_finding(
+            "recalculation_needed", "high",
+            "자금 조달 구조(PF 한도/트랜치/회수 스케줄)를 변경하면 월별 현금흐름·Max Minus·PF 인출 스케줄을 다시 산출해야 합니다.",
+            recommended_action="조달 보강 후 feasibility_cashflow Pod를 재실행하여 CalculationRun 이력과 Max Minus를 갱신하세요.",
+        ))
+    if has(("PF_LIMIT_FULLY_DRAWN",)):
+        findings.append(_finding(
+            "risk_note", "medium",
+            "사업 기간 중 PF 한도가 전액 소진됩니다(미인출 한도 0). 추가 비용 초과나 회수 지연 시 완충 여력이 없습니다.",
+            recommended_action="공사비 초과·분양 지연 민감도에서 예비비/추가 조달 여력을 확인하고 미인출 한도 확보 방안을 검토하세요.",
+        ))
+    if cashflow_error or not cashflow:
+        findings.append(_finding(
+            "missing_evidence", "high",
+            "현금흐름 엔진이 실행되지 않았습니다(입력 미비). Max Minus·필요 PF 한도·자금 부족 시점을 판단할 근거가 없습니다.",
+            recommended_action="매출·총사업비·공사 착공/준공 일정 및 PF 구조를 확정하여 현금흐름 엔진 입력을 완성한 뒤 재실행하세요.",
+        ))
+    elif str(cashflow.get("dataStatus") or "") == "partial":
+        findings.append(_finding(
+            "data_quality", "medium",
+            "현금흐름 결과가 부분(partial) 상태입니다. 매핑 경고가 있어 일부 가정이 자동 보정되었습니다.",
+            recommended_action="매핑 진단(warnings)을 확인하고 회수 스케줄·비용 항목·트랜치 매핑을 보강한 뒤 재산출하세요.",
+        ))
+    irr_status = str(project_irr.get("status") or "")
+    irr_value = project_irr.get("value")
+    if irr_status == "loss" or (isinstance(irr_value, (int, float)) and irr_value < 0):
+        findings.append(_finding(
+            "risk_note", "high",
+            "프로젝트 IRR이 음수입니다. 현 가정 하에서 투입 자본을 회수하지 못합니다.",
+            recommended_action="분양가·공사비·토지비·사업 일정 가정을 재검토하고, 수정 가정으로 수익성 지표를 재산출하세요.",
+        ))
+    elif irr_status == "not_available" or not returns:
+        findings.append(_finding(
+            "missing_evidence", "medium",
+            "수익성 지표(IRR/Equity Multiple/ICR)가 산출되지 않았습니다(현금흐름 시계열 근거 부족).",
+            recommended_action="유입/유출이 포함된 프로젝트 현금흐름 시계열 또는 매출·비용·일정 가정을 첨부하여 수익성 지표를 산출하세요.",
+        ))
+    elif project_irr.get("meetsHurdle") is False:
+        findings.append(_finding(
+            "risk_note", "medium",
+            "프로젝트 IRR이 목표 수익률(허들)을 하회합니다. 지분 가격 또는 사업 구조 재검토가 필요합니다.",
+            recommended_action="허들 대비 IRR 격차의 원인(분양가/원가/레버리지)을 점검하고 구조 개선안을 검토하세요.",
+        ))
+    headroom = pf_readiness.get("headroomToRecommendedLimit") if isinstance(pf_readiness, dict) else None
+    if (isinstance(pf_readiness, dict) and pf_readiness.get("status") == "leverage_review_required") or (isinstance(headroom, (int, float)) and headroom < 0):
+        findings.append(_finding(
+            "risk_note", "high",
+            "PF 조달 규모가 권고 한도(매출·원가 기준)를 초과하여 레버리지 재검토가 필요합니다.",
+            recommended_action="권고 PF 한도 대비 초과분에 대해 자본 확충 또는 조달 규모 조정 근거를 첨부하세요.",
+        ))
+    if missing_fields:
+        findings.append(_finding(
+            "missing_evidence", "high",
+            f"사업수지 핵심 입력값이 누락되어 예비 산출 상태입니다(누락: {', '.join(missing_fields[:6])}). evidence-ready 판단으로 볼 수 없습니다.",
+            recommended_action="누락된 토지면적·연면적/용적률·총매출·총사업비·PF 구조·사업일정 항목을 보강한 뒤 재실행하세요.",
+        ))
+    if isinstance(logistics, dict) and logistics.get("applicable") and logistics_flags:
+        findings.append(_finding(
+            "risk_note", "medium",
+            "물류 등 임대·선매각형 자산의 수지 전제(Cap Rate, 선매각가, 임차인 안정성, 스펙)에서 결측 또는 경고 플래그가 감지되었습니다.",
+            recommended_action="임대료/NOI, Cap Rate, 선매각 계약가, 임차인 신용·임대차 기간 근거를 첨부하여 Exit 가치와 선매각 LTV 전제를 확정하세요.",
+        ))
+    extra = {"sourceType": "cash_flow_run", "status": status} if status else None
+    _attach_pod_provenance(findings, source_artifact_key, extra)
+    if status:
+        for item in findings:
+            item.setdefault("context", {})["deterministicCashFlowStatus"] = status
+    return findings
+
+
+def _public_policy_findings(
+    source_artifact: Dict[str, Any],
+    source_artifact_key: str | None,
+    project_data: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Public-Policy reviewer: route the developability-score dimension signals.
+
+    Flags dimensions computed without data (dataLimitations), missing regulation
+    basis, weak gaps, and the still-stubbed policy-simulation output."""
+    findings: List[Dict[str, Any]] = []
+    score = _first_dict_value(source_artifact, {"developabilityScore"})
+    dimensions = _first_dict_value(score, {"dimensions"}) if score else {}
+    grade = str(score.get("grade") or "") if isinstance(score, dict) else ""
+    gaps = [str(g) for g in (score.get("gaps") or []) if g] if isinstance(score, dict) else []
+    data_limitations = [str(d) for d in (score.get("dataLimitations") or []) if d] if isinstance(score, dict) else []
+    policy_notes = " ".join(str(n) for n in (source_artifact.get("policyNotes") or []))
+
+    if grade == "no_data":
+        findings.append(_finding(
+            "missing_evidence", "blocking",
+            "개발가능성 평가에 필요한 토지·법규·사업성·시장성 데이터가 모두 부족하여 점수를 산출할 수 없습니다(grade=no_data).",
+            recommended_action="토지 증빙, 규제 자료, 사업수지, 시장성 분석 중 최소 필수 입력을 확보한 뒤 pod를 재실행하세요.",
+        ))
+    elif data_limitations:
+        findings.append(_finding(
+            "missing_evidence", "high",
+            f"개발가능성 종합점수가 일부 축({', '.join(data_limitations[:5])}) 데이터 없이 산출되었습니다. 해당 축은 가중치에서 제외되어 종합점수가 왜곡될 수 있습니다.",
+            recommended_action="dataLimitations에 표기된 축의 근거 자료를 첨부한 뒤 개발가능성 점수를 재산출하세요.",
+        ))
+    regulation = dimensions.get("regulation") if isinstance(dimensions, dict) else None
+    if isinstance(regulation, dict) and regulation.get("available") is False:
+        findings.append(_finding(
+            "missing_evidence", "high",
+            "용도지역·용적률(regulation) 근거가 없어 규제 적합성 축이 점수에서 제외되었습니다. 인허가 가능성·규제 리스크를 evidence-ready로 볼 수 없습니다.",
+            recommended_action="용도지역, 법정/적용 용적률, 도시계획 자료를 첨부한 뒤 규제 축을 포함해 재산출하세요.",
+        ))
+    if gaps:
+        findings.append(_finding(
+            "risk_note", "medium",
+            f"개발가능성 축 중 취약 항목이 감지되었습니다(gaps: {', '.join(gaps[:5])}) — 해당 축 점수가 50점 미만입니다.",
+            recommended_action="gaps에 나열된 축의 개선 근거를 검토하고 보완 자료를 첨부하세요. 점수를 재평가하되 PASS/FAIL은 재판정하지 마세요.",
+        ))
+    if "until dedicated policy simulation" in policy_notes or "policy simulation agents are implemented" in policy_notes:
+        findings.append(_finding(
+            "missing_evidence", "high",
+            "공공성·도시계획·기부채납·정책 시뮬레이션 전용 분석이 아직 실행되지 않았습니다. 현재 산출물은 개발가능성/규제 근거를 재사용한 대체 결과입니다.",
+            recommended_action="공공기여 자료·정책/공모 지침을 첨부하고, 전용 정책 시뮬레이션이 실행되기 전까지 정책 판단을 report-grade로 사용하지 마세요.",
+        ))
+    _attach_pod_provenance(findings, source_artifact_key)
     return findings
 
 

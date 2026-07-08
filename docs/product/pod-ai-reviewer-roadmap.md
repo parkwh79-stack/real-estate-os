@@ -80,11 +80,37 @@ evidence-aware findings (market_product → `proposed_price_basis_missing`,
   `data_quality`, `risk_note`, `recalculation_needed`). An LLM opinion alone
   (e.g. `guardrail`) never gates PASS/FAIL, per the invariant.
 
+### 2026-07-06 All six pods reviewed
+
+Added deterministic reviewers for the remaining three pods, so all six Chief
+pods now produce a Pod AI Review (LLM-evidence-aware when a key is available,
+deterministic fallback otherwise):
+
+- **Cost-Schedule** (`_cost_schedule_findings`): routes `engineReadiness`
+  (blockingFields / canRunCashFlow) and empty costBreakdown/schedule as
+  missing-evidence / recalculation-needed; honestly flags that contractor-risk
+  and VE outputs are not yet produced by any agent. Reads structured fields, not
+  risk codes (this pod emits none). Also documents two orchestrator key-mismatch
+  bugs (costBreakdown/dataQualityWarnings) to fix in engineering.
+- **Feasibility-Cashflow** (`_feasibility_cashflow_findings`): routes
+  `MAX_MINUS_EXCEEDS_PF_LIMIT` (blocking + recalculation_needed),
+  `PF_LIMIT_FULLY_DRAWN`, negative/ below-hurdle project IRR, `pfReadiness`
+  leverage review, `dataQuality.missingFields`, partial dataStatus, and
+  income-asset logistics flags. Never recomputes maxMinus/IRR.
+- **Public-Policy** (`_public_policy_findings`): routes developability-score
+  `grade=no_data`, `dataLimitations`, missing regulation dimension, weak `gaps`,
+  and the still-stubbed policy-simulation output.
+
+All wired into the Chief pod review set (all 6 pods) with per-pod agent ids.
+Verified: 8 new unit tests + live run of all three (CostSchedule/Feasibility
+Cashflow/PublicPolicy reviewer ids, findings produced).
+
 Still pending:
 
-- Cost-Schedule, Feasibility-Cashflow, and Public-Policy Pod AI Review.
 - AI Risk Committee integration using Pod AI Review findings.
 - ReportStudio paragraph generation with Pod AI Review evidence links.
+- PG v2 native per-table persistence (the understand-workflow spec agent hit the
+  session limit; also not live-verifiable without psycopg + a running Postgres).
 
 Current backend inventory:
 

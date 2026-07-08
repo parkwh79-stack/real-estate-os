@@ -103,6 +103,21 @@ def _cross_agent_reconciliation(project_data: Dict[str, Any], missing: List[Miss
                 {"marketEvidenceStatus": market_evidence_review.get("status")},
             )
 
+    for issue in _parsed_fact_reconciliation_issues(project_data):
+        add(
+            str(issue.get("code") or "PARSED_FACT_RECONCILIATION_ISSUE"),
+            str(issue.get("category") or "data_quality"),
+            str(issue.get("severity") or "medium"),
+            str(issue.get("message") or "Parsed fact requires review before downstream pod execution."),
+            ["ParserAgent", "DataQualityAgent"],
+            list(issue.get("targetAgents") or ["Chief Deal Orchestrator"]),
+            {
+                "parsedFacts": issue.get("parsedFacts") or [],
+                "canonicalField": issue.get("canonicalField"),
+                "sourceLocators": issue.get("sourceLocators") or [],
+            },
+        )
+
     parcel_area = _number((land_ledger.get("summary") or {}).get("totalAreaSqm")) if isinstance(land_ledger, dict) else None
     project_area = _number(land.get("areaSqm") or land.get("landAreaSqm") or land.get("area_sqm"))
     if parcel_area and project_area and project_area > 0:
@@ -626,7 +641,7 @@ def run_chief_deal_pod_use_case(
     }
     persisted_artifact = artifact_sink(artifact_record) if artifact_sink else artifact_record
     pod_ai_review_ref: Dict[str, Any] | None = None
-    if pod_key in {"land_legal", "market_product", "pf_credit"}:
+    if pod_key in {"land_legal", "market_product", "pf_credit", "cost_schedule", "feasibility_cashflow", "public_policy"}:
         pod_ai_review = PodAIReviewerAgent().review_pod(
             project_id=project_id,
             pod_key=pod_key,
@@ -1546,6 +1561,16 @@ def _evidence_vault(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     for record in list(project_data.get("landEvidence") or project_data.get("land_evidence") or []):
         if isinstance(record, dict):
             evidence.append({"evidenceType": record.get("evidenceType") or "land_evidence", **record})
+    parsed_facts = _parsed_fact_records(project_data)
+    if parsed_facts:
+        evidence.append(
+            {
+                "evidenceType": "parsed_fact_store",
+                "recordCount": len(parsed_facts),
+                "summary": project_data.get("parsedFactsSummary") or {},
+                "sourceLocator": {"type": "deal_state_records", "recordType": "parsed_fact"},
+            }
+        )
     return evidence
 
 
@@ -1610,6 +1635,132 @@ def _risks(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             if isinstance(rows, list):
                 risks.extend([row for row in rows if isinstance(row, dict)])
     return risks
+
+
+def _parsed_fact_reconciliation_issues(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    facts = _parsed_fact_records(project_data)
+    if not facts:
+        return []
+    issues: List[Dict[str, Any]] = []
+    facts_by_key: Dict[str, List[Dict[str, Any]]] = {}
+    for fact in facts:
+        key = str(fact.get("canonicalField") or fact.get("factKey") or fact.get("key") or "")
+        if not key:
+            continue
+        facts_by_key.setdefault(key, []).append(fact)
+
+    for key, rows in facts_by_key.items():
+        numeric_rows = [
+            (row, _number(row.get("normalizedValue") if row.get("normalizedValue") is not None else row.get("value")))
+            for row in rows
+        ]
+        numeric_rows = [(row, value) for row, value in numeric_rows if value is not None]
+        if len(numeric_rows) >= 2:
+            values = [value for _, value in numeric_rows]
+            denominator = max(abs(max(values)), 1.0)
+            variance = (max(values) - min(values)) / denominator
+            if variance > 0.01:
+                issues.append(
+                    {
+                        "code": f"PARSED_FACT_VALUE_CONFLICT:{key}",
+                        "category": "data_quality",
+                        "severity": "high",
+                        "message": f"파싱 후보값 {key}이 문서/셀/Agent 결과 사이에서 1% 이상 다릅니다.",
+                        "canonicalField": key,
+                        "targetAgents": _target_agents_from_facts(rows),
+                        "parsedFacts": [_parsed_fact_issue_preview(row) for row, _ in numeric_rows[:6]],
+                        "sourceLocators": [row.get("sourceLocator") for row, _ in numeric_rows if row.get("sourceLocator")],
+                    }
+                )
+
+    for fact in facts:
+        key = str(fact.get("canonicalField") or fact.get("factKey") or fact.get("key") or "")
+        if not (fact.get("critical") or key in _critical_parsed_fact_fields()):
+            continue
+        if _parsed_fact_has_specific_locator(fact):
+            continue
+        issues.append(
+            {
+                "code": f"PARSED_FACT_SOURCE_LOCATOR_WEAK:{key or fact.get('parserPath')}",
+                "category": "evidence",
+                "severity": "medium",
+                "message": f"핵심 파싱 후보값 {key or fact.get('parserPath')}에 문서 페이지, 엑셀 셀, API row 수준의 근거 위치가 부족합니다.",
+                "canonicalField": key,
+                "targetAgents": _target_agents_from_facts([fact]),
+                "parsedFacts": [_parsed_fact_issue_preview(fact)],
+                "sourceLocators": [fact.get("sourceLocator")] if fact.get("sourceLocator") else [],
+            }
+        )
+    return issues
+
+
+def _parsed_fact_records(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    records = project_data.get("parsedFacts") or project_data.get("parsed_facts") or []
+    if isinstance(records, list):
+        return [record for record in records if isinstance(record, dict)]
+    package = project_data.get("parsedFactPackage") or project_data.get("parsed_fact_package") or {}
+    if isinstance(package, dict) and isinstance(package.get("records"), list):
+        return [record for record in package["records"] if isinstance(record, dict)]
+    return []
+
+
+def _target_agents_from_facts(facts: List[Dict[str, Any]]) -> List[str]:
+    agents: List[str] = []
+    pod_to_agent = {
+        "land_legal": "Land-Legal Pod",
+        "market_product": "Market-Product Pod",
+        "cost_schedule": "Cost-Schedule Pod",
+        "feasibility_cashflow": "Feasibility-Cashflow Pod",
+        "pf_credit": "PF-Credit Pod",
+        "public_policy": "Public-Policy Pod",
+        "chief_orchestrator": "Chief Deal Orchestrator",
+    }
+    for fact in facts:
+        for pod_key in fact.get("targetPods") or []:
+            label = pod_to_agent.get(str(pod_key), str(pod_key))
+            if label not in agents:
+                agents.append(label)
+    return agents or ["Chief Deal Orchestrator"]
+
+
+def _parsed_fact_issue_preview(fact: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "recordId": fact.get("recordId"),
+        "canonicalField": fact.get("canonicalField") or fact.get("factKey") or fact.get("key"),
+        "parserPath": fact.get("parserPath"),
+        "value": fact.get("value"),
+        "normalizedValue": fact.get("normalizedValue"),
+        "sourceLocator": fact.get("sourceLocator"),
+        "locatorStatus": fact.get("locatorStatus"),
+        "confidence": fact.get("confidence"),
+    }
+
+
+def _parsed_fact_has_specific_locator(fact: Dict[str, Any]) -> bool:
+    locator = fact.get("sourceLocator")
+    if not isinstance(locator, dict):
+        return False
+    return any(locator.get(key) for key in ("cell", "apiRowId", "row", "rowIndex", "page", "pageNumber", "evidenceId", "sourceUrlOrEvidenceId", "artifactKey"))
+
+
+def _critical_parsed_fact_fields() -> set[str]:
+    return {
+        "land.address",
+        "land.pnu",
+        "land.area_sqm",
+        "landEvidence.officialLandPrice.pricePerSqm",
+        "architectural_plan.gross_floor_area_sqm",
+        "architectural_plan.unit_count",
+        "feasibility_input.total_revenue",
+        "feasibility_input.total_cost",
+        "feasibility_input.land_cost",
+        "feasibility_input.construction_cost",
+        "pf_structure.amount.sum",
+        "market.proposedPricePerPy",
+        "productMix.totalRevenue",
+        "productMix.pricePerPy",
+        "marketComparable.pricePerPy",
+    }
 
 
 def _conflicts(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:

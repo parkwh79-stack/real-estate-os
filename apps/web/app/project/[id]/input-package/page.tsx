@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
@@ -39,6 +39,23 @@ type SourceDocument = {
   uploadedAt?: string;
   validationStatus?: string;
   archiveIntegrityStatus?: string;
+};
+
+type ParsedFact = {
+  recordId?: string;
+  key?: string;
+  canonicalField?: string;
+  parserPath?: string;
+  value?: unknown;
+  normalizedValue?: unknown;
+  unit?: string;
+  confidence?: number;
+  validationStatus?: string;
+  locatorStatus?: string;
+  locatorPrecision?: string;
+  targetPods?: string[];
+  sourceLocator?: Record<string, unknown>;
+  textQualityFlags?: Record<string, boolean>;
 };
 
 type IntakeReadinessPlan = {
@@ -104,7 +121,7 @@ export default function InputPackagePage() {
     try {
       setContext(await fetchWorkspaceContext(projectId, "input_package", activeTrack));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "자료 입력 패키지 저장 상태를 불러오지 못했습니다.");
+      setError(err instanceof Error ? err.message : "?먮즺 ?낅젰 ?⑦궎吏 ????곹깭瑜?遺덈윭?ㅼ? 紐삵뻽?듬땲??");
     } finally {
       setLoading(false);
     }
@@ -124,13 +141,13 @@ export default function InputPackagePage() {
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ track: activeTrack, run: false }),
       });
-      if (!res.ok) throw new Error(`자료 보강 계획 생성 실패 (${res.status})`);
+      if (!res.ok) throw new Error(`?먮즺 蹂닿컯 怨꾪쉷 ?앹꽦 ?ㅽ뙣 (${res.status})`);
       const body = (await res.json()) as { intakeReadinessPlan?: IntakeReadinessPlan };
       setIntakePlan(body.intakeReadinessPlan ?? null);
-      setMessage(body.intakeReadinessPlan?.nextRecommendedAction ?? "자료 접수와 보강 계획을 업데이트했습니다.");
+      setMessage(body.intakeReadinessPlan?.nextRecommendedAction ?? "?먮즺 ?묒닔? 蹂닿컯 怨꾪쉷???낅뜲?댄듃?덉뒿?덈떎.");
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "자료 보강 계획 생성에 실패했습니다.");
+      setError(err instanceof Error ? err.message : "?먮즺 蹂닿컯 怨꾪쉷 ?앹꽦???ㅽ뙣?덉뒿?덈떎.");
     } finally {
       setRunning(null);
     }
@@ -146,11 +163,11 @@ export default function InputPackagePage() {
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ podKey }),
       });
-      if (!res.ok) throw new Error(`${label} 실행 실패 (${res.status})`);
-      setMessage(`${label} 실행 결과가 프로젝트 artifact로 저장되었습니다.`);
+      if (!res.ok) throw new Error(`${label} ?ㅽ뻾 ?ㅽ뙣 (${res.status})`);
+      setMessage(`${label} ?ㅽ뻾 寃곌낵媛 ?꾨줈?앺듃 artifact濡???λ릺?덉뒿?덈떎.`);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : `${label} 실행에 실패했습니다.`);
+      setError(err instanceof Error ? err.message : `${label} ?ㅽ뻾???ㅽ뙣?덉뒿?덈떎.`);
     } finally {
       setRunning(null);
     }
@@ -166,12 +183,12 @@ export default function InputPackagePage() {
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ persistEvidence: true, limit: 500 }),
       });
-      if (!res.ok) throw new Error(`PNU 보강 실패 (${res.status})`);
+      if (!res.ok) throw new Error(`PNU 蹂닿컯 ?ㅽ뙣 (${res.status})`);
       const body = await res.json();
-      setMessage(`PNU 보강 완료: ${body?.summary?.resolvedCount ?? body?.resolvedCount ?? 0}건 해석`);
+      setMessage(`PNU 蹂닿컯 ?꾨즺: ${body?.summary?.resolvedCount ?? body?.resolvedCount ?? 0}嫄??댁꽍`);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "PNU 보강에 실패했습니다.");
+      setError(err instanceof Error ? err.message : "PNU 蹂닿컯???ㅽ뙣?덉뒿?덈떎.");
     } finally {
       setRunning(null);
     }
@@ -182,9 +199,11 @@ export default function InputPackagePage() {
   const sourceSummary = asRecord(pageData.sourceDocumentSummary);
   const landLedgerSummary = asRecord(pageData.landLedgerSummary);
   const landEvidenceSummary = asRecord(pageData.landEvidenceSummary);
+  const parsedFacts = asArray<ParsedFact>(pageData.parsedFacts);
+  const parsedFactSummary = asRecord(pageData.parsedFactSummary);
   const recommendedActions = asArray<string>(pageData.recommendedActions);
   const missingInputs = asArray<Record<string, unknown>>(context?.missingInputRegister);
-  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
+  const projectName = displayText(context?.projectMemory?.projectName, `?꾨줈?앺듃 ${projectId}`);
   const docCount = Number(context?.projectMemory?.sourceDocumentCount ?? sourceSummary.count ?? documents.length ?? 0);
   const evidenceCount = Number(context?.projectMemory?.landEvidenceCount ?? landEvidenceSummary.count ?? 0);
 
@@ -206,7 +225,7 @@ export default function InputPackagePage() {
               자료 입력 패키지
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              업로드 원본, 자동분류 결과, 토지/PNU/공시지가 증빙, Pod 실행 결과를 같은 프로젝트 저장소에서 추적합니다.
+              업로드 원본, 자동분류 결과, 토지·PNU·공시지가 증빙, Pod 실행 결과를 같은 프로젝트 저장소에서 추적합니다.
             </p>
           </div>
         </div>
@@ -230,11 +249,12 @@ export default function InputPackagePage() {
           {error ? <Notice tone="bad">{error}</Notice> : null}
           {message ? <Notice tone="good">{message}</Notice> : null}
 
-          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
             <Kpi label="저장 문서" value={`${docCount.toLocaleString("ko-KR")}건`} icon={<FileArchive />} />
             <Kpi label="토지조서 필지" value={`${Number(landLedgerSummary.parcelCount ?? 0).toLocaleString("ko-KR")}필지`} icon={<FileText />} />
             <Kpi label="PNU 확보" value={`${Number(landLedgerSummary.pnuCount ?? 0)}/${Number(landLedgerSummary.parcelCount ?? 0)}`} icon={<Database />} />
             <Kpi label="토지 증빙" value={`${evidenceCount.toLocaleString("ko-KR")}건`} icon={<Database />} />
+            <Kpi label="파싱 후보값" value={`${Number(parsedFactSummary.recordCount ?? parsedFacts.length ?? 0).toLocaleString("ko-KR")}건`} icon={<GitBranch />} />
             <Kpi label="보완 필요" value={`${missingInputs.length.toLocaleString("ko-KR")}건`} icon={<GitBranch />} />
           </section>
 
@@ -245,12 +265,12 @@ export default function InputPackagePage() {
                   Selected Track Workflow
                 </p>
                 <h2 className="mt-1 text-xl font-black text-slate-950 dark:text-white">
-                  {TRACK_LABELS[activeTrack]} 자료 보강 흐름
+                  {TRACK_LABELS[activeTrack]} ?먮즺 蹂닿컯 ?먮쫫
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{workflow.intent}</p>
               </div>
               <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-bold text-indigo-950 dark:border-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-100">
-                판단 질문: {workflow.decisionQuestion}
+                ?먮떒 吏덈Ц: {workflow.decisionQuestion}
               </div>
             </div>
             <div className="mt-4 grid gap-3 xl:grid-cols-5">
@@ -270,10 +290,10 @@ export default function InputPackagePage() {
           <FeasibilityExtractReview projectId={projectId} onApplied={refresh} />
 
           <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
-            <Panel title="다음 보강 작업">
+            <Panel title="?ㅼ쓬 蹂닿컯 ?묒뾽">
               <div className="flex flex-wrap gap-2">
-                <ActionButton label="자료 보강 계획 생성" busy={running === "finalize"} disabled={running !== null} onClick={() => void finalizeIntake()} />
-                <ActionButton label="PNU 일괄 해석" busy={running === "pnu"} disabled={running !== null || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
+                <ActionButton label="?먮즺 蹂닿컯 怨꾪쉷 ?앹꽦" busy={running === "finalize"} disabled={running !== null} onClick={() => void finalizeIntake()} />
+                <ActionButton label="PNU ?쇨큵 ?댁꽍" busy={running === "pnu"} disabled={running !== null || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
                 <ActionButton label="Land-Legal Pod" busy={running === "land_legal"} disabled={running !== null} onClick={() => void runPod("land_legal", "Land-Legal Pod")} />
                 <ActionButton label="Market-Product Pod" busy={running === "market_product"} disabled={running !== null} onClick={() => void runPod("market_product", "Market-Product Pod")} />
                 <ActionButton label="Feasibility-CF Pod" busy={running === "feasibility_cashflow"} disabled={running !== null} onClick={() => void runPod("feasibility_cashflow", "Feasibility-Cashflow Pod")} />
@@ -288,31 +308,92 @@ export default function InputPackagePage() {
                   </>
                 ) : (
                   <p>
-                    자료를 업로드하면 오케스트레이터가 어떤 Pod를 실행해야 하는지와 부족자료를 표시합니다.
+                    ?먮즺瑜??낅줈?쒗븯硫??ㅼ??ㅽ듃?덉씠?곌? ?대뼡 Pod瑜??ㅽ뻾?댁빞 ?섎뒗吏? 遺議깆옄猷뚮? ?쒖떆?⑸땲??
                   </p>
                 )}
               </div>
             </Panel>
 
-            <Panel title="보완 필요 항목">
+            <Panel title="蹂댁셿 ?꾩슂 ??ぉ">
               {missingInputs.length ? (
                 <div className="space-y-2">
                   {missingInputs.slice(0, 8).map((item, index) => (
                     <div key={index} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-                      <p className="font-black">{displayText(item.title ?? item.label ?? item.code, `보완 항목 ${index + 1}`)}</p>
+                      <p className="font-black">{displayText(item.title ?? item.label ?? item.code, `蹂댁셿 ??ぉ ${index + 1}`)}</p>
                       <p className="mt-1 text-xs leading-5">
-                        {displayText(item.reason ?? item.description ?? item.message, "다음 단계 실행 전 보완이 필요합니다.")}
+                        {displayText(item.reason ?? item.description ?? item.message, "?ㅼ쓬 ?④퀎 ?ㅽ뻾 ??蹂댁셿???꾩슂?⑸땲??")}
                       </p>
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100">
-                  현재 공통 저장 기준으로 즉시 표시되는 보완 항목은 없습니다.
+                  ?꾩옱 怨듯넻 ???湲곗??쇰줈 利됱떆 ?쒖떆?섎뒗 蹂댁셿 ??ぉ? ?놁뒿?덈떎.
                 </div>
               )}
             </Panel>
           </section>
+
+          <Panel title="AI 파싱 후보값 원장">
+            {parsedFacts.length ? (
+              <div className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-3">
+                  <MiniStat label="전체 후보값" value={`${Number(parsedFactSummary.recordCount ?? parsedFacts.length).toLocaleString("ko-KR")}건`} />
+                  <MiniStat label="근거 위치 부족" value={`${Number(parsedFactSummary.missingLocatorCount ?? 0).toLocaleString("ko-KR")}건`} />
+                  <MiniStat label="핵심 근거 위치 부족" value={`${Number(parsedFactSummary.criticalMissingLocatorCount ?? 0).toLocaleString("ko-KR")}건`} />
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[920px] text-left text-sm">
+                    <thead className="border-b border-slate-200 text-xs text-slate-500 dark:border-slate-800">
+                      <tr>
+                        <th className="px-3 py-2">표준 필드</th>
+                        <th className="px-3 py-2">추출값</th>
+                        <th className="px-3 py-2">검증 Pod</th>
+                        <th className="px-3 py-2">신뢰도</th>
+                        <th className="px-3 py-2">근거 위치</th>
+                        <th className="px-3 py-2">상태</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                      {parsedFacts.slice(0, 12).map((fact, index) => (
+                        <tr key={fact.recordId ?? `${fact.canonicalField}-${index}`}>
+                          <td className="px-3 py-3">
+                            <p className="font-black text-slate-950 dark:text-white">
+                              {displayText(fact.canonicalField ?? fact.key, "미매핑 필드")}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500">{displayText(fact.parserPath, "-")}</p>
+                          </td>
+                          <td className="px-3 py-3 font-bold text-slate-700 dark:text-slate-200">
+                            {formatParsedFactValue(fact)}
+                          </td>
+                          <td className="px-3 py-3">
+                            <div className="flex flex-wrap gap-1">
+                              {(fact.targetPods?.length ? fact.targetPods : ["chief_orchestrator"]).map((pod) => (
+                                <span key={pod} className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                                  {podLabel(pod)}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 text-slate-500">{formatConfidence(fact.confidence)}</td>
+                          <td className="px-3 py-3 text-slate-500">{parsedFactLocatorSummary(fact)}</td>
+                          <td className="px-3 py-3">
+                            <span className={`rounded-full px-2 py-1 text-xs font-black ${fact.validationStatus === "parsed" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-100" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-100"}`}>
+                              {fact.validationStatus === "parsed" ? "파싱 완료" : fact.validationStatus === "needs_source_locator" ? "근거 위치 필요" : "검토 필요"}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg bg-slate-50 p-5 text-sm leading-6 text-slate-500 dark:bg-slate-800/70">
+                아직 저장된 파싱 후보값이 없습니다. 사업계획서, IM, 토지조서, 사업수지 Excel을 업로드하면 ParserAgent가 후보값을 원장에 저장하고 각 Pod가 검증합니다.
+              </div>
+            )}
+          </Panel>
 
           <Panel title="저장된 원본 문서">
             {documents.length ? (
@@ -320,7 +401,7 @@ export default function InputPackagePage() {
                 <table className="w-full min-w-[760px] text-left text-sm">
                   <thead className="border-b border-slate-200 text-xs text-slate-500 dark:border-slate-800">
                     <tr>
-                      <th className="px-3 py-2">문서유형</th>
+                      <th className="px-3 py-2">문서 유형</th>
                       <th className="px-3 py-2">파일명</th>
                       <th className="px-3 py-2">크기</th>
                       <th className="px-3 py-2">검증</th>
@@ -348,7 +429,7 @@ export default function InputPackagePage() {
               </div>
             ) : (
               <div className="rounded-lg bg-slate-50 p-5 text-sm text-slate-500 dark:bg-slate-800/70">
-                아직 저장된 원본 문서가 없습니다. 위의 스마트 업로드에 파일을 올리세요.
+                아직 저장된 원본 문서가 없습니다. 위의 스마트 업로드에 파일을 올리면 서버 원장에 저장됩니다.
               </div>
             )}
           </Panel>
@@ -377,6 +458,57 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
       {children}
     </section>
   );
+}
+
+function MiniStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
+      <p className="text-xs font-bold text-slate-500">{label}</p>
+      <p className="mt-1 text-lg font-black text-slate-950 dark:text-white">{value}</p>
+    </div>
+  );
+}
+
+function formatParsedFactValue(fact: ParsedFact) {
+  const value = fact.normalizedValue ?? fact.value;
+  if (typeof value === "number") {
+    return `${value.toLocaleString("ko-KR")}${fact.unit ? ` ${fact.unit}` : ""}`;
+  }
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "-";
+  return JSON.stringify(value);
+}
+
+function formatConfidence(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+  return `${Math.round(value * 100)}%`;
+}
+
+function parsedFactLocatorSummary(fact: ParsedFact) {
+  const locator = fact.sourceLocator ?? {};
+  const preferred = [
+    locator.documentName ? String(locator.documentName) : "",
+    locator.pageNumber || locator.page ? `p.${String(locator.pageNumber ?? locator.page)}` : "",
+    locator.sheet || locator.sheetName ? String(locator.sheet ?? locator.sheetName) : "",
+    locator.cell ? `셀 ${String(locator.cell)}` : "",
+    locator.apiRowId ? `API row ${String(locator.apiRowId)}` : "",
+    locator.evidenceId ? `증빙 ${String(locator.evidenceId)}` : "",
+  ].filter(Boolean);
+  if (preferred.length) return preferred.join(" · ");
+  if (fact.locatorStatus === "document_only") return "문서 단위";
+  return "위치 미확인";
+}
+
+function podLabel(podKey: string) {
+  return ({
+    land_legal: "토지·법무",
+    market_product: "시장·상품",
+    cost_schedule: "원가·일정",
+    feasibility_cashflow: "사업수지·CF",
+    pf_credit: "PF·심사",
+    public_policy: "공공·정책",
+    chief_orchestrator: "오케스트레이터",
+  } as Record<string, string>)[podKey] ?? podKey;
 }
 
 function Notice({ tone, children }: { tone: "good" | "bad"; children: ReactNode }) {
