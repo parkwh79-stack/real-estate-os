@@ -1082,11 +1082,17 @@ def _execute_pod_artifact(
 
     if pod_key == "cost_schedule":
         feasibility = analyze_development_feasibility_use_case(project_data, options)
+        # DevelopmentFeasibilityAgent returns the cost split under "costs" and its
+        # quality warnings nested under "dataQuality.warnings" — read those keys
+        # (previously read costBreakdown/dataQualityWarnings, which the agent never
+        # emits, so both were always empty in the pod artifact).
+        data_quality = feasibility.get("dataQuality") or {}
         artifact = {
             "artifactType": "cost_schedule_pod_result",
-            "costBreakdown": feasibility.get("costBreakdown") or {},
+            "costBreakdown": feasibility.get("costs") or feasibility.get("costBreakdown") or {},
             "schedule": project_data.get("schedule") or project_data.get("project_schedule") or {},
-            "dataQualityWarnings": feasibility.get("dataQualityWarnings") or [],
+            "dataQualityWarnings": data_quality.get("warnings") or feasibility.get("dataQualityWarnings") or [],
+            "dataQualityMissingFields": data_quality.get("missingFields") or [],
             "engineReadiness": feasibility.get("downstreamEngineReadiness") or feasibility.get("engineReadiness") or {},
         }
         project_data.setdefault("costSchedule", artifact)
