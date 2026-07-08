@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from agents.report_agent import ReportAgent
 from agents.report_export_agent import ReportExportAgent
 from db.repositories.report_repository import ReportRepository
-from storage import list_deal_state_records
+from storage import list_deal_state_records, list_pod_ai_review_records
 from use_cases.common import deep_merge
 
 REPORT_TEMPLATE_TO_REPORT_SECTION = {
@@ -48,6 +48,65 @@ REPORT_SECTION_CATEGORIES = {
     "eodTriggers": "risk",
     "fundExecutionOrder": "risk",
 }
+
+# Report-section category -> Chief pods whose Pod AI Review findings back that
+# section, so a report paragraph carries the reviewer's evidence gaps / caveats.
+_SECTION_CATEGORY_PODS = {
+    "land": ("land_legal",),
+    "market": ("market_product",),
+    "feasibility": ("feasibility_cashflow",),
+    "cashflow": ("feasibility_cashflow",),
+    "pf": ("pf_credit",),
+    "risk": ("pf_credit", "land_legal", "public_policy"),
+}
+
+# Only deterministic-grounded findings become report-paragraph evidence — an LLM
+# opinion alone (guardrail/info) must never appear as report-grade evidence.
+_DETERMINISTIC_REVIEW_CATEGORIES = {
+    "missing_evidence",
+    "source_locator_gap",
+    "data_quality",
+    "risk_note",
+    "recalculation_needed",
+}
+
+
+def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Latest unresolved Pod AI Review findings per pod (deterministic-grounded).
+
+    Best-effort: read/shape errors yield {} so report generation never breaks."""
+    try:
+        reviews = list_pod_ai_review_records(str(project_id), limit=200)
+    except Exception:
+        return {}
+    latest_by_pod: Dict[str, Dict[str, Any]] = {}
+    for review in reviews:
+        pod_key = str(review.get("podKey") or "")
+        if not pod_key:
+            continue
+        current = latest_by_pod.get(pod_key)
+        if current is None or str(review.get("updatedAt") or "") >= str(current.get("updatedAt") or ""):
+            latest_by_pod[pod_key] = review
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for pod_key, review in latest_by_pod.items():
+        if str(review.get("reviewStatus") or "").lower() in {"approved", "waived", "resolved"}:
+            continue
+        findings = [
+            {
+                "findingId": f.get("findingId"),
+                "podKey": pod_key,
+                "reviewId": review.get("reviewId"),
+                "category": f.get("category"),
+                "severity": f.get("severity"),
+                "message": f.get("message"),
+                "recommendedAction": f.get("recommendedAction"),
+            }
+            for f in (review.get("findings") or [])
+            if str(f.get("category") or "") in _DETERMINISTIC_REVIEW_CATEGORIES
+        ]
+        if findings:
+            out[pod_key] = findings
+    return out
 
 
 def generate_pf_report_use_case(
@@ -108,9 +167,10 @@ def build_paragraph_evidence_links(
     a later frontend heuristic.
     """
     records = list_deal_state_records(project_id, limit=1000)
+    pod_findings = _load_pod_review_findings_by_pod(project_id)
     sections = _report_sections(structured_report)
     links = [
-        _build_section_link(project_id, section, records)
+        _build_section_link(project_id, section, records, pod_findings)
         for section in sections
     ]
     linked_record_ids = {
@@ -124,15 +184,23 @@ def build_paragraph_evidence_links(
         for link in links
         if (link.get("sourceLocatorCoverage") or {}).get("linkedWithLocator", 0) > 0
     )
+    linked_finding_ids = {
+        f.get("findingId")
+        for link in links
+        for f in link.get("podAiReviewFindings", [])
+        if f.get("findingId")
+    }
     return {
         "schemaVersion": "realytics-paragraph-evidence-links-v1",
         "projectId": project_id,
         "linkMethod": "server_deal_state_section_match_v1",
-        "generatedFrom": "deal_state_records",
+        "generatedFrom": "deal_state_records+pod_ai_reviews",
         "recordCount": len(records),
         "sectionCount": len(links),
         "linkedRecordCount": len(linked_record_ids),
         "sourceLocatorReadySectionCount": source_locator_ready,
+        "podAiReviewFindingCount": len(linked_finding_ids),
+        "sectionsWithPodReviewCount": sum(1 for link in links if link.get("podAiReviewFindings")),
         "links": links,
     }
 
@@ -287,6 +355,7 @@ def _build_section_link(
     project_id: str,
     section: Dict[str, Any],
     records: List[Dict[str, Any]],
+    pod_findings: Dict[str, List[Dict[str, Any]]] | None = None,
 ) -> Dict[str, Any]:
     section_key = str(section.get("key") or "")
     paragraph_id = f"section:{section_key or section.get('index') or 'unknown'}"
@@ -303,6 +372,15 @@ def _build_section_link(
         record_type = record.get("recordType")
         if record_type in record_type_ids and record.get("recordId"):
             record_type_ids[record_type].append(record["recordId"])
+    # Attach the Pod AI Review findings from the pods that back this section's
+    # category, so the report paragraph carries the reviewer's evidence caveats.
+    category = REPORT_SECTION_CATEGORIES.get(section_key) or _section_category(
+        " ".join([section_key, str(section.get("title") or ""), " ".join(section.get("sourceAgents") or [])]).lower()
+    )
+    pod_review_findings: List[Dict[str, Any]] = []
+    for pod_key in _SECTION_CATEGORY_PODS.get(category, ()):
+        pod_review_findings.extend((pod_findings or {}).get(pod_key, []))
+    blocking_review = any(str(f.get("severity")).lower() == "blocking" for f in pod_review_findings)
     return {
         "paragraphId": paragraph_id,
         "projectId": project_id,
@@ -323,6 +401,8 @@ def _build_section_link(
             "missingLocator": max(len(compact_records) - linked_with_locator, 0),
         },
         "linkedRecords": compact_records,
+        "podAiReviewFindings": pod_review_findings[:8],
+        "podAiReviewBlocking": blocking_review,
     }
 
 

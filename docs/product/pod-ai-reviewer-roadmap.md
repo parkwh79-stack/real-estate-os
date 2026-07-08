@@ -127,9 +127,25 @@ accountable pods' Pod AI Review findings into its opinion:
 Verified: 3 unit tests + live (committee reviewers surface their pods'
 findings; escalation on blocking). Chief regression 17 green.
 
+### 2026-07-06 Report paragraphs carry Pod AI Review evidence
+
+`build_paragraph_evidence_links` now attaches, per report section, the Pod AI
+Review findings from the pods that back the section's category
+(`_SECTION_CATEGORY_PODS`: land→land_legal, market→market_product,
+feasibility/cashflow→feasibility_cashflow, pf→pf_credit, risk→pf_credit +
+land_legal + public_policy). Only deterministic-grounded findings
+(missing_evidence / source_locator_gap / data_quality / risk_note /
+recalculation_needed) are linked; each section carries `podAiReviewFindings`
+(pod/severity/message/recommendedAction) and a `podAiReviewBlocking` flag, and
+the top-level result reports `podAiReviewFindingCount` /
+`sectionsWithPodReviewCount`. The report page renders these as a per-section
+"Pod AI Review 지적" panel (rose when blocking). Resolved/waived reviews are not
+linked. Verified: 3 unit tests + live (generatedFrom
+`deal_state_records+pod_ai_reviews`, pf_credit findings on all pf/risk
+sections); report regression 11 green, web tsc/eslint 0.
+
 Still pending:
 
-- ReportStudio paragraph generation with Pod AI Review evidence links.
 - PG v2 native per-table persistence (the understand-workflow spec agent hit the
   session limit; also not live-verifiable without psycopg + a running Postgres).
 

@@ -52,6 +52,17 @@ interface ParagraphEvidenceLink {
     missingLocator?: number;
   };
   linkedRecords?: DealStateRecord[];
+  podAiReviewFindings?: PodAiReviewFinding[];
+  podAiReviewBlocking?: boolean;
+}
+
+interface PodAiReviewFinding {
+  findingId?: string;
+  podKey?: string;
+  category?: string;
+  severity?: string;
+  message?: string;
+  recommendedAction?: string;
 }
 
 interface ParagraphEvidenceLinks {
@@ -429,6 +440,21 @@ function ParagraphEvidenceLinkPanel({
                 {link.linkedRecordCount ?? link.linkedRecords?.length ?? 0}건 근거
               </span>
             </div>
+            {(link.podAiReviewFindings ?? []).length ? (
+              <div className={`mt-3 rounded-lg border p-3 ${link.podAiReviewBlocking ? "border-rose-200 bg-rose-50 dark:border-rose-900 dark:bg-rose-950/30" : "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"}`}>
+                <p className={`text-xs font-black ${link.podAiReviewBlocking ? "text-rose-800 dark:text-rose-200" : "text-amber-800 dark:text-amber-200"}`}>
+                  Pod AI Review 지적 {link.podAiReviewBlocking ? "· 차단(blocking)" : ""}
+                </p>
+                <ul className="mt-1.5 space-y-1">
+                  {(link.podAiReviewFindings ?? []).slice(0, 4).map((f, i) => (
+                    <li key={f.findingId ?? i} className="text-xs text-slate-700 dark:text-slate-200">
+                      <span className="font-mono text-[10px] text-slate-500">[{f.podKey}·{f.severity}]</span> {f.message}
+                      {f.recommendedAction ? <span className="mt-0.5 block text-[11px] text-slate-500">→ {f.recommendedAction}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             <div className="mt-3 space-y-2">
               {(link.linkedRecords ?? []).length ? (
                 (link.linkedRecords ?? []).slice(0, 5).map((record) => (
