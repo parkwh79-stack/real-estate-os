@@ -105,9 +105,30 @@ All wired into the Chief pod review set (all 6 pods) with per-pod agent ids.
 Verified: 8 new unit tests + live run of all three (CostSchedule/Feasibility
 Cashflow/PublicPolicy reviewer ids, findings produced).
 
+### 2026-07-06 AI Risk Committee consumes Pod AI Review findings
+
+The AI Risk Committee (`_risk_committee_opinions`) now folds each reviewer's
+accountable pods' Pod AI Review findings into its opinion:
+
+- `_load_pod_ai_review_findings(project_id)` reads the latest unresolved review
+  per pod and keeps only deterministic-grounded blocking/high findings
+  (categories missing_evidence / source_locator_gap / data_quality / risk_note /
+  recalculation_needed).
+- `_REVIEWER_POD_MAP` routes each of the 7 reviewers to its pods (credit_reviewer
+  → pf_credit/feasibility_cashflow, legal_compliance → land_legal/public_policy,
+  market_stress_tester → market_product, construction_risk → cost_schedule/
+  feasibility_cashflow, devils_advocate + ic_judge → all pods).
+- A **blocking** deterministic finding escalates the reviewer's stance to at
+  least `supports_hold` (never downgrades an existing `supports_fail`); a
+  **high** finding is surfaced as a concern only. An LLM opinion alone never
+  moves a stance (AGENTS.md §1). Findings + recommended actions appear in the
+  reviewer's keyConcerns / requiredActions tagged with the source pod.
+
+Verified: 3 unit tests + live (committee reviewers surface their pods'
+findings; escalation on blocking). Chief regression 17 green.
+
 Still pending:
 
-- AI Risk Committee integration using Pod AI Review findings.
 - ReportStudio paragraph generation with Pod AI Review evidence links.
 - PG v2 native per-table persistence (the understand-workflow spec agent hit the
   session limit; also not live-verifiable without psycopg + a running Postgres).

@@ -30,6 +30,52 @@ from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.track_workflows import get_track_workflow_definition, normalize_workflow_track
 
+# Pod AI Review finding categories grounded in deterministic signals (evidence
+# gaps, source-locator gaps, data quality, scenario-engine risk flags). Only
+# these may escalate an AI Risk Committee opinion — an LLM opinion alone
+# (guardrail/info) must never move a committee stance (AGENTS.md §1).
+_DETERMINISTIC_REVIEW_CATEGORIES = {
+    "missing_evidence",
+    "source_locator_gap",
+    "data_quality",
+    "risk_note",
+    "recalculation_needed",
+}
+
+
+def _load_pod_ai_review_findings(project_id: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Latest deterministic-grounded blocking/high Pod AI Review findings per pod.
+
+    Best-effort: any read/shape error yields {} so the committee still renders.
+    Only the newest review per pod contributes (stale reviews are ignored)."""
+    try:
+        from storage import list_pod_ai_review_records
+
+        reviews = list_pod_ai_review_records(str(project_id), limit=200)
+    except Exception:
+        return {}
+    latest_by_pod: Dict[str, Dict[str, Any]] = {}
+    for review in reviews:
+        pod_key = str(review.get("podKey") or "")
+        if not pod_key:
+            continue
+        current = latest_by_pod.get(pod_key)
+        if current is None or str(review.get("updatedAt") or "") >= str(current.get("updatedAt") or ""):
+            latest_by_pod[pod_key] = review
+    findings_by_pod: Dict[str, List[Dict[str, Any]]] = {}
+    for pod_key, review in latest_by_pod.items():
+        if str(review.get("reviewStatus") or "").lower() in {"approved", "waived", "resolved"}:
+            continue
+        relevant = [
+            finding
+            for finding in (review.get("findings") or [])
+            if str(finding.get("severity") or "").lower() in {"blocking", "high"}
+            and str(finding.get("category") or "") in _DETERMINISTIC_REVIEW_CATEGORIES
+        ]
+        if relevant:
+            findings_by_pod[pod_key] = relevant
+    return findings_by_pod
+
 
 def _cross_agent_reconciliation(project_data: Dict[str, Any], missing: List[MissingInputRegisterItem]) -> List[Dict[str, Any]]:
     """Deterministic cross-agent consistency checks for the AI Deal Room."""
@@ -264,11 +310,28 @@ def _scenario_flags(base: Dict[str, Any], missing: List[MissingInputRegisterItem
     return flags
 
 
+# Which Chief pods each committee reviewer is accountable for — used to route
+# that pod's Pod AI Review findings into the reviewer's concerns/stance.
+_REVIEWER_POD_MAP: Dict[str, tuple] = {
+    "devils_advocate": ("land_legal", "market_product", "cost_schedule", "feasibility_cashflow", "pf_credit", "public_policy"),
+    "credit_reviewer": ("pf_credit", "feasibility_cashflow"),
+    "legal_compliance_reviewer": ("land_legal", "public_policy"),
+    "market_stress_tester": ("market_product",),
+    "construction_risk_reviewer": ("cost_schedule", "feasibility_cashflow"),
+    "lender_persona_reviewer": ("pf_credit", "feasibility_cashflow"),
+    "ic_judge": ("land_legal", "market_product", "cost_schedule", "feasibility_cashflow", "pf_credit", "public_policy"),
+}
+
+# Committee stance ranking so an escalation never downgrades a stronger stance.
+_IMPACT_RANK = {"supports_pass": 0, "supports_conditional_pass": 1, "supports_hold": 2, "supports_fail": 3}
+
+
 def _risk_committee_opinions(
     project_data: Dict[str, Any],
     missing: List[MissingInputRegisterItem],
     conflicts: List[Dict[str, Any]],
     scenarios: List[ScenarioConclusion],
+    pod_findings: Dict[str, List[Dict[str, Any]]] | None = None,
 ) -> List[RiskCommitteeOpinion]:
     blocking = [item.description for item in missing if item.severity == "blocking"]
     high_conflicts = [row for row in conflicts if row.get("severity") in {"blocking", "high"}]
@@ -277,8 +340,36 @@ def _risk_committee_opinions(
     base_metrics = base.key_metrics if base else {}
     exit_sale_rate = _number(base_metrics.get("exitSaleRate"))
     profit_margin = _number(base_metrics.get("profitMargin"))
+    pod_findings = pod_findings or {}
+
+    def _reviewer_pod_findings(role: str) -> List[tuple]:
+        """(podKey, finding) for the pods this reviewer is accountable for."""
+        return [
+            (pod_key, finding)
+            for pod_key in _REVIEWER_POD_MAP.get(role, ())
+            for finding in pod_findings.get(pod_key, [])
+        ]
 
     def opinion(role: str, text: str, impact: str, concerns: List[str], actions: List[str], confidence: float = 0.78) -> RiskCommitteeOpinion:
+        # Fold this reviewer's Pod AI Review findings into concerns + stance.
+        relevant = _reviewer_pod_findings(role)
+        if relevant:
+            concerns = list(concerns)
+            actions = list(actions)
+            has_blocking = any(str(f.get("severity")).lower() == "blocking" for _, f in relevant)
+            for pod_key, finding in relevant[:6]:
+                msg = str(finding.get("message") or finding.get("category") or "").strip()
+                if msg:
+                    concerns.append(f"[{pod_key}] {msg[:100]}")
+                act = str(finding.get("recommendedAction") or "").strip()
+                if act:
+                    actions.append(f"[{pod_key}] {act[:100]}")
+            # A blocking deterministic finding escalates the stance to at least HOLD
+            # (never downgrades an existing FAIL). High-only findings add concerns only.
+            if has_blocking:
+                target = "supports_hold"
+                if _IMPACT_RANK.get(target, 0) > _IMPACT_RANK.get(impact, 0):
+                    impact = target
         return RiskCommitteeOpinion(
             reviewerRole=role,  # type: ignore[arg-type]
             opinion=text,
@@ -535,7 +626,8 @@ def plan_chief_deal_orchestration_use_case(
             )
 
     scenario_conclusions = _scenario_conclusions(project_data, missing, conflicts)
-    risk_committee = _risk_committee_opinions(project_data, missing, conflicts, scenario_conclusions)
+    pod_findings = _load_pod_ai_review_findings(project_id)
+    risk_committee = _risk_committee_opinions(project_data, missing, conflicts, scenario_conclusions, pod_findings)
     decision_gate = _decision_gate(missing, conflicts, risk_committee, scenario_conclusions)
     learning_loop_events = _merge_learning_loop_events(
         stored_learning_loop_events,
