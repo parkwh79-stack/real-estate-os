@@ -51,11 +51,18 @@ type ParsedFact = {
   unit?: string;
   confidence?: number;
   validationStatus?: string;
+  reviewStatus?: string;
   locatorStatus?: string;
   locatorPrecision?: string;
   targetPods?: string[];
   sourceLocator?: Record<string, unknown>;
   textQualityFlags?: Record<string, boolean>;
+  podValidationStatusByPod?: Record<string, {
+    status?: string;
+    findingCount?: number;
+    findingCodes?: string[];
+    validatedAt?: string;
+  }>;
 };
 
 type IntakeReadinessPlan = {
@@ -189,6 +196,30 @@ export default function InputPackagePage() {
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "PNU 蹂닿컯???ㅽ뙣?덉뒿?덈떎.");
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  const reviewParsedFact = async (recordId: string | undefined, reviewStatus: "approved" | "needs_revision") => {
+    if (!recordId) return;
+    setRunning(`parsed-fact-review:${recordId}`);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/deal-state-records/${encodeURIComponent(recordId)}/review`, {
+        method: "PATCH",
+        headers: { ...authHeaders("web-reviewer"), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reviewStatus,
+          comment: reviewStatus === "approved" ? "파싱 후보값을 기준값 후보로 승인" : "보완자료 또는 근거 위치 보강 필요",
+        }),
+      });
+      if (!res.ok) throw new Error(`파싱 후보값 검토 저장 실패 (${res.status})`);
+      setMessage(reviewStatus === "approved" ? "파싱 후보값을 승인했습니다." : "보완 요청 상태로 저장했습니다.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "파싱 후보값 검토 저장에 실패했습니다.");
     } finally {
       setRunning(null);
     }
@@ -343,7 +374,7 @@ export default function InputPackagePage() {
                   <MiniStat label="핵심 근거 위치 부족" value={`${Number(parsedFactSummary.criticalMissingLocatorCount ?? 0).toLocaleString("ko-KR")}건`} />
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[920px] text-left text-sm">
+                  <table className="w-full min-w-[1160px] text-left text-sm">
                     <thead className="border-b border-slate-200 text-xs text-slate-500 dark:border-slate-800">
                       <tr>
                         <th className="px-3 py-2">표준 필드</th>
@@ -351,7 +382,9 @@ export default function InputPackagePage() {
                         <th className="px-3 py-2">검증 Pod</th>
                         <th className="px-3 py-2">신뢰도</th>
                         <th className="px-3 py-2">근거 위치</th>
+                        <th className="px-3 py-2">Pod 검증</th>
                         <th className="px-3 py-2">상태</th>
+                        <th className="px-3 py-2">검토 액션</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -378,9 +411,35 @@ export default function InputPackagePage() {
                           <td className="px-3 py-3 text-slate-500">{formatConfidence(fact.confidence)}</td>
                           <td className="px-3 py-3 text-slate-500">{parsedFactLocatorSummary(fact)}</td>
                           <td className="px-3 py-3">
-                            <span className={`rounded-full px-2 py-1 text-xs font-black ${fact.validationStatus === "parsed" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-100" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-100"}`}>
-                              {fact.validationStatus === "parsed" ? "파싱 완료" : fact.validationStatus === "needs_source_locator" ? "근거 위치 필요" : "검토 필요"}
+                            <PodValidationChips fact={fact} />
+                          </td>
+                          <td className="px-3 py-3">
+                            <span className={`rounded-full px-2 py-1 text-xs font-black ${parsedFactStatusClass(fact.validationStatus)}`}>
+                              {parsedFactStatusLabel(fact.validationStatus)}
                             </span>
+                            {fact.reviewStatus ? (
+                              <p className="mt-1 text-[11px] font-bold text-slate-500">검토: {parsedFactReviewLabel(fact.reviewStatus)}</p>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-3">
+                            <div className="flex flex-wrap gap-1">
+                              <button
+                                type="button"
+                                disabled={!fact.recordId || running === `parsed-fact-review:${fact.recordId}`}
+                                onClick={() => void reviewParsedFact(fact.recordId, "approved")}
+                                className="rounded-md bg-emerald-50 px-2 py-1 text-[11px] font-black text-emerald-700 disabled:opacity-40 dark:bg-emerald-950/30 dark:text-emerald-100"
+                              >
+                                승인
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!fact.recordId || running === `parsed-fact-review:${fact.recordId}`}
+                                onClick={() => void reviewParsedFact(fact.recordId, "needs_revision")}
+                                className="rounded-md bg-amber-50 px-2 py-1 text-[11px] font-black text-amber-700 disabled:opacity-40 dark:bg-amber-950/30 dark:text-amber-100"
+                              >
+                                보완요청
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -509,6 +568,75 @@ function podLabel(podKey: string) {
     public_policy: "공공·정책",
     chief_orchestrator: "오케스트레이터",
   } as Record<string, string>)[podKey] ?? podKey;
+}
+
+function parsedFactStatusLabel(status?: string) {
+  if (status === "pod_validated") return "Pod 검증 완료";
+  if (status === "parsed") return "파싱 완료";
+  if (status === "needs_source_locator") return "근거 위치 필요";
+  if (status === "needs_review") return "검토 필요";
+  return status || "대기";
+}
+
+function parsedFactStatusClass(status?: string) {
+  if (status === "pod_validated" || status === "parsed") {
+    return "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-100";
+  }
+  if (status === "needs_source_locator") {
+    return "bg-rose-50 text-rose-700 dark:bg-rose-950/30 dark:text-rose-100";
+  }
+  return "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-100";
+}
+
+function parsedFactReviewLabel(status?: string) {
+  if (status === "approved") return "승인";
+  if (status === "waived") return "유보";
+  if (status === "resolved") return "해결";
+  if (status === "needs_revision") return "보완요청";
+  return status ?? "-";
+}
+
+function podValidationStatusLabel(status?: string) {
+  if (status === "validated") return "검증";
+  if (status === "needs_source_locator") return "근거";
+  if (status === "needs_review") return "검토";
+  return "대기";
+}
+
+function podValidationStatusClass(status?: string) {
+  if (status === "validated") {
+    return "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-100";
+  }
+  if (status === "needs_source_locator") {
+    return "bg-rose-50 text-rose-700 dark:bg-rose-950/30 dark:text-rose-100";
+  }
+  if (status === "needs_review") {
+    return "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-100";
+  }
+  return "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300";
+}
+
+function PodValidationChips({ fact }: { fact: ParsedFact }) {
+  const statuses = fact.podValidationStatusByPod ?? {};
+  const targetPods = fact.targetPods?.length ? fact.targetPods : ["chief_orchestrator"];
+  return (
+    <div className="flex flex-wrap gap-1">
+      {targetPods.map((pod) => {
+        const status = statuses[pod]?.status;
+        const findingCount = Number(statuses[pod]?.findingCount ?? 0);
+        return (
+          <span
+            key={pod}
+            title={statuses[pod]?.findingCodes?.join(", ") || podLabel(pod)}
+            className={`rounded-full px-2 py-1 text-[11px] font-black ${podValidationStatusClass(status)}`}
+          >
+            {podLabel(pod)} · {podValidationStatusLabel(status)}
+            {findingCount ? ` ${findingCount}` : ""}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 function Notice({ tone, children }: { tone: "good" | "bad"; children: ReactNode }) {

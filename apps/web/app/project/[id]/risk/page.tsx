@@ -15,13 +15,14 @@ import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from ".
 import { CalculationRunHistoryPanel } from "../../../../components/calculation/calculation-run-history-panel";
 
 type ReviewStatus = "approved" | "waived" | "needs_revision" | "resolved";
+type RiskFilter = "all" | "open" | "blocking" | "auto_supplement" | "missing_locator";
 type RiskAssessment = { overall?: Record<string, unknown> };
 
 const RISK_CONTROLS = [
   "토지 소유권 및 매매계약",
   "지분합계 및 공유자 동의",
   "제한물권 말소",
-  "국공유지·특수필지 처리",
+  "국공유지·수용·매도청구 처리",
   "인허가 일정",
   "용도지역·건축가능성",
   "시행사 재무 및 신용도",
@@ -44,8 +45,29 @@ function severityOf(record: DealStateRecord) {
   return String(record.severity ?? record.grade ?? record.riskLevel ?? "").toLowerCase();
 }
 
+function riskCodeOf(record: DealStateRecord) {
+  return String(record.riskCode ?? record.code ?? record.key ?? "").toUpperCase();
+}
+
 function isClosed(record: DealStateRecord) {
   return ["approved", "waived", "resolved"].includes(String(record.reviewStatus ?? "").toLowerCase());
+}
+
+function isBlocking(record: DealStateRecord) {
+  const severity = severityOf(record);
+  const code = riskCodeOf(record);
+  return record.blocking === true
+    || ["critical", "blocking"].includes(severity)
+    || code.includes("SENIOR_SHORTFALL")
+    || code.includes("UNSOLD_LTV_BREACH")
+    || code.includes("BLOCKING");
+}
+
+function isAutoSupplement(record: DealStateRecord) {
+  const sourceType = String(record.sourceType ?? "").toLowerCase();
+  return sourceType === "auto_evidence_supplement"
+    || riskCodeOf(record).includes("SUPPLEMENTED")
+    || riskCodeOf(record).includes("NEEDS_APPROVAL");
 }
 
 export default function RiskReviewPage() {
@@ -54,6 +76,7 @@ export default function RiskReviewPage() {
   const [context, setContext] = useState<WorkspacePageContext | null>(null);
   const [riskRecords, setRiskRecords] = useState<DealStateRecord[]>([]);
   const [assessment, setAssessment] = useState<RiskAssessment | null>(null);
+  const [filter, setFilter] = useState<RiskFilter>("all");
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
@@ -65,7 +88,7 @@ export default function RiskReviewPage() {
     setError(null);
     try {
       const ctxPromise = fetchWorkspaceContext(projectId, "pf");
-      const risksPromise = fetchDealStateRecords(projectId, { recordType: "risk_issue", limit: 700, actor: "risk-reviewer" });
+      const risksPromise = fetchDealStateRecords(projectId, { recordType: "risk_issue", limit: 800, actor: "risk-reviewer" });
       const assessPromise = runAssess
         ? fetch(`${apiBase}/projects/${projectId}/risk/assess`, {
             method: "POST",
@@ -141,10 +164,22 @@ export default function RiskReviewPage() {
   const summary = useMemo(() => {
     const critical = risks.filter((record) => severityOf(record).includes("critical")).length;
     const high = risks.filter((record) => severityOf(record).includes("high")).length;
+    const blocking = risks.filter((record) => isBlocking(record) && !isClosed(record)).length;
     const unresolved = risks.filter((record) => !isClosed(record)).length;
     const locatorMissing = risks.filter((record) => !hasSourceLocator(record)).length;
-    return { critical, high, unresolved, locatorMissing };
+    const autoSupplement = risks.filter((record) => isAutoSupplement(record) && !isClosed(record)).length;
+    return { critical, high, blocking, unresolved, locatorMissing, autoSupplement };
   }, [risks]);
+
+  const visibleRisks = useMemo(() => {
+    return risks.filter((record) => {
+      if (filter === "open") return !isClosed(record);
+      if (filter === "blocking") return isBlocking(record) && !isClosed(record);
+      if (filter === "auto_supplement") return isAutoSupplement(record);
+      if (filter === "missing_locator") return !hasSourceLocator(record);
+      return true;
+    });
+  }, [filter, risks]);
 
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
   const overall = assessment?.overall ?? {};
@@ -163,7 +198,7 @@ export default function RiskReviewPage() {
               리스크 원장 / Risk Register
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              `deal_state_records`의 `risk_issue`를 기준으로 승인, waive, 보완요청, resolved 상태를 관리합니다.
+              `deal_state_records`의 risk_issue를 기준으로 승인, waive, 보완요청, resolved 상태를 관리합니다.
             </p>
           </div>
         </div>
@@ -189,21 +224,36 @@ export default function RiskReviewPage() {
         <>
           {error ? <Notice>{error}</Notice> : null}
 
-          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-            <Kpi label="Risk rows" value={`${risks.length.toLocaleString("ko-KR")}건`} />
+          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+            <Kpi label="전체 리스크" value={`${risks.length.toLocaleString("ko-KR")}건`} />
+            <Kpi label="Blocking" value={`${summary.blocking.toLocaleString("ko-KR")}건`} tone={summary.blocking ? "bad" : "good"} />
             <Kpi label="Critical" value={`${summary.critical.toLocaleString("ko-KR")}건`} tone={summary.critical ? "bad" : "good"} />
             <Kpi label="High" value={`${summary.high.toLocaleString("ko-KR")}건`} tone={summary.high ? "warn" : "good"} />
-            <Kpi label="미해결" value={`${summary.unresolved.toLocaleString("ko-KR")}건`} tone={summary.unresolved ? "warn" : "good"} />
+            <Kpi label="AI 보강 검토" value={`${summary.autoSupplement.toLocaleString("ko-KR")}건`} tone={summary.autoSupplement ? "warn" : "good"} />
             <Kpi label="근거 위치 부족" value={`${summary.locatorMissing.toLocaleString("ko-KR")}건`} tone={summary.locatorMissing ? "warn" : "good"} />
           </section>
 
           <Panel title="Deal State 기반 리스크 검토">
-            {risks.length ? (
+            <div className="mb-4 flex flex-wrap gap-2">
+              {([
+                ["all", "전체"],
+                ["open", "미해결"],
+                ["blocking", "Blocking"],
+                ["auto_supplement", "AI 보강 검토"],
+                ["missing_locator", "근거 위치 부족"],
+              ] as Array<[RiskFilter, string]>).map(([value, label]) => (
+                <button key={value} type="button" onClick={() => setFilter(value)} className={`h-9 rounded-lg px-3 text-xs font-black ${filter === value ? "bg-slate-950 text-white dark:bg-white dark:text-slate-950" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {visibleRisks.length ? (
               <div className="max-h-[720px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-800">
-                <table className="w-full min-w-[1180px] text-left text-xs">
+                <table className="w-full min-w-[1220px] text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500 dark:bg-slate-800">
                     <tr>
                       <th className="px-3 py-2">리스크</th>
+                      <th className="px-3 py-2">분류</th>
                       <th className="px-3 py-2">등급</th>
                       <th className="px-3 py-2">검토상태</th>
                       <th className="px-3 py-2">출처</th>
@@ -212,13 +262,18 @@ export default function RiskReviewPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {risks.map((risk, index) => (
+                    {visibleRisks.map((risk, index) => (
                       <tr key={risk.recordId ?? `${risk.key}-${index}`} className="border-t border-slate-100 align-top dark:border-slate-800">
                         <td className="px-3 py-3">
-                          <p className="font-black text-slate-950 dark:text-white">{displayText(risk.title ?? risk.item ?? risk.key, `Risk ${index + 1}`)}</p>
-                          <p className="mt-1 max-w-xl text-slate-500">{displayText(risk.description ?? risk.mitigation, "설명 또는 완화방안이 아직 없습니다.")}</p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="font-black text-slate-950 dark:text-white">{displayText(risk.title ?? risk.item ?? risk.riskCode ?? risk.key, `Risk ${index + 1}`)}</p>
+                            {isAutoSupplement(risk) ? <Badge tone="amber">AI 보강 검토</Badge> : null}
+                            {isBlocking(risk) && !isClosed(risk) ? <Badge tone="rose">Blocking</Badge> : null}
+                          </div>
+                          <p className="mt-1 max-w-xl text-slate-500">{displayText(risk.description ?? risk.message ?? risk.mitigation, "설명 또는 완화방안이 아직 없습니다.")}</p>
                           <p className="mt-1 text-[11px] text-slate-400">{risk.recordId}</p>
                         </td>
+                        <td className="px-3 py-3 text-slate-500">{displayText(risk.category ?? risk.podKey, "-")}</td>
                         <td className="px-3 py-3 font-bold text-slate-700 dark:text-slate-200">{displayText(risk.severity ?? risk.grade ?? risk.riskLevel, "-")}</td>
                         <td className={`px-3 py-3 font-bold ${isClosed(risk) ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}`}>{displayText(risk.reviewStatus, "open")}</td>
                         <td className="px-3 py-3 text-slate-500">{displayText(risk.sourceType, "-")}</td>
@@ -237,7 +292,7 @@ export default function RiskReviewPage() {
                 </table>
               </div>
             ) : (
-              <Empty text="저장된 risk_issue 원장이 없습니다. PF-Credit Pod 또는 Risk 재평가를 실행하면 자동으로 적재됩니다." />
+              <Empty text="조건에 맞는 risk_issue 원장이 없습니다. PF-Credit Pod 또는 Risk 재평가를 실행하면 자동으로 적재됩니다." />
             )}
           </Panel>
 
@@ -281,6 +336,13 @@ function ActionButton({ label, disabled, danger, onClick }: { label: string; dis
       {label}
     </button>
   );
+}
+
+function Badge({ children, tone }: { children: ReactNode; tone: "amber" | "rose" }) {
+  const klass = tone === "rose"
+    ? "bg-rose-50 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200"
+    : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-100";
+  return <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${klass}`}>{children}</span>;
 }
 
 function Loading({ text }: { text: string }) {

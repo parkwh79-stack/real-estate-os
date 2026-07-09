@@ -21,6 +21,11 @@ from storage import (
 RESOLVED_REVIEW_STATUSES = {"approved", "waived", "resolved"}
 APPROVED_ASSUMPTION_STATUSES = {"approved", "active", "resolved"}
 TRACEABILITY_RISK_CODES = {"SOURCE_LOCATOR_MISSING", "EVIDENCE_TRACE_WEAK"}
+AUTO_SUPPLEMENT_REVIEW_RISK_TOKENS = {
+    "SUPPLEMENTED_NEEDS_REVIEW",
+    "NEEDS_APPROVAL",
+    "CANDIDATE_NEEDS_APPROVAL",
+}
 # Pod AI Review finding categories that are grounded in deterministic signals
 # (evidence gaps, source-locator gaps, data-quality, and scenario-engine risk
 # flags). Only these can block readiness — per the invariant that an LLM opinion
@@ -63,6 +68,7 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
     evidence_records = [record for record in records if record.get("recordType") == "evidence"]
     metric_records = [record for record in records if record.get("recordType") == "metric"]
     assumption_records = [record for record in records if record.get("recordType") == "assumption"]
+    auto_supplement_records = [record for record in records if record.get("recordType") == "auto_supplement_attempt"]
     missing_locator_records = [record for record in records if not _has_source_locator(record)]
 
     blocking_risks = [record for record in risk_records if _is_blocking_deal_state_risk(record)]
@@ -91,12 +97,27 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         if str(record.get("reviewStatus") or record.get("approvalStatus") or record.get("status") or "").lower()
         in APPROVED_ASSUMPTION_STATUSES
     ]
+    open_assumption_candidates = [
+        record
+        for record in assumption_records
+        if _requires_assumption_candidate_review(record)
+    ]
     open_traceability_risks = [
         record
         for record in risk_records
-        if str(record.get("key") or "").upper() in TRACEABILITY_RISK_CODES
+        if _risk_code(record) in TRACEABILITY_RISK_CODES
         and str(record.get("reviewStatus") or record.get("status") or "open").lower()
         not in RESOLVED_REVIEW_STATUSES
+    ]
+    open_auto_supplement_risks = [
+        record
+        for record in risk_records
+        if _is_auto_supplement_review_risk(record)
+    ]
+    open_auto_supplement_attempts = [
+        record
+        for record in auto_supplement_records
+        if _auto_supplement_attempt_has_open_gap(record)
     ]
 
     # Pod AI Review blockers — count only deterministic-grounded blocking findings
@@ -131,6 +152,10 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         "evidenceCount": len(evidence_records),
         "metricCount": len(metric_records),
         "assumptionCount": len(assumption_records),
+        "openAssumptionCandidateCount": len(open_assumption_candidates),
+        "autoSupplementAttemptCount": len(auto_supplement_records),
+        "openAutoSupplementRiskCount": len(open_auto_supplement_risks),
+        "openAutoSupplementGapCount": len(open_auto_supplement_attempts),
         "activeAssumptionOverrideCount": len(active_overrides),
         "latestCalculationRunCount": len(latest_run_by_engine),
         "latestMetricCount": len(deterministic_metrics),
@@ -140,6 +165,9 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         "sampleBlockingRiskKeys": _sample_keys(unreviewed_blocking_risks),
         "sampleStaleMetricKeys": _sample_keys(stale_metrics),
         "sampleMissingLocatorKeys": _sample_keys(missing_locator_records),
+        "sampleOpenAssumptionCandidateKeys": _sample_keys(open_assumption_candidates),
+        "sampleAutoSupplementRiskKeys": _sample_keys(open_auto_supplement_risks),
+        "sampleAutoSupplementGapKeys": _sample_keys(open_auto_supplement_attempts),
         "podAiReviewBlockerCount": len(pod_ai_review_blockers),
         "podAiReviewBlockerSummary": [
             {"podKey": b["podKey"], "category": b["finding"].get("category"), "message": str(b["finding"].get("message") or "")[:120]}
@@ -185,6 +213,24 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
             "blocking",
         ),
         _gate(
+            "DEAL_STATE_ASSUMPTION_CANDIDATES_REVIEWED",
+            not open_assumption_candidates,
+            f"{len(open_assumption_candidates)} auto-supplemented or benchmark assumption candidate(s) still require reviewer approval.",
+            "blocking",
+        ),
+        _gate(
+            "DEAL_STATE_AUTO_SUPPLEMENT_REVIEW_ITEMS_CLEARED",
+            not open_auto_supplement_risks,
+            f"{len(open_auto_supplement_risks)} auto-supplement risk review item(s) remain open.",
+            "blocking",
+        ),
+        _gate(
+            "DEAL_STATE_AUTO_SUPPLEMENT_GAPS_RESOLVED",
+            not open_auto_supplement_attempts,
+            f"{len(open_auto_supplement_attempts)} auto-supplement attempt(s) still report failed or user-material-required gaps.",
+            "blocking",
+        ),
+        _gate(
             "DEAL_STATE_SOURCE_LOCATORS_ATTACHED",
             len(missing_locator_records) == 0,
             f"{len(missing_locator_records)} Deal State record(s) lack source locators.",
@@ -215,6 +261,9 @@ def deal_state_approval_actions(gates: List[Dict[str, Any]]) -> List[str]:
         "DEAL_STATE_REPORT_GRADE_METRICS_PRESENT": "Run deterministic calculation engines so report-grade metrics are persisted.",
         "DEAL_STATE_CORE_METRICS_LATEST": "Rerun downstream calculations or refresh stale metrics so the approval gate uses the latest CalculationRun per engine.",
         "DEAL_STATE_ASSUMPTION_OVERRIDES_APPROVED": "Approve the relevant assumption or create an active assumption override for unresolved data-quality conflicts.",
+        "DEAL_STATE_ASSUMPTION_CANDIDATES_REVIEWED": "Review AI/benchmark-supplemented assumption candidates and approve, waive, resolve, or replace them with source-backed values.",
+        "DEAL_STATE_AUTO_SUPPLEMENT_REVIEW_ITEMS_CLEARED": "Resolve auto-supplement review risks before using supplemented values in approval-grade outputs.",
+        "DEAL_STATE_AUTO_SUPPLEMENT_GAPS_RESOLVED": "Close failed auto-supplement attempts by attaching evidence, approving a documented assumption, or waiving with rationale.",
         "DEAL_STATE_SOURCE_LOCATORS_ATTACHED": "Attach document page, Excel cell, API row, evidence ID, or Agent artifact locators to Deal State records.",
         "DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT": "Resolve SOURCE_LOCATOR_MISSING or EVIDENCE_TRACE_WEAK risks before approval.",
     }
@@ -237,6 +286,10 @@ def _empty_context(project_id: str) -> Dict[str, Any]:
         "evidenceCount": 0,
         "metricCount": 0,
         "assumptionCount": 0,
+        "openAssumptionCandidateCount": 0,
+        "autoSupplementAttemptCount": 0,
+        "openAutoSupplementRiskCount": 0,
+        "openAutoSupplementGapCount": 0,
         "activeAssumptionOverrideCount": 0,
         "latestCalculationRunCount": 0,
         "latestMetricCount": 0,
@@ -246,6 +299,9 @@ def _empty_context(project_id: str) -> Dict[str, Any]:
         "sampleBlockingRiskKeys": [],
         "sampleStaleMetricKeys": [],
         "sampleMissingLocatorKeys": [],
+        "sampleOpenAssumptionCandidateKeys": [],
+        "sampleAutoSupplementRiskKeys": [],
+        "sampleAutoSupplementGapKeys": [],
         "gates": [],
     }
 
@@ -334,12 +390,55 @@ def _has_source_locator(record: Dict[str, Any]) -> bool:
 
 def _is_blocking_deal_state_risk(record: Dict[str, Any]) -> bool:
     severity = str(record.get("severity") or record.get("riskLevel") or record.get("grade") or "").lower()
-    code = str(record.get("key") or record.get("code") or "").upper()
+    code = _risk_code(record)
+    if record.get("blocking") is True:
+        return True
     if severity in {"blocking", "critical"}:
         return True
     if any(token in code for token in ("SENIOR_SHORTFALL", "UNSOLD_LTV_BREACH", "REJECT", "BLOCKING")):
         return True
     return False
+
+
+def _risk_code(record: Dict[str, Any]) -> str:
+    return str(record.get("riskCode") or record.get("code") or record.get("key") or "").upper()
+
+
+def _review_status(record: Dict[str, Any]) -> str:
+    return str(record.get("reviewStatus") or record.get("approvalStatus") or record.get("status") or "").lower()
+
+
+def _requires_assumption_candidate_review(record: Dict[str, Any]) -> bool:
+    status = _review_status(record)
+    if status in RESOLVED_REVIEW_STATUSES or status in APPROVED_ASSUMPTION_STATUSES:
+        return False
+    assumption_type = str(record.get("assumptionType") or "").lower()
+    source_type = str(record.get("sourceType") or "").lower()
+    approval_status = str(record.get("approvalStatus") or "").lower()
+    if approval_status in {"candidate_needs_review", "candidate", "needs_review"}:
+        return True
+    if source_type == "auto_evidence_supplement":
+        return True
+    return any(token in assumption_type for token in ("proxy", "candidate", "benchmark"))
+
+
+def _is_auto_supplement_review_risk(record: Dict[str, Any]) -> bool:
+    if _review_status(record) in RESOLVED_REVIEW_STATUSES:
+        return False
+    code = _risk_code(record)
+    source_type = str(record.get("sourceType") or "").lower()
+    if source_type == "auto_evidence_supplement" and str(record.get("reviewStatus") or "").lower() in {"needs_revision", "needs_review", "unreviewed", "open", ""}:
+        return True
+    return any(token in code for token in AUTO_SUPPLEMENT_REVIEW_RISK_TOKENS)
+
+
+def _auto_supplement_attempt_has_open_gap(record: Dict[str, Any]) -> bool:
+    if _review_status(record) in RESOLVED_REVIEW_STATUSES:
+        return False
+    summary = record.get("summary") if isinstance(record.get("summary"), dict) else {}
+    needs_user_material = int(summary.get("needsUserMaterialCount") or 0)
+    failed = int(summary.get("failedCount") or 0)
+    return needs_user_material > 0 or failed > 0
 
 
 def _has_data_quality_or_assumption_risk(risk_records: List[Dict[str, Any]]) -> bool:

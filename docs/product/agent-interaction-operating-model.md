@@ -244,6 +244,114 @@ This prevents early parsing from becoming a silent final assumption. It also
 lets Market-Product, Land-Legal, Feasibility-Cashflow, and PF-Credit Pods share
 the same candidate values, source locators, and term normalization boundary.
 
+### Pod Parsed-Fact Validation
+
+Each Pod must validate the parser candidates it consumes before treating them
+as decision-grade assumptions. The validator is deterministic and evidence
+aware; LLM reviewers may explain findings, but they do not replace the source
+locator and value-consistency checks.
+
+| Pod | Parsed-fact validation responsibility |
+|---|---|
+| `land_legal` | Verify land area, PNU, official land price, registry and encumbrance evidence candidates. |
+| `market_product` | Verify proposed sale price basis, transaction/presale/listing/manual comparables, rent assumptions, and Cap Rate evidence. |
+| `feasibility_cashflow` | Verify total sales revenue, total project cost, construction cost, land cost, funding/PF amount, and schedule values. |
+| `pf_credit` | Verify PF amount, LTV/LTC/DSCR, Exit sale rate, Waterfall, tranche recovery, and discount-stress candidates. |
+
+Implementation contract:
+
+```text
+Chief Pod run
+  -> writes chief_pod_artifact
+  -> PodParsedFactValidator loads parsed_fact rows whose targetPods include the Pod
+  -> Auto Evidence Supplement tries public/internal/historical sources before blocking
+  -> validator updates podValidationStatusByPod on each parsed_fact
+  -> validator writes parsed_fact_validation record
+  -> validator materializes blocking gaps as risk_issue records
+  -> Approval Readiness Gate and Risk Register read the same records
+```
+
+### Auto Evidence Supplement Before Blocking
+
+REALYTICS should not stop at "missing input" when the missing value can be
+legitimately recovered from public APIs, internal deal memory, or historical
+review cases. The Orchestrator must first attempt supplementing evidence and
+only then ask the user for additional materials.
+
+```text
+Parsed Fact validation gap
+  -> Auto Evidence Supplement
+     -> official public API evidence when available
+     -> project-memory evidence when already stored
+     -> market comparable benchmark when price basis is missing
+     -> historical benchmark candidate when project data is absent
+     -> manual evidence request when licensed/manual evidence is required
+  -> Persist source-backed records
+  -> Re-run Pod parsed-fact validation
+  -> Keep approval-grade use behind review/approval when the value is a proxy
+```
+
+Supplemented values are classified by origin:
+
+| Origin | Record type | Approval use |
+|---|---|---|
+| Official public API | `evidence` + `parsed_fact` | Can support analysis; final approval still checks locator/review gates. |
+| Project memory / uploaded state | `evidence` + `parsed_fact` | Can support analysis when source locator exists. |
+| Market comparable benchmark | `assumption` + `parsed_fact` | Scenario and review use only until approved. |
+| Historical case benchmark | `assumption` + `parsed_fact` | Proxy only; requires human approval. |
+| Registry / encumbrance missing | `evidence` request | Cannot be invented; remains a required evidence request. |
+
+Important invariant:
+
+```text
+Auto supplement may create a candidate value.
+It must never pretend that a proxy is the user's submitted assumption.
+Every supplemented value must carry sourceAuthority, factOrigin, sourceLocator,
+confidence, and review status.
+```
+
+Approval gate rule:
+
+```text
+Auto-supplemented official evidence can support analysis when the source locator
+is complete.
+
+Auto-supplemented benchmark/proxy values cannot support final approval until
+their assumption candidate and companion risk_issue are reviewed.
+
+Failed auto-supplement attempts, evidence requests, or user-material-required
+gaps remain approval blockers until they are resolved, waived with rationale,
+or replaced by source-backed evidence.
+```
+
+The Approval Readiness Gate therefore evaluates:
+
+| Gate | Meaning |
+|---|---|
+| `DEAL_STATE_ASSUMPTION_CANDIDATES_REVIEWED` | Benchmark/proxy assumption candidates must be approved, waived, resolved, or replaced. |
+| `DEAL_STATE_AUTO_SUPPLEMENT_REVIEW_ITEMS_CLEARED` | Auto-supplement risks such as `PROPOSED_PRICE_BASIS_SUPPLEMENTED_NEEDS_REVIEW` must be reviewed. |
+| `DEAL_STATE_AUTO_SUPPLEMENT_GAPS_RESOLVED` | Failed or manual-evidence-required supplement attempts must be closed before approval. |
+
+Reviewer UI rule:
+
+```text
+Risk Register shows auto-supplement risk_issue rows.
+Evidence / Assumption Review shows evidence, assumptions, parsed facts,
+validation records, and auto_supplement_attempt rows from the same Deal State
+ledger.
+Review actions write back to deal_state_records with audit history.
+```
+
+Standard finding codes include:
+
+| Code | Meaning |
+|---|---|
+| `PARSED_FACT_SOURCE_LOCATOR_WEAK` | A critical parsed value lacks page/cell/API-row/evidence locator. |
+| `PARSED_FACT_VALUE_CONFLICT` | Two or more parsed values for the same canonical field differ beyond tolerance. |
+| `PARSED_FACT_TERM_MAPPING_NEEDED` | A parsed term is not sufficiently mapped to the controlled vocabulary. |
+| `PARSED_FACT_REQUIRED_MISSING` | The Pod lacks a required parsed candidate/evidence class. |
+| `PROPOSED_PRICE_BASIS_MISSING` | Market comparables may exist, but the project’s proposed price basis is missing. |
+
 Target historical comparison:
 
 ```text

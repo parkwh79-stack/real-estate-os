@@ -579,6 +579,146 @@ def test_approval_readiness_gate_blocks_open_source_locator_audit_risks(tmp_path
     assert "DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT" in {item["code"] for item in gate["blockers"]}
 
 
+def test_approval_readiness_gate_blocks_auto_supplement_candidates_until_reviewed(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-auto-supplement.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    project_id = "approval-auto-supplement-project"
+
+    upsert_calculation_run_record(project_id, {
+        "calculationRunId": "calc:waterfall:latest",
+        "engineKey": "waterfall",
+        "engineVersion": "calculation_scenario_engine_v1",
+        "sourceLocator": {"calculationRunId": "calc:waterfall:latest", "engineKey": "waterfall"},
+        "outputMetrics": [
+            {
+                "key": "waterfall.summary.shortfallFlagCount",
+                "value": 0,
+                "sourceLocator": {
+                    "calculationRunId": "calc:waterfall:latest",
+                    "engineKey": "waterfall",
+                    "path": "summary.shortfallFlagCount",
+                },
+            }
+        ],
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "evidence-vworld-pnu",
+        "recordType": "evidence",
+        "key": "land.pnu",
+        "sourceType": "auto_evidence_supplement",
+        "sourceLocator": {"sourceName": "VWorld cadastral data", "pnu": "1111010100100010000"},
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "assumption:auto-market-price",
+        "recordType": "assumption",
+        "key": "market.proposedPricePerPy",
+        "assumptionType": "benchmark_proxy_not_project_proposed_price",
+        "approvalStatus": "candidate_needs_review",
+        "reviewStatus": "needs_revision",
+        "sourceType": "auto_evidence_supplement",
+        "sourceLocator": {"sourceName": "Market comparable benchmark", "comparableCount": 3},
+        "value": 35000000,
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "risk:auto-market-review",
+        "recordType": "risk_issue",
+        "key": "auto_supplement.market_product.market.proposedPricePerPy.PROPOSED_PRICE_BASIS_SUPPLEMENTED_NEEDS_REVIEW",
+        "riskCode": "PROPOSED_PRICE_BASIS_SUPPLEMENTED_NEEDS_REVIEW",
+        "category": "data_quality",
+        "severity": "medium",
+        "reviewStatus": "needs_revision",
+        "sourceType": "auto_evidence_supplement",
+        "sourceLocator": {"sourceName": "Market comparable benchmark", "comparableCount": 3},
+    })
+
+    gate = OrchestrationAgent()._approval_readiness_gate(_approval_ready_base_run(project_id))
+    blocker_codes = {item["code"] for item in gate["blockers"]}
+
+    assert "DEAL_STATE_ASSUMPTION_CANDIDATES_REVIEWED" in blocker_codes
+    assert "DEAL_STATE_AUTO_SUPPLEMENT_REVIEW_ITEMS_CLEARED" in blocker_codes
+    assert gate["summary"]["dealStateOpenAssumptionCandidateCount"] == 1
+    assert gate["summary"]["dealStateOpenAutoSupplementRiskCount"] == 1
+
+    upsert_deal_state_record(project_id, {
+        "recordId": "assumption:auto-market-price",
+        "recordType": "assumption",
+        "key": "market.proposedPricePerPy",
+        "assumptionType": "benchmark_proxy_not_project_proposed_price",
+        "approvalStatus": "approved",
+        "reviewStatus": "approved",
+        "sourceType": "auto_evidence_supplement",
+        "sourceLocator": {"sourceName": "Market comparable benchmark", "comparableCount": 3},
+        "value": 35000000,
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "risk:auto-market-review",
+        "recordType": "risk_issue",
+        "key": "auto_supplement.market_product.market.proposedPricePerPy.PROPOSED_PRICE_BASIS_SUPPLEMENTED_NEEDS_REVIEW",
+        "riskCode": "PROPOSED_PRICE_BASIS_SUPPLEMENTED_NEEDS_REVIEW",
+        "category": "data_quality",
+        "severity": "medium",
+        "reviewStatus": "resolved",
+        "sourceType": "auto_evidence_supplement",
+        "sourceLocator": {"sourceName": "Market comparable benchmark", "comparableCount": 3},
+    })
+
+    cleared = OrchestrationAgent()._approval_readiness_gate(_approval_ready_base_run(project_id))
+    cleared_codes = {item["code"]: item for item in cleared["gates"]}
+    assert cleared_codes["DEAL_STATE_ASSUMPTION_CANDIDATES_REVIEWED"]["pass"] is True
+    assert cleared_codes["DEAL_STATE_AUTO_SUPPLEMENT_REVIEW_ITEMS_CLEARED"]["pass"] is True
+
+
+def test_approval_readiness_gate_blocks_failed_auto_supplement_attempts(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-auto-supplement-gap.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    project_id = "approval-auto-supplement-gap-project"
+
+    upsert_calculation_run_record(project_id, {
+        "calculationRunId": "calc:discount_stress:latest",
+        "engineKey": "discount_stress",
+        "engineVersion": "discount_stress_v1",
+        "sourceLocator": {"calculationRunId": "calc:discount_stress:latest", "engineKey": "discount_stress"},
+        "outputMetrics": [
+            {
+                "key": "discount_stress.discount10.exitSaleRate",
+                "value": 0.62,
+                "sourceLocator": {
+                    "calculationRunId": "calc:discount_stress:latest",
+                    "engineKey": "discount_stress",
+                    "path": "scenarios[key=severe].saleRate",
+                },
+            }
+        ],
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "evidence-market",
+        "recordType": "evidence",
+        "key": "market.comparable",
+        "sourceType": "manual_evidence",
+        "sourceLocator": {"evidenceId": "market-comp-1"},
+    })
+    upsert_deal_state_record(project_id, {
+        "recordId": "auto_supplement_attempt:land_legal:failed",
+        "recordType": "auto_supplement_attempt",
+        "key": "auto_supplement.land_legal",
+        "sourceType": "auto_evidence_supplement",
+        "sourceLocator": {"type": "parsed_fact_validation", "podKey": "land_legal"},
+        "summary": {
+            "attemptCount": 2,
+            "createdRecordCount": 0,
+            "supplementedCount": 0,
+            "needsUserMaterialCount": 1,
+            "failedCount": 1,
+        },
+    })
+
+    gate = OrchestrationAgent()._approval_readiness_gate(_approval_ready_base_run(project_id))
+    blocker_codes = {item["code"] for item in gate["blockers"]}
+
+    assert "DEAL_STATE_AUTO_SUPPLEMENT_GAPS_RESOLVED" in blocker_codes
+    assert gate["summary"]["dealStateOpenAutoSupplementGapCount"] == 1
+
+
 def test_land_readiness_uses_flat_land_evidence_package():
     review = OrchestrationAgent()._review_land_readiness({
         "project": {"name": "Flat Land Evidence Pilot"},

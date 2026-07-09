@@ -96,7 +96,9 @@ from use_cases.feasibility_workbook_llm import (
 )
 from use_cases.intake_finalize import finalize_project_intake_use_case
 from use_cases.parcel_pnu_resolution import resolve_project_parcels_use_case, resolve_address_to_parcel
+from use_cases.auto_evidence_supplement import auto_supplement_validation_gaps
 from use_cases.parsed_facts import parsed_fact_package, persist_parsed_facts
+from use_cases.parsed_fact_validation import validate_parsed_facts_for_pod
 from use_cases.calculation_run_capture import scenario_engine_run_payloads, stress_test_run_payload
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
@@ -1926,6 +1928,71 @@ def list_project_deal_state_records(
     }
 
 
+@router.get("/{project_id}/parsed-facts")
+def list_project_parsed_facts(
+    project_id: str,
+    request: Request,
+    pod_key: str | None = None,
+    validation_status: str | None = None,
+    limit: int = Query(1000, ge=1, le=1000),
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    package = parsed_fact_package(project_id, limit=limit)
+    records = package.get("records") or []
+    if pod_key:
+        records = [record for record in records if pod_key in {str(p) for p in record.get("targetPods") or []}]
+    if validation_status:
+        records = [record for record in records if record.get("validationStatus") == validation_status]
+    return {
+        **package,
+        "podKey": pod_key,
+        "validationStatus": validation_status,
+        "count": len(records),
+        "records": records,
+    }
+
+
+@router.post("/{project_id}/parsed-facts/validate-pod")
+def validate_project_parsed_facts_for_pod(
+    project_id: str,
+    payload: Dict[str, Any],
+    request: Request,
+):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:review")
+    pod_key = str(payload.get("podKey") or payload.get("pod_key") or "").strip()
+    if not pod_key:
+        raise HTTPException(status_code=400, detail="podKey is required")
+    actor = str(
+        payload.get("validatedBy")
+        or payload.get("validated_by")
+        or identity_context_from_request(request).get("userId")
+        or "pod_fact_validator"
+    )
+    result = _validate_supplement_and_revalidate_parsed_facts(
+        project_id,
+        pod_key,
+        project_data=PROJECTS_DB[project_id],
+        source_artifact_key=payload.get("sourceArtifactKey") or payload.get("source_artifact_key"),
+        actor=actor,
+    )
+    record_user_activity_log(
+        {
+            "eventType": "parsed_fact_pod_validated",
+            "projectId": project_id,
+            "podKey": pod_key,
+            "validatedBy": actor,
+            "findingCount": (result.get("summary") or {}).get("findingCount"),
+            "riskIssueCount": (result.get("summary") or {}).get("riskIssueCount"),
+            "createdAt": result.get("validatedAt"),
+        }
+    )
+    return result
+
+
 @router.patch("/{project_id}/deal-state-records/{record_id}/review")
 def review_project_deal_state_record(
     project_id: str,
@@ -2901,6 +2968,67 @@ def _persist_shared_deal_state_graph(project_id: str, plan: Dict[str, Any], *, s
     return record
 
 
+def _latest_pod_artifact_key_from_plan(plan: Dict[str, Any], pod_key: str) -> str | None:
+    for run in plan.get("podRuns") or []:
+        if run.get("podKey") != pod_key:
+            continue
+        artifact_keys = run.get("artifactKeys") or []
+        if artifact_keys:
+            return str(artifact_keys[-1])
+    return None
+
+
+def _completed_pod_artifact_keys_from_plan(plan: Dict[str, Any]) -> Dict[str, str]:
+    artifact_keys: Dict[str, str] = {}
+    for run in plan.get("podRuns") or []:
+        pod_key = run.get("podKey")
+        if not pod_key or run.get("status") not in {"completed", "needs_recalculation"}:
+            continue
+        keys = run.get("artifactKeys") or []
+        if keys:
+            artifact_keys[str(pod_key)] = str(keys[-1])
+    return artifact_keys
+
+
+def _validate_supplement_and_revalidate_parsed_facts(
+    project_id: str,
+    pod_key: str,
+    *,
+    project_data: Dict[str, Any],
+    source_artifact_key: str | None,
+    actor: str,
+) -> Dict[str, Any]:
+    initial = validate_parsed_facts_for_pod(
+        project_id,
+        pod_key,
+        source_artifact_key=source_artifact_key,
+        actor=actor,
+    )
+    supplement = auto_supplement_validation_gaps(
+        project_id,
+        pod_key,
+        initial,
+        project_data,
+        actor=actor,
+    )
+    if int((supplement.get("summary") or {}).get("createdRecordCount") or 0) <= 0:
+        return {
+            **initial,
+            "autoSupplement": supplement,
+        }
+    final = validate_parsed_facts_for_pod(
+        project_id,
+        pod_key,
+        source_artifact_key=source_artifact_key,
+        actor=actor,
+    )
+    return {
+        **final,
+        "initialValidation": initial,
+        "autoSupplement": supplement,
+    }
+
+
 def _normalize_workspace_page(page: str) -> str:
     normalized = (page or "overview").replace("-", "_")
     aliases = {
@@ -3322,6 +3450,14 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    actor = str(identity_context_from_request(request).get("userId") or "chief_deal_orchestrator")
+    plan["parsedFactValidation"] = _validate_supplement_and_revalidate_parsed_facts(
+        project_id,
+        str(pod_key),
+        project_data=project_data,
+        source_artifact_key=_latest_pod_artifact_key_from_plan(plan, str(pod_key)),
+        actor=actor,
+    )
     _persist_shared_deal_state_graph(project_id, plan, source=f"chief_pod:{pod_key}")
     upsert_project_record(project_id, project_data)
 
@@ -3370,6 +3506,32 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
     )
 
+    completed_artifact_keys = _completed_pod_artifact_keys_from_plan(plan)
+    actor = str(identity_context_from_request(request).get("userId") or "chief_deal_orchestrator")
+    validation_results = [
+        _validate_supplement_and_revalidate_parsed_facts(
+            project_id,
+            pod_key,
+            project_data=project_data,
+            source_artifact_key=artifact_key,
+            actor=actor,
+        )
+        for pod_key, artifact_key in completed_artifact_keys.items()
+    ]
+    plan["parsedFactValidations"] = {
+        "schemaVersion": "realytics-parsed-fact-pod-validation-batch-v1",
+        "projectId": project_id,
+        "count": len(validation_results),
+        "results": validation_results,
+        "summary": {
+            "findingCount": sum(len(item.get("findings") or []) for item in validation_results),
+            "riskIssueCount": sum(int((item.get("summary") or {}).get("riskIssueCount") or 0) for item in validation_results),
+            "autoSupplementCreatedRecordCount": sum(
+                int(((item.get("autoSupplement") or {}).get("summary") or {}).get("createdRecordCount") or 0)
+                for item in validation_results
+            ),
+        },
+    }
     _persist_shared_deal_state_graph(project_id, plan, source="chief_pod:run_all")
     upsert_project_record(project_id, project_data)
 

@@ -2,7 +2,14 @@
 
 import { apiBase, authHeaders } from "./auth-client";
 
-export type DealStateRecordType = "metric" | "risk_issue" | "evidence" | "assumption" | "parsed_fact";
+export type DealStateRecordType =
+  | "metric"
+  | "risk_issue"
+  | "evidence"
+  | "assumption"
+  | "parsed_fact"
+  | "parsed_fact_validation"
+  | "auto_supplement_attempt";
 
 export type DealStateRecord = {
   recordId?: string;
@@ -56,30 +63,38 @@ export async function fetchDealStateRecords(
 }
 
 export async function fetchDealStateRecordGroups(projectId: string, limit = 500) {
-  const [metrics, risks, evidence, assumptions, parsedFacts] = await Promise.all([
+  const [metrics, risks, evidence, assumptions, parsedFacts, parsedFactValidations, autoSupplementAttempts] = await Promise.all([
     fetchDealStateRecords(projectId, { recordType: "metric", limit, actor: "web-auditor" }),
     fetchDealStateRecords(projectId, { recordType: "risk_issue", limit, actor: "web-auditor" }),
     fetchDealStateRecords(projectId, { recordType: "evidence", limit, actor: "web-auditor" }),
     fetchDealStateRecords(projectId, { recordType: "assumption", limit, actor: "web-auditor" }),
     fetchDealStateRecords(projectId, { recordType: "parsed_fact", limit, actor: "web-auditor" }),
+    fetchDealStateRecords(projectId, { recordType: "parsed_fact_validation", limit, actor: "web-auditor" }),
+    fetchDealStateRecords(projectId, { recordType: "auto_supplement_attempt", limit, actor: "web-auditor" }),
   ]);
-  return { metrics, risks, evidence, assumptions, parsedFacts };
+  return { metrics, risks, evidence, assumptions, parsedFacts, parsedFactValidations, autoSupplementAttempts };
 }
 
 export function hasSourceLocator(record: DealStateRecord) {
   const locator = record.sourceLocator;
   if (!locator || typeof locator !== "object") return false;
-  return Object.values(locator).some((value) => value !== undefined && value !== null && value !== "");
+  return Object.values(locator).some((value) => value !== undefined && value !== null && value !== "" && value !== 0);
 }
 
 export function locatorSummary(record: DealStateRecord) {
   const locator = record.sourceLocator ?? {};
   const preferred = [
+    locator.documentName ? `문서 ${locator.documentName}` : "",
     locator.documentId ? `문서 ${locator.documentId}` : "",
     locator.page ? `p.${locator.page}` : "",
+    locator.pageNumber ? `p.${locator.pageNumber}` : "",
+    locator.sheet ? `시트 ${locator.sheet}` : "",
     locator.cell ? `셀 ${locator.cell}` : "",
+    locator.row ? `행 ${locator.row}` : "",
     locator.apiRowId ? `API row ${locator.apiRowId}` : "",
     locator.evidenceId ? `증빙 ${locator.evidenceId}` : "",
+    locator.pnu ? `PNU ${locator.pnu}` : "",
+    locator.sourceName ? `${locator.sourceName}` : "",
     locator.artifactKey ? `Artifact ${locator.artifactKey}` : "",
     locator.nodeId ? `Node ${locator.nodeId}` : "",
   ].filter(Boolean);

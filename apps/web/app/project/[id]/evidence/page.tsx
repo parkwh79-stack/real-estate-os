@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { AlertTriangle, ArrowLeft, Database, FileSearch, GitBranch, Loader2, Search } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, Database, FileSearch, GitBranch, Loader2, Search, XCircle } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import {
   fetchDealStateRecordGroups,
@@ -11,6 +11,7 @@ import {
   hasSourceLocator,
   locatorSummary,
   type DealStateRecord,
+  type DealStateRecordType,
 } from "../../../../lib/deal-state-records";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
 
@@ -32,8 +33,8 @@ type EvidenceGraph = {
   auditWarnings?: string[];
 };
 
-type Filter = "all" | "evidence" | "metric" | "risk_issue" | "assumption" | "weak_locator";
-
+type Filter = "all" | DealStateRecordType | "weak_locator" | "review_needed";
+type ReviewStatus = "approved" | "waived" | "needs_revision" | "resolved";
 type SourceLocatorAuditResult = {
   auditId?: string;
   missingLocatorCount?: number;
@@ -57,6 +58,20 @@ function compactDate(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" });
 }
 
+function needsReview(record: DealStateRecord) {
+  const reviewStatus = String(record.reviewStatus ?? "").toLowerCase();
+  const approvalStatus = String(record.approvalStatus ?? "").toLowerCase();
+  return ["needs_revision", "needs_review", "candidate_needs_review", "unreviewed"].includes(reviewStatus)
+    || ["candidate_needs_review", "needs_review"].includes(approvalStatus)
+    || record.reviewRequired === true;
+}
+
+function isAutoSupplement(record: DealStateRecord) {
+  return String(record.sourceType ?? "").toLowerCase() === "auto_evidence_supplement"
+    || String(record.factOrigin ?? "").toLowerCase() === "auto_supplement"
+    || String(record.recordType ?? "") === "auto_supplement_attempt";
+}
+
 export default function EvidenceGraphAuditorPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
@@ -69,21 +84,45 @@ export default function EvidenceGraphAuditorPage() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [auditRunning, setAuditRunning] = useState(false);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [auditResult, setAuditResult] = useState<SourceLocatorAuditResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [ctx, groups, graphList] = await Promise.all([
-      fetchWorkspaceContext(projectId, "evidence").catch(() => null),
-      fetchDealStateRecordGroups(projectId, 800).catch(() => ({ metrics: [], risks: [], evidence: [], assumptions: [] })),
-      fetchJson<{ records?: EvidenceGraphSummary[] }>(`${apiBase}/projects/${projectId}/evidence-graphs`, { records: [] }),
-    ]);
-    setContext(ctx);
-    setRecords([...groups.evidence, ...groups.metrics, ...groups.risks, ...groups.assumptions]);
-    const nextGraphs = graphList.records ?? [];
-    setGraphs(nextGraphs);
-    setSelectedRunId((current) => current || nextGraphs[0]?.runId || "");
-    setLoading(false);
+    setError(null);
+    try {
+      const [ctx, groups, graphList] = await Promise.all([
+        fetchWorkspaceContext(projectId, "evidence").catch(() => null),
+        fetchDealStateRecordGroups(projectId, 900).catch(() => ({
+          metrics: [],
+          risks: [],
+          evidence: [],
+          assumptions: [],
+          parsedFacts: [],
+          parsedFactValidations: [],
+          autoSupplementAttempts: [],
+        })),
+        fetchJson<{ records?: EvidenceGraphSummary[] }>(`${apiBase}/projects/${projectId}/evidence-graphs`, { records: [] }),
+      ]);
+      setContext(ctx);
+      setRecords([
+        ...groups.evidence,
+        ...groups.assumptions,
+        ...groups.metrics,
+        ...groups.risks,
+        ...groups.parsedFacts,
+        ...groups.parsedFactValidations,
+        ...groups.autoSupplementAttempts,
+      ]);
+      const nextGraphs = graphList.records ?? [];
+      setGraphs(nextGraphs);
+      setSelectedRunId((current) => current || nextGraphs[0]?.runId || "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "근거 원장을 불러오지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
   }, [projectId]);
 
   const loadGraph = useCallback(async (runId: string) => {
@@ -105,6 +144,7 @@ export default function EvidenceGraphAuditorPage() {
 
   async function runSourceLocatorAudit() {
     setAuditRunning(true);
+    setError(null);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/deal-state-records/source-locator-audit`, {
         method: "POST",
@@ -113,8 +153,37 @@ export default function EvidenceGraphAuditorPage() {
       if (!res.ok) throw new Error(`Source Locator audit failed (${res.status})`);
       setAuditResult((await res.json()) as SourceLocatorAuditResult);
       await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "근거 위치 감사 실행에 실패했습니다.");
     } finally {
       setAuditRunning(false);
+    }
+  }
+
+  async function reviewRecord(record: DealStateRecord, reviewStatus: ReviewStatus) {
+    if (!record.recordId) return;
+    setReviewingId(record.recordId);
+    setError(null);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/deal-state-records/${encodeURIComponent(record.recordId)}/review`, {
+        method: "PATCH",
+        headers: { ...authHeaders("evidence-reviewer"), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reviewStatus,
+          reviewedBy: "evidence-reviewer",
+          comment: `Deal State record marked ${reviewStatus} from Evidence/Assumption screen.`,
+          waiverReason: reviewStatus === "waived" ? "Reviewer waiver from Evidence/Assumption screen." : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { detail?: string } | null;
+        throw new Error(body?.detail ?? `Review update failed (${res.status})`);
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "검토 상태 저장에 실패했습니다.");
+    } finally {
+      setReviewingId(null);
     }
   }
 
@@ -123,13 +192,18 @@ export default function EvidenceGraphAuditorPage() {
     metrics: records.filter((record) => record.recordType === "metric").length,
     risks: records.filter((record) => record.recordType === "risk_issue").length,
     assumptions: records.filter((record) => record.recordType === "assumption").length,
+    parsedFacts: records.filter((record) => record.recordType === "parsed_fact").length,
+    autoSupplement: records.filter((record) => isAutoSupplement(record)).length,
+    reviewNeeded: records.filter((record) => needsReview(record)).length,
     weakLocators: records.filter((record) => !hasSourceLocator(record)).length,
   }), [records]);
 
   const visibleRecords = records.filter((record) => {
-    const haystack = `${record.recordType ?? ""} ${record.key ?? ""} ${record.label ?? ""} ${record.sourceType ?? ""} ${JSON.stringify(record.sourceLocator ?? {})}`.toLowerCase();
+    const haystack = `${record.recordType ?? ""} ${record.key ?? ""} ${record.label ?? ""} ${record.sourceType ?? ""} ${record.recordId ?? ""} ${JSON.stringify(record.sourceLocator ?? {})}`.toLowerCase();
     const matchesFilter = filter === "all"
-      || (filter === "weak_locator" ? !hasSourceLocator(record) : record.recordType === filter);
+      || (filter === "weak_locator" ? !hasSourceLocator(record)
+        : filter === "review_needed" ? needsReview(record)
+          : record.recordType === filter);
     return matchesFilter && (!query.trim() || haystack.includes(query.toLowerCase()));
   });
 
@@ -144,9 +218,9 @@ export default function EvidenceGraphAuditorPage() {
           </Link>
           <div>
             <p className="text-sm font-semibold text-slate-500">{projectName}</p>
-            <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">근거 원장 / Evidence Auditor</h1>
+            <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">근거 원장 / Evidence & Assumption Review</h1>
             <p className="mt-1 text-sm text-slate-500">
-              보고서 문장, 리스크, 계산값, 가정이 어떤 문서·엑셀 셀·API row·Agent 산출물에서 왔는지 `deal_state_records` 기준으로 확인합니다.
+              문서, 엑셀 셀, API row, Agent artifact, 계산 run, AI 자동 보강 후보를 하나의 Deal State 원장에서 검토합니다.
             </p>
           </div>
         </div>
@@ -167,32 +241,38 @@ export default function EvidenceGraphAuditorPage() {
         </div>
       </header>
 
+      {error ? <Notice>{error}</Notice> : null}
+
       {auditResult ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
           Source Locator 감사 완료: 누락 {auditResult.missingLocatorCount ?? 0}건, 약한 추적 {auditResult.weakTraceCount ?? 0}건,
-          문단 근거 보강 필요 {auditResult.weakParagraphCount ?? 0}건을 확인했습니다. 결과는 Risk 원장에
-          SOURCE_LOCATOR_MISSING / EVIDENCE_TRACE_WEAK로 저장됩니다.
+          문단 근거 보강 필요 {auditResult.weakParagraphCount ?? 0}건을 확인했습니다.
+          결과는 Risk 원장에 SOURCE_LOCATOR_MISSING / EVIDENCE_TRACE_WEAK로 저장됩니다.
         </div>
       ) : null}
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <Kpi label="증거" value={`${counts.evidence.toLocaleString("ko-KR")}건`} />
-        <Kpi label="계산 지표" value={`${counts.metrics.toLocaleString("ko-KR")}건`} />
-        <Kpi label="리스크" value={`${counts.risks.toLocaleString("ko-KR")}건`} />
-        <Kpi label="가정" value={`${counts.assumptions.toLocaleString("ko-KR")}건`} />
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+        <Kpi label="증빙" value={`${counts.evidence.toLocaleString("ko-KR")}건`} />
+        <Kpi label="가정 후보" value={`${counts.assumptions.toLocaleString("ko-KR")}건`} />
+        <Kpi label="파싱값" value={`${counts.parsedFacts.toLocaleString("ko-KR")}건`} />
+        <Kpi label="AI 자동 보강" value={`${counts.autoSupplement.toLocaleString("ko-KR")}건`} tone={counts.autoSupplement ? "warn" : undefined} />
+        <Kpi label="검토 필요" value={`${counts.reviewNeeded.toLocaleString("ko-KR")}건`} tone={counts.reviewNeeded ? "warn" : "good"} />
         <Kpi label="근거 위치 부족" value={`${counts.weakLocators.toLocaleString("ko-KR")}건`} tone={counts.weakLocators ? "warn" : "good"} />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+      <section className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
         <Panel title="Deal State 원장" icon={<Database className="h-5 w-5" />}>
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="flex gap-2 overflow-x-auto">
               {([
                 ["all", "전체"],
-                ["evidence", "증거"],
-                ["metric", "지표"],
-                ["risk_issue", "리스크"],
+                ["evidence", "증빙"],
                 ["assumption", "가정"],
+                ["parsed_fact", "파싱값"],
+                ["metric", "계산지표"],
+                ["risk_issue", "리스크"],
+                ["auto_supplement_attempt", "AI 보강시도"],
+                ["review_needed", "검토 필요"],
                 ["weak_locator", "위치 부족"],
               ] as Array<[Filter, string]>).map(([value, label]) => (
                 <button key={value} type="button" onClick={() => setFilter(value)} className={`h-9 shrink-0 rounded-lg px-3 text-xs font-bold ${filter === value ? "bg-slate-950 text-white dark:bg-white dark:text-slate-950" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>
@@ -206,36 +286,57 @@ export default function EvidenceGraphAuditorPage() {
             </label>
           </div>
 
-          <div className="mt-4 max-h-[640px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-800">
+          <div className="mt-4 max-h-[680px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-800">
             {loading ? (
               <Loading text="Deal State 원장을 불러오는 중입니다." />
             ) : visibleRecords.length ? (
-              <table className="w-full min-w-[920px] text-left text-xs">
+              <table className="w-full min-w-[1120px] text-left text-xs">
                 <thead className="bg-slate-50 text-slate-500 dark:bg-slate-800">
                   <tr>
                     <th className="px-3 py-2">유형</th>
                     <th className="px-3 py-2">Key</th>
                     <th className="px-3 py-2">값</th>
+                    <th className="px-3 py-2">검토</th>
                     <th className="px-3 py-2">출처</th>
                     <th className="px-3 py-2">근거 위치</th>
                     <th className="px-3 py-2">Run</th>
+                    <th className="px-3 py-2">상태 처리</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleRecords.map((record) => (
-                    <tr key={record.recordId ?? `${record.recordType}-${record.key}`} className="border-t border-slate-100 dark:border-slate-800">
-                      <td className="px-3 py-3 font-bold text-slate-700 dark:text-slate-200">{typeLabel(record.recordType)}</td>
-                      <td className="px-3 py-3 font-black text-slate-950 dark:text-white">{displayText(record.key ?? record.label, "-")}</td>
+                    <tr key={record.recordId ?? `${record.recordType}-${record.key}`} className="border-t border-slate-100 align-top dark:border-slate-800">
+                      <td className="px-3 py-3 font-bold text-slate-700 dark:text-slate-200">
+                        <div className="flex flex-col gap-1">
+                          <span>{typeLabel(record.recordType)}</span>
+                          {isAutoSupplement(record) ? <Badge>AI 보강</Badge> : null}
+                        </div>
+                      </td>
+                      <td className="px-3 py-3">
+                        <p className="font-black text-slate-950 dark:text-white">{displayText(record.key ?? record.label, "-")}</p>
+                        <p className="mt-1 break-all text-[11px] text-slate-400">{record.recordId}</p>
+                      </td>
                       <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{formatRecordValue(record)}</td>
+                      <td className={`px-3 py-3 font-bold ${needsReview(record) ? "text-amber-700 dark:text-amber-300" : "text-emerald-700 dark:text-emerald-300"}`}>
+                        {displayText(record.reviewStatus ?? record.approvalStatus ?? record.validationStatus, needsReview(record) ? "review needed" : "ok")}
+                      </td>
                       <td className="px-3 py-3 text-slate-500">{displayText(record.sourceType, "-")}</td>
                       <td className={`px-3 py-3 font-semibold ${hasSourceLocator(record) ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}`}>{locatorSummary(record)}</td>
                       <td className="px-3 py-3 text-slate-500">{displayText(record.calculationRunId ?? record.evidenceGraphRunId ?? record.riskRegisterRunId, "-")}</td>
+                      <td className="px-3 py-3">
+                        <div className="flex flex-wrap gap-1">
+                          <ActionButton label="승인" disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "approved")} />
+                          <ActionButton label="Resolved" disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "resolved")} />
+                          <ActionButton label="Waive" disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "waived")} />
+                          <ActionButton label="보완요청" danger disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "needs_revision")} />
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             ) : (
-              <Empty text="조건에 맞는 Deal State 레코드가 없습니다. PF 심사나 Chief Pod를 실행하면 자동으로 적재됩니다." />
+              <Empty text="조건에 맞는 Deal State 레코드가 없습니다. 파일 업로드, Pod 실행, 계산 실행을 하면 자동으로 적재됩니다." />
             )}
           </div>
         </Panel>
@@ -274,11 +375,32 @@ export default function EvidenceGraphAuditorPage() {
 }
 
 function typeLabel(type?: string) {
-  if (type === "metric") return "지표";
+  if (type === "metric") return "계산지표";
   if (type === "risk_issue") return "리스크";
   if (type === "assumption") return "가정";
-  if (type === "evidence") return "증거";
+  if (type === "evidence") return "증빙";
+  if (type === "parsed_fact") return "파싱값";
+  if (type === "parsed_fact_validation") return "Pod 검증";
+  if (type === "auto_supplement_attempt") return "AI 보강시도";
   return displayText(type, "-");
+}
+
+function ActionButton({ label, disabled, danger, onClick }: { label: string; disabled?: boolean; danger?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex h-8 items-center gap-1 rounded-md px-2 text-[11px] font-bold disabled:opacity-50 ${danger ? "bg-rose-50 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200" : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200"}`}
+    >
+      {danger ? <XCircle className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
+      {label}
+    </button>
+  );
+}
+
+function Badge({ children }: { children: ReactNode }) {
+  return <span className="w-fit rounded-full bg-cyan-50 px-2 py-0.5 text-[10px] font-black text-cyan-700 dark:bg-cyan-950/30 dark:text-cyan-200">{children}</span>;
 }
 
 function Kpi({ label, value, tone }: { label: string; value: string; tone?: "good" | "warn" }) {
@@ -305,6 +427,10 @@ function Panel({ title, icon, children }: { title: string; icon: ReactNode; chil
 
 function Loading({ text }: { text: string }) {
   return <div className="flex min-h-[220px] items-center justify-center text-sm font-bold text-slate-500"><Loader2 className="mr-2 h-5 w-5 animate-spin" />{text}</div>;
+}
+
+function Notice({ children }: { children: ReactNode }) {
+  return <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{children}</div>;
 }
 
 function Empty({ text }: { text: string }) {
