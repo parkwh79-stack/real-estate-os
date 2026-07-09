@@ -1,8 +1,25 @@
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from agents.orchestration_agent import OrchestrationAgent
 from main import app
 from routers import projects
+
+
+def _bondong_project_id(client: TestClient) -> str:
+    """Find (or seed) the Daegu Bondong example project — hermetic against a
+    drifted runtime DB (the first project is not guaranteed to be the seeded one
+    with the parcel layout this acquisition-gate test depends on)."""
+    for item in client.get("/projects/").json():
+        if (item.get("project") or {}).get("name") == "Daegu Bondong Mixed-Use PF":
+            return item["project"]["id"]
+    example = json.loads(
+        (Path(__file__).parents[1] / "data" / "examples" / "daegu_bondong_mixed_use_pf.json").read_text(encoding="utf-8")
+    )
+    created = client.post("/projects/", json=example).json()
+    return created.get("id") or created["project"]["id"]
 
 
 def test_land_evidence_upsert_and_list_api():
@@ -228,7 +245,7 @@ def test_land_ledger_enrich_resolves_pnu_from_vworld_address_lookup(monkeypatch)
 
 def test_land_acquisition_status_record_clears_acquisition_gate():
     client = TestClient(app)
-    project_id = client.get("/projects/").json()[0]["project"]["id"]
+    project_id = _bondong_project_id(client)
 
     saved = client.post(
         f"/projects/{project_id}/land-evidence",

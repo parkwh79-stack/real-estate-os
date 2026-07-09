@@ -18,6 +18,17 @@ def load_logistics_example():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def bondong_project_id(client: TestClient) -> str:
+    """Find (or seed) the Daegu Bondong example project id — hermetic against a
+    drifted runtime DB. Uses .get() so a project without project.name never
+    raises KeyError while scanning the shared store."""
+    for item in client.get("/projects/").json():
+        if (item.get("project") or {}).get("name") == "Daegu Bondong Mixed-Use PF":
+            return item["project"]["id"]
+    created = client.post("/projects/", json=load_example()).json()
+    return created.get("id") or created["project"]["id"]
+
+
 def test_development_feasibility_agent_builds_developer_and_pf_metrics():
     result = DevelopmentFeasibilityAgent().analyze(load_example())
 
@@ -70,11 +81,7 @@ def test_development_feasibility_agent_adds_logistics_analysis():
 
 def test_development_feasibility_endpoint_returns_analysis():
     client = TestClient(app)
-    project_id = next(
-        item["project"]["id"]
-        for item in client.get("/projects/").json()
-        if item["project"]["name"] == "Daegu Bondong Mixed-Use PF"
-    )
+    project_id = bondong_project_id(client)
 
     res = client.post(f"/projects/{project_id}/development-feasibility/analyze", json={})
 
@@ -87,11 +94,7 @@ def test_development_feasibility_endpoint_returns_analysis():
 
 def test_cash_flow_run_endpoint_uses_development_feasibility_request_draft():
     client = TestClient(app)
-    project_id = next(
-        item["project"]["id"]
-        for item in client.get("/projects/").json()
-        if item["project"]["name"] == "Daegu Bondong Mixed-Use PF"
-    )
+    project_id = bondong_project_id(client)
 
     res = client.post(f"/projects/{project_id}/cash-flow/run", json={})
 
