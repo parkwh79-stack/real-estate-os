@@ -2644,7 +2644,7 @@ function DataQualityOverridePanel({
   onSaveOverride: (payload: Record<string, unknown>) => void;
   onUpdateOverrideStatus: (override: AssumptionOverrideRecord, status: "revoked" | "expired" | "active") => void;
 }) {
-  const checks = review.checks ?? [];
+  const checks = useMemo(() => review.checks ?? [], [review.checks]);
   const actionableChecks = useMemo(
     () => checks.filter((check) => ["blocking", "warning", "missing_data"].includes(check.status)),
     [checks],

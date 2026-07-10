@@ -86,6 +86,7 @@ from use_cases.chief_deal_orchestration import (
 )
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
+from use_cases.asset_feasibility_comparison import compare_asset_feasibility_use_case
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
 from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_case
 from agents.land_ledger_agent import LandLedgerParseError
@@ -2083,6 +2084,27 @@ def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] 
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     return analyze_development_feasibility_use_case(PROJECTS_DB[project_id], input_data)
+
+
+@router.post("/{project_id}/asset-comparison/analyze")
+def analyze_asset_feasibility_comparison(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
+    """Compare developer feasibility across asset-type scenarios for the same land.
+
+    Deterministic on-demand analysis (no persistence): each scenario is a re-run
+    of the feasibility engine under asset-type overrides. Scenarios without a
+    revenue/cost basis are surfaced as ``insufficient_data``, never fabricated.
+    """
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    payload = input_data or {}
+    scenarios = payload.get("scenarios") if isinstance(payload.get("scenarios"), list) else None
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else None
+    return compare_asset_feasibility_use_case(PROJECTS_DB[project_id], scenarios, options)
 
 @router.post("/{project_id}/cashflow/calculate")
 def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):

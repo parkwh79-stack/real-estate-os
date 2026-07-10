@@ -1,15 +1,15 @@
 "use client";
 
+/* eslint-disable react/prop-types -- component props are declared with TypeScript interfaces. */
+
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Loader2, Map as MapIcon, RefreshCw } from "lucide-react";
-import { authHeaders } from "../../../../lib/auth-client";
+import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
 import { MapIntelligence, type MapIntelligenceData, type TxMarker } from "../../../../components/map/map-intelligence";
 import { TransactionsPanel, type TxRecord } from "../../../../components/map/transactions-panel";
-
-const apiBase = "http://127.0.0.1:8000";
 
 type ParcelFeature = {
   geometry?: unknown;

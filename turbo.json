@@ -1,7 +1,17 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
   "ui": "tui",
-  "globalEnv": ["MOLIT_API_KEY", "LAW_OC_KEY", "NEXT_PUBLIC_KAKAO_APP_KEY"],
+  "globalEnv": [
+    "MOLIT_API_KEY",
+    "LAW_OC_KEY",
+    "NEXT_PUBLIC_KAKAO_APP_KEY",
+    "VWORLD_API_KEY",
+    "REALYTICS_EXCEL_TEMPLATE_DIR",
+    "REALYTICS_EXCEL_TEMPLATE_PATH",
+    "REALYTICS_EXCEL_TEMPLATE_ID",
+    "REALYTICS_EXCEL_TEMPLATE_VERSION",
+    "REALYTICS_SAMPLE_WORKBOOK_PATH"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

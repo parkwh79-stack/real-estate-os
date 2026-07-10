@@ -57,7 +57,7 @@ export default function GlossaryReviewPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
 
-  const candidates = data?.candidates ?? [];
+  const candidates = useMemo(() => data?.candidates ?? [], [data]);
   const pendingCount = useMemo(
     () => candidates.filter((candidate) => candidate.status === "pending_review").length,
     [candidates],

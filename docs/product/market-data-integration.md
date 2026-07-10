@@ -1,6 +1,6 @@
 # Market Data Integration (실거래가 · 제휴 데이터)
 
-Updated: 2026-06-24
+Updated: 2026-07-10
 
 Live market data for the map and the Marketability Agent. Two **legitimate**
 sources — no scraping of proprietary listing sites (that would violate both the
@@ -98,14 +98,19 @@ LAWD_CD (parcel PNU) + asset type, fetches recent 실거래가, and injects them
 agent then prices 분양가 적정성 / Exit 분양률 against actual closed transactions,
 which flows into Credit Review and the Phase 11 report.
 
-- **Gated by `REALYTICS_LIVE_MARKET_COMPARABLES`** (off by default so tests/CI
-  stay offline and deterministic; set it in the deployment `.env` to enable
-  auto-injection on every run). Also requires `DATA_GO_KR_API_KEY`.
+- **Gated by `REALYTICS_LIVE_MARKET_COMPARABLES`** — **enabled in the deployment
+  `.env` as of 2026-07-10** (`=true`) so the classic PF-run auto-injects on every
+  run. Tests/CI stay offline because `tests/conftest.py` force-deletes the flag
+  during the suite (the enabled path is tested via an explicit `environ` dict).
+  Also requires `DATA_GO_KR_API_KEY` (configured). Note: the Chief pod flow
+  (`chief_pod_auto_supplement._supplement_market`) and `auto_evidence_supplement`
+  inject live comparables **unconditionally** (not behind this flag).
 - Non-fabricating & fail-safe: no flag / no key / no LAWD_CD / no data → nothing
   injected; any fetch error is recorded in `run.errors` and never breaks the run.
 - The run records a `liveMarketComparables` artifact (injected count + diagnostic).
-- Verified live: a 서초구 PNU project pulled 40 실거래가 → all 40 normalized as
-  `public_api` comparables (`hasTransactionComparable=true`).
+- Verified live 2026-07-10 (flag enabled): classic PF-review on project 529
+  (서초구 11650, apartment) injected 40 live 실거래가 (months 202607/06/05) →
+  `liveMarketComparables` artifact `count=40`, run completed, no errors.
 
 ### Surfaced in the lender output (provenance)
 

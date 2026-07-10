@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable react/prop-types -- component props are declared with TypeScript interfaces. */
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -118,14 +120,6 @@ function parcelKey(feature: ParcelFeature, index: number): string {
 function parcelLabel(feature: ParcelFeature, index: number): string {
   const p = feature.properties ?? {};
   return p.addressFragment ?? p.lotNumber ?? p.pnu ?? `필지 ${index + 1}`;
-}
-
-function formatWon(value?: number): string {
-  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("ko-KR") : "미확인";
-}
-
-function formatArea(value?: number): string {
-  return typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString("ko-KR")}㎡` : "미확인";
 }
 
 function isLocated(feature: ParcelFeature): boolean {

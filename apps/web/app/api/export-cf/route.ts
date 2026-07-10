@@ -1,3 +1,4 @@
+/* eslint-disable no-useless-escape -- Excel formula strings intentionally contain escaped quotes. */
 import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
 import {

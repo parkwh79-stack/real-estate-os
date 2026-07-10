@@ -121,7 +121,7 @@ export default function PfStructurePage() {
         <Loading text="금융구조 원장을 불러오는 중입니다." />
       ) : (
         <>
-          {error ? <Notice tone="bad">{error}</Notice> : null}
+          {error ? <Notice>{error}</Notice> : null}
           <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <Kpi label="총 PF 금액" value={formatEok(totalPf)} />
             <Kpi label="Tranche 수" value={`${tranches.length.toLocaleString("ko-KR")}개`} />
@@ -186,7 +186,7 @@ function Loading({ text }: { text: string }) {
   return <div className="flex min-h-[240px] items-center justify-center rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-500 dark:border-slate-800 dark:bg-slate-900"><Loader2 className="mr-2 h-5 w-5 animate-spin" />{text}</div>;
 }
 
-function Notice({ tone, children }: { tone: "bad"; children: ReactNode }) {
+function Notice({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{children}</div>;
 }
 

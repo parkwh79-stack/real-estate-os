@@ -1,9 +1,7 @@
 import {
-  BarChart3,
   Building2,
   Factory,
   FileSearch,
-  FileText,
   Home,
   Landmark,
   RefreshCw,
