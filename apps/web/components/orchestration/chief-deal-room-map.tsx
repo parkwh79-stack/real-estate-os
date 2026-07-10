@@ -204,6 +204,14 @@ interface ChiefDealOrchestrationPlan {
     mitigationActions?: string[];
     humanReviewRequired?: boolean;
   };
+  approvalReadinessGate?: {
+    pass?: boolean;
+    status?: string;
+    blockingIssueCount?: number;
+    warningCount?: number;
+    blockers?: Array<{ code?: string; message?: string }>;
+    requiredActions?: string[];
+  };
   reportStudioOutputs?: string[];
   learningLoopEvents?: Array<Record<string, unknown>>;
 }
@@ -486,6 +494,12 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [supplements, setSupplements] = useState<AutoSupplementAttempt[] | null>(null);
   const [recalculationEvents, setRecalculationEvents] = useState<RecalculationEvent[]>([]);
   const [podAiReviews, setPodAiReviews] = useState<PodAIReview[]>([]);
+  const [approvalGate, setApprovalGate] = useState<ChiefDealOrchestrationPlan["approvalReadinessGate"] | null>(null);
+  const [cureType, setCureType] = useState("additional_collateral");
+  const [cureAmount, setCureAmount] = useState("");
+  const [cureEvidenceId, setCureEvidenceId] = useState("");
+  const [cureEvidenceNote, setCureEvidenceNote] = useState("");
+  const [cureSubmitting, setCureSubmitting] = useState(false);
 
   const loadRecalculationEvents = useCallback(async () => {
     try {
@@ -536,7 +550,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         }),
       });
       if (!res.ok) throw new Error(`Chief Deal Room 계획을 불러오지 못했습니다. (${res.status})`);
-      setPlan((await res.json()) as ChiefDealOrchestrationPlan);
+      const nextPlan = (await res.json()) as ChiefDealOrchestrationPlan;
+      setPlan(nextPlan);
+      setApprovalGate(nextPlan.approvalReadinessGate ?? null);
       await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Chief Deal Room 계획을 불러오지 못했습니다.");
@@ -544,6 +560,46 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setLoading(false);
     }
   }, [projectId, loadRecalculationEvents, loadPodAiReviews]);
+
+  const applyCureAndRerun = useCallback(async () => {
+    const amount = Number(cureAmount.replaceAll(",", ""));
+    if (!Number.isFinite(amount) || amount <= 0 || !cureEvidenceId.trim()) {
+      setError("Cure 금액과 증빙 ID 또는 출처 URL을 입력해 주세요.");
+      return;
+    }
+    setCureSubmitting(true);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/unsold-ltv-cure`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders("web") },
+        body: JSON.stringify({
+          cureType,
+          amount,
+          evidence: {
+            evidenceId: cureEvidenceId.trim(),
+            sourceType: "manual_upload_or_external_evidence",
+            note: cureEvidenceNote.trim(),
+          },
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(cleanText(body?.detail, "Cure 재계산에 실패했습니다."));
+      if (body.run?.artifacts?.approvalReadinessGate) {
+        setApprovalGate(body.run.artifacts.approvalReadinessGate);
+      } else if (body.approvalReadinessGate) {
+        setApprovalGate(body.approvalReadinessGate);
+      }
+      setCureAmount("");
+      setCureEvidenceId("");
+      setCureEvidenceNote("");
+      setError(null);
+      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Cure 재계산 중 오류가 발생했습니다.");
+    } finally {
+      setCureSubmitting(false);
+    }
+  }, [cureAmount, cureEvidenceId, cureEvidenceNote, cureType, loadPodAiReviews, loadRecalculationEvents, projectId]);
 
   const runPod = useCallback(async (podKey: PodKey, forceTrigger?: string): Promise<boolean> => {
     setExecutingPodKey(podKey);
@@ -713,6 +769,20 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
 
       {supplements ? <AutoSupplementBanner supplements={supplements} /> : null}
 
+      <ApprovalReadinessPanel
+        gate={approvalGate}
+        cureType={cureType}
+        cureAmount={cureAmount}
+        cureEvidenceId={cureEvidenceId}
+        cureEvidenceNote={cureEvidenceNote}
+        submitting={cureSubmitting}
+        onCureTypeChange={setCureType}
+        onAmountChange={setCureAmount}
+        onEvidenceIdChange={setCureEvidenceId}
+        onEvidenceNoteChange={setCureEvidenceNote}
+        onSubmit={() => void applyCureAndRerun()}
+      />
+
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div>
@@ -855,6 +925,79 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function ApprovalReadinessPanel({
+  gate,
+  cureType,
+  cureAmount,
+  cureEvidenceId,
+  cureEvidenceNote,
+  submitting,
+  onCureTypeChange,
+  onAmountChange,
+  onEvidenceIdChange,
+  onEvidenceNoteChange,
+  onSubmit,
+}: {
+  gate: ChiefDealOrchestrationPlan["approvalReadinessGate"] | null;
+  cureType: string;
+  cureAmount: string;
+  cureEvidenceId: string;
+  cureEvidenceNote: string;
+  submitting: boolean;
+  onCureTypeChange: (value: string) => void;
+  onAmountChange: (value: string) => void;
+  onEvidenceIdChange: (value: string) => void;
+  onEvidenceNoteChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const blockers = gate?.blockers ?? [];
+  return (
+    <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/20">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="text-xs font-black uppercase tracking-wide text-amber-700 dark:text-amber-300">Approval Readiness Gate v2</p>
+          <h2 className="mt-1 text-xl font-black text-slate-950 dark:text-white">
+            {gate?.pass ? "승인 가능성 검토 통과" : "승인 전 보완이 필요합니다"}
+          </h2>
+          <p className="mt-1 text-xs leading-5 text-amber-900 dark:text-amber-100">
+            차단 리스크 {gate?.blockingIssueCount ?? blockers.length}건 · 경고 {gate?.warningCount ?? 0}건 · cure 선택 후 증빙을 연결하면 PF 재계산과 Gate 재평가가 실행됩니다.
+          </p>
+        </div>
+        <span className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-black text-amber-800 dark:border-amber-700 dark:bg-slate-950 dark:text-amber-200">
+          {gate?.status ?? "not_ready"}
+        </span>
+      </div>
+      {blockers.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {blockers.slice(0, 5).map((item, index) => (
+            <span key={`${item.code ?? "blocker"}-${index}`} className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-800 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">
+              {item.code ?? "승인 차단"}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-4 grid gap-2 md:grid-cols-[1.1fr_0.8fr_1.2fr_1.4fr_auto]">
+        <select value={cureType} onChange={(event) => onCureTypeChange(event.target.value)} className="h-10 rounded border border-amber-200 bg-white px-2 text-sm font-semibold text-slate-800 dark:border-amber-800 dark:bg-slate-950 dark:text-slate-100">
+          <option value="additional_collateral">추가 담보</option>
+          <option value="pf_reduction">선순위/PF 감액</option>
+          <option value="equity_dsra_injection">Equity·DSRA 증액</option>
+          <option value="bulk_sale">Bulk Sale·선매입</option>
+          <option value="refinancing">준공 후 Refinancing</option>
+          <option value="cash_sweep_strengthening">상환계좌 배분 강화</option>
+        </select>
+        <input value={cureAmount} onChange={(event) => onAmountChange(event.target.value)} inputMode="numeric" placeholder="금액(원)" className="h-10 rounded border border-amber-200 bg-white px-3 text-sm font-semibold dark:border-amber-800 dark:bg-slate-950 dark:text-white" />
+        <input value={cureEvidenceId} onChange={(event) => onEvidenceIdChange(event.target.value)} placeholder="증빙 ID 또는 출처 URL" className="h-10 rounded border border-amber-200 bg-white px-3 text-sm font-semibold dark:border-amber-800 dark:bg-slate-950 dark:text-white" />
+        <input value={cureEvidenceNote} onChange={(event) => onEvidenceNoteChange(event.target.value)} placeholder="증빙 설명·페이지·셀 위치" className="h-10 rounded border border-amber-200 bg-white px-3 text-sm font-semibold dark:border-amber-800 dark:bg-slate-950 dark:text-white" />
+        <button type="button" onClick={onSubmit} disabled={submitting} className="inline-flex h-10 items-center justify-center gap-2 rounded bg-slate-950 px-3 text-sm font-black text-white disabled:opacity-50 dark:bg-white dark:text-slate-950">
+          {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          {submitting ? "재계산 중" : "증빙 저장·재계산"}
+        </button>
+      </div>
+      <p className="mt-2 text-[11px] font-semibold text-amber-800 dark:text-amber-200">현재 증빙 첨부는 원본 파일 자체가 아니라 Evidence ID/출처 locator를 연결합니다. 원본 파일은 자료 업로드 화면에서 먼저 보관해야 합니다.</p>
+    </section>
   );
 }
 

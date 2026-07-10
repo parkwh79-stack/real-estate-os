@@ -201,6 +201,11 @@ def resolve_project_parcels_use_case(
                 break
         probe = f"{prefix} {first_lot}".strip() if first_lot else prefix
         legal_dong_code = dong_code_resolver(probe) or dong_code_resolver(prefix)
+    # The 법정동코드 above belongs to the project address's 동. A parcel in a
+    # DIFFERENT 동 must NOT be constructed from it (that would stamp a wrong-동
+    # parcel's PNU/공시지가 as "verified"). Such parcels fall through to the
+    # address resolver, which swaps the 동 per parcel.
+    prefix_dong = _dong_of(prefix)
 
     results: List[Dict[str, Any]] = []
     resolved_count = 0
@@ -223,7 +228,9 @@ def resolve_project_parcels_use_case(
             continue
 
         # --- Primary: precise PNU construction from the 법정동코드 + 지번 ---------
-        if not legacy_mode and legal_dong_code:
+        head_dong = str(head.get("dong") or "").strip()
+        same_dong = not (head_dong and prefix_dong and head_dong != prefix_dong)
+        if not legacy_mode and legal_dong_code and same_dong:
             from integrations.vworld import build_pnu
 
             constructed = build_pnu(legal_dong_code, _parcel_lot(head))

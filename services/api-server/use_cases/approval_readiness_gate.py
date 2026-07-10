@@ -26,17 +26,21 @@ AUTO_SUPPLEMENT_REVIEW_RISK_TOKENS = {
     "NEEDS_APPROVAL",
     "CANDIDATE_NEEDS_APPROVAL",
 }
-# Pod AI Review finding categories that are grounded in deterministic signals
-# (evidence gaps, source-locator gaps, data-quality, and scenario-engine risk
-# flags). Only these can block readiness — per the invariant that an LLM opinion
-# alone must never gate PASS/FAIL. Advisory categories (guardrail, info) never block.
-DETERMINISTIC_REVIEW_CATEGORIES = {
-    "missing_evidence",
-    "source_locator_gap",
-    "data_quality",
-    "risk_note",
-    "recalculation_needed",
-}
+# Deterministic Pod AI Review provenance is guaranteed by reading the review's
+# `deterministicFindings` (set by the reviewer regardless of whether an LLM
+# supplied the display findings) — never the merged/LLM `findings`. So gating is
+# by SEVERITY, excluding only advisory categories. An LLM opinion alone can never
+# gate PASS/FAIL (AGENTS.md §1).
+ADVISORY_REVIEW_CATEGORIES = {"guardrail", "info", "note"}
+
+
+def _deterministic_review_findings(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The review's deterministic findings (falls back to `findings` for records
+    written before the field existed). Only well-formed dict findings."""
+    findings = review.get("deterministicFindings")
+    if not isinstance(findings, list):
+        findings = review.get("findings") or []
+    return [f for f in findings if isinstance(f, dict)]
 
 
 def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
@@ -136,9 +140,9 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         {"podKey": pod_key, "finding": finding}
         for pod_key, review in latest_review_by_pod.items()
         if str(review.get("reviewStatus") or "").lower() not in RESOLVED_REVIEW_STATUSES
-        for finding in (review.get("findings") or [])
+        for finding in _deterministic_review_findings(review)
         if str(finding.get("severity") or "").lower() == "blocking"
-        and str(finding.get("category") or "") in DETERMINISTIC_REVIEW_CATEGORIES
+        and str(finding.get("category") or "").lower() not in ADVISORY_REVIEW_CATEGORIES
     ]
 
     has_records = bool(records)
@@ -180,7 +184,7 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
             "DEAL_STATE_RECORDS_PRESENT",
             has_records,
             "Deal State records must exist before treating the project as approval-ready.",
-            "warning",
+            "blocking",
         ),
         _gate(
             "DEAL_STATE_BLOCKING_RISKS_CLEARED",
@@ -190,25 +194,25 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         ),
         _gate(
             "DEAL_STATE_REQUIRED_EVIDENCE_PRESENT",
-            not has_records or bool(evidence_records),
+            has_records and bool(evidence_records),
             "At least one source-backed evidence record must be present in Deal State.",
             "blocking",
         ),
         _gate(
             "DEAL_STATE_REPORT_GRADE_METRICS_PRESENT",
-            not has_records or bool(deterministic_metrics),
+            has_records and bool(deterministic_metrics),
             "Report-grade metrics must come from deterministic CalculationRun records.",
             "blocking",
         ),
         _gate(
             "DEAL_STATE_CORE_METRICS_LATEST",
-            not has_records or not stale_metrics,
+            has_records and not stale_metrics,
             f"{len(stale_metrics)} metric(s) are not sourced from the latest CalculationRun for their engine.",
             "blocking",
         ),
         _gate(
             "DEAL_STATE_ASSUMPTION_OVERRIDES_APPROVED",
-            not has_records or not has_assumption_requirement or bool(approved_assumptions) or bool(active_overrides),
+            has_records and (not has_assumption_requirement or bool(approved_assumptions) or bool(active_overrides)),
             "Assumption conflicts or assumption records require an approved assumption or active assumption override.",
             "blocking",
         ),

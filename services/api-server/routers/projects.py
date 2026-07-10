@@ -3029,6 +3029,86 @@ def _validate_supplement_and_revalidate_parsed_facts(
     }
 
 
+@router.post("/{project_id}/chief-orchestration/unsold-ltv-cure")
+def apply_unsold_ltv_cure_and_rerun(project_id: str, request: Request, input_data: Dict[str, Any]):
+    """Persist a source-backed Unsold LTV cure, rerun PF review, and refresh Gate v2."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "project:write")
+    payload = input_data or {}
+    cure_type = str(payload.get("cureType") or payload.get("cure_type") or "").strip()
+    amount = float(payload.get("amount") or 0)
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    evidence_id = str(
+        evidence.get("evidenceId")
+        or evidence.get("sourceUrlOrEvidenceId")
+        or evidence.get("source_url_or_evidence_id")
+        or ""
+    ).strip()
+    if not cure_type:
+        raise HTTPException(status_code=400, detail="cureType is required")
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be greater than zero")
+    if not evidence_id:
+        raise HTTPException(status_code=400, detail="Source-backed evidenceId or sourceUrlOrEvidenceId is required")
+
+    actor = str(identity_context_from_request(request).get("userId") or "chief_deal_orchestrator")
+    cure_record = {
+        "cureId": str(payload.get("cureId") or f"cure-{project_id}-unsold-ltv-{cure_type}-{int(amount)}"),
+        "cureType": cure_type,
+        "status": "active",
+        "amount": amount,
+        "riskCodes": ["UNSOLD_LTV_BREACH"],
+        "reviewedBy": actor,
+        "description": str(payload.get("description") or "Source-backed Unsold LTV cure selected in Chief Deal Room."),
+        "evidenceIds": [evidence_id],
+        "sourceUrlOrEvidenceId": evidence_id,
+        "sourceLocators": evidence.get("sourceLocators") or evidence.get("sourceLocator") or [],
+        "sourceName": evidence.get("sourceName"),
+        "sourceType": evidence.get("sourceType"),
+        "note": evidence.get("note"),
+    }
+    try:
+        saved_cure = upsert_restructuring_cure_record(project_id, cure_record)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    project_data = attach_approved_assumption_overrides(project_id, PROJECTS_DB[project_id])
+    project_data = attach_active_restructuring_cures(project_id, project_data)
+    project_data = dict(project_data)
+    project_data["adoptedRestructuringCures"] = [saved_cure]
+    rerun = run_and_save_pf_review_use_case(
+        orchestration_repository(),
+        project_id,
+        project_data,
+        {"trigger": "unsold_ltv_cure", "cureId": saved_cure.get("cureId")},
+    )
+    PROJECTS_DB[project_id] = project_data
+    record_sensitive_project_event(
+        request,
+        event_type="unsold_ltv_cure_rerun_completed",
+        project_id=project_id,
+        metadata={
+            "cureId": saved_cure.get("cureId"),
+            "cureType": cure_type,
+            "amount": amount,
+            "evidenceId": evidence_id,
+            "authorization": authz.get("authorization"),
+        },
+    )
+    artifacts = rerun.get("artifacts") or {}
+    rerun_response = {**rerun, "projectId": project_id}
+    return {
+        "schemaVersion": "realytics-unsold-ltv-cure-rerun-v1",
+        "projectId": project_id,
+        "cure": saved_cure,
+        "calculationRunIds": rerun.get("calculationRunIds") or {},
+        "restructuringPlan": artifacts.get("restructuringPlan"),
+        "approvalReadinessGate": artifacts.get("approvalReadinessGate"),
+        "run": rerun_response,
+    }
+
+
 def _normalize_workspace_page(page: str) -> str:
     normalized = (page or "overview").replace("-", "_")
     aliases = {

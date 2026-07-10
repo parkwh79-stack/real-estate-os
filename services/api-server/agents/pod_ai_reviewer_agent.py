@@ -80,6 +80,11 @@ class PodAIReviewerAgent:
             findings.extend(deterministic["guardrailFindings"])
 
         review_status = _status_from_findings(findings)
+        # Always keep the DETERMINISTIC findings separately, even when an LLM
+        # review supplies the display `findings`. Downstream gating (Approval
+        # Gate, Risk Committee, report evidence links) must judge from these —
+        # never from an LLM opinion alone (AGENTS.md §1).
+        deterministic_findings = deterministic["findings"]
         confidence = _bounded_float(review_payload.get("confidence"), default=deterministic["confidence"])
         review_id = f"pod-ai-review:{pod_key}:{uuid4()}"
         report_fragments = review_payload.get("reportFragments") if isinstance(review_payload.get("reportFragments"), dict) else deterministic["reportFragments"]
@@ -97,6 +102,7 @@ class PodAIReviewerAgent:
             "reviewStatus": review_status,
             "confidence": confidence,
             "findings": findings,
+            "deterministicFindings": deterministic_findings,
             "handoffs": _normalize_handoffs(review_payload.get("handoffs"), agent_id=agent_id) if review_payload else deterministic["handoffs"],
             "reportFragments": report_fragments,
             "documentFacts": document_facts,

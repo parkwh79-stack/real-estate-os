@@ -243,3 +243,47 @@ def test_pnu_construction_falls_back_to_address_when_no_dong_code():
 
     assert calls["resolver"] == 1  # fell back to address resolver
     assert result["resolvedCount"] == 1
+
+
+def test_different_dong_parcel_not_constructed_with_wrong_dong_code():
+    """A parcel in a different 동 must NOT be stamped with the project 동's code
+    (regression: wrong-동 PNU/공시지가 marked 'verified'). It falls through to the
+    address resolver, which handles the 동 correctly."""
+    repo = _FakeRepo(
+        {
+            "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+            "land_acquisition": [
+                {"addressFragment": "상갈동 13", "dong": "상갈동", "lotNumber": "13"},
+                {"addressFragment": "보라동 62", "dong": "보라동", "lotNumber": "62"},
+            ],
+        }
+    )
+    address_calls = []
+
+    def _dong_code(addr):
+        return "4146310300"  # 상갈동 code, regardless of probe
+
+    def _lookup(pnu):
+        # VWorld returns the parcel that PNU actually addresses (lot derived from
+        # the PNU's 본번/부번) — 상갈동 62 exists for the wrongly-constructed PNU.
+        bon, bu = int(pnu[11:15]), int(pnu[15:19])
+        jibun = f"{bon}-{bu}" if bu else f"{bon}"
+        return {"status": "resolved", "pnu": pnu, "lotNumber": jibun, "officialLandPricePerSqm": 999}
+
+    def _addr_resolver(address):
+        address_calls.append(address)
+        return {"status": "parcel_unresolved"}
+
+    result = resolve_project_parcels_use_case(
+        repo, "1", resolver=_addr_resolver, dong_code_resolver=_dong_code, pnu_lookup=_lookup
+    )
+
+    by_lot = {r["parcel"]: r for r in result["results"]}
+    # 상갈동 13 (same 동) is constructed + verified.
+    assert by_lot["상갈동 13"]["method"] == "pnu_construction"
+    assert repo.project["land_acquisition"][0]["pnu"] == "4146310300100130000"
+    # 보라동 62 (different 동) must NOT be construction-stamped with 상갈동's PNU.
+    assert by_lot["보라동 62"].get("method") != "pnu_construction"
+    assert "pnu" not in repo.project["land_acquisition"][1]
+    # It went to the address resolver (which would swap the 동).
+    assert any("보라동" in a for a in address_calls)

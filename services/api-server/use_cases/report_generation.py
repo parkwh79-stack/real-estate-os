@@ -51,24 +51,21 @@ REPORT_SECTION_CATEGORIES = {
 
 # Report-section category -> Chief pods whose Pod AI Review findings back that
 # section, so a report paragraph carries the reviewer's evidence gaps / caveats.
+# cost_schedule backs the feasibility/cashflow sections (cost + schedule feed the
+# cash-flow / feasibility numbers), else its findings would never reach a section.
 _SECTION_CATEGORY_PODS = {
     "land": ("land_legal",),
     "market": ("market_product",),
-    "feasibility": ("feasibility_cashflow",),
-    "cashflow": ("feasibility_cashflow",),
+    "feasibility": ("feasibility_cashflow", "cost_schedule"),
+    "cashflow": ("feasibility_cashflow", "cost_schedule"),
     "pf": ("pf_credit",),
     "risk": ("pf_credit", "land_legal", "public_policy"),
 }
 
-# Only deterministic-grounded findings become report-paragraph evidence — an LLM
-# opinion alone (guardrail/info) must never appear as report-grade evidence.
-_DETERMINISTIC_REVIEW_CATEGORIES = {
-    "missing_evidence",
-    "source_locator_gap",
-    "data_quality",
-    "risk_note",
-    "recalculation_needed",
-}
+# Report-paragraph evidence is drawn from the review's deterministic findings
+# (provenance guaranteed) filtered by severity — an LLM opinion alone (advisory
+# categories) must never appear as report-grade evidence.
+_ADVISORY_REVIEW_CATEGORIES = {"guardrail", "info", "note"}
 
 
 def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str, Any]]]:
@@ -91,6 +88,9 @@ def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str
     for pod_key, review in latest_by_pod.items():
         if str(review.get("reviewStatus") or "").lower() in {"approved", "waived", "resolved"}:
             continue
+        source = review.get("deterministicFindings")
+        if not isinstance(source, list):
+            source = review.get("findings") or []
         findings = [
             {
                 "findingId": f.get("findingId"),
@@ -101,8 +101,10 @@ def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str
                 "message": f.get("message"),
                 "recommendedAction": f.get("recommendedAction"),
             }
-            for f in (review.get("findings") or [])
-            if str(f.get("category") or "") in _DETERMINISTIC_REVIEW_CATEGORIES
+            for f in source
+            if isinstance(f, dict)
+            and str(f.get("severity") or "").lower() in {"blocking", "high", "medium"}
+            and str(f.get("category") or "").lower() not in _ADVISORY_REVIEW_CATEGORIES
         ]
         if findings:
             out[pod_key] = findings

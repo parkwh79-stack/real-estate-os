@@ -107,6 +107,25 @@ def test_chief_orchestration_endpoints():
     assert all_body["runAllSummary"]["completedCount"] >= 1
     assert "rows" in all_body["runAllSummary"]
 
+    cure_res = client.post(
+        f"/projects/{project_id}/chief-orchestration/unsold-ltv-cure",
+        json={
+            "cureType": "additional_collateral",
+            "amount": 1000000,
+            "evidence": {
+                "evidenceId": "test-collateral-evidence-001",
+                "sourceType": "manual_upload",
+                "note": "Test evidence locator",
+            },
+        },
+    )
+    assert cure_res.status_code == 200
+    cure_body = cure_res.json()
+    assert cure_body["cure"]["status"] == "active"
+    assert cure_body["cure"]["evidenceIds"] == ["test-collateral-evidence-001"]
+    assert "approvalReadinessGate" in cure_body
+    assert cure_body["run"]["projectId"] == project_id
+
 
 def test_workspace_context_persists_shared_deal_state_and_page_data():
     client = TestClient(app)

@@ -30,17 +30,10 @@ from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.track_workflows import get_track_workflow_definition, normalize_workflow_track
 
-# Pod AI Review finding categories grounded in deterministic signals (evidence
-# gaps, source-locator gaps, data quality, scenario-engine risk flags). Only
-# these may escalate an AI Risk Committee opinion — an LLM opinion alone
-# (guardrail/info) must never move a committee stance (AGENTS.md §1).
-_DETERMINISTIC_REVIEW_CATEGORIES = {
-    "missing_evidence",
-    "source_locator_gap",
-    "data_quality",
-    "risk_note",
-    "recalculation_needed",
-}
+# An LLM opinion alone must never move a committee stance (AGENTS.md §1). We read
+# the review's `deterministicFindings` (deterministic provenance guaranteed) and
+# gate by SEVERITY, excluding only advisory categories.
+_ADVISORY_REVIEW_CATEGORIES = {"guardrail", "info", "note"}
 
 
 def _load_pod_ai_review_findings(project_id: str) -> Dict[str, List[Dict[str, Any]]]:
@@ -66,11 +59,15 @@ def _load_pod_ai_review_findings(project_id: str) -> Dict[str, List[Dict[str, An
     for pod_key, review in latest_by_pod.items():
         if str(review.get("reviewStatus") or "").lower() in {"approved", "waived", "resolved"}:
             continue
+        source = review.get("deterministicFindings")
+        if not isinstance(source, list):
+            source = review.get("findings") or []
         relevant = [
             finding
-            for finding in (review.get("findings") or [])
-            if str(finding.get("severity") or "").lower() in {"blocking", "high"}
-            and str(finding.get("category") or "") in _DETERMINISTIC_REVIEW_CATEGORIES
+            for finding in source
+            if isinstance(finding, dict)
+            and str(finding.get("severity") or "").lower() in {"blocking", "high"}
+            and str(finding.get("category") or "").lower() not in _ADVISORY_REVIEW_CATEGORIES
         ]
         if relevant:
             findings_by_pod[pod_key] = relevant
