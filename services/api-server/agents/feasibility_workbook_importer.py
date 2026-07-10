@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from openpyxl import load_workbook
 
 from agents.feasibility_workbook_validator import validate_feasibility_workbook
+from agents.legacy_bonri_workbook_profile import legacy_bonri_registry_context
 from schemas.feasibility_study import FeasibilityStudyV2
 
 
@@ -104,9 +105,11 @@ def _import_legacy_bonri(
             "financing": _legacy_financing(cash_flow),
             "schedule": _legacy_schedule(input_sheet, source_name),
             "scenarios": _default_scenarios(),
+            "monthly_cash_flow": _legacy_monthly_cash_flow(cash_flow, source_name),
             "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, _max_minus_from_cash_flow(cash_flow)),
             "raw_import": {
                 "profile": validation.get("profile"),
+                "sampleProfile": legacy_bonri_registry_context(source_name),
                 "validationStatus": validation.get("status"),
                 "sourceWorkbook": source_name,
                 "unitScale": {
@@ -326,6 +329,63 @@ def _metrics(
         "ltc": (pf_amount or 0) / total_cost if total_cost else None,
         "exit_sale_rate": (pf_amount or 0) / total_revenue if total_revenue else None,
     }
+
+
+def _legacy_monthly_cash_flow(cash_flow: Any, source_name: str) -> List[Dict[str, Any]]:
+    """Map the legacy monthly CF block without inventing missing semantics.
+
+    The legacy sheet is row-oriented (line items in rows 100:158 and periods
+    in columns J:CH). We preserve the complete row matrix in each canonical
+    period's ``cashIn``/``cashOut`` buckets and keep the exact Excel range as
+    provenance. A later workbook adapter can classify individual rows into
+    named buckets without losing this imported source data.
+    """
+    rows: List[Dict[str, Any]] = []
+    start_col, end_col = 10, min(int(getattr(cash_flow, "max_column", 86) or 86), 86)
+    start_row, end_row = 100, min(int(getattr(cash_flow, "max_row", 158) or 158), 158)
+    # ``iter_rows`` is important here: repeated random access on an
+    # openpyxl read-only worksheet is disproportionately slow for legacy
+    # workbooks with large shared-string tables.
+    period_row = next(cash_flow.iter_rows(min_row=4, max_row=4, min_col=start_col, max_col=end_col, values_only=True), ())
+    source_rows = list(cash_flow.iter_rows(min_row=start_row, max_row=end_row, min_col=2, max_col=end_col, values_only=True))
+    for col in range(start_col, end_col + 1):
+        month_index = col - start_col
+        period_offset = col - start_col
+        period = period_row[period_offset] if period_offset < len(period_row) else None
+        period = period or f"M{month_index}"
+        cash_in: Dict[str, float] = {}
+        cash_out: Dict[str, float] = {}
+        for row_offset, values in enumerate(source_rows):
+            row = start_row + row_offset
+            # values begins at column B; the month value is offset by one
+            # because J is the tenth worksheet column.
+            value_offset = col - 2
+            value = _to_float(values[value_offset]) if value_offset < len(values) else None
+            if value is None:
+                continue
+            label = values[0] or (values[1] if len(values) > 1 else None) or f"row_{row}"
+            key = f"row_{row}_{str(label).strip()}"
+            # Preserve sign and original line item. Classification is only a
+            # display aid; the source row remains authoritative.
+            target = cash_in if value >= 0 else cash_out
+            target[key] = value
+        total_in = sum(cash_in.values())
+        total_out = sum(abs(v) for v in cash_out.values())
+        rows.append({
+            "month_index": month_index,
+            "period": str(period),
+            "cash_in": cash_in,
+            "cash_out": cash_out,
+            "net_cash_flow": total_in - total_out,
+            "source_locator": {
+                "sourceType": "excel_range",
+                "sourceDocument": source_name,
+                "sheetName": "2.현금흐름",
+                "cell": f"{_column_name(col)}{start_row}:{_column_name(col)}{end_row}",
+                "rowRange": f"B{start_row}:CH{end_row}",
+            },
+        })
+    return rows
 
 
 def _default_scenarios() -> List[Dict[str, Any]]:

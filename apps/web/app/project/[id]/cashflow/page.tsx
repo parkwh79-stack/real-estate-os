@@ -3,44 +3,32 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useParams } from "next/navigation";
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Calculator,
-  Download,
-  FileSpreadsheet,
-  Loader2,
-  PlayCircle,
-  RefreshCw,
-  ShieldCheck,
-  TrendingDown,
-  Wallet,
-} from "lucide-react";
+import { AlertTriangle, ArrowLeft, Calculator, Download, Loader2, PlayCircle, RefreshCw, ShieldCheck, TrendingDown, Wallet } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
-import { fetchLatestCashflow, type CashflowResult } from "../../../../lib/project-client";
+import { fetchLatestCalculationRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
+
+const SCENARIO_ENGINES = ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"];
 
 function formatEok(value?: number, digits = 1): string {
   if (typeof value !== "number" || Number.isNaN(value)) return "-";
-  return `${value.toLocaleString("ko-KR", {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })}억원`;
+  return `${value.toLocaleString("ko-KR", { minimumFractionDigits: digits, maximumFractionDigits: digits })}억원`;
 }
 
-function formatWonAsEok(value?: number, digits = 1): string {
-  if (typeof value !== "number" || Number.isNaN(value)) return "-";
-  return formatEok(value / 100_000_000, digits);
+function formatValue(value: unknown): string {
+  if (typeof value !== "number") return String(value ?? "-");
+  return value.toLocaleString("ko-KR", { maximumFractionDigits: 4 });
 }
 
-function cell(value: number): string {
-  if (Math.abs(value) < 0.05) return "-";
-  return value.toLocaleString("ko-KR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+function metric(run: CalculationRunRecord | null, keys: string[]): unknown {
+  const found = (run?.outputMetrics ?? []).find((item) => keys.includes(String(item.key ?? item.metricKey ?? "")));
+  return found?.value;
 }
 
 export default function ProjectCashflowPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
-  const [cf, setCf] = useState<CashflowResult | null>(null);
+  const [cashflow, setCashflow] = useState<CashflowResult | null>(null);
+  const [scenarioRuns, setScenarioRuns] = useState<Record<string, CalculationRunRecord | null>>({});
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,29 +37,29 @@ export default function ProjectCashflowPage() {
     setLoading(true);
     setError(null);
     try {
-      setCf(await fetchLatestCashflow(projectId));
+      const [cashflowResult, runs] = await Promise.all([
+        fetchLatestCashflow(projectId),
+        fetchLatestCalculationRuns(projectId, SCENARIO_ENGINES),
+      ]);
+      setCashflow(cashflowResult);
+      setScenarioRuns(runs);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Cash Flow 계산 결과를 불러오지 못했습니다.");
+      setError(err instanceof Error ? err.message : "계산 결과를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
   }, [projectId]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
-  const runFeasibilityCashflowPod = useCallback(async () => {
+  const runPod = useCallback(async () => {
     setRunning(true);
     setError(null);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/run-pod`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders("web") },
-        body: JSON.stringify({
-          podKey: "feasibility_cashflow",
-          options: { forceTrigger: "max_minus_exceeds_pf_limit" },
-        }),
+        body: JSON.stringify({ podKey: "feasibility_cashflow", options: { forceTrigger: "max_minus_exceeds_pf_limit" } }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(String(body.detail ?? "Feasibility-Cashflow Pod 실행에 실패했습니다."));
@@ -81,206 +69,48 @@ export default function ProjectCashflowPage() {
     } finally {
       setRunning(false);
     }
-  }, [projectId, load]);
+  }, [load, projectId]);
 
-  const maxMinusAbs = Math.abs(cf?.maxMinusEok ?? 0);
-  const s = cf?.summary ?? {};
-  const riskFlags = cf?.riskFlags ?? [];
-  const tableRows = useMemo(() => cf?.monthly.slice(0, 60) ?? [], [cf]);
+  const rows = useMemo(() => cashflow?.monthly.slice(0, 60) ?? [], [cashflow]);
+  const summary = cashflow?.summary ?? {};
+  const runId = cashflow?.runId ?? "-";
 
   return (
     <div className="space-y-6 pb-8">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex items-start gap-3">
-          <Link
-            href={`/project/${projectId}`}
-            className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
-            aria-label="프로젝트로 돌아가기"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
+          <Link href={`/project/${projectId}`} className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50" aria-label="프로젝트로 돌아가기"><ArrowLeft className="h-4 w-4" /></Link>
           <div>
-            <p className="text-xs font-black uppercase tracking-wider text-indigo-600 dark:text-indigo-300">
-              Feasibility-Cashflow Pod
-            </p>
-            <h1 className="mt-1 flex items-center gap-2 text-2xl font-black text-slate-950 dark:text-white">
-              <Wallet className="h-6 w-6 text-indigo-600" />
-              월별 Cash Flow / Max Minus
-            </h1>
-            <p className="mt-1 max-w-3xl text-sm font-semibold leading-6 text-slate-500">
-              샘플 사업수지 Excel의 `입력`, `사업수지`, `공정율`, `2.현금흐름` 구조를 기준으로 저장된 Cash Flow Engine 결과를 표시합니다.
-              고정 숫자는 표시하지 않으며, 결과가 없으면 Pod를 실행해 계산 artifact를 생성합니다.
-            </p>
+            <p className="text-xs font-black uppercase tracking-wider text-indigo-600">Feasibility-Cashflow Pod</p>
+            <h1 className="mt-1 flex items-center gap-2 text-2xl font-black text-slate-950"><Wallet className="h-6 w-6 text-indigo-600" />월별 현금흐름 및 Max Minus</h1>
+            <p className="mt-1 max-w-3xl text-sm font-semibold leading-6 text-slate-500">최신 CalculationRun의 월별 현금흐름, PF 인출, 상환·회수 시나리오를 같은 원장에서 확인합니다.</p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading || running}
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-          >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            새로고침
-          </button>
-          <button
-            type="button"
-            onClick={() => void runFeasibilityCashflowPod()}
-            disabled={loading || running}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-white dark:text-slate-950"
-          >
-            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
-            {running ? "Pod 실행 중" : "Feasibility-Cashflow Pod 실행"}
-          </button>
-          <a
-            href="/api/export-cf"
-            download="REALYTICS_Formula_CashFlow_Model.xlsx"
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-sm font-black text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900/60 dark:bg-indigo-950/30 dark:text-indigo-200"
-          >
-            <Download className="h-4 w-4" />
-            수식 Excel 다운로드
-          </a>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => void load()} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 disabled:opacity-40"><RefreshCw className="h-4 w-4" />새로고침</button>
+          <button type="button" onClick={() => void runPod()} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white disabled:opacity-40">{running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}{running ? "계산 중" : "Cash Flow 재실행"}</button>
+          <a href={`/api/export-cf?projectId=${encodeURIComponent(projectId)}`} download className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-sm font-black text-indigo-700"><Download className="h-4 w-4" />수식 Excel 다운로드</a>
         </div>
       </header>
 
-      {error ? (
-        <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-200">
-          {error}
-        </div>
-      ) : null}
-
-      {loading ? (
-        <div className="flex min-h-[260px] items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-500 dark:border-slate-800 dark:bg-slate-900">
-          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-          저장된 Cash Flow artifact를 조회하는 중입니다.
-        </div>
-      ) : !cf ? (
-        <EmptyState
-          title="아직 저장된 Cash Flow 계산 결과가 없습니다."
-          body="사업수지/상품구성/비용/일정 자료를 바탕으로 Feasibility-Cashflow Pod를 실행하면 월별 Cash Flow, Max Minus, PF 인출 필요액이 저장됩니다."
-          action={
-            <button
-              type="button"
-              onClick={() => void runFeasibilityCashflowPod()}
-              disabled={running}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-white dark:text-slate-950"
-            >
-              {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
-              Feasibility-Cashflow Pod 실행
-            </button>
-          }
-        />
-      ) : (
+      {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div> : null}
+      {loading ? <EmptyState title="CalculationRun을 조회하는 중입니다." body="프로젝트 원장에서 최신 계산 결과와 근거를 읽고 있습니다." loading /> : !cashflow ? <EmptyState title="저장된 Cash Flow 계산 결과가 없습니다." body="Feasibility-Cashflow Pod를 실행하면 실제 월별 Cash Flow와 PF 인출 결과가 저장됩니다." action={<button type="button" onClick={() => void runPod()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white"><PlayCircle className="h-4 w-4" />Pod 실행</button>} /> : (
         <>
           <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            <KpiCard
-              label="Max Minus"
-              value={formatEok(maxMinusAbs)}
-              sub={`M${cf.maxMinusMonth || "-"} 시점 누적 최저점`}
-              icon={<TrendingDown className="h-5 w-5 text-rose-600" />}
-              tone="text-rose-700 dark:text-rose-300"
-            />
-            <KpiCard
-              label="총 수입"
-              value={formatWonAsEok(s.totalRevenue)}
-              sub="분양/매각/임대 수입 가정"
-              icon={<Calculator className="h-5 w-5 text-emerald-600" />}
-            />
-            <KpiCard
-              label="총 사업비"
-              value={formatWonAsEok(s.totalProjectCost)}
-              sub="토지비·공사비·제경비·금융비"
-              icon={<FileSpreadsheet className="h-5 w-5 text-sky-600" />}
-            />
-            <KpiCard
-              label="PF 한도"
-              value={formatWonAsEok(s.pfLimit)}
-              sub={`총 인출 ${formatWonAsEok(s.totalPfDraw, 1)}`}
-              icon={<Wallet className="h-5 w-5 text-indigo-600" />}
-            />
-            <KpiCard
-              label="Funding Status"
-              value={String(s.status ?? "-")}
-              sub={cf.source === "chief_pod_artifact" ? "Chief Pod artifact" : "PF review run"}
-              icon={<ShieldCheck className="h-5 w-5 text-slate-600" />}
-            />
+            <KpiCard label="Max Minus" value={formatEok(Math.abs(cashflow.maxMinusEok))} sub={`M${cashflow.maxMinusMonth || "-"} 발생`} icon={<TrendingDown className="h-5 w-5 text-rose-600" />} tone="text-rose-700" />
+            <KpiCard label="총수입" value={formatEok(Number(summary.totalRevenue ?? 0) / 1e8)} sub="분양·매각·기타 수입" icon={<Calculator className="h-5 w-5 text-emerald-600" />} />
+            <KpiCard label="총사업비" value={formatEok(Number(summary.totalProjectCost ?? 0) / 1e8)} sub="토지비·공사비·금융비" icon={<Calculator className="h-5 w-5 text-sky-600" />} />
+            <KpiCard label="PF 한도" value={formatEok(Number(summary.pfLimit ?? 0) / 1e8)} sub={`총 인출 ${formatEok(Number(summary.totalPfDraw ?? 0) / 1e8)}`} icon={<Wallet className="h-5 w-5 text-indigo-600" />} />
+            <KpiCard label="계산 상태" value={String(summary.status ?? "완료")} sub={`CalculationRun ${runId.slice(0, 18)}`} icon={<ShieldCheck className="h-5 w-5 text-slate-600" />} />
           </section>
 
+          <ScenarioRegistryPanel runs={scenarioRuns} />
           <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 p-5 dark:border-slate-800">
-                <div>
-                  <h2 className="text-lg font-black text-slate-950 dark:text-white">월별 현금흐름표</h2>
-                  <p className="mt-1 text-xs font-semibold text-slate-500">
-                    단위: 억원. `2.현금흐름` 샘플 구조의 Cash-In, Cash-Out, Net CF, 누적 CF를 화면용으로 정규화했습니다.
-                  </p>
-                </div>
-                <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200">
-                  저장 artifact 기준
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[720px] border-collapse text-right text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-950/60">
-                      <th className="sticky left-0 z-10 bg-slate-50 p-3 text-left font-black dark:bg-slate-950">월차</th>
-                      <th className="p-3 font-black">Cash-In</th>
-                      <th className="p-3 font-black">Cash-Out</th>
-                      <th className="p-3 font-black">Net CF</th>
-                      <th className="p-3 font-black text-indigo-700 dark:text-indigo-300">누적 CF</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {tableRows.map((m) => (
-                      <tr key={m.period} className={m.period === `M${cf.maxMinusMonth}` ? "bg-rose-50/70 dark:bg-rose-950/20" : ""}>
-                        <td className="sticky left-0 z-10 bg-inherit p-3 text-left font-black text-slate-900 dark:text-white">{m.period}</td>
-                        <td className="p-3 text-slate-700 dark:text-slate-300">{cell(m.cashInEok)}</td>
-                        <td className="p-3 text-slate-700 dark:text-slate-300">{cell(m.cashOutEok)}</td>
-                        <td className={`p-3 font-bold ${m.netCashFlowEok < 0 ? "text-rose-600 dark:text-rose-300" : "text-slate-700 dark:text-slate-300"}`}>
-                          {cell(m.netCashFlowEok)}
-                        </td>
-                        <td className={`p-3 font-black ${m.cumulativeEok < 0 ? "text-rose-600 dark:text-rose-300" : "text-slate-950 dark:text-white"}`}>
-                          {cell(m.cumulativeEok)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">월별 Cash Flow</h2><p className="mt-1 text-xs font-semibold text-slate-500">저장된 CalculationRun의 실데이터입니다. 단위: 억원</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">원장 기준</span></div>
+              <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">Cash-In</th><th className="p-3">Cash-Out</th><th className="p-3">Net CF</th><th className="p-3">누적 CF</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.period} className={row.period === `M${cashflow.maxMinusMonth}` ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{row.cashInEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className="p-3">{row.cashOutEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className={`p-3 font-bold ${row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{row.netCashFlowEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className={`p-3 font-black ${row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{row.cumulativeEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div>
             </div>
-
-            <aside className="space-y-4">
-              <InfoPanel title="계산 근거">
-                <Fact label="Run / Artifact" value={cf.artifactKey || cf.runId} />
-                <Fact label="Artifact Type" value={cf.artifactType || cf.source} />
-                <Fact label="Completed At" value={cf.completedAt || "-"} />
-                <Fact label="Engine" value="realytics_cash_flow_engine_v1" />
-              </InfoPanel>
-
-              <InfoPanel title="샘플 Excel 반영 구조">
-                <ul className="space-y-2 text-xs font-semibold leading-5 text-slate-600 dark:text-slate-300">
-                  <li>`입력`: 사업명, 대지위치, 설계개요, 상품구성 입력</li>
-                  <li>`사업수지`: 총수입, 토지비, 공사비, 제경비, 금융비 집계</li>
-                  <li>`공정율`: 월차별 공정률과 공사비 배분 근거</li>
-                  <li>`2.현금흐름`: 월별 Cash-In/Out, Net CF, 누적 CF, Max Minus 산정</li>
-                </ul>
-              </InfoPanel>
-
-              <InfoPanel title="Risk Flags">
-                {riskFlags.length ? (
-                  <div className="space-y-2">
-                    {riskFlags.slice(0, 6).map((flag, index) => (
-                      <div key={String(flag.code ?? index)} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs dark:border-amber-900/60 dark:bg-amber-950/20">
-                        <p className="font-black text-amber-800 dark:text-amber-200">{String(flag.code ?? "RISK_FLAG")}</p>
-                        <p className="mt-1 font-semibold text-amber-700 dark:text-amber-300">{String(flag.message ?? flag.severity ?? "검토 필요")}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs font-semibold text-slate-500">저장된 Cash Flow 위험 플래그가 없습니다.</p>
-                )}
-              </InfoPanel>
-            </aside>
+            <aside className="space-y-4"><InfoPanel title="계산 근거"><Fact label="CalculationRun" value={runId} /><Fact label="Engine" value="cash_flow_engine" /><Fact label="완료 시각" value={cashflow.completedAt || "-"} /><Fact label="Source locator" value={JSON.stringify(cashflow.sourceMetadata ?? {})} /></InfoPanel><InfoPanel title="Cash Flow 위험"><RiskList flags={cashflow.riskFlags ?? []} /></InfoPanel></aside>
           </section>
         </>
       )}
@@ -288,56 +118,18 @@ export default function ProjectCashflowPage() {
   );
 }
 
-function EmptyState({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
-  return (
-    <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center dark:border-slate-700 dark:bg-slate-900">
-      <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
-      <p className="mt-4 text-lg font-black text-slate-950 dark:text-white">{title}</p>
-      <p className="mx-auto mt-2 max-w-2xl text-sm font-semibold leading-6 text-slate-500">{body}</p>
-      {action ? <div className="mt-5 flex justify-center">{action}</div> : null}
-    </div>
-  );
+function ScenarioRegistryPanel({ runs }: { runs: Record<string, CalculationRunRecord | null> }) {
+  const items = [
+    ["waterfall", "상환 Waterfall", ["waterfall.summary.shortfallFlagCount"]],
+    ["tranche_recovery", "Tranche별 회수율", ["tranche_recovery.senior"]],
+    ["unsold_ltv", "미분양 LTV", ["unsold_ltv.summary.maxUnsoldLtv"]],
+    ["discount_stress", "할인분양 Stress", ["discount_stress.discount10.exitSaleRate"]],
+  ] as const;
+  return <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{items.map(([key, title, keys]) => { const run = runs[key]; return <div key={key} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center justify-between"><p className="text-sm font-black text-slate-950">{title}</p><span className={`rounded-full px-2 py-1 text-[11px] font-black ${run ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{run ? "저장됨" : "미실행"}</span></div><p className="mt-3 text-xl font-black text-slate-900">{run ? formatValue(metric(run, [...keys])) : "-"}</p><p className="mt-1 break-all text-[11px] font-semibold text-slate-500">{run ? `${run.calculationRunId} · ${run.engineVersion ?? "-"}` : "해당 엔진을 실행하면 표시됩니다."}</p><p className="mt-2 break-all text-[10px] text-slate-400">{run?.sourceLocator ? JSON.stringify(run.sourceLocator) : "source locator 없음"}</p></div>; })}</section>;
 }
 
-function KpiCard({
-  label,
-  value,
-  sub,
-  icon,
-  tone,
-}: {
-  label: string;
-  value: string;
-  sub: string;
-  icon: ReactNode;
-  tone?: string;
-}) {
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs font-black uppercase tracking-wider text-slate-500">{label}</p>
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-50 dark:bg-slate-800">{icon}</div>
-      </div>
-      <p className={`mt-4 text-xl font-black ${tone ?? "text-slate-950 dark:text-white"}`}>{value}</p>
-      <p className="mt-1 text-xs font-semibold text-slate-500">{sub}</p>
-    </div>
-  );
-}
-
-function InfoPanel({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <h3 className="text-sm font-black text-slate-950 dark:text-white">{title}</h3>
-      <div className="mt-3">{children}</div>
-    </div>
-  );
-}
-
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between gap-3 border-b border-slate-100 py-2 text-xs last:border-b-0 dark:border-slate-800">
-      <span className="font-bold text-slate-500">{label}</span>
-      <span className="max-w-[220px] break-all text-right font-black text-slate-900 dark:text-slate-100">{value}</span>
-    </div>
-  );
-}
+function RiskList({ flags }: { flags: Array<Record<string, unknown>> }) { return flags.length ? <div className="space-y-2">{flags.slice(0, 8).map((flag, index) => <div key={String(flag.code ?? index)} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs"><p className="font-black text-amber-800">{String(flag.code ?? "RISK_FLAG")}</p><p className="mt-1 font-semibold text-amber-700">{String(flag.message ?? flag.severity ?? "검토 필요")}</p></div>)}</div> : <p className="text-xs font-semibold text-slate-500">저장된 Cash Flow 위험이 없습니다.</p>; }
+function EmptyState({ title, body, action, loading }: { title: string; body: string; action?: ReactNode; loading?: boolean }) { return <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center"><div className="mx-auto flex h-9 w-9 items-center justify-center text-amber-500">{loading ? <Loader2 className="h-8 w-8 animate-spin" /> : <AlertTriangle className="h-8 w-8" />}</div><p className="mt-4 text-lg font-black text-slate-950">{title}</p><p className="mx-auto mt-2 max-w-2xl text-sm font-semibold leading-6 text-slate-500">{body}</p>{action ? <div className="mt-5 flex justify-center">{action}</div> : null}</div>; }
+function KpiCard({ label, value, sub, icon, tone }: { label: string; value: string; sub: string; icon: ReactNode; tone?: string }) { return <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center justify-between"><p className="text-xs font-black tracking-wider text-slate-500">{label}</p>{icon}</div><p className={`mt-4 text-xl font-black ${tone ?? "text-slate-950"}`}>{value}</p><p className="mt-1 text-xs font-semibold text-slate-500">{sub}</p></div>; }
+function InfoPanel({ title, children }: { title: string; children: ReactNode }) { return <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><h3 className="text-sm font-black text-slate-950">{title}</h3><div className="mt-3">{children}</div></div>; }
+function Fact({ label, value }: { label: string; value: string }) { return <div className="flex items-start justify-between gap-3 border-b border-slate-100 py-2 text-xs last:border-0"><span className="font-bold text-slate-500">{label}</span><span className="max-w-[240px] break-all text-right font-black text-slate-900">{value}</span></div>; }

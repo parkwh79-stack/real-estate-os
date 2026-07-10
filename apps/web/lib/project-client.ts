@@ -86,6 +86,44 @@ interface RunListItem {
   status?: string;
   started_at?: string;
   completed_at?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  calculationRunId?: string;
+  engineKey?: string;
+  resultSnapshot?: Record<string, unknown>;
+  sourceLocator?: Record<string, unknown>;
+}
+
+export interface CalculationRunRecord {
+  calculationRunId: string;
+  engineKey: string;
+  engineVersion?: string;
+  inputEvidenceIds?: string[];
+  assumptionIds?: string[];
+  outputMetrics?: Array<Record<string, unknown>>;
+  riskIssueIds?: string[];
+  sourceLocator?: Record<string, unknown>;
+  scenario?: Record<string, unknown>;
+  resultSnapshot?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export async function fetchLatestCalculationRuns(
+  projectId: string,
+  engineKeys: string[],
+): Promise<Record<string, CalculationRunRecord | null>> {
+  const entries = await Promise.all(engineKeys.map(async (engineKey) => {
+    const res = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=${encodeURIComponent(engineKey)}&limit=1`, {
+      cache: "no-store",
+      headers: authHeaders("web"),
+    });
+    if (!res.ok) return [engineKey, null] as const;
+    const body = await res.json();
+    const record = Array.isArray(body.records) ? body.records[0] : null;
+    return [engineKey, record ?? null] as const;
+  }));
+  return Object.fromEntries(entries);
 }
 
 const WON = 1e8;
@@ -95,7 +133,7 @@ function cashflowFromResult(
   source: CashflowResult["source"],
   meta: { runId: string; completedAt?: string; artifactKey?: string; artifactType?: string },
 ): CashflowResult | null {
-  const rows = cf?.monthlyCashFlow;
+  const rows = cf?.monthlyCashFlow ?? cf?.rows;
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const summary = (cf?.summary ?? {}) as Record<string, number>;
   return {
@@ -108,11 +146,11 @@ function cashflowFromResult(
       const cashIn = (r.cashIn ?? {}) as Record<string, unknown>;
       const cashOut = (r.cashOut ?? {}) as Record<string, unknown>;
       return {
-        period: String(r.period ?? `M${r.monthIndex ?? ""}`),
-        cashInEok: Number(cashIn.totalCashIn ?? 0) / WON,
-        cashOutEok: Number(cashOut.totalCashOut ?? 0) / WON,
-        netCashFlowEok: Number(r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? 0) / WON,
-        cumulativeEok: Number(r.cumulativeCashFlowBeforePfDraw ?? r.cumulativeCashFlow ?? 0) / WON,
+        period: String(r.period ?? `M${r.monthIndex ?? r.month ?? ""}`),
+        cashInEok: Number(cashIn.totalCashIn ?? r.cash_in ?? 0) / WON,
+        cashOutEok: Number(cashOut.totalCashOut ?? r.cash_out ?? 0) / WON,
+        netCashFlowEok: Number(r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? r.net_cashflow ?? 0) / WON,
+        cumulativeEok: Number(r.cumulativeCashFlowBeforePfDraw ?? r.cumulativeCashFlow ?? r.cumulative_cashflow ?? 0) / WON,
       };
     }),
     maxMinusEok: Number(summary.maxMinus ?? 0) / WON,
@@ -135,6 +173,29 @@ function cashflowFromResult(
  * an honest "run the Feasibility-Cashflow Pod first" state instead of demo data.
  */
 export async function fetchLatestCashflow(projectId: string): Promise<CashflowResult | null> {
+  // CalculationRun is the canonical source for the screen. The snapshot is
+  // the exact deterministic output used by the run, including monthly rows;
+  // artifact lookup remains a compatibility fallback for older projects.
+  const runRes = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=cash_flow_engine&limit=10`, {
+    cache: "no-store",
+    headers: authHeaders("web"),
+  });
+  if (runRes.ok) {
+    const runBody = await runRes.json();
+    const runs: RunListItem[] = Array.isArray(runBody.records) ? runBody.records : [];
+    const latest = runs[0];
+    const snapshot = latest?.resultSnapshot;
+    if (snapshot) {
+      const parsed = cashflowFromResult(snapshot, "pf_review_orchestration", {
+        runId: String(latest.calculationRunId ?? latest.run_id ?? ""),
+        completedAt: String(latest.updatedAt ?? latest.completed_at ?? latest.createdAt ?? latest.started_at ?? ""),
+        artifactKey: String((latest.sourceLocator as Record<string, unknown> | undefined)?.artifactKey ?? ""),
+        artifactType: "calculation_run",
+      });
+      if (parsed) return parsed;
+    }
+  }
+
   const artifactRes = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/artifacts?pod_key=feasibility_cashflow`, {
     cache: "no-store",
     headers: authHeaders("web"),

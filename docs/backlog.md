@@ -2,6 +2,12 @@
 
 Updated: 2026-07-10
 
+Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
+
+## CalculationRun Registry v2 update
+
+2026-07-10: CalculationRun persistence now uses the `realytics-calculation-run-v2` contract. Each run preserves `calculationRunId`, `engineKey`, `engineVersion`, `inputEvidenceIds`, `assumptionIds`, `outputMetrics`, `riskIssueIds`, `riskIssues`, `sourceLocator`, `scenario`, `artifactRef`, and timestamps. Development feasibility analysis now creates a persisted `feasibility` run. The Bonri sample workbook profile records stable Korean sheet/cell/range locators for `입력`, `분양`, `사업수지`, `2.현금흐름`, and `공정율`; the real sample import was verified with revenue KRW 165,596,965,012 and cost KRW 151,841,565,314 from the workbook formulas. Remaining work: persist workbook import approval as a canonical FeasibilityStudyV2 version and add PostgreSQL-native migration/index coverage.
+
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
 | P2 | Web/UX | UI/UX 배선 전수 감사 (프론트↔백엔드) + map 페이지 apiBase 중복 정리 | Done | 2026-07-10: 사용자 요청으로 UI 배선 오류 전수 점검. **구조 레벨**(직접 대조): 프론트 API 경로 60여 개 전부 백엔드 라우트와 일치(메서드·쿼리 포함, `/monitoring/portfolio`=monitoring_router, `/auth/tenants`=POST 일치), podKey 4종(land_legal/market_product/feasibility_cashflow/pf_credit) 유효, `workspace/context?page=` 파라미터 7종 모두 계약 존재, ProjectWorkspaceNav·Sidebar 링크 전부 실존 페이지, Sidebar "AI 딜룸"은 프로젝트 컨텍스트에서만 노출+`/project/{id}/chief-orchestration`로 재배선(정상). **필드 레벨**(서브에이전트 정밀 감사): overview/input-package/land/marketability/feasibility/cashflow/pf-structure/risk/evidence/chief-orchestration/map/asset-comparison의 모든 `pageData.*`·응답 필드가 백엔드 빌더(`_workspace_page_data` 등)가 실제 emit하는 키와 스펠링 일치 — **필드명 불일치·죽은 버튼·응답 형태 불일치 0건**. 유일 수정: `map/page.tsx`가 `apiBase`를 import 안 하고 로컬 하드코딩 재선언(값 동일, 기능 무해) → 다른 페이지와 동일하게 `auth-client`에서 import하도록 정리. 웹 tsc 0. |
@@ -375,3 +381,14 @@ Updated: 2026-07-10
 | P3 | Dashboard| Portfolio monitoring | Planned | |
 | P3 | Deployment| Enterprise deployment | Planned | |
 | P3 | Payment | Payment system | Planned | |
+## Calculation and Pilot Integration Update (2026-07-10)
+
+- [x] Store the full deterministic calculation result snapshot on every CalculationRun so monthly Cash Flow and scenario matrices can be read without recomputation.
+- [x] Map the legacy Bonri workbook monthly block `2.현금흐름!J100:CH158` into `FeasibilityStudyV2.monthly_cash_flow` with Excel source locators.
+- [x] Materialize monthly Cash Flow metrics into `deal_state_records` with `calculationRunId` and month-level source locators.
+- [x] Persist Waterfall and Unsold LTV row metrics, Tranche Recovery metrics, and Discount Stress metrics in the CalculationRun registry.
+- [x] Make the web Cash Flow client query the latest `cash_flow_engine` CalculationRun before using legacy artifact fallback.
+- [x] Re-run the pilot fixture: 27/27 steps completed with zero runtime errors; approval readiness remains blocked by unresolved source-backed review conditions.
+- [ ] Run PostgreSQL with `REALYTICS_STORAGE_BACKEND=postgres` against a real managed database and execute the migration plus read/write smoke test.
+- [ ] Run Object Storage with `REALYTICS_OBJECT_STORAGE=s3` or MinIO and verify upload, download authorization, hash, and report export retention.
+- [ ] Execute the full pilot browser E2E: upload package, 112-parcel enrichment, market supplementation, calculations, cure evidence, rerun, and final gate review.

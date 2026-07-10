@@ -171,6 +171,26 @@ class ScenarioAssumption(BaseModel):
     delay_months: int = 0
 
 
+class MonthlyCashFlowRow(BaseModel):
+    """Canonical monthly cash-flow row shared by Excel, API, and CF engines."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    month_index: int
+    period: str
+    cash_in: Dict[str, float] = Field(default_factory=dict)
+    cash_out: Dict[str, float] = Field(default_factory=dict)
+    pf_draw: Dict[str, float] = Field(default_factory=dict)
+    loan_repayment: Dict[str, float] = Field(default_factory=dict)
+    operating_account_inflow: Optional[float] = None
+    operating_account_outflow: Optional[float] = None
+    repayment_reserve_inflow: Optional[float] = None
+    repayment_reserve_outflow: Optional[float] = None
+    net_cash_flow: Optional[float] = None
+    cumulative_cash_flow: Optional[float] = None
+    source_locator: Optional[Dict[str, Any]] = None
+
+
 class WorkbookSheetSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -279,6 +299,7 @@ class FeasibilityStudyV2(BaseModel):
     financing: List[FinancingTranche] = Field(default_factory=list)
     schedule: List[ScheduleMilestone] = Field(default_factory=list)
     scenarios: List[ScenarioAssumption] = Field(default_factory=list)
+    monthly_cash_flow: List[MonthlyCashFlowRow] = Field(default_factory=list)
     workbook: WorkbookMapping = Field(default_factory=default_workbook_mapping)
     metrics: Optional[FeasibilityMetrics] = None
     raw_import: Dict[str, Any] = Field(default_factory=dict)

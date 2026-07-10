@@ -84,6 +84,23 @@ def test_land_ledger_lot_number_normalization_handles_korean_variants():
         ) == expected
 
 
+def test_land_ledger_detects_modern_header_layout():
+    rows = [
+        ["title"],
+        ["번호", "지번(분할전)", "지번(분할후)", "지목", "현 소유자 (위탁자)", "지적 면적"],
+        [None] * 6,
+        [None] * 6,
+        [1, None, "6", "답", "상갈피에프브이(주)", 3788],
+    ]
+    result = LandLedgerAgent().analyze_rows(rows, sheet_name="상갈동", source_file="112-parcels.xlsx")
+    parcel = result["parcels"][0]
+    assert result["summary"]["parcelCount"] == 1
+    assert parcel["lotNumber"] == "6"
+    assert parcel["areaSqm"] == 3788
+    assert parcel["areaPy"] == pytest.approx(3788 * 0.3025)
+    assert parcel["owners"][0]["ownerName"] == "상갈피에프브이(주)"
+
+
 def test_land_ledger_batch_enrichment_resolves_pnu_price_and_registry_evidence():
     site = "\ub300"
     total = "\ud569  \uacc4"

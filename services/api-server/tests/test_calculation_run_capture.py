@@ -108,3 +108,38 @@ def test_empty_dump_yields_zero_summaries_not_errors():
         assert p["result"]["riskFlags"] == []
     assert stress_test_run_payload({})["result"]["summary"]["scenarioCount"] == 0
     assert stress_test_run_payload({})["engineKey"] == "discount_stress"
+
+
+def test_registry_payload_has_auditable_engine_and_source_contract():
+    payload = scenario_engine_run_payloads(_scenario_dump(), engines=["waterfall"])[0]
+    assert payload["engineKey"] == "waterfall"
+    assert payload["engineVersion"] == "calculation_scenario_engine_v1"
+    assert payload["artifactRef"]["section"] == "waterfallScenarios"
+    assert payload["result"]["riskFlags"][0]["code"] == "SENIOR_SHORTFALL"
+
+
+def test_scenario_registry_includes_waterfall_and_unsold_row_metrics():
+    payloads = scenario_engine_run_payloads({
+        "scenarioSetId": "sample",
+        "waterfallScenarios": [{"scenarioId": "base", "availableCash": 100, "totalShortfall": 5}],
+        "unsoldLtvMatrix": {"rows": [{"scenarioId": "base", "unsoldLtv": 0.82}]},
+        "trancheRecoveryMatrix": [],
+        "riskFlags": [],
+    })
+    waterfall = next(item for item in payloads if item["engineKey"] == "waterfall")
+    unsold = next(item for item in payloads if item["engineKey"] == "unsold_ltv")
+    assert "waterfall.base.availableCash" in waterfall["result"]["metrics"]
+    assert "unsold_ltv.base.unsoldLtv" in unsold["result"]["metrics"]
+
+
+def test_legacy_bonri_profile_exposes_sample_cell_locators():
+    from agents.legacy_bonri_workbook_profile import (
+        LEGACY_BONRI_PROFILE_ID,
+        legacy_bonri_registry_context,
+    )
+
+    context = legacy_bonri_registry_context("19.12.11 bonri.xlsx")
+    assert context["templateId"] == LEGACY_BONRI_PROFILE_ID
+    assert context["fieldLocators"]["revenue.total"]["sheet"] == "사업수지"
+    assert context["fieldLocators"]["revenue.total"]["cell"] == "D11"
+    assert context["fieldLocators"]["cashflow.monthly_sales_rates"]["range"] == "J8:CH10"

@@ -712,12 +712,67 @@ def _metric_rows_from_result(result: Dict[str, Any], *, prefix: str = "") -> lis
             continue
         if isinstance(value, (int, float)):
             rows.append({"key": f"{prefix}{key}", "value": value})
+    section_fields = {
+        "revenue": {"totalRevenue", "totalSalesRevenue"},
+        "costs": {"totalCost", "totalProjectCost"},
+        "developerReturns": {"developmentProfit", "profitMargin", "profitOnCost", "breakEvenSaleRate"},
+        "pfReadiness": {"ltvByRevenue", "ltcByCost", "dscr", "icr", "exitSaleRate", "recommendedPfLimit"},
+        "architecturalProgram": {"landAreaSqm", "grossFloorAreaSqm", "saleableAreaSqm", "unitCount"},
+        "summary": {"maxMinus", "peakLoanBalance", "totalRevenue", "totalCost", "developmentProfit"},
+    }
+    for section, fields in section_fields.items():
+        values = result.get(section)
+        if not isinstance(values, dict):
+            continue
+        for key in fields:
+            value = values.get(key)
+            if isinstance(value, (int, float)):
+                rows.append({"key": f"{prefix}{section}.{key}", "value": value})
     return rows
 
 
 def _risk_rows_from_result(result: Dict[str, Any]) -> list[Dict[str, Any]]:
     risks = result.get("riskFlags") or result.get("risk_flags") or result.get("riskIssues") or []
     return [risk for risk in risks if isinstance(risk, dict)]
+
+
+def _monthly_cashflow_metric_rows(result: Dict[str, Any], engine_key: str) -> list[Dict[str, Any]]:
+    """Index monthly rows in the deal-state ledger without replacing the run snapshot."""
+    rows: list[Dict[str, Any]] = []
+    monthly = result.get("monthlyCashFlow") or result.get("monthly_cash_flow") or result.get("rows") or []
+    if not isinstance(monthly, list):
+        return rows
+    for index, item in enumerate(monthly):
+        if not isinstance(item, dict):
+            continue
+        month = item.get("monthIndex", item.get("month_index", index))
+        period = item.get("period") or f"M{month}"
+        for field in ("netCashFlow", "net_cash_flow", "net_cashflow", "cumulativeCashFlowBeforePfDraw", "cumulativeCashFlow", "cumulative_cash_flow", "cumulative_cashflows", "pfDrawRequired", "totalPfDraw"):
+            value = item.get(field)
+            if isinstance(value, (int, float)):
+                canonical = {
+                    "netCashFlow": "netCashFlow",
+                    "net_cash_flow": "netCashFlow",
+                    "net_cashflow": "netCashFlow",
+                    "cumulativeCashFlowBeforePfDraw": "cumulativeCashFlow",
+                    "cumulativeCashFlow": "cumulativeCashFlow",
+                    "cumulative_cash_flow": "cumulativeCashFlow",
+                    "cumulative_cashflows": "cumulativeCashFlow",
+                    "pfDrawRequired": "pfDrawRequired",
+                    "totalPfDraw": "pfDraw",
+                }[field]
+                rows.append({
+                    "key": f"{engine_key}.monthly.{period}.{canonical}",
+                    "value": value,
+                    "unit": "KRW",
+                    "sourceLocator": item.get("sourceLocator") or item.get("source_locator") or {
+                        "sourceType": "calculation_run_monthly_row",
+                        "engineKey": engine_key,
+                        "monthIndex": month,
+                        "period": period,
+                    },
+                })
+    return rows
 
 
 def _persist_calculation_run(
@@ -735,15 +790,25 @@ def _persist_calculation_run(
         or artifact_ref
         or {"engineKey": engine_key}
     )
+    scenario = input_data.get("scenario") or input_data.get("scenarioContext") or input_data.get("scenario_context")
+    if not scenario and input_data.get("scenarioId"):
+        scenario = {"scenarioId": input_data.get("scenarioId")}
+    scenario = input_data.get("scenario") or input_data.get("scenarioContext") or input_data.get("scenario_context")
+    if not scenario and input_data.get("scenarioId"):
+        scenario = {"scenarioId": input_data.get("scenarioId")}
     return upsert_calculation_run_record(
         project_id,
         {
             "engineKey": engine_key,
             "engineVersion": input_data.get("engineVersion") or f"{engine_key}-v1",
-            "inputEvidenceIds": input_data.get("inputEvidenceIds") or input_data.get("evidenceIds") or [],
+            "inputEvidenceIds": input_data.get("inputEvidenceIds")
+            or input_data.get("evidenceIds")
+            or ([input_data.get("sourceDocumentId")] if input_data.get("sourceDocumentId") else []),
             "assumptionIds": input_data.get("assumptionIds") or [],
-            "outputMetrics": _metric_rows_from_result(result, prefix=f"{engine_key}."),
+            "outputMetrics": _metric_rows_from_result(result, prefix=f"{engine_key}." ) + _monthly_cashflow_metric_rows(result, engine_key),
             "riskIssues": _risk_rows_from_result(result),
+            "resultSnapshot": result,
+            "scenario": scenario or {},
             "artifactRef": artifact_ref or {},
             "sourceLocator": source_locator,
             "inputDigest": {
@@ -1857,7 +1922,7 @@ def list_project_calculation_runs(
     authorize_request(request, "project:read")
     records = list_calculation_run_records(project_id, engine_key=engine_key, limit=limit)
     return {
-        "schemaVersion": "realytics-calculation-run-list-v1",
+        "schemaVersion": "realytics-calculation-run-list-v2",
         "projectId": project_id,
         "engineKey": engine_key,
         "count": len(records),
@@ -2083,7 +2148,22 @@ def audit_project_source_locator_completeness(
 def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    return analyze_development_feasibility_use_case(PROJECTS_DB[project_id], input_data)
+    payload = input_data or {}
+    result = analyze_development_feasibility_use_case(PROJECTS_DB[project_id], payload)
+    run = _persist_calculation_run(
+        project_id,
+        engine_key="feasibility",
+        result=result,
+        input_data={
+            **payload,
+            "engineVersion": "development_feasibility_agent_v2",
+            "sourceLocator": payload.get("sourceLocator") or {
+                "sourceType": "project_feasibility_input",
+                "projectId": project_id,
+            },
+        },
+    )
+    return {**result, "calculationRunId": run["calculationRunId"]}
 
 
 @router.post("/{project_id}/asset-comparison/analyze")
@@ -2149,8 +2229,30 @@ def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
         "dscr": result["metrics"]["dscr"]["value"],
         "exit_sale_rate": result["metrics"]["exit_sale_rate"]["value"],
     }
-    run = _persist_calculation_run(project_id, engine_key="pf_metrics", result=response, input_data=input_data)
-    return {**response, "calculationRunId": run["calculationRunId"]}
+    pf_run = _persist_calculation_run(project_id, engine_key="pf_metrics", result=response, input_data=input_data)
+    ltv_run = _persist_calculation_run(
+        project_id,
+        engine_key="ltv_ltc_dscr",
+        result=response,
+        input_data={**(input_data or {}), "engineVersion": "ltv_ltc_dscr_v1"},
+        artifact_ref={"type": "pf_structure", "section": "metrics", "parentCalculationRunId": pf_run["calculationRunId"]},
+    )
+    exit_run = _persist_calculation_run(
+        project_id,
+        engine_key="exit_sale_rate",
+        result=response,
+        input_data={**(input_data or {}), "engineVersion": "exit_sale_rate_v1"},
+        artifact_ref={"type": "pf_structure", "section": "exit_sale_rate", "parentCalculationRunId": pf_run["calculationRunId"]},
+    )
+    return {
+        **response,
+        "calculationRunId": pf_run["calculationRunId"],
+        "calculationRunIds": {
+            "pf_metrics": pf_run["calculationRunId"],
+            "ltv_ltc_dscr": ltv_run["calculationRunId"],
+            "exit_sale_rate": exit_run["calculationRunId"],
+        },
+    }
 
 @router.post("/{project_id}/returns/calculate")
 def calculate_returns(project_id: str, input_data: Dict[str, Any] | None = None):

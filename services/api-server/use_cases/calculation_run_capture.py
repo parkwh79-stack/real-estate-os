@@ -135,6 +135,29 @@ def _discount_stress_metrics(scenarios: List[Dict[str, Any]]) -> Dict[str, Dict[
     return metrics
 
 
+def _scenario_row_metrics(rows: List[Dict[str, Any]], prefix: str) -> Dict[str, Dict[str, Any]]:
+    """Expose computed scenario cells as registry metrics with exact locators."""
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        scenario = row.get("scenarioId") or row.get("scenarioKey") or row.get("key") or index
+        for key, value in row.items():
+            if isinstance(value, (int, float)):
+                metrics[f"{prefix}.{scenario}.{key}"] = {
+                    "value": value,
+                    "unit": "KRW" if "amount" in key.lower() or "pool" in key.lower() else "ratio" if "rate" in key.lower() or "ratio" in key.lower() or "ltv" in key.lower() else None,
+                    "label": f"{prefix} {scenario} {key}",
+                    "sourceLocator": {
+                        "sourceType": f"scenario_{prefix}_row",
+                        "source": f"scenario.{prefix}",
+                        "path": f"{prefix}[index={index}].{key}",
+                        "scenarioId": scenario,
+                    },
+                }
+    return metrics
+
+
 def scenario_engine_run_payloads(
     dump: Dict[str, Any],
     *,
@@ -162,6 +185,7 @@ def scenario_engine_run_payloads(
                         "scenarioCount": len(rows),
                         "shortfallFlagCount": len(engine_flags),
                     },
+                    "metrics": _scenario_row_metrics(rows, "waterfall"),
                     "riskFlags": engine_flags,
                 },
                 "artifactRef": {"type": "scenario_set", "scenarioSetId": scenario_set_id, "section": "waterfallScenarios"},
@@ -187,7 +211,11 @@ def scenario_engine_run_payloads(
             {
                 "engineKey": "unsold_ltv",
                 "engineVersion": SCENARIO_ENGINE_VERSION,
-                "result": {"summary": summary, "riskFlags": engine_flags},
+                "result": {
+                    "summary": summary,
+                    "metrics": _scenario_row_metrics(rows, "unsold_ltv"),
+                    "riskFlags": engine_flags,
+                },
                 "artifactRef": {"type": "scenario_set", "scenarioSetId": scenario_set_id, "section": "unsoldLtvMatrix"},
             }
         )

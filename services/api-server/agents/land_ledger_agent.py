@@ -34,6 +34,39 @@ class LandLedgerParseError(ValueError):
     """Raised when a land ledger workbook cannot be read (empty/unsupported/corrupt)."""
 
 
+def _detect_column_map(rows: List[List[Any]]) -> Dict[str, int]:
+    """Detect common Korean land-ledger headers while preserving legacy fallback.
+
+    Some ledgers place owner and area before payment columns, while others use
+    a modern acquisition summary with ``지적 면적`` and ``현 소유자``. The
+    parser must bind by header meaning when available instead of silently
+    interpreting one column layout as another.
+    """
+    headers: Dict[str, int] = {}
+    for row in rows[:6]:
+        for index, value in enumerate(row):
+            text = str(value or "").replace("\n", " ").replace(" ", "").lower()
+            if not text:
+                continue
+            if "현소유자" in text or text in {"소유자", "매도인"}:
+                headers.setdefault("owner", index)
+            elif "지적면적" in text or text == "면적" or "토지면적" in text:
+                headers.setdefault("area_sqm", index)
+            elif "지목" in text:
+                headers.setdefault("land_category", index)
+            elif "분할후" in text:
+                headers["lot_number"] = index
+            elif "지번" in text:
+                headers.setdefault("lot_number", index)
+            elif text in {"번호", "순번", "연번"}:
+                headers.setdefault("sequence", index)
+    if "owner" in headers and "area_sqm" in headers and "lot_number" in headers:
+        # The sheet is a modern header-ledger. Do not guess payment columns
+        # that are not explicitly labelled; source evidence remains intact.
+        return headers
+    return {}
+
+
 def _read_workbook_rows(workbook_path: Path) -> tuple[List[List[Any]], str]:
     """Read the first worksheet of a .xls/.xlsx ledger into rows of cell values.
 
@@ -117,6 +150,7 @@ class LandLedgerAgent:
         source_file: Optional[str] = None,
         source_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        column_map = _detect_column_map(rows)
         data_rows = rows[4:]
         parcels: List[Dict[str, Any]] = []
         current: Optional[Dict[str, Any]] = None
@@ -128,15 +162,15 @@ class LandLedgerAgent:
 
             sequence = _to_int(_cell(row, 0))
             if sequence is not None:
-                current = self._new_parcel(row, sequence, row_index)
+                current = self._new_parcel(row, sequence, row_index, column_map=column_map)
                 parcels.append(current)
 
             if current is None:
                 continue
 
-            owner = str(_cell(row, 6) or "").strip()
+            owner = str(_cell(row, column_map.get("owner", 6)) or "").strip()
             if owner:
-                current["owners"].append(self._owner_record(row, row_index))
+                current["owners"].append(self._owner_record(row, row_index, column_map=column_map))
 
         lot_key_counts: Dict[str, int] = {}
         for parcel in parcels:
@@ -200,14 +234,17 @@ class LandLedgerAgent:
             analysis["importMetadata"]["validationStatus"] = validation["status"]
         return analysis
 
-    def _new_parcel(self, row: List[Any], sequence: int, row_index: int) -> Dict[str, Any]:
-        dong = _clean_text(_cell(row, 1))
-        lot_number = _clean_text(_cell(row, 2))
+    def _new_parcel(self, row: List[Any], sequence: int, row_index: int, *, column_map: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+        column_map = column_map or {}
+        dong = _clean_text(_cell(row, column_map.get("dong", 1)))
+        lot_number = _clean_text(_cell(row, column_map.get("lot_number", 2)))
         lot_parts = _parse_lot_number(lot_number)
-        land_category = _clean_text(_cell(row, 3))
-        area_sqm = _to_float(_cell(row, 4))
-        area_py = _to_float(_cell(row, 5))
-        total_contract_amount = _to_float(_cell(row, 8))
+        land_category = _clean_text(_cell(row, column_map.get("land_category", 3)))
+        area_sqm = _to_float(_cell(row, column_map.get("area_sqm", 4)))
+        area_py = _to_float(_cell(row, column_map.get("area_py", 5)))
+        if column_map.get("area_sqm") is not None and column_map.get("area_py") is None and area_sqm is not None:
+            area_py = area_sqm * SQM_TO_PY
+        total_contract_amount = _to_float(_cell(row, column_map.get("total_contract_amount", 8)))
         return {
             "sequence": sequence,
             "dong": dong,
@@ -236,10 +273,10 @@ class LandLedgerAgent:
             "officialLandPriceSource": None,
             "registryEvidence": None,
             "totalContractAmount": total_contract_amount,
-            "contractDate": _clean_text(_cell(row, 16)),
-            "depositDueDate": _clean_text(_cell(row, 17)),
-            "balanceDueDate": _clean_text(_cell(row, 18)),
-            "remarks": _clean_text(_cell(row, 19)),
+            "contractDate": _clean_text(_cell(row, column_map.get("contract_date", 16))),
+            "depositDueDate": _clean_text(_cell(row, column_map.get("deposit_due_date", 17))),
+            "balanceDueDate": _clean_text(_cell(row, column_map.get("balance_due_date", 18))),
+            "remarks": _clean_text(_cell(row, column_map.get("remarks", 19))),
             "owners": [],
             "evidence": [],
             "source": {
@@ -247,12 +284,12 @@ class LandLedgerAgent:
                 "sheet": "legacy-bonri-land-ledger-v1",
                 "rawCells": {
                     "sequence": _cell(row, 0),
-                    "dong": _cell(row, 1),
-                    "lotNumber": _cell(row, 2),
-                    "landCategory": _cell(row, 3),
-                    "areaSqm": _cell(row, 4),
-                    "areaPy": _cell(row, 5),
-                    "totalContractAmount": _cell(row, 8),
+                    "dong": _cell(row, column_map.get("dong", 1)),
+                    "lotNumber": _cell(row, column_map.get("lot_number", 2)),
+                    "landCategory": _cell(row, column_map.get("land_category", 3)),
+                    "areaSqm": _cell(row, column_map.get("area_sqm", 4)),
+                    "areaPy": _cell(row, column_map.get("area_py", 5)),
+                    "totalContractAmount": _cell(row, column_map.get("total_contract_amount", 8)),
                 },
             },
         }
@@ -285,41 +322,42 @@ class LandLedgerAgent:
             "changedAt": source_info.get("changed_at"),
         }
 
-    def _owner_record(self, row: List[Any], row_index: int) -> Dict[str, Any]:
-        owner_text = _clean_text(_cell(row, 6))
+    def _owner_record(self, row: List[Any], row_index: int, *, column_map: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+        column_map = column_map or {}
+        owner_text = _clean_text(_cell(row, column_map.get("owner", 6)))
         share = _parse_share(owner_text)
         return {
             "ownerName": _strip_share(owner_text),
             "rawOwnerText": owner_text,
             "share": share,
             "assetHint": _asset_hint(owner_text),
-            "individualContractAmount": _to_float(_cell(row, 7)),
-            "depositPaid": _to_float(_cell(row, 9)),
-            "depositUnpaid": _to_float(_cell(row, 10)),
-            "interimPayment": _to_float(_cell(row, 11)),
-            "balancePayment": _to_float(_cell(row, 12)),
-            "accountHolder": _clean_text(_cell(row, 13)),
-            "bankName": _clean_text(_cell(row, 14)),
-            "accountNumberMasked": _mask_account(_clean_text(_cell(row, 15))),
-            "contractDate": _clean_text(_cell(row, 16)),
-            "depositDueDate": _clean_text(_cell(row, 17)),
-            "balanceDueDate": _clean_text(_cell(row, 18)),
-            "remarks": _clean_text(_cell(row, 19)),
+            "individualContractAmount": _to_float(_cell(row, column_map.get("individual_contract_amount", 7))),
+            "depositPaid": _to_float(_cell(row, column_map.get("deposit_paid", 9))),
+            "depositUnpaid": _to_float(_cell(row, column_map.get("deposit_unpaid", 10))),
+            "interimPayment": _to_float(_cell(row, column_map.get("interim_payment", 11))),
+            "balancePayment": _to_float(_cell(row, column_map.get("balance_payment", 12))),
+            "accountHolder": _clean_text(_cell(row, column_map.get("account_holder", 13))),
+            "bankName": _clean_text(_cell(row, column_map.get("bank_name", 14))),
+            "accountNumberMasked": _mask_account(_clean_text(_cell(row, column_map.get("account_number", 15)))),
+            "contractDate": _clean_text(_cell(row, column_map.get("contract_date", 16))),
+            "depositDueDate": _clean_text(_cell(row, column_map.get("deposit_due_date", 17))),
+            "balanceDueDate": _clean_text(_cell(row, column_map.get("balance_due_date", 18))),
+            "remarks": _clean_text(_cell(row, column_map.get("remarks", 19))),
             "source": {
                 "row": row_index,
                 "rawCells": {
-                    "owner": _cell(row, 6),
-                    "individualContractAmount": _cell(row, 7),
-                    "depositPaid": _cell(row, 9),
-                    "depositUnpaid": _cell(row, 10),
-                    "interimPayment": _cell(row, 11),
-                    "balancePayment": _cell(row, 12),
+                    "owner": _cell(row, column_map.get("owner", 6)),
+                    "individualContractAmount": _cell(row, column_map.get("individual_contract_amount", 7)),
+                    "depositPaid": _cell(row, column_map.get("deposit_paid", 9)),
+                    "depositUnpaid": _cell(row, column_map.get("deposit_unpaid", 10)),
+                    "interimPayment": _cell(row, column_map.get("interim_payment", 11)),
+                    "balancePayment": _cell(row, column_map.get("balance_payment", 12)),
                 },
             },
             "security": {
                 "accountNumberStored": False,
                 "accountNumberEncrypted": None,
-                "accountNumberMasked": _mask_account(_clean_text(_cell(row, 15))),
+                "accountNumberMasked": _mask_account(_clean_text(_cell(row, column_map.get("account_number", 15)))),
                 "rawAccountRetained": False,
                 "auditRequiredForRawAccess": True,
             },

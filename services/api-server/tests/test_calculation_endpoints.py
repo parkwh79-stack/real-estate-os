@@ -28,6 +28,14 @@ def test_cashflow_endpoint_returns_monthly_rows_and_max_minus():
     assert body["max_minus_period"] == "M1"
     assert body["funding_gap"] == 50
 
+    runs = client.get(f"/projects/{project_id}/calculation-runs?engine_key=cashflow").json()["records"]
+    run = next(record for record in runs if record["calculationRunId"] == body["calculationRunId"])
+    assert run["resultSnapshot"]["period_count"] == 2
+    monthly = client.get(
+        f"/projects/{project_id}/deal-state-records?record_type=metric&calculation_run_id={body['calculationRunId']}"
+    ).json()["records"]
+    assert any(row["key"] == "cashflow.monthly.M1.netCashFlow" for row in monthly)
+
 
 def test_pf_structure_endpoint_returns_metric_statuses():
     client = TestClient(app)

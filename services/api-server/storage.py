@@ -1130,7 +1130,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
     }
     normalized = {
         **record,
-        "schemaVersion": record.get("schemaVersion") or "realytics-calculation-run-v1",
+        "schemaVersion": record.get("schemaVersion") or "realytics-calculation-run-v2",
         "projectId": project_id,
         "calculationRunId": str(run_id),
         "engineKey": engine_key,
@@ -1139,7 +1139,13 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
         "inputEvidenceIds": record.get("inputEvidenceIds") or record.get("input_evidence_ids") or [],
         "assumptionIds": record.get("assumptionIds") or record.get("assumption_ids") or [],
         "outputMetrics": record.get("outputMetrics") or record.get("output_metrics") or [],
+        # Keep the deterministic engine result for report/UI readback. The
+        # registry metrics remain the queryable index; this snapshot preserves
+        # monthly rows and matrix details without recomputation.
+        "resultSnapshot": record.get("resultSnapshot") or record.get("result_snapshot") or {},
         "riskIssues": record.get("riskIssues") or record.get("risk_issues") or [],
+        "riskIssueIds": record.get("riskIssueIds") or record.get("risk_issue_ids") or _risk_issue_ids(record),
+        "scenario": record.get("scenario") or record.get("scenarioContext") or record.get("scenario_context") or {},
         "artifactRef": record.get("artifactRef") or record.get("artifact_ref") or {},
         "sourceLocator": run_source_locator,
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
@@ -1242,6 +1248,19 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
             },
         )
     return normalized
+
+
+def _risk_issue_ids(record: Dict[str, Any]) -> list[str]:
+    """Derive stable risk identifiers without replacing the full risk payload."""
+    identifiers: list[str] = []
+    for risk in record.get("riskIssues") or record.get("risk_issues") or []:
+        if isinstance(risk, dict):
+            value = risk.get("riskIssueId") or risk.get("riskId") or risk.get("code") or risk.get("riskCode")
+        else:
+            value = risk
+        if value not in (None, "") and str(value) not in identifiers:
+            identifiers.append(str(value))
+    return identifiers
 
 
 def list_calculation_run_records(
