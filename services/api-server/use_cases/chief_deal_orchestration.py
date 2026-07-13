@@ -7,6 +7,7 @@ from core.text_normalization import build_term_surface_record
 from agents.orchestration_agent import OrchestrationAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
+from agents.market_product_depth_agent import MarketProductDepthAgent
 from agents.risk_register_agent import RiskRegisterAgent
 from agents.scenario_engine_agent import ScenarioEngineAgent
 from agents.pod_ai_reviewer_agent import PodAIReviewerAgent
@@ -23,8 +24,10 @@ from schemas.orchestration import (
     SharedDealStateGraph,
 )
 from use_cases.cash_flow import run_cash_flow_use_case
+from use_cases.covenant_eod import evaluate_covenant_eod_use_case
 from use_cases.developability_score import score_developability_use_case
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
+from use_cases.product_planning import compare_product_planning_use_case
 from use_cases.land_ledger_import import enrich_land_ledger_use_case
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
@@ -1075,6 +1078,18 @@ def _execute_pod_artifact(
         project_data["marketEvidenceReview"] = market_evidence_review
         project_data["marketability"] = artifact["marketabilityAnalysis"]
         project_data["marketabilityAnalysis"] = artifact["marketabilityAnalysis"]
+        try:  # deterministic product-planning program per asset type (reviewed by the pod AI reviewer)
+            artifact["productPlanning"] = compare_product_planning_use_case(project_data)
+            project_data["productPlanning"] = artifact["productPlanning"]
+        except Exception:  # never let product planning break the market pod
+            pass
+        try:  # market depth: 제공주체 분류·비교, 상품별 분양성 score, 흡수율, AI 추가작업 판단
+            artifact["marketProductDepth"] = MarketProductDepthAgent().analyze(
+                project_data, artifact["marketabilityAnalysis"], options=options,
+            )
+            project_data["marketProductDepth"] = artifact["marketProductDepth"]
+        except Exception:  # never let depth analysis break the market pod
+            pass
         return artifact
 
     if pod_key == "cost_schedule":
@@ -1148,6 +1163,11 @@ def _execute_pod_artifact(
             "riskRegister": risk_register,
             "creditReviewDecision": credit_review,
         }
+        try:  # deterministic covenant/EOD definitions (reviewed by the pod AI reviewer)
+            artifact["covenantEod"] = evaluate_covenant_eod_use_case(project_data)
+            project_data["covenantEod"] = artifact["covenantEod"]
+        except Exception:  # never let covenant derivation break the credit pod
+            pass
         project_data["pfStructureAnalysis"] = artifact["pfStructure"]
         project_data["pfStructure"] = artifact["pfStructure"]
         project_data["riskRegister"] = risk_register

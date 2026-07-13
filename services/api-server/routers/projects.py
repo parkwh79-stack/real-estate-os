@@ -87,6 +87,10 @@ from use_cases.chief_deal_orchestration import (
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
 from use_cases.asset_feasibility_comparison import compare_asset_feasibility_use_case
+from use_cases.covenant_eod import evaluate_covenant_eod_use_case
+from use_cases.product_planning import compare_product_planning_use_case
+from use_cases.market_product_depth import analyze_market_product_depth_use_case
+from use_cases.reanalyze_on_evidence import reanalyze_after_evidence_use_case
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
 from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_case
 from agents.land_ledger_agent import LandLedgerParseError
@@ -1341,7 +1345,25 @@ async def upload_business_plan(
     project = apply_parsed_project_data_use_case(project_repository(), project_id, parsed_data)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    auto = _maybe_auto_reanalyze_on_upload(project_id, parsed_data)
+    if auto:
+        project = {**project, "autoReanalysis": auto}
     return project
+
+
+def _maybe_auto_reanalyze_on_upload(project_id: str, parsed_data: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    """After applying new upload data, auto re-run the still-open / affected pods —
+    but only if the project was already analyzed (has completed pod artifacts).
+    A brand-new project's first upload is left for the user's "전체 자동 실행"."""
+    if project_id not in PROJECTS_DB or not _completed_pod_keys(project_id):
+        return None
+    meta = (parsed_data or {}).get("_meta") or {}
+    upload_meta = meta.get("upload") if isinstance(meta.get("upload"), dict) else {}
+    doc_type = upload_meta.get("documentType") or meta.get("documentType") or "business_plan"
+    try:
+        return _reanalyze_after_evidence(project_id, changed_document_types=[str(doc_type)])
+    except Exception:  # auto re-analysis must never break the upload
+        return None
 
 async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, Any]:
     """Sniff + classify one uploaded file, archive the original, return the plan."""
@@ -2185,6 +2207,61 @@ def analyze_asset_feasibility_comparison(
     scenarios = payload.get("scenarios") if isinstance(payload.get("scenarios"), list) else None
     options = payload.get("options") if isinstance(payload.get("options"), dict) else None
     return compare_asset_feasibility_use_case(PROJECTS_DB[project_id], scenarios, options)
+
+
+@router.post("/{project_id}/covenant-eod/evaluate")
+def evaluate_covenant_eod(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
+    """Derive covenant thresholds + EOD conditions from the deal's deterministic
+    feasibility/PF numbers (목표 분양률·LTV/LTC·책임준공·Cash Sweep·상환계좌 배분·
+    Equity 선투입·공사비 초과). Each item carries a source locator; missing inputs
+    are surfaced as needs_evidence, never fabricated. On-demand, no persistence."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    payload = input_data or {}
+    overrides = payload.get("overrides") if isinstance(payload.get("overrides"), dict) else None
+    policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
+    return evaluate_covenant_eod_use_case(PROJECTS_DB[project_id], overrides, policy)
+
+
+@router.post("/{project_id}/product-planning/compare")
+def compare_product_planning(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
+    """Compare an indicative development program across asset types for the same
+    land (연면적·전용면적·세대/호실수·전용률·주차·분양가·임대료). Deterministic;
+    planning ratios are labelled ``planning_benchmark`` and overridable, and any
+    revenue/rent without a price basis is left unset, never fabricated."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    payload = input_data or {}
+    scenarios = payload.get("scenarios") if isinstance(payload.get("scenarios"), list) else None
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else None
+    return compare_product_planning_use_case(PROJECTS_DB[project_id], scenarios, options)
+
+
+@router.post("/{project_id}/market-product-depth/analyze")
+def analyze_market_product_depth(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
+    """Market-Product depth: 제공주체(시행사/매각주관사/공공/AI) 분류·비교, 상품유형별
+    분양성 Score, 흡수율 모델, AI 추가필요작업 판단. Deterministic numbers; the LLM
+    only judges what additional evidence/analysis is needed (fallback deterministic)."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    payload = input_data or {}
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else None
+    return analyze_market_product_depth_use_case(PROJECTS_DB[project_id], options)
 
 @router.post("/{project_id}/cashflow/calculate")
 def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
@@ -3753,6 +3830,57 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         },
     )
     return plan
+
+
+def _completed_pod_keys(project_id: str) -> set:
+    """Pods that have a persisted artifact = already completed at least once."""
+    keys = set()
+    for record in list_chief_pod_artifact_records(project_id):
+        pod_key = record.get("podKey") or record.get("pod_key")
+        if pod_key:
+            keys.add(str(pod_key))
+    return keys
+
+
+def _reanalyze_after_evidence(project_id: str, *, changed_document_types: list[str] | None, options: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Re-run still-open + document-affected pods with the standard persistence sinks."""
+    project_data = PROJECTS_DB[project_id]
+    summary = reanalyze_after_evidence_use_case(
+        project_id,
+        project_data,
+        completed_pod_keys=_completed_pod_keys(project_id),
+        changed_document_types=changed_document_types,
+        options=options or {},
+        artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
+        review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
+        event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+    )
+    if summary.get("triggered"):
+        upsert_project_record(project_id, PROJECTS_DB[project_id])
+    return summary
+
+
+@router.post("/{project_id}/chief-orchestration/reanalyze")
+def reanalyze_chief_deal(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Smart re-analysis after new evidence: re-run the blocked / not-yet-completed
+    pods plus the pods the new document type feeds. Each pod re-run re-validates
+    parsed facts, auto-supplements, regenerates the AI review, and cascades. Pods
+    that still lack evidence stay blocked honestly."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    payload = input_data or {}
+    doc_types = payload.get("changedDocumentTypes")
+    doc_types = doc_types if isinstance(doc_types, list) else None
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    summary = _reanalyze_after_evidence(project_id, changed_document_types=doc_types, options=options)
+    record_sensitive_project_event(
+        request,
+        event_type="chief_orchestration_reanalyzed_on_evidence",
+        project_id=project_id,
+        metadata={"triggered": summary.get("triggered"), "rerun": summary.get("rerunCount"), "unblocked": summary.get("newlyUnblocked")},
+    )
+    return summary
 
 
 @router.get("/{project_id}/chief-orchestration/artifacts")

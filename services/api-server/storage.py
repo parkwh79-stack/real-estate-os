@@ -196,6 +196,13 @@ def delete_project_record_cascade(project_id: str) -> bool:
             "prompt_artifacts",
             "assumption_overrides",
             "restructuring_cures",
+            # Project-scoped stores that were previously orphaned on delete.
+            "deal_state_records",
+            "calculation_runs",
+            "land_evidence",
+            "recalculation_events",
+            "user_activity_logs",
+            "glossary_term_candidates",
         ):
             conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
         conn.commit()

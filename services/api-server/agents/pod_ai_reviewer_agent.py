@@ -415,6 +415,49 @@ def _market_product_findings(
             recommended_action="Run Marketability Analysis after market comparables, product mix, proposed price basis, demand/supply assumptions, and source metadata are attached.",
         ))
 
+    # Product planning (자산유형별 상품기획) — deterministic program derived from land/zoning.
+    product_planning = _first_dict_value(source_artifact, {"productPlanning", "product_planning"})
+    if product_planning:
+        rows = product_planning.get("rows") if isinstance(product_planning.get("rows"), list) else []
+        priced_count = product_planning.get("pricedCount")
+        benchmark_only = [r for r in rows if isinstance(r, dict) and r.get("assumptionBasis") == "planning_benchmark"]
+        if priced_count == 0 and rows:
+            findings.append(_finding(
+                "proposed_price_basis_missing",
+                "medium",
+                "상품기획(자산유형별 세대/호실·면적)은 산출됐으나 분양가·임대료 근거가 없어 분양수입/NOI가 산정되지 않았습니다.",
+                recommended_action="자산유형별 제안 분양가(평당) 또는 임대료·Cap Rate를 근거와 함께 입력한 뒤 상품기획을 재산출하세요.",
+            ))
+        elif benchmark_only:
+            findings.append(_finding(
+                "data_quality",
+                "info",
+                f"상품기획 {len(benchmark_only)}개 자산유형이 계획 벤치마크(전용률·평형·주차원단위) 기준입니다. 실제 설계·인허가 반영 전에는 참고치입니다.",
+                recommended_action="건축계획(전용률·평형·주차) 확정 시 상품기획을 실제 설계값으로 재산출하세요.",
+            ))
+
+    # Market depth (P1-04): 제공주체 비교 — 매각주관사 자료 부재 / 제안가 고평가.
+    depth = _first_dict_value(source_artifact, {"marketProductDepth", "market_product_depth"})
+    if depth:
+        provenance = depth.get("sourceProvenance") if isinstance(depth.get("sourceProvenance"), dict) else {}
+        if provenance and not provenance.get("salesAgentProvided"):
+            findings.append(_finding(
+                "missing_evidence",
+                "medium",
+                "매각 주관사(분양대행) 제공 자료가 없어 시행사 제안 분양가·흡수 가정을 교차검증할 수 없습니다.",
+                recommended_action="매각/분양대행 주관사 제공 자료를 확보해 시행사 제안치와 비교하세요.",
+            ))
+        comparison = depth.get("providerComparison") if isinstance(depth.get("providerComparison"), dict) else {}
+        for row in comparison.get("rows", []) if isinstance(comparison.get("rows"), list) else []:
+            delta = row.get("deltaVsPublicMedian")
+            if isinstance(delta, (int, float)) and delta > 0.15:
+                findings.append(_finding(
+                    "risk_note",
+                    "medium",
+                    f"{row.get('label')} 제안 분양가가 공공 실거래 중위값 대비 {round(delta * 100)}% 높습니다(고평가 우려).",
+                    recommended_action="분양가 산정근거 재확인 및 흡수율·할인분양 스트레스 시나리오를 검토하세요.",
+                ))
+
     if source_artifact_key:
         for item in findings:
             item["sourceLocators"].append({"sourceType": "chief_pod_artifact", "artifactKey": source_artifact_key})
@@ -493,17 +536,37 @@ def _pf_credit_findings(
             "PF 구조(대출금액·Tranche·금리·수수료·상환순위)가 pod 산출물에 없습니다. 신용 판단을 evidence-ready로 볼 수 없습니다.",
             recommended_action="PF Term Sheet 또는 대출조건표를 업로드하여 Tranche/우선순위/금리를 확정하세요.",
         ))
-    # 5. Covenant / EOD / CP terms.
-    covenants = project_data.get("covenants") or project_data.get("covenant") or {}
-    cp = project_data.get("conditions_precedent") or project_data.get("conditionsPrecedent")
-    eod = (covenants.get("events_of_default") if isinstance(covenants, dict) else None) or project_data.get("events_of_default")
-    if not covenants and not cp and not eod:
-        findings.append(_finding(
-            "missing_evidence",
-            "medium",
-            "Covenant / EOD(기한이익상실) / CP(선행조건) 조항 근거가 확인되지 않습니다.",
-            recommended_action="대출약정 초안의 covenant·EOD·CP 조항을 첨부하여 트리거/상환/통제 조건을 검토 가능하게 하세요.",
-        ))
+    # 5. Covenant / EOD — prefer the derived Covenant/EOD engine output when present.
+    covenant_eod = _first_dict_value(source_artifact, {"covenantEod", "covenant_eod"})
+    if covenant_eod:
+        for cov in covenant_eod.get("covenants", []):
+            if not isinstance(cov, dict):
+                continue
+            if cov.get("breached"):
+                findings.append(_finding(
+                    "risk_note",
+                    "high",
+                    f"커버넌트 '{cov.get('label')}' 임계 초과 — 현재 {cov.get('currentValue')} > 한도 {cov.get('thresholdValue')}.",
+                    recommended_action=cov.get("breachAction") or "회수/레버리지 보강 후 재계산이 필요합니다.",
+                ))
+            elif cov.get("status") == "needs_evidence":
+                findings.append(_finding(
+                    "missing_evidence",
+                    "medium",
+                    f"커버넌트 '{cov.get('label')}' 근거 부족 — 확정 전 근거가 필요합니다.",
+                    recommended_action="관련 근거(공사비/등기/시장/NOI)를 첨부한 뒤 Covenant/EOD를 재산출하세요.",
+                ))
+    else:
+        covenants = project_data.get("covenants") or project_data.get("covenant") or {}
+        cp = project_data.get("conditions_precedent") or project_data.get("conditionsPrecedent")
+        eod = (covenants.get("events_of_default") if isinstance(covenants, dict) else None) or project_data.get("events_of_default")
+        if not covenants and not cp and not eod:
+            findings.append(_finding(
+                "missing_evidence",
+                "medium",
+                "Covenant / EOD(기한이익상실) / CP(선행조건) 조항 근거가 확인되지 않습니다.",
+                recommended_action="대출약정 초안의 covenant·EOD·CP 조항을 첨부하여 트리거/상환/통제 조건을 검토 가능하게 하세요.",
+            ))
     # 6. Scenario evaluation missing entirely — cannot assess senior recovery.
     if not scenarios:
         findings.append(_finding(
