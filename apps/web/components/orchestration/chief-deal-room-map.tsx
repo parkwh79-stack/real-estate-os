@@ -729,6 +729,14 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const assumptionCount = plan?.sharedDealStateGraph.assumptionBook?.length ?? 0;
   const metricCount = plan?.sharedDealStateGraph.metrics?.length ?? 0;
   const eventCount = recalculationEvents.length || (plan?.learningLoopEvents?.length ?? 0);
+  // 분석 전(Pod 미실행) vs 분석 후 구분: Pod가 하나라도 실행됐는지로 판단.
+  const analyzed =
+    (plan?.podRuns ?? []).some((run) => run.status === "completed" || run.status === "running") ||
+    Boolean(plan?.runAllSummary);
+  // 파싱 후보값 검증 플래그(PARSED_FACT_*)는 "딜 충돌"이 아니라 "자료 확정 대기"다.
+  const parsingConfirmations = conflicts.filter((item) =>
+    String((item as Record<string, unknown>).code ?? "").startsWith("PARSED_FACT_"),
+  ).length;
 
   if (loading) {
     return (
@@ -769,6 +777,10 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
 
       {supplements ? <AutoSupplementBanner supplements={supplements} /> : null}
 
+      {!analyzed ? (
+        <PreAnalysisNotice parsingConfirmations={parsingConfirmations} missingCount={missing.length} />
+      ) : null}
+
       <ApprovalReadinessPanel
         gate={approvalGate}
         cureType={cureType}
@@ -796,20 +808,22 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
             </p>
           </div>
           <div className={`rounded-lg border px-4 py-3 text-sm font-bold ${decisionTone(plan.decisionGate?.decision)}`}>
-            <p className="text-xs uppercase tracking-wide opacity-70">Decision Gate</p>
+            <p className="text-xs uppercase tracking-wide opacity-70">Decision Gate{analyzed ? "" : " · 분석 전 잠정"}</p>
             <p className="mt-1 text-xl">{plan.decisionGate?.decision ?? "HOLD"}</p>
             <p className="mt-1 max-w-xs text-xs leading-5 opacity-80">
-              {cleanText(plan.decisionGate?.rationale, "아직 승인 가능성을 확정하기 전입니다. Pod 실행 결과와 blocker를 먼저 확인해야 합니다.")}
+              {analyzed
+                ? cleanText(plan.decisionGate?.rationale, "아직 승인 가능성을 확정하기 전입니다. Pod 실행 결과와 blocker를 먼저 확인해야 합니다.")
+                : "Pod를 아직 실행하지 않아 자동으로 보류(HOLD) 상태입니다. ‘전체 자동 실행’ 후 실제 판단이 생성됩니다."}
             </p>
           </div>
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-5">
           <Kpi label="선택 트랙" value={TRACK_LABELS[currentTrack]} />
-          <Kpi label="Blocking 이슈" value={`${blockingCount}건`} tone={blockingCount ? "bad" : "good"} />
-          <Kpi label="중요 보강/충돌" value={`${highCount}건`} tone={highCount ? "warn" : "good"} />
+          <Kpi label={analyzed ? "Blocking 이슈" : "필요 선행조건"} value={`${blockingCount}건`} tone={blockingCount ? (analyzed ? "bad" : "warn") : "good"} />
+          <Kpi label={analyzed ? "중요 보강/충돌" : "자료 확정 대기"} value={`${highCount}건`} tone={highCount ? "warn" : "good"} />
           <Kpi label="Deal State 값" value={`${evidenceCount + assumptionCount + metricCount}개`} />
-          <Kpi label="Learning Loop" value={`${eventCount}건`} tone={eventCount ? "warn" : "neutral"} />
+          <Kpi label="검토 대기" value={`${eventCount}건`} tone={eventCount ? "warn" : "neutral"} />
         </div>
       </section>
 
@@ -1052,6 +1066,28 @@ function Kpi({ label, value, tone = "neutral" }: { label: string; value: string;
       <p className="text-xs font-bold text-slate-500">{label}</p>
       <p className={`mt-1 text-lg font-black ${color}`}>{value}</p>
     </div>
+  );
+}
+
+function PreAnalysisNotice({ parsingConfirmations, missingCount }: { parsingConfirmations: number; missingCount: number }) {
+  return (
+    <section className="rounded-lg border border-sky-200 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950/30">
+      <div className="flex items-start gap-2.5">
+        <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-sky-600 dark:text-sky-300" />
+        <div>
+          <p className="text-sm font-black text-sky-950 dark:text-sky-100">아직 분석 전 단계입니다 — Pod를 실행하세요</p>
+          <p className="mt-1 text-xs font-semibold leading-5 text-sky-800 dark:text-sky-200">
+            업로드한 자료는 접수됐지만 아직 Agent Pod를 실행하지 않았습니다. 아래 <strong>전체 자동 실행</strong>을 누르면
+            파싱된 후보값이 검증·확정되고 실제 심사 판단(계산·리스크·승인 게이트)이 생성됩니다.
+          </p>
+          <p className="mt-1.5 text-xs leading-5 text-sky-700/90 dark:text-sky-300/80">
+            지금 보이는 {parsingConfirmations > 0 ? <><strong>자료 확정 대기 {parsingConfirmations}건</strong>과 </> : null}
+            보강 필요 {missingCount}건 · Decision Gate HOLD · 위원회 보류는{" "}
+            <strong>딜의 결함이 아니라 “아직 분석·확정 전”</strong>이라는 신호입니다. (예: 문서에서 값이 여러 번 다르게 나오거나, 값의 정확한 페이지·셀 위치가 아직 안 잡힌 상태)
+          </p>
+        </div>
+      </div>
+    </section>
   );
 }
 

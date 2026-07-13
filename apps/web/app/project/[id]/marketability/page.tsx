@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { AlertTriangle, ArrowLeft, BarChart3, Database, Loader2, RefreshCw, TrendingUp } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
+import { MarketDepthPanel } from "../../../../components/market/market-depth-panel";
 
 type MarketAnalysis = {
   applicable?: boolean;
@@ -273,6 +274,8 @@ export default function MarketabilityPage() {
           </section>
         </>
       )}
+
+      <MarketDepthPanel projectId={projectId} />
     </div>
   );
 }

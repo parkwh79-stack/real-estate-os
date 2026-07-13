@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft, Landmark, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
+import { CovenantEodPanel } from "../../../../components/pf/covenant-eod-panel";
 
 type Tranche = {
   tranche?: string;
@@ -176,6 +177,8 @@ export default function PfStructurePage() {
               <InfoRow label="Updated" value={displayText(artifact.createdAt ?? artifact.updatedAt, "미확인")} />
             </Panel>
           </section>
+
+          <CovenantEodPanel projectId={projectId} />
         </>
       )}
     </div>

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft, Loader2, Plus, Scale, Trash2, Trophy } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
+import { ProductPlanningPanel } from "../../../../components/product/product-planning-panel";
 
 const ASSET_TYPES: { value: string; label: string }[] = [
   { value: "apartment", label: "아파트" },
@@ -277,6 +278,8 @@ export default function AssetComparisonPage() {
           </button>
         </div>
       </Panel>
+
+      <ProductPlanningPanel projectId={projectId} />
 
       {result ? (
         <>
