@@ -320,16 +320,19 @@ Report Paragraph
 
 ### P1-04 Market-Product Pod
 
-- 비교사례 자동 수집
-- 제안 분양가 기준 검증
-- 임대료 근거 검증
-- Cap Rate 검증
-- 청약경쟁률
-- 미분양 통계
-- 흡수율 모델
-- 상품유형별 Score
-- 경쟁공급 지도
-- 민간 데이터 license metadata
+Status: 고도화 v1 Done (2026-07-10) — `agents/market_product_depth_agent.py` +
+`POST /projects/{id}/market-product-depth/analyze` + `components/market/market-depth-panel.tsx`.
+market_product Pod 아티팩트에 `marketProductDepth` 주입, Pod AI Reviewer가 소비.
+
+- 비교사례 자동 수집 ✅ (라이브 국토부 실거래가; 밸류맵 제휴 대기)
+- 제안 분양가 기준 검증 ✅ (공공 실거래 중위값 앵커)
+- **자료 제공주체 명명·비교 (시행사/매각주관사)** ✅ (dataProvider 우선·문서유형/파일명 추론)
+- 흡수율 모델 ✅ (월별 곡선; 예측 없으면 자산유형 벤치마크)
+- 상품유형별 Score ✅ (A~E)
+- **AI 추가필요작업 판단** ✅ (completeness critic, AIConnection+결정론 폴백)
+- 임대료·Cap Rate 검증 🟡 (income asset 축은 product planning/feasibility에서, 심화는 후속)
+- 청약경쟁률 ❌ / 미분양 통계 ❌ / 경쟁공급 지도 ❌ (외부데이터 의존 — 소스 확보 후)
+- 민간 데이터 license metadata 🟡
 
 ### P1-05 Cost-Schedule Pod
 
@@ -346,6 +349,12 @@ Report Paragraph
 - 비용·일정 변경 시 downstream 재계산 이벤트
 
 ### P1-06 Product Planning Agent
+
+Status: Done (v1, 2026-07-10) — `agents/product_planning_agent.py` + `use_cases/product_planning.py`
++ `POST /projects/{id}/product-planning/compare` + `components/product/product-planning-panel.tsx`
+(자산비교 페이지). 토지·규제에서 자산유형별 상품기획을 결정론 산출. 전용률·평형·주차원단위는
+`PLANNING_BENCHMARKS`(basis=planning_benchmark, override 가능), 가격 근거 없으면 분양수입/NOI
+미산정. LLM은 계산자가 아니라 market_product Pod 리뷰어로 근거검토만 얹는 구조(후속).
 
 대상 자산:
 
@@ -372,17 +381,31 @@ Report Paragraph
 
 ### P1-07 Covenant / EOD Agent
 
-- 목표 분양률
-- 공정률
-- LTV/LTC/DSCR
-- 책임준공
-- 할인분양
-- Cash Sweep
-- 상환계좌 배분
-- 공사비 초과
-- Equity 선투입
-- EOD 조건
-- 조건별 source locator 및 담당 reviewer
+Status: Done (v1, 2026-07-10) — `agents/covenant_eod_agent.py` + `use_cases/covenant_eod.py`
++ `POST /projects/{id}/covenant-eod/evaluate`. 결정론 feasibility/PF 산출값에서 커버넌트
+임계값과 EOD 조건을 도출하며 각 항목에 source locator를 부여한다. `covenant_monitoring`
+(사후 모니터링)과 구분되는 **정의(definition) 엔진**이다.
+
+- 목표 분양률 (Exit 분양률 기준) ✅
+- LTV 상한 (자산 프로파일) ✅ / LTC 상한·최소 DSCR (대주 정책 기본값, 라벨 명시) ✅
+- 책임준공 ✅
+- 할인분양 (EOD 트리거) ✅
+- Cash Sweep 개시 분양률 ✅
+- 상환계좌 배분 (Tranche 우선순위→시공사) ✅
+- 공사비 초과 충당 ✅
+- Equity 선투입 (requiredEquity) ✅
+- EOD 조건 5~6종 ✅
+- 조건별 source locator ✅ + **담당 reviewer 매핑** ✅ (2026-07-10): 각 covenant/EOD에
+  `responsibleReviewer`(credit_reviewer/market_stress_tester/construction_risk 등).
+- **TermSheet 소비 연결** ✅ (2026-07-10): `credit_documents.generate_credit_documents`가
+  `termSheetCovenants`를 `project_data.covenants`에 병합(리뷰어 override 우선) → term sheet가
+  실제 값 렌더. `covenantEod` 산출물도 노출.
+- **PF 화면 패널** ✅ (2026-07-10): `components/pf/covenant-eod-panel.tsx` → `/project/[id]/pf-structure`.
+- **Covenant Sheet export** ✅ (2026-07-10): `covenantSheet`(한국어 마크다운) — 커버넌트 표+EOD+담당;
+  PF 패널 다운로드 버튼(.md). Report Studio 통합 export(PDF/DOCX)는 P1-09에서.
+
+무조작: 수치 근거 없으면 `needs_evidence` + dataQualityNote, 정책 기본값은
+`sourceType=lender_policy_default`로 명시. P1-07 완결.
 
 ### P1-08 PF-Credit 고도화
 
