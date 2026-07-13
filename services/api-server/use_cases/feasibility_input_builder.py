@@ -96,6 +96,7 @@ def build_feasibility_input_draft(
     project_data: Dict[str, Any],
     *,
     parsed_facts: Optional[List[Dict[str, Any]]] = None,
+    options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     existing = project_data.get("feasibility_input") or {}
     v2 = project_data.get("feasibilityStudyV2") or {}
@@ -130,9 +131,15 @@ def build_feasibility_input_draft(
         if field in FIELDS:
             _set(field, record.get("normalizedValue") or record.get("value"), "parsed_fact", 0.6, needs_review=True)
 
-    # 4) deterministic derivation (AI-assisted proposal) for anything still missing
-    for field, meta in _derive_from_program(project_data).items():
-        _set(field, meta["value"], meta["source"], meta["confidence"], needs_review=True)
+    # 4) AI-assisted composition from the parsed development program (상품구성·연면적·
+    #    공시지가·시장 비교가) for anything still missing — the "사업수지를 직접 만들기" path.
+    program: Dict[str, Any] = {}
+    if any(field not in fields for field in ("total_revenue", "total_cost")):
+        from use_cases.feasibility_from_program import build_feasibility_from_program
+
+        program = build_feasibility_from_program(project_data, parsed_facts=parsed_facts, options=options)
+        for field, value in (program.get("feasibilityInput") or {}).items():
+            _set(field, value, "program_composition", 0.45, needs_review=True)
 
     # total_cost from its parts if still missing
     if "total_cost" not in fields:
@@ -149,13 +156,26 @@ def build_feasibility_input_draft(
         else "derived" if fields
         else "no_source"
     )
+    program_breakdown = None
+    if program and (program.get("productRevenue") or program.get("assumptions")):
+        program_breakdown = {
+            "productRevenue": program.get("productRevenue"),
+            "assumptions": program.get("assumptions"),
+            "landAreaSqm": program.get("landAreaSqm"),
+            "grossFloorAreaSqm": program.get("grossFloorAreaSqm"),
+            "comparablePricePerPy": program.get("comparablePricePerPy"),
+            "developmentProfit": program.get("developmentProfit"),
+            "profitMargin": program.get("profitMargin"),
+        }
+
     return {
         "schemaVersion": FEASIBILITY_INPUT_BUILDER_SCHEMA,
         "feasibilityInput": fields,
         "fieldSources": sources,
         "missing": missing,
-        "method": method,
+        "method": method if not (program and program.get("hasRevenueAndCost") and method in ("no_source", "derived")) else "program_composition",
         "needsReview": needs_review,
+        "programBreakdown": program_breakdown,
         "hasRevenueAndCost": bool(fields.get("total_revenue") and fields.get("total_cost")),
         "note": (
             "파싱된 사업수지(feasibilityStudyV2/parsed_fact)를 우선 사용하고, 없으면 토지·규제·상품기획·"

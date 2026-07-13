@@ -2436,7 +2436,8 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
         parsed_facts = list_deal_state_records(project_id, record_type="parsed_fact")
     except Exception:
         parsed_facts = []
-    draft = build_feasibility_input_draft(PROJECTS_DB[project_id], parsed_facts=parsed_facts)
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else None
+    draft = build_feasibility_input_draft(PROJECTS_DB[project_id], parsed_facts=parsed_facts, options=options)
     apply = payload.get("apply", True)
     if apply and draft.get("feasibilityInput"):
         project = PROJECTS_DB[project_id]
@@ -2444,7 +2445,15 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
         for key, value in draft["feasibilityInput"].items():
             feasibility_input[key] = value
         feasibility_input.setdefault("schema_source", "feasibility_input_builder")
-        project_repository().update(project_id, {"feasibility_input": feasibility_input})
+        update_payload: Dict[str, Any] = {"feasibility_input": feasibility_input}
+        # Materialize land area from the parsed program so map/land/feasibility engines
+        # read it (it was extracted into parsed_facts but not the structured land field).
+        land_area = ((draft.get("programBreakdown") or {}) or {}).get("landAreaSqm")
+        if land_area and not (project.get("land") or {}).get("area_sqm"):
+            land = dict(project.get("land") or {})
+            land["area_sqm"] = land_area
+            update_payload["land"] = land
+        project_repository().update(project_id, update_payload)
         draft["applied"] = True
         record_sensitive_project_event(
             request,
