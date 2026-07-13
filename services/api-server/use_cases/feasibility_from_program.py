@@ -73,6 +73,27 @@ def _comparable_price_per_py(project_data: Dict[str, Any], parsed_facts) -> Opti
     return _parsed(parsed_facts, "marketComparable.pricePerPy")
 
 
+def _parcel_land_cost(project_data: Dict[str, Any]) -> tuple:
+    """Sum (공시지가 × 면적) over the 토지조서 parcels. Returns (cost, priced_count, total)."""
+    ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
+    parcels = ledger.get("parcels") if isinstance(ledger, dict) else None
+    if not isinstance(parcels, list) or not parcels:
+        parcels = project_data.get("land_acquisition") or []
+    total = 0
+    priced = 0
+    cost = 0.0
+    for parcel in parcels:
+        if not isinstance(parcel, dict):
+            continue
+        total += 1
+        area = _num(parcel.get("areaSqm") or parcel.get("area_sqm"))
+        price = _num(parcel.get("officialLandPricePerSqm"))
+        if area and price:
+            cost += area * price
+            priced += 1
+    return (round(cost) if cost else None, priced, total)
+
+
 def _product_mix(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     sa = project_data.get("sales_assumptions") or {}
     for source in (sa.get("product_mix"), project_data.get("product_mix"), project_data.get("productMix")):
@@ -135,12 +156,21 @@ def build_feasibility_from_program(
     # --- Costs ---
     land_cost = _num(options.get("land_cost"))
     if not land_cost:
-        land_price = _official_land_price(project_data, parsed_facts)
-        if land_price and land_area:
-            land_cost = land_price * land_area
+        # Prefer a per-parcel 공시지가 sum (토지조서) — more accurate than aggregate.
+        parcel_cost, parcel_priced, parcel_total = _parcel_land_cost(project_data)
+        if parcel_cost:
+            land_cost = parcel_cost
             assumptions.append(
-                f"토지비 = 공시지가 {round(land_price/10000):,}만원/㎡ × {round(land_area):,}㎡ 추정 — 실제 토지 매입가 확인 필요(통상 공시지가보다 높음)."
+                f"토지비 = 토지조서 {parcel_priced}/{parcel_total}필지 공시지가×면적 합 {round(parcel_cost/1e8):,}억원(하한 추정) — "
+                "실제 매입가(수용보상가)는 공시지가보다 높음; 미평가 필지 보완 필요."
             )
+        else:
+            land_price = _official_land_price(project_data, parsed_facts)
+            if land_price and land_area:
+                land_cost = land_price * land_area
+                assumptions.append(
+                    f"토지비 = 공시지가 {round(land_price/10000):,}만원/㎡ × {round(land_area):,}㎡ 추정 — 실제 토지 매입가 확인 필요(통상 공시지가보다 높음)."
+                )
     construction_cost = _num(options.get("construction_cost"))
     ccps = _num(options.get("construction_cost_per_sqm")) or DEFAULT_CONSTRUCTION_COST_PER_SQM
     if not construction_cost and gfa:
