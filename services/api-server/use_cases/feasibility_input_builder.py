@@ -120,7 +120,10 @@ def build_feasibility_input_draft(
     for field in FIELDS:
         _set(field, v2_metrics.get(field), "feasibility_workbook_v2", 0.9)
 
-    # 3) parsed_fact records for feasibility fields (parsed document candidates)
+    # 3) parsed_fact records for feasibility fields. Distinguish REAL parsed document
+    #    values from auto_supplement benchmark PROXIES (factOrigin=auto_supplement) —
+    #    the latter are placeholders the pipeline filled when real data was missing and
+    #    must not be presented as a real 사업수지 (AGENTS.md §1/§7).
     for record in parsed_facts or []:
         if not isinstance(record, dict):
             continue
@@ -128,8 +131,16 @@ def build_feasibility_input_draft(
         if not canonical.startswith("feasibility_input."):
             continue
         field = canonical.split(".", 1)[1]
-        if field in FIELDS:
-            _set(field, record.get("normalizedValue") or record.get("value"), "parsed_fact", 0.6, needs_review=True)
+        if field not in FIELDS:
+            continue
+        is_proxy = str(record.get("factOrigin") or "") == "auto_supplement"
+        _set(
+            field,
+            record.get("normalizedValue") or record.get("value"),
+            "auto_supplement_proxy" if is_proxy else "parsed_fact",
+            0.25 if is_proxy else 0.6,
+            needs_review=True,
+        )
 
     # 4) AI-assisted composition from the parsed development program (상품구성·연면적·
     #    공시지가·시장 비교가) for anything still missing — the "사업수지를 직접 만들기" path.

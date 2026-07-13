@@ -43,6 +43,24 @@ def test_zero_parsed_fact_ignored():
     assert "total_revenue" not in d["feasibilityInput"]
 
 
+def test_auto_supplement_parsed_fact_flagged_as_proxy():
+    # auto_supplement placeholders are proxies, not real 사업수지 — must be labelled low-confidence.
+    facts = [
+        {"canonicalField": "feasibility_input.total_revenue", "normalizedValue": 75_000_000_000, "factOrigin": "auto_supplement"},
+        {"canonicalField": "feasibility_input.total_cost", "normalizedValue": 60_000_000_000, "factOrigin": "auto_supplement"},
+    ]
+    d = build_feasibility_input_draft({}, parsed_facts=facts)
+    assert d["fieldSources"]["total_revenue"]["source"] == "auto_supplement_proxy"
+    assert d["fieldSources"]["total_revenue"]["confidence"] == 0.25
+    assert d["needsReview"] is True
+
+
+def test_real_parsed_fact_not_marked_proxy():
+    facts = [{"canonicalField": "feasibility_input.total_revenue", "normalizedValue": 5000, "factOrigin": "document_parse"}]
+    d = build_feasibility_input_draft({}, parsed_facts=facts)
+    assert d["fieldSources"]["total_revenue"]["source"] == "parsed_fact"
+
+
 def test_no_source_leaves_missing_not_fabricated():
     d = build_feasibility_input_draft({})
     assert d["method"] == "no_source"
