@@ -76,6 +76,81 @@ def approve_feasibility_workbook_import_use_case(
     }
 
 
+def persist_feasibility_workbook_candidate_use_case(
+    project_repository: ProjectRepository,
+    project_id: str,
+    input_data: Dict[str, Any],
+    *,
+    recorded_by: str,
+) -> Dict[str, Any]:
+    """Persist a validated workbook draft for deterministic Pod consumption.
+
+    This is deliberately different from approval: the imported values are
+    marked ``candidate`` and remain subject to reviewer/assumption approval,
+    but Feasibility-Cashflow can now calculate from the real workbook instead
+    of treating the project as empty.
+    """
+    draft = input_data.get("feasibilityStudyV2Draft") or input_data.get("draft")
+    if not isinstance(draft, dict):
+        raise ValueError("feasibilityStudyV2Draft is required")
+
+    canonical = FeasibilityStudyV2.model_validate(draft).model_dump(mode="json")
+    now = datetime.now(timezone.utc).isoformat()
+    source_document = input_data.get("sourceDocument") or (canonical.get("raw_import") or {}).get("sourceDocument") or {}
+    import_id = input_data.get("importId") or f"feasibility-candidate-{uuid4()}"
+    canonical.setdefault("raw_import", {})
+    canonical["raw_import"]["candidateImport"] = {
+        "importId": import_id,
+        "recordedBy": recorded_by,
+        "recordedAt": now,
+        "status": "candidate",
+        "sourceDocument": source_document,
+        "validation": input_data.get("validation") or {},
+    }
+    existing = project_repository.get(project_id) or {}
+    history = list(((existing.get("_meta") or {}).get("feasibilityWorkbookCandidates") or []))
+    history.append({
+        "importId": import_id,
+        "recordedBy": recorded_by,
+        "recordedAt": now,
+        "sourceDocument": source_document,
+        "validationStatus": (input_data.get("validation") or {}).get("status"),
+    })
+    update_payload = {
+        "feasibilityStudyV2Draft": canonical,
+        "feasibilityStudyV2": canonical,
+        "canonicalFeasibilityStudyV2": canonical,
+        "product_mix": canonical.get("product_mix") or [],
+        "schedule": canonical.get("schedule") or {},
+        "pf_structure": canonical.get("financing") or [],
+        "feasibility_input": {
+            **(existing.get("feasibility_input") or {}),
+            **_feasibility_input_from_study(canonical),
+        },
+        "_meta": {
+            "feasibilityWorkbookCandidates": history,
+            "latestFeasibilityWorkbookCandidateId": import_id,
+            "feasibilityInputSource": "workbook_validation_candidate",
+            "feasibilityInputApprovalStatus": "candidate",
+            "upload": {
+                "validationStatus": "candidate",
+                "parserVersion": "feasibility-workbook-importer-v2",
+            },
+        },
+    }
+    updated = project_repository.update(project_id, update_payload)
+    if not updated:
+        raise LookupError("Project not found")
+    return {
+        "schemaVersion": "realytics-feasibility-workbook-candidate-v1",
+        "projectId": project_id,
+        "importId": import_id,
+        "status": "candidate",
+        "feasibilityInput": update_payload["feasibility_input"],
+        "project": updated,
+    }
+
+
 def approve_risk_report_workbook_import_use_case(
     project_repository: ProjectRepository,
     project_id: str,

@@ -1,5 +1,26 @@
 # Korean Law MCP Integration
 
+## API-server automatic execution
+
+The Legal Pod now attempts legal enrichment automatically when `lawContext` is
+not supplied. Configure one of these transports:
+
+```env
+# Preferred: an HTTP bridge in front of the Korean Law MCP server
+REALYTICS_KOREAN_LAW_MCP_URL=http://127.0.0.1:8787/tools/call
+
+# Fallback: official Law.go.kr search API credential
+LAW_OC=your-law-go-kr-oc
+REALYTICS_KOREAN_LAW_API_URL=https://www.law.go.kr/DRF/lawService.do
+```
+
+The bridge receives `{tool, arguments: {query, purpose}}` and returns JSON. The
+Legal Pod stores transport, per-query diagnostics, tool results, and failure
+reasons in `legalReview.mcp`. No key is written to evidence or logs.
+
+If neither setting is present, the run is `not_connected` with
+`skipped_missing_config`; the system does not claim that the law was checked.
+
 Updated: 2026-05-13
 
 ## Decision

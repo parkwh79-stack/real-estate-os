@@ -128,7 +128,7 @@ export default function InputPackagePage() {
     try {
       setContext(await fetchWorkspaceContext(projectId, "input_package", activeTrack));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "?먮즺 ?낅젰 ?⑦궎吏 ????곹깭瑜?遺덈윭?ㅼ? 紐삵뻽?듬땲??");
+      setError(err instanceof Error ? err.message : "자료 입력 패키지 상태를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
@@ -148,13 +148,13 @@ export default function InputPackagePage() {
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ track: activeTrack, run: false }),
       });
-      if (!res.ok) throw new Error(`?먮즺 蹂닿컯 怨꾪쉷 ?앹꽦 ?ㅽ뙣 (${res.status})`);
+      if (!res.ok) throw new Error(`자료 보완 계획 생성 실패 (${res.status})`);
       const body = (await res.json()) as { intakeReadinessPlan?: IntakeReadinessPlan };
       setIntakePlan(body.intakeReadinessPlan ?? null);
-      setMessage(body.intakeReadinessPlan?.nextRecommendedAction ?? "?먮즺 ?묒닔? 蹂닿컯 怨꾪쉷???낅뜲?댄듃?덉뒿?덈떎.");
+      setMessage(body.intakeReadinessPlan?.nextRecommendedAction ?? "자료 접수 및 보완 계획을 업데이트했습니다.");
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "?먮즺 蹂닿컯 怨꾪쉷 ?앹꽦???ㅽ뙣?덉뒿?덈떎.");
+      setError(err instanceof Error ? err.message : "자료 보완 계획 생성에 실패했습니다.");
     } finally {
       setRunning(null);
     }
@@ -168,13 +168,13 @@ export default function InputPackagePage() {
       const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/run-pod`, {
         method: "POST",
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-        body: JSON.stringify({ podKey }),
+        body: JSON.stringify({ podKey, options: { autoCascade: true } }),
       });
-      if (!res.ok) throw new Error(`${label} ?ㅽ뻾 ?ㅽ뙣 (${res.status})`);
-      setMessage(`${label} ?ㅽ뻾 寃곌낵媛 ?꾨줈?앺듃 artifact濡???λ릺?덉뒿?덈떎.`);
+      if (!res.ok) throw new Error(`${label} 실행 실패 (${res.status})`);
+      setMessage(`${label} 실행 결과가 프로젝트 원장에 저장되었습니다.`);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : `${label} ?ㅽ뻾???ㅽ뙣?덉뒿?덈떎.`);
+      setError(err instanceof Error ? err.message : `${label} 실행에 실패했습니다.`);
     } finally {
       setRunning(null);
     }
@@ -190,12 +190,12 @@ export default function InputPackagePage() {
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ persistEvidence: true, limit: 500 }),
       });
-      if (!res.ok) throw new Error(`PNU 蹂닿컯 ?ㅽ뙣 (${res.status})`);
+      if (!res.ok) throw new Error(`PNU 보강 실패 (${res.status})`);
       const body = await res.json();
-      setMessage(`PNU 蹂닿컯 ?꾨즺: ${body?.summary?.resolvedCount ?? body?.resolvedCount ?? 0}嫄??댁꽍`);
+      setMessage(`PNU 보강 완료: ${body?.summary?.resolvedCount ?? body?.resolvedCount ?? 0}필지 해석`);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "PNU 蹂닿컯???ㅽ뙣?덉뒿?덈떎.");
+      setError(err instanceof Error ? err.message : "PNU 보강에 실패했습니다.");
     } finally {
       setRunning(null);
     }
@@ -234,7 +234,7 @@ export default function InputPackagePage() {
   const parsedFactSummary = asRecord(pageData.parsedFactSummary);
   const recommendedActions = asArray<string>(pageData.recommendedActions);
   const missingInputs = asArray<Record<string, unknown>>(context?.missingInputRegister);
-  const projectName = displayText(context?.projectMemory?.projectName, `?꾨줈?앺듃 ${projectId}`);
+  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
   const docCount = Number(context?.projectMemory?.sourceDocumentCount ?? sourceSummary.count ?? documents.length ?? 0);
   const evidenceCount = Number(context?.projectMemory?.landEvidenceCount ?? landEvidenceSummary.count ?? 0);
 
@@ -296,12 +296,12 @@ export default function InputPackagePage() {
                   Selected Track Workflow
                 </p>
                 <h2 className="mt-1 text-xl font-black text-slate-950 dark:text-white">
-                  {TRACK_LABELS[activeTrack]} ?먮즺 蹂닿컯 ?먮쫫
+                  {TRACK_LABELS[activeTrack]} 자료 보완 흐름
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{workflow.intent}</p>
               </div>
               <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-bold text-indigo-950 dark:border-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-100">
-                ?먮떒 吏덈Ц: {workflow.decisionQuestion}
+                판단 질문: {workflow.decisionQuestion}
               </div>
             </div>
             <div className="mt-4 grid gap-3 xl:grid-cols-5">
@@ -321,10 +321,10 @@ export default function InputPackagePage() {
           <FeasibilityExtractReview projectId={projectId} onApplied={refresh} />
 
           <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
-            <Panel title="?ㅼ쓬 蹂닿컯 ?묒뾽">
+            <Panel title="다음 보완 작업">
               <div className="flex flex-wrap gap-2">
-                <ActionButton label="?먮즺 蹂닿컯 怨꾪쉷 ?앹꽦" busy={running === "finalize"} disabled={running !== null} onClick={() => void finalizeIntake()} />
-                <ActionButton label="PNU ?쇨큵 ?댁꽍" busy={running === "pnu"} disabled={running !== null || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
+                <ActionButton label="자료 보완 계획 생성" busy={running === "finalize"} disabled={running !== null} onClick={() => void finalizeIntake()} />
+                <ActionButton label="PNU 일괄 해석" busy={running === "pnu"} disabled={running !== null || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
                 <ActionButton label="Land-Legal Pod" busy={running === "land_legal"} disabled={running !== null} onClick={() => void runPod("land_legal", "Land-Legal Pod")} />
                 <ActionButton label="Market-Product Pod" busy={running === "market_product"} disabled={running !== null} onClick={() => void runPod("market_product", "Market-Product Pod")} />
                 <ActionButton label="Feasibility-CF Pod" busy={running === "feasibility_cashflow"} disabled={running !== null} onClick={() => void runPod("feasibility_cashflow", "Feasibility-Cashflow Pod")} />
@@ -339,27 +339,27 @@ export default function InputPackagePage() {
                   </>
                 ) : (
                   <p>
-                    ?먮즺瑜??낅줈?쒗븯硫??ㅼ??ㅽ듃?덉씠?곌? ?대뼡 Pod瑜??ㅽ뻾?댁빞 ?섎뒗吏? 遺議깆옄猷뚮? ?쒖떆?⑸땲??
+                    자료를 업로드하면 오케스트레이터가 어떤 Pod를 실행해야 하는지와 부족한 자료를 안내합니다.
                   </p>
                 )}
               </div>
             </Panel>
 
-            <Panel title="蹂댁셿 ?꾩슂 ??ぉ">
+            <Panel title="보완 필요 항목">
               {missingInputs.length ? (
                 <div className="space-y-2">
                   {missingInputs.slice(0, 8).map((item, index) => (
                     <div key={index} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-                      <p className="font-black">{displayText(item.title ?? item.label ?? item.code, `蹂댁셿 ??ぉ ${index + 1}`)}</p>
+                      <p className="font-black">{displayText(item.title ?? item.label ?? item.code, `보완 항목 ${index + 1}`)}</p>
                       <p className="mt-1 text-xs leading-5">
-                        {displayText(item.reason ?? item.description ?? item.message, "?ㅼ쓬 ?④퀎 ?ㅽ뻾 ??蹂댁셿???꾩슂?⑸땲??")}
+                        {displayText(item.reason ?? item.description ?? item.message, "다음 단계 실행을 위해 보완이 필요합니다.")}
                       </p>
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100">
-                  ?꾩옱 怨듯넻 ???湲곗??쇰줈 利됱떆 ?쒖떆?섎뒗 蹂댁셿 ??ぉ? ?놁뒿?덈떎.
+                  현재 공통 자료 기준으로 즉시 표시할 보완 항목이 없습니다.
                 </div>
               )}
             </Panel>

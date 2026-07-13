@@ -120,7 +120,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Response**: `realytics-report-template-v1`.
 
 ### `POST /projects/{project_id}/land-ledger/enrich`
-- **Description**: Enrich a parsed land ledger with batch PNU, cadastral characteristics, official land price, and registry/encumbrance evidence.
+- **Description**: Enrich a parsed land ledger with batch PNU, VWorld cadastral/jiga fields, land-use planning evidence, official land price, and registry/encumbrance evidence.
 - **Request Body**: `{ "landLedger": {...}, "options": { "legalDongCode": "2729012300", "useLiveConnectors": false, "baseYear": 2026, "pnuResolutions": [], "cadastralCharacteristics": [], "officialLandPrices": [], "registryEvidence": [] }, "persist": false }`
 - **Response**: Updated land ledger with refreshed parcel QA, workflow status, enrichment run summary, PF summary, evidence records, and coverage ratios.
 - **Live Connector Options**:
@@ -129,10 +129,11 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
   - `baseYear`: target official land price base year.
   - `connectorTimeoutSeconds`: per-request timeout for configured connector calls.
 - **Connector Environment Variables**:
-  - `REALYTICS_CADASTRAL_URL_TEMPLATE`: URL template for cadastral/land-use lookup. Supports `{pnu}`, `{service_key}`, and `{base_year}`.
+  - `REALYTICS_CADASTRAL_URL_TEMPLATE`: Optional URL template for cadastral lookup. Supports `{pnu}`, `{service_key}`, and `{base_year}`.
+  - `REALYTICS_LAND_USE_URL_TEMPLATE` or `REALYTICS_VWORLD_LAND_USE_URL_TEMPLATE`: URL template for source-backed zoning, statutory FAR/BCR, and district-unit-plan fields. Supports `{pnu}`, `{service_key}`, and `{base_year}`.
   - `REALYTICS_OFFICIAL_LAND_PRICE_URL_TEMPLATE`: URL template for official land price lookup. Supports `{pnu}`, `{service_key}`, and `{base_year}`.
   - API key lookup order: `REALYTICS_PUBLIC_DATA_API_KEY`, `DATA_GO_KR_API_KEY`, `REALYTICS_VWORLD_API_KEY`, `VWORLD_API_KEY`.
-- **Data Policy**: The endpoint can generate PNU from a configured legal dong code and normalized lot numbers. Official land price and registry evidence are never fabricated. Official price must come from provided connector/manual records or configured public/licensed adapters with base year/source evidence. Registry evidence remains manual/licensed evidence attachment; live registry lookup is not implemented.
+- **Data Policy**: The endpoint can generate PNU from a configured legal dong code and normalized lot numbers. When an approved VWorld/public-data key is present, the built-in exact-PNU lookup is attempted. VWorld-only zoning is stored as preliminary `zoning_only` context; statutory FAR/BCR are never inferred from a zoning name and require a configured land-use planning response. Official land price and registry evidence are never fabricated. Registry evidence remains manual/licensed evidence attachment; live registry lookup is not implemented.
 
 ### `POST /projects/{project_id}/cashflow/calculate`
 - **Description**: Trigger monthly cash flow calculation.
@@ -197,6 +198,17 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Response**: Legal review status, check findings, Korean Law MCP connection state, references, and follow-up items.
 - **Note**: `law_context` is designed for Korean Law MCP sidecar outputs and is normalized into `realytics-law-context-v1`. When no MCP context is supplied, the agent returns an explicit `connected: false` caution instead of pretending to have authoritative legal sources.
 - **Integration Guide**: See `docs/integrations/korean-law-mcp.md`.
+
+### `POST /projects/{project_id}/legal-pod/run`
+- **Description**: Execute the independent Land-Legal Legal Pod. The run reads persisted parcel land evidence, runs the preliminary legal/permit checks, persists `legal_reviews` and `permit_reviews`, materializes legal `risk_issue` records, and stores a `LegalReadinessPatchV1` handoff to PF-Credit.
+- **Request Body**: `{ "lawContext": {...}, "parsedDocuments": [{...}] }`. `lawContext` is optional; absence is reported as `not_connected` with a failure reason.
+- **Response**: `legalReview`, `permitReview`, generated `riskIssues`, and the persisted `handoff`. Parcel rows include PNU, owner-match status, encumbrance status, evidence IDs, and source locators.
+
+### `GET /projects/{project_id}/legal-reviews`
+- **Description**: List persisted Legal Pod review records, newest first.
+
+### `GET /projects/{project_id}/permit-reviews`
+- **Description**: List persisted permit review records, newest first, including parser availability and missing-document reasons.
 
 ### `POST /projects/{project_id}/reports/generate`
 - **Description**: Generate the PF Review Report.

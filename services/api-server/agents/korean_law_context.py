@@ -121,6 +121,28 @@ def build_korean_law_mcp_query_plan(project_data: Dict[str, Any]) -> List[Dict[s
         "purpose": "Confirm real estate trust, beneficial interest, and security trust basis.",
     })
 
+    queries.append({
+        "tool": "law_change_history",
+        "query": "\uad00\ub828 \ubc95\ub839 \uac1c\uc815\uc774\ub825 \uc2dc\ud589\uc77c \uc785\ubc95\uc608\uace0 \ubc1c\uc758 \uac1c\uc815\ub0b4\uc6a9",
+        "purpose": "Identify promulgation, effective-date, legislative-notice, proposal, and amendment-history evidence.",
+    })
+
+    asset_queries = {
+        "residential": ["주택법 주택공급에 관한 규칙 건축법 분양 관련 적용 법령"],
+        "mixed": ["주택법 건축법 건축물의 분양에 관한 법률 주상복합 적용 법령"],
+        "officetel": ["건축법 건축물의 분양에 관한 법률 오피스텔 적용 법령"],
+        "commercial": ["건축법 건축물의 분양에 관한 법률 상업시설 적용 법령"],
+        "logistics": ["물류시설의 개발 및 운영에 관한 법률 건축법 물류센터 적용 법령"],
+        "reit": ["부동산투자회사법 자본시장법 리츠 편입 운용 공시 법령"],
+        "fund": ["자본시장과 금융투자업에 관한 법률 부동산펀드 설정 운용 공시 법령"],
+    }
+    for query in asset_queries.get(project_type, ["건축법 국토계획법 부동산개발사업 적용 법령"]):
+        queries.append({
+            "tool": "search_law",
+            "query": query,
+            "purpose": f"Confirm asset-type-specific statutory requirements for {project_type or 'unknown asset type'}.",
+        })
+
     return queries
 
 
@@ -157,6 +179,14 @@ def _normalize_reference(item: Dict[str, Any], raw_tool: str | None = None) -> D
         "lawName": item.get("lawName") or item.get(LAW_NAME_KO) or item.get("title") or "",
         "article": item.get("article") or item.get(ARTICLE_NO_KO) or item.get("articleNo") or "",
         "effectiveDate": item.get("effectiveDate") or item.get(EFFECTIVE_DATE_KO) or item.get("efYd") or "",
+        "promulgationDate": item.get("promulgationDate") or item.get("promulgation_date") or item.get("promulgationDateKo") or item.get("announceDate") or "",
+        "amendmentDate": item.get("amendmentDate") or item.get("amendment_date") or item.get("revisionDate") or "",
+        "legislativeNoticeDate": item.get("legislativeNoticeDate") or item.get("legislative_notice_date") or item.get("noticeDate") or "",
+        "proposalDate": item.get("proposalDate") or item.get("proposal_date") or item.get("billDate") or "",
+        "lawId": item.get("lawId") or item.get("law_id") or item.get("법령ID") or "",
+        "changeType": item.get("changeType") or item.get("change_type") or item.get("amendmentType") or "",
+        "changeSummary": item.get("changeSummary") or item.get("change_summary") or item.get("revisionSummary") or "",
+        "status": item.get("status") or item.get("lawStatus") or "",
         "url": item.get("url") or item.get("link") or "",
         "summary": item.get("summary") or item.get("text") or item.get("content") or item.get("reason") or "",
         "verified": item.get("verified", item.get("exists", None)),

@@ -34,12 +34,74 @@ def import_feasibility_study_from_workbook(
 
     if profile == "realytics-formula-cash-flow-export":
         draft = _import_realytics_formula_export(workbook_path, validation, project_id, source_document)
+    elif profile == "yongin-public-rental-feasibility":
+        draft = _import_yongin_public_rental(workbook_path, validation, project_id, source_document)
     elif profile == "legacy-bonri-mixed-use-pf-feasibility":
         draft = _import_legacy_bonri(workbook_path, validation, project_id, source_document)
     else:
         draft = _minimal_draft(project_id, validation, source_document)
 
     return FeasibilityStudyV2.model_validate(draft).model_dump(mode="json")
+
+
+def _import_yongin_public_rental(workbook_path: Path, validation: Dict[str, Any], project_id: Optional[str], source_document: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Deterministic adapter for the 손익/개요수입/cash/임대료 workbook family."""
+    workbook = load_workbook(workbook_path, data_only=True, read_only=False)
+    try:
+        profit, overview, cash, _rent = [workbook[name] for name in workbook.sheetnames[:4]]
+        source_name = _source_name(workbook_path, source_document)
+        total_revenue = (_to_float(profit["I24"].value) or 0) * KRW_PER_THOUSAND
+        total_cost = (_to_float(profit["I81"].value) or 0) * KRW_PER_THOUSAND
+        development_profit = (_to_float(profit["I82"].value) or 0) * KRW_PER_THOUSAND
+        pf_amount = (_to_float(cash["D34"].value) or 0) * KRW_PER_THOUSAND
+        land_area = _to_float(overview["D2"].value)
+        gross_area = _to_float(overview["D15"].value)
+        unit_count = _to_float(overview["B26"].value)
+        product_mix = []
+        for row in range(18, 26):
+            units = _to_float(overview.cell(row, 2).value)
+            if not units:
+                continue
+            product_mix.append({
+                "key": f"apartment_type_{row - 17}",
+                "asset_type": "apartment",
+                "product_name": f"Apartment type {row - 17}",
+                "unit_count": units,
+                "exclusive_area_sqm": _to_float(overview.cell(row, 3).value),
+                "contract_area_sqm": _to_float(overview.cell(row, 5).value),
+                "provenance": _provenance(source_name, "xlsx", overview.title, f"A{row}:M{row}", None),
+            })
+        monthly_cash_flow = []
+        for column in range(5, cash.max_column + 1):
+            period = cash.cell(1, column).value
+            if period is None:
+                continue
+            net = sum(_to_float(cash.cell(row, column).value) or 0 for row in range(1, cash.max_row + 1))
+            monthly_cash_flow.append({
+                "month_index": len(monthly_cash_flow),
+                "period": str(period),
+                "cash_in": {},
+                "cash_out": {},
+                "net_cash_flow": net * KRW_PER_THOUSAND,
+                "source_locator": {"sourceType": "excel_column", "sourceDocument": source_name, "sheetName": cash.title, "cell": f"{_column_name(column)}1:{_column_name(column)}{cash.max_row}"},
+            })
+        return {
+            "project_id": project_id,
+            "project_name": _cell_value(profit, "A1"),
+            "asset_type": "mixed_use",
+            "site": {"land_area_sqm": _value("land_area_sqm", "land area", land_area, "SQM", overview.title, "D2", source_name), "zoning": _cell_value(overview, "D8")},
+            "program": {"gross_floor_area_sqm": _value("gross_floor_area_sqm", "gross floor area", gross_area, "SQM", overview.title, "D15", source_name), "unit_count": _value("unit_count", "unit count", unit_count, "COUNT", overview.title, "B26", source_name)},
+            "product_mix": product_mix,
+            "revenue_items": [_line_item("total_revenue", "Total revenue", "sales_and_rental_revenue", total_revenue, profit.title, "I24", source_name)],
+            "cost_items": [_line_item("total_cost", "Total project cost", "total_project_cost", total_cost, profit.title, "I81", source_name)],
+            "financing": [{"tranche_id": "pf", "name": "PF", "priority": "senior", "amount": pf_amount, "excel_row_id": f"{cash.title}!D34"}],
+            "schedule": [{"key": "construction_start", "label": "construction start", "planned_date": "2027-04", "provenance": _provenance(source_name, "xlsx", profit.title, "A3", None)}],
+            "monthly_cash_flow": monthly_cash_flow,
+            "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, min((row.get("net_cash_flow") or 0) for row in monthly_cash_flow) if monthly_cash_flow else None),
+            "raw_import": {"profile": validation.get("profile"), "validationStatus": validation.get("status"), "sourceWorkbook": source_name, "sourceDocument": source_document or {}, "mappedCells": {"totalRevenue": f"{profit.title}!I24", "totalCost": f"{profit.title}!I81", "developmentProfit": f"{profit.title}!I82", "pfAmount": f"{cash.title}!D34", "productMix": f"{overview.title}!A18:M25"}, "limitations": ["Product-level rental conversion and legal approval conditions remain subject to review."]},
+        }
+    finally:
+        workbook.close()
 
 
 def _import_legacy_bonri(

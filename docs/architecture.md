@@ -515,3 +515,21 @@ Recommended next coding sequence:
 9. Add `services/api-server/reports` wrappers.
 
 The safest first code move is the use-case layer because it creates a shared application boundary before deeper package migration.
+# Legal Pod persistence and orchestration
+
+The Legal Pod is an independent execution path inside the Land-Legal Pod. It reads the Shared Deal State and persisted land evidence, then writes `legal_reviews`, `permit_reviews`, legal `risk_issue` records, and a Legal-to-PF-Credit handoff. Approval Readiness consumes those records rather than trusting a transient artifact. `POST /projects/{project_id}/legal-pod/run` is the canonical API; Chief Deal Orchestrator invokes the same use case when running `land_legal`, so UI, API, and batch execution share the same business logic.
+
+Korean Law MCP results are optional enrichment. The Legal Pod reports connected/not_connected, citation verification, and failure reason explicitly. No missing law context is converted into a legal conclusion.
+# Development lifecycle orchestration
+
+The Chief Task Graph carries a structured `lifecycleProcess` contract for
+real-estate development. It separates planning (`direction_setting` through
+`business_analysis`) from execution (`contractor_and_pf`, sales, leasing,
+completion/operations) and exposes feedback-loop rules that trigger downstream
+Pod recalculation when market demand, design, permits, costs, schedules, sales,
+leases, or NOI change.
+
+This contract is additive to the track-specific Pod graph. The selected track
+defines the review objective; the lifecycle process supplies development-stage
+context, required evidence, expected outputs, and rerun events. Financial
+results remain deterministic and source-backed.

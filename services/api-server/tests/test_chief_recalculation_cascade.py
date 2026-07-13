@@ -1,6 +1,7 @@
 from use_cases.chief_deal_orchestration import (
     run_chief_deal_all_pods_use_case,
     run_chief_deal_pod_use_case,
+    run_chief_deal_pod_with_cascade_use_case,
 )
 
 
@@ -87,3 +88,19 @@ def test_run_all_without_triggers_reports_zero_recalculations():
     plan = run_chief_deal_all_pods_use_case("pnone", project, {})
     assert plan["runAllSummary"]["recalculatedCount"] == 0
     assert plan["runAllSummary"]["recalculationRows"] == []
+
+
+def test_single_pod_auto_cascade_consumes_downstream_recalculation_queue():
+    project = _full_project("pauto")
+    plan = run_chief_deal_pod_with_cascade_use_case(
+        "pauto",
+        "cost_schedule",
+        project,
+        {},
+        max_rounds=1,
+    )
+    summary = plan["autoCascadeSummary"]
+    assert summary["recalculatedCount"] >= 1
+    assert any(row["podKey"] == "feasibility_cashflow" for row in summary["rows"])
+    statuses = {row["podKey"]: row["status"] for row in plan["podRuns"]}
+    assert statuses["cost_schedule"] == "completed"

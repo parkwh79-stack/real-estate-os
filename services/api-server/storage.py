@@ -62,6 +62,8 @@ def default_state() -> Dict[str, Any]:
         "evidence_graphs": {},
         "chief_pod_artifacts": {},
         "pod_ai_reviews": {},
+        "legal_reviews": {},
+        "permit_reviews": {},
         "recalculation_events": {},
         "calculation_runs": {},
         "deal_state_records": {},
@@ -193,6 +195,8 @@ def delete_project_record_cascade(project_id: str) -> bool:
             "evidence_graphs",
             "chief_pod_artifacts",
             "pod_ai_reviews",
+            "legal_reviews",
+            "permit_reviews",
             "prompt_artifacts",
             "assumption_overrides",
             "restructuring_cures",
@@ -207,6 +211,65 @@ def delete_project_record_cascade(project_id: str) -> bool:
             conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
         conn.commit()
     return True
+
+
+def _upsert_review_record(project_id: str, record: Dict[str, Any], store_key: str, table: str, id_column: str) -> Dict[str, Any]:
+    """Persist a domain review in JSON/Postgres document state or SQLite."""
+    now = datetime.now(timezone.utc).isoformat()
+    review_id = str(record.get("reviewId") or record.get("review_id") or f"{store_key}:{uuid4()}")
+    normalized = {
+        **record,
+        "schemaVersion": record.get("schemaVersion") or "realytics-legal-review-v1",
+        "projectId": str(project_id),
+        "reviewId": review_id,
+        "createdAt": record.get("createdAt") or now,
+        "updatedAt": now,
+    }
+    if _use_document_store():
+        state = _load_json_state() or default_state()
+        state.setdefault(store_key, {}).setdefault(str(project_id), {})[review_id] = normalized
+        _save_json_state_from_state(state)
+        return normalized
+    with _connect_sqlite() as conn:
+        conn.execute(
+            f"""INSERT INTO {table}(project_id, {id_column}, status, updated_at, payload_json)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, {id_column}) DO UPDATE SET
+                  status=excluded.status, updated_at=excluded.updated_at,
+                  payload_json=excluded.payload_json""",
+            (str(project_id), review_id, normalized.get("status"), normalized["updatedAt"], json.dumps(normalized, ensure_ascii=False)),
+        )
+        conn.commit()
+    return normalized
+
+
+def _list_review_records(project_id: str, store_key: str, table: str, limit: int = 100) -> list[Dict[str, Any]]:
+    if _use_document_store():
+        state = _load_json_state() or default_state()
+        records = list(state.get(store_key, {}).get(str(project_id), {}).values())
+    else:
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(
+                f"SELECT payload_json FROM {table} WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (str(project_id), limit),
+            )]
+    return sorted(records, key=lambda item: item.get("updatedAt") or item.get("createdAt") or "", reverse=True)[:limit]
+
+
+def upsert_legal_review_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    return _upsert_review_record(project_id, record, "legal_reviews", "legal_reviews", "review_id")
+
+
+def list_legal_review_records(project_id: str, limit: int = 100) -> list[Dict[str, Any]]:
+    return _list_review_records(project_id, "legal_reviews", "legal_reviews", limit)
+
+
+def upsert_permit_review_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    return _upsert_review_record(project_id, record, "permit_reviews", "permit_reviews", "review_id")
+
+
+def list_permit_review_records(project_id: str, limit: int = 100) -> list[Dict[str, Any]]:
+    return _list_review_records(project_id, "permit_reviews", "permit_reviews", limit)
 
 
 def upsert_orchestration_run(project_id: str, run_id: str, run: Dict[str, Any]) -> bool:
@@ -1089,6 +1152,7 @@ def list_deal_state_records(
     calculation_run_id: str | None = None,
     review_status: str | None = None,
     missing_locator: bool | None = None,
+    latest_only: bool = False,
     limit: int = 200,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 200), 1000))
@@ -1123,6 +1187,29 @@ def list_deal_state_records(
             r for r in records
             if _deal_state_record_has_source_locator(r) != bool(missing_locator)
         ]
+    if latest_only:
+        # A deal-state record is an audit trail, but reviewer screens need the
+        # latest actionable row per business key.  Materializers intentionally
+        # retain historical rows for audit, so collapse only at read time.
+        source_priority = {
+            "risk_register": 3,
+            "chief_pod_artifact": 2,
+            "evidence_graph": 1,
+        }
+        latest_by_key: Dict[str, Dict[str, Any]] = {}
+        for record in records:
+            key = str(record.get("key") or record.get("recordId") or "")
+            current = latest_by_key.get(key)
+            if current is None:
+                latest_by_key[key] = record
+                continue
+            current_rank = source_priority.get(str(current.get("sourceType") or ""), 0)
+            candidate_rank = source_priority.get(str(record.get("sourceType") or ""), 0)
+            current_stamp = str(current.get("updatedAt") or current.get("createdAt") or "")
+            candidate_stamp = str(record.get("updatedAt") or record.get("createdAt") or "")
+            if candidate_rank > current_rank or (candidate_rank == current_rank and candidate_stamp > current_stamp):
+                latest_by_key[key] = record
+        records = list(latest_by_key.values())
     return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)[:limit]
 
 
@@ -2203,6 +2290,8 @@ def _save_json_state(
     calculation_runs: Dict[str, Any] | None = None,
     deal_state_records: Dict[str, Any] | None = None,
     pod_ai_reviews: Dict[str, Any] | None = None,
+    legal_reviews: Dict[str, Any] | None = None,
+    permit_reviews: Dict[str, Any] | None = None,
 ) -> None:
     path = state_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2219,6 +2308,8 @@ def _save_json_state(
         "evidence_graphs": evidence_graphs,
         "chief_pod_artifacts": chief_pod_artifacts,
         "pod_ai_reviews": pod_ai_reviews or (_load_json_state() or default_state()).get("pod_ai_reviews", {}),
+        "legal_reviews": legal_reviews or (_load_json_state() or default_state()).get("legal_reviews", {}),
+        "permit_reviews": permit_reviews or (_load_json_state() or default_state()).get("permit_reviews", {}),
         "recalculation_events": recalculation_events or (_load_json_state() or default_state()).get("recalculation_events", {}),
         "calculation_runs": calculation_runs or (_load_json_state() or default_state()).get("calculation_runs", {}),
         "deal_state_records": deal_state_records or (_load_json_state() or default_state()).get("deal_state_records", {}),
@@ -2372,6 +2463,26 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             ON pod_ai_reviews(project_id, pod_key, updated_at);
         CREATE INDEX IF NOT EXISTS idx_pod_ai_reviews_project_status
             ON pod_ai_reviews(project_id, review_status, updated_at);
+        CREATE TABLE IF NOT EXISTS legal_reviews (
+            project_id TEXT NOT NULL,
+            review_id TEXT NOT NULL,
+            status TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, review_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_legal_reviews_project_updated
+            ON legal_reviews(project_id, updated_at);
+        CREATE TABLE IF NOT EXISTS permit_reviews (
+            project_id TEXT NOT NULL,
+            review_id TEXT NOT NULL,
+            status TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, review_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_permit_reviews_project_updated
+            ON permit_reviews(project_id, updated_at);
         CREATE TABLE IF NOT EXISTS recalculation_events (
             project_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
@@ -3016,6 +3127,8 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("evidence_graphs", {})
     normalized.setdefault("chief_pod_artifacts", {})
     normalized.setdefault("pod_ai_reviews", {})
+    normalized.setdefault("legal_reviews", {})
+    normalized.setdefault("permit_reviews", {})
     normalized.setdefault("recalculation_events", {})
     normalized.setdefault("calculation_runs", {})
     normalized.setdefault("deal_state_records", {})
@@ -3059,6 +3172,8 @@ def _save_json_state_from_state(state: Dict[str, Any]) -> None:
         calculation_runs=state.get("calculation_runs", {}),
         deal_state_records=state.get("deal_state_records", {}),
         pod_ai_reviews=state.get("pod_ai_reviews", {}),
+        legal_reviews=state.get("legal_reviews", {}),
+        permit_reviews=state.get("permit_reviews", {}),
     )
 
 

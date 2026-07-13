@@ -83,6 +83,7 @@ from use_cases.chief_deal_orchestration import (
     plan_chief_deal_orchestration_use_case,
     run_chief_deal_all_pods_use_case,
     run_chief_deal_pod_use_case,
+    run_chief_deal_pod_with_cascade_use_case,
 )
 from use_cases.common import deep_merge
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
@@ -91,6 +92,7 @@ from use_cases.covenant_eod import evaluate_covenant_eod_use_case
 from use_cases.product_planning import compare_product_planning_use_case
 from use_cases.market_product_depth import analyze_market_product_depth_use_case
 from use_cases.reanalyze_on_evidence import reanalyze_after_evidence_use_case
+from use_cases.feasibility_input_builder import build_feasibility_input_draft
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
 from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_case
 from agents.land_ledger_agent import LandLedgerParseError
@@ -106,6 +108,7 @@ from use_cases.parsed_facts import parsed_fact_package, persist_parsed_facts
 from use_cases.parsed_fact_validation import validate_parsed_facts_for_pod
 from use_cases.calculation_run_capture import scenario_engine_run_payloads, stress_test_run_payload
 from use_cases.legal_review import review_legal_and_permits_use_case
+from use_cases.legal_pod import run_legal_pod_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
@@ -161,6 +164,7 @@ from use_cases.source_documents import (
 from use_cases.workbook_import_approval import (
     approve_feasibility_workbook_import_use_case,
     approve_risk_report_workbook_import_use_case,
+    persist_feasibility_workbook_candidate_use_case,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -388,6 +392,44 @@ def land_evidence_records_from_ledger(land_ledger: Dict[str, Any]) -> list[Dict[
                 "sourceUrlOrEvidenceId": cadastral.get("sourceUrlOrEvidenceId"),
                 "verificationStatus": "attached_pending_review",
             })
+        if parcel.get("landUsePlanning"):
+            land_use = parcel["landUsePlanning"]
+            records.append({
+                **land_use,
+                "recordKey": f"land_use_planning:{pnu or parcel_key}",
+                "evidenceId": f"land_use_planning:{pnu or parcel_key}",
+                "evidenceType": "land_use_planning",
+                "pnu": pnu,
+                "parcelKey": parcel_key,
+                "sourceName": land_use.get("sourceName") or "configured_land_use_planning_connector",
+                "sourceUrlOrEvidenceId": land_use.get("sourceUrlOrEvidenceId"),
+                "verificationStatus": "attached_pending_review",
+            })
+        for building in parcel.get("buildingUseRecords", []) or []:
+            records.append({
+                **building,
+                "recordKey": f"building_use:{building.get('buildingId') or building.get('gisBuildingId') or pnu or parcel_key}",
+                "evidenceId": f"building_use:{building.get('buildingId') or building.get('gisBuildingId') or pnu or parcel_key}",
+                "evidenceType": "building_use",
+                "pnu": pnu,
+                "parcelKey": parcel_key,
+                "sourceName": building.get("sourceName") or "VWorld building use attributes",
+                "sourceUrlOrEvidenceId": building.get("sourceUrlOrEvidenceId"),
+                "verificationStatus": "attached_pending_review",
+            })
+        if parcel.get("landCharacteristics"):
+            characteristics = parcel["landCharacteristics"]
+            records.append({
+                **characteristics,
+                "recordKey": f"land_characteristics:{pnu or parcel_key}",
+                "evidenceId": f"land_characteristics:{pnu or parcel_key}",
+                "evidenceType": "land_characteristics",
+                "pnu": pnu,
+                "parcelKey": parcel_key,
+                "sourceName": characteristics.get("sourceName") or "VWorld land characteristics",
+                "sourceUrlOrEvidenceId": characteristics.get("sourceUrlOrEvidenceId"),
+                "verificationStatus": "attached_pending_review",
+            })
         if parcel.get("officialLandPricePerSqm"):
             records.append({
                 "recordKey": f"official_land_price:{pnu or parcel_key}",
@@ -602,6 +644,10 @@ def persisted_land_evidence_package(project_id: str) -> Dict[str, Any]:
         "recordsByType": by_type,
         "pnuResolutions": pnu_records,
         "cadastralCharacteristics": by_type.get("cadastral_record", []),
+        "landUsePlanningRecords": by_type.get("land_use_planning", []),
+        "buildingUseRecords": by_type.get("building_use", []),
+        "landCharacteristicsRecords": by_type.get("land_characteristics", []),
+        "regionLandPriceTrends": by_type.get("land_price_trend", []),
         "officialLandPrices": by_type.get("official_land_price", []),
         "registryEvidence": registry_records,
         "parcelCount": len({record.get("pnu") or record.get("parcelKey") for record in records if record.get("pnu") or record.get("parcelKey")}),
@@ -636,6 +682,10 @@ def attach_persisted_land_evidence(project_id: str, project_data: Dict[str, Any]
                 {
                     "pnuResolutions": package.get("pnuResolutions", []),
                     "cadastralCharacteristics": package.get("cadastralCharacteristics", []),
+                    "landUsePlanningRecords": package.get("landUsePlanningRecords", []),
+                    "buildingUseRecords": package.get("buildingUseRecords", []),
+                    "landCharacteristicsRecords": package.get("landCharacteristicsRecords", []),
+                    "regionLandPriceTrends": package.get("regionLandPriceTrends", []),
                     "officialLandPrices": package.get("officialLandPrices", []),
                     "registryEvidence": package.get("registryEvidence", []),
                     "mode": "server_land_evidence_store",
@@ -1284,6 +1334,64 @@ def get_projects(request: Request):
     projects = list_projects_use_case(project_repository())
     return [project for project in projects if project_visible_to_identity(project, request)]
 
+
+@router.get("/recent-work")
+def get_recent_work(request: Request, limit: int = Query(5, ge=1, le=20)):
+    """Return the signed-in user's resumable deal-room work, not demo cards."""
+    authorize_request(request, "project:read")
+    visible = [p for p in list_projects_use_case(project_repository()) if project_visible_to_identity(p, request)]
+    items: list[Dict[str, Any]] = []
+    for project in visible:
+        project_id = str((project.get("project") or {}).get("id") or project.get("id") or "")
+        if not project_id:
+            continue
+        documents = list_source_documents_use_case(source_document_repository(), project_id)
+        runs = orchestration_repository().list_metadata(project_id)
+        latest_run = max(runs, key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), default={})
+        state = project.get("chief_orchestration_state") or {}
+        gate = state.get("approvalReadinessGate") or state.get("approval_readiness_gate") or {}
+        risk_count = len(project.get("risk_register", {}).get("risks", []) if isinstance(project.get("risk_register"), dict) else [])
+        items.append({
+            "projectId": project_id,
+            "projectName": _project_display_name(project_id, project),
+            "track": project.get("workflowTrack") or project.get("workflow_track"),
+            "lastWorkedAt": latest_run.get("completed_at") or latest_run.get("started_at") or project.get("updatedAt") or project.get("updated_at"),
+            "latestRunId": latest_run.get("run_id"),
+            "latestRunStatus": latest_run.get("status"),
+            "sourceDocumentCount": len(documents),
+            "openReviewCount": len(project.get("pending_reviews", []) if isinstance(project.get("pending_reviews"), list) else []),
+            "riskCount": risk_count,
+            "approvalStatus": gate.get("status") or "not_started",
+            "nextAction": _resume_action(project, documents, latest_run, gate),
+            "sourceHashes": sorted({str(item.get("sha256") or item.get("originalFileHash")) for item in documents if item.get("sha256") or item.get("originalFileHash")}),
+        })
+    items.sort(key=lambda item: str(item.get("lastWorkedAt") or ""), reverse=True)
+    return {"schemaVersion": "realytics-recent-work-v1", "count": min(limit, len(items)), "items": items[:limit]}
+
+
+@router.post("/intake/continuation-check")
+def check_intake_continuation(request: Request, input_data: Dict[str, Any] | None = None):
+    """Compare uploaded fingerprints with prior source documents before creating a new deal."""
+    authorize_request(request, "project:read")
+    files = input_data.get("files") if isinstance(input_data, dict) else []
+    files = files if isinstance(files, list) else []
+    visible = [p for p in list_projects_use_case(project_repository()) if project_visible_to_identity(p, request)]
+    matches: list[Dict[str, Any]] = []
+    for project in visible:
+        project_id = str((project.get("project") or {}).get("id") or project.get("id") or "")
+        documents = list_source_documents_use_case(source_document_repository(), project_id)
+        fingerprints = {str(item.get("sha256") or item.get("originalFileHash")): item for item in documents if item.get("sha256") or item.get("originalFileHash")}
+        matched_files = []
+        for file in files:
+            if not isinstance(file, dict):
+                continue
+            fingerprint = str(file.get("sha256") or "")
+            if fingerprint and fingerprint in fingerprints:
+                matched_files.append({"fileName": file.get("name"), "matchedDocument": fingerprints[fingerprint]})
+        if matched_files:
+            matches.append({"projectId": project_id, "projectName": _project_display_name(project_id, project), "matchedFiles": matched_files, "nextAction": "resume_existing_review"})
+    return {"schemaVersion": "realytics-intake-continuation-check-v1", "matches": matches, "shouldAsk": bool(matches)}
+
 @router.post("/")
 def create_project(project_data: Dict[str, Any], request: Request):
     return create_project_use_case(project_repository(), stamp_project_identity(project_data, request))
@@ -1571,7 +1679,7 @@ def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: D
     """토지조서의 모든 필지에 대해 지번별 PNU·공시지가를 VWorld로 일괄 해석·저장."""
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:write")
+    authorize_request(request, "project:analyze")
     payload = input_data or {}
     try:
         limit = max(1, min(500, int(payload.get("limit") or 150)))
@@ -1759,6 +1867,43 @@ def approve_project_feasibility_workbook_import(
         },
     )
     return result
+
+@router.post("/{project_id}/feasibility-workbook/import-candidate")
+def persist_project_feasibility_workbook_candidate(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any],
+):
+    """Persist a validated workbook draft for Pod calculations without approval."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "project:analyze")
+    try:
+        result = persist_feasibility_workbook_candidate_use_case(
+            project_repository(),
+            project_id,
+            input_data,
+            recorded_by=user_id_from_request(request),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    auto = _maybe_auto_reanalyze(project_id, ["feasibility_workbook"])
+    result["autoReanalysis"] = auto
+    record_sensitive_project_event(
+        request,
+        event_type="feasibility_workbook_candidate_persisted",
+        project_id=project_id,
+        metadata={
+            "importId": result.get("importId"),
+            "status": result.get("status"),
+            "authorization": authz.get("authorization"),
+            "autoReanalysisTriggered": bool(auto),
+        },
+    )
+    return result
+
 
 @router.post("/{project_id}/feasibility-workbook/learn")
 async def learn_project_feasibility_workbook(
@@ -1968,6 +2113,7 @@ def list_project_deal_state_records(
     calculation_run_id: str | None = None,
     review_status: str | None = None,
     missing_locator: bool | None = None,
+    latest_only: bool = False,
     limit: int = Query(200, ge=1, le=1000),
 ):
     """List Deal State records.
@@ -1992,6 +2138,7 @@ def list_project_deal_state_records(
         calculation_run_id=calculation_run_id,
         review_status=review_status,
         missing_locator=missing_locator,
+        latest_only=latest_only,
         limit=limit,
     )
     # Completeness summary over the same record-type scope, independent of the
@@ -2001,6 +2148,7 @@ def list_project_deal_state_records(
         project_id,
         record_type=record_type,
         calculation_run_id=calculation_run_id,
+        latest_only=latest_only,
         limit=1000,
     )
     with_locator = [r for r in scope if _deal_state_record_has_source_locator(r)]
@@ -2270,6 +2418,43 @@ def analyze_market_product_depth(
     payload = input_data or {}
     options = payload.get("options") if isinstance(payload.get("options"), dict) else None
     return analyze_market_product_depth_use_case(PROJECTS_DB[project_id], options)
+
+
+@router.post("/{project_id}/feasibility/build-input")
+def build_project_feasibility_input(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """AI-assisted 사업수지 구성: pull feasibility_input (총수입·총사업비·공사비·토지비·
+    금융비·PF) from parsed 사업수지 sources (feasibilityStudyV2 / parsed_facts) — and,
+    where a source is missing, propose deterministic values from land·regulation·
+    product plan·market price·공시지가 (flagged needsReview). With apply=true it
+    persists into feasibility_input so Cash Flow / PF produce real numbers. Never
+    fabricates a missing value to a made-up number."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    payload = input_data or {}
+    try:
+        parsed_facts = list_deal_state_records(project_id, record_type="parsed_fact")
+    except Exception:
+        parsed_facts = []
+    draft = build_feasibility_input_draft(PROJECTS_DB[project_id], parsed_facts=parsed_facts)
+    apply = payload.get("apply", True)
+    if apply and draft.get("feasibilityInput"):
+        project = PROJECTS_DB[project_id]
+        feasibility_input = dict(project.get("feasibility_input") or {})
+        for key, value in draft["feasibilityInput"].items():
+            feasibility_input[key] = value
+        feasibility_input.setdefault("schema_source", "feasibility_input_builder")
+        project_repository().update(project_id, {"feasibility_input": feasibility_input})
+        draft["applied"] = True
+        record_sensitive_project_event(
+            request,
+            event_type="feasibility_input_built",
+            project_id=project_id,
+            metadata={"method": draft.get("method"), "needsReview": draft.get("needsReview"), "missing": draft.get("missing")},
+        )
+    else:
+        draft["applied"] = False
+    return draft
 
 @router.post("/{project_id}/cashflow/calculate")
 def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
@@ -2878,6 +3063,72 @@ def review_legal_and_permits(project_id: str, input_data: Dict[str, Any] | None 
         raise HTTPException(status_code=404, detail="Project not found")
     return review_legal_and_permits_use_case(PROJECTS_DB[project_id], input_data)
 
+
+@router.post("/{project_id}/legal-pod/run")
+def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Run the independent Legal Pod and persist its PF handoff/evidence ledger."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorization = authorize_request(request, "project:analyze")
+    project_data = dict(PROJECTS_DB[project_id])
+    project_data["landEvidence"] = {
+        "records": list_land_evidence_records(project_id),
+    }
+    result = run_legal_pod_use_case(project_id, project_data, input_data or {})
+    project_data["legalPermitReview"] = result["legalReview"]
+    project_data["legalReview"] = result["legalReview"]
+    project_data["permitReview"] = result["permitReview"]
+    PROJECTS_DB[project_id].update({
+        "legalPermitReview": result["legalReview"],
+        "legalReview": result["legalReview"],
+        "permitReview": result["permitReview"],
+    })
+    upsert_project_record(project_id, PROJECTS_DB[project_id])
+    record_sensitive_project_event(
+        request,
+        event_type="legal_pod_run",
+        project_id=project_id,
+        metadata={
+            "legalReviewId": result["legalReview"].get("reviewId"),
+            "permitReviewId": result["permitReview"].get("reviewId"),
+            "status": result["legalReview"].get("status"),
+            "mcp": result["legalReview"].get("mcp"),
+            "authorization": authorization.get("authorization"),
+        },
+    )
+    return {"projectId": project_id, **result}
+
+
+@router.get("/{project_id}/legal-reviews")
+def list_project_legal_reviews(project_id: str, request: Request, limit: int = Query(20, ge=1, le=200)):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    from storage import list_legal_review_records
+    return {"projectId": project_id, "items": list_legal_review_records(project_id, limit)}
+
+
+@router.get("/{project_id}/permit-reviews")
+def list_project_permit_reviews(project_id: str, request: Request, limit: int = Query(20, ge=1, le=200)):
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    from storage import list_permit_review_records
+    return {"projectId": project_id, "items": list_permit_review_records(project_id, limit)}
+
+
+@router.get("/{project_id}/legal-pod/law-changes")
+def list_project_legal_law_changes(project_id: str, request: Request, limit: int = Query(100, ge=1, le=500)):
+    """Return source-backed legal reference changes across Legal Pod runs."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    records = [
+        record for record in list_deal_state_records(project_id)
+        if record.get("recordType") == "legal_law_change"
+    ]
+    return {"projectId": project_id, "items": records[:limit]}
+
 @router.post("/{project_id}/reports/generate")
 def generate_report(project_id: str, input_data: Dict[str, Any]):
     if project_id not in PROJECTS_DB:
@@ -3050,6 +3301,23 @@ def _project_display_name(project_id: str, project_data: Dict[str, Any]) -> str:
         return stored_name
     inferred_name = _infer_project_name_from_source_documents(project_data)
     return inferred_name or stored_name or f"프로젝트 {project_id}"
+
+
+def _resume_action(
+    project: Dict[str, Any],
+    documents: list[Dict[str, Any]],
+    latest_run: Dict[str, Any],
+    gate: Dict[str, Any],
+) -> str:
+    if not documents:
+        return "upload_source_documents"
+    if not latest_run:
+        return "run_initial_analysis"
+    if str(gate.get("status") or "").lower() in {"not_ready_for_approval", "needs_review", "hold"}:
+        return "resume_open_reviews"
+    if str(latest_run.get("status") or "").lower() in {"running", "queued", "failed"}:
+        return "inspect_latest_run"
+    return "continue_next_review_step"
 
 
 def _looks_like_corrupted_korean(value: Any) -> bool:
@@ -3244,7 +3512,10 @@ def apply_unsold_ltv_cure_and_rerun(project_id: str, request: Request, input_dat
     """Persist a source-backed Unsold LTV cure, rerun PF review, and refresh Gate v2."""
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    authz = authorize_request(request, "project:write")
+    # A cure is a lender-side risk review action, not an edit to the project's
+    # master data. Reviewers may submit it with risk:review; project:write
+    # remains reserved for changing the canonical project input package.
+    authz = authorize_request(request, "risk:review")
     payload = input_data or {}
     cure_type = str(payload.get("cureType") or payload.get("cure_type") or "").strip()
     amount = float(payload.get("amount") or 0)
@@ -3706,7 +3977,7 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
     """Chief Deal Orchestrator: execute a single agent pod and trigger downstream events."""
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:write")
+    authorize_request(request, "project:analyze")
     payload = input_data or {}
     pod_key = payload.get("podKey")
     if not pod_key:
@@ -3728,7 +3999,8 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
 
     project_data = PROJECTS_DB[project_id]
     try:
-        plan = run_chief_deal_pod_use_case(
+        pod_runner = run_chief_deal_pod_with_cascade_use_case if options.get("autoCascade") else run_chief_deal_pod_use_case
+        plan = pod_runner(
             project_id,
             pod_key,
             project_data,
@@ -3769,7 +4041,7 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
     """Chief Deal Orchestrator: execute the selected track's pod graph in order."""
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:write")
+    authorize_request(request, "project:analyze")
     payload = input_data or {}
     options = payload.get("options") or {}
     workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
@@ -3877,7 +4149,7 @@ def reanalyze_chief_deal(project_id: str, request: Request, input_data: Dict[str
     that still lack evidence stay blocked honestly."""
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:write")
+    authorize_request(request, "project:analyze")
     payload = input_data or {}
     doc_types = payload.get("changedDocumentTypes")
     doc_types = doc_types if isinstance(doc_types, list) else None

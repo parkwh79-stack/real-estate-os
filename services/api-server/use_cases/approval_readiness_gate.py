@@ -16,6 +16,8 @@ from storage import (
     list_calculation_run_records,
     list_deal_state_records,
     list_pod_ai_review_records,
+    list_legal_review_records,
+    list_permit_review_records,
 )
 
 RESOLVED_REVIEW_STATUSES = {"approved", "waived", "resolved"}
@@ -145,6 +147,23 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         and str(finding.get("category") or "").lower() not in ADVISORY_REVIEW_CATEGORIES
     ]
 
+    try:
+        legal_reviews = list_legal_review_records(str(project_id), limit=20)
+        permit_reviews = list_permit_review_records(str(project_id), limit=20)
+    except Exception:
+        legal_reviews, permit_reviews = [], []
+    latest_legal = legal_reviews[0] if legal_reviews else None
+    latest_permit = permit_reviews[0] if permit_reviews else None
+    legal_status = str((latest_legal or {}).get("status") or "not_run").lower()
+    permit_status = str((latest_permit or {}).get("status") or "not_run").lower()
+    law_context_connected = bool((latest_legal or {}).get("mcp", {}).get("connected"))
+    legal_blocking_risks = [
+        record for record in risk_records
+        if str(record.get("category") or "").lower() == "legal"
+        and _is_blocking_deal_state_risk(record)
+        and str(record.get("reviewStatus") or record.get("status") or "open").lower() not in RESOLVED_REVIEW_STATUSES
+    ]
+
     has_records = bool(records)
     has_assumption_requirement = bool(assumption_records) or _has_data_quality_or_assumption_risk(risk_records)
 
@@ -177,6 +196,12 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
             {"podKey": b["podKey"], "category": b["finding"].get("category"), "message": str(b["finding"].get("message") or "")[:120]}
             for b in pod_ai_review_blockers[:8]
         ],
+        "legalReviewStatus": legal_status,
+        "permitReviewStatus": permit_status,
+        "legalBlockingRiskCount": len(legal_blocking_risks),
+        "koreanLawMcpStatus": (latest_legal or {}).get("mcp", {}).get("status", "not_run"),
+        "koreanLawMcpFailureReason": (latest_legal or {}).get("mcp", {}).get("failureReason"),
+        "koreanLawMcpConnected": law_context_connected,
     })
 
     context["gates"].extend([
@@ -252,6 +277,24 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
             f"{len(pod_ai_review_blockers)} unresolved blocking Pod AI Review finding(s) (evidence/scenario-grounded) remain.",
             "blocking",
         ),
+        _gate(
+            "LEGAL_POD_REVIEW_COMPLETE",
+            bool(latest_legal) and not legal_blocking_risks,
+            "Legal Pod review must be run and all blocking legal issues must be resolved, waived, or cured.",
+            "blocking",
+        ),
+        _gate(
+            "PERMIT_REVIEW_AVAILABLE",
+            bool(latest_permit) and permit_status not in {"not_run", "missing"},
+            "Permit review evidence and status must be available before approval readiness.",
+            "blocking",
+        ),
+        _gate(
+            "KOREAN_LAW_EVIDENCE_AVAILABLE",
+            bool(latest_legal) and law_context_connected,
+            "Korean Law MCP or official law API evidence must be connected for approval-grade legal review.",
+            "blocking",
+        ),
     ])
     return _finalize_context(context)
 
@@ -270,6 +313,9 @@ def deal_state_approval_actions(gates: List[Dict[str, Any]]) -> List[str]:
         "DEAL_STATE_AUTO_SUPPLEMENT_GAPS_RESOLVED": "Close failed auto-supplement attempts by attaching evidence, approving a documented assumption, or waiving with rationale.",
         "DEAL_STATE_SOURCE_LOCATORS_ATTACHED": "Attach document page, Excel cell, API row, evidence ID, or Agent artifact locators to Deal State records.",
         "DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT": "Resolve SOURCE_LOCATOR_MISSING or EVIDENCE_TRACE_WEAK risks before approval.",
+        "LEGAL_POD_REVIEW_COMPLETE": "Run Legal Pod, attach parcel-level registry/encumbrance evidence, and resolve or waive legal blockers.",
+        "PERMIT_REVIEW_AVAILABLE": "Attach permit, zoning, law, or contract review evidence and run the permit review.",
+        "KOREAN_LAW_EVIDENCE_AVAILABLE": "Configure the Korean Law MCP bridge or LAW_OC and rerun Legal Pod so statutory references and citation checks are persisted.",
     }
     return list(dict.fromkeys(
         action_by_code.get(gate.get("code"), gate.get("message", "Review Deal State approval gate."))

@@ -397,3 +397,26 @@ CREATE INDEX IF NOT EXISTS idx_projects_payload_gin          ON projects        
 CREATE INDEX IF NOT EXISTS idx_deal_state_records_payload_gin ON deal_state_records USING GIN(payload_json);
 CREATE INDEX IF NOT EXISTS idx_calculation_runs_payload_gin   ON calculation_runs   USING GIN(payload_json);
 CREATE INDEX IF NOT EXISTS idx_chief_pod_artifacts_payload_gin ON chief_pod_artifacts USING GIN(payload_json);
+
+-- ---------------------------------------------------------------------------
+-- Legal Pod review ledger
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS legal_reviews (
+    project_id   TEXT NOT NULL,
+    review_id    TEXT NOT NULL,
+    status       TEXT,
+    updated_at   TIMESTAMPTZ,
+    payload_json JSONB NOT NULL,
+    PRIMARY KEY (project_id, review_id)
+);
+CREATE INDEX IF NOT EXISTS idx_legal_reviews_project_updated ON legal_reviews(project_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS permit_reviews (
+    project_id   TEXT NOT NULL,
+    review_id    TEXT NOT NULL,
+    status       TEXT,
+    updated_at   TIMESTAMPTZ,
+    payload_json JSONB NOT NULL,
+    PRIMARY KEY (project_id, review_id)
+);
+CREATE INDEX IF NOT EXISTS idx_permit_reviews_project_updated ON permit_reviews(project_id, updated_at);

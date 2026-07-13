@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -17,10 +17,11 @@ import {
   Wallet,
 } from "lucide-react";
 import { apiBase, authHeaders, clearStoredAuthSession } from "../../lib/auth-client";
+import { fetchRecentWork, type RecentWorkItem } from "../../lib/project-client";
 import { getTrackWorkflowDefinition, setStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
 import { SmartIntake } from "../intake/smart-intake";
 
-type Phase = "idle" | "creating" | "ready" | "error";
+type Phase = "idle" | "creating" | "resume" | "ready" | "error";
 
 type Classified = {
   filename: string;
@@ -54,6 +55,12 @@ type TriageResult = {
   confidenceBasis?: string;
   tracks: TriageTrack[];
   limitations?: string[];
+};
+
+type ContinuationMatch = {
+  projectId: string;
+  projectName: string;
+  matchedFiles: Array<{ fileName?: string }>;
 };
 
 const TRACK_META: Record<WorkflowTrack, Pick<TriageTrack, "label" | "title" | "description" | "entryHref">> = {
@@ -222,8 +229,18 @@ export function CommandCenter() {
   const [triageError, setTriageError] = useState<string | null>(null);
   const [selectedTrack, setSelectedTrack] = useState<WorkflowTrack | null>(null);
   const [finalizing, setFinalizing] = useState(false);
+  const [recentWork, setRecentWork] = useState<RecentWorkItem[]>([]);
+  const [continuationMatches, setContinuationMatches] = useState<ContinuationMatch[]>([]);
 
-  const start = useCallback(async (picked: File[]) => {
+  useEffect(() => {
+    let active = true;
+    void fetchRecentWork(5).then((items) => {
+      if (active) setRecentWork(items);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const start = useCallback(async (picked: File[], bypassContinuationCheck = false) => {
     if (!picked.length) return;
     const name = deriveProjectName(picked);
     setProjectName(name);
@@ -234,6 +251,28 @@ export function CommandCenter() {
     try {
       const buffered = await Promise.all(picked.map(async (f) => new File([await f.arrayBuffer()], f.name, { type: f.type })));
       setFiles(buffered);
+      if (!bypassContinuationCheck) {
+        const fingerprints = await Promise.all(buffered.map(async (file) => {
+          const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+          const sha256 = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+          return { name: file.name, size: file.size, sha256 };
+        }));
+        const continuationRes = await fetch(`${apiBase}/projects/intake/continuation-check`, {
+          method: "POST",
+          headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+          body: JSON.stringify({ files: fingerprints }),
+        });
+        if (continuationRes.ok) {
+          const continuationBody = await continuationRes.json();
+          const matches = Array.isArray(continuationBody.matches) ? continuationBody.matches as ContinuationMatch[] : [];
+          if (matches.length) {
+            setContinuationMatches(matches);
+            setPhase("resume");
+            return;
+          }
+        }
+      }
+      setContinuationMatches([]);
       const res = await fetch(`${apiBase}/projects/`, {
         method: "POST",
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
@@ -338,7 +377,11 @@ export function CommandCenter() {
           </p>
         </div>
 
-        {phase === "ready" && projectId ? (
+        {phase === "idle" && recentWork.length ? <RecentWorkPanel items={recentWork} onOpen={(item) => router.push(`/project/${item.projectId}/chief-orchestration`)} /> : null}
+
+        {phase === "resume" ? (
+          <ResumePanel matches={continuationMatches} onContinue={(match) => router.push(`/project/${match.projectId}/chief-orchestration`)} onNew={() => void start(files, true)} />
+        ) : phase === "ready" && projectId ? (
           <div className="space-y-4">
             <div className="flex flex-col gap-2 rounded-2xl border border-sky-500/20 bg-slate-900/60 p-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
@@ -391,6 +434,49 @@ export function CommandCenter() {
         </div>
       </div>
     </main>
+  );
+}
+
+function ResumePanel({ matches, onContinue, onNew }: { matches: ContinuationMatch[]; onContinue: (match: ContinuationMatch) => void; onNew: () => void }) {
+  return (
+    <section className="rounded-2xl border border-amber-400/40 bg-amber-500/10 p-5 text-white">
+      <p className="text-xs font-bold uppercase tracking-[0.16em] text-amber-300">기존 자료 확인</p>
+      <h2 className="mt-1 text-xl font-black">같은 자료로 진행한 심사가 있습니다.</h2>
+      <p className="mt-2 text-sm leading-6 text-amber-100">기존 프로젝트의 계산 결과, 증빙, 미해결 리스크를 이어서 볼지 새 프로젝트로 다시 분석할지 선택하세요.</p>
+      <div className="mt-4 space-y-2">
+        {matches.map((match) => <button key={match.projectId} type="button" onClick={() => onContinue(match)} className="flex w-full items-center justify-between rounded-xl border border-amber-300/30 bg-slate-950/50 p-3 text-left hover:border-amber-300"><span><span className="block text-sm font-black">{match.projectName}</span><span className="text-xs text-amber-100/70">{match.matchedFiles.map((file) => file.fileName).filter(Boolean).join(", ")}</span></span><ArrowRight className="h-4 w-4 text-amber-300" /></button>)}
+      </div>
+      <button type="button" onClick={onNew} className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg border border-slate-600 bg-slate-950 px-4 text-sm font-black text-white hover:border-sky-400">새 프로젝트로 분석 시작</button>
+    </section>
+  );
+}
+
+function RecentWorkPanel({ items, onOpen }: { items: RecentWorkItem[]; onOpen: (item: RecentWorkItem) => void }) {
+  const actionLabels: Record<string, string> = {
+    upload_source_documents: "자료 업로드",
+    run_initial_analysis: "초기 분석 실행",
+    resume_open_reviews: "미해결 심사 이어가기",
+    inspect_latest_run: "최근 실행 확인",
+    continue_next_review_step: "다음 심사 단계",
+  };
+  return (
+    <section className="mb-4 rounded-2xl border border-sky-500/20 bg-slate-900/70 p-4 backdrop-blur">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-sky-300">최근 작업 기억</p>
+          <h2 className="mt-1 text-base font-black text-white">이전에 검토하던 프로젝트를 이어갈까요?</h2>
+          <p className="mt-1 text-xs font-semibold text-slate-400">저장된 프로젝트, 업로드 문서, 최근 실행 상태와 승인 Gate를 기준으로 표시합니다.</p>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2">
+        {items.map((item) => (
+          <button key={item.projectId} type="button" onClick={() => onOpen(item)} className="flex items-center justify-between gap-3 rounded-xl border border-slate-700 bg-slate-950/50 p-3 text-left hover:border-sky-400">
+            <span className="min-w-0"><span className="block truncate text-sm font-black text-white">{item.projectName}</span><span className="mt-1 block text-xs font-semibold text-slate-400">자료 {item.sourceDocumentCount}건 · 검토 대기 {item.openReviewCount}건 · Risk {item.riskCount}건 · Gate {item.approvalStatus}</span></span>
+            <span className="shrink-0 rounded-lg bg-sky-500/15 px-3 py-2 text-xs font-black text-sky-200">{actionLabels[item.nextAction] ?? "작업 이어가기"}<ArrowRight className="ml-1 inline h-3 w-3" /></span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 

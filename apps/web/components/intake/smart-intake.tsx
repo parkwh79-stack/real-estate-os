@@ -42,10 +42,10 @@ const ROUTES: Record<string, { path: string; kind: "file" | "json" }> = {
 };
 
 const STATUS_LABEL: Record<RowStatus, string> = {
-  idle: "보관됨",
+  idle: "보류",
   processing: "처리 중",
   done: "처리 완료",
-  skipped: "보관만 함",
+  skipped: "보강 필요",
   error: "실패",
 };
 
@@ -69,12 +69,12 @@ function summarizeResult(type: string, body: Record<string, unknown>): string | 
     }
     if (type === "land_evidence") return "증빙 저장";
     if (type === "business_plan" || type === "basic_architectural_plan") {
-      return body.status === "host_llm_required" ? "LLM 추출 필요" : "파싱 완료";
+      return body.status === "host_llm_required" ? "LLM 호출 필요" : "파싱 완료";
     }
   } catch {
     /* best-effort summary */
   }
-  return "완료";
+  return "처리 완료";
 }
 
 async function enrichLandLedgerAfterAnalyze(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -202,6 +202,19 @@ export function SmartIntake({
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         let body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (row.type === "feasibility_workbook" && body.feasibilityStudyV2Draft) {
+          const candidateRes = await fetch(`${apiBase}/projects/${projectId}/feasibility-workbook/import-candidate`, {
+            method: "POST",
+            headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+            body: JSON.stringify({
+              feasibilityStudyV2Draft: body.feasibilityStudyV2Draft,
+              validation: body.validation,
+              sourceDocument: body.upload,
+            }),
+          });
+          if (!candidateRes.ok) throw new Error(`사업수지 원장 반영 실패 (HTTP ${candidateRes.status})`);
+          body = { ...body, candidateImport: await candidateRes.json().catch(() => ({})) };
+        }
         if (row.type === "land_ledger") {
           body = await enrichLandLedgerAfterAnalyze(projectId, body);
         }

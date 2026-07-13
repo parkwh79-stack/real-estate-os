@@ -158,6 +158,31 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
     assert allowed.status_code == 200
 
 
+def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
+    client = TestClient(app)
+    session = client.post(
+        "/auth/session",
+        json={
+            "userId": "analysis-reviewer-user",
+            "tenantId": "tenant-auth",
+            "role": "reviewer",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    project_id = client.get("/projects/").json()[0]["project"]["id"]
+    response = client.post(
+        f"/projects/{project_id}/chief-orchestration/run-pod",
+        headers={"x-realytics-session-id": session},
+        json={"podKey": "land_legal", "options": {"useLiveConnectors": False}},
+    )
+    assert response.status_code == 200
+
+    me = client.get("/auth/me", headers={"x-realytics-session-id": session}).json()
+    assert "project:analyze" in me["permissions"]
+    assert "project:write" not in me["permissions"]
+
+
 def test_hs256_bearer_token_creates_idp_identity_context(monkeypatch):
     monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
     monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "test-idp-secret")

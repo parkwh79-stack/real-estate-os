@@ -25,6 +25,10 @@ export type DealStateRecord = {
   evidenceGraphRunId?: string;
   evidenceGraphNodeId?: string;
   confidence?: number;
+  description?: string;
+  message?: string;
+  mitigation?: string;
+  findings?: string[];
   severity?: string;
   reviewStatus?: string;
   updatedAt?: string;
@@ -46,11 +50,13 @@ export async function fetchDealStateRecords(
     calculationRunId?: string;
     limit?: number;
     actor?: string;
+    latestOnly?: boolean;
   } = {},
 ): Promise<DealStateRecord[]> {
   const params = new URLSearchParams();
   if (options.recordType) params.set("record_type", options.recordType);
   if (options.calculationRunId) params.set("calculation_run_id", options.calculationRunId);
+  if (options.latestOnly) params.set("latest_only", "true");
   params.set("limit", String(options.limit ?? 300));
   const suffix = params.toString();
   const res = await fetch(`${apiBase}/projects/${projectId}/deal-state-records?${suffix}`, {

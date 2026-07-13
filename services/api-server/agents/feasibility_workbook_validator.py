@@ -156,6 +156,13 @@ def validate_feasibility_workbook(
 def _detect_profile(workbook: Any) -> Dict[str, Any]:
     defined_names = set(workbook.defined_names.keys())
     sheet_names = set(workbook.sheetnames)
+    if {"\uc190\uc775", "\uac1c\uc694\uc218\uc785", "cash", "\uc784\ub300\ub8cc"}.issubset(sheet_names):
+        return {
+            "profile": "yongin-public-rental-feasibility",
+            "required_sheets": [],
+            "key_cells": {},
+            "formula_integrity_sheets": [],
+        }
     if "realytics_fs_schema_version" in defined_names or "07_Import계약" in sheet_names:
         return REALYTICS_FORMULA_WORKBOOK_PROFILE
     return LEGACY_BONRI_WORKBOOK_PROFILE

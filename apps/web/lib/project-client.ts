@@ -10,6 +10,31 @@ export interface ProjectOption {
   status?: string;
 }
 
+export interface RecentWorkItem {
+  projectId: string;
+  projectName: string;
+  track?: string;
+  lastWorkedAt?: string;
+  latestRunId?: string;
+  latestRunStatus?: string;
+  sourceDocumentCount: number;
+  openReviewCount: number;
+  riskCount: number;
+  approvalStatus: string;
+  nextAction: string;
+  sourceHashes?: string[];
+}
+
+export async function fetchRecentWork(limit = 5): Promise<RecentWorkItem[]> {
+  const res = await fetch(`${apiBase}/projects/recent-work?limit=${limit}`, {
+    cache: "no-store",
+    headers: authHeaders("web"),
+  });
+  if (!res.ok) return [];
+  const body = await res.json();
+  return Array.isArray(body.items) ? (body.items as RecentWorkItem[]) : [];
+}
+
 interface RawProjectSummary {
   id?: string | number;
   project?: {

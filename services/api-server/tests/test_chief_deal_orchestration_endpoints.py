@@ -127,6 +127,33 @@ def test_chief_orchestration_endpoints():
     assert cure_body["run"]["projectId"] == project_id
 
 
+def test_recent_work_returns_resume_action_and_continuation_match():
+    client = TestClient(app)
+    project_id = first_project_id(client)
+    project_data = PROJECTS_DB[project_id]
+    project_data["source_documents"] = [{
+        "documentType": "business_plan",
+        "originalFileName": "repeatable-plan.pdf",
+        "sha256": "sha-repeatable-001",
+    }]
+    project_data["chief_orchestration_state"] = {
+        "approvalReadinessGate": {"status": "not_ready_for_approval"}
+    }
+    upsert_project_record(project_id, project_data)
+
+    recent = client.get("/projects/recent-work")
+    assert recent.status_code == 200
+    item = next(row for row in recent.json()["items"] if row["projectId"] == project_id)
+    assert item["nextAction"] == "resume_open_reviews"
+    assert "sha-repeatable-001" in item["sourceHashes"]
+
+    check = client.post("/projects/intake/continuation-check", json={"files": [{"name": "repeatable-plan.pdf", "sha256": "sha-repeatable-001"}]})
+    assert check.status_code == 200
+    match = next(row for row in check.json()["matches"] if row["projectId"] == project_id)
+    assert match["nextAction"] == "resume_existing_review"
+    assert match["matchedFiles"][0]["matchedDocument"]["originalFileName"] == "repeatable-plan.pdf"
+
+
 def test_workspace_context_persists_shared_deal_state_and_page_data():
     client = TestClient(app)
     project_id = first_project_id(client)

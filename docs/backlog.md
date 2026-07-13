@@ -10,6 +10,7 @@ Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
 
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
+| P0 | Feasibility/CashFlow | 파싱된 사업수지 → feasibility_input 브릿지 + AI 사업수지 구성 (Cash Flow 0 원인 수정) | Done | 2026-07-10: 사용자 지적 — 딜룸(753)엔 시나리오 매출 8,540억이 뜨는데 Cash Flow(751)는 전부 0. 진단: **파싱된 사업수지 → `feasibility_input` 배선 단절**. 751은 parsed_facts에 총수입 750억·총사업비 600억이 있었으나 feasibility_input으로 안 흘러 cash flow 엔진이 0(limitations: total_sales_revenue/total_project_cost/pf_loan/schedule_missing). **버그 수정**: `_apply_feasibility_summary_to_project`가 analyze의 실제 키(`revenue`/`costs`/`developerReturns`)가 아닌 `revenueAssumptions`/`costBreakdown`를 읽어 동기화 실패 → 올바른 키로 수정(양수·미채움만 채움). **신규 브릿지/AI 빌더**: `use_cases/feasibility_input_builder.py` `build_feasibility_input_draft` — 우선순위(기존 input→feasibilityStudyV2.metrics(정본 워크북)→parsed_fact feasibility_input.*→토지·규제·상품기획·시장가·공시지가 결정론 파생)로 feasibility_input 구성, 각 필드 source·confidence·needsReview 표기, 0/누락은 무조작(missing 표기). `POST /{id}/feasibility/build-input`(apply 시 persist). **프론트**: cashflow 페이지에 "AI 사업수지 구성" 버튼(빌드→hasRevenueAndCost면 Cash Flow Pod 자동 실행)+출처/검토 안내 배너+빈 상태 액션. **라이브 검증**: 751 build-input(parsed_fact)→feasibility_input 총수입750/총사업비600억 적용→analyze 총수입750·총사업비600·개발이익150억·이익률20%(이전 전부 0); 753(feasibility_workbook_v2)→8,539/7,793억. 신규 유닛 6건 green, 웹 tsc/eslint 0. |
 | P0 | Land/Evidence | 공백 없는 표지 주소 지오코딩 실패 수정 → 748 토지증빙 자동보강 unblock (근본원인) | Done | 2026-07-10: 748(용인상갈)이 land_legal→pf_credit blocked이던 **근본원인 규명·수정**. 파서가 저장한 표지 주소가 공백 없는 형태 `경기도용인시기흥구상갈동13번지일대` → `resolve_address_to_parcel._address_candidates`가 이를 그대로만 지오코딩 시도 → VWorld `not_found` → PNU 미해석 → 토지증빙 게이트 open. **수정**: `_address_candidates`가 `address_mining.mine_addresses_from_text` 정규식으로 공백 없는 주소를 **정규화 후보**(`경기도 용인시 기흥구 상갈동 13` + 동단위 폴백)로 추가. **라이브 검증**: 공백주소 resolve→PNU 4146310300100130000·공시지가 1,466,000; 748 reanalyze → **land_legal·pf_credit·public_policy 3개 전부 blocked→completed(전 6 Pod 통과)**. 유닛 3건(공백주소 정규화·기존 유지·비매칭 원본). |
 | P0 | Orchestration/Evidence | 업로드 자동 재구동 확대(land 경로) + Chief Deal Room 재분석 진행표시 | Done | 2026-07-10: ① 스마트 자동 재구동 트리거를 land 경로로 확대 — `/land-ledger/analyze`·`/land/parcels/resolve`·`/land-evidence` 응답에 `_maybe_auto_reanalyze`(분석 이력 있을 때만) 연결, 응답에 `autoReanalysis` 노출. 공용 헬퍼 `_maybe_auto_reanalyze(project_id, doc_types)`로 정리. ② 프론트 Chief Deal Room에 **"새 자료 반영 재분석"** 버튼(analyzed일 때만)+진행표시("…재검증·재실행·AI 재판단 중")+결과 배너(재실행 N·해제 M·잔여 K), `POST /reanalyze` 호출. 웹 tsc/eslint 0. |
 | P0 | Orchestration/Evidence | 추가 자료 업로드 시 blocked Pod 스마트 자동 재구동 배선 | Done | 2026-07-10: 사용자 질문("추가 자료 업로드 시 재파싱+검증+blocked Pod 재구동+AI 재판단 배선 있나?") → 진단: **부분 배선**(업로드=재파싱만, Pod 실행 시 재검증·자동보강·AI리뷰·cascade는 있으나 업로드가 Pod 재실행을 트리거 안 함, 수동 재실행 필요). 사용자 선택=자동(스마트). 신규 `use_cases/reanalyze_on_evidence.py` — 완료된 Pod(artifact 보유) 제외한 **blocked/never-run Pod ∪ 문서유형 영향 Pod**(business_plan→land/market/feasibility, land_ledger→land_legal, feasibility_workbook→feasibility/cost, market_evidence→market)를 `run_chief_deal_pod`로 재실행(=재검증+자동보강+AI판단+cascade 전부 재사용). 신규 문서 없으면 재파싱은 업로드 단계에서 이미 수행. `POST /{id}/chief-orchestration/reanalyze` + `/upload`에서 **분석 이력 있을 때만 자동 트리거**(fresh 프로젝트 첫 업로드는 사용자 '전체 자동 실행'에 맡김; async 핸들러 내 동기 실행이라 파일럿 규모 가정, guard로 업로드 무중단). **무조작**: 증빙 여전히 없으면 정직하게 blocked 유지(newlyUnblocked/stillBlocked 구분). **검증**: 신규 유닛 5건(문서→Pod 매핑·blocked+affected 타겟·완료 Pod도 문서영향시 재실행·fresh skip·엔드포인트) green, 라이브(748 reanalyze→land_legal/pf_credit/public_policy 3개 재실행, 토지증빙 미확보로 정직 blocked 유지). 잔여: 토지조서/토지증빙 업로드 경로(land-ledger/analyze 등)도 트리거 연결, 프론트 진행표시. |
@@ -403,3 +404,132 @@ Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
 - [ ] Run PostgreSQL with `REALYTICS_STORAGE_BACKEND=postgres` against a real managed database and execute the migration plus read/write smoke test.
 - [ ] Run Object Storage with `REALYTICS_OBJECT_STORAGE=s3` or MinIO and verify upload, download authorization, hash, and report export retention.
 - [ ] Execute the full pilot browser E2E: upload package, 112-parcel enrichment, market supplementation, calculations, cure evidence, rerun, and final gate review.
+
+## Analysis Execution Permission (2026-07-13)
+
+- [x] Split Pod execution from project mutation: `project:analyze` is now a dedicated permission.
+- [x] Grant `project:analyze` to reviewer/admin/analyst roles while keeping `project:write` restricted.
+- [x] Apply the permission to Chief Pod run, run-all, reanalyze, and parcel analysis routes.
+- [x] Add strict-RBAC regression coverage proving a reviewer can execute a Pod without receiving project write permission.
+
+## Resume and Duplicate Intake Memory (2026-07-13)
+
+- [x] Add `GET /projects/recent-work` for login-scoped recent project memory, latest run, open review count, risk count, and next action.
+- [x] Add `POST /projects/intake/continuation-check` to compare uploaded SHA-256 fingerprints with prior source documents.
+- [x] Show a start-screen choice between resuming the matched project and starting a new analysis.
+- [x] Show recent saved work after login so the user can continue from the last review checkpoint.
+- [ ] Extend continuation matching from exact SHA-256 to document version similarity for revised files, with explicit confidence and no automatic overwrite.
+
+## Web Development Runtime Stability (2026-07-13)
+
+- [x] Reproduce the Next.js 16.2.0 child-worker failure on `/project/[id]/chief-orchestration`.
+- [x] Confirm a clean cache + Webpack run returns HTTP 200 for the launcher and Chief Deal Room.
+- [x] Use Webpack as the default local development runtime to avoid the observed Turbopack worker/EPIPE failure.
+- [x] Keep Turbopack available as an explicit `dev:turbo` experiment command.
+- [ ] Re-enable Turbopack only after the route compiles reliably on the target Windows environment and the watcher scan warnings are resolved.
+
+## Autonomous Chief Deal Room Execution (2026-07-13)
+
+- [x] Auto-start `run-all-pods` after a new Deal Room plan is loaded with no prior Pod run history.
+- [x] Preserve dependency order and persist each Pod artifact, AI review, handoff, and recalculation event through the existing server workflow.
+- [x] Avoid duplicate execution on refresh when completed, blocked, failed, or recalculation history already exists.
+- [x] Verify the PF track end-to-end: 6 requested Pods, 6 completed, 0 blocked on project `749`.
+- [ ] Move long-running all-Pod execution to a background job with live per-Pod progress events instead of holding one HTTP request open.
+
+## Reviewer Cure Permission (2026-07-13)
+
+- [x] Change the Unsold LTV cure action from `project:write` to `risk:review`, matching the reviewer workflow.
+- [x] Restart the API runtime with the updated authorization route and verify reviewer requests are no longer rejected for missing project write permission.
+
+## Input Package Korean Text Cleanup (2026-07-13)
+
+- [x] Replace corrupted track labels and workflow descriptions with UTF-8 Korean financial terminology.
+- [x] Replace corrupted Smart Intake document types, status labels, confidence guidance, and result summaries.
+- [x] Replace corrupted input-package action, workflow, supplement, and error messages.
+- [x] Verify `/project/{id}/input-package` returns HTTP 200 with type-check and lint passing.
+
+## Feasibility Workbook to Pod Wiring (2026-07-13)
+
+- [x] Parse the real Bonri sample workbook into revenue, cost, product mix, financing, schedule, and 77 monthly cash-flow rows with Excel locators.
+- [x] Persist validated workbook drafts as `candidate` FeasibilityStudyV2 records without falsely marking them approved.
+- [x] Materialize candidate values into `feasibility_input`, `product_mix`, `schedule`, and `pf_structure` so Missing Input Register and Feasibility-Cashflow read the same project state.
+- [x] Add automatic downstream Pod cascade for single-Pod Cost/Market/Land changes when `autoCascade` is enabled.
+- [x] Re-run the sample import and cascade regression suite: 19 tests passed.
+- [ ] Add an explicit reviewer approval action in Input Package to promote candidate workbook values to `approved` and re-evaluate Approval Readiness Gate.
+
+## Risk Register and Practical Workbook Repair (2026-07-13)
+
+- [x] Read Risk Register screens as latest actionable risk per business key while retaining historical rows for audit.
+- [x] Prefer enriched `risk_register` / `chief_pod_artifact` rows over sparse Evidence Graph mirror rows so description, mitigation, severity, and source locator remain visible.
+- [x] Add explicit `legalReviewExecution` metadata to the Land-Legal Pod artifact so LegalReviewAgent execution is visible in the Deal Room.
+- [x] Add a deterministic adapter for the practical `손익 / 개요수입 / cash / 임대료` workbook family used by project 753; Gemini quota is no longer on the critical parsing path.
+- [x] Persist project 753's archived workbook as a candidate FeasibilityStudyV2 and verify revenue, cost, PF, product mix, and feasibility input materialization.
+- [ ] Add a browser E2E assertion that Risk Register shows deduplicated records and non-empty explanations after Pod execution.
+- [ ] Add explicit LegalReviewAgent panel with law-context connectivity, checks, follow-ups, and evidence locators.
+# Legal Pod hardening (2026-07-13)
+
+- [x] Independent `POST /projects/{project_id}/legal-pod/run` execution path.
+- [x] Persist `legal_reviews` and `permit_reviews` in JSON/Postgres document state and SQLite tables.
+- [x] Persist parcel-level registry/encumbrance review rows with source locators.
+- [x] Materialize legal risks and Legal -> PF-Credit handoff into `deal_state_records`.
+- [x] Add legal review and permit review conditions to Approval Readiness Gate.
+- [x] Add Chief Deal Room Legal Pod panel and MCP connection/failure display.
+- [x] Add automatic Legal Pod land enrichment and Korean Law MCP HTTP/Law.go.kr transport attempt with per-query diagnostics.
+- [ ] Deploy authenticated Korean Law MCP bridge and persist request/response evidence locators.
+- [ ] Add contract/permit/statute document parsers with page, sheet/cell, and API-row locators.
+- [ ] Add Legal Pod review UI for approve, waive, needs_revision, and resolved states.
+
+## Legal Pod diagnostics and land-enrichment visibility (2026-07-13)
+
+- [x] Expose automatic land-enrichment summary in the Chief Deal Room Legal Pod panel.
+- [x] Show PNU resolution, cadastral, official land-price, skipped-configuration, and fetch-failure counts.
+- [x] Show connector diagnostics with parcel PNU and source-backed failure reason instead of a generic missing-input message.
+- [x] Keep Korean Law MCP transport and per-query diagnostics visible in the Legal Pod result.
+- [ ] Configure a real authenticated Korean Law MCP bridge or `LAW_OC` in the runtime and verify citation-bearing responses.
+- [ ] Configure VWorld/cadastral and official-land-price URL templates and API keys, then run the 112-parcel live enrichment smoke test.
+
+## Land Pod -> Legal Pod context reconciliation (2026-07-13)
+
+- [x] Read legacy `landLedger.parcels` and summary values in Legal Pod instead of treating the container as a single parcel.
+- [x] Pass `landLedger.summary.totalAreaSqm` into the legal developability table with an Excel artifact locator.
+- [x] Separate missing registry attachments from confirmed encumbrance or ownership mismatch; missing evidence is caution/pending, not a blocker.
+- [x] Store structured `landPodHandoff` with consumed fields and requested zoning/FAR/BCR/district-plan fields.
+- [x] Connect the Land Pod VWorld/public land-use adapter to populate source-backed zoning and statutory FAR/BCR/district-unit-plan evidence when configured; VWorld-only zoning is explicitly marked partial.
+- [ ] Re-run Chief Deal Room orchestration so the shared Risk Register also reflects the pending-versus-confirmed rights policy.
+
+## Land-use planning API adapter (2026-07-13)
+
+- [x] Add configurable `land_use_planning` connector fields and per-PNU diagnostics.
+- [x] Use the built-in VWorld cadastral lookup when an approved VWorld/public-data key is present.
+- [x] Persist land-use planning evidence and hydrate Legal Pod `regulation` values from the same run.
+- [x] Never infer statutory FAR/BCR from a zoning name; VWorld-only responses remain `zoning_only`.
+- [ ] Configure and verify `REALYTICS_LAND_USE_URL_TEMPLATE` against the approved public land-use planning API contract.
+- [ ] Re-run the 112-parcel pilot and confirm per-parcel zoning/FAR/BCR coverage before developability approval.
+- [x] 2026-07-13 smoke test: project 753 ran the new VWorld fallback and persisted 112 PNU resolutions and 18 VWorld-backed official-price records. No zoning/FAR/BCR record was fabricated; the remaining gap is the deployment-specific land-use planning endpoint.
+
+## VWorld land characteristics adapter (2026-07-13)
+
+- [x] Add direct `getLandCharacteristics` integration with `pnu`, `stdrYear`, JSON paging, API key, and optional registered domain.
+- [x] Normalize parcel area, land category, use districts, land-use situation, terrain, road frontage, source-returned official land price, and base date.
+- [x] Attach records to each matching parcel and persist them as `land_characteristics` evidence for Legal Pod and shared deal state hydration.
+- [x] Use the endpoint's official land price only as a source-backed fallback when a dedicated official-price record is absent; never infer statutory FAR/BCR or ownership.
+- [x] Project 753 live smoke: 112 PNU checked, 18 land-characteristics records fetched, 94 no-record diagnostics, 0 fetch failures; 18 records persisted in the land evidence endpoint.
+- [ ] Add source-specific reconciliation risk when land-characteristics area or price differs from the land ledger/cadastral record.
+
+## Development lifecycle process orchestration (2026-07-13)
+
+- [x] Add a structured development lifecycle contract for planning, development concretization, design/product, sales/leasing, and business analysis.
+- [x] Add execution stages for contractor/PF, sales, leasing, and completion/operations.
+- [x] Add feedback-loop events for market, program, permit, cost, schedule, sales, lease, and NOI changes.
+- [x] Expose the lifecycle process and feedback loops on the Chief Task Graph.
+- [ ] Add lifecycle-stage progress and evidence completion to the Chief Deal Room UI.
+- [ ] Persist actual sales, lease, completion, cost, and repayment outcomes for the Learning Loop.
+
+## Legal law-change monitoring (2026-07-13)
+
+- [x] Add deterministic comparison of Legal Pod law-reference snapshots.
+- [x] Persist added, removed, and changed law references as `legal_law_change` deal-state records.
+- [x] Track effective date, promulgation date, amendment date, legislative-notice date, proposal date, amendment type, and change summary when supplied by the source.
+- [x] Add `GET /projects/{project_id}/legal-pod/law-changes` for review tooling.
+- [ ] Add scheduled background re-query and notification when a law reference changes.
+- [ ] Add UI diff view showing before/after provisions and asset/lifecycle impact.

@@ -13,6 +13,7 @@ ROLE_PERMISSIONS = {
     "admin": {
         "project:read",
         "project:write",
+        "project:analyze",
         "evidence:read",
         "report:read",
         "report:export",
@@ -23,6 +24,7 @@ ROLE_PERMISSIONS = {
     },
     "reviewer": {
         "project:read",
+        "project:analyze",
         "evidence:read",
         "report:read",
         "report:export",
@@ -33,6 +35,7 @@ ROLE_PERMISSIONS = {
     "analyst": {
         "project:read",
         "project:write",
+        "project:analyze",
         "evidence:read",
         "report:read",
         "report:export",

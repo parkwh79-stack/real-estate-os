@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -104,6 +104,41 @@ interface PodAIReview {
   aiBrainUsed?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
+}
+
+interface LegalPodRun {
+  legalReview?: {
+    reviewId?: string;
+    status?: string;
+    mcp?: { status?: string; connected?: boolean; failureReason?: string | null; transport?: string; diagnostics?: Array<{ status?: string; connector?: string; message?: string; pnu?: string }> };
+    checks?: Array<{ title?: string; severity?: string; findings?: string[] }>;
+    parcelLegalReviews?: Array<{ status?: string; pnu?: string; encumbrancePresent?: boolean }>;
+    pfHandoff?: { reviewStatus?: string; requiresHumanReview?: boolean };
+    developabilityAnalysis?: {
+      status?: string;
+      zoning?: string;
+      areaLawTable?: Array<{ field?: string; value?: unknown; unit?: string; legalBasis?: string }>;
+      lawSources?: Array<{ name?: string; url?: string; article?: string }>;
+      breaches?: string[];
+      conditionalFindings?: string[];
+      missingRequiredInputs?: string[];
+    };
+    landEnrichment?: {
+      status?: string;
+      pnuResolutions?: Array<{ pnu?: string; matchConfidence?: number }>;
+      cadastralCharacteristics?: Array<{ pnu?: string; areaSqm?: number; zoning?: string }>;
+      landUsePlanningRecords?: Array<{ pnu?: string; zoning?: string; legalFar?: number; legalBcr?: number; coverage?: string; missingFields?: string[] }>;
+      officialLandPrices?: Array<{ pnu?: string; pricePerSqm?: number; baseYear?: number | string }>;
+      diagnostics?: Array<{ status?: string; connector?: string; message?: string; pnu?: string }>;
+    };
+    landPodHandoff?: {
+      status?: string;
+      missingFields?: string[];
+      requestedFields?: string[];
+      nextAction?: string;
+    };
+  };
+  permitReview?: { status?: string; parserStatus?: string; parserFailureReason?: string | null };
 }
 
 interface DealStateValue {
@@ -502,6 +537,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [cureEvidenceId, setCureEvidenceId] = useState("");
   const [cureEvidenceNote, setCureEvidenceNote] = useState("");
   const [cureSubmitting, setCureSubmitting] = useState(false);
+  const [legalPodRun, setLegalPodRun] = useState<LegalPodRun | null>(null);
+  const [legalPodRunning, setLegalPodRunning] = useState(false);
+  const autoRunStartedRef = useRef(false);
 
   const loadRecalculationEvents = useCallback(async () => {
     try {
@@ -533,6 +571,40 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     }
   }, [projectId]);
 
+  const loadLegalPod = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/legal-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web") });
+      if (!res.ok) return;
+      const body = await res.json().catch(() => ({}));
+      const item = Array.isArray(body.items) ? body.items[0] : null;
+      if (!item) return;
+      const permitRes = await fetch(`${apiBase}/projects/${projectId}/permit-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web") });
+      const permitBody = await permitRes.json().catch(() => ({}));
+      setLegalPodRun({ legalReview: item, permitReview: Array.isArray(permitBody.items) ? permitBody.items[0] : undefined });
+    } catch {
+      setLegalPodRun(null);
+    }
+  }, [projectId]);
+
+  const runLegalPod = useCallback(async () => {
+    setLegalPodRunning(true);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/legal-pod/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders("web") },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(cleanText(body?.detail, "Legal Pod 실행에 실패했습니다."));
+      setLegalPodRun(body);
+      await loadLegalPod();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Legal Pod 실행 중 오류가 발생했습니다.");
+    } finally {
+      setLegalPodRunning(false);
+    }
+  }, [loadLegalPod, projectId]);
+
   const loadPlan = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -555,13 +627,13 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = (await res.json()) as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setApprovalGate(nextPlan.approvalReadinessGate ?? null);
-      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
+      await Promise.all([loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Chief Deal Room 계획을 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
-  }, [projectId, loadRecalculationEvents, loadPodAiReviews]);
+  }, [projectId, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
 
   const applyCureAndRerun = useCallback(async () => {
     const amount = Number(cureAmount.replaceAll(",", ""));
@@ -620,7 +692,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         body: JSON.stringify({
           podKey,
           workflowTrack: track ?? getStoredWorkflowTrack(),
-          options: forceTrigger ? { forceTrigger } : {},
+          options: { ...(forceTrigger ? { forceTrigger } : {}), autoCascade: true },
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -705,6 +777,21 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   useEffect(() => {
     void loadPlan();
   }, [loadPlan]);
+
+  // A newly created deal should not stop at a visual plan. Once the shared
+  // graph is loaded, let the Chief Orchestrator execute the selected track's
+  // dependency order automatically. Existing runs are left untouched so a
+  // refresh never duplicates a completed analysis.
+  useEffect(() => {
+    if (!plan || loading || executingAll || autoRunStartedRef.current) return;
+    const hasRunHistory = (plan.podRuns ?? []).some((run) =>
+      ["completed", "running", "blocked", "failed", "needs_recalculation"].includes(run.status),
+    );
+    const hasRunSummary = Boolean((plan as ChiefDealOrchestrationPlan & { runAllSummary?: unknown }).runAllSummary);
+    if (hasRunHistory || hasRunSummary) return;
+    autoRunStartedRef.current = true;
+    void runAllPods();
+  }, [executingAll, loading, plan, runAllPods]);
 
   const runsByPod = useMemo(() => {
     const map = new Map<PodKey, AgentPodRun>();
@@ -818,6 +905,8 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         onEvidenceNoteChange={setCureEvidenceNote}
         onSubmit={() => void applyCureAndRerun()}
       />
+
+      <LegalPodPanel run={legalPodRun} running={legalPodRunning} onRun={() => void runLegalPod()} />
 
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
@@ -989,6 +1078,73 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       </div>
     </div>
   );
+}
+
+function LegalPodPanel({ run, running, onRun }: { run: LegalPodRun | null; running: boolean; onRun: () => void }) {
+  const review = run?.legalReview;
+  const checks = review?.checks ?? [];
+  const parcels = review?.parcelLegalReviews ?? [];
+  const unresolvedParcels = parcels.filter((parcel) => parcel.status === "needs_review").length;
+  const resolvedPnuCount = parcels.filter((parcel) => Boolean(parcel.pnu)).length;
+  const mcpStatus = review?.mcp?.status ?? "not_run";
+  const developability = review?.developabilityAnalysis;
+  const landEnrichment = review?.landEnrichment;
+  const enrichmentDiagnostics = landEnrichment?.diagnostics ?? [];
+  const enrichmentFetched = enrichmentDiagnostics.filter((item) => item.status === "fetched").length;
+  const enrichmentSkipped = enrichmentDiagnostics.filter((item) => item.status?.startsWith("skipped_")).length;
+  const enrichmentFailures = enrichmentDiagnostics.filter((item) => item.status?.endsWith("failed") || item.status === "no_record" || item.status === "record_missing_price").length;
+  const enrichmentSummary = landEnrichment ? `${landEnrichment.pnuResolutions?.length ?? 0} PNU · ${landEnrichment.cadastralCharacteristics?.length ?? 0}건 지적자료 · ${landEnrichment.landUsePlanningRecords?.length ?? 0}건 토지이용계획 · ${landEnrichment.officialLandPrices?.length ?? 0}건 공시지가` : "자동 보강 미실행";
+  return (
+    <section className="rounded-lg border border-violet-200 bg-violet-50/70 p-4 shadow-sm dark:border-violet-900/70 dark:bg-violet-950/20">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-700 dark:text-violet-300">Legal Pod</p>
+          <h2 className="mt-1 text-lg font-black text-slate-950 dark:text-white">법무·인허가 검토 및 PF handoff</h2>
+          <p className="mt-1 text-xs font-semibold text-slate-600 dark:text-slate-300">토지 증빙, 인허가, 법령·계약서 근거를 검토하고 PF-Credit Pod에 전달합니다.</p>
+        </div>
+        <button type="button" onClick={onRun} disabled={running} className="inline-flex h-9 items-center gap-2 rounded-lg bg-violet-700 px-3 text-sm font-black text-white hover:bg-violet-800 disabled:opacity-50">
+          {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scale className="h-4 w-4" />}
+          {running ? "법무 검토 실행 중" : "법무 Pod 실행"}
+        </button>
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        <LegalMetric label="PNU 검증" value={`${resolvedPnuCount}/${parcels.length}`} />
+        <LegalMetric label="권리·등기 검토 완료" value={`${parcels.length - unresolvedParcels}/${parcels.length}`} />
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-5">
+        <LegalMetric label="법무 상태" value={review?.status ?? "미실행"} />
+        <LegalMetric label="필지 검토" value={`${parcels.length - unresolvedParcels}/${parcels.length}`} />
+        <LegalMetric label="인허가 검토" value={run?.permitReview?.status ?? "미실행"} />
+        <LegalMetric label="Korean Law MCP" value={mcpStatus === "connected" ? "연결" : "미연결"} />
+        <LegalMetric label="토지이용계획" value={`${landEnrichment?.landUsePlanningRecords?.length ?? 0}건`} />
+      </div>
+      {review?.mcp?.failureReason ? <p className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">법령 MCP 미연결 사유: {review.mcp.failureReason}</p> : null}
+      {run?.permitReview?.parserFailureReason ? <p className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">문서 파서 상태: {run.permitReview.parserFailureReason}</p> : null}
+      {review?.landPodHandoff ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50/80 p-3 text-xs dark:border-amber-800 dark:bg-amber-950/20">
+        <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-black text-amber-900 dark:text-amber-100">토지 Pod → 법무 검토 연결</span><span className="rounded-full bg-white px-2 py-1 font-black text-amber-800 dark:bg-slate-950 dark:text-amber-200">{review.landPodHandoff.status ?? "needs_review"}</span></div>
+        <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{review.landPodHandoff.nextAction ?? "토지 원장에서 용도지역·법정 용적률·건폐율 근거를 보강합니다."}</p>
+        {review.landPodHandoff.requestedFields?.length ? <p className="mt-1 font-semibold text-amber-900 dark:text-amber-100">요청 필드: {review.landPodHandoff.requestedFields.join(" · ")}</p> : null}
+      </div> : null}
+      {landEnrichment ? <div className="mt-3 rounded-md border border-sky-200 bg-sky-50/80 p-3 text-xs dark:border-sky-800 dark:bg-sky-950/30">
+        <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-black text-sky-900 dark:text-sky-100">토지 자동 보강 결과</span><span className="font-bold text-sky-800 dark:text-sky-200">{enrichmentSummary}</span></div>
+        <div className="mt-2 flex flex-wrap gap-2 text-[11px] font-bold"><span className="rounded bg-white px-2 py-1 text-emerald-700 dark:bg-slate-950">확보 {enrichmentFetched}건</span><span className="rounded bg-white px-2 py-1 text-amber-700 dark:bg-slate-950">설정 누락 {enrichmentSkipped}건</span><span className="rounded bg-white px-2 py-1 text-rose-700 dark:bg-slate-950">실패/미확인 {enrichmentFailures}건</span></div>
+        {enrichmentDiagnostics.length ? <ul className="mt-2 space-y-1 text-slate-700 dark:text-slate-200">{enrichmentDiagnostics.slice(0, 6).map((item, index) => <li key={`${item.connector ?? "connector"}-${item.pnu ?? index}`}><span className="font-black">{item.connector ?? "connector"}</span> · <span>{item.status ?? "unknown"}</span>{item.pnu ? ` · ${item.pnu}` : ""} · {item.message ?? "진단 메시지 없음"}</li>)}</ul> : null}
+      </div> : null}
+      {checks.length ? <div className="mt-3 grid gap-1.5 md:grid-cols-2">{checks.slice(0, 6).map((check) => <div key={check.title} className="rounded-md border border-violet-200 bg-white/80 px-2 py-1.5 text-xs dark:border-violet-800 dark:bg-slate-950/50"><span className="font-black">{check.title}</span><span className="ml-2 text-slate-500">{check.severity}</span><p className="mt-1 text-slate-600 dark:text-slate-300">{check.findings?.[0]}</p></div>)}</div> : <p className="mt-3 text-xs font-semibold text-slate-600 dark:text-slate-300">독립 Legal Pod 실행 결과가 아직 없습니다.</p>}
+      {developability ? <div className="mt-3 rounded-md border border-violet-200 bg-white/80 p-3 dark:border-violet-800 dark:bg-slate-950/50">
+        <div className="flex flex-wrap items-center justify-between gap-2"><p className="font-black text-slate-950 dark:text-white">용도지역·면적·개발가능성 판정</p><span className="rounded-full bg-violet-100 px-2 py-1 text-[10px] font-black text-violet-800">{developability.status}</span></div>
+        <p className="mt-1 text-xs font-semibold text-slate-600 dark:text-slate-300">확인된 용도지역: {developability.zoning ?? "미확인"}</p>
+        <div className="mt-2 overflow-x-auto"><table className="min-w-full text-left text-[11px]"><thead><tr className="border-b border-violet-100"><th className="px-2 py-1">항목</th><th className="px-2 py-1">값</th><th className="px-2 py-1">법적 기준</th></tr></thead><tbody>{(developability.areaLawTable ?? []).map((row) => <tr key={row.field} className="border-b border-violet-50 last:border-0"><td className="px-2 py-1 font-bold">{row.field}</td><td className="px-2 py-1">{row.value == null ? "미확인" : `${String(row.value)}${row.unit ?? ""}`}</td><td className="px-2 py-1 text-slate-500">{row.legalBasis}</td></tr>)}</tbody></table></div>
+        {(developability.breaches?.length || developability.conditionalFindings?.length || developability.missingRequiredInputs?.length) ? <div className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">{[...(developability.breaches ?? []), ...(developability.conditionalFindings ?? []), ...(developability.missingRequiredInputs ?? [])].slice(0, 4).join(" / ")}</div> : null}
+        <div className="mt-2 flex flex-wrap gap-1">{(developability.lawSources ?? []).slice(0, 5).map((source) => <a key={`${source.name}-${source.url}`} href={source.url ?? "#"} target="_blank" rel="noreferrer" className="rounded-full border border-violet-200 px-2 py-1 text-[10px] font-bold text-violet-800 hover:bg-violet-100">{source.name ?? "법령 출처"}</a>)}</div>
+      </div> : null}
+      {review?.pfHandoff ? <p className="mt-3 text-xs font-black text-violet-800 dark:text-violet-200">PF-Credit handoff: {review.pfHandoff.reviewStatus ?? "pending"} · {review.pfHandoff.requiresHumanReview ? "사람 검토 필요" : "자동 전달 가능"}</p> : null}
+    </section>
+  );
+}
+
+function LegalMetric({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-md border border-violet-200 bg-white/80 px-2 py-2 dark:border-violet-800 dark:bg-slate-950/50"><p className="text-[10px] font-bold text-slate-500">{label}</p><p className="mt-1 text-sm font-black text-slate-950 dark:text-white">{value}</p></div>;
 }
 
 function ApprovalReadinessPanel({

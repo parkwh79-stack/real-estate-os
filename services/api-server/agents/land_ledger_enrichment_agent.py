@@ -34,6 +34,9 @@ class LandLedgerEnrichmentAgent:
 
         pnu_records = _index_records(options.get("pnuResolutions") or options.get("pnu_resolutions") or [])
         cadastral_records = _index_records(options.get("cadastralCharacteristics") or options.get("cadastral_characteristics") or [])
+        land_use_records = _index_records(options.get("landUsePlanningRecords") or options.get("land_use_planning_records") or [])
+        building_use_records = _index_records(options.get("buildingUseRecords") or options.get("building_use_records") or [])
+        land_characteristics_records = _index_records(options.get("landCharacteristicsRecords") or options.get("land_characteristics_records") or [])
         official_price_records = _index_records(options.get("officialLandPrices") or options.get("official_land_prices") or [])
         registry_records = _index_records(options.get("registryEvidence") or options.get("registry_evidence") or [])
 
@@ -45,6 +48,9 @@ class LandLedgerEnrichmentAgent:
                     legal_dong_code=legal_dong_code,
                     pnu_records=pnu_records,
                     cadastral_records=cadastral_records,
+                    land_use_records=land_use_records,
+                    building_use_records=building_use_records,
+                    land_characteristics_records=land_characteristics_records,
                     official_price_records=official_price_records,
                     registry_records=registry_records,
                 )
@@ -81,6 +87,8 @@ class LandLedgerEnrichmentAgent:
             "dataSourcePolicy": {
                 "pnu": "manual fixture, legal-dong-code resolver, or future public API adapter",
                 "cadastral": "manual fixture or configured cadastral/public land-use adapter",
+                "landCharacteristics": "VWorld getLandCharacteristics source-backed parcel area, land category, use districts, terrain, road frontage, and official land price for the requested base year; values require reconciliation with the ledger and other evidence",
+                "buildingUse": "VWorld getBuildingUse source-backed building attributes; existing building facts require reconciliation with the proposed program",
                 "officialLandPrice": "manual fixture or configured official land price adapter; no price is fabricated",
                 "registryEvidence": "manual evidence attachment or licensed registry source; no registry completion without evidence",
             },
@@ -94,6 +102,9 @@ class LandLedgerEnrichmentAgent:
         legal_dong_code: Optional[str],
         pnu_records: Dict[str, Dict[str, Any]],
         cadastral_records: Dict[str, Dict[str, Any]],
+        land_use_records: Dict[str, Dict[str, Any]],
+        building_use_records: Dict[str, Dict[str, Any]],
+        land_characteristics_records: Dict[str, Dict[str, Any]],
         official_price_records: Dict[str, Dict[str, Any]],
         registry_records: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
@@ -102,6 +113,9 @@ class LandLedgerEnrichmentAgent:
             "addressFragment": parcel.get("addressFragment"),
             "pnuResolved": False,
             "cadastralAttached": False,
+            "landUsePlanningAttached": False,
+            "buildingUseAttached": False,
+            "landCharacteristicsAttached": False,
             "officialLandPriceAttached": False,
             "registryEvidenceAttached": False,
             "status": "enrichment_failed",
@@ -128,6 +142,21 @@ class LandLedgerEnrichmentAgent:
             result["cadastralAttached"] = True
         elif parcel.get("pnu") and not parcel.get("cadastralCharacteristics"):
             result["issues"].append(_issue("cadastral_characteristics_missing", "caution", "Cadastral characteristics were not provided for the resolved PNU."))
+
+        land_use_record = _lookup_record(land_use_records, parcel)
+        if land_use_record:
+            self._apply_land_use_record(parcel, land_use_record)
+            result["landUsePlanningAttached"] = True
+
+        building_use_record = _lookup_record(building_use_records, parcel)
+        if building_use_record:
+            self._apply_building_use_record(parcel, building_use_record)
+            result["buildingUseAttached"] = True
+
+        land_characteristics_record = _lookup_record(land_characteristics_records, parcel)
+        if land_characteristics_record:
+            self._apply_land_characteristics_record(parcel, land_characteristics_record)
+            result["landCharacteristicsAttached"] = True
 
         official_price_record = _lookup_record(official_price_records, parcel)
         if official_price_record:
@@ -198,6 +227,52 @@ class LandLedgerEnrichmentAgent:
         parcel["officialLandPriceSourceUrlOrEvidenceId"] = record.get("sourceUrlOrEvidenceId") or record.get("evidenceId")
         parcel["officialLandPriceFetchedAt"] = record.get("fetchedAt") or _now()
         parcel.setdefault("evidence", []).append(_evidence("official_land_price", record, parcel))
+
+    def _apply_land_use_record(self, parcel: Dict[str, Any], record: Dict[str, Any]) -> None:
+        parcel["landUsePlanning"] = {
+            "pnu": record.get("pnu") or parcel.get("pnu"),
+            "zoning": record.get("zoning"),
+            "landUseZones": record.get("landUseZones", []),
+            "legalFar": record.get("legalFar"),
+            "legalBcr": record.get("legalBcr"),
+            "districtUnitPlan": record.get("districtUnitPlan"),
+            "coverage": record.get("coverage"),
+            "missingFields": record.get("missingFields", []),
+            "sourceName": record.get("sourceName"),
+            "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("evidenceId"),
+            "baseDate": record.get("baseDate"),
+            "fetchedAt": record.get("fetchedAt") or _now(),
+        }
+        parcel.setdefault("evidence", []).append(_evidence("land_use_planning", record, parcel))
+
+    def _apply_building_use_record(self, parcel: Dict[str, Any], record: Dict[str, Any]) -> None:
+        parcel.setdefault("buildingUseRecords", []).append({
+            key: value for key, value in record.items()
+            if key not in {"pnu", "fetchedAt"}
+        } | {
+            "pnu": record.get("pnu") or parcel.get("pnu"),
+            "fetchedAt": record.get("fetchedAt") or _now(),
+        })
+        parcel.setdefault("evidence", []).append(_evidence("building_use", record, parcel))
+
+    def _apply_land_characteristics_record(self, parcel: Dict[str, Any], record: Dict[str, Any]) -> None:
+        parcel["landCharacteristics"] = dict(record)
+        parcel["landCharacteristicsSource"] = record.get("sourceName")
+        parcel["landCharacteristicsSourceUrlOrEvidenceId"] = record.get("sourceUrlOrEvidenceId")
+        # VWorld returns the official land price in this endpoint as well. Use
+        # it only as a source-backed fallback; a dedicated official-price
+        # record applied later remains authoritative when present.
+        if not parcel.get("officialLandPricePerSqm") and record.get("officialLandPricePerSqm") is not None:
+            parcel["officialLandPricePerSqm"] = record["officialLandPricePerSqm"]
+            parcel["officialLandPriceBaseYear"] = record.get("standardYear")
+            parcel["officialLandPriceBaseDate"] = record.get("baseDate")
+            parcel["officialTotalLandValue"] = (
+                record["officialLandPricePerSqm"] * record["areaSqm"]
+                if record.get("areaSqm") is not None else None
+            )
+            parcel["officialLandPriceSource"] = record.get("sourceName")
+            parcel["officialLandPriceSourceUrlOrEvidenceId"] = record.get("sourceUrlOrEvidenceId")
+        parcel.setdefault("evidence", []).append(_evidence("land_characteristics", record, parcel))
 
     def _apply_registry_record(self, parcel: Dict[str, Any], record: Dict[str, Any]) -> None:
         parcel["registryEvidence"] = {
@@ -286,7 +361,7 @@ def _lookup_record(records: Dict[str, Dict[str, Any]], parcel: Dict[str, Any]) -
 
 def _merge_connector_result(options: Dict[str, Any], connector_result: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(options)
-    for key in ["pnuResolutions", "cadastralCharacteristics", "officialLandPrices", "registryEvidence"]:
+    for key in ["pnuResolutions", "cadastralCharacteristics", "landUsePlanningRecords", "buildingUseRecords", "landCharacteristicsRecords", "regionLandPriceTrends", "officialLandPrices", "registryEvidence"]:
         existing = merged.get(key) or []
         if not isinstance(existing, list):
             existing = list(existing.values()) if isinstance(existing, dict) else []

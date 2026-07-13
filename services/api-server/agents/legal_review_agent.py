@@ -1,6 +1,7 @@
 from typing import Any, Dict, List
 
 from agents.korean_law_context import build_korean_law_mcp_query_plan, normalize_law_context
+from agents.legal_developability_agent import LegalDevelopabilityAgent
 
 
 class LegalReviewAgent:
@@ -18,6 +19,8 @@ class LegalReviewAgent:
             self._covenant_check(project_data),
             self._law_context_check(normalized_context),
         ]
+        developability = LegalDevelopabilityAgent().analyze(project_data, normalized_context)
+        checks.append(self._developability_check(developability))
         blocking = [check for check in checks if check["severity"] == "blocking"]
         caution = [check for check in checks if check["severity"] == "caution"]
 
@@ -36,8 +39,28 @@ class LegalReviewAgent:
             "citationVerification": normalized_context.get("citationVerification"),
             "recommendedMcpQueries": build_korean_law_mcp_query_plan(project_data),
             "requiredFollowUps": self._follow_ups(blocking, caution),
+            "developabilityAnalysis": developability,
             "disclaimer": "This is a preliminary PF legal and permit checklist, not a final legal opinion.",
         }
+
+    def _developability_check(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        status = analysis.get("status")
+        if status == "blocked":
+            severity = "blocking"
+        elif status in {"not_assessable", "conditional"}:
+            severity = "caution"
+        else:
+            severity = "clear"
+        findings = [*analysis.get("breaches", []), *analysis.get("conditionalFindings", [])]
+        if analysis.get("missingRequiredInputs"):
+            findings.append("필수 법규·면적 입력 누락: " + ", ".join(analysis["missingRequiredInputs"]))
+        return self._check(
+            "developability",
+            "실제 용도지역·면적·개발가능성",
+            severity,
+            findings or ["확인된 법정 기준과 계획값 사이에 직접적인 초과가 없습니다."],
+            details=analysis,
+        )
 
     def _zoning_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
         regulation = data.get("regulation", {})
@@ -77,13 +100,28 @@ class LegalReviewAgent:
 
     def _land_rights_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
         parcels = data.get("land_acquisition", [])
+        if isinstance(parcels, dict):
+            parcels = parcels.get("parcels") or parcels.get("rows") or []
+        if not isinstance(parcels, list):
+            parcels = []
+        if not parcels:
+            land_ledger = data.get("landLedger") if isinstance(data.get("landLedger"), dict) else {}
+            parcels = land_ledger.get("parcels") if isinstance(land_ledger.get("parcels"), list) else []
         land_evidence = data.get("landEvidence") or data.get("land_evidence") or {}
         registry_records = self._registry_records(land_evidence)
         issues = []
         if not parcels and not registry_records:
             issues.append("Land ownership, share ratio, area, and encumbrance data are missing.")
-        share_sum = sum(p.get("share", 0) for p in parcels)
-        if parcels and share_sum < 0.999:
+        share_values = []
+        for parcel in parcels:
+            value = parcel.get("share") or parcel.get("ownershipShare") or parcel.get("knownShareSum")
+            try:
+                if value not in (None, ""):
+                    share_values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        share_sum = sum(share_values)
+        if share_values and share_sum < 0.999:
             issues.append(f"Confirmed ownership share totals {share_sum:.2%}, below 100%.")
         mortgages = [p.get("mortgage") for p in parcels if p.get("mortgage")]
         if mortgages:
@@ -106,10 +144,13 @@ class LegalReviewAgent:
             issues.append("Registry evidence includes encumbrances or release-required items.")
         if owner_unmatched:
             issues.append("Registry owner match status requires legal confirmation.")
+        if parcels and not registry_records:
+            issues.append("Registry and encumbrance evidence is not attached; legal review remains pending.")
+        blocking_issue = bool(registry_release_required or owner_unmatched or (share_values and share_sum < 0.999))
         return self._check(
             "land_rights",
             "Land rights and encumbrances",
-            "blocking" if (parcels and share_sum < 0.999) or owner_unmatched else "caution" if issues else "clear",
+            "blocking" if blocking_issue else "caution" if issues else "clear",
             issues or ["Land ownership and rights evidence were reviewed from supplied registry/land data."],
         )
 
@@ -191,13 +232,16 @@ class LegalReviewAgent:
             [f"{len(references)} legal references were connected."] if references else ["law_context was supplied but references is empty."],
         )
 
-    def _check(self, key: str, title: str, severity: str, findings: List[str]) -> Dict[str, Any]:
-        return {
+    def _check(self, key: str, title: str, severity: str, findings: List[str], details: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        result = {
             "key": key,
             "title": title,
             "severity": severity,
             "findings": findings,
         }
+        if details is not None:
+            result["details"] = details
+        return result
 
     def _follow_ups(self, blocking: List[Dict[str, Any]], caution: List[Dict[str, Any]]) -> List[str]:
         follow_ups = []

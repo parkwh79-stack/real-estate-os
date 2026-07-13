@@ -88,7 +88,7 @@ export default function RiskReviewPage() {
     setError(null);
     try {
       const ctxPromise = fetchWorkspaceContext(projectId, "pf");
-      const risksPromise = fetchDealStateRecords(projectId, { recordType: "risk_issue", limit: 800, actor: "risk-reviewer" });
+      const risksPromise = fetchDealStateRecords(projectId, { recordType: "risk_issue", limit: 800, latestOnly: true, actor: "risk-reviewer" });
       const assessPromise = runAssess
         ? fetch(`${apiBase}/projects/${projectId}/risk/assess`, {
             method: "POST",

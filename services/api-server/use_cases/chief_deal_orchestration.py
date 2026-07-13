@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
 from core.calculations import calculate_pf_metrics
@@ -30,8 +31,10 @@ from use_cases.development_feasibility import analyze_development_feasibility_us
 from use_cases.product_planning import compare_product_planning_use_case
 from use_cases.land_ledger_import import enrich_land_ledger_use_case
 from use_cases.legal_review import review_legal_and_permits_use_case
+from use_cases.legal_pod import run_legal_pod_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.track_workflows import get_track_workflow_definition, normalize_workflow_track
+from use_cases.development_process import get_development_process
 
 # An LLM opinion alone must never move a committee stance (AGENTS.md §1). We read
 # the review's `deterministicFindings` (deterministic provenance guaranteed) and
@@ -995,6 +998,90 @@ def run_chief_deal_all_pods_use_case(
     return final_plan
 
 
+def run_chief_deal_pod_with_cascade_use_case(
+    project_id: str,
+    pod_key: str,
+    project_data: Dict[str, Any],
+    options: Dict[str, Any] | None = None,
+    *,
+    artifact_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    review_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    event_sink: Callable[[Dict[str, Any]], None] | None = None,
+    max_rounds: int = 2,
+) -> Dict[str, Any]:
+    """Run one Pod and automatically consume its recalculation events.
+
+    The normal single-Pod API remains backward-compatible. This explicit
+    cascade path is used by the UI when a reviewer asks for an autonomous
+    downstream run, so a cost or market update does not leave dependent Pods
+    permanently in ``needs_recalculation``.
+    """
+    options = dict(options or {})
+    options.pop("autoCascade", None)
+    plan = run_chief_deal_pod_use_case(
+        project_id,
+        pod_key,
+        project_data,
+        options,
+        artifact_sink=artifact_sink,
+        review_sink=review_sink,
+        event_sink=event_sink,
+    )
+    rows: List[Dict[str, Any]] = []
+    for round_index in range(1, max(0, max_rounds) + 1):
+        state = project_data.get("chief_orchestration_state") or {}
+        pod_runs = state.get("podRuns") or {}
+        order = list((plan.get("taskGraph") or {}).get("recommendedRunOrder") or [])
+        pending = [
+            key for key in order
+            if key and (pod_runs.get(str(key)) or {}).get("status") == "needs_recalculation"
+        ]
+        if not pending:
+            break
+        for target_key in pending:
+            started_at = datetime.now(timezone.utc).isoformat()
+            triggers = [
+                str(event.get("trigger"))
+                for event in (pod_runs.get(str(target_key)) or {}).get("recalculationEvents") or []
+            ]
+            try:
+                plan = run_chief_deal_pod_use_case(
+                    project_id,
+                    str(target_key),
+                    project_data,
+                    options,
+                    artifact_sink=artifact_sink,
+                    review_sink=review_sink,
+                    event_sink=event_sink,
+                )
+                rows.append({
+                    "podKey": target_key,
+                    "round": round_index,
+                    "status": "recalculated",
+                    "triggers": triggers[:5],
+                    "startedAt": started_at,
+                    "completedAt": datetime.now(timezone.utc).isoformat(),
+                })
+            except ValueError as exc:
+                rows.append({
+                    "podKey": target_key,
+                    "round": round_index,
+                    "status": "blocked",
+                    "triggers": triggers[:5],
+                    "error": str(exc),
+                })
+                break
+    plan = plan_chief_deal_orchestration_use_case(project_id, project_data, options)
+    plan["autoCascadeSummary"] = {
+        "schemaVersion": "realytics-chief-pod-auto-cascade-v1",
+        "sourcePod": pod_key,
+        "recalculatedCount": len([row for row in rows if row.get("status") == "recalculated"]),
+        "blockedCount": len([row for row in rows if row.get("status") == "blocked"]),
+        "rows": rows,
+    }
+    return plan
+
+
 def _truthy(value: Any) -> bool:
     if value in (None, "", 0, 0.0):
         return False
@@ -1022,8 +1109,17 @@ def _execute_pod_artifact(
             "artifactType": "land_legal_pod_result",
             "domainWorkflow": _workflow_summary(workflow_run),
             "standardArtifacts": workflow_artifacts,
-            "legalPermitReview": review_legal_and_permits_use_case(project_data, options),
+            "legalPermitReview": run_legal_pod_use_case(project_id, project_data, options)["legalReview"],
             "developabilityScore": score_developability_use_case(project_data),
+        }
+        # Keep the legal review as a first-class, auditable result.  The pod is
+        # the execution unit, but LegalReviewAgent remains visible to the Deal
+        # Room and downstream Risk Register instead of being hidden in a blob.
+        artifact["legalReviewExecution"] = {
+            "agent": "LegalReviewAgent",
+            "executed": True,
+            "mode": "preliminary_pf_legal_permit_check",
+            "source": "Land-Legal Pod",
         }
         if workflow_artifacts.get("landAgentReview"):
             artifact["landAgentReview"] = workflow_artifacts["landAgentReview"]
@@ -1528,23 +1624,32 @@ def _number(value: Any) -> float | None:
 
 
 def _apply_feasibility_summary_to_project(project_data: Dict[str, Any], feasibility: Dict[str, Any]) -> None:
+    """Sync computed feasibility totals back into feasibility_input so downstream
+    engines (cash flow, PF) read them. DevelopmentFeasibilityAgent.analyze returns
+    the totals under ``revenue``/``costs``/``developerReturns`` (not
+    revenueAssumptions/costBreakdown) — reading the wrong keys previously left
+    feasibility_input un-synced. Only fills a field when it has a positive value
+    and is missing/zero in feasibility_input (never overwrites real input)."""
     feasibility_input = project_data.setdefault("feasibility_input", {})
-    summary = feasibility.get("summary") or feasibility.get("developerReturns") or {}
-    revenue = feasibility.get("revenueAssumptions") or {}
-    costs = feasibility.get("costBreakdown") or {}
+    revenue = feasibility.get("revenue") or feasibility.get("revenueAssumptions") or {}
+    costs = feasibility.get("costs") or feasibility.get("costBreakdown") or {}
+    returns = feasibility.get("developerReturns") or feasibility.get("summary") or {}
+
+    def _fill(key: str, value: Any) -> None:
+        if value in (None, "") or not isinstance(value, (int, float)) or value <= 0:
+            return
+        if not feasibility_input.get(key):
+            feasibility_input[key] = value
+
     if isinstance(revenue, dict):
-        total_revenue = revenue.get("totalRevenue") or revenue.get("total_revenue")
-        if total_revenue not in (None, ""):
-            feasibility_input["total_revenue"] = total_revenue
+        _fill("total_revenue", revenue.get("totalRevenue") or revenue.get("total_revenue"))
     if isinstance(costs, dict):
-        total_cost = costs.get("totalCost") or costs.get("total_cost")
-        construction_cost = costs.get("constructionCost") or costs.get("construction_cost")
-        if total_cost not in (None, ""):
-            feasibility_input["total_cost"] = total_cost
-        if construction_cost not in (None, ""):
-            feasibility_input["construction_cost"] = construction_cost
-    if isinstance(summary, dict):
-        profit_margin = summary.get("profitMargin") or summary.get("developerProfitMargin")
+        _fill("total_cost", costs.get("totalCost") or costs.get("total_cost"))
+        _fill("construction_cost", costs.get("constructionCost") or costs.get("construction_cost"))
+        _fill("land_cost", costs.get("landCost") or costs.get("land_cost"))
+        _fill("finance_cost", costs.get("financeCost") or costs.get("finance_cost"))
+    if isinstance(returns, dict):
+        profit_margin = returns.get("profitMargin") or returns.get("developerProfitMargin")
         if profit_margin not in (None, ""):
             project_data.setdefault("expected_results", {})["profit_margin"] = profit_margin
 
@@ -2147,6 +2252,7 @@ def _task_graph(pods: List[AgentPodPlan], workflow_track: str = "development") -
     normalized_track = normalize_workflow_track(workflow_track)
     workflow_definition = get_track_workflow_definition(normalized_track)
     stages = _track_execution_stages(normalized_track)
+    lifecycle_process = get_development_process()
     stage_by_pod = {
         pod_key: stage
         for stage in stages
@@ -2156,6 +2262,8 @@ def _task_graph(pods: List[AgentPodPlan], workflow_track: str = "development") -
         "workflowTrack": normalized_track,
         "trackWorkflow": workflow_definition,
         "executionStages": stages,
+        "lifecycleProcess": lifecycle_process,
+        "feedbackLoops": lifecycle_process["feedbackLoops"],
         "recommendedRunOrder": [pod.pod_key for pod in pods],
         "nodes": [
             {

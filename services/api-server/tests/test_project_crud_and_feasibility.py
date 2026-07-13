@@ -478,6 +478,45 @@ def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatc
     client.delete(f"/projects/{project_id}")
 
 
+def test_feasibility_workbook_candidate_feeds_pods_without_claiming_approval(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "candidate.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Workbook Candidate Project"}}).json()
+    project_id = created["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": project_id,
+        "project_name": "Workbook Candidate Project",
+        "asset_type": "mixed_use",
+        "product_mix": [{"key": "apartment", "asset_type": "apartment", "product_name": "아파트", "unit_count": 120}],
+        "schedule": [{"key": "completion", "label": "준공", "planned_date": "2028-01-01"}],
+        "metrics": {"total_revenue": 100000000000, "total_cost": 85000000000},
+        "financing": [{"tranche_id": "tr_a", "name": "Tr.A", "priority": "senior", "amount": 60000000000}],
+    }
+
+    response = client.post(
+        f"/projects/{project_id}/feasibility-workbook/import-candidate",
+        json={
+            "feasibilityStudyV2Draft": draft,
+            "validation": {"status": "valid"},
+            "sourceDocument": {"originalFileName": "candidate.xlsx"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "candidate"
+    assert body["feasibilityInput"]["total_revenue"] == 100000000000
+    fetched = client.get(f"/projects/{project_id}").json()
+    assert fetched["_meta"]["feasibilityInputApprovalStatus"] == "candidate"
+    assert fetched["product_mix"][0]["asset_type"] == "apartment"
+    assert fetched["pf_structure"][0]["priority"] == "senior"
+
+    client.delete(f"/projects/{project_id}")
+
+
 def test_risk_report_workbook_approve_persists_register_and_sections(tmp_path, monkeypatch):
     monkeypatch.setattr(projects, "persist_state", lambda: None)
     monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "risk-approval.sqlite3"))

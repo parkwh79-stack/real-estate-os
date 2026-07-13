@@ -51,16 +51,18 @@ class RiskRegisterAgent:
         evidence_ids = land.get("evidenceIds") or []
         source_locators = land.get("sourceLocators") or []
         for index, issue in enumerate(land.get("blockingIssues", []), 1):
+            issue_text = str(issue)
+            registry_evidence_pending = "missing_registry_evidence" in issue_text or "Registry and encumbrance evidence is missing" in issue_text
             risks.append(self._risk(
                 source_agent="LandAgent",
                 source_artifact="landAgentReview",
                 category="Land Risk",
                 code=f"LAND_BLOCKING_{index}",
                 title="Land readiness blocking issue",
-                description=str(issue),
-                severity="critical",
+                description=issue_text,
+                severity="medium" if registry_evidence_pending else "critical",
                 probability="medium",
-                mitigant="Resolve land title, acquisition, registry, or ledger validation issue before PF approval.",
+                mitigant="Attach licensed registry evidence and continue legal verification; convert to blocking only if a confirmed encumbrance or ownership mismatch is found." if registry_evidence_pending else "Resolve land title, acquisition, registry, or ledger validation issue before PF approval.",
                 evidence_ids=evidence_ids,
                 source_locators=source_locators,
             ))
