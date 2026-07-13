@@ -490,6 +490,8 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [track, setTrack] = useState<WorkflowTrack | null>(null);
   const [executingPodKey, setExecutingPodKey] = useState<PodKey | null>(null);
   const [executingAll, setExecutingAll] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [reanalyzeResult, setReanalyzeResult] = useState<{ rerunCount?: number; newlyUnblocked?: string[]; stillBlocked?: string[]; triggered?: boolean } | null>(null);
   const [executionProgress, setExecutionProgress] = useState(0);
   const [supplements, setSupplements] = useState<AutoSupplementAttempt[] | null>(null);
   const [recalculationEvents, setRecalculationEvents] = useState<RecalculationEvent[]>([]);
@@ -678,6 +680,28 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     }
   }, [projectId, track, loadRecalculationEvents, loadPodAiReviews]);
 
+  const reanalyzeOnEvidence = useCallback(async () => {
+    setReanalyzing(true);
+    setReanalyzeResult(null);
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/reanalyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders("web") },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(cleanText(body?.detail, "새 자료 반영 재분석에 실패했습니다."));
+      setReanalyzeResult(body);
+      await loadPlan();
+      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "새 자료 반영 재분석 중 오류가 발생했습니다.");
+    } finally {
+      setReanalyzing(false);
+    }
+  }, [projectId, loadPlan, loadRecalculationEvents, loadPodAiReviews]);
+
   useEffect(() => {
     void loadPlan();
   }, [loadPlan]);
@@ -846,16 +870,41 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
                     트랙별 Task Graph 순서대로 Pod를 실행합니다. 막히는 Pod는 VWorld, 국토부 실거래가 등 합법적 소스에서 먼저 자동 보강을 시도하고, 그래도 부족한 항목만 blocker로 남깁니다.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void runAllPods()}
-                  disabled={executingAll || executingPodKey !== null}
-                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg bg-sky-700 px-3 text-sm font-black text-white transition-colors hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {executingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  {executingAll ? `전체 실행 중 ${executionProgress}%` : "전체 자동 실행"}
-                </button>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  {analyzed ? (
+                    <button
+                      type="button"
+                      onClick={() => void reanalyzeOnEvidence()}
+                      disabled={reanalyzing || executingAll || executingPodKey !== null}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-sky-300 bg-white px-3 text-sm font-black text-sky-800 transition-colors hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-sky-800 dark:bg-slate-900 dark:text-sky-200"
+                    >
+                      {reanalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                      {reanalyzing ? "새 자료 반영 재분석 중…" : "새 자료 반영 재분석"}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => void runAllPods()}
+                    disabled={executingAll || executingPodKey !== null || reanalyzing}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-sky-700 px-3 text-sm font-black text-white transition-colors hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {executingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                    {executingAll ? `전체 실행 중 ${executionProgress}%` : "전체 자동 실행"}
+                  </button>
+                </div>
               </div>
+              {reanalyzing ? (
+                <div className="mb-3 flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-bold text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-200">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  새 자료를 반영해 막힌 Pod를 재검증·재실행하고 AI가 다시 판단하는 중입니다…
+                </div>
+              ) : reanalyzeResult ? (
+                <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                  {reanalyzeResult.triggered === false
+                    ? "재분석할 이전 분석 이력이 없습니다. ‘전체 자동 실행’을 먼저 실행하세요."
+                    : `재분석 완료 — Pod ${reanalyzeResult.rerunCount ?? 0}개 재실행 · 해제 ${reanalyzeResult.newlyUnblocked?.length ?? 0}개${(reanalyzeResult.stillBlocked?.length ?? 0) ? ` · 여전히 보강 필요 ${reanalyzeResult.stillBlocked?.length}개` : ""}`}
+                </div>
+              ) : null}
               {plan.runAllSummary ? <RunAllSummaryPanel summary={plan.runAllSummary} /> : null}
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {plan.agentPods.map((pod) => {

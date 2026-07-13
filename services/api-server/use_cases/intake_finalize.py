@@ -31,6 +31,22 @@ def _address_candidates(address: str) -> List[str]:
     dong_idx = next((i for i, t in enumerate(tokens) if t.endswith(("동", "리", "가"))), -1)
     if dong_idx >= 0:
         candidates.append(" ".join(tokens[: dong_idx + 1]))
+    # No-space cover addresses (e.g. "경기도용인시기흥구상갈동13번지일대") don't geocode as-is.
+    # Normalize them to a spaced, geocodable form via the address-mining regex — this
+    # is what unblocks land evidence auto-supplement when the parser stored a
+    # no-space address (the leading cause of Land-Legal Pod staying blocked).
+    try:
+        from use_cases.address_mining import mine_addresses_from_text
+
+        for hit in mine_addresses_from_text(raw):
+            normalized = (hit.get("address") or "").strip()
+            if normalized:
+                candidates.append(normalized)  # e.g. "경기도 용인시 기흥구 상갈동 13"
+                parts = normalized.split()
+                if len(parts) > 1:
+                    candidates.append(" ".join(parts[:-1]))  # dong-level fallback
+    except Exception:  # mining is best-effort; never break resolution
+        pass
     return list(dict.fromkeys([c for c in candidates if c]))
 
 

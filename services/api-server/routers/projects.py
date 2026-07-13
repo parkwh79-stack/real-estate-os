@@ -1351,19 +1351,24 @@ async def upload_business_plan(
     return project
 
 
-def _maybe_auto_reanalyze_on_upload(project_id: str, parsed_data: Dict[str, Any] | None) -> Dict[str, Any] | None:
-    """After applying new upload data, auto re-run the still-open / affected pods —
-    but only if the project was already analyzed (has completed pod artifacts).
-    A brand-new project's first upload is left for the user's "전체 자동 실행"."""
+def _maybe_auto_reanalyze(project_id: str, doc_types: list[str] | None) -> Dict[str, Any] | None:
+    """Auto re-run the still-open / document-affected pods after new evidence — but
+    only if the project was already analyzed (has completed pod artifacts). A
+    brand-new project's first upload is left for the user's "전체 자동 실행".
+    Never raises: auto re-analysis must not break the upload/persist request."""
     if project_id not in PROJECTS_DB or not _completed_pod_keys(project_id):
         return None
+    try:
+        return _reanalyze_after_evidence(project_id, changed_document_types=doc_types)
+    except Exception:
+        return None
+
+
+def _maybe_auto_reanalyze_on_upload(project_id: str, parsed_data: Dict[str, Any] | None) -> Dict[str, Any] | None:
     meta = (parsed_data or {}).get("_meta") or {}
     upload_meta = meta.get("upload") if isinstance(meta.get("upload"), dict) else {}
     doc_type = upload_meta.get("documentType") or meta.get("documentType") or "business_plan"
-    try:
-        return _reanalyze_after_evidence(project_id, changed_document_types=[str(doc_type)])
-    except Exception:  # auto re-analysis must never break the upload
-        return None
+    return _maybe_auto_reanalyze(project_id, [str(doc_type)])
 
 async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, Any]:
     """Sniff + classify one uploaded file, archive the original, return the plan."""
@@ -1551,10 +1556,12 @@ async def analyze_land_ledger_upload(
         update_payload["land_acquisition"] = parcels
     project_repository().update(project_id, update_payload)
 
+    auto = _maybe_auto_reanalyze(project_id, ["land_ledger"])
     return {
         "project_id": project_id,
         "landLedger": ledger,
         "persisted": True,
+        "autoReanalysis": auto,
         "note": "필지가 프로젝트에 저장되었습니다. /land/parcels/resolve로 지번별 PNU·공시지가를 일괄 해석할 수 있습니다.",
     }
 
@@ -1623,6 +1630,7 @@ def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: D
         "persistedLandEvidenceCount": len(persisted_evidence),
         "persistedLandEvidence": persisted_evidence,
         "vworld": vworld_status(),
+        "autoReanalysis": _maybe_auto_reanalyze(project_id, ["land_ledger"]),
     }
 
 @router.post("/{project_id}/feasibility-workbook/validate")
@@ -2692,6 +2700,7 @@ def upsert_project_land_evidence(project_id: str, request: Request, input_data: 
         "projectId": project_id,
         "count": len(records),
         "records": records,
+        "autoReanalysis": _maybe_auto_reanalyze(project_id, ["land_evidence"]),
     }
 
 @router.get("/{project_id}/assumption-overrides")
