@@ -623,7 +623,7 @@ class DevelopmentFeasibilityAgent:
             })
         return rows
 
-    def _schedule_v2(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _schedule_v2(self, schedule: Any) -> List[Dict[str, Any]]:
         labels = {
             "land_purchase": "Land purchase",
             "permit_approval": "Permit approval",
@@ -632,11 +632,27 @@ class DevelopmentFeasibilityAgent:
             "completion": "Completion",
             "loan_maturity": "Loan maturity",
         }
-        return [
-            {"key": key, "label": labels.get(key, key), "planned_date": self._schedule_date_value(value)}
-            for key, value in schedule.items()
-            if value
-        ]
+        # Legacy shape: a dict of {key: date}.
+        if isinstance(schedule, dict):
+            return [
+                {"key": key, "label": labels.get(key, key), "planned_date": self._schedule_date_value(value)}
+                for key, value in schedule.items()
+                if value
+            ]
+        # Canonical FeasibilityStudyV2 shape: a list of {key, label, planned_date, ...}.
+        if isinstance(schedule, list):
+            rows: List[Dict[str, Any]] = []
+            for item in schedule:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("key") or item.get("name")
+                planned = item.get("planned_date") or item.get("plannedDate")
+                if planned is None and item.get("value") is not None:
+                    planned = self._schedule_date_value(item.get("value"))
+                if key and planned:
+                    rows.append({"key": key, "label": item.get("label") or labels.get(key, key), "planned_date": planned})
+            return rows
+        return []
 
     @staticmethod
     def _schedule_date_value(value: Any) -> str:

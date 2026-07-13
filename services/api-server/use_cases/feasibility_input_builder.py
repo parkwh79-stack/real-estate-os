@@ -112,13 +112,16 @@ def build_feasibility_input_draft(
         fields[field] = num
         sources[field] = {"source": source, "confidence": confidence, "needsReview": needs_review}
 
-    # 1) existing non-zero feasibility_input (kept as-is, highest trust)
+    # 1) canonical feasibilityStudyV2 metrics (approved 사업수지 workbook) = AUTHORITATIVE.
+    #    This must win over any existing feasibility_input, because the latter can hold
+    #    stale auto_supplement placeholders (e.g. 751 had fake 750/600억 shadowing the
+    #    real 8,540/7,794억 approved workbook). The approved workbook IS the 사업수지.
     for field in FIELDS:
-        _set(field, existing.get(field), "feasibility_input", 0.95)
+        _set(field, v2_metrics.get(field), "feasibility_workbook_v2", 0.92)
 
-    # 2) canonical feasibilityStudyV2 metrics (workbook import = parsed 사업수지)
+    # 2) existing feasibility_input for any field the workbook does not cover
     for field in FIELDS:
-        _set(field, v2_metrics.get(field), "feasibility_workbook_v2", 0.9)
+        _set(field, existing.get(field), "feasibility_input", 0.8)
 
     # 3) parsed_fact records for feasibility fields. Distinguish REAL parsed document
     #    values from auto_supplement benchmark PROXIES (factOrigin=auto_supplement) —

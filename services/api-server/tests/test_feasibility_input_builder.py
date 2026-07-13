@@ -11,10 +11,20 @@ def test_builds_from_feasibility_workbook_v2():
     assert d["needsReview"] is False  # canonical parsed source → no review flag
 
 
-def test_existing_input_kept_over_workbook():
-    pd = {"feasibility_input": {"total_revenue": 100}, "feasibilityStudyV2": {"metrics": {"total_revenue": 999}}}
+def test_approved_workbook_wins_over_stale_feasibility_input():
+    # The approved 사업수지 workbook (feasibilityStudyV2) is authoritative — it must win
+    # over a stale/placeholder feasibility_input (e.g. auto_supplement 750/600억).
+    pd = {"feasibility_input": {"total_revenue": 75_000_000_000}, "feasibilityStudyV2": {"metrics": {"total_revenue": 853_951_767_703}}}
     d = build_feasibility_input_draft(pd)
-    assert d["feasibilityInput"]["total_revenue"] == 100  # existing input wins
+    assert d["feasibilityInput"]["total_revenue"] == 853_951_767_703
+    assert d["fieldSources"]["total_revenue"]["source"] == "feasibility_workbook_v2"
+
+
+def test_existing_input_fills_field_workbook_lacks():
+    pd = {"feasibility_input": {"finance_cost": 5_000_000_000}, "feasibilityStudyV2": {"metrics": {"total_revenue": 100_000_000_000, "total_cost": 80_000_000_000}}}
+    d = build_feasibility_input_draft(pd)
+    assert d["feasibilityInput"]["finance_cost"] == 5_000_000_000  # workbook lacks it → existing fills
+    assert d["fieldSources"]["finance_cost"]["source"] == "feasibility_input"
 
 
 def test_derives_land_and_construction_from_program_flagged_review():

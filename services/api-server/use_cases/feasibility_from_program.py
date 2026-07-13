@@ -73,6 +73,33 @@ def _comparable_price_per_py(project_data: Dict[str, Any], parsed_facts) -> Opti
     return _parsed(parsed_facts, "marketComparable.pricePerPy")
 
 
+def _regulation_from_parcels(project_data: Dict[str, Any]) -> tuple:
+    """Aggregate parcel VWorld landUsePlanning into a (legalFar, [용도지역]) — the
+    missing bridge from per-parcel land-use attributes to the feasibility engine.
+    Returns (None, zones) when VWorld did not provide a legal FAR (e.g. 계획관리지역
+    원형지) so the pod honestly stays blocked instead of using a fabricated FAR."""
+    ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
+    parcels = ledger.get("parcels") if isinstance(ledger, dict) else None
+    if not isinstance(parcels, list):
+        parcels = project_data.get("land_acquisition") or []
+    fars: List[float] = []
+    zones: List[str] = []
+    for parcel in parcels:
+        if not isinstance(parcel, dict):
+            continue
+        lup = parcel.get("landUsePlanning") or {}
+        if not isinstance(lup, dict):
+            continue
+        far = _num(lup.get("legalFar"))
+        if far:
+            fars.append(far)
+        for zone in lup.get("landUseZones") or []:
+            if zone and zone not in zones:
+                zones.append(str(zone))
+    # Use the max legal FAR across parcels (the governing 용도지역) when available.
+    return (max(fars) if fars else None, zones)
+
+
 def _parcel_land_cost(project_data: Dict[str, Any]) -> tuple:
     """Sum (공시지가 × 면적) over the 토지조서 parcels. Returns (cost, priced_count, total)."""
     ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
@@ -113,7 +140,11 @@ def build_feasibility_from_program(
     land_area = _num(options.get("land_area_sqm")) or _land_area(project_data, parsed_facts)
     gfa = _num((project_data.get("architectural_plan") or {}).get("gross_floor_area_sqm"))
     if not gfa and land_area:  # fall back to 연면적 = 토지면적 × 용적률
-        far = _num((project_data.get("regulation") or {}).get("applied_far"))
+        far = _num(options.get("applied_far")) or _num((project_data.get("regulation") or {}).get("applied_far"))
+        if not far:  # wiring: pull legalFar from parcel VWorld landUsePlanning if VWorld provided it
+            far, zones = _regulation_from_parcels(project_data)
+            if far:
+                assumptions.append(f"용적률 {far:g}% = 필지 용도지역({', '.join(zones[:2])}) 법정 용적률(VWorld) 적용.")
         if far:
             gfa = land_area * far / 100
     comparable = _num(options.get("sale_price_per_py")) or _comparable_price_per_py(project_data, parsed_facts)

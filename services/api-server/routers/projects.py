@@ -2453,6 +2453,21 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
             land = dict(project.get("land") or {})
             land["area_sqm"] = land_area
             update_payload["land"] = land
+        # Materialize the architectural program + product mix from the approved 사업수지
+        # workbook (feasibilityStudyV2) so the feasibility engine + Pod AI review see the
+        # GFA/product mix (otherwise architecturalProgram.grossFloorAreaSqm stays 0 and
+        # the pod flags "건축 프로그램 누락" even though the workbook has it).
+        v2 = project.get("feasibilityStudyV2") or project.get("canonicalFeasibilityStudyV2") or {}
+        if isinstance(v2, dict):
+            program = v2.get("program") or {}
+            gfa_node = program.get("gross_floor_area_sqm") if isinstance(program, dict) else None
+            gfa_val = gfa_node.get("value") if isinstance(gfa_node, dict) else (gfa_node if isinstance(gfa_node, (int, float)) else None)
+            if gfa_val and not (project.get("architectural_plan") or {}).get("gross_floor_area_sqm"):
+                arch = dict(project.get("architectural_plan") or {})
+                arch["gross_floor_area_sqm"] = gfa_val
+                update_payload["architectural_plan"] = arch
+            # Note: V2.product_mix uses nested provenance objects (not the flat shape the
+            # feasibility engine expects), so it is NOT copied to project.product_mix here.
         project_repository().update(project_id, update_payload)
         draft["applied"] = True
         record_sensitive_project_event(
