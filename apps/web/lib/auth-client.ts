@@ -1,4 +1,6 @@
-export const apiBase = "http://127.0.0.1:8000";
+// Browser calls stay same-origin so local browser security extensions do not
+// block the API. Next.js forwards /api/backend/* to the FastAPI service.
+export const apiBase = typeof window === "undefined" ? "http://127.0.0.1:8000" : "/api/backend";
 
 export interface RealyticsUser {
   userId: string;

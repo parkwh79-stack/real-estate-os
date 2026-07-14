@@ -41,6 +41,7 @@ from schemas.credit_enhancement import CreditEnhancementRequest, CreditEnhanceme
 from schemas.cash_sweep import CashSweepRequest, CashSweepTranche
 from core.risk_assessment import build_basic_risk_matrix
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
+from agent_platform.domain_agent_runtime import run_domain_agent_callable_with_contract
 
 
 class OrchestrationAgent:
@@ -73,6 +74,7 @@ class OrchestrationAgent:
             "artifacts": {},
             "errors": [],
             "approval": None,
+            "agentRuntimeExecutions": [],
         }
 
         try:
@@ -83,7 +85,21 @@ class OrchestrationAgent:
 
             self._run_term_annotation_step(run, project_data)
 
-            land_review = self._review_land_readiness(project_data)
+            land_review = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="LandReadinessAgent",
+                task_type="land_readiness_review",
+                domain="land_legal",
+                input_snapshot={
+                    "land": project_data.get("land"),
+                    "landLedger": project_data.get("landLedger"),
+                    "landEvidence": project_data.get("landEvidence"),
+                },
+                executor=lambda: self._review_land_readiness(project_data),
+                output_schema_name="LandReadinessReview",
+            )
             run["artifacts"]["landAgentReview"] = land_review
             self._complete_step(run, "land_agent_review", {
                 "status": land_review["status"],
@@ -122,7 +138,23 @@ class OrchestrationAgent:
                 },
             )
 
-            developer_feasibility = DevelopmentFeasibilityAgent().analyze(project_data)
+            developer_feasibility = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="DevelopmentFeasibilityAgent",
+                task_type="development_feasibility_analysis",
+                domain="feasibility_cashflow",
+                input_snapshot={
+                    "feasibilityInput": project_data.get("feasibility_input"),
+                    "feasibilityStudyV2": project_data.get("feasibilityStudyV2"),
+                    "productMix": project_data.get("productMix") or project_data.get("product_mix"),
+                    "schedule": project_data.get("schedule"),
+                },
+                executor=lambda: DevelopmentFeasibilityAgent().analyze(project_data),
+                output_schema_name="DevelopmentFeasibilityResult",
+                deterministic_authority_required=True,
+            )
             run["artifacts"]["developerFeasibility"] = developer_feasibility
             self._complete_step(run, "development_feasibility_analysis", {
                 "summary": developer_feasibility["summary"],
@@ -175,14 +207,6 @@ class OrchestrationAgent:
                             "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
                             "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
                         })
-                if not product_mix:
-                    product_mix.append({
-                        "type": "General",
-                        "units": 100,
-                        "avgUnitPrice": (project_data.get("feasibility_input", {}).get("total_revenue", 0.0) / 100.0) if project_data.get("feasibility_input", {}).get("total_revenue") else 1000000.0,
-                        "totalRevenue": project_data.get("feasibility_input", {}).get("total_revenue") or 100000000.0
-                    })
-
                 tranches = project_data.get("pf_structure", [])
                 pf_structure_list = []
                 for idx, item in enumerate(tranches):
@@ -194,15 +218,6 @@ class OrchestrationAgent:
                             "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                             "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
                         })
-                if not pf_structure_list:
-                    pf_structure_list.append({
-                        "tranche": "Senior",
-                        "amount": sum(t.get("amount", 0) for t in tranches) or 10000000.0,
-                        "priority": 1,
-                        "interestRate": 0.065,
-                        "feeRate": 0.01
-                    })
-
                 raw_scenario_drivers = (
                     project_data.get("scenarioDrivers")
                     or project_data.get("scenario_drivers")
@@ -214,20 +229,33 @@ class OrchestrationAgent:
                 if isinstance(raw_scenario_drivers, dict) and raw_scenario_drivers:
                     scenario_drivers = ScenarioDrivers.model_validate(raw_scenario_drivers)
 
-                scenario_req = ScenarioSetRequest(
-                    scenarioSetId=f"run-{run['run_id']}",
-                    scenarioSetName="Orchestration Run Scenario Set",
-                    productMix=product_mix,
-                    pfStructure=pf_structure_list,
-                    scenarioDrivers=scenario_drivers,
-                )
-                scenario_run_result = ScenarioEngineAgent().run_scenario_set(scenario_req)
-                run["artifacts"]["scenariosEvaluation"] = scenario_run_result.model_dump(by_alias=True)
+                missing_scenario_inputs = []
+                if not product_mix:
+                    missing_scenario_inputs.append("product_mix")
+                if not pf_structure_list:
+                    missing_scenario_inputs.append("pf_structure")
+                if missing_scenario_inputs:
+                    run["artifacts"]["scenarioEngineReadiness"] = {
+                        "status": "not_ready",
+                        "reason": "deterministic_input_missing",
+                        "missingInputs": missing_scenario_inputs,
+                        "message": "Scenario Engine was not executed because verified product mix or PF structure inputs are missing.",
+                    }
+                else:
+                    scenario_req = ScenarioSetRequest(
+                        scenarioSetId=f"run-{run['run_id']}",
+                        scenarioSetName="Orchestration Run Scenario Set",
+                        productMix=product_mix,
+                        pfStructure=pf_structure_list,
+                        scenarioDrivers=scenario_drivers,
+                    )
+                    scenario_run_result = ScenarioEngineAgent().run_scenario_set(scenario_req)
+                    run["artifacts"]["scenariosEvaluation"] = scenario_run_result.model_dump(by_alias=True)
 
-                # Include scenario fragments directly in the pf_structure artifact
-                pf_structure["scenariosSummary"] = scenario_run_result.reportFragments.waterfallSummary
-                pf_structure["unsoldLtvSummary"] = scenario_run_result.reportFragments.unsoldLtvSummary
-                pf_structure["trancheRecoverySummary"] = scenario_run_result.reportFragments.trancheRecoverySummary
+                    # Include scenario fragments directly in the pf_structure artifact.
+                    pf_structure["scenariosSummary"] = scenario_run_result.reportFragments.waterfallSummary
+                    pf_structure["unsoldLtvSummary"] = scenario_run_result.reportFragments.unsoldLtvSummary
+                    pf_structure["trancheRecoverySummary"] = scenario_run_result.reportFragments.trancheRecoverySummary
             except Exception as exc:
                 run["errors"].append({"message": f"Scenario calculation failed: {str(exc)}", "type": exc.__class__.__name__})
 
@@ -240,10 +268,25 @@ class OrchestrationAgent:
             self._run_credit_enhancement_step(run, project_data, pf_structure)
             self._run_cash_sweep_step(run, project_data)
 
-            market_evidence = MarketEvidenceAgent().review(
-                project_data,
-                developer_feasibility,
-                feasibility,
+            market_evidence = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="MarketEvidenceAgent",
+                task_type="market_evidence_reconciliation",
+                domain="market_product",
+                input_snapshot={
+                    "market": project_data.get("market"),
+                    "marketEvidence": project_data.get("marketEvidence") or project_data.get("market_evidence"),
+                    "developerFeasibility": developer_feasibility,
+                    "feasibility": feasibility,
+                },
+                executor=lambda: MarketEvidenceAgent().review(
+                    project_data,
+                    developer_feasibility,
+                    feasibility,
+                ),
+                output_schema_name="MarketEvidenceReview",
             )
             run["artifacts"]["marketEvidenceReview"] = market_evidence
             self._complete_step(run, "market_evidence_reconciliation", {
@@ -281,7 +324,21 @@ class OrchestrationAgent:
             )
             marketability_input["marketEvidenceReview"] = market_evidence
             self._maybe_inject_live_market_comparables(run, project_data, marketability_input)
-            marketability = MarketabilityAgent().analyze(marketability_input)
+            marketability = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="MarketabilityAgent",
+                task_type="marketability_analysis",
+                domain="market_product",
+                input_snapshot={
+                    "marketEvidenceReview": market_evidence,
+                    "market": marketability_input.get("market"),
+                    "productMix": marketability_input.get("productMix") or marketability_input.get("product_mix"),
+                },
+                executor=lambda: MarketabilityAgent().analyze(marketability_input),
+                output_schema_name="MarketabilityAnalysis",
+            )
             run["artifacts"]["marketabilityAnalysis"] = marketability
             self._complete_step(run, "marketability_analysis", marketability, artifact_key="marketabilityAnalysis")
             self._add_handoff(
@@ -305,16 +362,24 @@ class OrchestrationAgent:
                 },
             )
 
-            data_quality = DataQualityAgent().review(
-                project_data,
-                {
+            data_quality_inputs = {
                     "landAgentReview": land_review,
                     "developerFeasibility": developer_feasibility,
                     "feasibility": feasibility,
                     "pfStructure": pf_structure,
                     "marketEvidenceReview": market_evidence,
                     "marketabilityAnalysis": marketability,
-                },
+                }
+            data_quality = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="DataQualityAgent",
+                task_type="cross_document_data_quality_review",
+                domain="cross_agent_reconciliation",
+                input_snapshot=data_quality_inputs,
+                executor=lambda: DataQualityAgent().review(project_data, data_quality_inputs),
+                output_schema_name="DataQualityReview",
             )
             run["artifacts"]["dataQualityReview"] = data_quality
             self._complete_step(run, "data_quality_review", {
@@ -386,9 +451,24 @@ class OrchestrationAgent:
                 "reconciliationStatus": reconciliation["status"],
             }, artifact_key="consensusResolution")
 
-            legal_review = LegalReviewAgent().review(
-                project_data,
-                options.get("law_context"),
+            legal_review = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="LegalReviewAgent",
+                task_type="legal_permit_review",
+                domain="land_legal",
+                input_snapshot={
+                    "land": project_data.get("land"),
+                    "landLedger": project_data.get("landLedger"),
+                    "legalContext": options.get("law_context"),
+                    "sourceDocuments": project_data.get("source_documents"),
+                },
+                executor=lambda: LegalReviewAgent().review(
+                    project_data,
+                    options.get("law_context"),
+                ),
+                output_schema_name="LegalReviewResult",
             )
             run["artifacts"]["legalPermitReview"] = legal_review
             self._complete_step(run, "legal_permit_review", {
@@ -423,7 +503,22 @@ class OrchestrationAgent:
             run["artifacts"]["riskAssessment"] = risk
             self._complete_step(run, "risk_assessment", risk, artifact_key="riskAssessment")
 
-            risk_register = RiskRegisterAgent().build(project_data, run["artifacts"])
+            risk_register = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="RiskRegisterAgent",
+                task_type="risk_register_aggregation",
+                domain="pf_credit",
+                input_snapshot={
+                    "artifactKeys": sorted(run["artifacts"]),
+                    "legalReview": legal_review,
+                    "marketability": marketability,
+                    "pfStructure": pf_structure,
+                },
+                executor=lambda: RiskRegisterAgent().build(project_data, run["artifacts"]),
+                output_schema_name="RiskRegister",
+            )
             run["artifacts"]["riskRegister"] = risk_register
             self._complete_step(run, "risk_register_generation", {
                 "status": risk_register["status"],
@@ -458,7 +553,21 @@ class OrchestrationAgent:
                 },
             )
 
-            credit_review = CreditReviewAgent().decide(project_data, run["artifacts"])
+            credit_review = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="CreditReviewAgent",
+                task_type="credit_decision_review",
+                domain="pf_credit",
+                input_snapshot={
+                    "riskRegister": risk_register,
+                    "pfStructure": pf_structure,
+                    "scenariosEvaluation": run["artifacts"].get("scenariosEvaluation"),
+                },
+                executor=lambda: CreditReviewAgent().decide(project_data, run["artifacts"]),
+                output_schema_name="CreditReviewDecision",
+            )
             run["artifacts"]["creditReviewDecision"] = credit_review
             self._complete_step(run, "credit_review_decision", {
                 "decision": credit_review["decision"],
@@ -537,20 +646,50 @@ class OrchestrationAgent:
 
             self._run_developability_score_step(run, project_data)
 
-            report_agent = ReportAgent()
-            structured_report = report_agent.generate_structured_report(project_data)
-            report_markdown = report_agent.generate_report(project_data)
-            report_artifact = {
-                "report": structured_report,
-                "report_markdown": report_markdown,
-            }
+            def generate_report_artifact() -> Dict[str, Any]:
+                report_agent = ReportAgent()
+                return {
+                    "report": report_agent.generate_structured_report(project_data),
+                    "report_markdown": report_agent.generate_report(project_data),
+                }
+
+            report_artifact = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="ReportAgent",
+                task_type="phase11_report_generation",
+                domain="report_studio",
+                input_snapshot={
+                    "creditReviewDecision": credit_review,
+                    "riskRegister": risk_register,
+                    "artifactKeys": sorted(run["artifacts"]),
+                },
+                executor=generate_report_artifact,
+                output_schema_name="Phase11ReportArtifact",
+            )
+            structured_report = report_artifact["report"]
+            report_markdown = report_artifact["report_markdown"]
             run["artifacts"]["phase11Report"] = report_artifact
             self._complete_step(run, "phase11_report_generation", {
                 "template": structured_report["template"],
                 "sectionCount": structured_report["qualityChecks"]["actualSectionCount"],
             }, artifact_key="phase11Report")
 
-            evidence_graph = EvidenceGraphAgent().build(project_data, run)
+            evidence_graph = self._run_domain_agent(
+                run,
+                project_data=project_data,
+                options=options,
+                agent_id="EvidenceGraphAgent",
+                task_type="evidence_graph_generation",
+                domain="evidence_governance",
+                input_snapshot={
+                    "artifactKeys": sorted(run["artifacts"]),
+                    "handoffIds": [item.get("handoffId") for item in run.get("handoffs") or []],
+                },
+                executor=lambda: EvidenceGraphAgent().build(project_data, run),
+                output_schema_name="EvidenceGraph",
+            )
             run["artifacts"]["evidenceGraph"] = evidence_graph
             glossary_candidate_capture = capture_unmapped_term_surface_candidates_use_case(
                 [
@@ -561,6 +700,8 @@ class OrchestrationAgent:
                 project_id=project_id,
                 run_id=run["run_id"],
                 source="evidence_graph.term_surface",
+                tenant_id=str((run.get("ai_connection") or {}).get("tenant_id") or "default"),
+                created_by=str(run.get("user_id") or "system_learning_loop"),
             )
             run["artifacts"]["glossaryCandidateCapture"] = glossary_candidate_capture
             self._complete_step(run, "evidence_graph_generation", {
@@ -652,6 +793,7 @@ class OrchestrationAgent:
             "artifacts": {},
             "nextActions": [],
             "errors": [],
+            "agentRuntimeExecutions": [],
         }
 
         def step(step_id: str, status: str, detail: Dict[str, Any], artifact_key: str | None = None, artifact: Any = None) -> None:
@@ -683,14 +825,40 @@ class OrchestrationAgent:
         return run
 
     def _wf_land_review(self, run, data, step, options) -> None:
-        land = self._review_land_readiness(data)
+        land = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="LandReadinessAgent",
+            task_type="land_readiness_review",
+            domain="land_legal",
+            input_snapshot={"land": data.get("land"), "landLedger": data.get("landLedger")},
+            executor=lambda: self._review_land_readiness(data),
+            output_schema_name="LandReadinessReview",
+        )
         step("land_agent_review", land.get("status", "completed"),
              {"status": land.get("status"), "summary": land.get("summary")},
              "landAgentReview", land)
         run["nextActions"].extend(land.get("nextActions", []) or [])
 
     def _wf_feasibility(self, run, data, step, options) -> None:
-        dev = DevelopmentFeasibilityAgent().analyze(data)
+        dev = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="DevelopmentFeasibilityAgent",
+            task_type="development_feasibility_analysis",
+            domain="feasibility_cashflow",
+            input_snapshot={
+                "feasibilityInput": data.get("feasibility_input"),
+                "feasibilityStudyV2": data.get("feasibilityStudyV2"),
+                "productMix": data.get("productMix") or data.get("product_mix"),
+                "schedule": data.get("schedule"),
+            },
+            executor=lambda: DevelopmentFeasibilityAgent().analyze(data),
+            output_schema_name="DevelopmentFeasibilityResult",
+            deterministic_authority_required=True,
+        )
         step("development_feasibility_analysis", "completed",
              {"summary": dev.get("summary"), "pfStatus": dev.get("pfReadiness", {}).get("status")},
              "developerFeasibility", dev)
@@ -700,16 +868,59 @@ class OrchestrationAgent:
         step("return_metrics", "completed", {"summary": ret.get("summary")}, "returnMetrics", ret)
 
     def _wf_marketability(self, run, data, step, options) -> None:
-        dev = DevelopmentFeasibilityAgent().analyze(data)
+        dev = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="DevelopmentFeasibilityAgent",
+            task_type="marketability_feasibility_context",
+            domain="feasibility_cashflow",
+            input_snapshot={
+                "feasibilityInput": data.get("feasibility_input"),
+                "productMix": data.get("productMix") or data.get("product_mix"),
+            },
+            executor=lambda: DevelopmentFeasibilityAgent().analyze(data),
+            output_schema_name="DevelopmentFeasibilityResult",
+            deterministic_authority_required=True,
+        )
         feas = self._calculate_feasibility(data)
-        market_evidence = MarketEvidenceAgent().review(data, dev, feas)
+        market_evidence = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="MarketEvidenceAgent",
+            task_type="market_evidence_reconciliation",
+            domain="market_product",
+            input_snapshot={
+                "market": data.get("market"),
+                "marketEvidence": data.get("marketEvidence") or data.get("market_evidence"),
+                "developerFeasibility": dev,
+                "feasibility": feas,
+            },
+            executor=lambda: MarketEvidenceAgent().review(data, dev, feas),
+            output_schema_name="MarketEvidenceReview",
+        )
         step("market_evidence_reconciliation", market_evidence.get("status", "completed"),
              {"status": market_evidence.get("status"), "evidenceSummary": market_evidence.get("evidenceSummary")},
              "marketEvidenceReview", market_evidence)
         mk_input = self._deep_merge(data, market_evidence.get("marketPayloadPatch", {}))
         mk_input["marketEvidenceReview"] = market_evidence
         self._maybe_inject_live_market_comparables(run, data, mk_input)
-        marketability = MarketabilityAgent().analyze(mk_input)
+        marketability = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="MarketabilityAgent",
+            task_type="marketability_analysis",
+            domain="market_product",
+            input_snapshot={
+                "marketEvidenceReview": market_evidence,
+                "market": mk_input.get("market"),
+                "productMix": mk_input.get("productMix") or mk_input.get("product_mix"),
+            },
+            executor=lambda: MarketabilityAgent().analyze(mk_input),
+            output_schema_name="MarketabilityAnalysis",
+        )
         step("marketability_analysis", "completed",
              {"saleable": marketability.get("isSaleable", marketability.get("applicable"))},
              "marketabilityAnalysis", marketability)
@@ -718,22 +929,91 @@ class OrchestrationAgent:
         feasibility_input = data.get("feasibility_input", {}) or {}
         ret = calculate_return_metrics(feasibility_input)
         step("return_metrics", "completed", {"summary": ret.get("summary")}, "returnMetrics", ret)
-        stress = StressTestAgent().run_stress_test(self._build_stress_request(data)).model_dump()
+        stress_request = self._build_stress_request(data)
+        stress = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="StressTestAgent",
+            task_type="returns_stress_test",
+            domain="pf_credit",
+            input_snapshot=stress_request.model_dump(by_alias=True, mode="json"),
+            executor=lambda: StressTestAgent().run_stress_test(stress_request),
+            output_schema_name="StressTestResult",
+            deterministic_authority_required=True,
+        )
         step("stress_test", "completed",
              {"worstCaseKey": stress.get("worstCaseKey"), "seniorBreakScenarioKey": stress.get("seniorBreakScenarioKey")},
              "stressTest", stress)
 
     def _wf_pf_structure_review(self, run, data, step, options) -> None:
-        pf = self._calculate_pf_structure(data)
+        pf = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="PFStructuringAgent",
+            task_type="pf_structure_calculation",
+            domain="pf_credit",
+            input_snapshot={
+                "feasibilityInput": data.get("feasibility_input"),
+                "pfStructure": data.get("pf_structure") or data.get("pfStructure"),
+                "cashFlowRunResult": data.get("cashFlowRunResult"),
+            },
+            executor=lambda: self._calculate_pf_structure(data),
+            output_schema_name="PFStructureResult",
+            deterministic_authority_required=True,
+        )
         step("pf_structure_calculation", "completed",
              {"ltv": pf.get("ltv"), "ltc": pf.get("ltc"), "exit_sale_rate": pf.get("exit_sale_rate")},
              "pfStructure", pf)
         ce_inputs = [CreditEnhancementInput(**e) for e in (data.get("credit_enhancements") or []) if isinstance(e, dict)]
         ce_req = CreditEnhancementRequest(baseSeniorLtv=float(pf.get("ltv") or 0.0), enhancements=ce_inputs)
-        ce = CreditEnhancementAgent().evaluate(ce_req).model_dump()
+        ce = self._run_domain_agent(
+            run,
+            project_data=data,
+            options=options,
+            agent_id="CreditEnhancementAgent",
+            task_type="credit_enhancement_analysis",
+            domain="pf_credit",
+            input_snapshot=ce_req.model_dump(by_alias=True, mode="json"),
+            executor=lambda: CreditEnhancementAgent().evaluate(ce_req),
+            output_schema_name="CreditEnhancementResult",
+            deterministic_authority_required=True,
+        )
         step("credit_enhancement", "completed",
              {"enhancementGrade": ce.get("enhancementGrade"), "adjustedSeniorLtv": ce.get("adjustedSeniorLtv")},
              "creditEnhancement", ce)
+
+    def _run_domain_agent(
+        self,
+        run: Dict[str, Any],
+        *,
+        project_data: Dict[str, Any],
+        options: Dict[str, Any],
+        agent_id: str,
+        task_type: str,
+        domain: str,
+        input_snapshot: Dict[str, Any],
+        executor,
+        output_schema_name: str,
+        deterministic_authority_required: bool = False,
+        llm_required: bool = False,
+    ) -> Any:
+        output, runtime_envelope = run_domain_agent_callable_with_contract(
+            project_id=str(run.get("project_id") or project_data.get("projectId") or ""),
+            agent_id=agent_id,
+            task_type=task_type,
+            domain=domain,
+            input_snapshot=input_snapshot,
+            executor=executor,
+            options=options,
+            parent_run_id=str(run.get("run_id") or "") or None,
+            output_schema_name=output_schema_name,
+            deterministic_authority_required=deterministic_authority_required,
+            llm_required=llm_required,
+        )
+        run.setdefault("agentRuntimeExecutions", []).append(runtime_envelope)
+        return output
 
     @staticmethod
     def _build_stress_request(data: Dict[str, Any]) -> StressTestRequest:
@@ -1369,6 +1649,13 @@ class OrchestrationAgent:
         return build_basic_risk_matrix(data)
 
     def _build_restructuring_plan(self, scenario_req: Any, scenario_run_result: Any, project_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        adopted_cures = []
+        if isinstance(project_data, dict):
+            adopted_cures = (
+                project_data.get("adoptedRestructuringCures")
+                or project_data.get("adopted_restructuring_cures")
+                or []
+            )
         if scenario_req is None or scenario_run_result is None:
             return {
                 "schemaVersion": "realytics-restructuring-agent-v1",
@@ -1376,6 +1663,10 @@ class OrchestrationAgent:
                 "status": "skipped",
                 "reason": "Scenario Engine result is unavailable; restructuring plan could not be generated.",
                 "recommendations": [],
+                # Persisted cures remain part of the review record even when the
+                # deterministic scenario engine cannot run. They are evidence of
+                # an adopted action, not proof that the financial blocker is cured.
+                "adoptedCures": RestructuringAgent().summarize_adopted_cures(adopted_cures),
                 "approvalPath": {
                     "currentStatus": "scenario_result_missing",
                     "remainingBlockers": [],
@@ -1389,13 +1680,6 @@ class OrchestrationAgent:
                     "confidence": 0.0,
                 },
             }
-        adopted_cures = []
-        if isinstance(project_data, dict):
-            adopted_cures = (
-                project_data.get("adoptedRestructuringCures")
-                or project_data.get("adopted_restructuring_cures")
-                or []
-            )
         return RestructuringAgent().build_restructuring_plan(
             scenario_req,
             scenario_run_result,

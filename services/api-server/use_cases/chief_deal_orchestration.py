@@ -11,7 +11,7 @@ from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.market_product_depth_agent import MarketProductDepthAgent
 from agents.risk_register_agent import RiskRegisterAgent
 from agents.scenario_engine_agent import ScenarioEngineAgent
-from agents.pod_ai_reviewer_agent import PodAIReviewerAgent
+from agent_platform.bootstrap import run_pod_ai_review_with_contract
 from schemas.scenario import ScenarioSetRequest
 from schemas.orchestration import (
     AgentPodPlan,
@@ -35,6 +35,15 @@ from use_cases.legal_pod import run_legal_pod_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.track_workflows import get_track_workflow_definition, normalize_workflow_track
 from use_cases.development_process import get_development_process
+from use_cases.pod_execution_coordinator import PodDependencyError, PodExecutionCoordinator
+from agent_platform.domain_pod_runtime import run_domain_pod_with_contract
+from agent_platform.domain_agent_runtime import run_domain_agent_callable_with_contract
+from use_cases.chief_pod_records import (
+    build_pod_handoffs,
+    calculation_records_for_pod,
+    pod_input_snapshot,
+    stable_digest,
+)
 
 # An LLM opinion alone must never move a committee stance (AGENTS.md §1). We read
 # the review's `deterministicFindings` (deterministic provenance guaranteed) and
@@ -662,6 +671,45 @@ def plan_chief_deal_orchestration_use_case(
     return plan.model_dump(by_alias=True)
 
 
+def _transition_recalculation_events(
+    events: List[Dict[str, Any]],
+    status: str,
+    event_sink: Callable[[Dict[str, Any]], Any] | None,
+    *,
+    error: str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event["status"] = status
+        event["updatedAt"] = now
+        if status == "running":
+            event["startedAt"] = event.get("startedAt") or now
+        elif status == "completed":
+            event["completedAt"] = now
+        elif status == "failed":
+            event["failedAt"] = now
+            event["error"] = error
+        if event_sink is not None:
+            event_sink(dict(event))
+
+
+def _dependency_artifact_refs(
+    target_pod: AgentPodPlan,
+    pod_runs: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        dependency: {
+            "status": (pod_runs.get(dependency) or {}).get("status"),
+            "artifactKeys": (pod_runs.get(dependency) or {}).get("artifactKeys") or [],
+            "calculationRunIds": (pod_runs.get(dependency) or {}).get("calculationRunIds") or [],
+            "outputHash": (pod_runs.get(dependency) or {}).get("outputHash"),
+        }
+        for dependency in target_pod.dependencies
+    }
+
+
 def run_chief_deal_pod_use_case(
     project_id: str,
     pod_key: str,
@@ -670,7 +718,9 @@ def run_chief_deal_pod_use_case(
     *,
     artifact_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     review_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
-    event_sink: Callable[[Dict[str, Any]], None] | None = None,
+    event_sink: Callable[[Dict[str, Any]], Any] | None = None,
+    calculation_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    handoff_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Execute a single agent pod, update its state, run the Event Bus triggers,
     and persist the updated orchestration state and derived metrics into the project.
@@ -689,6 +739,13 @@ def run_chief_deal_pod_use_case(
     target_pod = next((p for p in pods if p.pod_key == pod_key), None)
     if not target_pod:
         raise ValueError(f"Pod {pod_key} not found")
+
+    state = project_data.setdefault("chief_orchestration_state", {})
+    pod_runs = state.setdefault("podRuns", {})
+    learning_loop_events = state.setdefault("learningLoopEvents", [])
+    artifacts = state.setdefault("artifacts", {})
+    coordinator = PodExecutionCoordinator()
+    coordinator.require_ready(target_pod, pod_runs)
 
     # 2. Check if the pod is blocked — but first let the orchestrator try to
     # self-serve the missing inputs from parsed data + public APIs (VWorld PNU/
@@ -715,55 +772,131 @@ def run_chief_deal_pod_use_case(
                 f"자동 보강 시도: {tried}. 남은 필요 자료: {'; '.join(still_needed[:4])}"
             )
 
-    # 3. Load or initialize the orchestration state
-    state = project_data.get("chief_orchestration_state") or {}
-    pod_runs = state.setdefault("podRuns", {})
-    learning_loop_events = state.setdefault("learningLoopEvents", [])
-    artifacts = state.setdefault("artifacts", {})
-
-    # 4. Execute the real domain use case for the pod and persist its artifact.
+    # 3. Execute the real domain use case and persist calculation/handoff records.
     now = datetime.now(timezone.utc).isoformat()
     artifact_key = f"artifact:{pod_key}:{now}"
-    artifact = _execute_pod_artifact(project_id, pod_key, project_data, options)
-    term_surface_metadata = _pod_term_surface_metadata(pod_key, artifact)
-    artifact_record = {
-        "artifactKey": artifact_key,
-        "podKey": pod_key,
-        "createdAt": now,
-        "schemaVersion": "realytics-chief-pod-artifact-v1",
-        "termSurfaceMetadata": term_surface_metadata,
-        "result": artifact,
-    }
-    persisted_artifact = artifact_sink(artifact_record) if artifact_sink else artifact_record
-    pod_ai_review_ref: Dict[str, Any] | None = None
-    if pod_key in {"land_legal", "market_product", "pf_credit", "cost_schedule", "feasibility_cashflow", "public_policy"}:
-        pod_ai_review = PodAIReviewerAgent().review_pod(
+    previous_run = dict(pod_runs.get(pod_key) or {})
+    incoming_events = [
+        event
+        for event in previous_run.get("recalculationEvents") or []
+        if isinstance(event, dict) and event.get("status") not in {"completed", "superseded"}
+    ]
+    _transition_recalculation_events(incoming_events, "running", event_sink)
+    input_snapshot = pod_input_snapshot(
+        pod_key,
+        project_data,
+        _dependency_artifact_refs(target_pod, pod_runs),
+    )
+    input_hash = stable_digest(input_snapshot)
+    try:
+        artifact, domain_runtime = run_domain_pod_with_contract(
             project_id=project_id,
             pod_key=pod_key,
-            source_artifact=persisted_artifact,
-            source_artifact_key=artifact_key,
+            input_snapshot=input_snapshot,
             project_data=project_data,
             options=options,
+            executor=lambda: _execute_pod_artifact(project_id, pod_key, project_data, options),
         )
-        persisted_review = review_sink(pod_ai_review) if review_sink else pod_ai_review
-        pod_ai_review_ref = {
-            "reviewId": persisted_review.get("reviewId"),
-            "reviewStatus": persisted_review.get("reviewStatus"),
-            "reviewMode": persisted_review.get("reviewMode"),
-            "agentId": persisted_review.get("agentId"),
-            "confidence": persisted_review.get("confidence"),
+        output_hash = stable_digest(artifact)
+        calculation_records = calculation_records_for_pod(
+            project_id=project_id,
+            pod_key=pod_key,
+            artifact_key=artifact_key,
+            artifact=artifact,
+            input_snapshot=input_snapshot,
+            project_data=project_data,
+        )
+        persisted_calculations = [
+            calculation_sink(record) if calculation_sink else record
+            for record in calculation_records
+        ]
+        calculation_run_ids = [
+            str(record.get("calculationRunId"))
+            for record in persisted_calculations
+            if record.get("calculationRunId")
+        ]
+        handoff_records = build_pod_handoffs(
+            project_id=project_id,
+            pod_key=pod_key,
+            artifact_key=artifact_key,
+            downstream_pods=coordinator.downstream_pods(pod_key, pods),
+            artifact=artifact,
+            calculation_run_ids=calculation_run_ids,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            run_id=state.get("runId"),
+        )
+        persisted_handoffs = [
+            handoff_sink(record) if handoff_sink else record
+            for record in handoff_records
+        ]
+        handoff_ids = [
+            str(record.get("handoffId"))
+            for record in persisted_handoffs
+            if record.get("handoffId")
+        ]
+        term_surface_metadata = _pod_term_surface_metadata(pod_key, artifact)
+        artifact_record = {
+            "artifactKey": artifact_key,
+            "podKey": pod_key,
+            "createdAt": now,
+            "schemaVersion": "realytics-chief-pod-artifact-v2",
+            "termSurfaceMetadata": term_surface_metadata,
+            "inputHash": input_hash,
+            "outputHash": output_hash,
+            "previousOutputHash": previous_run.get("outputHash"),
+            "calculationRunIds": calculation_run_ids,
+            "handoffIds": handoff_ids,
+            "domainAgentRuntime": domain_runtime,
+            "result": artifact,
         }
-        persisted_artifact["podAiReviewId"] = persisted_review.get("reviewId")
-        persisted_artifact["podAiReview"] = pod_ai_review_ref
-        if artifact_sink is not None:
-            persisted_artifact = artifact_sink(persisted_artifact)
+        persisted_artifact = artifact_sink(artifact_record) if artifact_sink else artifact_record
+        pod_ai_review_ref: Dict[str, Any] | None = None
+        if pod_key in {"land_legal", "market_product", "pf_credit", "cost_schedule", "feasibility_cashflow", "public_policy"}:
+            pod_ai_review = run_pod_ai_review_with_contract(
+                project_id=project_id,
+                pod_key=pod_key,
+                source_artifact=persisted_artifact,
+                source_artifact_key=artifact_key,
+                project_data=project_data,
+                options=options,
+            )
+            persisted_review = review_sink(pod_ai_review) if review_sink else pod_ai_review
+            pod_ai_review_ref = {
+                "reviewId": persisted_review.get("reviewId"),
+                "reviewStatus": persisted_review.get("reviewStatus"),
+                "reviewMode": persisted_review.get("reviewMode"),
+                "agentId": persisted_review.get("agentId"),
+                "confidence": persisted_review.get("confidence"),
+                "agentRunId": (
+                    ((persisted_review.get("agentPlatform") or {}).get("durableRuntime") or {}).get("agentRunId")
+                ),
+                "brainUsageEventIds": (
+                    ((persisted_review.get("agentPlatform") or {}).get("durableRuntime") or {}).get("brainUsageEventIds")
+                    or []
+                ),
+            }
+            persisted_artifact["podAiReviewId"] = persisted_review.get("reviewId")
+            persisted_artifact["podAiReview"] = pod_ai_review_ref
+            if artifact_sink is not None:
+                persisted_artifact = artifact_sink(persisted_artifact)
+    except Exception as exc:
+        _transition_recalculation_events(incoming_events, "failed", event_sink, error=str(exc))
+        raise
+
+    _transition_recalculation_events(incoming_events, "completed", event_sink)
     artifacts[artifact_key] = {
         "artifactKey": artifact_key,
         "podKey": pod_key,
         "artifactType": artifact.get("artifactType"),
         "createdAt": persisted_artifact.get("createdAt") or now,
         "termSurfaceCount": len(term_surface_metadata),
-        "schemaVersion": "realytics-chief-pod-artifact-ref-v1",
+        "calculationRunIds": calculation_run_ids,
+        "handoffIds": handoff_ids,
+        "domainAgentRunId": domain_runtime.get("agentRunId"),
+        "inputHash": input_hash,
+        "outputHash": output_hash,
+        "schemaVersion": "realytics-chief-pod-artifact-ref-v2",
     }
     if pod_ai_review_ref:
         artifacts[artifact_key]["podAiReview"] = pod_ai_review_ref
@@ -773,57 +906,83 @@ def run_chief_deal_pod_use_case(
         "status": "completed",
         "progressPercent": 100,
         "artifactKeys": [artifact_key],
+        "calculationRunIds": calculation_run_ids,
         "podAiReviewIds": [pod_ai_review_ref["reviewId"]] if pod_ai_review_ref and pod_ai_review_ref.get("reviewId") else [],
-        "handoffIds": [f"handoff:{pod_key}:{now}"],
-        "recalculationEvents": pod_runs.get(pod_key, {}).get("recalculationEvents") or [],
+        "handoffIds": handoff_ids,
+        "domainAgentRunId": domain_runtime.get("agentRunId"),
+        "inputHash": input_hash,
+        "outputHash": output_hash,
+        "recalculationEvents": incoming_events,
+    }
+    state.setdefault("podFingerprints", {})[pod_key] = {
+        "inputHash": input_hash,
+        "outputHash": output_hash,
+        "artifactKey": artifact_key,
+        "updatedAt": now,
     }
             
-    # 5. Event Bus: Evaluate Recalculation Rules
-    triggers = []
-    if pod_key == "cost_schedule":
-        triggers.append("finance_cost_changed")
-    elif pod_key == "market_product" and options.get("forceTrigger") == "market_price_unsupported":
-        triggers.append("market_price_unsupported")
-    elif pod_key == "land_legal" and options.get("forceTrigger") == "legal_product_infeasible":
-        triggers.append("legal_product_infeasible")
-    elif pod_key == "feasibility_cashflow" and options.get("forceTrigger") == "max_minus_exceeds_pf_limit":
-        triggers.append("max_minus_exceeds_pf_limit")
-
+    # 4. Event Bus: emit only explicit domain triggers or actual output changes.
+    triggers: List[str] = []
+    forced_by_pod = {
+        "cost_schedule": "finance_cost_changed",
+        "market_product": "market_price_unsupported",
+        "land_legal": "legal_product_infeasible",
+        "feasibility_cashflow": "max_minus_exceeds_pf_limit",
+    }
+    force_trigger = options.get("forceTrigger")
+    if force_trigger and str(force_trigger) == forced_by_pod.get(pod_key):
+        triggers.append(str(force_trigger))
     if options.get("trigger"):
-        triggers.append(options["trigger"])
-
+        triggers.append(str(options["trigger"]))
     recalc_rules = _task_graph(pods, workflow_track)["recalculationRules"]
-    for trigger in triggers:
+    event_specs: List[tuple[str, List[str]]] = []
+    previous_output_hash = previous_run.get("outputHash")
+    if previous_output_hash and previous_output_hash != output_hash:
+        event_specs.append(
+            (f"{pod_key}_output_changed", coordinator.downstream_pods(pod_key, pods))
+        )
+    for trigger in dict.fromkeys(triggers):
         rule = next((r for r in recalc_rules if r["trigger"] == trigger), None)
         if rule:
-            target_pods = rule["rerun"]
-            event = {
-                "eventId": f"event:{trigger}:{now}",
-                "eventType": "recalculation_triggered",
-                "trigger": trigger,
-                "sourcePod": pod_key,
-                "timestamp": now,
-                "targetPods": target_pods,
-            }
-            learning_loop_events.append(event)
-            if event_sink is not None:
-                try:
-                    event_sink(event)
-                except Exception:
-                    pass  # durable audit is best-effort; never break the pod run
-            for target_key in target_pods:
-                target_run = pod_runs.setdefault(target_key, {
-                    "podKey": target_key,
-                    "status": "planned",
-                    "progressPercent": 0,
-                    "artifactKeys": [],
-                    "handoffIds": [],
-                    "recalculationEvents": [],
-                })
-                target_run["status"] = "needs_recalculation"
-                # Avoid duplicates
-                if not any(e["eventId"] == event["eventId"] for e in target_run.setdefault("recalculationEvents", [])):
-                    target_run["recalculationEvents"].append(event)
+            event_specs.append((trigger, list(rule["rerun"])))
+
+    seen_event_specs: set[tuple[str, tuple[str, ...]]] = set()
+    for trigger, target_pods in event_specs:
+        target_pods = [target for target in target_pods if target != pod_key]
+        spec_key = (trigger, tuple(target_pods))
+        if not target_pods or spec_key in seen_event_specs:
+            continue
+        seen_event_specs.add(spec_key)
+        event = {
+            "eventId": f"event:{trigger}:{output_hash[:12]}:{now}",
+            "eventType": "recalculation_triggered",
+            "trigger": trigger,
+            "sourcePod": pod_key,
+            "timestamp": now,
+            "createdAt": now,
+            "status": "pending_recalculation",
+            "targetPods": target_pods,
+            "inputHash": input_hash,
+            "previousOutputHash": previous_output_hash,
+            "outputHash": output_hash,
+            "sourceArtifactKey": artifact_key,
+            "calculationRunIds": calculation_run_ids,
+        }
+        learning_loop_events.append(event)
+        if event_sink is not None:
+            event_sink(dict(event))
+        for target_key in target_pods:
+            target_run = pod_runs.setdefault(target_key, {
+                "podKey": target_key,
+                "status": "planned",
+                "progressPercent": 0,
+                "artifactKeys": [],
+                "handoffIds": [],
+                "recalculationEvents": [],
+            })
+            target_run["status"] = "needs_recalculation"
+            if not any(e.get("eventId") == event["eventId"] for e in target_run.setdefault("recalculationEvents", [])):
+                target_run["recalculationEvents"].append(dict(event))
 
     project_data["chief_orchestration_state"] = state
     plan = plan_chief_deal_orchestration_use_case(project_id, project_data, options)
@@ -839,7 +998,9 @@ def run_chief_deal_all_pods_use_case(
     *,
     artifact_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     review_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
-    event_sink: Callable[[Dict[str, Any]], None] | None = None,
+    event_sink: Callable[[Dict[str, Any]], Any] | None = None,
+    calculation_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    handoff_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     max_recalculation_rounds: int = 2,
 ) -> Dict[str, Any]:
     """Execute the current track's pod graph in recommended order.
@@ -859,9 +1020,10 @@ def run_chief_deal_all_pods_use_case(
 
     options = options or {}
     initial = plan_chief_deal_orchestration_use_case(project_id, project_data, options)
-    order = list((initial.get("taskGraph") or {}).get("recommendedRunOrder") or [])
-    if not order:
-        order = [pod.get("podKey") for pod in initial.get("agentPods") or [] if pod.get("podKey")]
+    workflow_track = _workflow_track(project_data, options)
+    pods = _agent_pods(_missing_inputs(project_data), workflow_track)
+    preferred_order = list((initial.get("taskGraph") or {}).get("recommendedRunOrder") or [])
+    order = PodExecutionCoordinator().topological_order(pods, preferred_order)
 
     summary_rows: List[Dict[str, Any]] = []
     auto_supplements: List[Dict[str, Any]] = []
@@ -879,6 +1041,8 @@ def run_chief_deal_all_pods_use_case(
                 artifact_sink=artifact_sink,
                 review_sink=review_sink,
                 event_sink=event_sink,
+                calculation_sink=calculation_sink,
+                handoff_sink=handoff_sink,
             )
             auto_supplements.extend(last_plan.get("autoSupplements") or [])
             run = next((item for item in last_plan.get("podRuns", []) if item.get("podKey") == pod_key), {})
@@ -946,6 +1110,8 @@ def run_chief_deal_all_pods_use_case(
                     artifact_sink=artifact_sink,
                     review_sink=review_sink,
                     event_sink=event_sink,
+                    calculation_sink=calculation_sink,
+                    handoff_sink=handoff_sink,
                 )
                 recalculation_rows.append(
                     {
@@ -1006,7 +1172,9 @@ def run_chief_deal_pod_with_cascade_use_case(
     *,
     artifact_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     review_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
-    event_sink: Callable[[Dict[str, Any]], None] | None = None,
+    event_sink: Callable[[Dict[str, Any]], Any] | None = None,
+    calculation_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    handoff_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     max_rounds: int = 2,
 ) -> Dict[str, Any]:
     """Run one Pod and automatically consume its recalculation events.
@@ -1026,6 +1194,8 @@ def run_chief_deal_pod_with_cascade_use_case(
         artifact_sink=artifact_sink,
         review_sink=review_sink,
         event_sink=event_sink,
+        calculation_sink=calculation_sink,
+        handoff_sink=handoff_sink,
     )
     rows: List[Dict[str, Any]] = []
     for round_index in range(1, max(0, max_rounds) + 1):
@@ -1053,6 +1223,8 @@ def run_chief_deal_pod_with_cascade_use_case(
                     artifact_sink=artifact_sink,
                     review_sink=review_sink,
                     event_sink=event_sink,
+                    calculation_sink=calculation_sink,
+                    handoff_sink=handoff_sink,
                 )
                 rows.append({
                     "podKey": target_key,
@@ -1102,15 +1274,81 @@ def _execute_pod_artifact(
     keeps the pod orchestration deterministic while ensuring each button stores a
     real artifact produced by existing domain logic wherever available.
     """
+    child_runtime_executions: List[Dict[str, Any]] = []
+
+    def run_child_agent(
+        *,
+        agent_id: str,
+        task_type: str,
+        domain: str,
+        input_snapshot: Dict[str, Any],
+        executor,
+        output_schema_name: str,
+        deterministic_authority_required: bool = False,
+        llm_required: bool = False,
+    ) -> Any:
+        output, envelope = run_domain_agent_callable_with_contract(
+            project_id=project_id,
+            agent_id=agent_id,
+            task_type=task_type,
+            domain=domain,
+            input_snapshot=input_snapshot,
+            executor=executor,
+            options=options,
+            parent_run_id=str(options.get("runId") or options.get("run_id") or "") or None,
+            output_schema_name=output_schema_name,
+            deterministic_authority_required=deterministic_authority_required,
+            llm_required=llm_required,
+        )
+        child_runtime_executions.append(envelope)
+        return output
+
+    def finalize(artifact: Dict[str, Any]) -> Dict[str, Any]:
+        nested = (
+            (artifact.get("domainWorkflow") or {}).get("agentRuntimeExecutions")
+            if isinstance(artifact.get("domainWorkflow"), dict)
+            else []
+        )
+        artifact["agentRuntimeExecutions"] = [
+            *[item for item in nested or [] if isinstance(item, dict)],
+            *child_runtime_executions,
+        ]
+        return artifact
+
     if pod_key == "land_legal":
         workflow_run = _run_domain_workflow(project_id, "land_review", project_data, options)
         workflow_artifacts = workflow_run.get("artifacts") or {}
+        legal_pod_result = run_child_agent(
+            agent_id="LegalReviewAgent",
+            task_type="legal_permit_review",
+            domain="land_legal",
+            input_snapshot={
+                "land": project_data.get("land"),
+                "landLedger": project_data.get("landLedger"),
+                "legalContext": project_data.get("legalContext"),
+                "sourceDocuments": project_data.get("source_documents"),
+            },
+            executor=lambda: run_legal_pod_use_case(project_id, project_data, options),
+            output_schema_name="LegalPodResult",
+        )
+        developability_score = run_child_agent(
+            agent_id="DevelopabilityScoreAgent",
+            task_type="developability_score",
+            domain="land_legal",
+            input_snapshot={
+                "land": project_data.get("land"),
+                "landLedger": project_data.get("landLedger"),
+                "legal": legal_pod_result.get("legalReview") if isinstance(legal_pod_result, dict) else None,
+            },
+            executor=lambda: score_developability_use_case(project_data),
+            output_schema_name="DevelopabilityScore",
+        )
         artifact: Dict[str, Any] = {
             "artifactType": "land_legal_pod_result",
             "domainWorkflow": _workflow_summary(workflow_run),
             "standardArtifacts": workflow_artifacts,
-            "legalPermitReview": run_legal_pod_use_case(project_id, project_data, options)["legalReview"],
-            "developabilityScore": score_developability_use_case(project_data),
+            "legalPermitReview": legal_pod_result["legalReview"],
+            "developabilityScore": developability_score,
         }
         # Keep the legal review as a first-class, auditable result.  The pod is
         # the execution unit, but LegalReviewAgent remains visible to the Deal
@@ -1127,12 +1365,17 @@ def _execute_pod_artifact(
         land_ledger = project_data.get("landLedger") or project_data.get("land_ledger")
         if isinstance(land_ledger, dict):
             try:
-                artifact["landLedgerEnrichment"] = enrich_land_ledger_use_case(
-                    land_ledger,
-                    {
-                        "mode": "chief_orchestrator_pod",
-                        **(options.get("landLedgerOptions") or {}),
-                    },
+                land_options = {
+                    "mode": "chief_orchestrator_pod",
+                    **(options.get("landLedgerOptions") or {}),
+                }
+                artifact["landLedgerEnrichment"] = run_child_agent(
+                    agent_id="LandLedgerEnrichmentAgent",
+                    task_type="land_ledger_enrichment",
+                    domain="land_legal",
+                    input_snapshot={"landLedger": land_ledger, "options": land_options},
+                    executor=lambda: enrich_land_ledger_use_case(land_ledger, land_options),
+                    output_schema_name="LandLedgerEnrichment",
                 )
                 project_data["landLedger"] = artifact["landLedgerEnrichment"]
                 artifact.setdefault("standardArtifacts", {})["landLedgerEnrichment"] = artifact["landLedgerEnrichment"]
@@ -1146,14 +1389,24 @@ def _execute_pod_artifact(
         project_data["legal"] = artifact["legalPermitReview"]
         project_data["legalPermitReview"] = artifact["legalPermitReview"]
         project_data["developabilityScore"] = artifact["developabilityScore"]
-        return artifact
+        return finalize(artifact)
 
     if pod_key == "market_product":
         workflow_run = _run_domain_workflow(project_id, "marketability", project_data, options)
         workflow_artifacts = workflow_run.get("artifacts") or {}
         market_evidence_review = workflow_artifacts.get("marketEvidenceReview")
         if not isinstance(market_evidence_review, dict):
-            market_evidence_review = MarketEvidenceAgent().review(project_data)
+            market_evidence_review = run_child_agent(
+                agent_id="MarketEvidenceAgent",
+                task_type="market_evidence_reconciliation",
+                domain="market_product",
+                input_snapshot={
+                    "market": project_data.get("market"),
+                    "marketEvidence": project_data.get("marketEvidence") or project_data.get("market_evidence"),
+                },
+                executor=lambda: MarketEvidenceAgent().review(project_data),
+                output_schema_name="MarketEvidenceReview",
+            )
             workflow_artifacts["marketEvidenceReview"] = market_evidence_review
         document_market_facts = _document_market_fact_summary(project_data, market_evidence_review)
         document_market_reconciliation = _document_market_reconciliation_summary(market_evidence_review)
@@ -1164,7 +1417,17 @@ def _execute_pod_artifact(
             "documentParsedMarketFacts": document_market_facts,
             "documentMarketReconciliation": document_market_reconciliation,
             "marketEvidenceReview": market_evidence_review,
-            "marketabilityAnalysis": workflow_artifacts.get("marketabilityAnalysis") or analyze_marketability_use_case(project_data, options),
+            "marketabilityAnalysis": workflow_artifacts.get("marketabilityAnalysis") or run_child_agent(
+                agent_id="MarketabilityAgent",
+                task_type="marketability_analysis",
+                domain="market_product",
+                input_snapshot={
+                    "marketEvidenceReview": market_evidence_review,
+                    "productMix": project_data.get("productMix") or project_data.get("product_mix"),
+                },
+                executor=lambda: analyze_marketability_use_case(project_data, options),
+                output_schema_name="MarketabilityAnalysis",
+            ),
         }
         if workflow_artifacts.get("liveMarketComparables"):
             artifact["liveMarketComparables"] = workflow_artifacts["liveMarketComparables"]
@@ -1175,21 +1438,53 @@ def _execute_pod_artifact(
         project_data["marketability"] = artifact["marketabilityAnalysis"]
         project_data["marketabilityAnalysis"] = artifact["marketabilityAnalysis"]
         try:  # deterministic product-planning program per asset type (reviewed by the pod AI reviewer)
-            artifact["productPlanning"] = compare_product_planning_use_case(project_data)
+            artifact["productPlanning"] = run_child_agent(
+                agent_id="ProductPlanningAgent",
+                task_type="product_planning_comparison",
+                domain="market_product",
+                input_snapshot={
+                    "assetType": project_data.get("assetType"),
+                    "productMix": project_data.get("productMix") or project_data.get("product_mix"),
+                    "marketability": artifact["marketabilityAnalysis"],
+                },
+                executor=lambda: compare_product_planning_use_case(project_data),
+                output_schema_name="ProductPlanningComparison",
+            )
             project_data["productPlanning"] = artifact["productPlanning"]
         except Exception:  # never let product planning break the market pod
             pass
         try:  # market depth: 제공주체 분류·비교, 상품별 분양성 score, 흡수율, AI 추가작업 판단
-            artifact["marketProductDepth"] = MarketProductDepthAgent().analyze(
-                project_data, artifact["marketabilityAnalysis"], options=options,
+            artifact["marketProductDepth"] = run_child_agent(
+                agent_id="MarketProductDepthAgent",
+                task_type="market_product_depth_analysis",
+                domain="market_product",
+                input_snapshot={
+                    "marketability": artifact["marketabilityAnalysis"],
+                    "productMix": project_data.get("productMix") or project_data.get("product_mix"),
+                },
+                executor=lambda: MarketProductDepthAgent().analyze(
+                    project_data, artifact["marketabilityAnalysis"], options=options,
+                ),
+                output_schema_name="MarketProductDepthAnalysis",
             )
             project_data["marketProductDepth"] = artifact["marketProductDepth"]
         except Exception:  # never let depth analysis break the market pod
             pass
-        return artifact
+        return finalize(artifact)
 
     if pod_key == "cost_schedule":
-        feasibility = analyze_development_feasibility_use_case(project_data, options)
+        feasibility = run_child_agent(
+            agent_id="DevelopmentFeasibilityAgent",
+            task_type="cost_schedule_feasibility_analysis",
+            domain="cost_schedule",
+            input_snapshot={
+                "feasibilityInput": project_data.get("feasibility_input"),
+                "schedule": project_data.get("schedule") or project_data.get("project_schedule"),
+            },
+            executor=lambda: analyze_development_feasibility_use_case(project_data, options),
+            output_schema_name="DevelopmentFeasibilityResult",
+            deterministic_authority_required=True,
+        )
         # DevelopmentFeasibilityAgent returns the cost split under "costs" and its
         # quality warnings nested under "dataQuality.warnings" — read those keys
         # (previously read costBreakdown/dataQualityWarnings, which the agent never
@@ -1204,12 +1499,27 @@ def _execute_pod_artifact(
             "engineReadiness": feasibility.get("downstreamEngineReadiness") or feasibility.get("engineReadiness") or {},
         }
         project_data.setdefault("costSchedule", artifact)
-        return artifact
+        return finalize(artifact)
 
     if pod_key == "feasibility_cashflow":
         workflow_run = _run_domain_workflow(project_id, "feasibility", project_data, options)
         workflow_artifacts = workflow_run.get("artifacts") or {}
-        feasibility = analyze_development_feasibility_use_case(project_data, options)
+        feasibility = workflow_artifacts.get("developerFeasibility")
+        if not isinstance(feasibility, dict):
+            feasibility = run_child_agent(
+                agent_id="DevelopmentFeasibilityAgent",
+                task_type="development_feasibility_analysis",
+                domain="feasibility_cashflow",
+                input_snapshot={
+                    "feasibilityInput": project_data.get("feasibility_input"),
+                    "feasibilityStudyV2": project_data.get("feasibilityStudyV2"),
+                    "productMix": project_data.get("productMix") or project_data.get("product_mix"),
+                    "schedule": project_data.get("schedule"),
+                },
+                executor=lambda: analyze_development_feasibility_use_case(project_data, options),
+                output_schema_name="DevelopmentFeasibilityResult",
+                deterministic_authority_required=True,
+            )
         artifact = {
             "artifactType": "feasibility_cashflow_pod_result",
             "domainWorkflow": _workflow_summary(workflow_run),
@@ -1219,7 +1529,19 @@ def _execute_pod_artifact(
             "feasibility": workflow_artifacts.get("feasibility"),
         }
         try:
-            artifact["cashFlowRunResult"] = run_cash_flow_use_case(project_data, feasibility)
+            artifact["cashFlowRunResult"] = run_child_agent(
+                agent_id="CashFlowEngineAgent",
+                task_type="monthly_cash_flow_calculation",
+                domain="feasibility_cashflow",
+                input_snapshot={
+                    "cashFlowRunRequestDraft": feasibility.get("cashFlowRunRequestDraft"),
+                    "financing": project_data.get("pf_structure") or project_data.get("pfStructure"),
+                    "schedule": project_data.get("schedule"),
+                },
+                executor=lambda: run_cash_flow_use_case(project_data, feasibility),
+                output_schema_name="CashFlowRunResult",
+                deterministic_authority_required=True,
+            )
         except Exception as exc:  # pragma: no cover - defensive artifact, not a hard pod failure
             artifact["cashFlowRunError"] = {
                 "message": str(exc),
@@ -1233,22 +1555,64 @@ def _execute_pod_artifact(
         if isinstance(artifact.get("cashFlowRunResult"), dict):
             project_data["cashFlowRunResult"] = artifact["cashFlowRunResult"]
         _apply_feasibility_summary_to_project(project_data, feasibility)
-        return artifact
+        return finalize(artifact)
 
     if pod_key == "pf_credit":
         workflow_run = _run_domain_workflow(project_id, "pf_structure_review", project_data, options)
         workflow_artifacts = workflow_run.get("artifacts") or {}
         standard_artifacts = _current_standard_artifacts(project_data)
         standard_artifacts.update({k: v for k, v in workflow_artifacts.items() if v is not None})
-        pf_structure = workflow_artifacts.get("pfStructure") or _calculate_pf_structure_artifact(project_data, options)
+        pf_structure = workflow_artifacts.get("pfStructure") or run_child_agent(
+            agent_id="PFStructuringAgent",
+            task_type="pf_structure_calculation",
+            domain="pf_credit",
+            input_snapshot={
+                "feasibilityInput": project_data.get("feasibility_input"),
+                "pfStructure": project_data.get("pf_structure") or project_data.get("pfStructure"),
+                "cashFlowRunResult": project_data.get("cashFlowRunResult"),
+            },
+            executor=lambda: _calculate_pf_structure_artifact(project_data, options),
+            output_schema_name="PFStructureResult",
+            deterministic_authority_required=True,
+        )
         standard_artifacts["pfStructure"] = pf_structure
-        scenario_result = _run_pf_scenario_if_ready(project_id, project_data, options)
+        scenario_result = run_child_agent(
+            agent_id="ScenarioEngineAgent",
+            task_type="pf_recovery_scenario_analysis",
+            domain="pf_credit",
+            input_snapshot={
+                "productMix": project_data.get("productMix") or project_data.get("product_mix"),
+                "pfStructure": pf_structure,
+                "scenarioDrivers": project_data.get("scenarioDrivers") or project_data.get("scenario_drivers"),
+            },
+            executor=lambda: _run_pf_scenario_if_ready(project_id, project_data, options),
+            output_schema_name="ScenarioSetResult",
+            deterministic_authority_required=True,
+        )
         if scenario_result:
             standard_artifacts["scenariosEvaluation"] = scenario_result
             project_data["scenariosEvaluation"] = scenario_result
-        risk_register = RiskRegisterAgent().build(project_data, standard_artifacts)
+        risk_register = run_child_agent(
+            agent_id="RiskRegisterAgent",
+            task_type="risk_register_aggregation",
+            domain="pf_credit",
+            input_snapshot={"artifactKeys": sorted(standard_artifacts), "pfStructure": pf_structure},
+            executor=lambda: RiskRegisterAgent().build(project_data, standard_artifacts),
+            output_schema_name="RiskRegister",
+        )
         standard_artifacts["riskRegister"] = risk_register
-        credit_review = CreditReviewAgent().decide(project_data, standard_artifacts)
+        credit_review = run_child_agent(
+            agent_id="CreditReviewAgent",
+            task_type="credit_decision_review",
+            domain="pf_credit",
+            input_snapshot={
+                "riskRegister": risk_register,
+                "pfStructure": pf_structure,
+                "scenariosEvaluation": scenario_result,
+            },
+            executor=lambda: CreditReviewAgent().decide(project_data, standard_artifacts),
+            output_schema_name="CreditReviewDecision",
+        )
         standard_artifacts["creditReviewDecision"] = credit_review
         artifact = {
             "artifactType": "pf_credit_pod_result",
@@ -1260,7 +1624,18 @@ def _execute_pod_artifact(
             "creditReviewDecision": credit_review,
         }
         try:  # deterministic covenant/EOD definitions (reviewed by the pod AI reviewer)
-            artifact["covenantEod"] = evaluate_covenant_eod_use_case(project_data)
+            artifact["covenantEod"] = run_child_agent(
+                agent_id="CovenantEodAgent",
+                task_type="covenant_eod_evaluation",
+                domain="pf_credit",
+                input_snapshot={
+                    "pfStructure": pf_structure,
+                    "riskRegister": risk_register,
+                    "creditReviewDecision": credit_review,
+                },
+                executor=lambda: evaluate_covenant_eod_use_case(project_data),
+                output_schema_name="CovenantEodResult",
+            )
             project_data["covenantEod"] = artifact["covenantEod"]
         except Exception:  # never let covenant derivation break the credit pod
             pass
@@ -1268,18 +1643,29 @@ def _execute_pod_artifact(
         project_data["pfStructure"] = artifact["pfStructure"]
         project_data["riskRegister"] = risk_register
         project_data["creditReviewDecision"] = credit_review
-        return artifact
+        return finalize(artifact)
 
     if pod_key == "public_policy":
         artifact = {
             "artifactType": "public_policy_pod_result",
-            "developabilityScore": score_developability_use_case(project_data),
+            "developabilityScore": run_child_agent(
+                agent_id="PublicFeasibilityAgent",
+                task_type="public_policy_developability_review",
+                domain="public_policy",
+                input_snapshot={
+                    "land": project_data.get("land"),
+                    "legalContext": project_data.get("legalContext"),
+                    "developabilityScore": project_data.get("developabilityScore"),
+                },
+                executor=lambda: score_developability_use_case(project_data),
+                output_schema_name="PublicPolicyDevelopabilityReview",
+            ),
             "policyNotes": [
                 "Public-policy pod currently reuses developability and regulation evidence until dedicated policy simulation agents are implemented.",
             ],
         }
         project_data["publicPolicyReview"] = artifact
-        return artifact
+        return finalize(artifact)
 
     raise ValueError(f"Pod {pod_key} not found")
 
@@ -1299,6 +1685,11 @@ def _run_domain_workflow(
 
 
 def _workflow_summary(run: Dict[str, Any]) -> Dict[str, Any]:
+    runtime_executions = [
+        item
+        for item in run.get("agentRuntimeExecutions") or []
+        if isinstance(item, dict)
+    ]
     return {
         "runId": run.get("run_id"),
         "workflow": run.get("workflow"),
@@ -1306,6 +1697,13 @@ def _workflow_summary(run: Dict[str, Any]) -> Dict[str, Any]:
         "stepCount": len(run.get("steps") or []),
         "artifactKeys": sorted((run.get("artifacts") or {}).keys()),
         "errorCount": len(run.get("errors") or []),
+        "agentRuntimeExecutionCount": len(runtime_executions),
+        "agentRunIds": [
+            str(item.get("agentRunId"))
+            for item in runtime_executions
+            if item.get("agentRunId")
+        ],
+        "agentRuntimeExecutions": runtime_executions,
     }
 
 
@@ -1607,10 +2005,6 @@ def _scenario_pf_structure(project_data: Dict[str, Any], options: Dict[str, Any]
     if tranches:
         return tranches
 
-    feasibility = project_data.get("feasibility_input") or {}
-    pf_amount = _number(options.get("pfAmount") or feasibility.get("pf_amount") or feasibility.get("pfLoan")) or 0.0
-    if pf_amount > 0:
-        return [{"tranche": "Senior", "amount": pf_amount, "priority": 1, "interestRate": 0.0, "feeRate": 0.0}]
     return []
 
 

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from agents.ai_audit import build_ai_brain_used_audit_event, record_ai_brain_used
+from agent_platform.brains.control import record_brain_provider_result, route_ai_connection_candidates
 
 
 CLAUDE_API_ALIASES = {"anthropic", "claude", "claude_api"}
@@ -214,7 +215,152 @@ def resolve_ai_context(
     return base
 
 
+def _route_execution_context(
+    ai_context: Dict[str, Any] | None,
+    *,
+    task_type: str,
+    context_token_estimate: int,
+    estimated_output_tokens: int = 2000,
+    include_fallbacks: bool = True,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    requested_context = dict(ai_context or {})
+    primary = resolve_ai_context(requested_context)
+    routing_controls = {
+        "data_classification": requested_context.get("data_classification")
+        or requested_context.get("dataClassification")
+        or primary.get("data_classification")
+        or "confidential",
+        "risk_level": requested_context.get("risk_level")
+        or requested_context.get("riskLevel")
+        or primary.get("risk_level")
+        or "high",
+        "max_cost_usd": requested_context.get("max_cost_usd")
+        if requested_context.get("max_cost_usd") is not None
+        else requested_context.get("maxCostUsd", primary.get("max_cost_usd") or 0),
+        "local_only": bool(
+            requested_context.get("local_only")
+            if requested_context.get("local_only") is not None
+            else requested_context.get("localOnly", primary.get("local_only"))
+        ),
+        "prohibited_providers": list(
+            requested_context.get("prohibited_providers")
+            or requested_context.get("prohibitedProviders")
+            or primary.get("prohibited_providers")
+            or []
+        ),
+        "request_id": requested_context.get("request_id")
+        or requested_context.get("requestId")
+        or primary.get("request_id"),
+    }
+    primary.update(routing_controls)
+    candidates = [primary]
+    common = {
+        "tenant_id": primary.get("tenant_id"),
+        "user_id": primary.get("user_id"),
+        "project_id": primary.get("project_id"),
+        "run_id": primary.get("run_id"),
+        **routing_controls,
+    }
+    for provider in (("local", "anthropic", "openai", "gemini", "groq", "openrouter", "deepseek", "together") if include_fallbacks else ()):
+        if provider == primary.get("provider"):
+            continue
+        fallback = resolve_ai_context({"provider": provider, **common})
+        fallback.update(common)
+        if fallback.get("direct_model_call"):
+            candidates.append(fallback)
+    selected, routing = route_ai_connection_candidates(
+        candidates,
+        task_type=task_type,
+        context_token_estimate=context_token_estimate,
+        estimated_output_tokens=estimated_output_tokens,
+    )
+    context = dict(selected or primary)
+    context["brain_routing_event_id"] = routing.get("routingEventId")
+    context["brain_routing_policy_version"] = routing.get("routingPolicyVersion")
+    context["brain_routing_selected_profile_id"] = routing.get("selectedProfileId")
+    context["brain_routing_fallback_used"] = bool(
+        selected and selected.get("provider") != primary.get("provider")
+    )
+    return context, routing
+
+
 class AIConnection:
+    def embed_text(
+        self,
+        text: str,
+        *,
+        ai_context: Dict[str, Any] | None = None,
+    ) -> list[float]:
+        """Create an embedding through the same router, health, and audit boundary."""
+        embed_model = os.environ.get("REALYTICS_EMBED_MODEL", "text-embedding-3-small")
+        requested = {**(ai_context or {}), "model": embed_model}
+        context, routing = _route_execution_context(
+            requested,
+            task_type="embedding_retrieval",
+            context_token_estimate=max(1, len(text) // 3),
+            estimated_output_tokens=0,
+            include_fallbacks=False,
+        )
+        context = {
+            **context,
+            "task_type": "embedding_retrieval",
+            "model": embed_model,
+            "brain_profile_id": f"runtime:{context.get('provider')}:{embed_model}",
+        }
+        started_at = datetime.now(timezone.utc).isoformat()
+        if routing.get("blocked"):
+            failed = AIExtractionResult(
+                data=None,
+                meta=safe_ai_context(context),
+                error=str(routing.get("blockedReason") or "Central Brain Router blocked embedding."),
+            )
+            self._audit_extract_json(text, "Embedding retrieval", context, failed, started_at)
+            raise RuntimeError(failed.error)
+        if context.get("provider") not in OPENAI_COMPATIBLE_PROVIDERS:
+            failed = AIExtractionResult(
+                data=None,
+                meta=safe_ai_context(context),
+                error=f"Embedding provider is not OpenAI-compatible: {context.get('provider')}",
+            )
+            self._audit_extract_json(text, "Embedding retrieval", context, failed, started_at)
+            raise RuntimeError(failed.error)
+        api_key_env = context.get("api_key_env")
+        api_key = context.get("api_key") or (os.environ.get(api_key_env) if api_key_env else None)
+        if not context.get("is_local") and not api_key:
+            failed = AIExtractionResult(
+                data=None,
+                meta=safe_ai_context(context),
+                error=f"{api_key_env or 'API key'} not configured for embedding provider.",
+            )
+            self._audit_extract_json(text, "Embedding retrieval", context, failed, started_at)
+            raise RuntimeError(failed.error)
+        try:
+            from openai import OpenAI
+
+            kwargs: Dict[str, Any] = {"api_key": api_key or "not-needed"}
+            if context.get("base_url"):
+                kwargs["base_url"] = context["base_url"]
+            context["provider_call_attempted"] = True
+            response = OpenAI(**kwargs).embeddings.create(model=embed_model, input=text)
+            vector = list(response.data[0].embedding)
+            completed = AIExtractionResult(
+                data={"embeddingDimensions": len(vector)},
+                meta={
+                    **safe_ai_context(context),
+                    "parsing_runtime": f"embedding:{context.get('provider')}",
+                    "token_usage": _normalize_token_usage(
+                        getattr(response, "usage", None),
+                        provider="openai_compatible_embedding",
+                    ),
+                },
+            )
+            self._audit_extract_json(text, "Embedding retrieval", context, completed, started_at)
+            return vector
+        except Exception as exc:
+            failed = AIExtractionResult(data=None, meta=safe_ai_context(context), error=str(exc))
+            self._audit_extract_json(text, "Embedding retrieval", context, failed, started_at)
+            raise RuntimeError(str(exc)) from exc
+
     def extract_json(
         self,
         prompt: str,
@@ -222,37 +368,82 @@ class AIConnection:
         system: str,
         ai_context: Dict[str, Any] | None = None,
     ) -> AIExtractionResult:
-        context = resolve_ai_context(ai_context)
         started_at = datetime.now(timezone.utc).isoformat()
-        provider = context["provider"]
-
-        if provider == "anthropic":
-            result = self._extract_with_anthropic(prompt, system, context)
-            self._audit_extract_json(prompt, system, context, result, started_at)
-            return result
-        if provider == "claude_desktop":
+        context, routing = _route_execution_context(
+            ai_context,
+            task_type=str((ai_context or {}).get("task_type") or (ai_context or {}).get("taskType") or "structured_extraction"),
+            context_token_estimate=max(1, (len(prompt) + len(system)) // 3),
+        )
+        if routing.get("blocked"):
             result = AIExtractionResult(
                 data=None,
-                meta=context,
+                meta=safe_ai_context(context),
+                error=str(routing.get("blockedReason") or "Central Brain Router blocked this call."),
+            )
+            self._audit_extract_json(prompt, system, context, result, started_at)
+            return result
+        result = self._extract_for_context(prompt, system, context)
+        self._audit_extract_json(prompt, system, context, result, started_at)
+        if result.data is not None or not context.get("provider_call_attempted"):
+            return result
+
+        failed_provider = str(context.get("provider") or "")
+        prohibited = sorted(set([
+            *((ai_context or {}).get("prohibited_providers") or []),
+            failed_provider,
+        ]) - {""})
+        fallback_input = {
+            **(ai_context or {}),
+            "prohibited_providers": prohibited,
+            "task_type": str((ai_context or {}).get("task_type") or "structured_extraction"),
+        }
+        fallback_context, fallback_routing = _route_execution_context(
+            fallback_input,
+            task_type=fallback_input["task_type"],
+            context_token_estimate=max(1, (len(prompt) + len(system)) // 3),
+        )
+        if fallback_routing.get("blocked") or fallback_context.get("provider") == failed_provider:
+            return result
+        fallback_started_at = datetime.now(timezone.utc).isoformat()
+        fallback_result = self._extract_for_context(prompt, system, fallback_context)
+        fallback_result.meta.update({
+            "fallbackFromProvider": failed_provider,
+            "fallbackReason": result.error,
+        })
+        self._audit_extract_json(
+            prompt,
+            system,
+            fallback_context,
+            fallback_result,
+            fallback_started_at,
+        )
+        return fallback_result
+
+    def _extract_for_context(
+        self,
+        prompt: str,
+        system: str,
+        context: Dict[str, Any],
+    ) -> AIExtractionResult:
+        provider = context["provider"]
+        if provider == "anthropic":
+            return self._extract_with_anthropic(prompt, system, context)
+        if provider == "claude_desktop":
+            return AIExtractionResult(
+                data=None,
+                meta=safe_ai_context(context),
                 error=(
                     "Claude Desktop is the MCP host LLM. The server cannot call the "
                     "Claude Desktop UI model internally; return a host_llm_extraction request instead."
                 ),
             )
-            self._audit_extract_json(prompt, system, context, result, started_at)
-            return result
         if provider in OPENAI_COMPATIBLE_PROVIDERS:
-            result = self._extract_with_openai_compatible(prompt, system, context)
-            self._audit_extract_json(prompt, system, context, result, started_at)
-            return result
-
-        result = AIExtractionResult(
+            return self._extract_with_openai_compatible(prompt, system, context)
+        return AIExtractionResult(
             data=None,
-            meta=context,
+            meta=safe_ai_context(context),
             error=f"Unsupported AI provider: {provider}",
         )
-        self._audit_extract_json(prompt, system, context, result, started_at)
-        return result
 
     def _audit_extract_json(
         self,
@@ -274,7 +465,17 @@ class AIConnection:
             token_usage=(result.meta or {}).get("token_usage"),
             started_at=started_at,
         )
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        latency_ms = max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
+        event.setdefault("metadata", {})["latencyMs"] = latency_ms
         stored = record_ai_brain_used(event)
+        if context.get("provider_call_attempted"):
+            record_brain_provider_result(
+                context,
+                success=result.data is not None,
+                latency_ms=latency_ms,
+                error=result.error,
+            )
         if stored and isinstance(result.meta, dict):
             result.meta["ai_brain_used_event_id"] = stored.get("eventId")
 
@@ -298,13 +499,13 @@ class AIConnection:
         if is_local and not base_url:
             return AIExtractionResult(
                 data=None,
-                meta=context,
+                meta=safe_ai_context(context),
                 error="REALYTICS_LLM_BASE_URL not configured for the local/self-hosted model.",
             )
         if not is_local and not api_key:
             return AIExtractionResult(
                 data=None,
-                meta=context,
+                meta=safe_ai_context(context),
                 error=f"{api_key_env or 'API key'} not configured for provider '{context['provider']}'.",
             )
 
@@ -327,18 +528,19 @@ class AIConnection:
             if context.get("supports_json_mode"):
                 request_kwargs["response_format"] = {"type": "json_object"}
 
+            context["provider_call_attempted"] = True
             response = client.chat.completions.create(**request_kwargs)
             content = response.choices[0].message.content or "{}"
             return AIExtractionResult(
                 data=_load_json_object(content),
                 meta={
-                    **context,
+                    **safe_ai_context(context),
                     "parsing_runtime": f"openai_compatible:{context['provider']}",
                     "token_usage": _normalize_token_usage(getattr(response, "usage", None), provider="openai_compatible"),
                 },
             )
         except Exception as exc:
-            return AIExtractionResult(data=None, meta=context, error=str(exc))
+            return AIExtractionResult(data=None, meta=safe_ai_context(context), error=str(exc))
 
     def _extract_with_anthropic(
         self,
@@ -350,7 +552,7 @@ class AIConnection:
         if not api_key:
             return AIExtractionResult(
                 data=None,
-                meta=context,
+                meta=safe_ai_context(context),
                 error=(
                     "ANTHROPIC_API_KEY not configured. Claude Desktop can host MCP tool calls, "
                     "but the MCP server cannot call the Claude Desktop UI model internally."
@@ -361,6 +563,7 @@ class AIConnection:
             from anthropic import Anthropic
 
             client = Anthropic(api_key=api_key)
+            context["provider_call_attempted"] = True
             response = client.messages.create(
                 model=context["model"],
                 max_tokens=4096,
@@ -374,13 +577,13 @@ class AIConnection:
             return AIExtractionResult(
                 data=_load_json_object(content),
                 meta={
-                    **context,
+                    **safe_ai_context(context),
                     "parsing_runtime": "anthropic.messages",
                     "token_usage": _normalize_token_usage(getattr(response, "usage", None), provider="anthropic"),
                 },
             )
         except Exception as exc:
-            return AIExtractionResult(data=None, meta=context, error=str(exc))
+            return AIExtractionResult(data=None, meta=safe_ai_context(context), error=str(exc))
 
 
 def _usage_value(usage: Any, *names: str) -> int | None:

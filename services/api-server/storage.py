@@ -3,7 +3,8 @@ import hashlib
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 from uuid import uuid4
@@ -11,12 +12,102 @@ from uuid import uuid4
 from core.text_normalization import normalize_match_text
 
 
-STATE_VERSION = 13
+STATE_VERSION = 16
 DEFAULT_STATE_FILE = Path(__file__).parent / "data" / "runtime" / "state.json"
 DEFAULT_SQLITE_FILE = Path(__file__).parent / "data" / "runtime" / "realytics.sqlite3"
 MAX_JSON_ACTIVITY_LOGS = 10000
 ASSUMPTION_OVERRIDE_STATUSES = {"active", "revoked", "expired", "superseded"}
 GLOSSARY_CANDIDATE_STATUSES = {"pending_review", "approved", "rejected", "needs_revision", "merged", "free_text"}
+_AGENT_RUNTIME_LOCK = threading.RLock()
+
+_OPERATIONAL_RECORD_SPECS: Dict[str, Dict[str, Any]] = {
+    "runtime_outbox_events": {
+        "store": "runtime_outbox_events",
+        "key": "event_id",
+        "aliases": {
+            "event_id": "eventId", "tenant_id": "tenantId", "project_id": "projectId",
+            "aggregate_type": "aggregateType", "aggregate_id": "aggregateId",
+            "event_type": "eventType", "idempotency_key": "idempotencyKey", "status": "status",
+            "attempt_count": "attemptCount", "max_attempts": "maxAttempts",
+            "available_at": "availableAt", "lease_owner": "leaseOwner",
+            "lease_expires_at": "leaseExpiresAt", "created_at": "createdAt",
+            "updated_at": "updatedAt", "published_at": "publishedAt",
+        },
+    },
+    "brain_provider_health": {
+        "store": "brain_provider_health", "key": "health_id",
+        "aliases": {
+            "health_id": "healthId", "tenant_id": "tenantId", "brain_profile_id": "brainProfileId",
+            "provider": "provider", "model": "model", "status": "status",
+            "consecutive_failures": "consecutiveFailures", "checked_at": "checkedAt",
+            "next_check_at": "nextCheckAt",
+        },
+    },
+    "brain_routing_policies": {
+        "store": "brain_routing_policies", "key": "policy_id",
+        "aliases": {
+            "policy_id": "policyId", "tenant_id": "tenantId", "user_id": "userId",
+            "version": "version", "active": "active", "created_at": "createdAt",
+        },
+    },
+    "brain_routing_events": {
+        "store": "brain_routing_events", "key": "routing_event_id",
+        "aliases": {
+            "routing_event_id": "routingEventId", "run_id": "runId", "request_id": "requestId",
+            "tenant_id": "tenantId", "user_id": "userId", "project_id": "projectId",
+            "task_type": "taskType", "policy_id": "policyId", "policy_version": "policyVersion",
+            "selected_profile_id": "selectedProfileId", "selected_provider": "selectedProvider",
+            "selected_model": "selectedModel", "blocked": "blocked", "occurred_at": "occurredAt",
+        },
+    },
+    "tool_calls": {
+        "store": "tool_calls", "key": "tool_call_id",
+        "aliases": {
+            "tool_call_id": "request.toolCallId", "run_id": "request.runId",
+            "step_id": "request.stepId", "tenant_id": "request.tenantId", "user_id": "request.userId",
+            "project_id": "request.projectId", "tool_id": "request.toolId",
+            "tool_version": "toolVersion", "status": "result.status",
+            "side_effect_level": "sideEffectLevel", "idempotency_key": "request.idempotencyKey",
+            "state_version": "stateVersion", "requested_at": "request.requestedAt",
+            "completed_at": "result.completedAt",
+        },
+    },
+    "learning_candidates": {
+        "store": "learning_candidates", "key": "candidate_id",
+        "aliases": {
+            "candidate_id": "candidateId", "tenant_id": "tenantId", "project_id": "projectId",
+            "candidate_type": "candidateType", "target_key": "targetKey", "status": "status",
+            "created_by": "createdBy", "created_at": "createdAt", "updated_at": "updatedAt",
+        },
+    },
+    "learning_evaluations": {
+        "store": "learning_evaluations", "key": "evaluation_id",
+        "aliases": {
+            "evaluation_id": "evaluationId", "candidate_id": "candidateId", "tenant_id": "tenantId",
+            "passed": "passed", "evaluated_at": "evaluatedAt",
+        },
+    },
+    "learning_promotions": {
+        "store": "learning_promotions", "key": "decision_id",
+        "aliases": {
+            "decision_id": "decisionId", "candidate_id": "candidateId", "tenant_id": "tenantId",
+            "action": "action", "environment": "environment", "approved_by": "approvedBy",
+            "approved_at": "approvedAt",
+        },
+    },
+    "coding_pod_jobs": {
+        "store": "coding_pod_jobs", "key": "job_id",
+        "aliases": {
+            "job_id": "jobId", "tenant_id": "tenantId", "requested_by": "requestedBy",
+            "workspace_ref": "workspaceRef", "branch_name": "branchName", "status": "status",
+            "idempotency_key": "idempotencyKey", "lease_owner": "leaseOwner",
+            "lease_expires_at": "leaseExpiresAt", "heartbeat_at": "heartbeatAt",
+            "attempt_count": "attemptCount", "max_attempts": "maxAttempts",
+            "state_version": "stateVersion",
+            "created_at": "createdAt", "updated_at": "updatedAt",
+        },
+    },
+}
 
 
 def storage_backend() -> str:
@@ -62,6 +153,19 @@ def default_state() -> Dict[str, Any]:
         "evidence_graphs": {},
         "chief_pod_artifacts": {},
         "pod_ai_reviews": {},
+        "agent_handoffs": {},
+        "agent_runs": {},
+        "agent_run_steps": {},
+        "brain_usage_events": {},
+        "runtime_outbox_events": {},
+        "brain_provider_health": {},
+        "brain_routing_policies": {},
+        "brain_routing_events": {},
+        "tool_calls": {},
+        "learning_candidates": {},
+        "learning_evaluations": {},
+        "learning_promotions": {},
+        "coding_pod_jobs": {},
         "legal_reviews": {},
         "permit_reviews": {},
         "recalculation_events": {},
@@ -195,6 +299,10 @@ def delete_project_record_cascade(project_id: str) -> bool:
             "evidence_graphs",
             "chief_pod_artifacts",
             "pod_ai_reviews",
+            "agent_handoffs",
+            "agent_runs",
+            "agent_run_steps",
+            "brain_usage_events",
             "legal_reviews",
             "permit_reviews",
             "prompt_artifacts",
@@ -241,6 +349,786 @@ def _upsert_review_record(project_id: str, record: Dict[str, Any], store_key: st
         )
         conn.commit()
     return normalized
+
+
+def _upsert_postgres_typed_record(
+    *,
+    store_key: str,
+    project_id: str,
+    record_id: str,
+    table: str,
+    values: Dict[str, Any],
+    normalized: Dict[str, Any],
+) -> None:
+    """Dual-write critical audit data to app_state and its typed table."""
+    from db import postgres
+
+    state = _load_json_state() or default_state()
+    state.setdefault(store_key, {}).setdefault(str(project_id), {})[str(record_id)] = normalized
+    _save_json_state_from_state(state)
+    postgres.upsert_typed_jsonb_record(table, values, normalized)
+
+
+def _agent_run_values(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "run_id": record.get("runId"),
+        "project_id": record.get("projectId"),
+        "tenant_id": record.get("tenantId"),
+        "user_id": record.get("userId"),
+        "request_id": record.get("requestId"),
+        "correlation_id": record.get("correlationId"),
+        "trace_id": record.get("traceId"),
+        "agent_id": record.get("agentId"),
+        "agent_version": record.get("agentVersion"),
+        "task_type": record.get("taskType"),
+        "idempotency_key": record.get("idempotencyKey"),
+        "input_hash": record.get("inputHash"),
+        "status": record.get("status"),
+        "attempt_count": int(record.get("attemptCount") or 0),
+        "max_attempts": int(record.get("maxAttempts") or 1),
+        "cancellation_requested": bool(record.get("cancellationRequested")),
+        "state_version": int(record.get("stateVersion") or 1),
+        "lease_owner": record.get("leaseOwner"),
+        "lease_expires_at": record.get("leaseExpiresAt"),
+        "heartbeat_at": record.get("heartbeatAt"),
+        "deadline_at": record.get("deadlineAt"),
+        "consumed_cost_usd": float((record.get("budget") or {}).get("consumedCostUsd") or 0),
+        "consumed_llm_calls": int((record.get("budget") or {}).get("consumedLlmCalls") or 0),
+        "consumed_tool_calls": int((record.get("budget") or {}).get("consumedToolCalls") or 0),
+        "retry_of_run_id": record.get("retryOfRunId"),
+        "selected_brain_profile_id": record.get("selectedBrainProfileId"),
+        "created_at": record.get("createdAt"),
+        "updated_at": record.get("updatedAt"),
+        "started_at": record.get("startedAt"),
+        "completed_at": record.get("completedAt"),
+    }
+
+
+def create_agent_run_record(record: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
+    """Atomically create an Agent run, enforcing tenant/Agent idempotency."""
+    normalized = dict(record)
+    values = _agent_run_values(normalized)
+    run_id = str(values.get("run_id") or "")
+    if not run_id:
+        raise ValueError("runId is required")
+    backend = storage_backend()
+    if backend == "postgres":
+        from db import postgres
+
+        created = postgres.insert_typed_jsonb_record("agent_runs", values, normalized)
+        persisted = normalized if created else get_agent_run_by_idempotency_record(
+            tenant_id=str(values.get("tenant_id") or ""),
+            agent_id=str(values.get("agent_id") or ""),
+            idempotency_key=str(values.get("idempotency_key") or ""),
+        )
+        if created:
+            state = _load_json_state() or default_state()
+            state.setdefault("agent_runs", {})[run_id] = normalized
+            _save_json_state_from_state(state)
+        return persisted or normalized, created
+    if backend == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            existing = next(
+                (
+                    item for item in state.setdefault("agent_runs", {}).values()
+                    if item.get("tenantId") == values.get("tenant_id")
+                    and item.get("agentId") == values.get("agent_id")
+                    and item.get("idempotencyKey") == values.get("idempotency_key")
+                ),
+                None,
+            )
+            if existing:
+                return existing, False
+            state["agent_runs"][run_id] = normalized
+            _save_json_state_from_state(state)
+            return normalized, True
+    with _AGENT_RUNTIME_LOCK, _connect_sqlite() as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO agent_runs(
+                    run_id, project_id, tenant_id, user_id, request_id, correlation_id, trace_id,
+                    agent_id, agent_version, task_type, idempotency_key, input_hash, status,
+                    attempt_count, max_attempts, cancellation_requested, state_version,
+                    lease_owner, lease_expires_at, heartbeat_at, deadline_at,
+                    consumed_cost_usd, consumed_llm_calls, consumed_tool_calls, retry_of_run_id,
+                    selected_brain_profile_id, created_at, updated_at, started_at, completed_at,
+                    payload_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*values.values(), json.dumps(normalized, ensure_ascii=False)),
+            )
+            conn.commit()
+            return normalized, True
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT payload_json FROM agent_runs WHERE tenant_id = ? AND agent_id = ? AND idempotency_key = ?",
+                (values["tenant_id"], values["agent_id"], values["idempotency_key"]),
+            ).fetchone()
+            return (json.loads(row["payload_json"]) if row else normalized), False
+
+
+def get_agent_run_record(run_id: str) -> Dict[str, Any] | None:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.get_typed_jsonb_record("agent_runs", {"run_id": str(run_id)})
+    if storage_backend() == "json":
+        return (_load_json_state() or default_state()).get("agent_runs", {}).get(str(run_id))
+    with _connect_sqlite() as conn:
+        row = conn.execute("SELECT payload_json FROM agent_runs WHERE run_id = ?", (str(run_id),)).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def get_agent_run_by_idempotency_record(
+    *,
+    tenant_id: str,
+    agent_id: str,
+    idempotency_key: str,
+) -> Dict[str, Any] | None:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.get_typed_jsonb_record(
+            "agent_runs",
+            {"tenant_id": tenant_id, "agent_id": agent_id, "idempotency_key": idempotency_key},
+        )
+    if storage_backend() == "json":
+        return next(
+            (
+                item for item in (_load_json_state() or default_state()).get("agent_runs", {}).values()
+                if item.get("tenantId") == tenant_id
+                and item.get("agentId") == agent_id
+                and item.get("idempotencyKey") == idempotency_key
+            ),
+            None,
+        )
+    with _connect_sqlite() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM agent_runs WHERE tenant_id = ? AND agent_id = ? AND idempotency_key = ?",
+            (tenant_id, agent_id, idempotency_key),
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def update_agent_run_record(
+    run_id: str,
+    record: Dict[str, Any],
+    *,
+    expected_state_version: int,
+    outbox_event: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Persist one state transition with optimistic concurrency control."""
+    normalized = dict(record)
+    values = _agent_run_values(normalized)
+    if str(values.get("run_id")) != str(run_id):
+        raise ValueError("runId does not match the target record")
+    backend = storage_backend()
+    if backend == "postgres":
+        from db import postgres
+
+        if outbox_event:
+            outbox_spec = _operational_spec("runtime_outbox_events")
+            outbox_values = {
+                column: _payload_path_value(outbox_event, alias)
+                for column, alias in outbox_spec["aliases"].items()
+            }
+            updated = postgres.update_agent_run_with_outbox(
+                values,
+                normalized,
+                expected_state_version=expected_state_version,
+                outbox_values=outbox_values,
+                outbox_payload=outbox_event,
+            )
+        else:
+            updated = postgres.update_agent_run_optimistic(
+                values,
+                normalized,
+                expected_state_version=expected_state_version,
+            )
+        if not updated:
+            raise RuntimeError("AGENT_RUN_VERSION_CONFLICT")
+        state = _load_json_state() or default_state()
+        state.setdefault("agent_runs", {})[str(run_id)] = normalized
+        if outbox_event:
+            state.setdefault("runtime_outbox_events", {})[str(outbox_event["eventId"])] = outbox_event
+        _save_json_state_from_state(state)
+        return normalized
+    if backend == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            current = state.setdefault("agent_runs", {}).get(str(run_id))
+            if not current:
+                raise KeyError(run_id)
+            if int(current.get("stateVersion") or 1) != int(expected_state_version):
+                raise RuntimeError("AGENT_RUN_VERSION_CONFLICT")
+            state["agent_runs"][str(run_id)] = normalized
+            if outbox_event:
+                state.setdefault("runtime_outbox_events", {})[str(outbox_event["eventId"])] = outbox_event
+            _save_json_state_from_state(state)
+            return normalized
+    with _AGENT_RUNTIME_LOCK, _connect_sqlite() as conn:
+        assignments = [f"{column} = ?" for column in values if column != "run_id"]
+        params = [values[column] for column in values if column != "run_id"]
+        assignments.append("payload_json = ?")
+        params.extend([json.dumps(normalized, ensure_ascii=False), str(run_id), int(expected_state_version)])
+        cursor = conn.execute(
+            f"UPDATE agent_runs SET {', '.join(assignments)} WHERE run_id = ? AND state_version = ?",
+            params,
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("AGENT_RUN_VERSION_CONFLICT")
+        if outbox_event:
+            spec = _operational_spec("runtime_outbox_events")
+            outbox_values = {
+                column: _payload_path_value(outbox_event, alias)
+                for column, alias in spec["aliases"].items()
+            }
+            columns = list(outbox_values)
+            conn.execute(
+                f"INSERT OR IGNORE INTO runtime_outbox_events({', '.join(columns)}, payload_json) "
+                f"VALUES({', '.join('?' for _ in columns)}, ?)",
+                [*outbox_values.values(), json.dumps(outbox_event, ensure_ascii=False, default=str)],
+            )
+        conn.commit()
+    return normalized
+
+
+def list_agent_run_records(
+    *,
+    project_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[Dict[str, Any]]:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where: Dict[str, Any] = {}
+        if project_id:
+            where["project_id"] = str(project_id)
+        if status:
+            where["status"] = status
+        return postgres.list_typed_jsonb_records("agent_runs", where=where, limit=limit)
+    if storage_backend() == "json":
+        records = list((_load_json_state() or default_state()).get("agent_runs", {}).values())
+    else:
+        query = "SELECT payload_json FROM agent_runs WHERE 1=1"
+        params: list[Any] = []
+        if project_id:
+            query += " AND project_id = ?"
+            params.append(str(project_id))
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if project_id:
+        records = [item for item in records if str(item.get("projectId") or "") == str(project_id)]
+    if status:
+        records = [item for item in records if item.get("status") == status]
+    return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)[:limit]
+
+
+def upsert_agent_run_step_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(record)
+    values = {
+        "step_id": normalized.get("stepId"),
+        "run_id": normalized.get("runId"),
+        "project_id": normalized.get("projectId"),
+        "sequence_no": normalized.get("sequenceNo"),
+        "stage": normalized.get("stage"),
+        "step_type": normalized.get("stepType"),
+        "status": normalized.get("status"),
+        "attempt_no": normalized.get("attemptNo"),
+        "error_code": (normalized.get("error") or {}).get("code"),
+        "started_at": normalized.get("startedAt"),
+        "completed_at": normalized.get("completedAt"),
+    }
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        postgres.upsert_typed_jsonb_record("agent_run_steps", values, normalized)
+        state = _load_json_state() or default_state()
+        state.setdefault("agent_run_steps", {}).setdefault(str(values["run_id"]), {})[str(values["step_id"])] = normalized
+        _save_json_state_from_state(state)
+    elif storage_backend() == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            state.setdefault("agent_run_steps", {}).setdefault(str(values["run_id"]), {})[str(values["step_id"])] = normalized
+            _save_json_state_from_state(state)
+    else:
+        with _connect_sqlite() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_run_steps(
+                    step_id, run_id, project_id, sequence_no, stage, step_type, status,
+                    attempt_no, error_code, started_at, completed_at, payload_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(step_id) DO UPDATE SET
+                    status=excluded.status, error_code=excluded.error_code,
+                    completed_at=excluded.completed_at, payload_json=excluded.payload_json
+                """,
+                (*values.values(), json.dumps(normalized, ensure_ascii=False)),
+            )
+            conn.commit()
+    return normalized
+
+
+def list_agent_run_step_records(run_id: str) -> list[Dict[str, Any]]:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.list_typed_jsonb_records("agent_run_steps", where={"run_id": str(run_id)}, limit=1000)
+    if storage_backend() == "json":
+        records = list((_load_json_state() or default_state()).get("agent_run_steps", {}).get(str(run_id), {}).values())
+    else:
+        with _connect_sqlite() as conn:
+            records = [
+                json.loads(row["payload_json"])
+                for row in conn.execute(
+                    "SELECT payload_json FROM agent_run_steps WHERE run_id = ? ORDER BY sequence_no",
+                    (str(run_id),),
+                )
+            ]
+    return sorted(records, key=lambda item: int(item.get("sequenceNo") or 0))
+
+
+def upsert_brain_usage_event_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist usage metadata only; prompts, responses, and credentials are forbidden."""
+    normalized = dict(record)
+    values = {
+        "event_id": normalized.get("eventId"),
+        "run_id": normalized.get("runId"),
+        "step_id": normalized.get("stepId"),
+        "tenant_id": normalized.get("tenantId"),
+        "project_id": normalized.get("projectId"),
+        "agent_id": normalized.get("agentId"),
+        "agent_version": normalized.get("agentVersion"),
+        "brain_profile_id": normalized.get("brainProfileId"),
+        "provider": normalized.get("provider"),
+        "model": normalized.get("model"),
+        "status": normalized.get("status"),
+        "input_tokens": normalized.get("inputTokens"),
+        "output_tokens": normalized.get("outputTokens"),
+        "estimated_cost_usd": normalized.get("estimatedCostUsd"),
+        "latency_ms": normalized.get("latencyMs"),
+        "occurred_at": normalized.get("occurredAt"),
+    }
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        postgres.upsert_typed_jsonb_record("brain_usage_events", values, normalized)
+        state = _load_json_state() or default_state()
+        state.setdefault("brain_usage_events", {}).setdefault(str(values["run_id"]), {})[str(values["event_id"])] = normalized
+        _save_json_state_from_state(state)
+    elif storage_backend() == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            state.setdefault("brain_usage_events", {}).setdefault(str(values["run_id"]), {})[str(values["event_id"])] = normalized
+            _save_json_state_from_state(state)
+    else:
+        with _connect_sqlite() as conn:
+            conn.execute(
+                """
+                INSERT INTO brain_usage_events(
+                    event_id, run_id, step_id, tenant_id, project_id, agent_id, agent_version,
+                    brain_profile_id, provider, model, status, input_tokens, output_tokens,
+                    estimated_cost_usd, latency_ms, occurred_at, payload_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET payload_json=excluded.payload_json
+                """,
+                (*values.values(), json.dumps(normalized, ensure_ascii=False)),
+            )
+            conn.commit()
+    return normalized
+
+
+def list_brain_usage_event_records(run_id: str) -> list[Dict[str, Any]]:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.list_typed_jsonb_records("brain_usage_events", where={"run_id": str(run_id)}, limit=1000)
+    if storage_backend() == "json":
+        records = list((_load_json_state() or default_state()).get("brain_usage_events", {}).get(str(run_id), {}).values())
+    else:
+        with _connect_sqlite() as conn:
+            records = [
+                json.loads(row["payload_json"])
+                for row in conn.execute(
+                    "SELECT payload_json FROM brain_usage_events WHERE run_id = ? ORDER BY occurred_at",
+                    (str(run_id),),
+                )
+            ]
+    return sorted(records, key=lambda item: item.get("occurredAt") or "")
+
+
+def _new_runtime_outbox_payload(
+    *,
+    tenant_id: str,
+    project_id: str | None,
+    aggregate_type: str,
+    aggregate_id: str,
+    event_type: str,
+    updated_at: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    event_id = f"outbox:{uuid4()}"
+    return {
+        "schemaVersion": "realytics-runtime-outbox-event-v1",
+        "eventId": event_id,
+        "tenantId": tenant_id,
+        "projectId": project_id,
+        "aggregateType": aggregate_type,
+        "aggregateId": aggregate_id,
+        "eventType": event_type,
+        "idempotencyKey": f"{aggregate_type}:{aggregate_id}:{event_type}:{updated_at}",
+        "status": "pending",
+        "payload": payload,
+        "attemptCount": 0,
+        "maxAttempts": 8,
+        "availableAt": updated_at,
+        "leaseOwner": None,
+        "leaseExpiresAt": None,
+        "lastError": None,
+        "createdAt": updated_at,
+        "updatedAt": updated_at,
+        "publishedAt": None,
+    }
+
+
+def _runtime_outbox_values(event: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        column: _payload_path_value(event, alias)
+        for column, alias in _OPERATIONAL_RECORD_SPECS["runtime_outbox_events"]["aliases"].items()
+    }
+
+
+def _insert_sqlite_runtime_outbox(conn: sqlite3.Connection, event: Dict[str, Any]) -> None:
+    values = _runtime_outbox_values(event)
+    columns = list(values)
+    conn.execute(
+        f"INSERT OR IGNORE INTO runtime_outbox_events({', '.join(columns)}, payload_json) "
+        f"VALUES({', '.join('?' for _ in columns)}, ?)",
+        [*values.values(), json.dumps(event, ensure_ascii=False)],
+    )
+
+
+def upsert_operational_record(table: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist an Agent Platform control-plane record in a first-class store."""
+    spec = _operational_spec(table)
+    normalized = dict(record)
+    values = {
+        column: _payload_path_value(normalized, alias)
+        for column, alias in spec["aliases"].items()
+    }
+    key_column = str(spec["key"])
+    key_value = values.get(key_column)
+    if key_value in {None, ""}:
+        raise ValueError(f"{spec['aliases'][key_column]} is required")
+    backend = storage_backend()
+    if backend == "postgres":
+        from db import postgres
+
+        postgres.upsert_typed_jsonb_record(table, values, normalized)
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            state.setdefault(spec["store"], {})[str(key_value)] = normalized
+            _save_json_state_from_state(state)
+        return normalized
+    if backend == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            state.setdefault(spec["store"], {})[str(key_value)] = normalized
+            _save_json_state_from_state(state)
+        return normalized
+    columns = list(values)
+    update_columns = [column for column in columns if column != key_column]
+    sql = (
+        f"INSERT INTO {table}({', '.join(columns)}, payload_json) "
+        f"VALUES({', '.join('?' for _ in columns)}, ?) "
+        f"ON CONFLICT({key_column}) DO UPDATE SET "
+        + ", ".join([*(f"{column}=excluded.{column}" for column in update_columns), "payload_json=excluded.payload_json"])
+    )
+    with _connect_sqlite() as conn:
+        conn.execute(sql, [*values.values(), json.dumps(normalized, ensure_ascii=False, default=str)])
+        conn.commit()
+    return normalized
+
+
+def get_operational_record(table: str, record_id: str) -> Dict[str, Any] | None:
+    spec = _operational_spec(table)
+    key_column = str(spec["key"])
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.get_typed_jsonb_record(table, {key_column: str(record_id)})
+    if storage_backend() == "json":
+        return (_load_json_state() or default_state()).get(spec["store"], {}).get(str(record_id))
+    with _connect_sqlite() as conn:
+        row = conn.execute(
+            f"SELECT payload_json FROM {table} WHERE {key_column} = ?",
+            (str(record_id),),
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def list_operational_records(
+    table: str,
+    *,
+    filters: Dict[str, Any] | None = None,
+    limit: int = 100,
+) -> list[Dict[str, Any]]:
+    spec = _operational_spec(table)
+    filters = dict(filters or {})
+    allowed = set(spec["aliases"])
+    if any(column not in allowed for column in filters):
+        raise ValueError(f"Unsupported filter for {table}")
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.list_typed_jsonb_records(table, where=filters, limit=limit)
+    if storage_backend() == "json":
+        records = list((_load_json_state() or default_state()).get(spec["store"], {}).values())
+        for column, expected in filters.items():
+            alias = spec["aliases"][column]
+            records = [item for item in records if _payload_path_value(item, alias) == expected]
+        return records[: max(1, min(int(limit), 1000))]
+    clauses = [f"{column} = ?" for column in filters]
+    sql = f"SELECT payload_json FROM {table}"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY rowid DESC LIMIT ?"
+    params = [*filters.values(), max(1, min(int(limit), 1000))]
+    with _connect_sqlite() as conn:
+        return [json.loads(row["payload_json"]) for row in conn.execute(sql, params)]
+
+
+def claim_runtime_outbox_event_records(
+    *,
+    worker_id: str,
+    limit: int = 20,
+    lease_seconds: int = 60,
+) -> list[Dict[str, Any]]:
+    """Lease due outbox events so concurrent workers cannot publish the same event."""
+    now = datetime.now(timezone.utc)
+    lease_expires_at = now + timedelta(seconds=max(5, lease_seconds))
+    backend = storage_backend()
+    if backend == "postgres":
+        from db import postgres
+
+        return postgres.claim_runtime_outbox_records(
+            worker_id=worker_id,
+            now=now,
+            lease_expires_at=lease_expires_at,
+            limit=limit,
+        )
+    if backend == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            records = list(state.setdefault("runtime_outbox_events", {}).values())
+            eligible = [
+                item for item in records
+                if _outbox_is_claimable(item, now)
+            ]
+            eligible.sort(key=lambda item: (item.get("availableAt") or "", item.get("createdAt") or ""))
+            claimed = []
+            for item in eligible[: max(1, min(int(limit), 100))]:
+                updated = _claimed_outbox_payload(item, worker_id, now, lease_expires_at)
+                state["runtime_outbox_events"][str(updated["eventId"])] = updated
+                claimed.append(updated)
+            _save_json_state_from_state(state)
+            return claimed
+    with _AGENT_RUNTIME_LOCK, _connect_sqlite() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """
+            SELECT event_id, payload_json
+            FROM runtime_outbox_events
+            WHERE (
+                (status IN ('pending', 'retrying') AND available_at <= ?)
+                OR (status = 'processing' AND lease_expires_at < ?)
+            )
+            ORDER BY available_at, created_at
+            LIMIT ?
+            """,
+            (now.isoformat(), now.isoformat(), max(1, min(int(limit), 100))),
+        ).fetchall()
+        claimed = []
+        for row in rows:
+            updated = _claimed_outbox_payload(
+                json.loads(row["payload_json"]), worker_id, now, lease_expires_at,
+            )
+            conn.execute(
+                """
+                UPDATE runtime_outbox_events
+                SET status = ?, attempt_count = ?, lease_owner = ?, lease_expires_at = ?,
+                    updated_at = ?, payload_json = ?
+                WHERE event_id = ?
+                """,
+                (
+                    updated["status"], updated["attemptCount"], updated["leaseOwner"],
+                    updated["leaseExpiresAt"], updated["updatedAt"],
+                    json.dumps(updated, ensure_ascii=False), updated["eventId"],
+                ),
+            )
+            claimed.append(updated)
+        conn.commit()
+        return claimed
+
+
+def claim_coding_pod_job_record(
+    *,
+    worker_id: str,
+    lease_seconds: int = 120,
+) -> Dict[str, Any] | None:
+    """Atomically lease one queued or abandoned Coding Pod job."""
+    now = datetime.now(timezone.utc)
+    lease_expires_at = now + timedelta(seconds=max(30, lease_seconds))
+    backend = storage_backend()
+    if backend == "postgres":
+        from db import postgres
+
+        return postgres.claim_coding_pod_job_record(
+            worker_id=worker_id,
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+    if backend == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            records = list(state.setdefault("coding_pod_jobs", {}).values())
+            eligible = [item for item in records if _coding_job_is_claimable(item, now)]
+            eligible.sort(key=lambda item: (item.get("createdAt") or "", item.get("jobId") or ""))
+            if not eligible:
+                return None
+            updated = _claimed_coding_job_payload(eligible[0], worker_id, now, lease_expires_at)
+            state["coding_pod_jobs"][str(updated["jobId"])] = updated
+            _save_json_state_from_state(state)
+            return updated
+    with _AGENT_RUNTIME_LOCK, _connect_sqlite() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT job_id, payload_json
+            FROM coding_pod_jobs
+            WHERE attempt_count < max_attempts AND (
+                status = 'queued'
+                OR (status IN ('leased', 'running') AND lease_expires_at < ?)
+            )
+            ORDER BY created_at, job_id
+            LIMIT 1
+            """,
+            (now.isoformat(),),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        updated = _claimed_coding_job_payload(
+            json.loads(row["payload_json"]), worker_id, now, lease_expires_at,
+        )
+        conn.execute(
+            """
+            UPDATE coding_pod_jobs
+            SET status = ?, lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?,
+                attempt_count = ?, max_attempts = ?, state_version = ?, updated_at = ?,
+                payload_json = ?
+            WHERE job_id = ?
+            """,
+            (
+                updated["status"], updated["leaseOwner"], updated["leaseExpiresAt"],
+                updated["heartbeatAt"], updated["attemptCount"], updated["maxAttempts"],
+                updated["stateVersion"], updated["updatedAt"],
+                json.dumps(updated, ensure_ascii=False), updated["jobId"],
+            ),
+        )
+        conn.commit()
+        return updated
+
+
+def _coding_job_is_claimable(record: Dict[str, Any], now: datetime) -> bool:
+    if int(record.get("attemptCount") or 0) >= int(record.get("maxAttempts") or 3):
+        return False
+    status = str(record.get("status") or "")
+    if status == "queued":
+        return True
+    if status in {"leased", "running"}:
+        expires = record.get("leaseExpiresAt")
+        return bool(expires and _parse_datetime(expires) < now)
+    return False
+
+
+def _claimed_coding_job_payload(
+    record: Dict[str, Any],
+    worker_id: str,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> Dict[str, Any]:
+    updated = dict(record)
+    updated.update({
+        "status": "leased",
+        "leaseOwner": worker_id,
+        "leaseExpiresAt": lease_expires_at.isoformat(),
+        "heartbeatAt": now.isoformat(),
+        "attemptCount": int(record.get("attemptCount") or 0) + 1,
+        "maxAttempts": int(record.get("maxAttempts") or 3),
+        "stateVersion": int(record.get("stateVersion") or 1) + 1,
+        "updatedAt": now.isoformat(),
+    })
+    return updated
+
+
+def _outbox_is_claimable(record: Dict[str, Any], now: datetime) -> bool:
+    status = str(record.get("status") or "")
+    if status in {"pending", "retrying"}:
+        return _parse_datetime(record.get("availableAt")) <= now
+    if status == "processing":
+        expires = record.get("leaseExpiresAt")
+        return bool(expires and _parse_datetime(expires) < now)
+    return False
+
+
+def _claimed_outbox_payload(
+    record: Dict[str, Any],
+    worker_id: str,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> Dict[str, Any]:
+    updated = dict(record)
+    updated.update({
+        "status": "processing",
+        "attemptCount": int(record.get("attemptCount") or 0) + 1,
+        "leaseOwner": worker_id,
+        "leaseExpiresAt": lease_expires_at.isoformat(),
+        "updatedAt": now.isoformat(),
+    })
+    return updated
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _operational_spec(table: str) -> Dict[str, Any]:
+    spec = _OPERATIONAL_RECORD_SPECS.get(table)
+    if spec is None:
+        raise ValueError(f"Unsupported operational table: {table}")
+    return spec
+
+
+def _payload_path_value(payload: Dict[str, Any], path: str) -> Any:
+    value: Any = payload
+    for segment in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(segment)
+    return value
 
 
 def _list_review_records(project_id: str, store_key: str, table: str, limit: int = 100) -> list[Dict[str, Any]]:
@@ -626,74 +1514,114 @@ def _materialize_chief_artifact_records(project_id: str, artifact: Dict[str, Any
     result = _as_dict(artifact.get("result"))
     artifact_key = artifact.get("artifactKey")
     pod_key = artifact.get("podKey")
-    source_locator = {"artifactKey": artifact_key, "podKey": pod_key, "artifactType": artifact.get("artifactType")}
+    base_locator = {
+        "artifactKey": artifact_key,
+        "podKey": pod_key,
+        "artifactType": artifact.get("artifactType"),
+    }
+    materialized: set[str] = set()
+    pending_records: list[Dict[str, Any]] = []
+    id_keys = {
+        "id", "ids", "page", "row", "index", "year", "month", "monthindex",
+        "priority", "rank", "units", "unitcount",
+    }
 
-    metric_sources = [
-        _as_dict(result.get("metrics")),
-        _as_dict(result.get("keyMetrics")),
-        _as_dict(result.get("summary")),
-    ]
-    for source in metric_sources:
-        for key, value in source.items():
-            if isinstance(value, dict):
-                metric_value = value.get("value")
-                unit = value.get("unit")
-            else:
-                metric_value = value
-                unit = None
-            if isinstance(metric_value, (int, float)):
-                upsert_deal_state_record(
-                    project_id,
-                    {
-                        "recordId": _stable_deal_state_id(project_id, "chief_artifact_metric", artifact_key, key),
-                        "recordType": "metric",
-                        "key": f"{pod_key}.{key}" if pod_key else str(key),
-                        "value": metric_value,
-                        "unit": unit,
-                        "sourceType": "chief_pod_artifact",
-                        "sourceLocator": source_locator,
-                    },
-                )
+    def locator_for(path: str, inherited: Dict[str, Any], node: Any = None) -> Dict[str, Any]:
+        explicit = {}
+        if isinstance(node, dict):
+            explicit = _as_dict(node.get("sourceLocator") or node.get("source_locator"))
+        return {**base_locator, **inherited, **explicit, "artifactPath": path}
 
-    for index, risk in enumerate(_as_list(result.get("riskFlags") or result.get("riskIssues"))):
-        if not isinstance(risk, dict):
-            continue
-        code = risk.get("code") or risk.get("riskCode") or f"risk_{index + 1}"
-        upsert_deal_state_record(
-            project_id,
+    def persist_reference(record_type: str, value: Any, path: str, locator: Dict[str, Any]) -> None:
+        if value in (None, ""):
+            return
+        reference = str(value)
+        record_id = _stable_deal_state_id(
+            project_id, f"chief_artifact_{record_type}", artifact_key, path, reference
+        )
+        if record_id in materialized:
+            return
+        materialized.add(record_id)
+        pending_records.append(
             {
-                **risk,
-                "recordId": _stable_deal_state_id(project_id, "chief_artifact_risk", artifact_key, code, index),
-                "recordType": "risk_issue",
-                "key": code,
+                "recordId": record_id,
+                "recordType": record_type,
+                "key": reference,
                 "sourceType": "chief_pod_artifact",
-                "sourceLocator": risk.get("sourceLocator") or source_locator,
-            },
+                "sourceLocator": locator,
+            }
         )
 
-    for evidence_id in _as_list(result.get("evidenceIds") or result.get("inputEvidenceIds")):
-        upsert_deal_state_record(
-            project_id,
+    def walk(node: Any, path: str, inherited_locator: Dict[str, Any]) -> None:
+        current_locator = locator_for(path, inherited_locator, node)
+        if isinstance(node, dict):
+            for key, value in node.items():
+                child_path = f"{path}.{key}"
+                normalized_key = str(key).replace("_", "").lower()
+                if normalized_key in {"riskflags", "riskissues"} and isinstance(value, list):
+                    for index, risk in enumerate(value):
+                        if not isinstance(risk, dict):
+                            continue
+                        risk_path = f"{child_path}[{index}]"
+                        code = risk.get("code") or risk.get("riskCode") or f"risk_{index + 1}"
+                        record_id = _stable_deal_state_id(
+                            project_id, "chief_artifact_risk", artifact_key, risk_path, code
+                        )
+                        if record_id not in materialized:
+                            materialized.add(record_id)
+                            pending_records.append(
+                                {
+                                    **risk,
+                                    "recordId": record_id,
+                                    "recordType": "risk_issue",
+                                    "key": code,
+                                    "sourceType": "chief_pod_artifact",
+                                    "sourceLocator": locator_for(risk_path, current_locator, risk),
+                                }
+                            )
+                    continue
+                if normalized_key in {"evidenceid", "evidenceids", "inputevidenceids", "sourceevidenceids"}:
+                    references = value if isinstance(value, list) else [value]
+                    for index, reference in enumerate(references):
+                        persist_reference("evidence", reference, f"{child_path}[{index}]", current_locator)
+                    continue
+                if normalized_key in {"assumptionid", "assumptionids", "inputassumptionids"}:
+                    references = value if isinstance(value, list) else [value]
+                    for index, reference in enumerate(references):
+                        persist_reference("assumption", reference, f"{child_path}[{index}]", current_locator)
+                    continue
+                if normalized_key in {"sourcelocator", "sourcelocators"}:
+                    continue
+                walk(value, child_path, current_locator)
+            return
+        if isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]", current_locator)
+            return
+        if isinstance(node, bool) or not isinstance(node, (int, float)):
+            return
+        leaf_key = path.rsplit(".", 1)[-1].split("[", 1)[0].replace("_", "").lower()
+        if leaf_key in id_keys or leaf_key.endswith("id") or leaf_key.endswith("ids"):
+            return
+        record_id = _stable_deal_state_id(project_id, "chief_artifact_metric", artifact_key, path)
+        if record_id in materialized:
+            return
+        materialized.add(record_id)
+        metric_path_parts = path.removeprefix("result.").split(".")
+        canonical_metric_path = ".".join(part for part in metric_path_parts if part != "metrics")
+        pending_records.append(
             {
-                "recordId": _stable_deal_state_id(project_id, "chief_artifact_evidence", artifact_key, evidence_id),
-                "recordType": "evidence",
-                "key": str(evidence_id),
+                "recordId": record_id,
+                "recordType": "metric",
+                "key": f"{pod_key}.{canonical_metric_path}" if pod_key else canonical_metric_path,
+                "value": node,
                 "sourceType": "chief_pod_artifact",
-                "sourceLocator": source_locator,
-            },
+                "sourceLocator": current_locator,
+            }
         )
 
-    for assumption_id in _as_list(result.get("assumptionIds") or result.get("inputAssumptionIds")):
-        upsert_deal_state_record(
-            project_id,
-            {
-                "recordId": _stable_deal_state_id(project_id, "chief_artifact_assumption", artifact_key, assumption_id),
-                "recordType": "assumption",
-                "key": str(assumption_id),
-                "sourceType": "chief_pod_artifact",
-                "sourceLocator": source_locator,
-            },
-        )
+    walk(result, "result", {})
+    upsert_deal_state_records(project_id, pending_records)
 
 
 def upsert_risk_register_record(
@@ -897,7 +1825,26 @@ def upsert_chief_pod_artifact_record(project_id: str, record: Dict[str, Any]) ->
         "updatedAt": now,
     }
 
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        _upsert_postgres_typed_record(
+            store_key="chief_pod_artifacts",
+            project_id=project_id,
+            record_id=normalized["artifactKey"],
+            table="chief_pod_artifacts",
+            values={
+                "project_id": project_id,
+                "artifact_key": normalized["artifactKey"],
+                "pod_key": normalized.get("podKey"),
+                "artifact_type": normalized.get("artifactType"),
+                "status": normalized.get("status"),
+                "created_at": normalized.get("createdAt"),
+                "updated_at": normalized.get("updatedAt"),
+            },
+            normalized=normalized,
+        )
+        _materialize_chief_artifact_records(project_id, normalized)
+        return normalized
+    if storage_backend() == "json":
         state = _load_json_state() or default_state()
         state.setdefault("chief_pod_artifacts", {})
         state["chief_pod_artifacts"].setdefault(project_id, {})[normalized["artifactKey"]] = normalized
@@ -937,7 +1884,14 @@ def upsert_chief_pod_artifact_record(project_id: str, record: Dict[str, Any]) ->
 
 
 def get_chief_pod_artifact_record(project_id: str, artifact_key: str) -> Dict[str, Any] | None:
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.get_typed_jsonb_record(
+            "chief_pod_artifacts",
+            {"project_id": project_id, "artifact_key": artifact_key},
+        )
+    if storage_backend() == "json":
         state = _load_json_state() or default_state()
         return state.get("chief_pod_artifacts", {}).get(project_id, {}).get(artifact_key)
     with _connect_sqlite() as conn:
@@ -954,7 +1908,14 @@ def list_chief_pod_artifact_records(
     pod_key: str | None = None,
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where = {"project_id": project_id}
+        if pod_key:
+            where["pod_key"] = pod_key
+        records = postgres.list_typed_jsonb_records("chief_pod_artifacts", where=where, limit=limit)
+    elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         records = list(state.get("chief_pod_artifacts", {}).get(project_id, {}).values())
     else:
@@ -985,11 +1946,36 @@ def upsert_pod_ai_review_record(project_id: str, record: Dict[str, Any]) -> Dict
         "sourceArtifactKey": record.get("sourceArtifactKey") or record.get("source_artifact_key"),
         "agentId": record.get("agentId") or record.get("agent_id") or "PodAIReviewerAgent",
         "reviewStatus": record.get("reviewStatus") or record.get("review_status") or "warning",
+        "agentRunId": record.get("agentRunId") or (((record.get("agentPlatform") or {}).get("durableRuntime") or {}).get("agentRunId")),
+        "aiBrainUsedEventId": record.get("aiBrainUsedEventId") or next(
+            iter((((record.get("agentPlatform") or {}).get("durableRuntime") or {}).get("brainUsageEventIds") or [])),
+            None,
+        ),
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
 
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        _upsert_postgres_typed_record(
+            store_key="pod_ai_reviews",
+            project_id=project_id,
+            record_id=normalized["reviewId"],
+            table="pod_ai_reviews",
+            values={
+                "project_id": project_id,
+                "review_id": normalized["reviewId"],
+                "pod_key": normalized.get("podKey"),
+                "source_artifact_key": normalized.get("sourceArtifactKey"),
+                "agent_id": normalized.get("agentId"),
+                "review_status": normalized.get("reviewStatus"),
+                "ai_brain_used_event_id": normalized.get("aiBrainUsedEventId"),
+                "created_at": normalized.get("createdAt"),
+                "updated_at": normalized.get("updatedAt"),
+            },
+            normalized=normalized,
+        )
+        return normalized
+    if storage_backend() == "json":
         state = _load_json_state() or default_state()
         state.setdefault("pod_ai_reviews", {})
         state["pod_ai_reviews"].setdefault(project_id, {})[normalized["reviewId"]] = normalized
@@ -1031,7 +2017,13 @@ def upsert_pod_ai_review_record(project_id: str, record: Dict[str, Any]) -> Dict
 
 
 def get_pod_ai_review_record(project_id: str, review_id: str) -> Dict[str, Any] | None:
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.get_typed_jsonb_record(
+            "pod_ai_reviews", {"project_id": project_id, "review_id": review_id}
+        )
+    if storage_backend() == "json":
         state = _load_json_state() or default_state()
         return state.get("pod_ai_reviews", {}).get(project_id, {}).get(review_id)
     with _connect_sqlite() as conn:
@@ -1050,7 +2042,18 @@ def list_pod_ai_review_records(
     source_artifact_key: str | None = None,
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where = {"project_id": project_id}
+        if pod_key:
+            where["pod_key"] = pod_key
+        if review_status:
+            where["review_status"] = review_status
+        if source_artifact_key:
+            where["source_artifact_key"] = source_artifact_key
+        records = postgres.list_typed_jsonb_records("pod_ai_reviews", where=where, limit=limit)
+    elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         records = list(state.get("pod_ai_reviews", {}).get(project_id, {}).values())
     else:
@@ -1078,12 +2081,155 @@ def list_pod_ai_review_records(
     return sorted(records, key=lambda item: item.get("updatedAt") or item.get("createdAt") or "", reverse=True)[:limit]
 
 
-def upsert_deal_state_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
-    """Persist one Evidence/Assumption/Metric/RiskIssue as a queryable first-class row."""
+def upsert_agent_handoff_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a typed AgentHandoffEnvelope as an auditable communication row."""
     now = datetime.now(timezone.utc).isoformat()
+    handoff_id = record.get("handoffId") or record.get("handoff_id") or f"handoff:{uuid4()}"
+    normalized = {
+        **record,
+        "schemaVersion": record.get("schemaVersion") or "realytics-agent-handoff-v1",
+        "projectId": str(project_id),
+        "handoffId": str(handoff_id),
+        "runId": record.get("runId") or record.get("run_id"),
+        "fromAgent": record.get("fromAgent") or record.get("from_agent"),
+        "toAgent": record.get("toAgent") or record.get("to_agent"),
+        "handoffType": record.get("handoffType") or record.get("handoff_type") or "pod_artifact_ready",
+        "status": record.get("status") or "created",
+        "createdAt": record.get("createdAt") or record.get("created_at") or now,
+        "updatedAt": now,
+    }
+    outbox = _new_runtime_outbox_payload(
+        tenant_id=str(record.get("tenantId") or "legacy"),
+        project_id=str(project_id),
+        aggregate_type="agent_handoff",
+        aggregate_id=normalized["handoffId"],
+        event_type="agent_handoff_upserted",
+        updated_at=now,
+        payload={
+            "projectId": str(project_id),
+            "handoffId": normalized["handoffId"],
+            "runId": normalized.get("runId"),
+            "fromAgent": normalized.get("fromAgent"),
+            "toAgent": normalized.get("toAgent"),
+        },
+    )
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        postgres.upsert_typed_jsonb_record_with_outbox(
+            "agent_handoffs",
+            {
+                "project_id": str(project_id),
+                "handoff_id": normalized["handoffId"],
+                "run_id": normalized.get("runId"),
+                "from_agent": normalized.get("fromAgent"),
+                "to_agent": normalized.get("toAgent"),
+                "handoff_type": normalized.get("handoffType"),
+                "status": normalized.get("status"),
+                "created_at": normalized.get("createdAt"),
+                "updated_at": normalized.get("updatedAt"),
+            },
+            normalized,
+            _runtime_outbox_values(outbox),
+            outbox,
+        )
+        state = _load_json_state() or default_state()
+        state.setdefault("agent_handoffs", {}).setdefault(str(project_id), {})[normalized["handoffId"]] = normalized
+        state.setdefault("runtime_outbox_events", {})[outbox["eventId"]] = outbox
+        _save_json_state_from_state(state)
+        return normalized
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        state.setdefault("agent_handoffs", {}).setdefault(str(project_id), {})[normalized["handoffId"]] = normalized
+        state.setdefault("runtime_outbox_events", {})[outbox["eventId"]] = outbox
+        _save_json_state_from_state(state)
+        return normalized
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_handoffs(
+                project_id, handoff_id, run_id, from_agent, to_agent, handoff_type,
+                status, created_at, updated_at, payload_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, handoff_id) DO UPDATE SET
+                run_id=excluded.run_id,
+                from_agent=excluded.from_agent,
+                to_agent=excluded.to_agent,
+                handoff_type=excluded.handoff_type,
+                status=excluded.status,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                str(project_id),
+                normalized["handoffId"],
+                normalized.get("runId"),
+                normalized.get("fromAgent"),
+                normalized.get("toAgent"),
+                normalized.get("handoffType"),
+                normalized.get("status"),
+                normalized.get("createdAt"),
+                normalized.get("updatedAt"),
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        _insert_sqlite_runtime_outbox(conn, outbox)
+        conn.commit()
+    return normalized
+
+
+def list_agent_handoff_records(
+    project_id: str,
+    *,
+    from_agent: str | None = None,
+    to_agent: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[Dict[str, Any]]:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where: Dict[str, Any] = {"project_id": str(project_id)}
+        if from_agent:
+            where["from_agent"] = from_agent
+        if to_agent:
+            where["to_agent"] = to_agent
+        if status:
+            where["status"] = status
+        return postgres.list_typed_jsonb_records("agent_handoffs", where=where, limit=limit)
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        records = list(state.get("agent_handoffs", {}).get(str(project_id), {}).values())
+    else:
+        query = "SELECT payload_json FROM agent_handoffs WHERE project_id = ?"
+        params: list[Any] = [str(project_id)]
+        for column, value in (("from_agent", from_agent), ("to_agent", to_agent), ("status", status)):
+            if value:
+                query += f" AND {column} = ?"
+                params.append(value)
+        query += " ORDER BY created_at DESC, handoff_id DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if from_agent:
+        records = [row for row in records if row.get("fromAgent") == from_agent]
+    if to_agent:
+        records = [row for row in records if row.get("toAgent") == to_agent]
+    if status:
+        records = [row for row in records if row.get("status") == status]
+    return sorted(records, key=lambda item: item.get("createdAt") or "", reverse=True)[:limit]
+
+
+def _normalize_deal_state_record(
+    project_id: str,
+    record: Dict[str, Any],
+    *,
+    now: str | None = None,
+) -> Dict[str, Any]:
+    now = now or datetime.now(timezone.utc).isoformat()
     record_type = record.get("recordType") or record.get("record_type") or "metric"
     record_id = record.get("recordId") or record.get("record_id") or f"{record_type}:{record.get('key') or uuid4()}"
-    normalized = {
+    return {
         **record,
         "schemaVersion": record.get("schemaVersion") or "realytics-deal-state-record-v1",
         "projectId": project_id,
@@ -1099,15 +2245,58 @@ def upsert_deal_state_record(project_id: str, record: Dict[str, Any]) -> Dict[st
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
-    if _use_document_store():
+
+
+def _deal_state_typed_values(project_id: str, normalized: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "project_id": project_id,
+        "record_id": normalized["recordId"],
+        "record_type": normalized.get("recordType"),
+        "key": normalized.get("key"),
+        "calculation_run_id": normalized.get("calculationRunId"),
+        "source_type": normalized.get("sourceType"),
+        "review_status": normalized.get("reviewStatus"),
+        "updated_at": normalized.get("updatedAt"),
+    }
+
+
+def upsert_deal_state_records(
+    project_id: str,
+    records: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    """Persist a materialized deal-state batch in one backend transaction."""
+    if not records:
+        return []
+    now = datetime.now(timezone.utc).isoformat()
+    normalized_rows = [
+        _normalize_deal_state_record(project_id, record, now=now) for record in records
+    ]
+    if storage_backend() == "postgres":
+        from db import postgres
+
         state = _load_json_state() or default_state()
-        state.setdefault("deal_state_records", {})
-        state["deal_state_records"].setdefault(project_id, {})[normalized["recordId"]] = normalized
+        project_records = state.setdefault("deal_state_records", {}).setdefault(project_id, {})
+        for normalized in normalized_rows:
+            project_records[normalized["recordId"]] = normalized
         _save_json_state_from_state(state)
-        return normalized
+        postgres.upsert_typed_jsonb_records(
+            "deal_state_records",
+            [
+                (_deal_state_typed_values(project_id, normalized), normalized)
+                for normalized in normalized_rows
+            ],
+        )
+        return normalized_rows
+    if storage_backend() == "json":
+        state = _load_json_state() or default_state()
+        project_records = state.setdefault("deal_state_records", {}).setdefault(project_id, {})
+        for normalized in normalized_rows:
+            project_records[normalized["recordId"]] = normalized
+        _save_json_state_from_state(state)
+        return normalized_rows
 
     with _connect_sqlite() as conn:
-        conn.execute(
+        conn.executemany(
             """
             INSERT INTO deal_state_records(
                 project_id, record_id, record_type, key, calculation_run_id,
@@ -1122,19 +2311,27 @@ def upsert_deal_state_record(project_id: str, record: Dict[str, Any]) -> Dict[st
                 updated_at=excluded.updated_at,
                 payload_json=excluded.payload_json
             """,
-            (
-                project_id,
-                normalized["recordId"],
-                normalized["recordType"],
-                normalized.get("key"),
-                normalized.get("calculationRunId"),
-                normalized.get("sourceType"),
-                normalized.get("updatedAt"),
-                json.dumps(normalized, ensure_ascii=False),
-            ),
+            [
+                (
+                    project_id,
+                    normalized["recordId"],
+                    normalized["recordType"],
+                    normalized.get("key"),
+                    normalized.get("calculationRunId"),
+                    normalized.get("sourceType"),
+                    normalized.get("updatedAt"),
+                    json.dumps(normalized, ensure_ascii=False),
+                )
+                for normalized in normalized_rows
+            ],
         )
         conn.commit()
-    return normalized
+    return normalized_rows
+
+
+def upsert_deal_state_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist one Evidence/Assumption/Metric/RiskIssue as a queryable first-class row."""
+    return upsert_deal_state_records(project_id, [record])[0]
 
 
 def _deal_state_record_has_source_locator(record: Dict[str, Any]) -> bool:
@@ -1156,7 +2353,18 @@ def list_deal_state_records(
     limit: int = 200,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 200), 1000))
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where: Dict[str, Any] = {"project_id": project_id}
+        if record_type:
+            where["record_type"] = record_type
+        if calculation_run_id:
+            where["calculation_run_id"] = calculation_run_id
+        if review_status and review_status != "unreviewed":
+            where["review_status"] = review_status
+        records = postgres.list_typed_jsonb_records("deal_state_records", where=where, limit=limit)
+    elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         records = list(state.get("deal_state_records", {}).get(project_id, {}).values())
     else:
@@ -1233,6 +2441,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
         "inputEvidenceIds": record.get("inputEvidenceIds") or record.get("input_evidence_ids") or [],
         "assumptionIds": record.get("assumptionIds") or record.get("assumption_ids") or [],
         "outputMetrics": record.get("outputMetrics") or record.get("output_metrics") or [],
+        "inputSnapshot": record.get("inputSnapshot") or record.get("input_snapshot") or {},
         # Keep the deterministic engine result for report/UI readback. The
         # registry metrics remain the queryable index; this snapshot preserves
         # monthly rows and matrix details without recomputation.
@@ -1245,11 +2454,50 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
+    outbox = _new_runtime_outbox_payload(
+        tenant_id=str(record.get("tenantId") or "legacy"),
+        project_id=str(project_id),
+        aggregate_type="calculation_run",
+        aggregate_id=normalized["calculationRunId"],
+        event_type="calculation_run_upserted",
+        updated_at=now,
+        payload={
+            "projectId": str(project_id),
+            "calculationRunId": normalized["calculationRunId"],
+            "engineKey": normalized.get("engineKey"),
+            "status": normalized.get("status"),
+        },
+    )
 
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        postgres.upsert_typed_jsonb_record_with_outbox(
+            "calculation_runs",
+            {
+                "project_id": project_id,
+                "calculation_run_id": normalized["calculationRunId"],
+                "engine_key": normalized.get("engineKey"),
+                "engine_version": normalized.get("engineVersion"),
+                "status": normalized.get("status"),
+                "created_at": normalized.get("createdAt"),
+                "updated_at": normalized.get("updatedAt"),
+            },
+            normalized,
+            _runtime_outbox_values(outbox),
+            outbox,
+        )
+        state = _load_json_state() or default_state()
+        state.setdefault("calculation_runs", {}).setdefault(str(project_id), {})[
+            normalized["calculationRunId"]
+        ] = normalized
+        state.setdefault("runtime_outbox_events", {})[outbox["eventId"]] = outbox
+        _save_json_state_from_state(state)
+    elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         state.setdefault("calculation_runs", {})
         state["calculation_runs"].setdefault(project_id, {})[normalized["calculationRunId"]] = normalized
+        state.setdefault("runtime_outbox_events", {})[outbox["eventId"]] = outbox
         _save_json_state_from_state(state)
     else:
         with _connect_sqlite() as conn:
@@ -1278,14 +2526,37 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                     json.dumps(normalized, ensure_ascii=False),
                 ),
             )
+            _insert_sqlite_runtime_outbox(conn, outbox)
             conn.commit()
 
+    _materialize_calculation_run_record(project_id, normalized)
+    return normalized
+
+
+def materialize_calculation_run_record(project_id: str, calculation_run_id: str) -> list[Dict[str, Any]]:
+    """Idempotently rebuild Deal State projections from a durable CalculationRun."""
+    run = next(
+        (
+            item for item in list_calculation_run_records(project_id, limit=500)
+            if str(item.get("calculationRunId")) == str(calculation_run_id)
+        ),
+        None,
+    )
+    if run is None:
+        raise KeyError(f"CalculationRun not found: {calculation_run_id}")
+    return _materialize_calculation_run_record(project_id, run)
+
+
+def _materialize_calculation_run_record(
+    project_id: str,
+    normalized: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    materialized_records: list[Dict[str, Any]] = []
     for metric in normalized.get("outputMetrics") or []:
         if isinstance(metric, dict):
             key = metric.get("key") or metric.get("metricKey")
             metric_source_locator = metric.get("sourceLocator") or metric.get("source_locator") or run_source_locator
-            upsert_deal_state_record(
-                project_id,
+            materialized_records.append(
                 {
                     **metric,
                     "recordId": metric.get("recordId") or f"metric:{normalized['calculationRunId']}:{key or uuid4()}",
@@ -1293,7 +2564,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                     "calculationRunId": normalized["calculationRunId"],
                     "sourceType": "calculation_run",
                     "sourceLocator": metric_source_locator,
-                },
+                }
             )
     for risk in normalized.get("riskIssues") or []:
         if isinstance(risk, dict):
@@ -1305,8 +2576,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                 or (risk_locators[0] if isinstance(risk_locators, list) and risk_locators else None)
                 or run_source_locator
             )
-            upsert_deal_state_record(
-                project_id,
+            materialized_records.append(
                 {
                     **risk,
                     "recordId": risk.get("recordId") or f"risk:{normalized['calculationRunId']}:{code or uuid4()}",
@@ -1315,11 +2585,10 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                     "calculationRunId": normalized["calculationRunId"],
                     "sourceType": "calculation_run",
                     "sourceLocator": risk_source_locator,
-                },
+                }
             )
     for assumption_id in normalized.get("assumptionIds") or []:
-        upsert_deal_state_record(
-            project_id,
+        materialized_records.append(
             {
                 "recordId": f"assumption:{normalized['calculationRunId']}:{assumption_id}",
                 "recordType": "assumption",
@@ -1327,11 +2596,10 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                 "calculationRunId": normalized["calculationRunId"],
                 "sourceType": "calculation_run",
                 "sourceLocator": {"calculationRunId": normalized["calculationRunId"]},
-            },
+            }
         )
     for evidence_id in normalized.get("inputEvidenceIds") or []:
-        upsert_deal_state_record(
-            project_id,
+        materialized_records.append(
             {
                 "recordId": f"evidence:{normalized['calculationRunId']}:{evidence_id}",
                 "recordType": "evidence",
@@ -1339,9 +2607,11 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
                 "calculationRunId": normalized["calculationRunId"],
                 "sourceType": "calculation_run",
                 "sourceLocator": {"calculationRunId": normalized["calculationRunId"]},
-            },
+            }
         )
-    return normalized
+    if materialized_records:
+        upsert_deal_state_records(project_id, materialized_records)
+    return materialized_records
 
 
 def _risk_issue_ids(record: Dict[str, Any]) -> list[str]:
@@ -1364,7 +2634,14 @@ def list_calculation_run_records(
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 100), 500))
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where: Dict[str, Any] = {"project_id": project_id}
+        if engine_key:
+            where["engine_key"] = engine_key
+        records = postgres.list_typed_jsonb_records("calculation_runs", where=where, limit=limit)
+    elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         records = list(state.get("calculation_runs", {}).get(project_id, {}).values())
     else:
@@ -1408,7 +2685,28 @@ def upsert_recalculation_event_record(project_id: str, event: Dict[str, Any]) ->
         "updatedAt": now,
     }
 
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        _upsert_postgres_typed_record(
+            store_key="recalculation_events",
+            project_id=project_id,
+            record_id=normalized["eventId"],
+            table="recalculation_events",
+            values={
+                "project_id": project_id,
+                "event_id": normalized["eventId"],
+                "run_id": normalized.get("runId"),
+                "source_pod": normalized.get("sourcePod"),
+                "target_pod": normalized.get("targetPod"),
+                "trigger_name": normalized.get("trigger"),
+                "event_type": normalized.get("eventType"),
+                "status": normalized.get("status"),
+                "created_at": normalized.get("createdAt"),
+                "updated_at": normalized.get("updatedAt"),
+            },
+            normalized=normalized,
+        )
+        return normalized
+    if storage_backend() == "json":
         state = _load_json_state() or default_state()
         state.setdefault("recalculation_events", {})
         state["recalculation_events"].setdefault(project_id, {})[normalized["eventId"]] = normalized
@@ -1460,7 +2758,18 @@ def list_recalculation_event_records(
     status: str | None = None,
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where: Dict[str, Any] = {"project_id": project_id}
+        if run_id:
+            where["run_id"] = run_id
+        if source_pod:
+            where["source_pod"] = source_pod
+        if status:
+            where["status"] = status
+        records = postgres.list_typed_jsonb_records("recalculation_events", where=where, limit=limit)
+    elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         records = list(state.get("recalculation_events", {}).get(project_id, {}).values())
     else:
@@ -2292,11 +3601,17 @@ def _save_json_state(
     pod_ai_reviews: Dict[str, Any] | None = None,
     legal_reviews: Dict[str, Any] | None = None,
     permit_reviews: Dict[str, Any] | None = None,
+    agent_handoffs: Dict[str, Any] | None = None,
+    agent_runs: Dict[str, Any] | None = None,
+    agent_run_steps: Dict[str, Any] | None = None,
+    brain_usage_events: Dict[str, Any] | None = None,
+    operational_stores: Dict[str, Dict[str, Any]] | None = None,
 ) -> None:
     path = state_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
-    payload = _normalize_state({
+    existing_state = _load_json_state() or default_state()
+    payload_data = {
         "version": STATE_VERSION,
         "project_id_counter": project_id_counter,
         "projects": projects,
@@ -2307,12 +3622,16 @@ def _save_json_state(
         "risk_registers": risk_registers,
         "evidence_graphs": evidence_graphs,
         "chief_pod_artifacts": chief_pod_artifacts,
-        "pod_ai_reviews": pod_ai_reviews or (_load_json_state() or default_state()).get("pod_ai_reviews", {}),
-        "legal_reviews": legal_reviews or (_load_json_state() or default_state()).get("legal_reviews", {}),
-        "permit_reviews": permit_reviews or (_load_json_state() or default_state()).get("permit_reviews", {}),
-        "recalculation_events": recalculation_events or (_load_json_state() or default_state()).get("recalculation_events", {}),
-        "calculation_runs": calculation_runs or (_load_json_state() or default_state()).get("calculation_runs", {}),
-        "deal_state_records": deal_state_records or (_load_json_state() or default_state()).get("deal_state_records", {}),
+        "pod_ai_reviews": pod_ai_reviews or existing_state.get("pod_ai_reviews", {}),
+        "agent_handoffs": agent_handoffs or existing_state.get("agent_handoffs", {}),
+        "agent_runs": agent_runs or existing_state.get("agent_runs", {}),
+        "agent_run_steps": agent_run_steps or existing_state.get("agent_run_steps", {}),
+        "brain_usage_events": brain_usage_events or existing_state.get("brain_usage_events", {}),
+        "legal_reviews": legal_reviews or existing_state.get("legal_reviews", {}),
+        "permit_reviews": permit_reviews or existing_state.get("permit_reviews", {}),
+        "recalculation_events": recalculation_events or existing_state.get("recalculation_events", {}),
+        "calculation_runs": calculation_runs or existing_state.get("calculation_runs", {}),
+        "deal_state_records": deal_state_records or existing_state.get("deal_state_records", {}),
         "prompt_artifacts": prompt_artifacts,
         "assumption_overrides": assumption_overrides,
         "restructuring_cures": restructuring_cures,
@@ -2321,8 +3640,14 @@ def _save_json_state(
         "project_snapshots": project_snapshots,
         "user_activity_logs": user_activity_logs[-MAX_JSON_ACTIVITY_LOGS:],
         "identity": identity or default_state()["identity"],
-        "user_ai_profiles": user_ai_profiles or (_load_json_state() or default_state()).get("user_ai_profiles", {}),
-    })
+        "user_ai_profiles": user_ai_profiles or existing_state.get("user_ai_profiles", {}),
+    }
+    for store_name in _OPERATIONAL_RECORD_SPECS:
+        payload_data[store_name] = (operational_stores or {}).get(
+            store_name,
+            existing_state.get(store_name, {}),
+        )
+    payload = _normalize_state(payload_data)
     if storage_backend() == "postgres":
         from db import postgres
 
@@ -2463,6 +3788,236 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             ON pod_ai_reviews(project_id, pod_key, updated_at);
         CREATE INDEX IF NOT EXISTS idx_pod_ai_reviews_project_status
             ON pod_ai_reviews(project_id, review_status, updated_at);
+        CREATE TABLE IF NOT EXISTS agent_handoffs (
+            project_id TEXT NOT NULL,
+            handoff_id TEXT NOT NULL,
+            run_id TEXT,
+            from_agent TEXT,
+            to_agent TEXT,
+            handoff_type TEXT,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, handoff_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_handoffs_project_route
+            ON agent_handoffs(project_id, from_agent, to_agent, created_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_handoffs_project_status
+            ON agent_handoffs(project_id, status, updated_at);
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            run_id TEXT PRIMARY KEY,
+            project_id TEXT,
+            tenant_id TEXT NOT NULL,
+            user_id TEXT,
+            request_id TEXT NOT NULL,
+            correlation_id TEXT,
+            trace_id TEXT,
+            agent_id TEXT NOT NULL,
+            agent_version TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 1,
+            cancellation_requested INTEGER NOT NULL DEFAULT 0,
+            state_version INTEGER NOT NULL DEFAULT 1,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            heartbeat_at TEXT,
+            deadline_at TEXT,
+            consumed_cost_usd REAL NOT NULL DEFAULT 0,
+            consumed_llm_calls INTEGER NOT NULL DEFAULT 0,
+            consumed_tool_calls INTEGER NOT NULL DEFAULT 0,
+            retry_of_run_id TEXT,
+            selected_brain_profile_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE (tenant_id, agent_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_project_updated
+            ON agent_runs(project_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_status_updated
+            ON agent_runs(status, updated_at);
+        CREATE TABLE IF NOT EXISTS agent_run_steps (
+            step_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            project_id TEXT,
+            sequence_no INTEGER NOT NULL,
+            stage TEXT NOT NULL,
+            step_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_no INTEGER,
+            error_code TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE (run_id, sequence_no)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_run_steps_run_sequence
+            ON agent_run_steps(run_id, sequence_no);
+        CREATE TABLE IF NOT EXISTS brain_usage_events (
+            event_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            step_id TEXT,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT,
+            agent_id TEXT NOT NULL,
+            agent_version TEXT NOT NULL,
+            brain_profile_id TEXT,
+            provider TEXT,
+            model TEXT,
+            status TEXT NOT NULL,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            estimated_cost_usd REAL,
+            latency_ms INTEGER,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_brain_usage_events_run
+            ON brain_usage_events(run_id, occurred_at);
+        CREATE INDEX IF NOT EXISTS idx_brain_usage_events_project
+            ON brain_usage_events(project_id, occurred_at);
+        CREATE TABLE IF NOT EXISTS runtime_outbox_events (
+            event_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT,
+            aggregate_type TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 8,
+            available_at TEXT NOT NULL,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            published_at TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_outbox_claim
+            ON runtime_outbox_events(status, available_at, lease_expires_at);
+        CREATE TABLE IF NOT EXISTS brain_provider_health (
+            health_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            brain_profile_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            status TEXT NOT NULL,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            checked_at TEXT NOT NULL,
+            next_check_at TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE(tenant_id, brain_profile_id)
+        );
+        CREATE TABLE IF NOT EXISTS brain_routing_policies (
+            policy_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            user_id TEXT,
+            version INTEGER NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE(tenant_id, user_id, version)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_brain_routing_policy_scope_version
+            ON brain_routing_policies(tenant_id, COALESCE(user_id, ''), version);
+        CREATE TABLE IF NOT EXISTS brain_routing_events (
+            routing_event_id TEXT PRIMARY KEY,
+            run_id TEXT,
+            request_id TEXT,
+            tenant_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            project_id TEXT,
+            task_type TEXT NOT NULL,
+            policy_id TEXT,
+            policy_version INTEGER,
+            selected_profile_id TEXT,
+            selected_provider TEXT,
+            selected_model TEXT,
+            blocked INTEGER NOT NULL DEFAULT 0,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_brain_routing_events_run
+            ON brain_routing_events(run_id, occurred_at);
+        CREATE TABLE IF NOT EXISTS tool_calls (
+            tool_call_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            step_id TEXT,
+            tenant_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            project_id TEXT,
+            tool_id TEXT NOT NULL,
+            tool_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            side_effect_level TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            state_version INTEGER NOT NULL DEFAULT 1,
+            requested_at TEXT NOT NULL,
+            completed_at TEXT,
+            payload_json TEXT NOT NULL,
+            UNIQUE(tenant_id, tool_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id, requested_at);
+        CREATE TABLE IF NOT EXISTS learning_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT,
+            candidate_type TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS learning_evaluations (
+            evaluation_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS learning_promotions (
+            decision_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            approved_by TEXT NOT NULL,
+            approved_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS coding_pod_jobs (
+            job_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            requested_by TEXT NOT NULL,
+            workspace_ref TEXT NOT NULL,
+            branch_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            heartbeat_at TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            state_version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE(tenant_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_coding_pod_jobs_claim
+            ON coding_pod_jobs(status, lease_expires_at, created_at);
         CREATE TABLE IF NOT EXISTS legal_reviews (
             project_id TEXT NOT NULL,
             review_id TEXT NOT NULL,
@@ -2686,7 +4241,29 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             ON user_ai_profiles(tenant_id, updated_at);
         """
     )
+    _ensure_sqlite_column(conn, "agent_runs", "lease_owner", "TEXT")
+    _ensure_sqlite_column(conn, "agent_runs", "lease_expires_at", "TEXT")
+    _ensure_sqlite_column(conn, "agent_runs", "heartbeat_at", "TEXT")
+    _ensure_sqlite_column(conn, "agent_runs", "deadline_at", "TEXT")
+    _ensure_sqlite_column(conn, "agent_runs", "consumed_cost_usd", "REAL NOT NULL DEFAULT 0")
+    _ensure_sqlite_column(conn, "agent_runs", "consumed_llm_calls", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_sqlite_column(conn, "agent_runs", "consumed_tool_calls", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_sqlite_column(conn, "agent_runs", "retry_of_run_id", "TEXT")
+    _ensure_sqlite_column(conn, "coding_pod_jobs", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_sqlite_column(conn, "coding_pod_jobs", "max_attempts", "INTEGER NOT NULL DEFAULT 3")
+    _ensure_sqlite_column(conn, "coding_pod_jobs", "state_version", "INTEGER NOT NULL DEFAULT 1")
     conn.commit()
+
+
+def _ensure_sqlite_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    existing = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def _load_sqlite_state() -> Dict[str, Any] | None:
@@ -2753,6 +4330,21 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         ):
             pod_ai_reviews.setdefault(row["project_id"], {})[row["review_id"]] = json.loads(row["payload_json"])
 
+        agent_runs = {
+            row["run_id"]: json.loads(row["payload_json"])
+            for row in conn.execute("SELECT run_id, payload_json FROM agent_runs ORDER BY updated_at, run_id")
+        }
+        agent_run_steps: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT run_id, step_id, payload_json FROM agent_run_steps ORDER BY run_id, sequence_no"
+        ):
+            agent_run_steps.setdefault(row["run_id"], {})[row["step_id"]] = json.loads(row["payload_json"])
+        brain_usage_events: Dict[str, Any] = {}
+        for row in conn.execute(
+            "SELECT run_id, event_id, payload_json FROM brain_usage_events ORDER BY run_id, occurred_at"
+        ):
+            brain_usage_events.setdefault(row["run_id"], {})[row["event_id"]] = json.loads(row["payload_json"])
+
         recalculation_events: Dict[str, Any] = {}
         for row in conn.execute(
             "SELECT project_id, event_id, payload_json FROM recalculation_events ORDER BY project_id, created_at, event_id"
@@ -2815,7 +4407,7 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         }
 
     has_identity_records = any(identity.get(key) for key in ("tenants", "users", "sessions"))
-    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not chief_pod_artifacts and not pod_ai_reviews and not recalculation_events and not prompt_artifacts and not assumption_overrides and not restructuring_cures and not glossary_terms and not glossary_term_candidates and not metadata and not has_identity_records:
+    if not projects and not reports and not orchestrations and not risk_registers and not evidence_graphs and not chief_pod_artifacts and not pod_ai_reviews and not agent_runs and not agent_run_steps and not brain_usage_events and not recalculation_events and not prompt_artifacts and not assumption_overrides and not restructuring_cures and not glossary_terms and not glossary_term_candidates and not metadata and not has_identity_records:
         return None
 
     return _normalize_state({
@@ -2830,6 +4422,9 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
         "evidence_graphs": evidence_graphs,
         "chief_pod_artifacts": chief_pod_artifacts,
         "pod_ai_reviews": pod_ai_reviews,
+        "agent_runs": agent_runs,
+        "agent_run_steps": agent_run_steps,
+        "brain_usage_events": brain_usage_events,
         "recalculation_events": recalculation_events,
         "prompt_artifacts": prompt_artifacts,
         "assumption_overrides": assumption_overrides,
@@ -3127,6 +4722,10 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("evidence_graphs", {})
     normalized.setdefault("chief_pod_artifacts", {})
     normalized.setdefault("pod_ai_reviews", {})
+    normalized.setdefault("agent_handoffs", {})
+    normalized.setdefault("agent_runs", {})
+    normalized.setdefault("agent_run_steps", {})
+    normalized.setdefault("brain_usage_events", {})
     normalized.setdefault("legal_reviews", {})
     normalized.setdefault("permit_reviews", {})
     normalized.setdefault("recalculation_events", {})
@@ -3174,6 +4773,14 @@ def _save_json_state_from_state(state: Dict[str, Any]) -> None:
         pod_ai_reviews=state.get("pod_ai_reviews", {}),
         legal_reviews=state.get("legal_reviews", {}),
         permit_reviews=state.get("permit_reviews", {}),
+        agent_handoffs=state.get("agent_handoffs", {}),
+        agent_runs=state.get("agent_runs", {}),
+        agent_run_steps=state.get("agent_run_steps", {}),
+        brain_usage_events=state.get("brain_usage_events", {}),
+        operational_stores={
+            store_name: state.get(store_name, {})
+            for store_name in _OPERATIONAL_RECORD_SPECS
+        },
     )
 
 

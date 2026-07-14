@@ -120,6 +120,10 @@ def _sales_collection_schedule(request: Dict[str, Any], months: int) -> List[Dic
     schedule = [{"contract": 0.0, "interim": 0.0, "balance": 0.0} for _ in range(months + 1)]
     for product in request.get("productMix", []):
         revenue = float(product.get("totalSalesRevenue") or 0.0)
+        explicit_steps = product.get("collectionSteps") or []
+        if explicit_steps:
+            _apply_explicit_collection_steps(schedule, explicit_steps, months, revenue)
+            continue
         collection = product.get("defaultCollection") or "manual"
         for item in _collection_template(collection, months):
             month = min(months, item["month"])
@@ -127,6 +131,46 @@ def _sales_collection_schedule(request: Dict[str, Any], months: int) -> List[Dic
             bucket = "balance" if "balance" in label else "contract" if "contract" in label else "interim"
             schedule[month][bucket] += revenue * item["rate"]
     return schedule
+
+
+def _apply_explicit_collection_steps(
+    schedule: List[Dict[str, float]],
+    steps: List[Dict[str, Any]],
+    months: int,
+    revenue: float,
+) -> None:
+    """Apply workbook-derived collection rows before default asset schedules."""
+    for step in steps:
+        label = str(step.get("stage") or step.get("label") or "interim").lower()
+        bucket = _collection_bucket(label)
+        monthly_amounts = step.get("monthlyCollectionAmounts")
+        if isinstance(monthly_amounts, list) and monthly_amounts:
+            for month_index, amount in enumerate(monthly_amounts[: len(schedule)]):
+                try:
+                    schedule[month_index][bucket] += float(amount or 0.0)
+                except (TypeError, ValueError):
+                    continue
+            continue
+        due_month = step.get("dueMonth") or step.get("month")
+        rate = step.get("collectionRate") or step.get("rate") or 0.0
+        try:
+            month = min(months, max(0, int(due_month or 0)))
+            schedule[month][bucket] += revenue * float(rate)
+        except (TypeError, ValueError):
+            continue
+
+
+def _collection_bucket(label: str) -> str:
+    normalized_label = str(label).casefold()
+    if any(token in normalized_label for token in ("balance", "\uC794\uAE08", "final")):
+        return "balance"
+    if any(token in normalized_label for token in ("contract", "\uACC4\uC57D", "deposit")):
+        return "contract"
+    if any(token in label for token in ("balance", "잔금", "final")):
+        return "balance"
+    if any(token in label for token in ("contract", "계약", "deposit")):
+        return "contract"
+    return "interim"
 
 
 def _collection_template(collection: str, months: int) -> List[Dict[str, Any]]:

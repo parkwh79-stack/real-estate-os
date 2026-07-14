@@ -72,6 +72,12 @@ from storage import (
     upsert_land_evidence_record,
     upsert_chief_pod_artifact_record,
     upsert_pod_ai_review_record,
+    upsert_agent_handoff_record,
+    list_agent_handoff_records,
+    get_agent_run_record,
+    list_agent_run_records,
+    list_agent_run_step_records,
+    list_brain_usage_event_records,
     upsert_recalculation_event_record,
     upsert_prompt_artifact_record,
     upsert_restructuring_cure_record,
@@ -79,6 +85,10 @@ from storage import (
     upsert_calculation_run_record,
 )
 from use_cases.cash_flow import run_cash_flow_use_case
+from agent_platform.runtime import StorageAgentRunRepository
+from agent_platform.contracts import LearningCandidate
+from agent_platform.learning import LearningLifecycleService
+from agent_platform.operational import OperationalRepository
 from use_cases.chief_deal_orchestration import (
     plan_chief_deal_orchestration_use_case,
     run_chief_deal_all_pods_use_case,
@@ -92,7 +102,7 @@ from use_cases.covenant_eod import evaluate_covenant_eod_use_case
 from use_cases.product_planning import compare_product_planning_use_case
 from use_cases.market_product_depth import analyze_market_product_depth_use_case
 from use_cases.reanalyze_on_evidence import reanalyze_after_evidence_use_case
-from use_cases.feasibility_input_builder import build_feasibility_input_draft
+from use_cases.feasibility_input_builder import build_feasibility_input_draft, canonical_product_mix_to_runtime
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
 from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_case
 from agents.land_ledger_agent import LandLedgerParseError
@@ -861,6 +871,7 @@ def _persist_calculation_run(
             "assumptionIds": input_data.get("assumptionIds") or [],
             "outputMetrics": _metric_rows_from_result(result, prefix=f"{engine_key}." ) + _monthly_cashflow_metric_rows(result, engine_key),
             "riskIssues": _risk_rows_from_result(result),
+            "inputSnapshot": input_data,
             "resultSnapshot": result,
             "scenario": scenario or {},
             "artifactRef": artifact_ref or {},
@@ -1245,7 +1256,13 @@ async def validate_uploaded_risk_report_workbook(project_id: str, file: UploadFi
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-async def learn_uploaded_feasibility_workbook(project_id: str, file: UploadFile) -> Dict[str, Any]:
+async def learn_uploaded_feasibility_workbook(
+    project_id: str,
+    file: UploadFile,
+    *,
+    tenant_id: str = "default",
+    created_by: str = "system",
+) -> Dict[str, Any]:
     suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
     uploaded_at = now_iso()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -1289,10 +1306,46 @@ async def learn_uploaded_feasibility_workbook(project_id: str, file: UploadFile)
                 ],
             }
         upload_meta["learningStatus"] = learning.get("status")
+        lifecycle_candidate = None
+        mapping_candidates = learning.get("mappingCandidates") or []
+        if mapping_candidates:
+            now = datetime.now(timezone.utc)
+            selected_template = (learning.get("templateCandidates") or [{}])[0] or {}
+            target_key = str(
+                selected_template.get("templateId")
+                or upload_meta.get("archiveId")
+                or upload_meta.get("originalFileHash")
+            )
+            candidate = LearningCandidate(
+                candidate_id=f"learning-candidate:{uuid4()}",
+                tenant_id=tenant_id,
+                project_id=project_id,
+                candidate_type="feasibility_workbook_mapping",
+                target_key=target_key,
+                proposed_change={
+                    "selectedTemplate": selected_template,
+                    "mappingCandidates": mapping_candidates,
+                    "validationPlan": learning.get("validationPlan") or {},
+                    "automationDecision": learning.get("automationDecision") or {},
+                },
+                evidence_ids=[str(upload_meta.get("archiveId") or upload_meta.get("originalFileHash"))],
+                created_by=created_by,
+                created_at=now,
+                updated_at=now,
+                metadata={
+                    "sourceDocumentType": upload_meta.get("documentType"),
+                    "parserVersion": upload_meta.get("parserVersion"),
+                    "automaticPromotionAllowed": False,
+                },
+            )
+            lifecycle_candidate = LearningLifecycleService(
+                OperationalRepository(),
+            ).create_candidate(candidate).model_dump(by_alias=True, mode="json")
         return {
             "project_id": project_id,
             "upload": upload_meta,
             "learning": learning,
+            "learningCandidate": lifecycle_candidate,
             "note": (
                 "Workbook learning is read-only. Mapping candidates require LLM judgement, "
                 "automated validation, shadow-mode import, and regression tests before they "
@@ -1908,11 +1961,19 @@ def persist_project_feasibility_workbook_candidate(
 @router.post("/{project_id}/feasibility-workbook/learn")
 async def learn_project_feasibility_workbook(
     project_id: str,
+    request: Request,
     file: UploadFile = File(...),
 ):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    result = await learn_uploaded_feasibility_workbook(project_id, file)
+    identity = authorize_request(request, "project:analyze")
+    user = identity.get("user") or {}
+    result = await learn_uploaded_feasibility_workbook(
+        project_id,
+        file,
+        tenant_id=str(user.get("tenantId") or "default"),
+        created_by=str(user.get("userId") or "unknown"),
+    )
     save_source_document_metadata_use_case(source_document_repository(), project_id, result["upload"])
     return result
 
@@ -2466,8 +2527,14 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
                 arch = dict(project.get("architectural_plan") or {})
                 arch["gross_floor_area_sqm"] = gfa_val
                 update_payload["architectural_plan"] = arch
-            # Note: V2.product_mix uses nested provenance objects (not the flat shape the
-            # feasibility engine expects), so it is NOT copied to project.product_mix here.
+            canonical_mix = canonical_product_mix_to_runtime(v2.get("product_mix"))
+            if canonical_mix:
+                # The approved canonical workbook is authoritative for the
+                # downstream runtime shape as well. Preserve provenance on each
+                # row so later Pod reconciliation can distinguish it from a
+                # manually entered product mix.
+                update_payload["product_mix"] = canonical_mix
+                update_payload["product_mix_source"] = "canonical_feasibility_study_v2"
         project_repository().update(project_id, update_payload)
         draft["applied"] = True
         record_sensitive_project_event(
@@ -2496,9 +2563,65 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
 def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    result = run_cash_flow_use_case(PROJECTS_DB[project_id], input_data)
-    run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data=input_data)
-    return {**result, "calculationRunId": run["calculationRunId"]}
+    request_data = input_data or {}
+    if request_data.get("requestType") != "cash_flow_run_request_v1" and request_data.get("cashFlowRunRequest", {}).get("requestType") != "cash_flow_run_request_v1" and request_data.get("cashFlowRunRequestDraft", {}).get("requestType") != "cash_flow_run_request_v1":
+        request_data = analyze_development_feasibility_use_case(PROJECTS_DB[project_id], request_data).get("cashFlowRunRequestDraft") or request_data
+    project = PROJECTS_DB[project_id]
+    result = run_cash_flow_use_case(project, request_data)
+    run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data=request_data)
+
+    # A Cash Flow rerun is the financial starting point for the four review
+    # panels shown on the Cash Flow screen.  Persist the dependent scenario
+    # runs here so the UI never presents an apparently completed CF run with
+    # empty waterfall, recovery, LTV, and discount-stress cards.
+    scenario_run_ids: Dict[str, str] = {}
+    discount_stress_run_id: str | None = None
+    try:
+        scenario_input = {
+            "sourceMetadata": request_data.get("sourceMetadata") or request_data.get("source_metadata"),
+            "parentCalculationRunId": run["calculationRunId"],
+            "sourceLocator": {"parentCalculationRunId": run["calculationRunId"], "engineKey": "cash_flow_engine"},
+        }
+        scenario_request = build_scenario_request_from_project(project, scenario_input)
+        scenario_result = ScenarioEngineAgent().run_scenario_set(scenario_request)
+        scenario_run_ids = _persist_scenario_calculation_runs(
+            project_id,
+            scenario_result.model_dump(),
+            scenario_input,
+        )
+    except Exception:
+        # The primary deterministic cash-flow result remains available even
+        # when a dependent scenario cannot run because its inputs are partial.
+        scenario_run_ids = {}
+
+    try:
+        stress_input = {
+            "pfAmount": request_data.get("pfAmount") or request_data.get("pf_amount") or project.get("pf_amount") or project.get("feasibility_input", {}).get("pf_amount", 0),
+            "parentCalculationRunId": run["calculationRunId"],
+            "sourceLocator": {"parentCalculationRunId": run["calculationRunId"], "engineKey": "cash_flow_engine"},
+        }
+        stress_result = StressTestAgent().run_stress_test(build_stress_test_request_from_project(project, stress_input))
+        stress_payload = stress_test_run_payload(stress_result.model_dump())
+        stress_run = _persist_calculation_run(
+            project_id,
+            engine_key=stress_payload["engineKey"],
+            result=stress_payload["result"],
+            input_data={**stress_input, "engineVersion": stress_payload["engineVersion"]},
+            artifact_ref=stress_payload["artifactRef"],
+        )
+        discount_stress_run_id = str(stress_run.get("calculationRunId"))
+    except Exception:
+        discount_stress_run_id = None
+
+    return {
+        **result,
+        "calculationRunId": run["calculationRunId"],
+        "calculationRunIds": {
+            "cash_flow_engine": run["calculationRunId"],
+            **scenario_run_ids,
+            **({"discount_stress": discount_stress_run_id} if discount_stress_run_id else {}),
+        },
+    }
 
 @router.post("/{project_id}/pf/structure")
 def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
@@ -2685,10 +2808,17 @@ def build_stress_test_request_from_project(project: Dict[str, Any], input_data: 
     for index, tranche in enumerate(raw_tranches, start=1):
         if not isinstance(tranche, dict):
             continue
+        raw_priority = tranche.get("priority", index)
+        try:
+            priority = int(raw_priority or index)
+        except (TypeError, ValueError):
+            # Some imported PF structures use semantic priority names
+            # (senior/mezzanine/junior); preserve their order deterministically.
+            priority = index
         tranches.append(StressTranche(
             tranche=str(tranche.get("tranche") or tranche.get("name") or f"Tr.{index}"),
             amount=_to_number(tranche.get("amount", 0.0)),
-            priority=int(tranche.get("priority", index) or index),
+            priority=priority,
             interestRate=_to_number(tranche.get("interestRate", tranche.get("interest_rate", tranche.get("rate", 0.0)))),
             feeRate=_to_number(tranche.get("feeRate", tranche.get("fee_rate", 0.0))),
         ))
@@ -4032,6 +4162,8 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
             artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
             review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
             event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+            calculation_sink=lambda record: upsert_calculation_run_record(project_id, record),
+            handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4090,6 +4222,8 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
         review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
         event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+        calculation_sink=lambda record: upsert_calculation_run_record(project_id, record),
+        handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
     )
 
     completed_artifact_keys = _completed_pod_artifact_keys_from_plan(plan)
@@ -4159,6 +4293,8 @@ def _reanalyze_after_evidence(project_id: str, *, changed_document_types: list[s
         artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
         review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
         event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+        calculation_sink=lambda record: upsert_calculation_run_record(project_id, record),
+        handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
     )
     if summary.get("triggered"):
         upsert_project_record(project_id, PROJECTS_DB[project_id])
@@ -4255,6 +4391,79 @@ def get_chief_deal_pod_ai_review(project_id: str, review_id: str, request: Reque
     return record
 
 
+@router.get("/{project_id}/chief-orchestration/agent-runs")
+def list_chief_agent_runs(
+    project_id: str,
+    request: Request,
+    status: str | None = None,
+    limit: int = 100,
+):
+    """List durable Agent executions associated with the current project."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    records = list_agent_run_records(
+        project_id=project_id,
+        status=status,
+        limit=max(1, min(500, int(limit or 100))),
+    )
+    return {
+        "schemaVersion": "realytics-agent-run-list-v1",
+        "projectId": project_id,
+        "status": status,
+        "count": len(records),
+        "records": records,
+    }
+
+
+@router.get("/{project_id}/chief-orchestration/agent-runs/{agent_run_id}")
+def get_chief_agent_run(project_id: str, agent_run_id: str, request: Request):
+    """Read a durable Agent run with ordered steps and secret-free Brain usage."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    record = get_agent_run_record(agent_run_id)
+    if not record or str(record.get("projectId") or "") != str(project_id):
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return {
+        "schemaVersion": "realytics-agent-run-detail-v1",
+        "projectId": project_id,
+        "run": record,
+        "steps": list_agent_run_step_records(agent_run_id),
+        "brainUsageEvents": list_brain_usage_event_records(agent_run_id),
+    }
+
+
+@router.post("/{project_id}/chief-orchestration/agent-runs/{agent_run_id}/cancel")
+def cancel_chief_agent_run(
+    project_id: str,
+    agent_run_id: str,
+    request: Request,
+    payload: Dict[str, Any] | None = None,
+):
+    """Request cooperative cancellation; terminal runs remain immutable."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authz = authorize_request(request, "project:analyze")
+    record = get_agent_run_record(agent_run_id)
+    if not record or str(record.get("projectId") or "") != str(project_id):
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    reason = str((payload or {}).get("reason") or "user_requested")
+    cancelled = StorageAgentRunRepository().request_cancellation(agent_run_id, reason=reason)
+    record_sensitive_project_event(
+        request,
+        event_type="agent_run_cancellation_requested",
+        project_id=project_id,
+        run_id=agent_run_id,
+        metadata={
+            "reason": reason,
+            "requestedBy": (authz.get("user") or {}).get("userId"),
+            "runStatus": cancelled.status.value,
+        },
+    )
+    return cancelled.model_dump(by_alias=True, mode="json")
+
+
 @router.get("/{project_id}/chief-orchestration/recalculation-events")
 def list_chief_deal_recalculation_events(
     project_id: str,
@@ -4280,6 +4489,34 @@ def list_chief_deal_recalculation_events(
     )
     return {
         "schemaVersion": "realytics-recalculation-event-list-v1",
+        "projectId": project_id,
+        "count": len(records),
+        "records": records,
+    }
+
+
+@router.get("/{project_id}/chief-orchestration/handoffs")
+def list_chief_deal_handoffs(
+    project_id: str,
+    request: Request,
+    from_agent: str | None = None,
+    to_agent: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+):
+    """List persisted AgentHandoffEnvelope records for Pod-to-Pod audit."""
+    if project_id not in PROJECTS_DB:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:read")
+    records = list_agent_handoff_records(
+        project_id,
+        from_agent=from_agent,
+        to_agent=to_agent,
+        status=status,
+        limit=max(1, min(500, int(limit or 100))),
+    )
+    return {
+        "schemaVersion": "realytics-agent-handoff-list-v1",
         "projectId": project_id,
         "count": len(records),
         "records": records,

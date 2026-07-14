@@ -104,6 +104,7 @@ export interface CashflowResult {
   reportFragments?: Record<string, string>;
   riskFlags?: Array<Record<string, unknown>>;
   sourceMetadata?: Record<string, unknown>;
+  inputSnapshot?: Record<string, unknown>;
 }
 
 interface RunListItem {
@@ -116,6 +117,7 @@ interface RunListItem {
   calculationRunId?: string;
   engineKey?: string;
   resultSnapshot?: Record<string, unknown>;
+  inputSnapshot?: Record<string, unknown>;
   sourceLocator?: Record<string, unknown>;
 }
 
@@ -130,6 +132,7 @@ export interface CalculationRunRecord {
   sourceLocator?: Record<string, unknown>;
   scenario?: Record<string, unknown>;
   resultSnapshot?: Record<string, unknown>;
+  inputSnapshot?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -139,14 +142,19 @@ export async function fetchLatestCalculationRuns(
   engineKeys: string[],
 ): Promise<Record<string, CalculationRunRecord | null>> {
   const entries = await Promise.all(engineKeys.map(async (engineKey) => {
-    const res = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=${encodeURIComponent(engineKey)}&limit=1`, {
-      cache: "no-store",
-      headers: authHeaders("web"),
-    });
-    if (!res.ok) return [engineKey, null] as const;
-    const body = await res.json();
-    const record = Array.isArray(body.records) ? body.records[0] : null;
-    return [engineKey, record ?? null] as const;
+    try {
+      const res = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=${encodeURIComponent(engineKey)}&limit=1`, {
+        cache: "no-store",
+        headers: authHeaders("web"),
+      });
+      if (!res.ok) return [engineKey, null] as const;
+      const body = await res.json();
+      const record = Array.isArray(body.records) ? body.records[0] : null;
+      return [engineKey, record ?? null] as const;
+    } catch {
+      // A missing optional scenario must not hide the primary Cash Flow run.
+      return [engineKey, null] as const;
+    }
   }));
   return Object.fromEntries(entries);
 }
@@ -156,7 +164,7 @@ const WON = 1e8;
 function cashflowFromResult(
   cf: Record<string, unknown> | null | undefined,
   source: CashflowResult["source"],
-  meta: { runId: string; completedAt?: string; artifactKey?: string; artifactType?: string },
+  meta: { runId: string; completedAt?: string; artifactKey?: string; artifactType?: string; inputSnapshot?: Record<string, unknown> },
 ): CashflowResult | null {
   const rows = cf?.monthlyCashFlow ?? cf?.rows;
   if (!Array.isArray(rows) || rows.length === 0) return null;
@@ -184,6 +192,7 @@ function cashflowFromResult(
     reportFragments: (cf?.reportFragments ?? {}) as Record<string, string>,
     riskFlags: Array.isArray(cf?.riskFlags) ? (cf?.riskFlags as Array<Record<string, unknown>>) : [],
     sourceMetadata: (cf?.sourceMetadata ?? {}) as Record<string, unknown>,
+    inputSnapshot: meta.inputSnapshot,
   };
 }
 
@@ -201,70 +210,87 @@ export async function fetchLatestCashflow(projectId: string): Promise<CashflowRe
   // CalculationRun is the canonical source for the screen. The snapshot is
   // the exact deterministic output used by the run, including monthly rows;
   // artifact lookup remains a compatibility fallback for older projects.
-  const runRes = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=cash_flow_engine&limit=10`, {
-    cache: "no-store",
-    headers: authHeaders("web"),
-  });
-  if (runRes.ok) {
-    const runBody = await runRes.json();
-    const runs: RunListItem[] = Array.isArray(runBody.records) ? runBody.records : [];
-    const latest = runs[0];
-    const snapshot = latest?.resultSnapshot;
-    if (snapshot) {
-      const parsed = cashflowFromResult(snapshot, "pf_review_orchestration", {
-        runId: String(latest.calculationRunId ?? latest.run_id ?? ""),
-        completedAt: String(latest.updatedAt ?? latest.completed_at ?? latest.createdAt ?? latest.started_at ?? ""),
-        artifactKey: String((latest.sourceLocator as Record<string, unknown> | undefined)?.artifactKey ?? ""),
-        artifactType: "calculation_run",
-      });
-      if (parsed) return parsed;
-    }
-  }
-
-  const artifactRes = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/artifacts?pod_key=feasibility_cashflow`, {
-    cache: "no-store",
-    headers: authHeaders("web"),
-  });
-  if (artifactRes.ok) {
-    const body = await artifactRes.json();
-    const records = Array.isArray(body.records) ? body.records : [];
-    for (const record of records) {
-      const result = (record.result ?? record) as Record<string, unknown>;
-      const cf = result.cashFlowRunResult as Record<string, unknown> | undefined;
-      const parsed = cashflowFromResult(cf, "chief_pod_artifact", {
-        runId: String(record.runId ?? record.artifactKey ?? "chief-pod"),
-        completedAt: String(record.updatedAt ?? record.createdAt ?? ""),
-        artifactKey: String(record.artifactKey ?? ""),
-        artifactType: String(result.artifactType ?? record.artifactType ?? ""),
-      });
-      if (parsed) return parsed;
-    }
-  }
-
-  const listRes = await fetch(`${apiBase}/projects/${projectId}/orchestrations`, {
-    cache: "no-store",
-    headers: authHeaders("web"),
-  });
-  if (!listRes.ok) return null;
-  const listBody = await listRes.json();
-  const runs: RunListItem[] = Array.isArray(listBody) ? listBody : listBody.runs ?? listBody.orchestrations ?? [];
-  const ordered = [...runs]
-    .filter((r) => r.run_id)
-    .sort((a, b) => String(b.completed_at ?? b.started_at ?? "").localeCompare(String(a.completed_at ?? a.started_at ?? "")));
-
-  // Probe the most recent runs for one that carries cash-flow results.
-  for (const run of ordered.slice(0, 6)) {
-    const detailRes = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${run.run_id}`, {
+  try {
+    const runRes = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=cash_flow_engine&limit=10`, {
       cache: "no-store",
       headers: authHeaders("web"),
     });
-    if (!detailRes.ok) continue;
-    const detail = await detailRes.json();
-    const parsed = cashflowFromResult(detail?.artifacts?.developerFeasibility?.cashFlowRunResult, "pf_review_orchestration", {
-      runId: String(run.run_id),
-      completedAt: run.completed_at,
+    if (runRes.ok) {
+      const runBody = await runRes.json();
+      const runs: RunListItem[] = Array.isArray(runBody.records) ? runBody.records : [];
+      const latest = runs[0];
+      const snapshot = latest?.resultSnapshot;
+      if (snapshot) {
+        const parsed = cashflowFromResult(snapshot, "pf_review_orchestration", {
+          runId: String(latest.calculationRunId ?? latest.run_id ?? ""),
+          completedAt: String(latest.updatedAt ?? latest.completed_at ?? latest.createdAt ?? latest.started_at ?? ""),
+          artifactKey: String((latest.sourceLocator as Record<string, unknown> | undefined)?.artifactKey ?? ""),
+          artifactType: "calculation_run",
+          inputSnapshot: latest.inputSnapshot,
+        });
+        if (parsed) return parsed;
+      }
+    }
+  } catch {
+    // Continue to compatibility artifacts when the calculation registry is temporarily unavailable.
+  }
+
+  try {
+    const artifactRes = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/artifacts?pod_key=feasibility_cashflow`, {
+      cache: "no-store",
+      headers: authHeaders("web"),
     });
-    if (parsed) return parsed;
+    if (artifactRes.ok) {
+      const body = await artifactRes.json();
+      const records = Array.isArray(body.records) ? body.records : [];
+      for (const record of records) {
+        const result = (record.result ?? record) as Record<string, unknown>;
+        const cf = result.cashFlowRunResult as Record<string, unknown> | undefined;
+        const parsed = cashflowFromResult(cf, "chief_pod_artifact", {
+          runId: String(record.runId ?? record.artifactKey ?? "chief-pod"),
+          completedAt: String(record.updatedAt ?? record.createdAt ?? ""),
+          artifactKey: String(record.artifactKey ?? ""),
+          artifactType: String(result.artifactType ?? record.artifactType ?? ""),
+        });
+        if (parsed) return parsed;
+      }
+    }
+  } catch {
+    // Compatibility fallback is optional; never hide a registry result or empty state.
+  }
+
+  try {
+    const listRes = await fetch(`${apiBase}/projects/${projectId}/orchestrations`, {
+      cache: "no-store",
+      headers: authHeaders("web"),
+    });
+    if (!listRes.ok) return null;
+    const listBody = await listRes.json();
+    const runs: RunListItem[] = Array.isArray(listBody) ? listBody : listBody.runs ?? listBody.orchestrations ?? [];
+    const ordered = [...runs]
+      .filter((r) => r.run_id)
+      .sort((a, b) => String(b.completed_at ?? b.started_at ?? "").localeCompare(String(a.completed_at ?? a.started_at ?? "")));
+
+    // Probe the most recent runs for one that carries cash-flow results.
+    for (const run of ordered.slice(0, 6)) {
+      try {
+        const detailRes = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${run.run_id}`, {
+          cache: "no-store",
+          headers: authHeaders("web"),
+        });
+        if (!detailRes.ok) continue;
+        const detail = await detailRes.json();
+        const parsed = cashflowFromResult(detail?.artifacts?.developerFeasibility?.cashFlowRunResult, "pf_review_orchestration", {
+          runId: String(run.run_id),
+          completedAt: run.completed_at,
+        });
+        if (parsed) return parsed;
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return null;
   }
   return null;
 }

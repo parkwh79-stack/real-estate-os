@@ -132,7 +132,8 @@ DevelopmentFeasibilityAgent output
 | `project_id`, `project_name`, `asset_type` | `project.projectId`, `project.projectName`, `project.buildingUse` | Preserve canonical project identity |
 | `site.address`, `site.land_area_sqm`, `site.zoning` | `project.location`, `project.landAreaSqm`, `project.useDistrict` | Use provenance if imported from PDF or workbook |
 | `program.gross_floor_area_sqm`, `program.saleable_area_sqm` | `project.grossFloorAreaSqm`, product area defaults | Used for project summary and area checks |
-| `product_mix` | `productMix` | Normalize unit count, area, sale price, total revenue, asset type, and recovery haircut |
+| `product_mix` | `productMix` | Normalize unit count, area, sale price, total revenue, asset type, recovery haircut, and product-level collection schedule |
+| `raw_import.productMonthlySalesRateScenarios` | `productMix[*].collectionSteps`, `monthlyCollectionAmounts`, `monthlyCollectionRates`, `cumulativeCollectionRates` | Preserve workbook-derived contract/interim/balance timing and source locator; explicit monthly amounts take precedence over asset defaults |
 | `revenue_items` | `sourcesAndUses.revenue` | Classify sales, lease deposit, forward sale, refinancing, and other revenue |
 | `cost_items` | `sourcesAndUses.cost` and monthly cost schedule | Classify land, construction, indirect, marketing, tax, trust, finance, contingency, and other costs |
 | `financing` | `pfStructure` and `sourcesAndUses.funding` | Map senior/middle/junior/equity/bridge tranches and terms |
@@ -179,7 +180,7 @@ Current implementation exists at the pure-function level.
 | FeasibilityStudyV2 to CashFlowRunRequest draft mapper | Implemented |
 | Baseline Cash Flow Engine run | Implemented |
 | PF draw schedule | Implemented as tranche-aware baseline draw schedule |
-| Sales collection schedule by product | Implemented with asset profile default schedules |
+| Sales collection schedule by product | Implemented with workbook-derived explicit schedules first, then asset profile defaults when no product schedule exists |
 | Operating / repayment account allocation | Implemented as baseline 75/25 pre-completion split and post-completion sweep |
 | Cash Flow API workflow | Implemented for `POST /projects/{project_id}/cash-flow/run` |
 | Cash Flow Review UI | Not implemented |

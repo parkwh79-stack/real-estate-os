@@ -21,6 +21,15 @@ ROLE_PERMISSIONS = {
         "assumption:override",
         "audit:read",
         "user:manage",
+        "agent:operate",
+        "brain:manage",
+        "tool:read",
+        "tool:execute",
+        "learning:read",
+        "learning:review",
+        "learning:promote",
+        "coding:request",
+        "coding:operate",
     },
     "reviewer": {
         "project:read",
@@ -31,6 +40,10 @@ ROLE_PERMISSIONS = {
         "risk:review",
         "assumption:override",
         "audit:read",
+        "agent:operate",
+        "tool:read",
+        "learning:read",
+        "learning:review",
     },
     "analyst": {
         "project:read",
@@ -40,10 +53,14 @@ ROLE_PERMISSIONS = {
         "report:read",
         "report:export",
         "audit:read:self",
+        "agent:operate",
+        "tool:read",
+        "coding:request",
     },
     "viewer": {
         "project:read",
         "report:read",
+        "tool:read",
     },
 }
 

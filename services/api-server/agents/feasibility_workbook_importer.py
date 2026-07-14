@@ -463,7 +463,14 @@ def _realytics_product_monthly_sales_rate_scenarios(
     source_name: str,
     total_revenue_krw: Optional[float],
 ) -> List[Dict[str, Any]]:
+    resolved_sheet_name = _find_product_collection_sheet(workbook)
+    if resolved_sheet_name:
+        sheet_name = resolved_sheet_name
+    else:
+        return []
     sheet_name = "02B_수납스케줄"
+    # Keep the resolved workbook sheet; the legacy literal above may be mojibake.
+    sheet_name = resolved_sheet_name
     if sheet_name not in workbook.sheetnames:
         return []
 
@@ -552,6 +559,20 @@ def _realytics_product_monthly_sales_rate_scenarios(
             },
         }
     ]
+
+
+def _find_product_collection_sheet(workbook: Any) -> Optional[str]:
+    """Resolve product collection sheets without relying on corrupted UI text."""
+    for sheet_name in workbook.sheetnames:
+        normalized = str(sheet_name).strip().casefold().replace(" ", "")
+        if normalized.startswith("02b") and any(
+            token in normalized for token in ("수납", "납입", "collection", "schedule")
+        ):
+            return sheet_name
+    for sheet_name in workbook.sheetnames:
+        if str(sheet_name).strip().casefold().replace(" ", "").startswith("02b"):
+            return sheet_name
+    return None
 
 
 def _cumulative_rates(values: List[float]) -> List[float]:

@@ -1,8 +1,49 @@
 ﻿# Product Backlog
 
-Updated: 2026-07-10
+Updated: 2026-07-14
 
 Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
+
+## Agent Platform control plane v1
+
+2026-07-14: The modular Agent Platform specification is now a controlled execution
+plane over the existing REALYTICS domain/data plane. Typed Agent/Brain/Tool
+contracts, durable runs, policy-aware Brain routing, provider health, transactional
+outbox, governed learning, and isolated Coding Pod control are implemented. All six
+Chief Pods and principal inner Domain Agents use the common runtime; remaining
+helper-Agent migration and production worker deployment are tracked below. Detailed
+contract and limitations:
+`docs/product/agent-platform-control-plane-v1.md`.
+
+| Priority | Module | Task | Status | Notes |
+|---|---|---|---|---|
+| P0 | Agent Platform | Typed Agent/Brain/Evidence contracts | Done | Includes typed SourceLocator and deterministic confidence metrics. |
+| P0 | Agent Platform | AgentRegistry, BrainRegistry, LegacyAgentAdapter | Done | Compatibility-first migration; existing domain Agents are not rewritten. |
+| P0 | Orchestration/AI | Route Pod AI Reviewer through common Agent contract | Done | Existing Pod review persistence remains source of truth; transient BYOK is excluded from serialization. |
+| P1 | Agent Runtime | Durable AgentRun/AgentRunStep state machine | In Progress | Typed runs/steps/Brain usage, guarded transitions, optimistic versioning, tenant/Agent idempotency, retry, cancellation, deadlines, consumed budgets, lease heartbeat/recovery, transactional outbox, and Chief/Domain Agent integration are active. Remaining: isolated process workers, automatic request reconstruction, manual linked retry, and live PostgreSQL multi-worker CI. See `docs/product/durable-agent-runtime-v1.md`. |
+| P1 | Brain Routing | Versioned tenant/user Brain policy and routing audit | In Progress | Central `AIConnection` routing now persists policy version, candidate/rejection rationale, provider health, fallback, failure, token usage, and cost. Remaining: Secret Manager deployment, scheduled health probes, policy admin UI, and cost reconciliation. |
+| P1 | Tool Platform | ToolManifest/ToolRegistry and side-effect authorization | In Progress | Manifest/registry/audited executor and real read-only Deal State/CalculationRun tools are active with role, classification, project scope, idempotency, and approval contracts. Side-effect tools remain unavailable until isolated implementations and approval resolvers exist. |
+| P1 | Security | Secret Manager and strict production RBAC | Planned | Remove local fallback secret and permissive RBAC before external pilot. |
+| P2 | Learning | Candidate/evaluation/canary/promotion/rollback | In Progress | Persistent governed lifecycle is active; Excel and unmapped glossary terms create candidates, and evaluation/canary/human promotion/rollback are enforced. Remaining: automated benchmark/canary workers and approved-policy deployment adapters. |
+| P2 | Coding Pod | Isolated recursive coding runtime | In Progress | Durable job queue, exclusive lease, heartbeat/recovery, cancellation, audit, and remote HTTPS sandbox adapter/worker are active. Remaining: deploy and attest the separate executor service; production deal credentials are never passed to its payload. |
+| P1 | Agent Runtime | Complete helper-Agent migration | Planned | Report visualization, optimization, export, and several full-PF helper calls still use compatibility invocation. Move them through `run_domain_agent_callable_with_contract` without changing deterministic calculation authority. |
+| P1 | Operations | Production Agent workers and broker delivery | Planned | Run long Agents in isolated workers, reconstruct requests after lease loss, deploy outbox consumers, and prove PostgreSQL lease/idempotency behavior under concurrency. |
+
+## Chief Pod runtime integrity update
+
+2026-07-13: The Chief task graph is now enforced by `PodExecutionCoordinator` instead of being UI-only metadata. Pod execution persists CalculationRun records and validated AgentHandoffEnvelope rows, uses stable input/output hashes for Event Bus decisions, and advances recalculation events through pending/running/completed/failed states. Nested Pod output is batch-materialized to `deal_state_records` with artifact paths. Synthetic product-mix and Senior-tranche fallbacks were removed. PostgreSQL critical stores now have typed-table dual-write/read paths. Endpoint E2E tests use an isolated disposable DB. Detailed contract: `docs/product/chief-pod-runtime-integrity.md`.
+
+2026-07-14 verification: evidence-triggered reanalysis now uses the same CalculationRun and handoff sinks as direct Pod execution, canonical metric keys preserve the existing Deal State contract, 42 focused runtime tests and 122 wider regressions pass, and web TypeScript plus zero-warning ESLint checks pass. Live PostgreSQL verification remains open until an isolated `REALYTICS_TEST_DATABASE_URL` is supplied.
+
+| Priority | Module | Task | Status | Notes |
+|---|---|---|---|---|
+| P0 | Orchestration | Enforce track-specific Pod DAG | Done | Single-Pod and full-run paths use the same dependency gate and topological ordering. |
+| P0 | Orchestration/Audit | Persist CalculationRun and AgentHandoffEnvelope from Pod execution | Done | Artifact references include calculationRunIds, handoffIds, inputHash, and outputHash. |
+| P0 | Event Bus | Hash-based recalculation and durable lifecycle | Done | Explicit trigger or changed output hash only; event persistence errors are not hidden. |
+| P0 | Data | Recursive artifact materialization | Done | Nested Metric/RiskIssue/Evidence/Assumption records are written in one transaction with `artifactPath`. |
+| P0 | PF Integrity | Remove hard-coded scenario fallback | Done | Missing verified product mix or tranche data is `not_ready`, never a fabricated financial result. |
+| P1 | PostgreSQL | Typed critical-table persistence | In Progress | Typed adapters and migration exist; run optional live test with isolated `REALYTICS_TEST_DATABASE_URL`, then add CI PostgreSQL service and migration job. |
+| P1 | Event Bus | Distributed worker/outbox and retry lease | In Progress | Transactional AgentRun/CalculationRun/Handoff outbox, leased worker, retry backoff, dead-letter, and manual requeue are active. Remaining: broker deployment, consumer observability, and live multi-process PostgreSQL verification. |
 
 ## CalculationRun Registry v2 update
 
@@ -325,6 +366,13 @@ Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
 | P1 | Calculation | Development Feasibility to FeasibilityStudyV2 draft mapping | Done | DevelopmentFeasibilityAgent now emits a FeasibilityStudyV2-valid draft with site, program, revenue, cost, financing, schedule, scenarios, metrics, and mapping diagnostics |
 | P1 | Calculation | Asset-type calculation profiles | Done | Added deterministic asset profiles for apartment, officetel, commercial, KIC, mixed-use, logistics, lodging, and other assets; profiles drive revenue mode, collection schedule, recovery haircut, and LTV threshold |
 | P1 | Calculation | FeasibilityStudyV2 to CashFlowRunRequest draft mapping | Done | Added asset-aware mapper that converts FeasibilityStudyV2 drafts into CashFlowRunRequest drafts with sources/uses, product mix profiles, PF structure, schedule, scenario set, diagnostics, and source metadata |
+
+## Feasibility Pod canonical-to-runtime bridge (2026-07-13)
+
+- [x] Materialize approved `FeasibilityStudyV2.product_mix` rows into the runtime `project.product_mix` contract consumed by Feasibility/Cash Flow Pods.
+- [x] Convert nested canonical values and SQM fields into runtime unit count, contract PY, price/PY, revenue, asset type, and provenance without inventing missing values.
+- [x] Verify live project 751: approved workbook values flow through to 8 product rows, total revenue 8,539.5억원, total cost 7,793.5억원, GFA 211,969.6㎡, and a real Cash Flow Engine result.
+- [x] Add product-level monthly sales-rate and collection schedules to the canonical-to-runtime bridge when those rows are present in the workbook; explicit workbook schedules now flow into CashFlowRunRequest before asset defaults.
 | P1 | Calculation | Cash Flow Engine run implementation | Done | Baseline engine consumes CashFlowRunRequest and generates sales collection, operating/repayment account allocation, tranche-aware PF draw schedule, monthly cash flow, Max Minus, risk flags, and report fragments |
 | P1 | Calculation | Cash Flow Engine advanced scenario workflow | In Progress | Calculation Scenario Engine now covers persisted recovery scenarios, waterfall, unsold LTV matrix, and tranche recovery; remaining work is direct Cash Flow Review UI and best/base/downside/stress run orchestration |
 | P1 | Calculation | Calculation Scenario Engine design | Done | Added roadmap and schema for waterfall, unsold LTV matrix, tranche recovery, API workflow, UI review, persistence, and report mapping |
@@ -459,7 +507,28 @@ Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
 - [x] Re-run the sample import and cascade regression suite: 19 tests passed.
 - [ ] Add an explicit reviewer approval action in Input Package to promote candidate workbook values to `approved` and re-evaluate Approval Readiness Gate.
 
+## FeasibilityStudyV2 product collection schedule bridge (2026-07-13)
+
+- [x] Preserve workbook-derived product-level `collectionSteps`, monthly collection amounts/rates, cumulative rates, and Excel source locators in the FeasibilityStudyV2 raw import.
+- [x] Map imported product schedules into `CashFlowRunRequest.productMix` for both canonical product rows and imported-only product rows.
+- [x] Make Cash Flow Engine apply explicit workbook monthly amounts for contract, interim, and balance collections before asset-type default schedules.
+- [x] Keep asset-type defaults as a transparent fallback when no product-level schedule is present; do not invent missing workbook values.
+- [x] Add regression coverage for exact contract/interim/balance month allocation and existing Feasibility/sample import workflows.
+- [ ] Add typed `ProductMixRow.collection_schedule` fields and canonicalize legacy workbook schedule labels before persistence.
+- [x] Add API E2E coverage proving an approved workbook schedule reaches the persisted `calculationRunId` `inputSnapshot` and `resultSnapshot`; the test asserts contract/interim/balance amounts and the Excel source locator.
+- [x] Verify the authenticated browser Cash Flow route renders the persisted CalculationRun-backed monthly rows and calculation evidence after the approved schedule is executed. 2026-07-13: project 751 verified at `http://localhost:3000/project/751/cashflow` through the same-origin `/api/backend` proxy; the page rendered the latest `calculationRunId`, monthly rows, and Excel locator `02B_collection_schedule!A4:AY6` without `Failed to fetch`.
+- [x] Add a browser test harness assertion for the exact `calculationRunId` and persisted input-snapshot locator. 2026-07-13: browser DOM verification confirmed the latest run and input snapshot, while the API E2E verified M0 contract 100, M2 interim 600, and M3 balance 300 from the approved workbook schedule.
+
 ## Risk Register and Practical Workbook Repair (2026-07-13)
+
+## Cash Flow scenario panels and project export (2026-07-13)
+
+- [x] Make Cash Flow rerun persist dependent `waterfall`, `tranche_recovery`, `unsold_ltv`, and `discount_stress` CalculationRuns alongside `cash_flow_engine`.
+- [x] Store scenario result rows in each CalculationRun snapshot so tranche principal claims, payments, shortfalls, recovery ratios, waterfall totals, and unsold LTV rows are reviewable without recomputation.
+- [x] Add Cash Flow UI detail tables for Waterfall, Tranche recovery amounts/rates, unsold LTV, and discount-stress outputs.
+- [x] Replace the legacy static sample download path with `/api/projects/{project_id}/cashflow/export`, which generates a project-specific formula workbook from the latest CalculationRun snapshots.
+- [x] Fix semantic tranche priority values such as `senior`, `mezzanine`, and `junior` in stress-test request normalization.
+- [ ] Add browser download assertion that opens the generated workbook and verifies the project CalculationRun ID and scenario sheets in CI.
 
 - [x] Read Risk Register screens as latest actionable risk per business key while retaining historical rows for audit.
 - [x] Prefer enriched `risk_register` / `chief_pod_artifact` rows over sparse Evidence Graph mirror rows so description, mitigation, severity, and source locator remain visible.

@@ -186,6 +186,7 @@ def scenario_engine_run_payloads(
                         "shortfallFlagCount": len(engine_flags),
                     },
                     "metrics": _scenario_row_metrics(rows, "waterfall"),
+                    "rows": rows,
                     "riskFlags": engine_flags,
                 },
                 "artifactRef": {"type": "scenario_set", "scenarioSetId": scenario_set_id, "section": "waterfallScenarios"},
@@ -214,6 +215,7 @@ def scenario_engine_run_payloads(
                 "result": {
                     "summary": summary,
                     "metrics": _scenario_row_metrics(rows, "unsold_ltv"),
+                    "rows": rows,
                     "riskFlags": engine_flags,
                 },
                 "artifactRef": {"type": "scenario_set", "scenarioSetId": scenario_set_id, "section": "unsoldLtvMatrix"},
@@ -235,6 +237,7 @@ def scenario_engine_run_payloads(
                 "result": {
                     "summary": summary,
                     "metrics": _tranche_recovery_metrics(rows),
+                    "rows": rows,
                     "riskFlags": engine_flags,
                 },
                 "artifactRef": {"type": "scenario_set", "scenarioSetId": scenario_set_id, "section": "trancheRecoveryMatrix"},

@@ -50,7 +50,14 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
 
 
 def _product_mix(study: FeasibilityStudyV2, asset_profiles: Dict[str, Any]) -> List[Dict[str, Any]]:
+    imported_schedule = _imported_product_collection_schedule(study.raw_import)
     if not study.product_mix:
+        imported_products = imported_schedule.get("products") or []
+        if imported_products:
+            return [
+                _product_row_from_imported_schedule(product, asset_profiles)
+                for product in imported_products
+            ]
         asset_type = study.asset_type.value
         profile = _profile(asset_profiles, asset_type)
         return [{
@@ -64,10 +71,11 @@ def _product_mix(study: FeasibilityStudyV2, asset_profiles: Dict[str, Any]) -> L
         }]
 
     rows = []
+    rows_by_asset_type: Dict[str, List[Dict[str, Any]]] = {}
     for row in study.product_mix:
         asset_type = row.asset_type.value
         profile = _profile(asset_profiles, asset_type)
-        rows.append({
+        mapped = {
             "productId": row.key,
             "type": asset_type,
             "productName": row.product_name,
@@ -79,8 +87,122 @@ def _product_mix(study: FeasibilityStudyV2, asset_profiles: Dict[str, Any]) -> L
             "pricePerPy": row.avg_sale_price_per_py,
             "totalSalesRevenue": row.revenue,
             **profile,
-        })
+        }
+        imported = (
+            imported_schedule.get("byProduct", {}).get(row.product_name)
+            or imported_schedule.get("byProduct", {}).get(asset_type)
+            or imported_schedule.get("byProduct", {}).get(_normalize_asset_type_key(asset_type))
+        )
+        if imported:
+            same_asset_rows = rows_by_asset_type.setdefault(asset_type, [])
+            same_asset_rows.append(mapped)
+            is_specific_match = str(row.product_name or "") in {
+                str(imported.get("productName") or ""),
+                str(imported.get("productId") or ""),
+            }
+            if is_specific_match or len(same_asset_rows) == 1 and sum(
+                1 for candidate in study.product_mix if candidate.asset_type.value == asset_type
+            ) == 1:
+                mapped.update(_collection_fields(imported))
+            else:
+                # A workbook row keyed only by asset type is an aggregate
+                # schedule. Distribute it across the existing product types so
+                # the aggregate contract/interim/balance cash is not duplicated.
+                candidates = [candidate for candidate in study.product_mix if candidate.asset_type.value == asset_type]
+                total_weight = sum(_product_weight(candidate) for candidate in candidates) or 1.0
+                mapped.update(_collection_fields(imported, scale=_product_weight(row) / total_weight))
+        rows.append(mapped)
     return rows
+
+
+def _imported_product_collection_schedule(raw_import: Dict[str, Any]) -> Dict[str, Any]:
+    scenarios = raw_import.get("productMonthlySalesRateScenarios") if isinstance(raw_import, dict) else None
+    if not isinstance(scenarios, list) or not scenarios:
+        return {"products": [], "byProduct": {}}
+    scenario = next((item for item in scenarios if isinstance(item, dict)), None)
+    if not scenario:
+        return {"products": [], "byProduct": {}}
+    products = [item for item in scenario.get("products", []) if isinstance(item, dict)]
+    by_product: Dict[str, Dict[str, Any]] = {}
+    for product in products:
+        for key in (
+            product.get("productType"),
+            product.get("assetType"),
+            _normalize_asset_type_key(product.get("productType") or product.get("assetType")),
+        ):
+            if key:
+                by_product[str(key)] = product
+    return {"products": products, "byProduct": by_product}
+
+
+def _product_row_from_imported_schedule(product: Dict[str, Any], asset_profiles: Dict[str, Any]) -> Dict[str, Any]:
+    asset_type = str(product.get("assetType") or product.get("productType") or "other").lower()
+    normalized_asset_type = _normalize_asset_type_key(asset_type)
+    row = {
+        "productId": product.get("productType") or "imported-product",
+        "type": normalized_asset_type,
+        "productName": product.get("productType"),
+        "units": None,
+        "totalSalesRevenue": product.get("productRevenue") or 0,
+        **_profile(asset_profiles, normalized_asset_type),
+    }
+    row.update(_collection_fields(product))
+    return row
+
+
+def _normalize_asset_type_key(value: Any) -> str:
+    """Map workbook labels and canonical asset codes to one matching key."""
+    text = str(value or "").strip().casefold()
+    if any(token in text for token in ("apartment", "apt", "아파트", "공동주택")):
+        return "apartment"
+    if any(token in text for token in ("officetel", "office", "오피스텔")):
+        return "officetel"
+    if any(token in text for token in ("commercial", "retail", "상가", "근린생활")):
+        return "commercial"
+    if any(token in text for token in ("knowledge", "지식산업")):
+        return "knowledge_industry_center"
+    if any(token in text for token in ("logistics", "물류")):
+        return "logistics"
+    if any(token in text for token in ("living", "숙박", "생숙")):
+        return "serviced_residence"
+    return text or "other"
+
+
+def _product_weight(row: Any) -> float:
+    revenue = _value(getattr(row, "revenue", None))
+    units = _value(getattr(row, "unit_count", None))
+    try:
+        if revenue is not None and float(revenue) > 0:
+            return float(revenue)
+        if units is not None and float(units) > 0:
+            return float(units)
+    except (TypeError, ValueError):
+        pass
+    return 1.0
+
+
+def _collection_fields(product: Dict[str, Any], scale: float = 1.0) -> Dict[str, Any]:
+    steps = [step for step in product.get("collectionSteps", []) if isinstance(step, dict)]
+    source_locator = product.get("provenance") or product.get("sourceLocator")
+    if not source_locator and steps:
+        source_locator = steps[0].get("provenance") or steps[0].get("sourceLocator")
+    if scale != 1.0:
+        scaled_steps = []
+        for step in steps:
+            scaled = dict(step)
+            amounts = step.get("monthlyCollectionAmounts")
+            if isinstance(amounts, list):
+                scaled["monthlyCollectionAmounts"] = [float(amount or 0) * scale for amount in amounts]
+            scaled_steps.append(scaled)
+        steps = scaled_steps
+    fields = {
+        "collectionSteps": steps,
+        "monthlyCollectionAmounts": product.get("monthlyCollectionAmounts") or [],
+        "monthlyCollectionRates": product.get("monthlyCollectionRates") or [],
+        "cumulativeCollectionRates": product.get("cumulativeCollectionRates") or [],
+        "collectionSourceLocator": source_locator,
+    }
+    return {key: value for key, value in fields.items() if value not in (None, [], {})}
 
 
 def _profile(asset_profiles: Dict[str, Any], asset_type: str) -> Dict[str, Any]:

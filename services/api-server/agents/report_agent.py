@@ -69,14 +69,6 @@ class ReportAgent:
                         "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
                         "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
                     })
-            if not product_mix:
-                product_mix.append({
-                    "type": "General",
-                    "units": 100,
-                    "avgUnitPrice": (total_revenue / 100.0) if total_revenue else 1000000.0,
-                    "totalRevenue": total_revenue or 100000000.0
-                })
-
             pf_structure = []
             for idx, item in enumerate(tranches):
                 if isinstance(item, dict):
@@ -87,22 +79,14 @@ class ReportAgent:
                         "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                         "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
                     })
-            if not pf_structure:
-                pf_structure.append({
-                    "tranche": "Senior",
-                    "amount": total_pf or 10000000.0,
-                    "priority": 1,
-                    "interestRate": 0.065,
-                    "feeRate": 0.01
-                })
-
-            req = ScenarioSetRequest(
-                scenarioSetId="auto-report-set",
-                scenarioSetName="Auto Generated Report Scenario Set",
-                productMix=product_mix,
-                pfStructure=pf_structure,
-            )
-            scenario_result = ScenarioEngineAgent().run_scenario_set(req)
+            if product_mix and pf_structure:
+                req = ScenarioSetRequest(
+                    scenarioSetId="auto-report-set",
+                    scenarioSetName="Auto Generated Report Scenario Set",
+                    productMix=product_mix,
+                    pfStructure=pf_structure,
+                )
+                scenario_result = ScenarioEngineAgent().run_scenario_set(req)
         except Exception:
             scenario_result = None
 
@@ -300,14 +284,6 @@ class ReportAgent:
                         "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
                         "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
                     })
-            if not product_mix:
-                product_mix.append({
-                    "type": "General",
-                    "units": 100,
-                    "avgUnitPrice": (total_revenue / 100.0) if total_revenue else 1000000.0,
-                    "totalRevenue": total_revenue or 100000000.0
-                })
-
             pf_structure = []
             for idx, item in enumerate(tranches):
                 if isinstance(item, dict):
@@ -318,22 +294,14 @@ class ReportAgent:
                         "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                         "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
                     })
-            if not pf_structure:
-                pf_structure.append({
-                    "tranche": "Senior",
-                    "amount": total_pf or 10000000.0,
-                    "priority": 1,
-                    "interestRate": 0.065,
-                    "feeRate": 0.01
-                })
-
-            req = ScenarioSetRequest(
-                scenarioSetId="auto-report-set",
-                scenarioSetName="Auto Generated Report Scenario Set",
-                productMix=product_mix,
-                pfStructure=pf_structure,
-            )
-            scenario_result = ScenarioEngineAgent().run_scenario_set(req)
+            if product_mix and pf_structure:
+                req = ScenarioSetRequest(
+                    scenarioSetId="auto-report-set",
+                    scenarioSetName="Auto Generated Report Scenario Set",
+                    productMix=product_mix,
+                    pfStructure=pf_structure,
+                )
+                scenario_result = ScenarioEngineAgent().run_scenario_set(req)
         except Exception:
             scenario_result = None
 

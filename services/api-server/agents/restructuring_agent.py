@@ -53,7 +53,7 @@ class RestructuringAgent:
             "adjustedRequestSummary": adjusted_request_summary,
             "seniorShortfallFix": senior_fix,
             "unsoldLtvFix": unsold_ltv_fix,
-            "adoptedCures": self._adopted_cure_summary(adopted_cures),
+            "adoptedCures": self.summarize_adopted_cures(adopted_cures),
             "recommendations": recommendations,
             "approvalPath": self._approval_path(after or before, recommendations, adopted_cures),
             "sourceMetadata": {
@@ -277,7 +277,7 @@ class RestructuringAgent:
             ],
         }
 
-    def _adopted_cure_summary(self, cures: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def summarize_adopted_cures(self, cures: List[Dict[str, Any]]) -> Dict[str, Any]:
         records = [cure for cure in cures if isinstance(cure, dict)]
         active = [cure for cure in records if cure.get("status") == "active"]
         source_backed = self._active_source_backed_cures(records)

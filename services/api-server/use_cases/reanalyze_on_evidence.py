@@ -49,6 +49,8 @@ def reanalyze_after_evidence_use_case(
     artifact_sink: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     review_sink: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
+    calculation_sink: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    handoff_sink: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Re-run the still-open + document-affected pods after new evidence arrives."""
     completed = set(completed_pod_keys or set())
@@ -88,6 +90,8 @@ def reanalyze_after_evidence_use_case(
                 artifact_sink=artifact_sink,
                 review_sink=review_sink,
                 event_sink=event_sink,
+                calculation_sink=calculation_sink,
+                handoff_sink=handoff_sink,
             )
             rows.append({"pod": pod, "before": "completed" if was_completed else "blocked", "after": "completed"})
         except Exception as exc:  # blocked pods raise ValueError with the missing-evidence reason

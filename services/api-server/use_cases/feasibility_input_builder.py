@@ -30,6 +30,62 @@ FIELDS = ["total_revenue", "total_cost", "construction_cost", "land_cost", "fina
 _CONSTRUCTION_COST_PER_SQM_BENCHMARK = 3_500_000
 
 
+def canonical_product_mix_to_runtime(product_mix: Any) -> List[Dict[str, Any]]:
+    """Convert approved FeasibilityStudyV2 product rows to the runtime shape.
+
+    Workbook imports use snake_case and nested FeasibilityValue objects, while
+    the existing feasibility/cash-flow engines consume the compact product mix
+    shape. Keeping this conversion explicit prevents an approved workbook from
+    disappearing between the canonical store and downstream Pods.
+    """
+    if not isinstance(product_mix, list):
+        return []
+
+    def scalar(value: Any) -> Any:
+        if isinstance(value, dict) and "value" in value:
+            return value.get("value")
+        return value
+
+    def numeric(value: Any) -> Any:
+        value = scalar(value)
+        if value in (None, ""):
+            return None
+        try:
+            return float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+
+    rows: List[Dict[str, Any]] = []
+    for index, item in enumerate(product_mix, start=1):
+        if not isinstance(item, dict):
+            continue
+        units = numeric(item.get("unit_count"))
+        contract_sqm = numeric(item.get("contract_area_sqm"))
+        contract_py = scalar(item.get("contract_area_py"))
+        if contract_py in (None, "") and contract_sqm not in (None, ""):
+            contract_py = contract_sqm * 0.3025
+        else:
+            contract_py = numeric(contract_py)
+        price_py = numeric(item.get("avg_sale_price_per_py"))
+        price_sqm = numeric(item.get("avg_sale_price_per_sqm"))
+        if price_py in (None, "") and price_sqm not in (None, ""):
+            price_py = price_sqm / 0.3025
+        revenue = numeric(item.get("revenue"))
+        row = {
+            "key": item.get("key") or f"product-{index}",
+            "type": item.get("product_name") or item.get("asset_type") or f"Product {index}",
+            "productType": item.get("asset_type") or item.get("product_name"),
+            "units": units,
+            "contractAreaPy": contract_py,
+            "pricePerPy": price_py,
+            "totalRevenue": revenue,
+            "source": "canonical_feasibility_study_v2",
+            "provenance": item.get("provenance"),
+        }
+        rows.append({key: value for key, value in row.items() if value is not None})
+    return rows
+
+
 def _num(value: Any) -> Optional[float]:
     if isinstance(value, bool) or value in (None, ""):
         return None

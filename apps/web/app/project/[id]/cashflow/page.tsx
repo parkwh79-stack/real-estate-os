@@ -46,10 +46,15 @@ export default function ProjectCashflowPage() {
     setLoading(true);
     setError(null);
     try {
-      const [cashflowResult, runs] = await Promise.all([
-        fetchLatestCashflow(projectId),
-        fetchLatestCalculationRuns(projectId, SCENARIO_ENGINES),
-      ]);
+      // Scenario registry is supplementary. A transient scenario/API failure
+      // must not hide the primary persisted Cash Flow calculation.
+      const cashflowResult = await fetchLatestCashflow(projectId);
+      let runs: Record<string, CalculationRunRecord | null> = {};
+      try {
+        runs = await fetchLatestCalculationRuns(projectId, SCENARIO_ENGINES);
+      } catch {
+        runs = {};
+      }
       setCashflow(cashflowResult);
       setScenarioRuns(runs);
     } catch (err) {
@@ -107,6 +112,13 @@ export default function ProjectCashflowPage() {
   const rows = useMemo(() => cashflow?.monthly.slice(0, 60) ?? [], [cashflow]);
   const summary = cashflow?.summary ?? {};
   const runId = cashflow?.runId ?? "-";
+  const inputScheduleEvidence = cashflow?.inputSnapshot
+    ? JSON.stringify(
+        (Array.isArray(cashflow.inputSnapshot.productMix) ? cashflow.inputSnapshot.productMix : [])
+          .map((item: Record<string, unknown>) => item.collectionSourceLocator)
+          .filter(Boolean),
+      )
+    : "-";
 
   return (
     <div className="space-y-6 pb-8">
@@ -123,7 +135,7 @@ export default function ProjectCashflowPage() {
           <button type="button" onClick={() => void load()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 disabled:opacity-40"><RefreshCw className="h-4 w-4" />새로고침</button>
           <button type="button" onClick={() => void buildFeasibilityInput()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-3 text-sm font-black text-indigo-700 disabled:opacity-40"><Calculator className="h-4 w-4" />{buildingFeas ? "사업수지 구성 중…" : "AI 사업수지 구성"}</button>
           <button type="button" onClick={() => void runPod()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white disabled:opacity-40">{running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}{running ? "계산 중" : "Cash Flow 재실행"}</button>
-          <a href={`/api/export-cf?projectId=${encodeURIComponent(projectId)}`} download className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-sm font-black text-indigo-700"><Download className="h-4 w-4" />수식 Excel 다운로드</a>
+          <a href={`/api/projects/${encodeURIComponent(projectId)}/cashflow/export`} download className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-sm font-black text-indigo-700"><Download className="h-4 w-4" />수식 Excel 다운로드</a>
         </div>
       </header>
 
@@ -146,12 +158,13 @@ export default function ProjectCashflowPage() {
           </section>
 
           <ScenarioRegistryPanel runs={scenarioRuns} />
+          <ScenarioDetailPanel runs={scenarioRuns} />
           <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">월별 Cash Flow</h2><p className="mt-1 text-xs font-semibold text-slate-500">저장된 CalculationRun의 실데이터입니다. 단위: 억원</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">원장 기준</span></div>
               <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">Cash-In</th><th className="p-3">Cash-Out</th><th className="p-3">Net CF</th><th className="p-3">누적 CF</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.period} className={row.period === `M${cashflow.maxMinusMonth}` ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{row.cashInEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className="p-3">{row.cashOutEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className={`p-3 font-bold ${row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{row.netCashFlowEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className={`p-3 font-black ${row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{row.cumulativeEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div>
             </div>
-            <aside className="space-y-4"><InfoPanel title="계산 근거"><Fact label="CalculationRun" value={runId} /><Fact label="Engine" value="cash_flow_engine" /><Fact label="완료 시각" value={cashflow.completedAt || "-"} /><Fact label="Source locator" value={JSON.stringify(cashflow.sourceMetadata ?? {})} /></InfoPanel><InfoPanel title="Cash Flow 위험"><RiskList flags={cashflow.riskFlags ?? []} /></InfoPanel></aside>
+            <aside className="space-y-4"><InfoPanel title="계산 근거"><Fact label="CalculationRun" value={runId} /><Fact label="Engine" value="cash_flow_engine" /><Fact label="Input snapshot" value={inputScheduleEvidence} /><Fact label="완료 시각" value={cashflow.completedAt || "-"} /><Fact label="Source locator" value={JSON.stringify(cashflow.sourceMetadata ?? {})} /></InfoPanel><InfoPanel title="Cash Flow 위험"><RiskList flags={cashflow.riskFlags ?? []} /></InfoPanel></aside>
           </section>
         </>
       )}
@@ -167,6 +180,41 @@ function ScenarioRegistryPanel({ runs }: { runs: Record<string, CalculationRunRe
     ["discount_stress", "할인분양 Stress", ["discount_stress.discount10.exitSaleRate"]],
   ] as const;
   return <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{items.map(([key, title, keys]) => { const run = runs[key]; return <div key={key} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center justify-between"><p className="text-sm font-black text-slate-950">{title}</p><span className={`rounded-full px-2 py-1 text-[11px] font-black ${run ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{run ? "저장됨" : "미실행"}</span></div><p className="mt-3 text-xl font-black text-slate-900">{run ? formatValue(metric(run, [...keys])) : "-"}</p><p className="mt-1 break-all text-[11px] font-semibold text-slate-500">{run ? `${run.calculationRunId} · ${run.engineVersion ?? "-"}` : "해당 엔진을 실행하면 표시됩니다."}</p><p className="mt-2 break-all text-[10px] text-slate-400">{run?.sourceLocator ? JSON.stringify(run.sourceLocator) : "source locator 없음"}</p></div>; })}</section>;
+}
+
+function ScenarioDetailPanel({ runs }: { runs: Record<string, CalculationRunRecord | null> }) {
+  const recoveryRows = Array.isArray(runs.tranche_recovery?.resultSnapshot?.rows)
+    ? runs.tranche_recovery?.resultSnapshot?.rows as Array<Record<string, unknown>>
+    : [];
+  const waterfallRows = Array.isArray(runs.waterfall?.resultSnapshot?.rows)
+    ? runs.waterfall?.resultSnapshot?.rows as Array<Record<string, unknown>>
+    : [];
+  const ltvRows = Array.isArray(runs.unsold_ltv?.resultSnapshot?.rows)
+    ? runs.unsold_ltv?.resultSnapshot?.rows as Array<Record<string, unknown>>
+    : [];
+  const trancheRows = recoveryRows.flatMap((scenario) =>
+    (Array.isArray(scenario.tranches) ? scenario.tranches : []).map((tranche) => ({
+      scenario: String(scenario.scenarioId ?? "-"),
+      saleRate: Number(scenario.saleRate ?? 0),
+      discountRate: Number(scenario.discountRate ?? 0),
+      tranche: String((tranche as Record<string, unknown>).tranche ?? "-"),
+      principalClaim: Number((tranche as Record<string, unknown>).principalClaim ?? 0),
+      paymentReceived: Number((tranche as Record<string, unknown>).paymentReceived ?? 0),
+      shortfall: Number((tranche as Record<string, unknown>).shortfall ?? 0),
+      recoveryRatio: Number((tranche as Record<string, unknown>).recoveryRatio ?? 0),
+    })),
+  ).slice(0, 18);
+  return (
+    <section className="grid gap-3 xl:grid-cols-3">
+      <DetailTable title="Tranche별 회수 및 금액" run={runs.tranche_recovery} headers={["시나리오", "Tranche", "청구액", "회수액", "부족액", "회수율"]} rows={trancheRows.map((row) => [row.scenario, row.tranche, formatValue(row.principalClaim / 1e8), formatValue(row.paymentReceived / 1e8), formatValue(row.shortfall / 1e8), `${(row.recoveryRatio * 100).toFixed(1)}%`])} />
+      <DetailTable title="상환 Waterfall" run={runs.waterfall} headers={["시나리오", "가용현금", "청구액", "부족액", "잔여현금"]} rows={waterfallRows.slice(0, 8).map((row) => [String(row.scenarioId ?? "-"), formatValue(Number(row.cashAvailable ?? 0) / 1e8), formatValue(Number(row.totalClaimAmount ?? 0) / 1e8), formatValue(Number(row.totalShortfall ?? 0) / 1e8), formatValue(Number(row.remainingCash ?? 0) / 1e8)])} />
+      <DetailTable title="미분양 LTV 주요 구간" run={runs.unsold_ltv} headers={["분양률", "할인율", "미분양가치", "미분양 LTV", "위험등급"]} rows={ltvRows.slice(0, 8).map((row) => [ `${(Number(row.saleRate ?? 0) * 100).toFixed(0)}%`, `${(Number(row.discountRate ?? 0) * 100).toFixed(0)}%`, formatValue(Number(row.discountedUnsoldValue ?? 0) / 1e8), `${(Number(row.unsoldLtv ?? 0) * 100).toFixed(1)}%`, String(row.riskLevel ?? "-") ])} />
+    </section>
+  );
+}
+
+function DetailTable({ title, run, headers, rows }: { title: string; run: CalculationRunRecord | null | undefined; headers: string[]; rows: string[][] }) {
+  return <div className="overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center justify-between"><h3 className="text-sm font-black text-slate-950">{title}</h3><span className={`rounded-full px-2 py-1 text-[11px] font-black ${run ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{run ? "계산 완료" : "재실행 필요"}</span></div>{rows.length ? <div className="mt-3 max-h-64 overflow-auto"><table className="w-full min-w-[420px] text-right text-[11px]"><thead className="sticky top-0 bg-slate-50 text-slate-500"><tr>{headers.map((header) => <th key={header} className="p-2">{header}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, index) => <tr key={`${title}-${index}`}>{row.map((cell, cellIndex) => <td key={`${index}-${cellIndex}`} className="p-2 font-semibold">{cell}</td>)}</tr>)}</tbody></table></div> : <p className="mt-4 text-xs font-semibold text-slate-500">Cash Flow를 재실행하면 최신 CalculationRun 결과가 표시됩니다.</p>}</div>;
 }
 
 function RiskList({ flags }: { flags: Array<Record<string, unknown>> }) { return flags.length ? <div className="space-y-2">{flags.slice(0, 8).map((flag, index) => <div key={String(flag.code ?? index)} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs"><p className="font-black text-amber-800">{String(flag.code ?? "RISK_FLAG")}</p><p className="mt-1 font-semibold text-amber-700">{String(flag.message ?? flag.severity ?? "검토 필요")}</p></div>)}</div> : <p className="text-xs font-semibold text-slate-500">저장된 Cash Flow 위험이 없습니다.</p>; }

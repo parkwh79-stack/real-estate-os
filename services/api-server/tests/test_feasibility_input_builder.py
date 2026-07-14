@@ -1,4 +1,22 @@
-from use_cases.feasibility_input_builder import FIELDS, build_feasibility_input_draft
+from use_cases.feasibility_input_builder import FIELDS, build_feasibility_input_draft, canonical_product_mix_to_runtime
+
+
+def test_canonical_product_mix_is_materialized_for_runtime_engines():
+    rows = canonical_product_mix_to_runtime([{
+        "key": "apt-a",
+        "asset_type": "apartment",
+        "product_name": "아파트 A형",
+        "unit_count": 100,
+        "contract_area_sqm": 99.1735537,
+        "avg_sale_price_per_sqm": 9_917_355.37,
+        "revenue": 300_000_000_000,
+    }])
+    assert rows[0]["type"] == "아파트 A형"
+    assert rows[0]["units"] == 100
+    assert round(rows[0]["contractAreaPy"], 2) == 30.0
+    assert round(rows[0]["pricePerPy"]) == 32_784_646
+    assert rows[0]["totalRevenue"] == 300_000_000_000
+    assert rows[0]["source"] == "canonical_feasibility_study_v2"
 
 
 def test_builds_from_feasibility_workbook_v2():

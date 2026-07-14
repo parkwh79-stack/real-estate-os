@@ -1,7 +1,45 @@
+import copy
+import json
+
+import pytest
 from fastapi.testclient import TestClient
 from main import app
 from routers.projects import PROJECTS_DB
 from storage import upsert_project_record
+
+
+@pytest.fixture(autouse=True)
+def _isolated_chief_e2e_database(tmp_path, monkeypatch):
+    """Keep endpoint tests off developer/pilot state and the default runtime DB."""
+    original_projects = copy.deepcopy(PROJECTS_DB)
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "chief-e2e.sqlite3"))
+    monkeypatch.setenv("REALYTICS_AI_PROVIDER", "none")
+    import use_cases.legal_pod as legal_pod
+
+    monkeypatch.setattr(
+        legal_pod,
+        "run_korean_law_mcp",
+        lambda project_data: {
+            "source": "test-law-context",
+            "connected": True,
+            "references": [
+                {
+                    "lawName": "National Land Planning Act",
+                    "article": "Article 36",
+                    "sourceUrl": "https://example.invalid/law/article-36",
+                }
+            ],
+        },
+    )
+    PROJECTS_DB.clear()
+    project_id = "chief-e2e-project"
+    project_data = {"project": {"id": project_id, "name": "Chief isolated E2E project"}}
+    PROJECTS_DB[project_id] = project_data
+    upsert_project_record(project_id, project_data)
+    yield
+    PROJECTS_DB.clear()
+    PROJECTS_DB.update(original_projects)
 
 
 def first_project_id(client: TestClient) -> str:
@@ -17,6 +55,28 @@ def test_chief_orchestration_endpoints():
     project_data["source_documents"] = [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "a1"}]
     project_data["land"] = {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000}
     project_data["landEvidence"] = [{"evidenceType": "official_land_price", "pnu": "1111010100100010000"}]
+    project_data["regulation"] = {"zoning": "residential", "far": 300, "bcr": 60}
+    project_data["legal"] = {"permitStatus": "pending"}
+    project_data["market"] = {
+        "manualComparables": [{"name": "Comparable A", "pricePerPy": 30_000_000}]
+    }
+    project_data["product_mix"] = [
+        {
+            "type": "apartment",
+            "units": 100,
+            "avgUnitPrice": 1_000_000_000,
+            "totalRevenue": 100_000_000_000,
+        }
+    ]
+    project_data["feasibility_input"] = {
+        "total_revenue": 100_000_000_000,
+        "total_cost": 80_000_000_000,
+        "construction_cost": 30_000_000_000,
+    }
+    project_data["schedule"] = {"completionMonth": 36}
+    project_data["pf_structure"] = [
+        {"tranche": "Senior", "amount": 50_000_000_000, "priority": 1}
+    ]
     upsert_project_record(project_id, project_data)
 
     # 1. Get Plan
@@ -74,6 +134,24 @@ def test_chief_orchestration_endpoints():
     assert review_res.status_code == 200
     assert review_res.json()["agentId"] == "LandLegalPodAIReviewer"
 
+    durable = reviews[0]["agentPlatform"]["durableRuntime"]
+    agent_run_id = durable["agentRunId"]
+    assert durable["status"] in {"completed", "completed_with_review", "blocked"}
+    agent_runs_res = client.get(f"/projects/{project_id}/chief-orchestration/agent-runs")
+    assert agent_runs_res.status_code == 200
+    assert any(item["runId"] == agent_run_id for item in agent_runs_res.json()["records"])
+    agent_run_res = client.get(f"/projects/{project_id}/chief-orchestration/agent-runs/{agent_run_id}")
+    assert agent_run_res.status_code == 200
+    assert agent_run_res.json()["run"]["runId"] == agent_run_id
+    assert agent_run_res.json()["steps"]
+    assert all("api_key" not in json.dumps(item) for item in agent_run_res.json()["brainUsageEvents"])
+
+    handoff_res = client.get(f"/projects/{project_id}/chief-orchestration/handoffs?from_agent=land_legal")
+    assert handoff_res.status_code == 200
+    handoffs = handoff_res.json()["records"]
+    assert handoffs
+    assert handoffs[0]["payload"]["sourceArtifactKey"] == artifacts[0]["artifactKey"]
+
     events_res = client.get(f"/projects/{project_id}/chief-orchestration/recalculation-events?source_pod=land_legal")
     assert events_res.status_code == 200
     events = events_res.json()["records"]
@@ -106,6 +184,12 @@ def test_chief_orchestration_endpoints():
     assert all_body["runAllSummary"]["requestedPodCount"] == 6
     assert all_body["runAllSummary"]["completedCount"] >= 1
     assert "rows" in all_body["runAllSummary"]
+
+    calculations_res = client.get(f"/projects/{project_id}/calculation-runs")
+    assert calculations_res.status_code == 200
+    engine_keys = {row["engineKey"] for row in calculations_res.json()["records"]}
+    assert "development_feasibility" in engine_keys
+    assert "cash_flow_engine" in engine_keys
 
     cure_res = client.post(
         f"/projects/{project_id}/chief-orchestration/unsold-ltv-cure",

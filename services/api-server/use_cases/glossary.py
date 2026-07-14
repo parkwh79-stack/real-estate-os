@@ -6,6 +6,11 @@ from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
+from uuid import uuid4
+
+from agent_platform.contracts import LearningCandidate
+from agent_platform.learning import LearningLifecycleError, LearningLifecycleService
+from agent_platform.operational import OperationalRepository
 
 from core.text_normalization import build_term_surface_record, normalize_match_text
 from storage import (
@@ -384,6 +389,8 @@ def capture_unmapped_term_surface_candidates_use_case(
     project_id: str | None = None,
     run_id: str | None = None,
     source: str = "evidence_graph",
+    tenant_id: str = "default",
+    created_by: str = "system_learning_loop",
 ) -> Dict[str, Any]:
     """Route unmapped DB-to-Pod term surfaces into the glossary review queue.
 
@@ -417,6 +424,49 @@ def capture_unmapped_term_surface_candidates_use_case(
         project_id=project_id,
         run_id=run_id,
     )
+    learning_candidate_ids: list[str] = []
+    learning_service = LearningLifecycleService(OperationalRepository())
+    now = datetime.now(timezone.utc)
+    for result in normalized.get("results", []):
+        candidate = result.get("candidate") if isinstance(result, dict) else None
+        if not isinstance(candidate, dict) or not candidate.get("candidateId"):
+            continue
+        source_locator = candidate.get("sourceLocator") or {}
+        evidence_id = source_locator.get("evidenceId") if isinstance(source_locator, dict) else None
+        learning_id = f"learning:glossary:{candidate['candidateId']}"
+        learning_candidate = LearningCandidate(
+            candidate_id=learning_id,
+            tenant_id=tenant_id or "default",
+            project_id=project_id,
+            candidate_type="glossary_term_mapping",
+            target_key=str(candidate.get("surface") or candidate["candidateId"]),
+            proposed_change={
+                "glossaryCandidateId": candidate["candidateId"],
+                "surface": candidate.get("surface"),
+                "suggestedTermId": candidate.get("suggestedTermId"),
+                "suggestedCanonicalField": candidate.get("suggestedCanonicalField"),
+                "sourceLocator": source_locator,
+            },
+            evidence_ids=[str(evidence_id)] if evidence_id else [],
+            source_run_ids=[str(run_id)] if run_id else [],
+            created_by=created_by,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "source": source,
+                "promotionPolicy": "human_evaluation_canary_required",
+                "autoPromotionAllowed": False,
+                "correlationId": str(uuid4()),
+            },
+        )
+        try:
+            learning_service.create_candidate(learning_candidate)
+            learning_candidate_ids.append(learning_id)
+        except LearningLifecycleError:
+            # A source run or explicit Evidence ID is mandatory. The glossary
+            # review queue remains valid, but it is not silently promoted into
+            # the governed learning lifecycle without provenance.
+            continue
     return {
         "schemaVersion": GLOSSARY_CANDIDATE_CAPTURE_SCHEMA_VERSION,
         "source": source,
@@ -426,6 +476,8 @@ def capture_unmapped_term_surface_candidates_use_case(
         "unmappedSurfaceCount": len(items),
         "matchedCount": normalized.get("matchedCount", 0),
         "capturedCount": normalized.get("candidateCount", 0),
+        "learningCandidateCount": len(learning_candidate_ids),
+        "learningCandidateIds": learning_candidate_ids,
         "results": normalized.get("results", []),
         "candidates": [
             result.get("candidate")

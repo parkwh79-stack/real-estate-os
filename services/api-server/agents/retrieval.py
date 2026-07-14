@@ -114,28 +114,16 @@ class EmbeddingRetrievalIndex:
 
 
 def default_embed_fn(ai_context: Optional[Dict[str, Any]] = None) -> Callable[[str], List[float]]:
-    """Embed via the auto-selected OpenAI-compatible provider (lazy import)."""
+    """Embed through the central Brain Router and audited AI connection."""
     from agents.ai_router import select_ai_context
+    from agents.ai_connection import AIConnection
 
     ctx = ai_context or select_ai_context(tier="retrieval")
     if not ctx:
         raise RuntimeError("No AI provider configured for embeddings; use the lexical backend.")
 
     def _embed(text: str) -> List[float]:
-        try:
-            from openai import OpenAI
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("openai package required for embedding backend.") from exc
-        import os
-
-        api_key_env = ctx.get("api_key_env")
-        client_kwargs: Dict[str, Any] = {"api_key": os.environ.get(api_key_env) if api_key_env else "not-needed"}
-        if ctx.get("base_url"):
-            client_kwargs["base_url"] = ctx["base_url"]
-        client = OpenAI(**client_kwargs)
-        model = os.environ.get("REALYTICS_EMBED_MODEL", "text-embedding-3-small")
-        resp = client.embeddings.create(model=model, input=text)
-        return list(resp.data[0].embedding)
+        return AIConnection().embed_text(text, ai_context=ctx)
 
     return _embed
 

@@ -6,7 +6,7 @@ REALYTICS x PLATFORM9 is an alpha-stage monorepo for building AI agents that hel
 
 ## Current Development Snapshot
 
-Updated: 2026-05-20
+Updated: 2026-07-14
 
 The repository currently includes:
 
@@ -27,6 +27,7 @@ The repository currently includes:
 - Structured report export pipeline with Markdown, JSON, print-ready HTML, PDF, and DOCX artifacts.
 - Project-level real pilot input package UI for archiving business plans, land ledgers, feasibility workbooks, land evidence JSON, and approved data-quality overrides before PF review runs.
 - Kakao Login and KakaoTalk notification baseline with mobile file intake, mobile review action center, Kakao OAuth callback, REALYTICS session handoff, safe message preview, and audit logging.
+- Agent Platform control plane with typed Agent/Brain/Tool contracts, six-Pod durable execution, child Domain Agent runs, deadline/budget/lease controls, transactional outbox, provider health and routing audit, governed learning candidates, and isolated Coding Pod jobs.
 
 ## Main Capabilities
 
@@ -496,7 +497,8 @@ graph TD
     Web[Next.js Web App] --> API[FastAPI API Server]
     API --> Calc[Calculation Engine]
     API --> Agents[AI Agent Layer]
-    API --> Store[SQLite MVP Storage]
+    API --> Control[Agent Platform Control Plane]
+    API --> Store[SQLite Controlled / PostgreSQL Production]
     API --> Reports[Report Export Engine]
     API --> UseCases[Application Use Case Layer]
     API --> Kakao[Kakao Login and Notification Adapter]
@@ -507,6 +509,12 @@ graph TD
     Agents --> Market[Marketability Agent]
     Agents --> Legal[Legal / Permit Agent]
     Agents --> Orchestrator[PF Review Orchestrator]
+    Control --> Runs[AgentRun, Steps, Brain Usage]
+    Control --> Router[Brain Router and Provider Health]
+    Control --> Tools[ToolRegistry and Audited Calls]
+    Control --> Outbox[Transactional Outbox]
+    Control --> Learning[Governed Learning Lifecycle]
+    Control --> Coding[Coding Pod Queue]
     Orchestrator --> Handoffs[Agent Handoff and Progress Model]
     Kakao --> Mobile[Mobile Review Action Center]
     MCP[MCP Server] --> API
@@ -540,6 +548,19 @@ Health check:
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+Optional Agent Platform workers:
+
+```bash
+cd services/api-server
+python scripts/run_agent_platform_worker.py
+python scripts/run_coding_pod_worker.py
+```
+
+`run_agent_platform_worker.py` dispatches leased outbox events and recovers expired
+Agent leases. `run_coding_pod_worker.py` requires a separately deployed isolated
+executor configured by `REALYTICS_CODING_EXECUTOR_URL`; it never runs repository
+shell commands inside the API process.
 
 ### 3. Run the web app
 

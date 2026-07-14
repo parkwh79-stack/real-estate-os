@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable
+from uuid import uuid4
 
 SECRET_KEYS = {"api_key", "apikey", "token", "secret", "password"}
+logger = logging.getLogger(__name__)
 
 
 def _safe_context(context: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -110,10 +114,58 @@ def build_ai_brain_used_audit_event(
 
 
 def record_ai_brain_used(event: Dict[str, Any]) -> Dict[str, Any] | None:
+    event = dict(event)
+    event.setdefault("eventId", str(uuid4()))
+    stored: Dict[str, Any] | None = None
+    failures: list[str] = []
     try:
         from storage import record_user_activity_log
 
-        return record_user_activity_log(event)
-    except Exception:
-        # AI audit must never break an Agent run.
-        return None
+        stored = record_user_activity_log(event)
+    except Exception as exc:
+        failures.append(f"activity_log:{exc}")
+    try:
+        from storage import upsert_brain_usage_event_record
+
+        metadata = dict(event.get("metadata") or {})
+        usage = dict(metadata.get("tokenUsage") or {})
+        status = str(metadata.get("status") or "failed")
+        upsert_brain_usage_event_record({
+            "schemaVersion": "realytics-brain-usage-event-v1",
+            "eventId": f"brain-usage:{event['eventId']}",
+            "runId": event.get("runId") or f"direct-ai:{event['eventId']}",
+            "stepId": None,
+            "tenantId": metadata.get("tenantId") or "default",
+            "projectId": event.get("projectId"),
+            "agentId": metadata.get("agentId") or "AIConnection",
+            "agentVersion": metadata.get("agentVersion") or "legacy-ai-connection-v1",
+            "brainProfileId": metadata.get("aiContext", {}).get("brain_profile_id"),
+            "provider": metadata.get("provider"),
+            "model": metadata.get("model"),
+            "promptVersion": metadata.get("promptVersion"),
+            "status": "completed" if status == "success" else (
+                "fallback" if status == "fallback_used" else "failed"
+            ),
+            "inputTokens": usage.get("promptTokens") or usage.get("inputTokens"),
+            "outputTokens": usage.get("completionTokens") or usage.get("outputTokens"),
+            "estimatedCostUsd": usage.get("estimatedCostUsd"),
+            "latencyMs": metadata.get("latencyMs"),
+            "fallbackReason": metadata.get("error") if status != "success" else None,
+            "occurredAt": event.get("createdAt"),
+            "metadata": {
+                "routingEventId": metadata.get("aiContext", {}).get("brain_routing_event_id"),
+                "brainSource": metadata.get("brainSource"),
+                "keyMode": metadata.get("keyMode"),
+                "promptHash": metadata.get("promptHash"),
+                "promptPersisted": False,
+                "responsePersisted": False,
+                "credentialsPersisted": False,
+            },
+        })
+    except Exception as exc:
+        failures.append(f"brain_usage:{exc}")
+    if failures:
+        logger.error("AI audit persistence failed: %s", "; ".join(failures))
+        if os.environ.get("REALYTICS_AUDIT_FAIL_CLOSED", "false").lower() in {"1", "true", "yes"}:
+            raise RuntimeError("AI_AUDIT_PERSISTENCE_FAILED: " + "; ".join(failures))
+    return stored or event

@@ -143,7 +143,7 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ### `POST /projects/{project_id}/cash-flow/run`
 - **Description**: Run the baseline Cash Flow Engine through the canonical feasibility path.
 - **Request Body**: Optional `CashFlowRunRequest` directly, `{ "cashFlowRunRequest": {...} }`, `{ "cashFlowRunRequestDraft": {...} }`, or project-data overrides that can be analyzed by Development Feasibility Agent.
-- **Response**: `realytics_cash_flow_engine_v1` result with summary, product-based sales collection schedule, operating/repayment reserve account allocation, tranche-aware PF draw schedule, monthly cash-flow rows, Max Minus, risk flags, report fragments, and source metadata.
+- **Response**: `realytics_cash_flow_engine_v1` result with summary, product-based sales collection schedule, operating/repayment reserve account allocation, tranche-aware PF draw schedule, monthly cash-flow rows, Max Minus, risk flags, report fragments, and source metadata. When the canonical FeasibilityStudyV2 contains workbook-derived `raw_import.productMonthlySalesRateScenarios`, each `productMix` row carries `collectionSteps`, `monthlyCollectionAmounts`, `monthlyCollectionRates`, `cumulativeCollectionRates`, and a source locator; those explicit contract/interim/balance amounts are used before asset-type defaults. The persisted `cash_flow_engine` CalculationRun stores the exact resolved request in `inputSnapshot` and the deterministic output in `resultSnapshot`, including the workbook locator. Aggregate asset-type schedules are allocated across existing product types by revenue or unit weight so the schedule is not duplicated.
 - **Canonical path**: `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest -> Cash Flow Engine`.
 
 ### `POST /projects/{project_id}/pf/structure`
@@ -531,3 +531,79 @@ Explicit sensitive events currently recorded:
 - `source_document_download`
 - `report_export_created`
 - `report_export_download`
+
+## Durable Agent Runtime
+
+- `GET /projects/{project_id}/chief-orchestration/agent-runs`
+  - Lists persisted Agent runs for a project; optional `status` and `limit` filters.
+- `GET /projects/{project_id}/chief-orchestration/agent-runs/{agent_run_id}`
+  - Returns the run envelope, ordered lifecycle/attempt steps, and secret-free Brain usage events.
+- `POST /projects/{project_id}/chief-orchestration/agent-runs/{agent_run_id}/cancel`
+  - Persists a cooperative cancellation request. Body: `{ "reason": "..." }`.
+  - Terminal runs are immutable and are returned unchanged.
+
+## Agent Platform Operations
+
+All routes below require the named RBAC permission and enforce the authenticated
+tenant where the record has a tenant owner.
+
+### Runtime and outbox
+
+- `POST /agent-platform/runtime/recover-expired` (`agent:operate`)
+  - Fails expired non-terminal Agent leases as `WORKER_LEASE_EXPIRED` and emits a
+    durable recovery event. It does not silently replay an unknown request payload.
+- `GET /agent-platform/runtime/outbox` (`audit:read`)
+  - Lists tenant-scoped pending, processing, retrying, published, or dead-letter events.
+- `POST /agent-platform/runtime/outbox/dispatch?limit=20` (`agent:operate`)
+  - Runs one leased outbox-dispatch batch.
+- `POST /agent-platform/runtime/outbox/{event_id}/requeue` (`agent:operate`)
+  - Audited manual requeue. Body: `{ "reason": "..." }`.
+
+### Brain routing control
+
+- `GET /agent-platform/brains/health` (`audit:read`)
+- `GET /agent-platform/brains/routing-events` (`audit:read`)
+- `GET /agent-platform/brains/policies` (`audit:read`)
+- `POST /agent-platform/brains/policies` (`brain:manage`)
+
+Policies are versioned by tenant/user scope. Routing events preserve candidate
+scores, hard-filter rejection reasons, selected provider/model, policy version, and
+blocked/fallback rationale. Secret values are excluded.
+
+### Tool control
+
+- `GET /agent-platform/tools` (`tool:read`)
+- `GET /agent-platform/tool-calls` (`audit:read`)
+- `POST /agent-platform/tools/execute` (`tool:execute`)
+
+Only registered `ToolManifest` implementations may run. The controlled registry
+currently contains real read-only Deal State and CalculationRun ledger tools.
+Mutation and external side-effect tools are not registered until an approval
+resolver and isolated execution policy exist.
+
+### Learning lifecycle
+
+- `GET /agent-platform/learning/candidates` (`learning:read`)
+- `POST /agent-platform/learning/candidates` (`learning:review`)
+- `POST /agent-platform/learning/candidates/{candidate_id}/submit` (`learning:review`)
+- `POST /agent-platform/learning/evaluations` (`learning:review`)
+- `POST /agent-platform/learning/decisions` (`learning:promote`)
+
+An approved production promotion requires persisted evaluation and canary evidence.
+Discovery never mutates a production parser, glossary, calculation, or routing
+policy automatically.
+
+### Isolated Coding Pod control
+
+- `GET /agent-platform/coding/jobs` (`coding:operate`)
+- `POST /agent-platform/coding/jobs` (`coding:request`)
+- `POST /agent-platform/coding/jobs/claim` (`coding:operate`)
+- `POST /agent-platform/coding/jobs/{job_id}/heartbeat` (`coding:operate`)
+- `POST /agent-platform/coding/jobs/{job_id}/start` (`coding:operate`)
+- `POST /agent-platform/coding/jobs/{job_id}/complete` (`coding:operate`)
+- `POST /agent-platform/coding/jobs/{job_id}/fail` (`coding:operate`)
+- `POST /agent-platform/coding/jobs/{job_id}/cancel` (`coding:request`)
+
+The API controls durable jobs only. Repository code execution happens in a separate
+worker and remote sandbox. The sandbox token is sent as an Authorization header and
+is never stored in the job payload or business database.

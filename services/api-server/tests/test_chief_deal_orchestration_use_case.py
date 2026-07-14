@@ -267,6 +267,16 @@ def test_market_product_pod_persists_ai_review_for_market_evidence_gaps():
         "feasibility_input": {"total_revenue": 100000000000, "total_cost": 80000000000},
         "schedule": {"completionMonth": 36},
         "pf_structure": [{"tranche": "Senior", "amount": 50000000000}],
+        "chief_orchestration_state": {
+            "podRuns": {
+                "land_legal": {
+                    "podKey": "land_legal",
+                    "status": "completed",
+                    "artifactKeys": ["artifact:land_legal:seed"],
+                    "outputHash": "seed-land-output",
+                }
+            }
+        },
     }
     persisted_artifacts = {}
     persisted_reviews = {}

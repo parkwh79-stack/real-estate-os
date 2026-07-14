@@ -9,6 +9,7 @@ Postgres + the live data migration is the deployment step; this module is
 unit-tested for config/DSN/DDL without a live database.
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,7 +18,6 @@ from urllib.parse import quote_plus
 # Authoritative schema lives in a versioned .sql migration so a DBA and the app
 # share one source of truth (faithful mirror of storage._ensure_sqlite_schema).
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
-INITIAL_SCHEMA_FILE = MIGRATIONS_DIR / "0001_initial_schema.sql"
 
 
 def postgres_configured() -> bool:
@@ -88,6 +88,18 @@ JSONB_STORE_TABLES: List[str] = [
     "evidence_graphs",
     "chief_pod_artifacts",
     "pod_ai_reviews",
+    "agent_runs",
+    "agent_run_steps",
+    "brain_usage_events",
+    "runtime_outbox_events",
+    "brain_provider_health",
+    "brain_routing_policies",
+    "brain_routing_events",
+    "tool_calls",
+    "learning_candidates",
+    "learning_evaluations",
+    "learning_promotions",
+    "coding_pod_jobs",
     "prompt_artifacts",
     "assumption_overrides",
     "restructuring_cures",
@@ -108,12 +120,16 @@ def _split_sql_statements(sql: str) -> List[str]:
 def schema_ddl() -> List[str]:
     """All DDL statements to bootstrap a fresh PostgreSQL/PostGIS database.
 
-    Loads the authoritative versioned migration (0001_initial_schema.sql) so the
-    app's ensure_schema() and a manually-run migration provision identical tables
-    — a faithful, typed mirror of the SQLite stores (not a generic JSONB stub).
+    Loads every authoritative versioned migration in filename order so fresh and
+    existing databases receive the same typed schema as the SQLite stores. The
+    migrations are idempotent and do not rely on a generic JSONB-only fallback.
     """
-    if INITIAL_SCHEMA_FILE.exists():
-        return _split_sql_statements(INITIAL_SCHEMA_FILE.read_text(encoding="utf-8"))
+    migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    if migration_files:
+        statements: List[str] = []
+        for migration_file in migration_files:
+            statements.extend(_split_sql_statements(migration_file.read_text(encoding="utf-8")))
+        return statements
     # Fallback (should not happen in a packaged deploy): minimal spatial bootstrap.
     return [
         POSTGIS_BOOTSTRAP_SQL,
@@ -129,6 +145,520 @@ def ensure_schema(conn) -> None:
         for statement in schema_ddl():
             cur.execute(statement)
     conn.commit()
+
+
+_TYPED_JSONB_TABLES: Dict[str, Dict[str, Any]] = {
+    "agent_runs": {
+        "key": ("run_id",),
+        "columns": (
+            "run_id", "project_id", "tenant_id", "user_id", "request_id",
+            "correlation_id", "trace_id", "agent_id", "agent_version", "task_type",
+            "idempotency_key", "input_hash", "status", "attempt_count", "max_attempts",
+            "cancellation_requested", "state_version", "lease_owner", "lease_expires_at",
+            "heartbeat_at", "deadline_at", "consumed_cost_usd", "consumed_llm_calls",
+            "consumed_tool_calls", "retry_of_run_id", "selected_brain_profile_id",
+            "created_at", "updated_at", "started_at", "completed_at",
+        ),
+        "order": "updated_at DESC, run_id DESC",
+    },
+    "agent_run_steps": {
+        "key": ("step_id",),
+        "columns": (
+            "step_id", "run_id", "project_id", "sequence_no", "stage", "step_type",
+            "status", "attempt_no", "error_code", "started_at", "completed_at",
+        ),
+        "order": "sequence_no ASC, step_id ASC",
+    },
+    "brain_usage_events": {
+        "key": ("event_id",),
+        "columns": (
+            "event_id", "run_id", "step_id", "tenant_id", "project_id", "agent_id",
+            "agent_version", "brain_profile_id", "provider", "model", "status",
+            "input_tokens", "output_tokens", "estimated_cost_usd", "latency_ms", "occurred_at",
+        ),
+        "order": "occurred_at ASC, event_id ASC",
+    },
+    "runtime_outbox_events": {
+        "key": ("event_id",),
+        "columns": (
+            "event_id", "tenant_id", "project_id", "aggregate_type", "aggregate_id",
+            "event_type", "idempotency_key", "status", "attempt_count", "max_attempts",
+            "available_at", "lease_owner", "lease_expires_at", "created_at", "updated_at",
+            "published_at",
+        ),
+        "order": "created_at ASC, event_id ASC",
+    },
+    "brain_provider_health": {
+        "key": ("health_id",),
+        "columns": (
+            "health_id", "tenant_id", "brain_profile_id", "provider", "model", "status",
+            "consecutive_failures", "checked_at", "next_check_at",
+        ),
+        "order": "checked_at DESC, health_id DESC",
+    },
+    "brain_routing_policies": {
+        "key": ("policy_id",),
+        "columns": ("policy_id", "tenant_id", "user_id", "version", "active", "created_at"),
+        "order": "version DESC, created_at DESC",
+    },
+    "brain_routing_events": {
+        "key": ("routing_event_id",),
+        "columns": (
+            "routing_event_id", "run_id", "request_id", "tenant_id", "user_id", "project_id",
+            "task_type", "policy_id", "policy_version", "selected_profile_id",
+            "selected_provider", "selected_model", "blocked", "occurred_at",
+        ),
+        "order": "occurred_at DESC, routing_event_id DESC",
+    },
+    "tool_calls": {
+        "key": ("tool_call_id",),
+        "columns": (
+            "tool_call_id", "run_id", "step_id", "tenant_id", "user_id", "project_id",
+            "tool_id", "tool_version", "status", "side_effect_level", "idempotency_key",
+            "state_version", "requested_at", "completed_at",
+        ),
+        "order": "requested_at DESC, tool_call_id DESC",
+    },
+    "learning_candidates": {
+        "key": ("candidate_id",),
+        "columns": (
+            "candidate_id", "tenant_id", "project_id", "candidate_type", "target_key", "status",
+            "created_by", "created_at", "updated_at",
+        ),
+        "order": "updated_at DESC, candidate_id DESC",
+    },
+    "learning_evaluations": {
+        "key": ("evaluation_id",),
+        "columns": ("evaluation_id", "candidate_id", "tenant_id", "passed", "evaluated_at"),
+        "order": "evaluated_at DESC, evaluation_id DESC",
+    },
+    "learning_promotions": {
+        "key": ("decision_id",),
+        "columns": (
+            "decision_id", "candidate_id", "tenant_id", "action", "environment",
+            "approved_by", "approved_at",
+        ),
+        "order": "approved_at DESC, decision_id DESC",
+    },
+    "coding_pod_jobs": {
+        "key": ("job_id",),
+        "columns": (
+            "job_id", "tenant_id", "requested_by", "workspace_ref", "branch_name", "status",
+            "idempotency_key", "lease_owner", "lease_expires_at", "heartbeat_at", "created_at",
+            "attempt_count", "max_attempts", "state_version", "updated_at",
+        ),
+        "order": "created_at ASC, job_id ASC",
+    },
+    "chief_pod_artifacts": {
+        "key": ("project_id", "artifact_key"),
+        "columns": ("project_id", "artifact_key", "pod_key", "artifact_type", "status", "created_at", "updated_at"),
+        "order": "created_at DESC, artifact_key DESC",
+    },
+    "pod_ai_reviews": {
+        "key": ("project_id", "review_id"),
+        "columns": ("project_id", "review_id", "pod_key", "source_artifact_key", "agent_id", "review_status", "ai_brain_used_event_id", "created_at", "updated_at"),
+        "order": "updated_at DESC, review_id DESC",
+    },
+    "agent_handoffs": {
+        "key": ("project_id", "handoff_id"),
+        "columns": ("project_id", "handoff_id", "run_id", "from_agent", "to_agent", "handoff_type", "status", "created_at", "updated_at"),
+        "order": "created_at DESC, handoff_id DESC",
+    },
+    "recalculation_events": {
+        "key": ("project_id", "event_id"),
+        "columns": ("project_id", "event_id", "run_id", "source_pod", "target_pod", "trigger_name", "event_type", "status", "created_at", "updated_at"),
+        "order": "created_at DESC, event_id DESC",
+    },
+    "calculation_runs": {
+        "key": ("project_id", "calculation_run_id"),
+        "columns": ("project_id", "calculation_run_id", "engine_key", "engine_version", "status", "created_at", "updated_at"),
+        "order": "created_at DESC, calculation_run_id DESC",
+    },
+    "deal_state_records": {
+        "key": ("project_id", "record_id"),
+        "columns": ("project_id", "record_id", "record_type", "key", "calculation_run_id", "source_type", "review_status", "updated_at"),
+        "order": "updated_at DESC, record_id DESC",
+    },
+}
+
+
+def insert_typed_jsonb_record(
+    table: str,
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    conn=None,
+) -> bool:
+    """Insert an immutable/idempotent runtime row and report whether it won."""
+    spec = _TYPED_JSONB_TABLES.get(table)
+    if spec is None:
+        raise ValueError(f"Unsupported typed PostgreSQL table: {table}")
+    columns = [column for column in spec["columns"] if column in values]
+    missing_keys = [column for column in spec["key"] if column not in values]
+    if missing_keys:
+        raise ValueError(f"Missing PostgreSQL key columns for {table}: {', '.join(missing_keys)}")
+    insert_columns = [*columns, "payload_json"]
+    placeholders = ["%s" for _ in columns] + ["%s::jsonb"]
+    sql = (
+        f"INSERT INTO {table}({', '.join(insert_columns)}) "
+        f"VALUES({', '.join(placeholders)}) ON CONFLICT DO NOTHING"
+    )
+    params = [values[column] for column in columns]
+    params.append(json.dumps(payload, ensure_ascii=False, default=str))
+    owns = conn is None
+    if owns:
+        conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            created = cur.rowcount == 1
+        conn.commit()
+        return created
+    finally:
+        if owns:
+            conn.close()
+
+
+def update_agent_run_optimistic(
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    expected_state_version: int,
+    conn=None,
+) -> bool:
+    """Update one Agent run only when its persisted state version still matches."""
+    run_id = values.get("run_id")
+    if not run_id:
+        raise ValueError("run_id is required")
+    spec = _TYPED_JSONB_TABLES["agent_runs"]
+    columns = [
+        column for column in spec["columns"]
+        if column in values and column not in {"run_id"}
+    ]
+    assignments = [f"{column} = %s" for column in columns]
+    assignments.append("payload_json = %s::jsonb")
+    sql = (
+        f"UPDATE agent_runs SET {', '.join(assignments)} "
+        "WHERE run_id = %s AND state_version = %s"
+    )
+    params = [values[column] for column in columns]
+    params.extend([
+        json.dumps(payload, ensure_ascii=False, default=str),
+        run_id,
+        expected_state_version,
+    ])
+    owns = conn is None
+    if owns:
+        conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            updated = cur.rowcount == 1
+        conn.commit()
+        return updated
+    finally:
+        if owns:
+            conn.close()
+
+
+def update_agent_run_with_outbox(
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    expected_state_version: int,
+    outbox_values: Dict[str, Any],
+    outbox_payload: Dict[str, Any],
+) -> bool:
+    """Atomically persist one AgentRun transition and its durable outbox event."""
+    conn = connect()
+    try:
+        ensure_schema(conn)
+        run_spec = _TYPED_JSONB_TABLES["agent_runs"]
+        columns = [
+            column for column in run_spec["columns"]
+            if column in values and column != "run_id"
+        ]
+        assignments = [f"{column} = %s" for column in columns]
+        assignments.append("payload_json = %s::jsonb")
+        run_params = [values[column] for column in columns]
+        run_params.extend([
+            json.dumps(payload, ensure_ascii=False, default=str),
+            values["run_id"],
+            expected_state_version,
+        ])
+        outbox_spec = _TYPED_JSONB_TABLES["runtime_outbox_events"]
+        outbox_columns = [column for column in outbox_spec["columns"] if column in outbox_values]
+        outbox_sql = (
+            f"INSERT INTO runtime_outbox_events({', '.join(outbox_columns)}, payload_json) "
+            f"VALUES({', '.join('%s' for _ in outbox_columns)}, %s::jsonb) "
+            "ON CONFLICT DO NOTHING"
+        )
+        outbox_params = [outbox_values[column] for column in outbox_columns]
+        outbox_params.append(json.dumps(outbox_payload, ensure_ascii=False, default=str))
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE agent_runs SET {', '.join(assignments)} "
+                "WHERE run_id = %s AND state_version = %s",
+                run_params,
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
+            cur.execute(outbox_sql, outbox_params)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _typed_upsert_command(
+    table: str,
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+) -> tuple[str, list[Any]]:
+    spec = _TYPED_JSONB_TABLES.get(table)
+    if spec is None:
+        raise ValueError(f"Unsupported typed PostgreSQL table: {table}")
+    columns = [column for column in spec["columns"] if column in values]
+    missing_keys = [column for column in spec["key"] if column not in values]
+    if missing_keys:
+        raise ValueError(f"Missing PostgreSQL key columns for {table}: {', '.join(missing_keys)}")
+    insert_columns = [*columns, "payload_json"]
+    placeholders = ["%s" for _ in columns] + ["%s::jsonb"]
+    update_columns = [column for column in columns if column not in spec["key"]]
+    update_columns.append("payload_json")
+    update_clause = ", ".join(f"{column}=EXCLUDED.{column}" for column in update_columns)
+    sql = (
+        f"INSERT INTO {table}({', '.join(insert_columns)}) "
+        f"VALUES({', '.join(placeholders)}) "
+        f"ON CONFLICT ({', '.join(spec['key'])}) DO UPDATE SET {update_clause}"
+    )
+    params = [values[column] for column in columns]
+    params.append(json.dumps(payload, ensure_ascii=False, default=str))
+    return sql, params
+
+
+def upsert_typed_jsonb_record(table: str, values: Dict[str, Any], payload: Dict[str, Any], *, conn=None) -> None:
+    """Write a critical audit record to its first-class PostgreSQL table."""
+    sql, params = _typed_upsert_command(table, values, payload)
+    owns = conn is None
+    if owns:
+        conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+        conn.commit()
+    finally:
+        if owns:
+            conn.close()
+
+
+def upsert_typed_jsonb_records(
+    table: str,
+    records: List[tuple[Dict[str, Any], Dict[str, Any]]],
+    *,
+    conn=None,
+) -> None:
+    """Write a homogeneous typed-record batch using one schema check and commit."""
+    if not records:
+        return
+    commands = [_typed_upsert_command(table, values, payload) for values, payload in records]
+    owns = conn is None
+    if owns:
+        conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            for sql, params in commands:
+                cur.execute(sql, params)
+        conn.commit()
+    finally:
+        if owns:
+            conn.close()
+
+
+def upsert_typed_jsonb_record_with_outbox(
+    table: str,
+    values: Dict[str, Any],
+    payload: Dict[str, Any],
+    outbox_values: Dict[str, Any],
+    outbox_payload: Dict[str, Any],
+) -> None:
+    """Commit a typed aggregate and its delivery event in one transaction."""
+    aggregate_sql, aggregate_params = _typed_upsert_command(table, values, payload)
+    outbox_sql, outbox_params = _typed_upsert_command(
+        "runtime_outbox_events", outbox_values, outbox_payload,
+    )
+    conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(aggregate_sql, aggregate_params)
+            cur.execute(outbox_sql, outbox_params)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_typed_jsonb_record(table: str, where: Dict[str, Any], *, conn=None) -> Optional[Dict[str, Any]]:
+    rows = list_typed_jsonb_records(table, where=where, limit=1, conn=conn)
+    return rows[0] if rows else None
+
+
+def list_typed_jsonb_records(
+    table: str,
+    *,
+    where: Dict[str, Any] | None = None,
+    limit: int = 100,
+    conn=None,
+) -> List[Dict[str, Any]]:
+    spec = _TYPED_JSONB_TABLES.get(table)
+    if spec is None:
+        raise ValueError(f"Unsupported typed PostgreSQL table: {table}")
+    where = where or {}
+    allowed = set(spec["columns"])
+    if any(column not in allowed for column in where):
+        raise ValueError(f"Unsupported PostgreSQL filter for {table}")
+    clauses = [f"{column} = %s" for column in where]
+    sql = f"SELECT payload_json FROM {table}"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += f" ORDER BY {spec['order']} LIMIT %s"
+    params = [*where.values(), max(1, min(int(limit), 1000))]
+    owns = conn is None
+    if owns:
+        conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        records: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = row[0]
+            records.append(json.loads(payload) if isinstance(payload, (str, bytes, bytearray)) else payload)
+        return records
+    finally:
+        if owns:
+            conn.close()
+
+
+def claim_runtime_outbox_records(
+    *,
+    worker_id: str,
+    now,
+    lease_expires_at,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Claim due outbox rows with PostgreSQL row locking and skip-locked semantics."""
+    conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT event_id, payload_json
+                FROM runtime_outbox_events
+                WHERE (
+                    (status IN ('pending', 'retrying') AND available_at <= %s)
+                    OR (status = 'processing' AND lease_expires_at < %s)
+                )
+                ORDER BY available_at, created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+                """,
+                (now, now, max(1, min(int(limit), 100))),
+            )
+            rows = cur.fetchall()
+            claimed: List[Dict[str, Any]] = []
+            for event_id, raw_payload in rows:
+                payload = dict(raw_payload)
+                payload.update({
+                    "status": "processing",
+                    "leaseOwner": worker_id,
+                    "leaseExpiresAt": lease_expires_at.isoformat(),
+                    "updatedAt": now.isoformat(),
+                    "attemptCount": int(payload.get("attemptCount") or 0) + 1,
+                })
+                cur.execute(
+                    """
+                    UPDATE runtime_outbox_events
+                    SET status = 'processing', attempt_count = %s, lease_owner = %s,
+                        lease_expires_at = %s, updated_at = %s, payload_json = %s::jsonb
+                    WHERE event_id = %s
+                    """,
+                    (
+                        payload["attemptCount"], worker_id, lease_expires_at, now,
+                        json.dumps(payload, ensure_ascii=False, default=str), event_id,
+                    ),
+                )
+                claimed.append(payload)
+        conn.commit()
+        return claimed
+    finally:
+        conn.close()
+
+
+def claim_coding_pod_job_record(*, worker_id: str, now, lease_expires_at) -> Dict[str, Any] | None:
+    """Claim one Coding Pod job with row locking and expired-worker recovery."""
+    conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT job_id, payload_json
+                FROM coding_pod_jobs
+                WHERE attempt_count < max_attempts AND (
+                    status = 'queued'
+                    OR (status IN ('leased', 'running') AND lease_expires_at < %s)
+                )
+                ORDER BY created_at, job_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """,
+                (now,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.commit()
+                return None
+            job_id, raw_payload = row
+            payload = dict(raw_payload)
+            payload.update({
+                "status": "leased",
+                "leaseOwner": worker_id,
+                "leaseExpiresAt": lease_expires_at.isoformat(),
+                "heartbeatAt": now.isoformat(),
+                "attemptCount": int(payload.get("attemptCount") or 0) + 1,
+                "maxAttempts": int(payload.get("maxAttempts") or 3),
+                "stateVersion": int(payload.get("stateVersion") or 1) + 1,
+                "updatedAt": now.isoformat(),
+            })
+            cur.execute(
+                """
+                UPDATE coding_pod_jobs
+                SET status = 'leased', lease_owner = %s, lease_expires_at = %s,
+                    heartbeat_at = %s, attempt_count = %s, max_attempts = %s,
+                    state_version = %s, updated_at = %s, payload_json = %s::jsonb
+                WHERE job_id = %s
+                """,
+                (
+                    worker_id, lease_expires_at, now, payload["attemptCount"],
+                    payload["maxAttempts"], payload["stateVersion"], now,
+                    json.dumps(payload, ensure_ascii=False, default=str), job_id,
+                ),
+            )
+        conn.commit()
+        return payload
+    finally:
+        conn.close()
 
 
 # --- State document store --------------------------------------------------

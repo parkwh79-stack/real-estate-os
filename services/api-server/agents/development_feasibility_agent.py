@@ -403,6 +403,16 @@ class DevelopmentFeasibilityAgent:
         land = project_data.get("land", {})
         regulation = project_data.get("regulation", {})
         schedule = project_data.get("schedule", {})
+        canonical_study = project_data.get("feasibilityStudyV2") or project_data.get("canonicalFeasibilityStudyV2") or {}
+        canonical_raw_import = canonical_study.get("raw_import") if isinstance(canonical_study, dict) else {}
+        raw_import = dict(canonical_raw_import) if isinstance(canonical_raw_import, dict) else {}
+        raw_import.update({
+            "source": "development_feasibility_agent",
+            "sourceAnalysisType": "developer_and_pf_feasibility",
+            "note": "Draft mapping for FeasibilityStudyV2; workbook cell provenance is added by the workbook adapter.",
+            "assetCalculationProfiles": asset_profile_summary,
+            "logisticsAnalysis": logistics_analysis or {},
+        })
         return {
             "version": FEASIBILITY_STUDY_SCHEMA_VERSION,
             "project_id": project.get("id"),
@@ -458,13 +468,7 @@ class DevelopmentFeasibilityAgent:
                 "ltc": pf["ltcByCost"],
                 "exit_sale_rate": pf["exitSaleRate"],
             },
-            "raw_import": {
-                "source": "development_feasibility_agent",
-                "sourceAnalysisType": "developer_and_pf_feasibility",
-                "note": "Draft mapping for FeasibilityStudyV2; workbook cell provenance is added by the workbook adapter.",
-                "assetCalculationProfiles": asset_profile_summary,
-                "logisticsAnalysis": logistics_analysis or {},
-            },
+            "raw_import": raw_import,
         }
 
     def _logistics_analysis(

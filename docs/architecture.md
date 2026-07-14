@@ -1,6 +1,6 @@
 # REALYTICS x PLATFORM9 Architecture
 
-Updated: 2026-05-20
+Updated: 2026-07-13
 
 ## 1. Purpose
 
@@ -23,6 +23,7 @@ realytics-platform9-monorepo/
 |
 |-- services/
 |   `-- api-server/
+|       |-- agent_platform/
 |       |-- agents/
 |       |-- core/
 |       |-- data/
@@ -59,9 +60,10 @@ Important current implementation locations:
 | Agents | `services/api-server/agents` | Development feasibility, cash flow, marketability, land ledger, legal, parser, orchestration, and report agents |
 | Calculations | `services/api-server/core` | Pure calculation functions, logistics helpers, and risk assessment |
 | Schemas | `services/api-server/schemas` | Feasibility Study v2, report, orchestration, agent handoff/progress, and Valuemap schemas |
-| Storage | `services/api-server/storage.py` | SQLite/JSON-backed MVP persistence |
+| Storage | `services/api-server/storage.py` | SQLite/JSON controlled implementation plus PostgreSQL app-state compatibility and typed critical-table persistence |
 | Repositories | `services/api-server/db/repositories` | Wrapper layer over current MVP runtime stores for projects, source document metadata, upload archives, reports, market evidence, and orchestration runs |
 | Runtime data | `services/api-server/data/runtime` | SQLite state and uploaded document archive; ignored by Git |
+| Agent control plane | `services/api-server/agent_platform` | Typed Agent/Brain/Tool contracts, registries, durable runtime, policy routing, operational outbox, learning lifecycle, and isolated Coding Pod control |
 | Product docs | `docs/product` | Agent roadmaps and implementation status |
 | Integration docs | `docs/integrations` | Korean Law MCP and external integration notes |
 
@@ -106,6 +108,50 @@ realytics-ai-lab/
 ```
 
 This target is directionally correct, but it should be reached through compatibility wrappers rather than large file moves.
+
+## 3.1 Agent Platform operational topology
+
+The Agent Platform is a control plane over the existing domain/data plane. It is
+not a second source of project truth.
+
+```text
+Track Task Graph / PodExecutionCoordinator
+                  |
+                  v
+       Durable Pod + Domain Agent Runtime
+       |          |             |
+       v          v             v
+ AgentRun      Brain Router   ToolRegistry
+ steps/lease   policy/health  audited calls
+       |          |             |
+       +----------+-------------+
+                  |
+                  v
+ Transactional Outbox -> leased worker -> domain handlers / audit
+                  |
+                  v
+ Existing sources of truth
+ Shared Deal State / CalculationRun / Handoff / Evidence / Risk
+```
+
+Operational records use typed SQLite/PostgreSQL tables:
+
+- `agent_runs`, `agent_run_steps`, `brain_usage_events`
+- `runtime_outbox_events`
+- `brain_provider_health`, `brain_routing_policies`, `brain_routing_events`
+- `tool_calls`
+- `learning_candidates`, `learning_evaluations`, `learning_promotions`
+- `coding_pod_jobs`
+
+Every Chief Pod uses the common Pod runtime. Principal inner Domain Agents use the
+common Domain Agent runtime and keep deterministic engines authoritative. A Pod
+artifact references child AgentRun envelopes; it does not copy project state into a
+new database model.
+
+The Coding Pod runs in a separate worker and calls an external isolated sandbox by
+HTTPS. The API process never runs repository shell commands and never places an API
+token inside the persisted job payload. The external executor deployment remains an
+operations dependency.
 
 ## 4. Current vs Target Gap
 
