@@ -14,7 +14,7 @@ The repository currently includes:
 - FastAPI backend for project CRUD, calculations, agents, orchestration, reports, uploads, and exports.
 - Application use-case layer for reusable API, MCP, batch job, and future UI-triggered workflows, including project management, source documents, feasibility, cash flow, PF review, land ledger, marketability, legal review, report, and evidence review flows.
 - Repository wrapper layer for project CRUD, source document metadata, upload archives, report, market evidence, and orchestration persistence boundaries.
-- SQLite-backed MVP persistence for projects, reports, and orchestration runs.
+- SQLite-backed controlled local persistence plus typed PostgreSQL tables for durable Agent runs, steps, Brain usage, outbox events, CalculationRun, handoff, and Deal State records. The legacy `app_state` compatibility document remains during migration.
 - MCP server integration for Claude Desktop or other MCP hosts.
 - AI connection layer for OpenAI API, Anthropic API, and Claude Desktop host-LLM mode.
 - Phase 11 Hana-style PF review report with 20 sections.
@@ -28,6 +28,15 @@ The repository currently includes:
 - Project-level real pilot input package UI for archiving business plans, land ledgers, feasibility workbooks, land evidence JSON, and approved data-quality overrides before PF review runs.
 - Kakao Login and KakaoTalk notification baseline with mobile file intake, mobile review action center, Kakao OAuth callback, REALYTICS session handoff, safe message preview, and audit logging.
 - Agent Platform control plane with typed Agent/Brain/Tool contracts, six-Pod durable execution, child Domain Agent runs, deadline/budget/lease controls, transactional outbox, provider health and routing audit, governed learning candidates, and isolated Coding Pod jobs.
+
+### Implementation Level
+
+The current repository is a **controlled internal-pilot build**, not a production-ready credit decision system.
+
+- Deterministic calculations and source evidence remain authoritative; LLM output is used for evidence-aware review, reconciliation, and report drafting.
+- Agent and Pod execution can be persisted through the Durable Agent Runtime, with idempotency, retry, cancellation, lease recovery, Brain usage audit, and transactional outbox support.
+- Production deployment still requires strict authentication and tenant isolation, native PostgreSQL migration completion, external Secret Manager and object storage, report-grade Cash Flow assumptions, and removal of every synthetic financial or land-data fallback.
+- Approval Readiness is separate from execution completion. A completed run must not be interpreted as an approved deal.
 
 ## Main Capabilities
 
@@ -48,7 +57,7 @@ Key files:
 
 ### 2. Calculation Engine
 
-Implemented P0 calculation functions:
+Implemented baseline calculation functions:
 
 - Feasibility calculation
 - Monthly cash flow
@@ -59,6 +68,12 @@ Implemented P0 calculation functions:
 - Exit sale rate
 - Tranche all-in cost
 - Basic PF metrics bundle
+
+Important calculation boundary:
+
+- Current baseline `calculate_ltv` is sales-value leverage (`PF amount / total sales revenue`) and must not be represented as appraisal LTV without an explicit denominator and evidence reference.
+- Current simple all-in cost and fallback monthly cost schedules remain controlled-pilot calculations. Report-grade output requires tranche cash-date XIRR, approved project schedules, and covenant-driven account allocation.
+- Missing source inputs must produce an incomplete-data state, not invented product units, PF tranches, prices, or land evidence.
 
 Key files:
 
@@ -625,6 +640,9 @@ Notes:
 - Credit Review Agent: [`docs/product/credit-review-agent.md`](docs/product/credit-review-agent.md)
 - Marketability Agent roadmap: [`docs/product/marketability-agent-roadmap.md`](docs/product/marketability-agent-roadmap.md)
 - Cash Flow Engine / Agent roadmap: [`docs/product/cash-flow-engine-agent.md`](docs/product/cash-flow-engine-agent.md)
+- Agent Platform control plane: [`docs/product/agent-platform-control-plane-v1.md`](docs/product/agent-platform-control-plane-v1.md)
+- Durable Agent Runtime: [`docs/product/durable-agent-runtime-v1.md`](docs/product/durable-agent-runtime-v1.md)
+- Chief Pod runtime integrity: [`docs/product/chief-pod-runtime-integrity.md`](docs/product/chief-pod-runtime-integrity.md)
 - Calculation Scenario Engine roadmap: [`docs/product/calculation-scenario-engine.md`](docs/product/calculation-scenario-engine.md)
 - Feasibility workbook validation: [`docs/product/feasibility-workbook-validation.md`](docs/product/feasibility-workbook-validation.md)
 - Korean Law MCP integration: [`docs/integrations/korean-law-mcp.md`](docs/integrations/korean-law-mcp.md)
@@ -636,6 +654,9 @@ Notes:
 ## Verification Notes
 
 Recent local checks performed during development:
+
+- Agent Platform, Durable Runtime, product collection schedule, and approved-schedule Cash Flow focused suite: 35 passed, 1 failed on 2026-07-14.
+- The remaining failure is a known `CalculationRun` materialization regression: `run_source_locator` is referenced before definition in `services/api-server/storage.py`. This is the first P0 follow-up and is not being represented as production-ready.
 
 - Web lint: passed
 - Web type check: passed
@@ -659,9 +680,16 @@ Most recent Kakao-related local checks:
 
 ## Current Limitations
 
-- This is still alpha/MVP software.
-- Orchestration is synchronous, not yet a background job queue.
-- SQLite is used for MVP persistence; PostgreSQL migration is future work.
+- This is controlled internal-pilot software, not a production credit-approval system.
+- The Durable Agent Runtime, worker entry points, leases, retries, cancellation, and transactional outbox are implemented. Some legacy PF jobs still run through an in-process `ThreadPoolExecutor` and must be migrated to the common runtime.
+- Typed PostgreSQL operational tables are implemented, but project state still uses SQLite/local runtime paths and a PostgreSQL `app_state` compatibility document in parts of the application. Native tenant-scoped PostgreSQL repositories are not yet the sole source of truth.
+- Local development defaults remain permissive for RBAC, tenant isolation, and IdP operation. Production must fail closed with explicit origins, strict RBAC, verified OIDC/JWKS identity, and tenant-scoped repository queries.
+- The scenario builder still contains controlled-pilot synthetic fallbacks when product mix or PF structure is missing. These must be removed before report-grade use.
+- The web PNU lookup route currently has a mock fallback when configuration or the upstream API fails. Mock land evidence must be restricted to an explicitly marked demo mode and must never enter an approval or report evidence graph.
+- Cash Flow supports approved product collection schedules, but fallback construction/financial/other costs are still evenly distributed and the baseline pre-completion collection allocation uses a fixed 75% operating / 25% repayment split. Approved schedules and covenant rules must take precedence before production use.
+- Financial metric contracts still need explicit denominator variants for sales-value LTV, appraisal LTV, unsold LTV, senior LTV, and total LTV, plus tranche cash-date XIRR for all-in cost.
+- Consensus patches and execution/approval/report statuses require stronger immutable versioning so that reconciliation proposals cannot be confused with approved assumptions.
+- There is no repository CI workflow yet. Python tests, web lint/type/build, migrations, contract checks, and browser E2E must be enforced before protected-branch production releases.
 - Report exports now produce structured Markdown/JSON/HTML/PDF/DOCX artifacts, but enterprise-grade styling QA and advanced renderer hardening remain ongoing.
 - Land ledger enrichment supports batch enrichment from supplied connector records, but live public/registry connector automation and production credential handling remain future work.
 - Marketability Agent still needs full parser-field evidence locator coverage, real public/partner comparable data adapters, product-specific scoring weights, stronger absorption/back-testing, and a dedicated frontend review page.
