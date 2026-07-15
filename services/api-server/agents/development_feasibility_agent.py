@@ -6,7 +6,7 @@ from core.calculations import (
     calculate_development_profit,
     calculate_exit_sale_rate,
     calculate_ltc,
-    calculate_ltv,
+    calculate_sales_value_ltv,
     calculate_profit_margin,
     sqm_to_py,
 )
@@ -243,7 +243,9 @@ class DevelopmentFeasibilityAgent:
         recommended_pf_limit = min(recommended_by_revenue, recommended_by_cost) if total_revenue and total_cost else 0
         return {
             "totalPfAmount": total_pf,
-            "ltvByRevenue": calculate_ltv(total_pf, total_revenue),
+            "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue),
+            "ltvByRevenue": calculate_sales_value_ltv(total_pf, total_revenue),
+            "ltvByRevenueBasis": "gross_sales_value",
             "ltcByCost": calculate_ltc(total_pf, total_cost),
             "equityRatio": max(0, total_cost - total_pf) / total_cost if total_cost else 0,
             "landCostRatio": costs["costRatio"]["land"],

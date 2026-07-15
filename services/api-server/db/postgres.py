@@ -18,6 +18,7 @@ from urllib.parse import quote_plus
 # Authoritative schema lives in a versioned .sql migration so a DBA and the app
 # share one source of truth (faithful mirror of storage._ensure_sqlite_schema).
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+INITIAL_SCHEMA_FILE = MIGRATIONS_DIR / "0001_initial_schema.sql"
 
 
 def postgres_configured() -> bool:
@@ -107,6 +108,8 @@ JSONB_STORE_TABLES: List[str] = [
     "glossary_term_candidates",
     "project_snapshots",
     "async_jobs",
+    "assumption_proposals",
+    "project_versions",
 ]
 
 
@@ -148,6 +151,35 @@ def ensure_schema(conn) -> None:
 
 
 _TYPED_JSONB_TABLES: Dict[str, Dict[str, Any]] = {
+    "projects": {
+        "key": ("project_id",),
+        "columns": ("project_id", "tenant_id", "created_by", "updated_at"),
+        "order": "updated_at DESC, project_id DESC",
+    },
+    "async_jobs": {
+        "key": ("id",),
+        "columns": (
+            "id", "project_id", "tenant_id", "kind", "status", "attempt_count",
+            "max_attempts", "lease_owner", "lease_expires_at", "created_at", "updated_at",
+        ),
+        "order": "created_at ASC, id ASC",
+    },
+    "assumption_proposals": {
+        "key": ("proposal_id",),
+        "columns": (
+            "proposal_id", "project_id", "run_id", "field_path", "source_agent", "status",
+            "created_at", "reviewed_at",
+        ),
+        "order": "created_at DESC, proposal_id DESC",
+    },
+    "project_versions": {
+        "key": ("version_id",),
+        "columns": (
+            "version_id", "project_id", "tenant_id", "version", "base_version",
+            "created_by", "created_at", "state_hash",
+        ),
+        "order": "version DESC, created_at DESC",
+    },
     "agent_runs": {
         "key": ("run_id",),
         "columns": (
@@ -280,6 +312,64 @@ _TYPED_JSONB_TABLES: Dict[str, Dict[str, Any]] = {
         "order": "updated_at DESC, record_id DESC",
     },
 }
+
+
+def claim_async_job_record(*, worker_id: str, now, lease_expires_at) -> Dict[str, Any] | None:
+    """Claim one queued/expired asynchronous job with SKIP LOCKED semantics."""
+    conn = connect()
+    try:
+        ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, payload_json
+                FROM async_jobs
+                WHERE attempt_count < max_attempts AND (
+                    status = 'queued'
+                    OR (status = 'running' AND lease_expires_at < %s)
+                )
+                ORDER BY created_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """,
+                (now,),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.commit()
+                return None
+            job_id, raw_payload = row
+            payload = dict(raw_payload)
+            payload.update(
+                {
+                    "status": "running",
+                    "startedAt": payload.get("startedAt") or now.isoformat(),
+                    "leaseOwner": worker_id,
+                    "leaseExpiresAt": lease_expires_at.isoformat(),
+                    "attemptCount": int(payload.get("attemptCount") or 0) + 1,
+                    "updatedAt": now.isoformat(),
+                }
+            )
+            cur.execute(
+                """
+                UPDATE async_jobs
+                SET status = 'running', attempt_count = %s, lease_owner = %s,
+                    lease_expires_at = %s, updated_at = %s, payload_json = %s::jsonb
+                WHERE id = %s
+                """,
+                (
+                    payload["attemptCount"],
+                    worker_id,
+                    lease_expires_at,
+                    now,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    job_id,
+                ),
+            )
+        conn.commit()
+        return payload
+    finally:
+        conn.close()
 
 
 def insert_typed_jsonb_record(

@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
 
-from core.calculations import calculate_exit_sale_rate, calculate_ltv
+from core.calculations import calculate_exit_sale_rate, calculate_sales_value_ltv
 from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
 from schemas.scenario import ScenarioSetRequest
 from agents.scenario_engine_agent import ScenarioEngineAgent
@@ -147,7 +147,9 @@ class ReportAgent:
             "marketAnalysis": self._structured_market(input_data),
             "businessFeasibility": {
                 "metrics": {
-                    "ltv": calculate_ltv(total_pf, total_revenue),
+                    "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue),
+                    "ltv": calculate_sales_value_ltv(total_pf, total_revenue),
+                    "ltvBasis": "gross_sales_value",
                     "exitSalesRate": calculate_exit_sale_rate(total_pf, finance_cost, total_revenue),
                     "profitMargin": profit_margin,
                     "developmentProfit": development_profit,

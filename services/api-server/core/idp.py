@@ -11,6 +11,8 @@ from typing import Any, Dict
 
 from fastapi import HTTPException, Request
 
+from core.runtime_profile import security_default
+
 
 SECRET_HINT_KEYS = {"secret", "token", "key", "password"}
 
@@ -34,9 +36,9 @@ def idp_status() -> Dict[str, Any]:
         "mode": mode,
         "enabled": mode != "off",
         "provider": os.environ.get("REALYTICS_IDP_PROVIDER") or "external-idp",
-        "issuer": os.environ.get("REALYTICS_IDP_ISSUER"),
-        "audience": os.environ.get("REALYTICS_IDP_AUDIENCE"),
-        "jwksUrlConfigured": bool(os.environ.get("REALYTICS_IDP_JWKS_URL")),
+        "issuer": _first_env("REALYTICS_IDP_ISSUER", "REALYTICS_OIDC_ISSUER"),
+        "audience": _first_env("REALYTICS_IDP_AUDIENCE", "REALYTICS_OIDC_AUDIENCE"),
+        "jwksUrlConfigured": bool(_first_env("REALYTICS_IDP_JWKS_URL", "REALYTICS_OIDC_JWKS_URL")),
         "hs256SecretConfigured": bool(os.environ.get("REALYTICS_IDP_JWT_SECRET")),
         "unsignedDevTokensAllowed": _allow_unsigned_dev_tokens(),
         "tenantIsolationMode": tenant_isolation_mode(),
@@ -50,7 +52,10 @@ def idp_mode() -> str:
 
 
 def tenant_isolation_mode() -> str:
-    return (os.environ.get("REALYTICS_TENANT_ISOLATION_MODE") or "permissive").lower()
+    return (
+        os.environ.get("REALYTICS_TENANT_ISOLATION_MODE")
+        or security_default(local="permissive", hardened="strict")
+    ).lower()
 
 
 def principal_from_request(request: Request) -> IdpPrincipal | None:
@@ -67,6 +72,15 @@ def principal_from_bearer_token(token: str) -> IdpPrincipal:
         raise HTTPException(status_code=401, detail={"error": "idp_disabled"})
     if mode in {"hs256", "jwt_hs256"}:
         claims = _decode_hs256_jwt(token)
+    elif mode in {"oidc", "jwks", "rs256"}:
+        try:
+            from core.oidc import verify_oidc_token
+
+            claims = verify_oidc_token(token)
+        except ValueError as exc:
+            raise HTTPException(status_code=401, detail={"error": "invalid_oidc_token"}) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail={"error": "oidc_verifier_unavailable"}) from exc
     elif mode in {"dev", "unsigned-dev"}:
         if not _allow_unsigned_dev_tokens():
             raise HTTPException(
@@ -208,10 +222,12 @@ def _allow_unsigned_dev_tokens() -> bool:
 
 
 def _limitations(mode: str) -> list[str]:
+    if mode in {"oidc", "jwks", "rs256"}:
+        return ["OIDC RS256/JWKS signature, issuer, audience, and expiry validation is enabled."]
     if mode in {"hs256", "jwt_hs256"}:
         return [
             "HS256 JWT verification is enabled for pilot/enterprise proxy integrations.",
-            "OIDC JWKS/RS256 validation remains the next production hardening step.",
+            "Use OIDC JWKS/RS256 mode for hardened deployments.",
         ]
     if mode in {"dev", "unsigned-dev"}:
         return [
@@ -236,3 +252,11 @@ def _b64url_decode(value: str) -> bytes:
         return base64.urlsafe_b64decode(value + padding)
     except Exception as exc:
         raise HTTPException(status_code=401, detail={"error": "invalid_jwt_encoding"}) from exc
+
+
+def _first_env(*keys: str) -> str | None:
+    for key in keys:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return None

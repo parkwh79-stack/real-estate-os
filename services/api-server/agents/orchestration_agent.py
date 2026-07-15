@@ -5,7 +5,7 @@ from uuid import uuid4
 from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
 from agents.ai_connection import resolve_ai_context, safe_ai_context
 from agents.ai_router import describe_selection, select_ai_context
-from agents.consensus_engine import ConsensusEngine, _set_by_path, build_consensus_coordinator
+from agents.consensus_engine import ConsensusEngine, build_consensus_coordinator
 from agents.credit_document_agent import CreditDocumentAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.data_quality_agent import DataQualityAgent
@@ -42,6 +42,7 @@ from schemas.cash_sweep import CashSweepRequest, CashSweepTranche
 from core.risk_assessment import build_basic_risk_matrix
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 from agent_platform.domain_agent_runtime import run_domain_agent_callable_with_contract
+from use_cases.assumption_proposals import build_consensus_assumption_proposals
 
 
 class OrchestrationAgent:
@@ -63,6 +64,9 @@ class OrchestrationAgent:
             "project_id": project_id,
             "workflow": PF_REVIEW_WORKFLOW,
             "status": "running",
+            "executionStatus": "running",
+            "approvalStatus": "not_evaluated",
+            "reportStatus": "not_started",
             "started_at": now,
             "completed_at": None,
             "user_id": ai_connection["user_id"],
@@ -424,24 +428,25 @@ class OrchestrationAgent:
                 project_data, run["artifacts"], _reconcile_with, coordinator=consensus_coordinator
             )
             consensus["aiSelection"] = describe_selection(consensus_ai)
-            for patch in consensus.get("patches", []):
-                _set_by_path(project_data, patch["field"], patch["value"])
-            if consensus.get("patches"):
-                # Re-derive the deterministic artifacts that depend on the agreed
-                # assumptions so downstream credit/report use consensus values.
-                pf_structure = self._calculate_pf_structure(project_data)
-                run["artifacts"]["pfStructure"] = pf_structure
-                reconciliation = self._reconcile_agent_outputs(
-                    project_data=project_data,
-                    land_review=land_review,
-                    developer_feasibility=developer_feasibility,
-                    feasibility=feasibility,
-                    pf_structure=pf_structure,
-                    market_evidence=market_evidence,
-                    marketability=marketability,
-                )
-                run["artifacts"]["reconciliationGate"] = reconciliation
             consensus_artifact = {k: v for k, v in consensus.items() if k != "agreedProjectData"}
+            proposals = build_consensus_assumption_proposals(
+                project_id,
+                run["run_id"],
+                project_data,
+                consensus,
+            )
+            consensus_artifact["assumptionProposals"] = proposals
+            consensus_artifact["proposalStatus"] = "pending_approval" if proposals else "not_required"
+            consensus_artifact["calculationPolicy"] = (
+                "Original project assumptions remain authoritative until proposals are approved into a new project version."
+            )
+            run["artifacts"]["assumptionProposals"] = {
+                "schemaVersion": "realytics-assumption-proposals-v1",
+                "projectId": project_id,
+                "runId": run["run_id"],
+                "status": consensus_artifact["proposalStatus"],
+                "proposals": proposals,
+            }
             run["artifacts"]["consensusResolution"] = consensus_artifact
             self._complete_step(run, "consensus_resolution", {
                 "status": consensus_artifact["status"],
@@ -449,6 +454,7 @@ class OrchestrationAgent:
                 "resolvedCount": consensus_artifact["summary"]["resolvedCount"],
                 "unresolvedCount": consensus_artifact["summary"]["unresolvedCount"],
                 "reconciliationStatus": reconciliation["status"],
+                "pendingProposalCount": len(proposals),
             }, artifact_key="consensusResolution")
 
             legal_review = self._run_domain_agent(
@@ -746,15 +752,20 @@ class OrchestrationAgent:
 
             approval_readiness = self._approval_readiness_gate(run)
             run["artifacts"]["approvalReadinessGate"] = approval_readiness
+            run["approvalStatus"] = "ready_for_review" if approval_readiness.get("status") in {"ready", "pass"} else "not_ready"
             self._complete_step(run, "approval_readiness_gate", approval_readiness, artifact_key="approvalReadinessGate")
 
             # Credit documents synthesise every prior artifact (incl. the approval
             # readiness gate), so they are generated last.
             self._run_credit_document_step(run, project_data)
 
-            run["status"] = "completed" if quality["pass"] else "completed_with_warnings"
+            run["executionStatus"] = "completed" if quality["pass"] else "completed_with_warnings"
+            run["reportStatus"] = "quality_pass" if quality["pass"] else "quality_warning"
+            run["status"] = run["executionStatus"]
         except Exception as exc:
-            run["status"] = "failed"
+            run["executionStatus"] = "failed"
+            run["reportStatus"] = "failed" if run.get("reportStatus") == "not_started" else run.get("reportStatus")
+            run["status"] = run["executionStatus"]
             run["errors"].append({"message": str(exc), "type": exc.__class__.__name__})
             self._mark_failed_progress(run, str(exc))
 
@@ -1763,6 +1774,11 @@ class OrchestrationAgent:
         land_review = artifacts.get("landAgentReview") or {}
         evidence_graph = artifacts.get("evidenceGraph") or {}
         restructuring = artifacts.get("restructuringPlan") or {}
+        assumption_proposals = (artifacts.get("assumptionProposals") or {}).get("proposals") or []
+        pending_assumption_proposals = [
+            item for item in assumption_proposals
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ]
         restructuring_blockers = set((restructuring.get("approvalPath") or {}).get("remainingBlockers") or [])
 
         gates = [
@@ -1806,6 +1822,12 @@ class OrchestrationAgent:
                 "SENIOR_RESTRUCTURING_CLEARED",
                 not {"SENIOR_SHORTFALL", "STRESS_SENIOR_SHORTFALL"}.intersection(restructuring_blockers),
                 "Senior shortfall restructuring blockers must be cured and rerun before approval.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "ASSUMPTION_PROPOSALS_RESOLVED",
+                not pending_assumption_proposals,
+                f"{len(pending_assumption_proposals)} consensus assumption proposal(s) require approval into a new project version.",
                 severity="blocking",
             ),
         ]

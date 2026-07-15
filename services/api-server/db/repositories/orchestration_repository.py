@@ -5,7 +5,13 @@ from typing import Any, Callable, Dict, List
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
 from db.repositories.project_snapshot_repository import ProjectSnapshotRepository
 from db.repositories.report_repository import ReportRepository
-from storage import upsert_evidence_graph_record, upsert_risk_register_record
+from storage import (
+    get_orchestration_run_record,
+    list_orchestration_run_records,
+    upsert_assumption_proposal_record,
+    upsert_evidence_graph_record,
+    upsert_risk_register_record,
+)
 
 
 class OrchestrationRepository:
@@ -45,6 +51,10 @@ class OrchestrationRepository:
             upsert_risk_register_record(project_id, run["run_id"], run["artifacts"]["riskRegister"])
         if isinstance(run.get("artifacts", {}).get("evidenceGraph"), dict):
             upsert_evidence_graph_record(project_id, run["run_id"], run["artifacts"]["evidenceGraph"])
+        proposal_artifact = run.get("artifacts", {}).get("assumptionProposals") or {}
+        for proposal in proposal_artifact.get("proposals") or []:
+            if isinstance(proposal, dict):
+                upsert_assumption_proposal_record(proposal)
         self._persist_run(project_id, run["run_id"])
 
         if "phase11Report" in run.get("artifacts", {}):
@@ -66,13 +76,21 @@ class OrchestrationRepository:
         return run
 
     def list_metadata(self, project_id: str) -> List[Dict[str, Any]]:
-        runs = self.orchestration_store.get(project_id, {}).values()
+        project_runs = self.orchestration_store.setdefault(project_id, {})
+        for persisted_run in list_orchestration_run_records(project_id):
+            run_id = persisted_run.get("run_id")
+            if run_id:
+                project_runs[str(run_id)] = persisted_run
+        runs = project_runs.values()
         metadata = [
             {
                 "run_id": run["run_id"],
                 "project_id": run["project_id"],
                 "workflow": run["workflow"],
                 "status": run["status"],
+                "executionStatus": run.get("executionStatus") or run.get("status"),
+                "approvalStatus": run.get("approvalStatus") or "not_evaluated",
+                "reportStatus": run.get("reportStatus") or "not_started",
                 "started_at": run["started_at"],
                 "completed_at": run["completed_at"],
                 "step_count": len(run["steps"]),
@@ -86,6 +104,10 @@ class OrchestrationRepository:
         return metadata
 
     def get(self, project_id: str, run_id: str) -> Dict[str, Any] | None:
+        persisted_run = get_orchestration_run_record(project_id, run_id)
+        if persisted_run is not None:
+            self.orchestration_store.setdefault(project_id, {})[run_id] = persisted_run
+            return persisted_run
         return self.orchestration_store.get(project_id, {}).get(run_id)
 
     def save(self) -> None:

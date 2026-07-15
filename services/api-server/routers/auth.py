@@ -9,6 +9,7 @@ from fastapi.responses import RedirectResponse
 
 from core.authz import identity_context_from_request, permissions_for_role
 from core.idp import idp_status
+from core.secret_vault import ingest_user_credential, revoke_credential, revoke_session_credentials
 from integrations.kakao import (
     build_kakao_identity_records,
     exchange_kakao_authorization_code,
@@ -23,6 +24,7 @@ from storage import (
     get_user_session,
     list_users,
     record_user_activity_log,
+    revoke_user_session,
     upsert_user_ai_profile,
     upsert_tenant,
     upsert_user,
@@ -148,7 +150,75 @@ def get_ai_profile(request: Request):
             "model": "gemini-2.5-flash",
             "description": "개인 API Key가 없으면 시스템에 설정된 무료/기본 Gemini 프로필을 사용합니다. 시스템 키도 없으면 deterministic fallback으로 전환합니다.",
         },
-        "secretPolicy": "API Key는 응답에 평문으로 반환하지 않습니다. 로컬 MVP는 암호화 저장하며 운영 배포는 Secret Manager로 교체해야 합니다.",
+        "secretPolicy": "API Key는 전용 보안 입력 API로만 받고 응답·감사로그·프로필 DB에는 평문으로 저장하지 않습니다. 세션 키는 로그아웃 시 폐기됩니다.",
+    }
+
+
+@router.post("/ai-credentials")
+def ingest_ai_credential(request: Request, payload: Dict[str, Any]):
+    """Accept a BYOK secret once and persist only its non-secret reference."""
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Login required")
+    session = context.get("session") or {}
+    session_id = session.get("sessionId")
+    user = context["user"]
+    provider = str(payload.get("provider") or "gemini").strip().lower()
+    api_key = payload.get("apiKey") or payload.get("api_key")
+    try:
+        credential = ingest_user_credential(
+            user_id=user["userId"],
+            tenant_id=user.get("tenantId"),
+            session_id=session_id,
+            provider=provider,
+            secret=str(api_key or ""),
+            expires_on_logout=bool(payload.get("expiresOnLogout", True)),
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    previous = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    previous_ref = previous.get("credentialRef")
+    profile = upsert_user_ai_profile(
+        {
+            "userId": user["userId"],
+            "tenantId": user.get("tenantId"),
+            "provider": provider,
+            "model": payload.get("model"),
+            "credentialRef": credential["credentialRef"],
+            "credentialBackend": credential["backend"],
+            "apiKeyMasked": credential["masked"],
+            "allowSystemFallback": bool(payload.get("allowSystemFallback", True)),
+            "metadata": {
+                "expiresOnLogout": credential["expiresOnLogout"],
+                "ingestPath": "/auth/ai-credentials",
+            },
+        }
+    )
+    if previous_ref and previous_ref != credential["credentialRef"]:
+        revoke_credential(previous_ref)
+    record_user_activity_log(
+        {
+            "eventType": "ai_credential_ingested",
+            "userId": user["userId"],
+            "metadata": {
+                "tenantId": user.get("tenantId"),
+                "provider": provider,
+                "credentialBackend": credential["backend"],
+                "expiresOnLogout": credential["expiresOnLogout"],
+                "secretPersistedInProfile": False,
+            },
+        }
+    )
+    return {
+        "schemaVersion": "realytics-user-ai-credential-v1",
+        "profile": profile,
+        "credential": {
+            "configured": True,
+            "backend": credential["backend"],
+            "expiresOnLogout": credential["expiresOnLogout"],
+            "masked": credential["masked"],
+        },
     }
 
 
@@ -157,6 +227,17 @@ def save_ai_profile(request: Request, payload: Dict[str, Any]):
     context = identity_context_from_request(request)
     if not context.get("authenticated"):
         raise HTTPException(status_code=401, detail="Login required")
+    forbidden_secret_fields = {"apiKey", "api_key", "credentialRef", "credential_ref"}
+    supplied_secret_fields = sorted(forbidden_secret_fields.intersection(payload))
+    if supplied_secret_fields:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "secret_ingest_endpoint_required",
+                "message": "API Key는 /auth/ai-credentials 전용 엔드포인트로 입력해야 합니다.",
+                "fields": supplied_secret_fields,
+            },
+        )
     user = context["user"]
     profile = upsert_user_ai_profile(
         {
@@ -192,12 +273,18 @@ def remove_ai_profile(request: Request):
     if not context.get("authenticated"):
         raise HTTPException(status_code=401, detail="Login required")
     user = context["user"]
+    current_profile = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    credential_revoked = revoke_credential(current_profile.get("credentialRef"))
     deleted = delete_user_ai_profile(user["userId"])
     record_user_activity_log(
         {
             "eventType": "ai_profile_deleted",
             "userId": user["userId"],
-            "metadata": {"tenantId": user.get("tenantId"), "deleted": deleted},
+            "metadata": {
+                "tenantId": user.get("tenantId"),
+                "deleted": deleted,
+                "credentialRevoked": credential_revoked,
+            },
         }
     )
     ai_context = build_user_ai_context(user_id=user["userId"], tenant_id=user.get("tenantId"), host="web")
@@ -206,6 +293,91 @@ def remove_ai_profile(request: Request):
         "deleted": deleted,
         "profile": None,
         "effectiveAi": safe_user_ai_context_summary(ai_context),
+    }
+
+
+@router.delete("/ai-credentials/current")
+def revoke_current_ai_credential(request: Request):
+    """Revoke BYOK while preserving the user's provider/model preferences.
+
+    This path also supports OIDC bearer identities. REALYTICS cannot revoke
+    the upstream identity-provider session, but it can and must remove its own
+    credential reference before the browser completes logout.
+    """
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Login required")
+    user = context["user"]
+    current_profile = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    credential_revoked = revoke_credential(current_profile.get("credentialRef"))
+    if current_profile:
+        upsert_user_ai_profile(
+            {
+                "userId": user["userId"],
+                "tenantId": user.get("tenantId"),
+                "clearApiKey": True,
+            }
+        )
+    record_user_activity_log(
+        {
+            "eventType": "ai_credential_revoked",
+            "userId": user["userId"],
+            "metadata": {
+                "tenantId": user.get("tenantId"),
+                "credentialRevoked": credential_revoked,
+                "reason": "explicit_logout_cleanup",
+            },
+        }
+    )
+    return {
+        "schemaVersion": "realytics-user-ai-credential-revocation-v1",
+        "credentialRevoked": credential_revoked,
+    }
+
+
+@router.delete("/session/current")
+def logout_current_session(request: Request):
+    context = identity_context_from_request(request)
+    if not context.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Login required")
+    session = context.get("session") or {}
+    session_id = str(session.get("sessionId") or "")
+    if not session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Bearer-token sessions must be revoked by the configured identity provider.",
+        )
+    user = context["user"]
+    current_profile = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    profile_credential_revoked = revoke_credential(current_profile.get("credentialRef"))
+    if current_profile:
+        upsert_user_ai_profile(
+            {
+                "userId": user["userId"],
+                "tenantId": user.get("tenantId"),
+                "clearApiKey": True,
+            }
+        )
+    revoked_credentials = revoke_session_credentials(session_id)
+    session_revoked = revoke_user_session(session_id)
+    record_user_activity_log(
+        {
+            "eventType": "logout",
+            "userId": user["userId"],
+            "metadata": {
+                "tenantId": user.get("tenantId"),
+                "sessionId": session_id,
+                "sessionRevoked": session_revoked,
+                "sessionCredentialsRevoked": revoked_credentials,
+                "profileCredentialRevoked": profile_credential_revoked,
+            },
+        }
+    )
+    return {
+        "schemaVersion": "realytics-session-logout-v1",
+        "sessionRevoked": session_revoked,
+        "sessionCredentialsRevoked": revoked_credentials,
+        "profileCredentialRevoked": profile_credential_revoked,
     }
 
 

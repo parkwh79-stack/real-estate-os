@@ -19,14 +19,15 @@ from typing import Any, Dict, List, Optional
 
 
 def oidc_configured() -> bool:
-    return bool(os.environ.get("REALYTICS_OIDC_JWKS_URL") and os.environ.get("REALYTICS_OIDC_ISSUER"))
+    config = oidc_config()
+    return bool(config["jwksUrl"] and config["issuer"])
 
 
 def oidc_config() -> Dict[str, Any]:
     return {
-        "issuer": os.environ.get("REALYTICS_OIDC_ISSUER"),
-        "audience": os.environ.get("REALYTICS_OIDC_AUDIENCE"),
-        "jwksUrl": os.environ.get("REALYTICS_OIDC_JWKS_URL"),
+        "issuer": _first_env("REALYTICS_IDP_ISSUER", "REALYTICS_OIDC_ISSUER"),
+        "audience": _first_env("REALYTICS_IDP_AUDIENCE", "REALYTICS_OIDC_AUDIENCE"),
+        "jwksUrl": _first_env("REALYTICS_IDP_JWKS_URL", "REALYTICS_OIDC_JWKS_URL"),
     }
 
 
@@ -58,7 +59,7 @@ def select_jwk(jwks: Dict[str, Any], kid: Optional[str]) -> Optional[Dict[str, A
 
 
 def fetch_jwks(jwks_url: Optional[str] = None, *, timeout: float = 5.0) -> Dict[str, Any]:
-    jwks_url = jwks_url or os.environ.get("REALYTICS_OIDC_JWKS_URL")
+    jwks_url = jwks_url or oidc_config()["jwksUrl"]
     if not jwks_url:
         raise RuntimeError("REALYTICS_OIDC_JWKS_URL is not configured.")
     with urllib.request.urlopen(jwks_url, timeout=timeout) as response:  # noqa: S310 (configured URL)
@@ -98,8 +99,9 @@ def verify_oidc_token(
         ) from exc
 
     public_key = RSAAlgorithm.from_jwk(json.dumps(jwk))
-    audience = audience or os.environ.get("REALYTICS_OIDC_AUDIENCE")
-    issuer = issuer or os.environ.get("REALYTICS_OIDC_ISSUER")
+    config = oidc_config()
+    audience = audience or config["audience"]
+    issuer = issuer or config["issuer"]
     options = {"verify_aud": bool(audience)}
     try:
         claims = jwt.decode(
@@ -134,3 +136,11 @@ def oidc_status() -> Dict[str, Any]:
 
 def _now() -> int:
     return int(time.time())
+
+
+def _first_env(*keys: str) -> str | None:
+    for key in keys:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return None

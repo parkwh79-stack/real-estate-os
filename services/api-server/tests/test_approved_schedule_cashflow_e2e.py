@@ -59,6 +59,14 @@ def test_approved_feasibility_schedule_reaches_calculation_run_snapshot(tmp_path
     assert run_body["salesCollectionSchedule"][0]["contract"] == 100
     assert run_body["salesCollectionSchedule"][2]["interim"] == 600
     assert run_body["salesCollectionSchedule"][3]["balance"] == 300
+    assert run_body["scheduleProvenance"]["salesCollection"]["sourceMode"] == "approved_schedule"
+    assert run_body["scheduleProvenance"]["salesCollection"]["reportEligible"] is True
+    assert run_body["scheduleProvenance"]["costSchedule"]["sourceMode"] == "benchmark_estimate"
+    assert run_body["scheduleProvenance"]["costSchedule"]["reportEligible"] is False
+    assert run_body["scheduleProvenance"]["collectionAllocation"]["reportEligible"] is False
+    assert run_body["scheduleProvenance"]["reportEligible"] is False
+    assert run_body["reportFragments"]["reportEligible"] is False
+    assert run_body["reportFragments"]["usageRestriction"] == "review_required_not_for_approval_or_final_report"
 
     runs = client.get(f"/projects/{project_id}/calculation-runs?engine_key=cash_flow_engine").json()["records"]
     persisted = next(record for record in runs if record["calculationRunId"] == run_id)

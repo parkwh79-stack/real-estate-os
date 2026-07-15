@@ -30,9 +30,13 @@ _load_local_env()
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import agent_platform, audit, auth, glossary, kakao, google, valuemap, projects, ops, market
+from routers import agent_platform, audit, auth, glossary, kakao, google, valuemap, projects, project_assumptions, ops, market
+from core.authz import enforce_project_tenant_scope
 from core.idp import principal_from_request
+from core.runtime_profile import cors_origins, validate_security_configuration
 from storage import get_user_session, record_user_activity_log
+
+validate_security_configuration()
 
 app = FastAPI(
     title="REALYTICS x PLATFORM9 API",
@@ -42,7 +46,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -58,6 +62,20 @@ async def user_activity_middleware(request: Request, call_next):
     started = time.perf_counter()
     response = None
     try:
+        project_match = PROJECT_PATH_RE.match(request.url.path)
+        if project_match:
+            project = projects.PROJECTS_DB.get(project_match.group("project_id"))
+            if isinstance(project, dict):
+                try:
+                    enforce_project_tenant_scope(request, project)
+                except Exception as exc:
+                    from fastapi import HTTPException
+                    from fastapi.responses import JSONResponse
+
+                    if isinstance(exc, HTTPException):
+                        response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                        return response
+                    raise
         response = await call_next(request)
         return response
     finally:
@@ -109,6 +127,9 @@ async def user_activity_middleware(request: Request, call_next):
 app.include_router(valuemap.router)
 app.include_router(projects.router)
 app.include_router(projects.monitoring_router)
+app.include_router(projects.jobs_router)
+app.include_router(projects.source_documents_router)
+app.include_router(project_assumptions.router)
 app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(glossary.router)

@@ -5,7 +5,13 @@ from typing import Any, Dict
 
 from fastapi import HTTPException, Request
 
-from core.idp import enforce_tenant_header_match, principal_from_request, sanitized_idp_config
+from core.idp import (
+    enforce_tenant_header_match,
+    principal_from_request,
+    sanitized_idp_config,
+    tenant_isolation_mode,
+)
+from core.runtime_profile import security_default
 from storage import get_user, get_user_session, upsert_user
 
 
@@ -102,6 +108,8 @@ def identity_context_from_request(request: Request) -> Dict[str, Any]:
 
     session_id = request.headers.get("x-realytics-session-id")
     session = get_user_session(session_id) if session_id else None
+    if session and session.get("status") != "active":
+        session = None
     user_id = (
         session.get("userId")
         if session
@@ -161,5 +169,38 @@ def authorize_request(request: Request, permission: str) -> Dict[str, Any]:
     )
 
 
+def enforce_project_tenant_scope(request: Request, project: Dict[str, Any]) -> Dict[str, Any]:
+    """Fail closed on every project-scoped request in strict tenant mode."""
+    context = identity_context_from_request(request)
+    if tenant_isolation_mode() != "strict":
+        return context
+    if not context.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "authentication_required", "scope": "project"},
+        )
+    metadata = project.get("_meta") if isinstance(project.get("_meta"), dict) else {}
+    project_tenant = metadata.get("tenantId") or metadata.get("tenant_id")
+    actor_tenant = (context.get("user") or {}).get("tenantId")
+    if not project_tenant:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "project_tenant_unassigned", "scope": "project"},
+        )
+    if str(project_tenant) != str(actor_tenant or ""):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "tenant_scope_mismatch",
+                "projectTenantId": str(project_tenant),
+                "actorTenantId": str(actor_tenant or ""),
+            },
+        )
+    return context
+
+
 def rbac_mode() -> str:
-    return (os.environ.get("REALYTICS_RBAC_MODE") or "permissive").lower()
+    return (
+        os.environ.get("REALYTICS_RBAC_MODE")
+        or security_default(local="permissive", hardened="strict")
+    ).lower()

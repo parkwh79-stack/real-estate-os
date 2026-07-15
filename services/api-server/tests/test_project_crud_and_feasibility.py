@@ -59,6 +59,19 @@ def test_project_crud_create_update_delete_cascades_runtime_records(monkeypatch)
     assert client.get(f"/projects/{project_id}").status_code == 404
 
 
+def test_project_list_contract_marks_missing_project_type_as_unknown(monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "Type Pending Project"}}).json()
+    project_id = created["project"]["id"]
+
+    assert created["project"]["type"] == "unknown"
+    listed = next(item for item in client.get("/projects/").json() if item["project"]["id"] == project_id)
+    assert listed["project"]["type"] == "unknown"
+
+    client.delete(f"/projects/{project_id}")
+
+
 def test_apply_parsed_data_preserves_existing_project_identity(monkeypatch):
     monkeypatch.setattr(projects, "persist_state", lambda: None)
     client = TestClient(app)

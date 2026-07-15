@@ -15,6 +15,8 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
     costs = _cost_uses(study)
     funding = _funding_sources(study)
     diagnostics = _mapping_diagnostics(study, product_mix, revenue, costs, funding)
+    cost_schedule = _monthly_cost_schedule(study)
+    allocation_rules = _collection_allocation_rules(study)
 
     return {
         "requestType": "cash_flow_run_request_v1",
@@ -35,6 +37,8 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
         "productMix": product_mix,
         "pfStructure": _pf_structure(study),
         "schedule": _schedule(study),
+        "costSchedule": cost_schedule,
+        "collectionAllocationRules": allocation_rules,
         "scenarioSet": _scenario_set(study),
         "assetCalculationProfiles": asset_profiles,
         "mappingDiagnostics": diagnostics,
@@ -45,7 +49,89 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
             "baseDate": None,
             "confidence": 0.75 if diagnostics["status"] == "mapped_with_warnings" else 0.9,
             "limitations": diagnostics["warnings"],
+            "approvalStatus": (raw_import.get("canonicalStatus") or "unapproved"),
+            "approval": raw_import.get("approval") or {},
         },
+    }
+
+
+def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
+    """Preserve source-backed monthly cost rows without inventing classifications.
+
+    The canonical workbook import already keeps each Excel column's cash-out
+    buckets and source locator.  This mapper only classifies recognizable cost
+    labels; unrecognized outflows remain in ``otherCost`` and retain their
+    original row keys in ``sourceBreakdown``.
+    """
+    raw_import = dict(study.raw_import or {})
+    approval_status = str(raw_import.get("canonicalStatus") or "candidate")
+    rows: List[Dict[str, Any]] = []
+    for row in study.monthly_cash_flow:
+        cash_out = dict(row.cash_out or {})
+        if not cash_out:
+            continue
+        classified = {
+            "landCost": 0.0,
+            "constructionCost": 0.0,
+            "financialCost": 0.0,
+            "otherCost": 0.0,
+        }
+        source_breakdown: Dict[str, float] = {}
+        for key, raw_amount in cash_out.items():
+            try:
+                amount = abs(float(raw_amount or 0.0))
+            except (TypeError, ValueError):
+                continue
+            source_breakdown[str(key)] = amount
+            classified[_cost_bucket(key)] += amount
+        if not any(classified.values()):
+            continue
+        rows.append({
+            "monthIndex": row.month_index,
+            "period": row.period,
+            **classified,
+            "sourceBreakdown": source_breakdown,
+            "sourceLocator": row.source_locator,
+        })
+    return {
+        "rows": rows,
+        "approvalStatus": approval_status,
+        "sourceType": "approved_excel_schedule" if approval_status == "approved" else "workbook_schedule_candidate",
+        "sourceLocator": _first_source_locator(rows),
+    }
+
+
+def _cost_bucket(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    if any(token in text for token in ("land", "site acquisition", "토지", "용지", "매입")):
+        return "landCost"
+    if any(token in text for token in ("construction", "contractor", "공사", "도급", "기성")):
+        return "constructionCost"
+    if any(token in text for token in ("finance", "interest", "fee", "금융", "이자", "수수료")):
+        return "financialCost"
+    return "otherCost"
+
+
+def _first_source_locator(rows: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    for row in rows:
+        locator = row.get("sourceLocator")
+        if isinstance(locator, dict) and locator:
+            return locator
+    return None
+
+
+def _collection_allocation_rules(study: FeasibilityStudyV2) -> Dict[str, Any]:
+    raw_import = dict(study.raw_import or {})
+    raw_rules = raw_import.get("collectionAllocationRules")
+    if not isinstance(raw_rules, list):
+        raw_rules = []
+    approval_status = str(raw_import.get("canonicalStatus") or "candidate")
+    source_locator = raw_import.get("collectionAllocationSourceLocator")
+    return {
+        "rules": [dict(item) for item in raw_rules if isinstance(item, dict)],
+        "approvalStatus": approval_status,
+        "sourceType": "approved_workbook_rule" if approval_status == "approved" else "workbook_rule_candidate",
+        "sourceLocator": source_locator,
     }
 
 

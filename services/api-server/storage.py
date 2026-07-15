@@ -107,6 +107,32 @@ _OPERATIONAL_RECORD_SPECS: Dict[str, Dict[str, Any]] = {
             "created_at": "createdAt", "updated_at": "updatedAt",
         },
     },
+    "async_jobs": {
+        "store": "async_jobs", "key": "id",
+        "aliases": {
+            "id": "jobId", "project_id": "projectId", "tenant_id": "tenantId",
+            "kind": "kind", "status": "status", "attempt_count": "attemptCount",
+            "max_attempts": "maxAttempts", "lease_owner": "leaseOwner",
+            "lease_expires_at": "leaseExpiresAt", "created_at": "createdAt",
+            "updated_at": "updatedAt",
+        },
+    },
+    "assumption_proposals": {
+        "store": "assumption_proposals", "key": "proposal_id",
+        "aliases": {
+            "proposal_id": "proposalId", "project_id": "projectId", "run_id": "runId",
+            "field_path": "fieldPath", "source_agent": "sourceAgent", "status": "status",
+            "created_at": "createdAt", "reviewed_at": "reviewedAt",
+        },
+    },
+    "project_versions": {
+        "store": "project_versions", "key": "version_id",
+        "aliases": {
+            "version_id": "versionId", "project_id": "projectId", "tenant_id": "tenantId",
+            "version": "version", "base_version": "baseVersion", "created_by": "createdBy",
+            "created_at": "createdAt", "state_hash": "stateHash",
+        },
+    },
 }
 
 
@@ -177,6 +203,8 @@ def default_state() -> Dict[str, Any]:
         "glossary_terms": {},
         "glossary_term_candidates": {},
         "project_snapshots": {},
+        "assumption_proposals": {},
+        "project_versions": {},
         "user_activity_logs": [],
         "identity": {
             "tenants": {},
@@ -184,6 +212,7 @@ def default_state() -> Dict[str, Any]:
             "sessions": {},
         },
         "user_ai_profiles": {},
+        "async_jobs": {},
     }
 
 
@@ -250,6 +279,9 @@ def save_state(
         user_activity_logs = _load_existing_user_activity_logs()
     identity = _load_existing_identity_records()
     if _use_document_store():
+        if storage_backend() == "postgres":
+            for project_id, project_payload in projects.items():
+                upsert_project_record(str(project_id), project_payload, project_id_counter)
         _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity, glossary_term_candidates=glossary_term_candidates, pod_ai_reviews=pod_ai_reviews)
         return
     _save_sqlite_state(projects, reports, orchestrations, project_id_counter, market_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots)
@@ -263,7 +295,22 @@ def save_state(
 # backend so callers can fall back to a full save_state().
 
 def upsert_project_record(project_id: str, payload: Dict[str, Any], project_id_counter: int | None = None) -> bool:
-    """Persist a single project row (sqlite). Returns False on the json backend."""
+    """Persist a single project row in the authoritative typed store."""
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        metadata = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
+        postgres.upsert_typed_jsonb_record(
+            "projects",
+            {
+                "project_id": str(project_id),
+                "tenant_id": metadata.get("tenantId") or metadata.get("tenant_id"),
+                "created_by": metadata.get("createdBy") or metadata.get("created_by"),
+                "updated_at": metadata.get("updated_at") or metadata.get("updatedAt") or datetime.now(timezone.utc),
+            },
+            payload,
+        )
+        return True
     if storage_backend() != "sqlite":
         return False
     now = datetime.now(timezone.utc).isoformat()
@@ -319,6 +366,163 @@ def delete_project_record_cascade(project_id: str) -> bool:
             conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
         conn.commit()
     return True
+
+
+def get_project_record(project_id: str) -> Dict[str, Any] | None:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.get_typed_jsonb_record("projects", {"project_id": str(project_id)})
+    state = load_state() or default_state()
+    return (state.get("projects") or {}).get(str(project_id))
+
+
+def upsert_async_job_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(record)
+    job_id = str(normalized.get("jobId") or normalized.get("id") or uuid4())
+    normalized["jobId"] = job_id
+    normalized.setdefault("updatedAt", datetime.now(timezone.utc).isoformat())
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        postgres.upsert_typed_jsonb_record(
+            "async_jobs",
+            {
+                "id": job_id,
+                "project_id": normalized.get("projectId"),
+                "tenant_id": normalized.get("tenantId"),
+                "kind": normalized.get("kind"),
+                "status": normalized.get("status"),
+                "attempt_count": int(normalized.get("attemptCount") or 0),
+                "max_attempts": int(normalized.get("maxAttempts") or 3),
+                "lease_owner": normalized.get("leaseOwner"),
+                "lease_expires_at": normalized.get("leaseExpiresAt"),
+                "created_at": normalized.get("createdAt"),
+                "updated_at": normalized.get("updatedAt"),
+            },
+            normalized,
+        )
+        return normalized
+    if storage_backend() == "json":
+        with _AGENT_RUNTIME_LOCK:
+            state = _load_json_state() or default_state()
+            state.setdefault("async_jobs", {})[job_id] = normalized
+            _save_json_state_from_state(state)
+        return normalized
+    with _connect_sqlite() as conn:
+        conn.execute(
+            """
+            INSERT INTO async_jobs(job_id, project_id, tenant_id, kind, status, attempt_count,
+                max_attempts, lease_owner, lease_expires_at, created_at, updated_at, payload_json)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                status=excluded.status, attempt_count=excluded.attempt_count,
+                max_attempts=excluded.max_attempts, lease_owner=excluded.lease_owner,
+                lease_expires_at=excluded.lease_expires_at, updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                job_id,
+                normalized.get("projectId"),
+                normalized.get("tenantId"),
+                normalized.get("kind"),
+                normalized.get("status"),
+                int(normalized.get("attemptCount") or 0),
+                int(normalized.get("maxAttempts") or 3),
+                normalized.get("leaseOwner"),
+                normalized.get("leaseExpiresAt"),
+                normalized.get("createdAt"),
+                normalized.get("updatedAt"),
+                json.dumps(normalized, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    return normalized
+
+
+def get_async_job_record(job_id: str) -> Dict[str, Any] | None:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.get_typed_jsonb_record("async_jobs", {"id": str(job_id)})
+    if storage_backend() == "json":
+        return (_load_json_state() or default_state()).get("async_jobs", {}).get(str(job_id))
+    with _connect_sqlite() as conn:
+        row = conn.execute("SELECT payload_json FROM async_jobs WHERE job_id = ?", (str(job_id),)).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def list_async_job_records(*, project_id: str | None = None, status: str | None = None, limit: int = 100) -> list[Dict[str, Any]]:
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        where: Dict[str, Any] = {}
+        if project_id:
+            where["project_id"] = str(project_id)
+        if status:
+            where["status"] = status
+        return postgres.list_typed_jsonb_records("async_jobs", where=where, limit=limit)
+    if storage_backend() == "json":
+        records = list((_load_json_state() or default_state()).get("async_jobs", {}).values())
+    else:
+        query = "SELECT payload_json FROM async_jobs WHERE 1=1"
+        params: list[Any] = []
+        if project_id:
+            query += " AND project_id = ?"
+            params.append(str(project_id))
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
+        with _connect_sqlite() as conn:
+            records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if project_id:
+        records = [item for item in records if str(item.get("projectId")) == str(project_id)]
+    if status:
+        records = [item for item in records if item.get("status") == status]
+    return sorted(records, key=lambda item: item.get("createdAt") or "", reverse=True)[:limit]
+
+
+def claim_async_job_record(*, worker_id: str, lease_seconds: int = 120) -> Dict[str, Any] | None:
+    now = datetime.now(timezone.utc)
+    lease_expires_at = now + timedelta(seconds=max(10, lease_seconds))
+    if storage_backend() == "postgres":
+        from db import postgres
+
+        return postgres.claim_async_job_record(
+            worker_id=worker_id,
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+    with _AGENT_RUNTIME_LOCK:
+        candidates = list_async_job_records(limit=1000)
+        candidate = next(
+            (
+                item for item in reversed(candidates)
+                if int(item.get("attemptCount") or 0) < int(item.get("maxAttempts") or 3)
+                and (
+                    item.get("status") == "queued"
+                    or (
+                        item.get("status") == "running"
+                        and str(item.get("leaseExpiresAt") or "") < now.isoformat()
+                    )
+                )
+            ),
+            None,
+        )
+        if candidate is None:
+            return None
+        claimed = {
+            **candidate,
+            "status": "running",
+            "startedAt": candidate.get("startedAt") or now.isoformat(),
+            "leaseOwner": worker_id,
+            "leaseExpiresAt": lease_expires_at.isoformat(),
+            "attemptCount": int(candidate.get("attemptCount") or 0) + 1,
+            "updatedAt": now.isoformat(),
+        }
+        return upsert_async_job_record(claimed)
 
 
 def _upsert_review_record(project_id: str, record: Dict[str, Any], store_key: str, table: str, id_column: str) -> Dict[str, Any]:
@@ -906,6 +1110,32 @@ def list_operational_records(
         return [json.loads(row["payload_json"]) for row in conn.execute(sql, params)]
 
 
+def upsert_assumption_proposal_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    return upsert_operational_record("assumption_proposals", record)
+
+
+def list_assumption_proposal_records(
+    *, project_id: str, run_id: str | None = None, status: str | None = None, limit: int = 500
+) -> list[Dict[str, Any]]:
+    filters: Dict[str, Any] = {"project_id": project_id}
+    if run_id:
+        filters["run_id"] = run_id
+    if status:
+        filters["status"] = status
+    return list_operational_records("assumption_proposals", filters=filters, limit=limit)
+
+
+def upsert_project_version_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    return upsert_operational_record("project_versions", record)
+
+
+def list_project_version_records(project_id: str, *, limit: int = 100) -> list[Dict[str, Any]]:
+    records = list_operational_records(
+        "project_versions", filters={"project_id": project_id}, limit=limit
+    )
+    return sorted(records, key=lambda item: int(item.get("version") or 0), reverse=True)
+
+
 def claim_runtime_outbox_event_records(
     *,
     worker_id: str,
@@ -1182,6 +1412,42 @@ def upsert_orchestration_run(project_id: str, run_id: str, run: Dict[str, Any]) 
         )
         conn.commit()
     return True
+
+
+def get_orchestration_run_record(project_id: str, run_id: str) -> Dict[str, Any] | None:
+    """Load one orchestration run from the authoritative persistent store.
+
+    API and worker processes do not share their in-memory orchestration cache, so
+    reads must be able to observe a run written by another process.
+    """
+    if _use_document_store():
+        state = _load_json_state() or default_state()
+        run = state.get("orchestrations", {}).get(str(project_id), {}).get(str(run_id))
+        return run if isinstance(run, dict) else None
+
+    with _connect_sqlite() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM orchestrations WHERE project_id = ? AND run_id = ?",
+            (str(project_id), str(run_id)),
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row is not None else None
+
+
+def list_orchestration_run_records(project_id: str) -> list[Dict[str, Any]]:
+    """Load all persisted orchestration runs for a project, newest first."""
+    if _use_document_store():
+        state = _load_json_state() or default_state()
+        records = list(state.get("orchestrations", {}).get(str(project_id), {}).values())
+    else:
+        with _connect_sqlite() as conn:
+            records = [
+                json.loads(row["payload_json"])
+                for row in conn.execute(
+                    "SELECT payload_json FROM orchestrations WHERE project_id = ? ORDER BY started_at DESC",
+                    (str(project_id),),
+                )
+            ]
+    return sorted(records, key=lambda item: item.get("started_at") or "", reverse=True)
 
 
 def upsert_report_record(project_id: str, record: Dict[str, Any]) -> bool:
@@ -2552,6 +2818,16 @@ def _materialize_calculation_run_record(
     normalized: Dict[str, Any],
 ) -> list[Dict[str, Any]]:
     materialized_records: list[Dict[str, Any]] = []
+    run_source_locator = (
+        normalized.get("sourceLocator")
+        or normalized.get("source_locator")
+        or {
+            "sourceType": "calculation_run",
+            "calculationRunId": normalized["calculationRunId"],
+            "engineKey": normalized.get("engineKey"),
+            "engineVersion": normalized.get("engineVersion"),
+        }
+    )
     for metric in normalized.get("outputMetrics") or []:
         if isinstance(metric, dict):
             key = metric.get("key") or metric.get("metricKey")
@@ -3370,6 +3646,29 @@ def get_user_session(session_id: str) -> Dict[str, Any] | None:
     return _session_row_to_record(row) if row else None
 
 
+def revoke_user_session(session_id: str) -> bool:
+    """Revoke a persisted login session without deleting its audit history."""
+    if not session_id:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    if _use_document_store():
+        state = _load_json_state() or default_state()
+        session = state.get("identity", {}).get("sessions", {}).get(session_id)
+        if not session:
+            return False
+        session["status"] = "revoked"
+        session["lastSeenAt"] = now
+        _save_json_state_from_state(state)
+        return True
+    with _connect_sqlite() as conn:
+        cursor = conn.execute(
+            "UPDATE sessions SET status = ?, last_seen_at = ? WHERE session_id = ?",
+            ("revoked", now, session_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def list_users(*, tenant_id: str | None = None, limit: int = 100) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 100), 1000))
     if _use_document_store():
@@ -3393,9 +3692,9 @@ def list_users(*, tenant_id: str | None = None, limit: int = 100) -> list[Dict[s
 def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
     """Store one user's BYOK/default AI profile.
 
-    The API key is encrypted for local persistence and never returned by read
-    endpoints. Production deployments should replace this local encryption with
-    a secret-manager backed reference.
+    New callers should persist only a credential reference created by the
+    dedicated secret-ingest endpoint. ``apiKey`` remains a migration-only input
+    for legacy records and must never be accepted by a public profile endpoint.
     """
     now = datetime.now(timezone.utc).isoformat()
     user_id = str(record.get("userId") or record.get("user_id") or "")
@@ -3406,13 +3705,25 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
     model = record.get("model") or existing.get("model") or _default_model_for_provider(provider)
     raw_key = record.get("apiKey") or record.get("api_key")
     encrypted_key = existing.get("apiKeyEncrypted")
-    masked_key = existing.get("apiKeyMasked")
+    masked_key = (
+        record.get("apiKeyMasked")
+        or record.get("api_key_masked")
+        or existing.get("apiKeyMasked")
+    )
+    credential_ref = record.get("credentialRef") or record.get("credential_ref") or existing.get("credentialRef")
+    credential_backend = (
+        record.get("credentialBackend")
+        or record.get("credential_backend")
+        or existing.get("credentialBackend")
+    )
     if raw_key:
         encrypted_key = _encrypt_secret(str(raw_key))
         masked_key = _mask_secret(str(raw_key))
     elif record.get("clearApiKey"):
         encrypted_key = None
         masked_key = None
+        credential_ref = None
+        credential_backend = None
 
     profile = {
         "userId": user_id,
@@ -3422,7 +3733,9 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
         "status": record.get("status") or existing.get("status") or "active",
         "apiKeyEncrypted": encrypted_key,
         "apiKeyMasked": masked_key,
-        "apiKeyConfigured": bool(encrypted_key),
+        "apiKeyConfigured": bool(encrypted_key or credential_ref),
+        "credentialRef": credential_ref,
+        "credentialBackend": credential_backend,
         "allowSystemFallback": bool(record.get("allowSystemFallback", existing.get("allowSystemFallback", True))),
         "fallbackProvider": record.get("fallbackProvider") or existing.get("fallbackProvider") or "gemini",
         "fallbackModel": record.get("fallbackModel") or existing.get("fallbackModel") or "gemini-2.5-flash",
@@ -3441,8 +3754,8 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
         conn.execute(
             """
             INSERT INTO user_ai_profiles(user_id, tenant_id, provider, model, status, api_key_encrypted,
-                api_key_masked, allow_system_fallback, fallback_provider, fallback_model, created_at, updated_at, metadata_json)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                api_key_masked, credential_ref, credential_backend, allow_system_fallback, fallback_provider, fallback_model, created_at, updated_at, metadata_json)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 tenant_id=excluded.tenant_id,
                 provider=excluded.provider,
@@ -3450,6 +3763,8 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
                 status=excluded.status,
                 api_key_encrypted=excluded.api_key_encrypted,
                 api_key_masked=excluded.api_key_masked,
+                credential_ref=excluded.credential_ref,
+                credential_backend=excluded.credential_backend,
                 allow_system_fallback=excluded.allow_system_fallback,
                 fallback_provider=excluded.fallback_provider,
                 fallback_model=excluded.fallback_model,
@@ -3464,6 +3779,8 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
                 profile["status"],
                 profile["apiKeyEncrypted"],
                 profile["apiKeyMasked"],
+                profile["credentialRef"],
+                profile["credentialBackend"],
                 1 if profile["allowSystemFallback"] else 0,
                 profile["fallbackProvider"],
                 profile["fallbackModel"],
@@ -3527,11 +3844,13 @@ def _default_model_for_provider(provider: str) -> str:
 
 
 def _sanitize_user_ai_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    sanitized = {
         key: value
         for key, value in profile.items()
-        if key not in {"apiKeyEncrypted"}
+        if key not in {"apiKeyEncrypted", "credentialRef"}
     }
+    sanitized["credentialRefConfigured"] = bool(profile.get("credentialRef"))
+    return sanitized
 
 
 def _mask_secret(secret: str) -> str:
@@ -3567,7 +3886,15 @@ def _load_json_state() -> Dict[str, Any] | None:
         from db import postgres
 
         document = postgres.load_state_document()
-        return _normalize_state(document) if document else None
+        normalized = _normalize_state(document or {})
+        typed_projects = postgres.list_typed_jsonb_records("projects", limit=100000)
+        if typed_projects:
+            normalized["projects"] = {
+                _project_payload_id(item): item
+                for item in typed_projects
+                if _project_payload_id(item)
+            }
+        return normalized if document or typed_projects else None
     path = state_file_path()
     if not path.exists():
         return None
@@ -3651,11 +3978,25 @@ def _save_json_state(
     if storage_backend() == "postgres":
         from db import postgres
 
-        postgres.save_state_document(payload)
+        compatibility_payload = dict(payload)
+        compatibility_payload["projects"] = {}
+        compatibility_payload["async_jobs"] = {}
+        compatibility_payload["_persistence"] = {
+            "schemaVersion": "realytics-postgres-authority-v1",
+            "typedAuthorities": ["projects", "async_jobs"],
+            "legacyDocument": "compatibility_only",
+        }
+        postgres.save_state_document(compatibility_payload)
         return
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     tmp_path.replace(path)
+
+
+def _project_payload_id(payload: Dict[str, Any]) -> str:
+    project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
+    value = project.get("id") or payload.get("id") or payload.get("projectId")
+    return str(value) if value is not None else ""
 
 
 def _connect_sqlite() -> sqlite3.Connection:
@@ -3801,6 +4142,22 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL,
             PRIMARY KEY (project_id, handoff_id)
         );
+        CREATE TABLE IF NOT EXISTS async_jobs (
+            job_id TEXT PRIMARY KEY,
+            project_id TEXT,
+            tenant_id TEXT,
+            kind TEXT,
+            status TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_async_jobs_claim
+            ON async_jobs(status, lease_expires_at, created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_handoffs_project_route
             ON agent_handoffs(project_id, from_agent, to_agent, created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_handoffs_project_status
@@ -4018,6 +4375,33 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_coding_pod_jobs_claim
             ON coding_pod_jobs(status, lease_expires_at, created_at);
+        CREATE TABLE IF NOT EXISTS assumption_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            field_path TEXT NOT NULL,
+            source_agent TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_assumption_proposals_review
+            ON assumption_proposals(project_id, run_id, status, created_at);
+        CREATE TABLE IF NOT EXISTS project_versions (
+            version_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            tenant_id TEXT,
+            version INTEGER NOT NULL,
+            base_version INTEGER,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            state_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE(project_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_versions_project
+            ON project_versions(project_id, version DESC);
         CREATE TABLE IF NOT EXISTS legal_reviews (
             project_id TEXT NOT NULL,
             review_id TEXT NOT NULL,
@@ -4230,6 +4614,8 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
             status TEXT,
             api_key_encrypted TEXT,
             api_key_masked TEXT,
+            credential_ref TEXT,
+            credential_backend TEXT,
             allow_system_fallback INTEGER,
             fallback_provider TEXT,
             fallback_model TEXT,
@@ -4252,6 +4638,8 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
     _ensure_sqlite_column(conn, "coding_pod_jobs", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
     _ensure_sqlite_column(conn, "coding_pod_jobs", "max_attempts", "INTEGER NOT NULL DEFAULT 3")
     _ensure_sqlite_column(conn, "coding_pod_jobs", "state_version", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_sqlite_column(conn, "user_ai_profiles", "credential_ref", "TEXT")
+    _ensure_sqlite_column(conn, "user_ai_profiles", "credential_backend", "TEXT")
     conn.commit()
 
 
@@ -4739,6 +5127,7 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("project_snapshots", {})
     normalized.setdefault("user_activity_logs", [])
     normalized.setdefault("user_ai_profiles", {})
+    normalized.setdefault("async_jobs", {})
     normalized.setdefault("identity", default_state()["identity"])
     normalized["identity"].setdefault("tenants", {})
     normalized["identity"].setdefault("users", {})
@@ -5380,7 +5769,9 @@ def _user_ai_profile_row_to_record(row: sqlite3.Row) -> Dict[str, Any]:
         "status": row["status"],
         "apiKeyEncrypted": row["api_key_encrypted"],
         "apiKeyMasked": row["api_key_masked"],
-        "apiKeyConfigured": bool(row["api_key_encrypted"]),
+        "credentialRef": row["credential_ref"],
+        "credentialBackend": row["credential_backend"],
+        "apiKeyConfigured": bool(row["api_key_encrypted"] or row["credential_ref"]),
         "allowSystemFallback": bool(row["allow_system_fallback"]),
         "fallbackProvider": row["fallback_provider"],
         "fallbackModel": row["fallback_model"],
