@@ -278,6 +278,7 @@ def test_hs256_bearer_token_creates_idp_identity_context(monkeypatch):
             "name": "IdP Reviewer",
             "tenant_id": "tenant-idp",
             "role": "reviewer",
+            "realytics_principal_type": "human",
             "exp": int(time.time()) + 3600,
             "jti": "token-001",
         },
@@ -293,9 +294,31 @@ def test_hs256_bearer_token_creates_idp_identity_context(monkeypatch):
     assert body["user"]["userId"] == "idp-user@example.com"
     assert body["user"]["tenantId"] == "tenant-idp"
     assert body["user"]["role"] == "reviewer"
+    assert body["user"]["metadata"]["principalType"] == "human"
     assert "risk:review" in body["permissions"]
     assert body["identityProvider"]["mode"] == "hs256"
     assert "hs256SecretConfigured" not in body["identityProvider"]
+
+
+def test_client_credentials_bearer_is_not_classified_as_human(monkeypatch):
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "test-idp-secret")
+    client = TestClient(app)
+    token = _make_hs256_token(
+        {
+            "sub": "parser-service",
+            "tenant_id": "tenant-idp",
+            "role": "reviewer",
+            "gty": "client_credentials",
+            "exp": int(time.time()) + 3600,
+        },
+        "test-idp-secret",
+    )
+
+    me = client.get("/auth/me", headers={"authorization": f"Bearer {token}"})
+
+    assert me.status_code == 200
+    assert me.json()["user"]["metadata"]["principalType"] == "service"
 
 
 def test_bearer_token_tenant_mismatch_is_blocked(monkeypatch):

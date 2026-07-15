@@ -62,6 +62,13 @@ class UploadArchiveRepository:
             archive_id,
             self.safe_suffix(document.get("originalFileName")),
         )
+        object_key = str(object_key)
+        project_prefix = self.project_prefix(project_id) + "/"
+        if not object_key.startswith(project_prefix):
+            return None
+        scoped_name = object_key[len(project_prefix) :]
+        if "/" in scoped_name or "\\" in scoped_name or not scoped_name.startswith(archive_id):
+            return None
         if not self.object_storage.exists(object_key):
             return None
         content = self.object_storage.get(object_key)

@@ -122,6 +122,7 @@ from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
 from routers.project_jobs import build_project_jobs_router
+from routers.project_parser_v2 import build_project_parser_v2_router
 from routers.project_source_documents import build_project_source_documents_router
 from use_cases.term_annotation import annotate_terms_use_case
 from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
@@ -5161,6 +5162,12 @@ jobs_router = build_project_jobs_router(
     orchestration_repository_factory=orchestration_repository,
 )
 source_documents_router = build_project_source_documents_router(
+    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+    source_document_repository_factory=source_document_repository,
+    upload_archive_repository_factory=upload_archive_repository,
+    audit_recorder=record_sensitive_project_event,
+)
+parser_v2_router = build_project_parser_v2_router(
     project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
     source_document_repository_factory=source_document_repository,
     upload_archive_repository_factory=upload_archive_repository,

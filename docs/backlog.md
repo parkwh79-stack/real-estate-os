@@ -8,6 +8,7 @@ Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
 
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
+| P0 | Parser Platform V2 | Establish modular candidate-only parsing contracts, project profiles, approval snapshots, and normalized PostgreSQL foundation | In Progress | Controlled foundation and migration are documented in `docs/product/modular-document-parsing-platform.md`. Runtime records still use the backend-neutral `deal_state_records` projection. Real OCR/HWP, malware scanning, authority matrix, review UI, production monitoring, typed PostgreSQL repositories, and approved-snapshot Pod cutover remain explicit TODO-SDD gates. |
 | P0 | API regression | Isolate contract tests from developer runtime and cloud AI keys | Done | Full-suite runs use a disposable SQLite DB; the autouse test guard clears cloud provider keys loaded from local `.env`, and strict-RBAC reviewer analysis uses a source-backed runnable fixture instead of whichever runtime project happens to sort first. |
 | P0 | External worker | Refresh orchestration reads from durable storage | Done | Project run detail/list reads merge the authoritative store into the API cache, so a PF Review completed by a separate worker process is visible without restarting the API. |
 | P0 | CalculationRun | Fix approved-workbook source locator persistence | Done | `run_source_locator` regression fixed and approved schedule E2E passes. |
@@ -23,6 +24,40 @@ Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
 | P1 | Router architecture | Split project jobs, assumptions, and source documents | In Progress | Three coherent domains are outside the monolithic project router; calculation, evidence, and report routes remain to be extracted incrementally. |
 | P1 | Operations | Live PostgreSQL/S3/worker rehearsal | Planned | Apply migrations to an isolated real database, run multi-worker lease/cancellation tests, and verify S3 object lifecycle before external pilot. Reconcile the local `default`/`legacy` orphan outbox dead letters before importing any runtime state. |
 | P1 | Supply chain | Resolve residual moderate npm advisories | Planned | Next patched to 16.2.10 and high-risk `tmp` removed. Residual Next/PostCSS and ExcelJS/UUID advisories require upstream-safe upgrades and workbook regression testing; do not force downgrade. |
+
+## Parser V2 controlled rollout (2026-07-15)
+
+- [x] Add strict shared contracts for document versions, parsing runs, evidence
+  locators, candidates, conflicts, review decisions, canonical selections, and
+  approved snapshots without merging parser output into project JSON.
+- [x] Add version-pinned project profiles, capability-provider bindings,
+  dependency DAG planning, isolated module inputs, safe-document capability
+  gating, bounded outputs, and replay plan/input hashes.
+- [x] Bind PDF/XLSX/DOCX structural artifacts to immutable document versions and
+  exact locators; reject oversized archives, relationships, XML, output payloads,
+  and unregistered critical field/type/unit/entity combinations.
+- [x] Persist the bounded sanitized structural artifact on the append-only run,
+  require API-submitted `evidenceId` plus full locator attestation, and strip XLSX
+  formula/cache bodies while keeping their recalculation-blocking hashes.
+- [x] Add the controlled field registry and explicit projections into existing
+  Feasibility, Land Ledger, Marketability, and Cash Flow schema versions without
+  silent overwrite.
+- [x] Seal candidate/conflict membership, enforce producer-reviewer and
+  reviewer-snapshot-approver separation, bind derived values to exact
+  CalculationRun outputs, and preserve the calculation locator through snapshot
+  projection and handoff.
+- [x] Keep Phase 2 review/selection/snapshot routes default-off and require strict
+  tenant/RBAC plus verified OIDC/JWKS bearer and MFA claims when explicitly piloted.
+- [ ] Implement typed PostgreSQL repositories with transactions, RLS, candidate
+  set sealing, compare-and-swap review/selection, snapshot plus outbox atomicity,
+  and live multi-worker concurrency/recovery tests.
+- [ ] Persist Evidence Locators as first-class Evidence Graph records and prove
+  tenant-scoped resolution, retention, legal hold, and authorized source access.
+- [ ] Approve domain-specific handoff completeness rules, typed Pod payloads,
+  delegated approval limits, and live transactional CalculationRun binding.
+- [ ] Build/evaluate versioned document packs for Korean business plans,
+  feasibility workbooks, land ledgers, PF/loan/trust agreements, permits, leases,
+  appraisals, scanned OCR, and HWP/HWPX before production promotion.
 
 ## Agent Platform control plane v1
 

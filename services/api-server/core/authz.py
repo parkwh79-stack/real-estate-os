@@ -91,10 +91,12 @@ def identity_context_from_request(request: Request) -> Dict[str, Any]:
                     "identityProvider": principal.provider,
                     "tokenId": principal.token_id,
                     "authSource": "bearer_token",
+                    "principalType": principal.principal_type,
                 },
             }
         )
         permissions = permissions_for_role(user.get("role"))
+        assurance = _identity_assurance(principal.claims)
         return {
             "authenticated": True,
             "user": user,
@@ -103,6 +105,7 @@ def identity_context_from_request(request: Request) -> Dict[str, Any]:
             "permissions": permissions,
             "rbacMode": rbac_mode(),
             "identityProvider": sanitized_idp_config(),
+            "identityAssurance": assurance,
             "authSource": "bearer_token",
         }
 
@@ -204,3 +207,21 @@ def rbac_mode() -> str:
         os.environ.get("REALYTICS_RBAC_MODE")
         or security_default(local="permissive", hardened="strict")
     ).lower()
+
+
+def _identity_assurance(claims: Dict[str, Any]) -> Dict[str, Any]:
+    raw_amr = claims.get("amr")
+    if isinstance(raw_amr, str):
+        amr = [raw_amr]
+    elif isinstance(raw_amr, list):
+        amr = [str(item) for item in raw_amr]
+    else:
+        amr = []
+    acr = str(claims.get("acr") or "") or None
+    mfa_markers = {"mfa", "otp", "hwk", "swk", "fido", "webauthn"}
+    return {
+        "amr": amr,
+        "acr": acr,
+        "mfaVerified": bool(mfa_markers.intersection(item.casefold() for item in amr)),
+        "source": "verified_bearer_claims",
+    }

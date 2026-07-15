@@ -151,6 +151,28 @@ def test_upload_archive_repository_streams_verified_remote_object(tmp_path):
     assert download["archiveIntegrityStatus"] == "verified"
 
 
+def test_upload_archive_repository_rejects_cross_project_object_key(tmp_path):
+    object_storage = InMemoryObjectStorage()
+    repository = UploadArchiveRepository(
+        api_server_root=tmp_path,
+        object_storage=object_storage,
+    )
+    archive_meta = repository.archive_upload(
+        "project-a", b"same-tenant-secret", "plan.pdf", "application/pdf"
+    )
+
+    resolved = repository.resolve_download_metadata(
+        "project-b",
+        {
+            "archiveId": archive_meta["archiveId"],
+            "archiveObjectKey": archive_meta["archiveObjectKey"],
+            "originalFileName": "plan.pdf",
+        },
+    )
+
+    assert resolved is None
+
+
 def test_remote_download_uses_utf8_content_disposition_and_audit(tmp_path, monkeypatch):
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "permissive")
     object_storage = InMemoryObjectStorage()

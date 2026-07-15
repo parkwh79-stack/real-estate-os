@@ -25,6 +25,7 @@ class IdpPrincipal:
     display_name: str
     role: str
     provider: str
+    principal_type: str
     claims: Dict[str, Any]
     token_id: str | None = None
 
@@ -205,9 +206,30 @@ def _principal_from_claims(claims: Dict[str, Any]) -> IdpPrincipal:
         display_name=str(display_name),
         role=str(role),
         provider=os.environ.get("REALYTICS_IDP_PROVIDER") or claims.get("iss") or "external-idp",
+        principal_type=_principal_type_from_claims(claims),
         claims=claims,
         token_id=claims.get("jti"),
     )
+
+
+def _principal_type_from_claims(claims: Dict[str, Any]) -> str:
+    """Classify signed bearer principals without guessing that clients are humans.
+
+    Hardened approval paths require the IdP to map an explicit
+    ``realytics_principal_type=human`` claim. Common client-credential markers
+    are still classified as service for audit clarity; every other token remains
+    unknown and therefore fails closed at the Parser V2 approval boundary.
+    """
+
+    explicit = str(claims.get("realytics_principal_type") or "").casefold()
+    if explicit in {"human", "service"}:
+        return explicit
+    grant_type = str(claims.get("gty") or claims.get("grant_type") or "").casefold()
+    token_use = str(claims.get("token_use") or "").casefold()
+    identity_type = str(claims.get("idtyp") or "").casefold()
+    if grant_type == "client_credentials" or token_use == "client" or identity_type == "app":
+        return "service"
+    return "unknown"
 
 
 def _first_role(claims: Dict[str, Any]) -> str | None:
