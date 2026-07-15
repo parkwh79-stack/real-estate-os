@@ -279,7 +279,7 @@ export default function LoginPage() {
               </div>
             </div>
             <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
-              보안 원칙: API Key는 코드, GitHub, 로그, 감사 화면에 기록하지 않습니다. 서버 저장 방식은 Secret Manager 전환 전까지 파일럿용 암호화 저장으로만 사용하며, 민감 프로젝트는 세션용 키 또는 사내 Local LLM 사용을 권장합니다.
+              보안 원칙: API Key는 코드, GitHub, 프로필 DB, 로그, 감사 화면에 기록하지 않습니다. 전용 보안 입력 API가 세션 저장소 또는 운영 Secret Manager의 참조값만 만들며, 로그아웃 시 연결된 키를 폐기합니다.
             </p>
           </div>
 

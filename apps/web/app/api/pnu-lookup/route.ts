@@ -2,21 +2,19 @@ import { NextResponse } from "next/server";
 
 const MOLIT_BASE = "https://apis.data.go.kr/1613000/arLandUseInfoService";
 
-function mockPnuResponse(pnu: string, source = "mock") {
-  return {
-    pnu,
-    address: "대구광역시 달서구 본동 743 일원",
-    jimok: "대",
-    jimokCd: "08",
-    area: 2586.8,
-    zones: [
-      { gb: "용도지역", code: "UQA123", name: "일반상업지역", detail: "도시지역" },
-      { gb: "기타", code: "UQA999", name: "지구단위계획구역", detail: "사전협의 필요" },
-    ],
-    primaryZone: { gb: "용도지역", code: "UQA123", name: "일반상업지역" },
-    rawCount: 2,
-    source,
-  };
+function sourceUnavailable(pnu: string, reason: string, message: string, status = 503) {
+  return NextResponse.json(
+    {
+      pnu,
+      dataStatus: "source_unavailable",
+      source: "molit",
+      sourceUnavailable: true,
+      evidenceEligible: false,
+      reason,
+      message,
+    },
+    { status },
+  );
 }
 
 function getXml(xml: string, tag: string): string {
@@ -53,7 +51,11 @@ export async function GET(request: Request) {
   const apiKey = process.env.MOLIT_API_KEY;
 
   if (!apiKey) {
-    return NextResponse.json(mockPnuResponse(pnu));
+    return sourceUnavailable(
+      pnu,
+      "missing_configuration",
+      "MOLIT_API_KEY가 설정되지 않아 PNU 토지이용계획 자료를 조회할 수 없습니다.",
+    );
   }
 
   try {
@@ -71,9 +73,11 @@ export async function GET(request: Request) {
     const resultCode = getXml(xml, "resultCode");
 
     if (resultCode && resultCode !== "00") {
-      return NextResponse.json(
-        { error: `MOLIT API 오류: ${getXml(xml, "resultMsg")}` },
-        { status: 502 },
+      return sourceUnavailable(
+        pnu,
+        `upstream_result_${resultCode}`,
+        `국토교통부 토지이용계획 API 오류: ${getXml(xml, "resultMsg") || "응답 코드 확인 필요"}`,
+        502,
       );
     }
 
@@ -96,9 +100,17 @@ export async function GET(request: Request) {
       primaryZone,
       rawCount: zoneItems.length,
       source: "molit",
+      dataStatus: "available",
+      sourceUnavailable: false,
+      evidenceEligible: true,
     });
   } catch (error) {
     console.error("PNU lookup error:", error);
-    return NextResponse.json(mockPnuResponse(pnu, "mock_fallback"));
+    return sourceUnavailable(
+      pnu,
+      "upstream_request_failed",
+      "국토교통부 토지이용계획 API 요청에 실패했습니다. 가상 토지자료는 생성하지 않았습니다.",
+      502,
+    );
   }
 }

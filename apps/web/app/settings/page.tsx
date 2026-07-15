@@ -133,7 +133,8 @@ export default function SettingsPage() {
     setLoading(true);
     clearMessages();
     try {
-      const res = await fetch(`${apiBase}/auth/ai-profile`, {
+      const hasNewCredential = Boolean(apiKey.trim());
+      const res = await fetch(`${apiBase}/auth/${hasNewCredential ? "ai-credentials" : "ai-profile"}`, {
         method: "POST",
         headers: {
           ...authHeaders("web"),
@@ -142,16 +143,20 @@ export default function SettingsPage() {
         body: JSON.stringify({
           provider,
           model: model.trim() || selectedProvider?.defaultModel || "gemini-2.5-flash",
-          apiKey: apiKey.trim() || undefined,
+          ...(hasNewCredential ? { apiKey: apiKey.trim(), expiresOnLogout: true } : {}),
           status: "active",
           allowSystemFallback,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
-      const body = (await res.json()) as AiProfileResponse;
-      setAiProfile(body);
+      await res.json();
+      await loadAiProfile();
       setApiKey("");
-      setNotice("AI 모델 설정을 저장했습니다. API Key는 서버에 암호화 저장되고 화면에는 다시 표시되지 않습니다.");
+      setNotice(
+        hasNewCredential
+          ? "AI 모델과 세션용 API Key를 연결했습니다. 원문은 프로필 DB에 저장되지 않으며 로그아웃 시 폐기됩니다."
+          : "AI 모델 설정을 저장했습니다.",
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "AI 모델 설정 저장에 실패했습니다.");
     } finally {
@@ -240,7 +245,7 @@ export default function SettingsPage() {
             </button>
             <button
               type="button"
-              onClick={logout}
+              onClick={() => void logout()}
               className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               <LogOut className="h-4 w-4" />
@@ -310,7 +315,7 @@ export default function SettingsPage() {
                 className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
               />
               <p className="mt-1 text-xs text-slate-500">
-                저장 후에는 마스킹된 값만 표시됩니다. 파일럿 저장은 암호화 저장소를 사용하지만, 운영 환경에서는 Secret Manager 연동과 키 회전 정책이 필요합니다.
+                키 원문은 전용 보안 입력 API로만 전달되고 프로필 DB·로그에는 저장되지 않습니다. 세션 저장소 또는 운영 Secret Manager의 참조값만 보관하며 로그아웃 시 폐기합니다.
               </p>
             </label>
             <label className="flex items-start gap-2 rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700 md:col-span-2">
