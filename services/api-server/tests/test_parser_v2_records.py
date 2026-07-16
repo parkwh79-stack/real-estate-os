@@ -73,11 +73,49 @@ class InMemoryDealStateStub:
         return copy.deepcopy(records[: int(filters.get("limit") or 200)])
 
 
+class AtomicBatchDealStateStub(InMemoryDealStateStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_calls: list[list[dict]] = []
+        self.fail_next_batch = False
+
+    def persist_batch(self, project_id: str, records: list[dict]) -> list[dict]:
+        self.batch_calls.append(copy.deepcopy(records))
+        before = copy.deepcopy(self.rows)
+        before_count = self.upsert_count
+        try:
+            saved: list[dict] = []
+            for index, record in enumerate(records):
+                saved.append(self.upsert(project_id, record))
+                if self.fail_next_batch and index == 0:
+                    raise RuntimeError("simulated atomic batch failure")
+            return saved
+        except Exception:
+            self.rows = before
+            self.upsert_count = before_count
+            raise
+        finally:
+            self.fail_next_batch = False
+
+
 def _store() -> tuple[ParserV2RecordStore, InMemoryDealStateStub]:
     backend = InMemoryDealStateStub()
     return (
         ParserV2RecordStore(
             upsert_fn=backend.upsert,
+            list_fn=backend.list,
+            clock=TickClock(),
+        ),
+        backend,
+    )
+
+
+def _atomic_store() -> tuple[ParserV2RecordStore, AtomicBatchDealStateStub]:
+    backend = AtomicBatchDealStateStub()
+    return (
+        ParserV2RecordStore(
+            upsert_fn=backend.upsert,
+            persist_batch_fn=backend.persist_batch,
             list_fn=backend.list,
             clock=TickClock(),
         ),
@@ -153,6 +191,7 @@ def _candidate(
     value: int = 100_000_000_000,
     run_id: str = "run-1",
     document_version_id: str = "docv-1",
+    canonical_field: str = "feasibility.total_revenue",
 ) -> dict:
     return store.create_candidate(
         tenant_id=TENANT,
@@ -161,7 +200,7 @@ def _candidate(
         document_version_id=document_version_id,
         candidate_id=candidate_id,
         actor_id="parser-worker-1",
-        canonical_field="feasibility.total_revenue",
+        canonical_field=canonical_field,
         value=value,
         raw_value=f"{value:,}원",
         unit="KRW",
@@ -212,6 +251,28 @@ def _ready_candidate_store() -> tuple[ParserV2RecordStore, InMemoryDealStateStub
     return store, backend
 
 
+def _ready_atomic_candidate_store(
+) -> tuple[ParserV2RecordStore, AtomicBatchDealStateStub]:
+    store, backend = _atomic_store()
+    _document(store)
+    _run(store)
+    store.append_parsing_run_event(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        run_id="run-1",
+        actor_id="worker-1",
+        execution_status="running",
+    )
+    store.append_parsing_run_event(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        run_id="run-1",
+        actor_id="worker-1",
+        execution_status="completed",
+    )
+    return store, backend
+
+
 def _seal_run(store: ParserV2RecordStore, run_id: str = "run-1") -> dict:
     candidate_ids = sorted(
         item["candidateId"]
@@ -231,6 +292,33 @@ def _seal_run(store: ParserV2RecordStore, run_id: str = "run-1") -> dict:
         expected_candidate_ids=candidate_ids,
         expected_conflict_ids=conflict_ids,
     )
+
+
+def _approved_selection(
+    store: ParserV2RecordStore,
+    *,
+    candidate_id: str = "candidate-atomic",
+    selection_id: str = "selection-atomic-1",
+) -> tuple[dict, dict, dict]:
+    candidate = _candidate(store, candidate_id=candidate_id)
+    _seal_run(store)
+    decision = store.append_review_decision(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        candidate_id=candidate["candidateId"],
+        actor_id=ACTOR,
+        action="approve",
+        reason="Approved for atomic persistence testing.",
+    )
+    selection = store.create_canonical_selection(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        selection_id=selection_id,
+        actor_id=ACTOR,
+        candidate_id=candidate["candidateId"],
+        review_decision_id=decision["reviewDecisionId"],
+    )
+    return candidate, decision, selection
 
 
 def test_parsing_run_lifecycle_is_append_only_and_materialized() -> None:
@@ -1335,3 +1423,280 @@ def test_selection_and_snapshot_supersession_leave_only_new_versions_active() ->
         )
     ] == ["snapshot-version-2"]
     assert second_snapshot["snapshotVersion"] == 2
+
+
+def test_atomic_batch_callback_receives_selection_and_cascade_invalidations() -> None:
+    store, backend = _ready_atomic_candidate_store()
+    candidate, decision, first_selection = _approved_selection(store)
+    first_snapshot = store.create_approved_input_snapshot(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        snapshot_id="snapshot-atomic-1",
+        actor_id=SNAPSHOT_APPROVER,
+        selection_ids=[first_selection["selectionId"]],
+        purpose="pf_review",
+    )
+    backend.batch_calls.clear()
+
+    replacement = store.create_canonical_selection(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        selection_id="selection-atomic-2",
+        actor_id=ACTOR,
+        candidate_id=candidate["candidateId"],
+        review_decision_id=decision["reviewDecisionId"],
+        selection_version=2,
+        supersedes_selection_id=first_selection["selectionId"],
+    )
+
+    assert len(backend.batch_calls) == 1
+    batch = backend.batch_calls[0]
+    assert [item["eventKind"] for item in batch] == [
+        "created",
+        "invalidated",
+        "invalidated",
+    ]
+    assert [item["recordType"] for item in batch] == [
+        CANONICAL_SELECTION_RECORD_TYPE,
+        CANONICAL_SELECTION_RECORD_TYPE,
+        APPROVED_INPUT_SNAPSHOT_RECORD_TYPE,
+    ]
+    assert batch[0]["selectionId"] == replacement["selectionId"]
+    assert batch[1]["selectionId"] == first_selection["selectionId"]
+    assert batch[2]["snapshotId"] == first_snapshot["snapshotId"]
+    assert all(item.get("immutablePayloadHash") for item in batch)
+    assert [
+        item["selectionId"]
+        for item in store.list_canonical_selections(
+            TENANT, PROJECT, active_only=True
+        )
+    ] == [replacement["selectionId"]]
+    assert store.list_approved_input_snapshots(
+        TENANT, PROJECT, active_only=True
+    ) == []
+
+
+def test_atomic_candidate_batch_invalidates_shared_snapshot_once_deterministically() -> None:
+    store, backend = _ready_atomic_candidate_store()
+    first_candidate = _candidate(
+        store,
+        candidate_id="candidate-shared-z",
+    )
+    second_candidate = _candidate(
+        store,
+        candidate_id="candidate-shared-a",
+        value=50_000_000_000,
+        canonical_field="cost.total_project_cost",
+    )
+    _seal_run(store)
+    selections: list[dict] = []
+    for candidate, selection_id in (
+        (first_candidate, "selection-shared-z"),
+        (second_candidate, "selection-shared-a"),
+    ):
+        decision = store.append_review_decision(
+            tenant_id=TENANT,
+            project_id=PROJECT,
+            candidate_id=candidate["candidateId"],
+            actor_id=ACTOR,
+            action="approve",
+            reason="Approved for shared snapshot invalidation testing.",
+        )
+        selections.append(
+            store.create_canonical_selection(
+                tenant_id=TENANT,
+                project_id=PROJECT,
+                selection_id=selection_id,
+                actor_id=ACTOR,
+                candidate_id=candidate["candidateId"],
+                review_decision_id=decision["reviewDecisionId"],
+            )
+        )
+    snapshot = store.create_approved_input_snapshot(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        snapshot_id="snapshot-shared-selections",
+        actor_id=SNAPSHOT_APPROVER,
+        selection_ids=[item["selectionId"] for item in selections],
+        purpose="pf_review",
+    )
+    backend.batch_calls.clear()
+
+    records = store._build_active_selection_invalidation_batch_for_candidates(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        candidate_ids={
+            second_candidate["candidateId"],
+            first_candidate["candidateId"],
+        },
+        actor_id=ACTOR,
+        reason="Both candidates became stale.",
+    )
+    store._persist_immutable_batch(records)
+
+    assert len(backend.batch_calls) == 1
+    batch = backend.batch_calls[0]
+    assert [item["recordType"] for item in batch] == [
+        CANONICAL_SELECTION_RECORD_TYPE,
+        CANONICAL_SELECTION_RECORD_TYPE,
+        APPROVED_INPUT_SNAPSHOT_RECORD_TYPE,
+    ]
+    assert [item["selectionId"] for item in batch[:2]] == [
+        "selection-shared-a",
+        "selection-shared-z",
+    ]
+    snapshot_invalidations = [
+        item
+        for item in batch
+        if item["recordType"] == APPROVED_INPUT_SNAPSHOT_RECORD_TYPE
+    ]
+    assert len(snapshot_invalidations) == 1
+    assert snapshot_invalidations[0]["snapshotId"] == snapshot["snapshotId"]
+    assert snapshot_invalidations[0]["reason"] == (
+        "contains invalidated canonical selections "
+        "selection-shared-a, selection-shared-z"
+    )
+    assert store.list_canonical_selections(TENANT, PROJECT, active_only=True) == []
+    assert store.list_approved_input_snapshots(TENANT, PROJECT, active_only=True) == []
+
+
+def test_atomic_batch_callback_receives_snapshot_creation_and_supersession() -> None:
+    store, backend = _ready_atomic_candidate_store()
+    _, _, selection = _approved_selection(store)
+    first_snapshot = store.create_approved_input_snapshot(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        snapshot_id="snapshot-atomic-version-1",
+        actor_id=SNAPSHOT_APPROVER,
+        selection_ids=[selection["selectionId"]],
+        purpose="pf_review",
+    )
+    backend.batch_calls.clear()
+
+    replacement = store.create_approved_input_snapshot(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        snapshot_id="snapshot-atomic-version-2",
+        actor_id=SNAPSHOT_APPROVER,
+        selection_ids=[selection["selectionId"]],
+        purpose="pf_review",
+        supersedes_snapshot_id=first_snapshot["snapshotId"],
+    )
+
+    assert len(backend.batch_calls) == 1
+    batch = backend.batch_calls[0]
+    assert [item["eventKind"] for item in batch] == ["created", "invalidated"]
+    assert [item["snapshotId"] for item in batch] == [
+        replacement["snapshotId"],
+        first_snapshot["snapshotId"],
+    ]
+    assert batch[1]["replacementSnapshotId"] == replacement["snapshotId"]
+    assert [
+        item["snapshotId"]
+        for item in store.list_approved_input_snapshots(
+            TENANT, PROJECT, active_only=True
+        )
+    ] == [replacement["snapshotId"]]
+
+
+def test_atomic_batch_failure_leaves_selection_and_snapshot_unchanged() -> None:
+    store, backend = _ready_atomic_candidate_store()
+    candidate, decision, first_selection = _approved_selection(store)
+    first_snapshot = store.create_approved_input_snapshot(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        snapshot_id="snapshot-before-atomic-failure",
+        actor_id=SNAPSHOT_APPROVER,
+        selection_ids=[first_selection["selectionId"]],
+        purpose="pf_review",
+    )
+    backend.fail_next_batch = True
+
+    with pytest.raises(RuntimeError, match="simulated atomic batch failure"):
+        store.create_canonical_selection(
+            tenant_id=TENANT,
+            project_id=PROJECT,
+            selection_id="selection-atomic-failed",
+            actor_id=ACTOR,
+            candidate_id=candidate["candidateId"],
+            review_decision_id=decision["reviewDecisionId"],
+            selection_version=2,
+            supersedes_selection_id=first_selection["selectionId"],
+        )
+
+    assert [
+        item["selectionId"]
+        for item in store.list_canonical_selections(
+            TENANT, PROJECT, active_only=True
+        )
+    ] == [first_selection["selectionId"]]
+    assert [
+        item["snapshotId"]
+        for item in store.list_approved_input_snapshots(
+            TENANT, PROJECT, active_only=True
+        )
+    ] == [first_snapshot["snapshotId"]]
+    assert all(
+        item.get("selectionId") != "selection-atomic-failed"
+        for item in store.list_canonical_selections(TENANT, PROJECT)
+    )
+
+
+def test_atomic_batch_rejects_cross_tenant_records_before_callback() -> None:
+    store, backend = _atomic_store()
+    records = [
+        {
+            "recordId": "parser_v2_document_version:document-a",
+            "recordType": DOCUMENT_VERSION_RECORD_TYPE,
+            "tenantId": TENANT,
+            "projectId": PROJECT,
+        },
+        {
+            "recordId": "parser_v2_document_version:document-b",
+            "recordType": DOCUMENT_VERSION_RECORD_TYPE,
+            "tenantId": "tenant-other",
+            "projectId": PROJECT,
+        },
+    ]
+
+    with pytest.raises(ParserV2RecordError, match="multiple tenants"):
+        store._persist_immutable_batch(records)
+
+    assert backend.batch_calls == []
+
+
+def test_new_review_and_approval_invalidations_share_one_atomic_batch() -> None:
+    store, backend = _ready_atomic_candidate_store()
+    candidate, _, selection = _approved_selection(store)
+    snapshot = store.create_approved_input_snapshot(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        snapshot_id="snapshot-invalidated-by-review",
+        actor_id=SNAPSHOT_APPROVER,
+        selection_ids=[selection["selectionId"]],
+        purpose="pf_review",
+    )
+    backend.batch_calls.clear()
+
+    review = store.append_review_decision(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        candidate_id=candidate["candidateId"],
+        actor_id="reviewer-c",
+        action="reject",
+        reason="New evidence invalidates the prior approval.",
+        expected_decision_sequence=1,
+    )
+
+    assert len(backend.batch_calls) == 1
+    batch = backend.batch_calls[0]
+    assert [item["recordType"] for item in batch] == [
+        REVIEW_DECISION_RECORD_TYPE,
+        CANONICAL_SELECTION_RECORD_TYPE,
+        APPROVED_INPUT_SNAPSHOT_RECORD_TYPE,
+    ]
+    assert batch[0]["reviewDecisionId"] == review["reviewDecisionId"]
+    assert batch[1]["selectionId"] == selection["selectionId"]
+    assert batch[2]["snapshotId"] == snapshot["snapshotId"]
+    assert store.list_canonical_selections(TENANT, PROJECT, active_only=True) == []
+    assert store.list_approved_input_snapshots(TENANT, PROJECT, active_only=True) == []

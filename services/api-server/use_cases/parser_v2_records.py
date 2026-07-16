@@ -58,6 +58,9 @@ _TERMINAL_RUN_STATUSES = {
 }
 
 UpsertRecord = Callable[[str, Dict[str, Any]], Dict[str, Any]]
+PersistRecordBatch = Callable[
+    [str, List[Dict[str, Any]]], List[Dict[str, Any]]
+]
 ListRecords = Callable[..., List[Dict[str, Any]]]
 ListCalculationRuns = Callable[..., List[Dict[str, Any]]]
 Clock = Callable[[], datetime | str]
@@ -93,11 +96,17 @@ class ParserV2RecordStore:
         self,
         *,
         upsert_fn: UpsertRecord = upsert_deal_state_record,
+        persist_batch_fn: PersistRecordBatch | None = None,
         list_fn: ListRecords = list_deal_state_records,
         list_calculation_runs_fn: ListCalculationRuns = list_calculation_run_records,
         clock: Clock | None = None,
     ) -> None:
         self._upsert = upsert_fn
+        # When supplied, this callback must persist the complete list in one
+        # all-or-nothing transaction and preserve each immutable payload hash.
+        # The legacy single-record callback remains the default so existing
+        # JSON/SQLite/test backends keep their current behaviour.
+        self._persist_batch = persist_batch_fn
         self._list_records = list_fn
         self._list_calculation_runs = list_calculation_runs_fn
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -769,11 +778,21 @@ class ParserV2RecordStore:
                 ),
             }
         )
-        persisted = self._persist_immutable(record)
         if supersedes_candidate_id:
             affected_ids = self._candidate_dependency_closure(
                 tenant_id, project_id, {str(supersedes_candidate_id)}
             )
+            if self._persist_batch is not None:
+                invalidations = self._build_active_selection_invalidation_batch_for_candidates(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    candidate_ids=affected_ids,
+                    actor_id=actor_id,
+                    reason=f"candidate superseded by {candidate_id}",
+                )
+                return self._persist_immutable_batch([record, *invalidations])[0]
+        persisted = self._persist_immutable(record)
+        if supersedes_candidate_id:
             self._invalidate_active_selections_for_candidates(
                 tenant_id=tenant_id,
                 project_id=project_id,
@@ -871,10 +890,19 @@ class ParserV2RecordStore:
                 "sourceType": "parser_v2_reconciliation",
             }
         )
-        persisted = self._persist_immutable(record)
         affected_ids = self._candidate_dependency_closure(
             tenant_id, project_id, set(unique_ids)
         )
+        if self._persist_batch is not None:
+            invalidations = self._build_active_selection_invalidation_batch_for_candidates(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                candidate_ids=affected_ids,
+                actor_id=actor_id,
+                reason=f"open source conflict discovered: {conflict_id}",
+            )
+            return self._persist_immutable_batch([record, *invalidations])[0]
+        persisted = self._persist_immutable(record)
         self._invalidate_active_selections_for_candidates(
             tenant_id=tenant_id,
             project_id=project_id,
@@ -1215,6 +1243,16 @@ class ParserV2RecordStore:
                 "sourceType": "human_review",
             }
         )
+        if self._persist_batch is not None and existing_same_id is None:
+            invalidations = self._build_active_selection_invalidation_batch_for_candidates(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                candidate_ids={candidate_id},
+                actor_id=actor_id,
+                reason=f"candidate received newer review decision {stable_decision_id}",
+            )
+            return self._persist_immutable_batch([record, *invalidations])[0]
+
         persisted = self._persist_immutable(record)
         if existing_same_id is None:
             for selection in self.list_canonical_selections(
@@ -1460,6 +1498,19 @@ class ParserV2RecordStore:
                 "sourceType": "approved_parser_v2_candidate",
             }
         )
+        if self._persist_batch is not None:
+            records = [record]
+            if previous is not None:
+                records.extend(
+                    self._build_selection_invalidation_batch(
+                        selection=previous,
+                        actor_id=actor_id,
+                        reason=f"superseded by canonical selection {selection_id}",
+                        replacement_selection_id=selection_id,
+                    )
+                )
+            return self._persist_immutable_batch(records)[0]
+
         persisted = self._persist_immutable(record)
         if previous is not None:
             self._append_selection_invalidation_event(
@@ -1715,6 +1766,22 @@ class ParserV2RecordStore:
                 "sourceType": "approved_parser_v2_snapshot",
             }
         )
+        if self._persist_batch is not None:
+            records = [record]
+            if (
+                previous_snapshot is not None
+                and previous_snapshot.get("validityStatus") == "active"
+            ):
+                records.append(
+                    self._build_snapshot_invalidation_record(
+                        snapshot=previous_snapshot,
+                        actor_id=actor_id,
+                        reason=f"superseded by approved snapshot {snapshot_id}",
+                        replacement_snapshot_id=snapshot_id,
+                    )
+                )
+            return self._persist_immutable_batch(records)[0]
+
         persisted = self._persist_immutable(record)
         if (
             previous_snapshot is not None
@@ -1729,6 +1796,84 @@ class ParserV2RecordStore:
         return persisted
 
     def _append_selection_invalidation_event(
+        self,
+        *,
+        selection: Mapping[str, Any],
+        actor_id: str,
+        reason: str,
+        replacement_selection_id: str | None = None,
+        replacement_document_version_id: str | None = None,
+    ) -> Dict[str, Any]:
+        if self._persist_batch is not None:
+            records = self._build_selection_invalidation_batch(
+                selection=selection,
+                actor_id=actor_id,
+                reason=reason,
+                replacement_selection_id=replacement_selection_id,
+                replacement_document_version_id=replacement_document_version_id,
+            )
+            return self._persist_immutable_batch(records)[0]
+
+        record = self._build_selection_invalidation_record(
+            selection=selection,
+            actor_id=actor_id,
+            reason=reason,
+            replacement_selection_id=replacement_selection_id,
+            replacement_document_version_id=replacement_document_version_id,
+        )
+        persisted = self._persist_immutable(record)
+        for snapshot in self.list_approved_input_snapshots(
+            str(selection["tenantId"]),
+            str(selection["projectId"]),
+            active_only=True,
+        ):
+            if selection["selectionId"] in snapshot.get("selectionIds", []):
+                self._append_snapshot_invalidation_event(
+                    snapshot=snapshot,
+                    actor_id=actor_id,
+                    reason=(
+                        f"contains invalidated canonical selection {selection['selectionId']}"
+                    ),
+                )
+        return persisted
+
+    def _build_selection_invalidation_batch(
+        self,
+        *,
+        selection: Mapping[str, Any],
+        actor_id: str,
+        reason: str,
+        replacement_selection_id: str | None = None,
+        replacement_document_version_id: str | None = None,
+    ) -> List[Dict[str, Any]]:
+        records = [
+            self._build_selection_invalidation_record(
+                selection=selection,
+                actor_id=actor_id,
+                reason=reason,
+                replacement_selection_id=replacement_selection_id,
+                replacement_document_version_id=replacement_document_version_id,
+            )
+        ]
+        for snapshot in self.list_approved_input_snapshots(
+            str(selection["tenantId"]),
+            str(selection["projectId"]),
+            active_only=True,
+        ):
+            if selection["selectionId"] not in snapshot.get("selectionIds", []):
+                continue
+            records.append(
+                self._build_snapshot_invalidation_record(
+                    snapshot=snapshot,
+                    actor_id=actor_id,
+                    reason=(
+                        f"contains invalidated canonical selection {selection['selectionId']}"
+                    ),
+                )
+            )
+        return records
+
+    def _build_selection_invalidation_record(
         self,
         *,
         selection: Mapping[str, Any],
@@ -1773,23 +1918,29 @@ class ParserV2RecordStore:
                 "sourceType": "parser_v2_approval_invalidation",
             }
         )
-        persisted = self._persist_immutable(record)
-        for snapshot in self.list_approved_input_snapshots(
-            str(selection["tenantId"]),
-            str(selection["projectId"]),
-            active_only=True,
-        ):
-            if selection["selectionId"] in snapshot.get("selectionIds", []):
-                self._append_snapshot_invalidation_event(
-                    snapshot=snapshot,
-                    actor_id=actor_id,
-                    reason=(
-                        f"contains invalidated canonical selection {selection['selectionId']}"
-                    ),
-                )
-        return persisted
+        return record
 
     def _append_snapshot_invalidation_event(
+        self,
+        *,
+        snapshot: Mapping[str, Any],
+        actor_id: str,
+        reason: str,
+        replacement_snapshot_id: str | None = None,
+        replacement_document_version_id: str | None = None,
+    ) -> Dict[str, Any]:
+        record = self._build_snapshot_invalidation_record(
+            snapshot=snapshot,
+            actor_id=actor_id,
+            reason=reason,
+            replacement_snapshot_id=replacement_snapshot_id,
+            replacement_document_version_id=replacement_document_version_id,
+        )
+        if self._persist_batch is not None:
+            return self._persist_immutable_batch([record])[0]
+        return self._persist_immutable(record)
+
+    def _build_snapshot_invalidation_record(
         self,
         *,
         snapshot: Mapping[str, Any],
@@ -1832,7 +1983,7 @@ class ParserV2RecordStore:
                 "sourceType": "parser_v2_approval_invalidation",
             }
         )
-        return self._persist_immutable(record)
+        return record
 
     def _candidate_dependency_closure(
         self,
@@ -1878,6 +2029,70 @@ class ParserV2RecordStore:
                 )
             )
         return invalidations
+
+    def _build_active_selection_invalidation_batch_for_candidates(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        candidate_ids: set[str],
+        actor_id: str,
+        reason: str,
+    ) -> list[Dict[str, Any]]:
+        selections = sorted(
+            (
+                selection
+                for selection in self.list_canonical_selections(
+                    tenant_id, project_id, active_only=True
+                )
+                if str(selection.get("candidateId") or "") in candidate_ids
+            ),
+            key=lambda item: (
+                str(item.get("selectionId") or ""),
+                str(item.get("recordId") or ""),
+            ),
+        )
+        records = [
+            self._build_selection_invalidation_record(
+                selection=selection,
+                actor_id=actor_id,
+                reason=reason,
+            )
+            for selection in selections
+        ]
+        invalidated_selection_ids = {
+            str(selection["selectionId"]) for selection in selections
+        }
+        active_snapshots = sorted(
+            self.list_approved_input_snapshots(
+                tenant_id, project_id, active_only=True
+            ),
+            key=lambda item: (
+                str(item.get("snapshotId") or ""),
+                str(item.get("recordId") or ""),
+            ),
+        )
+        for snapshot in active_snapshots:
+            contained_selection_ids = sorted(
+                invalidated_selection_ids.intersection(
+                    str(item) for item in snapshot.get("selectionIds", [])
+                )
+            )
+            if not contained_selection_ids:
+                continue
+            selection_label = (
+                "selection " + contained_selection_ids[0]
+                if len(contained_selection_ids) == 1
+                else "selections " + ", ".join(contained_selection_ids)
+            )
+            records.append(
+                self._build_snapshot_invalidation_record(
+                    snapshot=snapshot,
+                    actor_id=actor_id,
+                    reason=f"contains invalidated canonical {selection_label}",
+                )
+            )
+        return records
 
     # -- Append-only approval invalidation --------------------------------
 
@@ -1961,7 +2176,9 @@ class ParserV2RecordStore:
                     "sourceType": "parser_v2_approval_invalidation",
                 }
             )
-            selection_events.append(self._persist_immutable(record))
+            selection_events.append(
+                record if self._persist_batch is not None else self._persist_immutable(record)
+            )
 
         affected_selection_ids = {
             str(item["selectionId"]) for item in affected_selections
@@ -2014,7 +2231,17 @@ class ParserV2RecordStore:
                     "sourceType": "parser_v2_approval_invalidation",
                 }
             )
-            snapshot_events.append(self._persist_immutable(record))
+            snapshot_events.append(
+                record if self._persist_batch is not None else self._persist_immutable(record)
+            )
+
+        if self._persist_batch is not None and (selection_events or snapshot_events):
+            selection_count = len(selection_events)
+            persisted_events = self._persist_immutable_batch(
+                [*selection_events, *snapshot_events]
+            )
+            selection_events = persisted_events[:selection_count]
+            snapshot_events = persisted_events[selection_count:]
 
         return {
             "schemaVersion": "realytics-parser-v2-invalidation-result-v1",
@@ -2438,6 +2665,116 @@ class ParserV2RecordStore:
                 f"immutable Parser V2 ID reused with different content: {prepared['recordId']}"
             )
         return self._upsert(str(prepared["projectId"]), prepared)
+
+    def _persist_immutable_batch(
+        self, records: Sequence[Mapping[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Persist an immutable record group through the optional atomic seam.
+
+        Validation and idempotent-existing checks remain in the record store;
+        the injected callback owns cross-process isolation and the all-or-none
+        commit. Callers only use this path when ``self._persist_batch`` exists.
+        """
+
+        if self._persist_batch is None:
+            raise ParserV2RecordError(
+                "atomic Parser V2 batch persistence is not configured"
+            )
+        if not records:
+            return []
+
+        prepared_records: List[Dict[str, Any]] = []
+        prepared_by_id: Dict[str, Dict[str, Any]] = {}
+        tenant_ids: set[str] = set()
+        project_ids: set[str] = set()
+        for source in records:
+            prepared = copy.deepcopy(dict(source))
+            prepared["immutablePayloadHash"] = _immutable_hash(prepared)
+            record_id = str(prepared.get("recordId") or "")
+            project_id = str(prepared.get("projectId") or "")
+            if not record_id or not project_id:
+                raise ParserV2RecordError(
+                    "atomic Parser V2 records require recordId and projectId"
+                )
+            duplicate = prepared_by_id.get(record_id)
+            if duplicate is not None and duplicate.get(
+                "immutablePayloadHash"
+            ) != prepared.get("immutablePayloadHash"):
+                raise ImmutableRecordConflict(
+                    f"immutable Parser V2 ID reused within one batch: {record_id}"
+                )
+            prepared_by_id[record_id] = prepared
+            prepared_records.append(prepared)
+            tenant_ids.add(str(prepared.get("tenantId") or ""))
+            project_ids.add(project_id)
+        if len(tenant_ids) != 1 or "" in tenant_ids:
+            raise ParserV2RecordError(
+                "one atomic Parser V2 batch cannot span multiple tenants"
+            )
+        if len(project_ids) != 1:
+            raise ParserV2RecordError(
+                "one atomic Parser V2 batch cannot span multiple projects"
+            )
+
+        resolved_by_id: Dict[str, Dict[str, Any]] = {}
+        pending_by_id: Dict[str, Dict[str, Any]] = {}
+        pending: List[Dict[str, Any]] = []
+        for prepared in prepared_records:
+            record_id = str(prepared["recordId"])
+            if record_id in resolved_by_id or record_id in pending_by_id:
+                continue
+            existing = self._find_by_record_id(
+                str(prepared["tenantId"]),
+                str(prepared["projectId"]),
+                str(prepared["recordType"]),
+                record_id,
+            )
+            if existing is not None:
+                if existing.get("immutablePayloadHash") != prepared.get(
+                    "immutablePayloadHash"
+                ):
+                    raise ImmutableRecordConflict(
+                        "immutable Parser V2 ID reused with different content: "
+                        f"{record_id}"
+                    )
+                resolved_by_id[record_id] = existing
+                continue
+            pending_by_id[record_id] = prepared
+            pending.append(prepared)
+
+        if pending:
+            persisted_rows = self._persist_batch(next(iter(project_ids)), pending)
+            if len(persisted_rows) != len(pending):
+                raise ParserV2RecordError(
+                    "atomic Parser V2 batch callback returned an incomplete result"
+                )
+            returned_ids: set[str] = set()
+            for persisted in persisted_rows:
+                saved = copy.deepcopy(dict(persisted))
+                record_id = str(saved.get("recordId") or "")
+                expected = pending_by_id.get(record_id)
+                if expected is None or record_id in returned_ids:
+                    raise ParserV2RecordError(
+                        "atomic Parser V2 batch callback returned an unexpected record"
+                    )
+                if saved.get("immutablePayloadHash") != expected.get(
+                    "immutablePayloadHash"
+                ):
+                    raise ImmutableRecordConflict(
+                        "atomic Parser V2 batch callback changed immutable content: "
+                        f"{record_id}"
+                    )
+                returned_ids.add(record_id)
+                resolved_by_id[record_id] = saved
+            if returned_ids != set(pending_by_id):
+                raise ParserV2RecordError(
+                    "atomic Parser V2 batch callback omitted a requested record"
+                )
+
+        return [
+            copy.deepcopy(resolved_by_id[str(item["recordId"])])
+            for item in prepared_records
+        ]
 
     def _find_by_record_id(
         self,
