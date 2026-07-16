@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+from core.schedule import schedule_event_map
+
 
 OFFICIAL_LAW_SOURCES = [
     {"name": "국토의 계획 및 이용에 관한 법률", "url": "https://www.law.go.kr/법령/국토의계획및이용에관한법률", "scope": "용도지역·지구단위계획·개발행위허가"},
@@ -41,7 +43,7 @@ class LegalDevelopabilityAgent:
         project = project_data.get("project") if isinstance(project_data.get("project"), dict) else {}
         regulation = project_data.get("regulation") if isinstance(project_data.get("regulation"), dict) else {}
         land = project_data.get("land") if isinstance(project_data.get("land"), dict) else {}
-        schedule = project_data.get("schedule") if isinstance(project_data.get("schedule"), dict) else {}
+        schedule = schedule_event_map(project_data.get("schedule"))
         zoning = _first(regulation, "zoning", "zone", "useDistrict", "use_district") or _first(land, "zoning", "zone")
         land_area = _number(_first(land, "area_sqm", "areaSqm", "landAreaSqm", "siteAreaSqm"))
         legal_far = _number(_first(regulation, "legal_far", "legalFar", "statutoryFar"))
@@ -104,4 +106,3 @@ class LegalDevelopabilityAgent:
     @staticmethod
     def _row(label: str, value: Any, legal_basis: str, canonical_field: str, *, required: bool, unit: str | None = None) -> Dict[str, Any]:
         return {"field": label, "canonicalField": f"regulation.{canonical_field}", "value": value, "unit": unit, "legalBasis": legal_basis, "required": required, "sourceLocator": {"sourceType": "project_regulation", "canonicalField": f"regulation.{canonical_field}"}}
-

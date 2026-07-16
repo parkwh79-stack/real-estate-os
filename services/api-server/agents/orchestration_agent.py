@@ -32,6 +32,7 @@ from core.calculations import (
     calculate_feasibility_metrics,
     calculate_pf_metrics,
     calculate_return_metrics,
+    normalize_tranche_priority,
 )
 from agents.stress_test_agent import StressTestAgent
 from agents.credit_enhancement_agent import CreditEnhancementAgent
@@ -218,7 +219,7 @@ class OrchestrationAgent:
                         pf_structure_list.append({
                             "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
                             "amount": float(item.get("amount") or 0.0),
-                            "priority": int(item.get("priority") or idx + 1),
+                            "priority": normalize_tranche_priority(item.get("priority"), idx + 1),
                             "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                             "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
                         })
@@ -1036,7 +1037,7 @@ class OrchestrationAgent:
             tranches.append(StressTranche(
                 tranche=str(item.get("tranche") or item.get("name") or f"Tr.{index}"),
                 amount=float(item.get("amount") or 0.0),
-                priority=int(item.get("priority") or index),
+                priority=normalize_tranche_priority(item.get("priority"), index),
                 interestRate=float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                 feeRate=float(item.get("fee_rate") or item.get("feeRate") or 0.0),
             ))
@@ -1357,7 +1358,7 @@ class OrchestrationAgent:
                 tranches.append(CashSweepTranche(
                     tranche=str(item.get("tranche") or item.get("name") or f"Tr.{index}"),
                     amount=float(item.get("amount") or 0.0),
-                    priority=int(item.get("priority") or index),
+                    priority=normalize_tranche_priority(item.get("priority"), index),
                     interestRate=float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                     feeRate=float(item.get("fee_rate") or item.get("feeRate") or 0.0),
                 ))

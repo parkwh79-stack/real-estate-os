@@ -1,6 +1,11 @@
 from typing import Dict, Any, List
 
-from core.calculations import calculate_exit_sale_rate, calculate_sales_value_ltv
+from core.calculations import (
+    calculate_exit_sale_rate,
+    calculate_sales_value_ltv,
+    normalize_tranche_priority,
+)
+from core.schedule import schedule_event_map
 from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
 from schemas.scenario import ScenarioSetRequest
 from agents.scenario_engine_agent import ScenarioEngineAgent
@@ -75,7 +80,7 @@ class ReportAgent:
                     pf_structure.append({
                         "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
                         "amount": float(item.get("amount") or 0.0),
-                        "priority": int(item.get("priority") or idx + 1),
+                        "priority": normalize_tranche_priority(item.get("priority"), idx + 1),
                         "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                         "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
                     })
@@ -292,7 +297,7 @@ class ReportAgent:
                     pf_structure.append({
                         "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
                         "amount": float(item.get("amount") or 0.0),
-                        "priority": int(item.get("priority") or idx + 1),
+                        "priority": normalize_tranche_priority(item.get("priority"), idx + 1),
                         "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                         "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
                     })
@@ -405,6 +410,7 @@ class ReportAgent:
         }
 
     def _structured_schedule(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
+        schedule = schedule_event_map(schedule)
         mapping = [
             ("land_purchase", "토지매입"),
             ("permit_approval", "사업인허가"),
@@ -650,7 +656,7 @@ class ReportAgent:
         return md + "\n"
 
     def _build_project_schedule(self, data: Dict[str, Any]) -> str:
-        s = data.get("schedule", {})
+        s = schedule_event_map(data.get("schedule"))
         md = "## 7. 사업추진 일정\n\n"
         md += f"- **토지매입 완료**: {s.get('land_purchase', 'TBD')}\n"
         md += f"- **사업인허가 완료**: {s.get('permit_approval', 'TBD')}\n"

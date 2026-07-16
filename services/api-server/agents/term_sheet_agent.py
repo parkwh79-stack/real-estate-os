@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from agents.credit_document_i18n import localize as _localize_condition
+from core.calculations import normalize_tranche_priority
 from agents.term_sheet_templates import (
     BOILERPLATE,
     DEFAULT_SECTION_SOURCE_AGENT,
@@ -354,7 +355,11 @@ class TermSheetAgent:
                 items.append("관리형토지신탁")
                 if tranches:
                     prio = ", ".join(
-                        f"{t['name']} {t['priority']}순위" for t in sorted(tranches, key=lambda x: x["priority"])
+                        f"{t['name']} {t['priority']}순위"
+                        for t in sorted(
+                            tranches,
+                            key=lambda x: normalize_tranche_priority(x.get("priority")),
+                        )
                     )
                     items.append(prio + ", 시공사 후순위")
                 items.append("대출금관리계좌 근질권 설정 · 시공사 책임준공 확약(미이행 시 채무인수)")

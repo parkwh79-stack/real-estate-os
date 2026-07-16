@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 
 from agents.feasibility_workbook_validator import validate_feasibility_workbook
 from agents.legacy_bonri_workbook_profile import legacy_bonri_registry_context
@@ -345,27 +346,48 @@ def _legacy_financing(cash_flow: Any) -> List[Dict[str, Any]]:
 
 
 def _legacy_schedule(input_sheet: Any, source_name: str) -> List[Dict[str, Any]]:
-    start_date = _date_value(_cell_value(input_sheet, "D25"))
-    completion_date = _date_value(_cell_value(input_sheet, "D26"))
-    duration = _to_float(_cell_value(input_sheet, "D24"))
+    start_date, start_cell = _schedule_date_with_source(input_sheet, "E25", "D25")
+    completion_date, completion_cell = _schedule_date_with_source(input_sheet, "E26", "D26")
+    duration = _to_float(_cell_value(input_sheet, "E24"))
+    if duration is None:
+        duration = _to_float(_cell_value(input_sheet, "D24"))
     return [
         {
             "key": "construction_start",
             "label": "착공일",
             "planned_date": start_date,
             "month_index": 1,
-            "excel": {"sheet_name": "입력", "cell": "D25"},
-            "provenance": _provenance(source_name, "xlsx", "입력", "D25", None),
+            "excel": {"sheet_name": "입력", "cell": start_cell},
+            "provenance": _provenance(source_name, "xlsx", "입력", start_cell, None),
         },
         {
             "key": "completion",
             "label": "준공일",
             "planned_date": completion_date,
             "month_index": int(duration) if duration else None,
-            "excel": {"sheet_name": "입력", "cell": "D26"},
-            "provenance": _provenance(source_name, "xlsx", "입력", "D26", None),
+            "excel": {"sheet_name": "입력", "cell": completion_cell},
+            "provenance": _provenance(source_name, "xlsx", "입력", completion_cell, None),
         },
     ]
+
+
+def _schedule_date_with_source(
+    input_sheet: Any,
+    value_cell: str,
+    legacy_cell: str,
+) -> tuple[Optional[str], str]:
+    """Read a schedule date from the value column, then a legacy inline cell.
+
+    Bonri-style workbooks place the labels in column D and their values in
+    column E. Older derived fixtures stored the dates directly in column D.
+    Only a value that can be normalized as a date is accepted, so labels such
+    as ``▶착공일:`` can never flow into downstream month calculations.
+    """
+    for cell in (value_cell, legacy_cell):
+        normalized = _date_value(_cell_value(input_sheet, cell))
+        if normalized is not None:
+            return normalized, cell
+    return None, value_cell
 
 
 def _metrics(
@@ -738,4 +760,34 @@ def _date_value(value: Any) -> Optional[str]:
         return value.date().isoformat()
     if isinstance(value, date):
         return value.isoformat()
-    return str(value) if value else None
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            converted = from_excel(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if isinstance(converted, datetime):
+            return converted.date().isoformat()
+        if isinstance(converted, date):
+            return converted.isoformat()
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).date().isoformat()
+    except ValueError:
+        pass
+    for pattern in ("%Y/%m/%d", "%Y.%m.%d", "%Y년 %m월 %d일", "%Y년%m월%d일"):
+        try:
+            return datetime.strptime(text, pattern).date().isoformat()
+        except ValueError:
+            continue
+    for pattern in ("%Y-%m", "%Y/%m", "%Y.%m", "%Y년 %m월", "%Y년%m월"):
+        try:
+            return datetime.strptime(text, pattern).strftime("%Y-%m")
+        except ValueError:
+            continue
+    return None

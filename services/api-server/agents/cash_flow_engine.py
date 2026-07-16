@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 from core.calculations import calculate_cashflow_max_minus_details
+from core.schedule import schedule_event_map
 
 
 def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -140,7 +141,7 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _project_month_count(request: Dict[str, Any]) -> int:
-    schedule = request.get("schedule") or {}
+    schedule = schedule_event_map(request.get("schedule"))
     start = _planned_date(schedule.get("construction_start"))
     completion = _planned_date(schedule.get("completion"))
     if start and completion:

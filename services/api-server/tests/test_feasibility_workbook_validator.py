@@ -182,7 +182,7 @@ def test_validate_realytics_formula_export_workbook_fails_missing_named_range(tm
     assert "fs_total_revenue" in result["schemaReadiness"]["missingRequiredNamedRanges"]
 
 
-def _build_bonri_import_workbook(path: Path) -> None:
+def _build_bonri_import_workbook(path: Path, *, legacy_schedule_layout: bool = False) -> None:
     _build_sample_like_workbook(path)
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -204,9 +204,20 @@ def _build_bonri_import_workbook(path: Path) -> None:
     input_sheet["E8"] = 4691.9
     input_sheet["F8"] = 1419.29975
     input_sheet["E22"] = 8.574381720430107
-    input_sheet["D24"] = 42
-    input_sheet["D25"] = "2020-05-01"
-    input_sheet["D26"] = "2023-10-01"
+    if legacy_schedule_layout:
+        input_sheet["D24"] = 42
+        input_sheet["E24"] = "invalid-duration"
+        input_sheet["D25"] = "2020-05-01"
+        input_sheet["E25"] = "invalid-start-date"
+        input_sheet["D26"] = "2023-10-01"
+        input_sheet["E26"] = "invalid-completion-date"
+    else:
+        input_sheet["D24"] = "사업기간:"
+        input_sheet["E24"] = 42
+        input_sheet["D25"] = "▶착공일:"
+        input_sheet["E25"] = "2020-05-01"
+        input_sheet["D26"] = "▶준공일:"
+        input_sheet["E26"] = "2023-10-01"
     input_sheet["F19"] = 54919.35
     input_sheet["M5"] = 19535.9714
     input_sheet["M6"] = 6457.036
@@ -272,6 +283,28 @@ def test_import_legacy_bonri_workbook_to_feasibility_study_v2(tmp_path):
     assert abs(study["metrics"]["total_cost"] - 151841565314.10385) < 1
     assert abs(study["metrics"]["ltc"] - (50000000000 / 151841565314.10385)) < 0.000001
     assert study["raw_import"]["unitScale"]["사업수지"] == "KRW_THOUSAND"
+    assert study["schedule"][0]["planned_date"] == "2020-05-01"
+    assert study["schedule"][0]["excel"]["cell"] == "E25"
+    assert study["schedule"][0]["provenance"]["cell"] == "E25"
+    assert study["schedule"][1]["planned_date"] == "2023-10-01"
+    assert study["schedule"][1]["month_index"] == 42
+    assert study["schedule"][1]["excel"]["cell"] == "E26"
+    assert study["schedule"][1]["provenance"]["cell"] == "E26"
+
+
+def test_import_legacy_bonri_workbook_falls_back_to_inline_schedule_dates(tmp_path):
+    workbook_path = tmp_path / "bonri-import-legacy-schedule.xlsx"
+    _build_bonri_import_workbook(workbook_path, legacy_schedule_layout=True)
+
+    study = import_feasibility_study_from_workbook(workbook_path, project_id="p-legacy")
+
+    assert study["schedule"][0]["planned_date"] == "2020-05-01"
+    assert study["schedule"][0]["excel"]["cell"] == "D25"
+    assert study["schedule"][0]["provenance"]["cell"] == "D25"
+    assert study["schedule"][1]["planned_date"] == "2023-10-01"
+    assert study["schedule"][1]["month_index"] == 42
+    assert study["schedule"][1]["excel"]["cell"] == "D26"
+    assert study["schedule"][1]["provenance"]["cell"] == "D26"
 
 
 def test_import_realytics_formula_export_workbook_to_feasibility_study_v2(tmp_path):

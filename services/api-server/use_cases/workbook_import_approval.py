@@ -239,7 +239,7 @@ def _feasibility_input_from_study(study: Dict[str, Any]) -> Dict[str, Any]:
     pf_amount = sum(
         float(item.get("amount") or 0)
         for item in financing
-        if item.get("priority") in {"senior", "middle", "junior", "bridge", "other"}
+        if item.get("priority") in {"senior", "middle", "mezzanine", "junior", "bridge", "other"}
     )
     if pf_amount:
         result["pf_amount"] = pf_amount

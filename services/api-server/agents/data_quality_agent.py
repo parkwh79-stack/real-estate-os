@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
+from core.schedule import schedule_event_map
 from core.text_normalization import build_term_surface_record
 
 
@@ -272,7 +273,7 @@ class DataQualityAgent:
         return self._clear("vat_basis_consistency", "VAT basis consistency", vat_values)
 
     def _date_schedule_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        schedule = data.get("schedule") or {}
+        schedule = schedule_event_map(data.get("schedule"))
         ordered_keys = ["land_purchase", "permit_approval", "construction_start", "presale_start", "completion"]
         values = [(key, schedule.get(key)) for key in ordered_keys if schedule.get(key)]
         if len(values) < 2:

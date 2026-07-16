@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
-from core.calculations import calculate_pf_metrics
+from core.calculations import calculate_pf_metrics, normalize_tranche_priority
 from core.text_normalization import build_term_surface_record
 from agents.orchestration_agent import OrchestrationAgent
 from agents.credit_review_agent import CreditReviewAgent
@@ -1997,7 +1997,10 @@ def _scenario_pf_structure(project_data: Dict[str, Any], options: Dict[str, Any]
             {
                 "tranche": str(item.get("tranche") or item.get("name") or f"Tr.{index}"),
                 "amount": amount,
-                "priority": int(_number(item.get("priority") or item.get("repaymentPriority")) or index),
+                "priority": normalize_tranche_priority(
+                    item.get("priority") or item.get("repaymentPriority"),
+                    index,
+                ),
                 "interestRate": _number(item.get("interestRate") or item.get("interest_rate")) or 0.0,
                 "feeRate": _number(item.get("feeRate") or item.get("fee_rate")) or 0.0,
             }

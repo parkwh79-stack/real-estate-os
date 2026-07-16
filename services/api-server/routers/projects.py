@@ -20,6 +20,7 @@ from core.calculations import (
     calculate_pf_metrics,
     calculate_feasibility_metrics,
     calculate_return_metrics,
+    normalize_tranche_priority,
 )
 from core.risk_assessment import build_basic_risk_matrix
 from schemas.scenario import ScenarioSetRequest
@@ -124,6 +125,7 @@ from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestrat
 from routers.project_jobs import build_project_jobs_router
 from routers.project_parser_v2 import build_project_parser_v2_router
 from routers.project_source_documents import build_project_source_documents_router
+from use_cases.parser_v2_runtime import build_parser_v2_runtime_dependencies
 from use_cases.term_annotation import annotate_terms_use_case
 from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
 from use_cases.covenant_monitoring import (
@@ -2751,7 +2753,7 @@ def build_scenario_request_from_project(project: Dict[str, Any], input_data: Dic
             pf_structure.append({
                 "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
                 "amount": float(item.get("amount") or item.get("principal") or 0.0),
-                "priority": int(item.get("priority") or idx + 1),
+                "priority": normalize_tranche_priority(item.get("priority"), idx + 1),
                 "interestRate": float(item.get("interestRate") or item.get("interest_rate") or item.get("rate") or 0.0),
                 "feeRate": float(item.get("feeRate") or item.get("fee_rate") or 0.0)
             })
@@ -2827,13 +2829,7 @@ def build_stress_test_request_from_project(project: Dict[str, Any], input_data: 
     for index, tranche in enumerate(raw_tranches, start=1):
         if not isinstance(tranche, dict):
             continue
-        raw_priority = tranche.get("priority", index)
-        try:
-            priority = int(raw_priority or index)
-        except (TypeError, ValueError):
-            # Some imported PF structures use semantic priority names
-            # (senior/mezzanine/junior); preserve their order deterministically.
-            priority = index
+        priority = normalize_tranche_priority(tranche.get("priority"), index)
         tranches.append(StressTranche(
             tranche=str(tranche.get("tranche") or tranche.get("name") or f"Tr.{index}"),
             amount=_to_number(tranche.get("amount", 0.0)),
@@ -5172,6 +5168,9 @@ parser_v2_router = build_project_parser_v2_router(
     source_document_repository_factory=source_document_repository,
     upload_archive_repository_factory=upload_archive_repository,
     audit_recorder=record_sensitive_project_event,
+    **build_parser_v2_runtime_dependencies(
+        project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+    ),
 )
 
 @router.post("/{project_id}/orchestrations/{run_id}/handoffs/{handoff_id}/review")

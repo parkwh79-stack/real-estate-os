@@ -14,7 +14,7 @@ from scripts.apply_pilot_data_quality_override import (
     _find_source_value,
     _upsert_override,
 )
-from scripts.apply_pilot_financial_cure import _apply_cure
+from scripts.apply_pilot_financial_cure import _apply_cure, _reduce_pf_structure
 from scripts.apply_pilot_review_actions import apply_review_actions, build_review_action_template
 from scripts.build_pilot_legal_evidence_package import (
     EVIDENCE_REQUIREMENTS,
@@ -49,6 +49,21 @@ def test_prepare_pilot_workspace_creates_payload_and_manifest(tmp_path):
     assert manifest["documentCount"] == 1
     assert manifest["documents"][0]["status"] == "referenced_external_file"
     assert manifest["documents"][0]["sha256"]
+
+
+def test_pf_reduction_cure_reduces_junior_before_senior_with_label_priorities():
+    payload = {
+        "pf_structure": [
+            {"name": "Tr.A", "amount": 100, "priority": "senior"},
+            {"name": "Tr.C", "amount": 40, "priority": "junior"},
+            {"name": "Tr.B", "amount": 60, "priority": "mezzanine"},
+        ]
+    }
+
+    _reduce_pf_structure(payload, 70)
+
+    amounts = {item["name"]: item["amount"] for item in payload["pf_structure"]}
+    assert amounts == {"Tr.A": 100, "Tr.B": 30, "Tr.C": 0}
 
 
 def test_pilot_run_summary_contains_key_review_sections():

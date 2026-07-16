@@ -38,6 +38,19 @@ def project_with_discount_triggers(client: TestClient) -> str:
     return created.get("id") or created["project"]["id"]
 
 
+def test_stress_request_normalizes_semantic_tranche_priorities():
+    request = OrchestrationAgent()._build_stress_request({
+        "feasibility_input": {"total_revenue": 1_000, "total_cost": 800},
+        "pf_structure": [
+            {"tranche": "Tr.C", "amount": 100, "priority": "junior"},
+            {"tranche": "Tr.A", "amount": 500, "priority": "senior"},
+            {"tranche": "Tr.B", "amount": 200, "priority": "mezzanine"},
+        ],
+    })
+
+    assert [tranche.priority for tranche in request.pfStructure] == [3, 1, 2]
+
+
 def _approval_ready_base_run(project_id: str) -> dict:
     return {
         "project_id": project_id,

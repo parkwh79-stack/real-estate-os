@@ -788,48 +788,63 @@ def _to_float(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-def _tranche_priority_rank(tranche: Dict[str, Any]) -> int:
-    """Normalize numeric and industry-label tranche priorities.
+_TRANCHE_PRIORITY_ALIASES = {
+    "senior": 1,
+    "first": 1,
+    "1st": 1,
+    "tr.a": 1,
+    "tranche a": 1,
+    "a": 1,
+    "선순위": 1,
+    "bridge": 1,
+    "mezzanine": 2,
+    "mezz": 2,
+    "middle": 2,
+    "second": 2,
+    "2nd": 2,
+    "tr.b": 2,
+    "tranche b": 2,
+    "b": 2,
+    "중순위": 2,
+    "junior": 3,
+    "third": 3,
+    "3rd": 3,
+    "tr.c": 3,
+    "tranche c": 3,
+    "c": 3,
+    "후순위": 3,
+    "other": 4,
+    "equity": 5,
+    "자기자본": 5,
+}
 
-    Imported workbooks use both ordinal numbers and labels such as
-    ``senior``/``mezzanine``/``junior``.  The deterministic engines must not
-    fail or reorder claims merely because one source uses the label form.
-    """
-    aliases = {
-        "senior": 1,
-        "first": 1,
-        "1st": 1,
-        "tr.a": 1,
-        "tranche a": 1,
-        "a": 1,
-        "mezzanine": 2,
-        "mezz": 2,
-        "middle": 2,
-        "second": 2,
-        "2nd": 2,
-        "tr.b": 2,
-        "tranche b": 2,
-        "b": 2,
-        "junior": 3,
-        "third": 3,
-        "3rd": 3,
-        "tr.c": 3,
-        "tranche c": 3,
-        "c": 3,
-        "equity": 4,
-    }
+
+def _parse_tranche_priority(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    normalized = str(value).strip().casefold()
+    if normalized in _TRANCHE_PRIORITY_ALIASES:
+        return _TRANCHE_PRIORITY_ALIASES[normalized]
+    try:
+        return int(float(normalized))
+    except ValueError:
+        return None
+
+
+def normalize_tranche_priority(value: Any, fallback: int = 99) -> int:
+    """Return a stable repayment rank for numeric or industry-label priority values."""
+    parsed = _parse_tranche_priority(value)
+    return parsed if parsed is not None else fallback
+
+
+def _tranche_priority_rank(tranche: Dict[str, Any]) -> int:
+    """Resolve a tranche rank from priority first, then its industry name."""
     for value in (tranche.get("priority"), tranche.get("name"), tranche.get("tranche")):
-        if value is None or isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            return int(value)
-        normalized = str(value).strip().casefold()
-        if normalized in aliases:
-            return aliases[normalized]
-        try:
-            return int(float(normalized))
-        except ValueError:
-            continue
+        parsed = _parse_tranche_priority(value)
+        if parsed is not None:
+            return parsed
     return 99
 
 def _lower_is_better_status(value: float, safe: float, caution: float, high: float) -> str:

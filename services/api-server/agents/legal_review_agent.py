@@ -2,6 +2,7 @@ from typing import Any, Dict, List
 
 from agents.korean_law_context import build_korean_law_mcp_query_plan, normalize_law_context
 from agents.legal_developability_agent import LegalDevelopabilityAgent
+from core.schedule import schedule_event_map
 
 
 class LegalReviewAgent:
@@ -83,7 +84,7 @@ class LegalReviewAgent:
         )
 
     def _permit_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        schedule = data.get("schedule", {})
+        schedule = schedule_event_map(data.get("schedule"))
         permit = schedule.get("permit_approval")
         construction = schedule.get("construction_start")
         issues = []

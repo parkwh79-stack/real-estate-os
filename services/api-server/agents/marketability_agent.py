@@ -4,6 +4,8 @@ import math
 from statistics import median
 from typing import Any, Dict, List, Optional
 
+from core.calculations import normalize_tranche_priority
+
 
 PRODUCT_TYPE_LABELS = {
     "apartment": "Apartment",
@@ -640,7 +642,10 @@ class MarketabilityAgent:
             for discount in discount_rates
         ]
 
-        sorted_tranches = sorted(tranches, key=lambda item: item.get("priority", 999))
+        sorted_tranches = sorted(
+            tranches,
+            key=lambda item: normalize_tranche_priority(item.get("priority")),
+        )
         cumulative = 0
         tranche_rates: Dict[str, float] = {}
         tranche_thresholds = []
@@ -1471,7 +1476,9 @@ def _unsold_haircut(product_type: str) -> float:
 def _tranche_recovery(tranches: List[Dict[str, Any]], recovery_value: float) -> List[Dict[str, Any]]:
     remaining = recovery_value
     rows = []
-    for index, tranche in enumerate(sorted(tranches, key=lambda item: item.get("priority", 999))):
+    for index, tranche in enumerate(
+        sorted(tranches, key=lambda item: normalize_tranche_priority(item.get("priority")))
+    ):
         amount = tranche.get("amount", 0) or 0
         recovered = min(amount, max(remaining, 0))
         remaining -= recovered

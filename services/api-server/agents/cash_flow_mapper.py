@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from core.calculations import normalize_tranche_priority
 from schemas.feasibility_study import FeasibilityStudyV2
 
 
@@ -447,11 +448,4 @@ def _value(value: Any) -> Any:
 
 
 def _repayment_priority(priority: str) -> int:
-    return {
-        "senior": 1,
-        "middle": 2,
-        "junior": 3,
-        "bridge": 1,
-        "other": 4,
-        "equity": 5,
-    }.get(priority, 99)
+    return normalize_tranche_priority(priority)
