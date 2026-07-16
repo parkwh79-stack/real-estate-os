@@ -21,6 +21,7 @@ from agent_platform.contracts import (
 )
 from agent_platform.learning import LearningLifecycleService
 from agent_platform.operational import AgentPlatformWorker, OperationalRepository
+from agent_platform.operational.handlers import build_default_outbox_handlers
 from agent_platform.operational.outbox import RuntimeOutboxDispatcher
 from agent_platform.tools import ToolExecutor, build_default_tool_registry
 from agents.ai_connection import AIConnection, AIExtractionResult
@@ -64,6 +65,78 @@ def test_calculation_run_and_outbox_are_persisted_and_reprocessed():
     assert published and published.status == OutboxEventStatus.PUBLISHED
     metrics = list_deal_state_records("project-ops", record_type="metric")
     assert any(item.get("key") == "cashflow.max_minus" for item in metrics)
+
+
+def test_default_worker_looks_up_parser_snapshot_by_identity(monkeypatch):
+    from db.repositories import parser_v2_repository as parser_repository
+
+    calls = []
+
+    class _ParserRepositoryStub:
+        def get_approved_snapshot(self, tenant_id, project_id, snapshot_id):
+            calls.append((tenant_id, project_id, snapshot_id))
+            return {
+                "eventKind": "created",
+                "snapshotId": "snapshot-1",
+                "selectionIds": ["selection-1"],
+            }
+
+        def list_records(self, *_args, **_kwargs):
+            raise AssertionError("snapshot verification must not use a bounded list")
+
+    monkeypatch.setattr(
+        parser_repository,
+        "ParserV2PostgresRepository",
+        _ParserRepositoryStub,
+    )
+    handler = build_default_outbox_handlers()[
+        "parser.approved_snapshot.created"
+    ]
+
+    handler(
+        {
+            "tenantId": "tenant-1",
+            "projectId": "project-1",
+            "snapshotId": "snapshot-1",
+            "selectionIds": ["selection-1"],
+        }
+    )
+
+    assert calls == [("tenant-1", "project-1", "snapshot-1")]
+
+
+def test_parser_snapshot_handler_rejects_mismatched_selection_set(monkeypatch):
+    from db.repositories import parser_v2_repository as parser_repository
+
+    class _ParserRepositoryStub:
+        def get_approved_snapshot(self, *_args, **_kwargs):
+            return {
+                "eventKind": "created",
+                "snapshotId": "snapshot-1",
+                "selectionIds": ["selection-authoritative"],
+            }
+
+    monkeypatch.setattr(
+        parser_repository,
+        "ParserV2PostgresRepository",
+        _ParserRepositoryStub,
+    )
+    handler = build_default_outbox_handlers()[
+        "parser.approved_snapshot.created"
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match="OUTBOX_PARSER_SNAPSHOT_SELECTIONS_MISMATCH",
+    ):
+        handler(
+            {
+                "tenantId": "tenant-1",
+                "projectId": "project-1",
+                "snapshotId": "snapshot-1",
+                "selectionIds": ["selection-stale"],
+            }
+        )
 
 
 def test_coding_pod_claim_is_exclusive_and_recovers_expired_worker():
