@@ -20,7 +20,7 @@ import {
   UserCheck,
   XCircle,
 } from "lucide-react";
-import { authHeaders, getStoredAuthSession } from "../../../../lib/auth-client";
+import { apiBase, authHeaders, getStoredAuthSession } from "../../../../lib/auth-client";
 import { OrchestrationToolbar } from "../../../../components/orchestration/orchestration-toolbar";
 
 interface RunSummary {
@@ -819,8 +819,6 @@ interface SnapshotDiffResponse {
     recommendedActions: string[];
   };
 }
-
-const apiBase = "http://127.0.0.1:8000";
 
 function currentSessionUserId(fallback = "web") {
   return getStoredAuthSession()?.user.userId ?? fallback;
