@@ -81,10 +81,17 @@ The first slice establishes reusable contracts and composition mechanics:
   registry and explicit, non-overwriting projections into existing OS schemas;
 - `use_cases/parser_v2_profiles.py`: immutable project-specific profiles whose
   resolved module IDs and versions are pinned at save time;
-- `use_cases/parser_v2_records.py`: backend-neutral append-only Parser V2 records
-  projected through `deal_state_records`, including field-validation findings,
-  source conflicts, decisions, selections, snapshot lineage, invalidations, and
-  the bounded sanitized orchestration artifact needed to attest source locators;
+- `use_cases/parser_v2_records.py`: backend-neutral append-only Parser V2 records,
+  including field-validation findings, source conflicts, decisions, selections,
+  snapshot lineage, invalidations, and the bounded sanitized orchestration
+  artifact needed to attest source locators. The default persistence seam remains
+  `deal_state_records`; an explicitly enabled normalized PostgreSQL adapter can
+  instead persist the same contracts into the typed Parser V2 tables;
+- `db/repositories/parser_v2_repository.py` and
+  `use_cases/parser_v2_runtime.py`: an opt-in, tenant-scoped, INSERT-only
+  PostgreSQL Repository with immutable replay checks, project-scoped transaction
+  locking, atomic record batches, normalized profile persistence, and an approved
+  snapshot/outbox commit boundary;
 - `routers/project_parser_v2.py`: candidate/run/profile/catalog routes and a
   Phase 2 review/selection/snapshot surface that remains disabled by default and
   additionally requires strict RBAC, strict tenant isolation, verified OIDC/JWKS
@@ -93,8 +100,9 @@ The first slice establishes reusable contracts and composition mechanics:
   exposing persistence/audit envelope fields.
 
 This is a foundation, not a claim that real OCR, HWP conversion, full clause
-extraction, all real-estate Ontology packs, malware scanning, review UI, or
-production PostgreSQL repositories are complete.
+extraction, all real-estate Ontology packs, malware scanning, review UI, live
+PostgreSQL migration/concurrency verification, legacy backfill, or production
+cutover is complete.
 
 ## 4. Candidate-only authority boundary
 
@@ -241,20 +249,37 @@ One global numeric authority rank must not overwrite these separate policies.
 
 ## 7. Persistence and Repository model
 
-### 7.1 Current runtime authority
+### 7.1 Runtime selection and authority
 
-The controlled slice currently uses the backend-neutral `deal_state_records`
-projection through `ParserV2RecordStore`. This avoids a second runtime database
-path while contract behavior and migration compatibility are tested.
+`ParserV2RecordStore` still defaults to the backend-neutral
+`deal_state_records` persistence seam. Existing SQLite, JSON, and PostgreSQL
+deployments therefore do not change Parser V2 storage merely by updating the
+application.
 
-This projection does not provide the transaction isolation needed for concurrent
-reviewers or multiple workers: several operations are read-then-insert and a
-snapshot spans multiple logical records. Therefore the Phase 2 approval surface
-must remain off until the typed PostgreSQL repository performs decision,
-selection, snapshot, invalidation, and outbox writes with database transactions,
-locks/compare-and-swap semantics, tenant RLS, and concurrency tests.
+The normalized repository is available only through this explicit combination:
 
-Migration `0006_parser_v2_platform.sql` adds the normalized PostgreSQL target:
+```text
+REALYTICS_STORAGE_BACKEND=postgres
+REALYTICS_PARSER_V2_PERSISTENCE=postgres_normalized
+REALYTICS_DATABASE_URL=<runtime-role DSN>   # or the supported REALYTICS_PG_* values
+```
+
+`REALYTICS_PARSER_V2_PERSISTENCE` may be unset or set to `legacy` to retain the
+existing seam. `postgres_normalized` is rejected for a non-PostgreSQL backend or
+an unconfigured DSN. Enabling normalized persistence does not enable the review
+and approval API: the separate default-off
+`REALYTICS_PARSER_V2_REVIEW_PILOT_ENABLED` gate, allowlists, strict tenant/RBAC
+checks, verified OIDC/JWKS bearer identity, and configured MFA policy still apply.
+
+This mode is an **opt-in implementation slice, not a production promotion**. It
+does not copy existing `deal_state_records` into normalized tables, dual-write
+the two stores, or prove parity. A deployment that opts in before an explicit
+backfill/reconciliation plan will see only records written to the normalized
+path.
+
+### 7.2 Normalized schema, migration ledger, and roles
+
+Migration `0006_parser_v2_platform.sql` creates the normalized target:
 
 | Table | Purpose |
 |---|---|
@@ -269,29 +294,97 @@ Migration `0006_parser_v2_platform.sql` adds the normalized PostgreSQL target:
 | `parser_approved_snapshots` | immutable set of approved selections for downstream use |
 | `parser_validity_events` | append-only withdrawal, invalidation, and supersession audit |
 
-The normalized tables use typed scope/status/version/hash columns for operational
-queries and JSONB for versioned contract payloads. Composite foreign keys prevent
-cross-project references. Join tables preserve conflict membership, derivation
-inputs, snapshot selections, and source runs.
+The tables use typed scope/status/version/hash columns for operational queries and
+JSONB for the complete versioned contract. Composite foreign keys prevent
+cross-project references, while join tables preserve conflict membership,
+derivation inputs, snapshot selections, and source runs.
 
-They are **not yet the active runtime repository**. Promotion requires a typed
-PostgreSQL Repository implementation, transaction tests, backfill/reconciliation,
-dual-read comparison, tenant isolation tests, and an explicit cutover. The
-`deal_state_records` projection remains authoritative until that work is complete.
+Migration `0007_parser_v2_rls.sql` enables and forces PostgreSQL row-level
+security on all 19 tenant-bearing Parser V2 tables. Each transaction sets the
+transaction-local GUC `realytics.tenant_id`; an absent or empty setting makes the
+policy match no rows and rejects writes. `runtime_outbox_events` is not covered by
+0007 and continues to rely on its existing tenant-aware repository and runtime
+controls.
 
-### 7.2 Repository responsibilities
+Migrations are recorded in `schema_migrations` by filename and a SHA-256 checksum
+of canonicalized SQL text. Applied files are never edited in place: a checksum
+mismatch fails deployment, and a new change requires a new numbered migration.
+An advisory transaction lock serializes concurrent migration attempts. Apply all
+pending migrations with a deployment-only DSN:
 
-A Parser Repository must:
+```bash
+REALYTICS_MIGRATION_DATABASE_URL='<migration-role DSN>' \
+  python services/api-server/scripts/migrate_postgres.py
+```
 
-- require tenant and project on every method;
-- verify the archived Object Storage identity and SHA-256 before creating a run;
-- perform idempotent inserts using stable contract hashes;
-- insert an entity and its membership rows in one transaction;
-- prohibit in-place mutation of append-only rows;
-- enforce legal state transitions and monotonic decision/selection versions;
-- materialize effective validity without deleting historical records;
-- return only approved, active selections to snapshot consumers;
-- emit an outbox event only after the snapshot transaction commits.
+Then apply the deployment-specific privilege manifest; role names deliberately
+do not appear in immutable numbered migrations:
+
+```bash
+REALYTICS_MIGRATION_DATABASE_URL='<migration-role DSN>' \
+REALYTICS_RUNTIME_DATABASE_ROLE='realytics_runtime' \
+  python services/api-server/scripts/provision_postgres_runtime.py
+```
+
+The migration role may own/alter schema objects. The runtime role must be a
+different `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS` role and
+must not own Parser V2 tables. The provisioner gives the append-only Parser
+tables only the exact `SELECT`/`INSERT` subset used by the repository, grants
+`schema_migrations` read-only access, and grants the outbox only
+`SELECT`/`INSERT`/`UPDATE`. Shared project/calculation grants are additive so the
+broader application privilege manifest remains independent. The normalized
+repository never applies DDL.
+
+When the opt-in mode starts, a read-only readiness probe verifies that every
+repository migration is present with its expected checksum, all 19 tables exist
+with RLS enabled and forced, ownership is separated, all required privileges are
+effective, and forbidden mutation privileges are absent even through `PUBLIC`
+or inherited grants. Startup fails closed if any check fails. The full command,
+grant matrix, and isolated live-test order are in `docs/product/deployment-plan.md`.
+
+### 7.3 Atomic approval and outbox boundary
+
+The normalized repository binds every operation to an explicit tenant/project,
+sets `realytics.tenant_id`, verifies the project belongs to that tenant, and takes
+a transaction-scoped advisory lock for the tenant/project. This serializes the
+current read/compare/append approval path across processes for the same project.
+Rows are INSERT-only: an exact immutable-hash replay is idempotent, while reuse of
+an identity with different content fails the transaction.
+
+One repository transaction covers the relevant parent and membership rows plus
+their required validity events. In particular:
+
+- a superseding canonical selection and the invalidation of the prior selection
+  must commit together;
+- candidate supersession, a newly opened conflict, or a newer review decision can
+  invalidate affected selections and dependent active snapshots in the same
+  batch;
+- an approved snapshot, its selection/source-run membership rows, any required
+  prior-snapshot invalidation, and the deterministic
+  `parser.approved_snapshot.created` outbox row share one rollback boundary;
+- the outbox row is inserted with `pending` status and becomes observable to the
+  existing dispatcher only when the database transaction commits.
+
+The repository rechecks current selection version, latest approving review,
+conflict status, derived-input closure, and snapshot membership under the
+transaction lock. These database-side checks narrow the race between the
+application pre-read and commit; they do not replace RBAC, four-eyes controls,
+domain completeness policy, or downstream outbox idempotency.
+
+### 7.4 Evidence still required before promotion
+
+The repository, migration runner, readiness probe, rollback behavior, and tenant
+scoping have deterministic/fake-connection tests. Without an isolated live
+PostgreSQL instance and separately provisioned roles, those tests do **not** prove
+actual RLS isolation, PostgreSQL lock behavior under concurrent workers,
+privilege grants, migration duration, driver/network failure behavior, or query
+performance.
+
+Promotion still requires a live migration report, cross-tenant and multi-worker
+tests, legacy backfill/replay, count/hash reconciliation, dual-read parity,
+rollback rehearsal, backup/restore evidence, and an explicit tenant-cohort
+cutover decision. Until those are complete, `deal_state_records` remains the
+default authority and normalized persistence remains a controlled opt-in path.
 
 ## 8. API, review, snapshot, and Pod flow
 
@@ -384,9 +477,14 @@ product. External malware scanning and quarantine remain production blockers.
 
 ### Phase 3 — PostgreSQL Repository promotion
 
-- apply migration to an isolated PostgreSQL/PostGIS environment;
-- run dual-write or replay backfill and reconcile hashes/counts;
-- prove transaction, idempotency, RLS/RBAC, multi-worker, retry, and recovery behavior;
+- apply the migration ledger with a deployment role in an isolated
+  PostgreSQL/PostGIS environment;
+- provision a distinct runtime role and pass the read-only Parser V2 readiness
+  check before serving traffic;
+- replay/backfill legacy records and reconcile hashes/counts through a dual-read
+  comparison;
+- prove transaction, idempotency, RLS/RBAC, multi-worker, outbox retry, and
+  recovery behavior against the live database;
 - cut over reads only after shadow parity and rollback rehearsal pass.
 
 ### Phase 4 — controlled production adoption
@@ -429,13 +527,13 @@ production capability:
 | TODO-SDD-AUTH-001 | Domain authority matrix for title, permit, contract, appraisal, market, approved scenario, and effective dates | legal/credit/industry review and versioned policy tests |
 | TODO-SDD-UI-001 | Reviewer workbench for side-by-side evidence, conflicts, revisions, bulk decisions, and snapshot diff | RBAC/E2E/accessibility tests and reviewer sign-off |
 | TODO-SDD-OPS-001 | Production monitoring for module/run latency, failure, retry, dead letter, drift, locator coverage, review backlog, and cost | dashboards, alerts, SLOs, and incident Runbook |
-| TODO-SDD-DB-001 | Typed PostgreSQL repositories, migration application, RLS/tenant tests, backfill, dual-read parity, and rollback | live PostgreSQL multi-worker report |
+| TODO-SDD-DB-001 | Live-validate the opt-in typed repository and migration/readiness tooling with separated roles; complete grants, RLS/tenant tests, backfill, dual-read parity, and rollback | live PostgreSQL multi-worker report |
 | TODO-SDD-STORAGE-001 | S3/MinIO IAM, versioning, retention, legal hold, backup/restore, and signed download policy | restore rehearsal and access audit |
 | TODO-SDD-DOMAIN-001 | Versioned extraction/validation packs for business plan, feasibility Excel, land ledger, PF agreements, trust/security, permits, leases and appraisals | per-pack schemas, corpus metrics, reviewer acceptance |
 | TODO-SDD-ONTOLOGY-001 | Core/extension Ontology registry, alias governance, migration rules, and candidate-term promotion | version compatibility and rollback tests |
 | TODO-SDD-PRIVACY-001 | PII discovery/redaction/tokenization, retention and provider-routing controls | leakage tests and privacy review |
 | TODO-SDD-INTEGRATION-001 | Approved snapshot projection into Pod DAG, CalculationRun, Evidence Graph, Risk/Approval Gate, and reports | end-to-end pilot with evidence trace |
-| TODO-SDD-TX-001 | Seal a run's complete candidate/finding/conflict set and commit review, canonical selection, snapshot, validity events, and outbox records atomically | competing-review and worker-crash transaction tests |
+| TODO-SDD-TX-001 | Extend the implemented selection/snapshot/validity/outbox transaction boundary to complete worker seal/review bundles and prove it under live contention and worker failure | competing-review and worker-crash transaction tests |
 | TODO-SDD-EVIDENCE-001 | Promote candidate-embedded locators to a first-class, tenant-scoped Evidence Graph record with resolvable IDs and retention policy | locator resolution, access-control, and deletion/retention tests |
 | TODO-SDD-HANDOFF-001 | Version typed Pod handoff payloads and approve per-domain minimum-input/completeness rules before a handoff may set `canExecute=true` | domain-owner sign-off and missing-input/blocking tests |
 | TODO-SDD-CALC-001 | Move the implemented exact CalculationRun/output/hash/input-snapshot binding into the typed PostgreSQL transaction and first-class Evidence Graph | live tamper/replay and output-lineage tests |
@@ -445,13 +543,17 @@ production capability:
 ## 13. Immediate next implementation order
 
 1. Freeze contracts and golden-corpus acceptance fixtures.
-2. Remove or feature-gate any unreviewed parser-to-project deep merge.
-3. Complete top-priority document packs: feasibility workbook, business plan, land
+2. Apply migrations to an isolated live PostgreSQL/PostGIS instance with separate
+   migration/runtime roles, then pass readiness, RLS, concurrency, and failure
+   tests without enabling a production tenant.
+3. Backfill or replay legacy Parser V2 records, reconcile counts/hashes, and prove
+   dual-read parity plus rollback.
+4. Keep review/snapshot APIs behind the existing pilot gate while completing the
+   reviewer UI and per-domain completeness rules.
+5. Connect approved snapshots—not raw candidates—to deterministic domain engines
+   and verify Evidence Locator continuity end to end.
+6. Complete top-priority document packs: feasibility workbook, business plan, land
    ledger, and PF terms.
-4. Add review decisions, canonical selections, and snapshot APIs/UI behind a
-   candidate-only feature flag.
-5. Connect approved snapshots—not raw candidates—to deterministic domain engines.
-6. Promote the PostgreSQL Repository after live migration and isolation tests.
 7. Expand Ontology and document packs through governed release cycles.
 
 This ordering makes modularity useful without weakening financial, legal, or
