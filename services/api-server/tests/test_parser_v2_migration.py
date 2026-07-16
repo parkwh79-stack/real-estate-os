@@ -3,6 +3,29 @@ from __future__ import annotations
 from db import postgres
 
 
+_PARSER_V2_TENANT_TABLES = (
+    "parser_document_versions",
+    "parser_project_profiles",
+    "parser_runs",
+    "parser_run_events",
+    "parser_candidate_set_seals",
+    "parsed_fact_candidates",
+    "parser_candidate_inputs",
+    "parser_validation_findings",
+    "parser_validation_finding_events",
+    "parser_review_decisions",
+    "parser_source_conflicts",
+    "parser_source_conflict_events",
+    "parser_conflict_candidates",
+    "parser_review_decision_conflicts",
+    "parser_canonical_selections",
+    "parser_approved_snapshots",
+    "parser_snapshot_selections",
+    "parser_snapshot_source_runs",
+    "parser_validity_events",
+)
+
+
 def test_parser_v2_migration_keeps_conflict_resolution_append_only() -> None:
     ddl = "\n".join(postgres.schema_ddl())
 
@@ -144,3 +167,48 @@ def test_parser_v2_derived_candidate_binds_engine_output_and_input_snapshot() ->
     assert "calculation_output_hash ~ '^[0-9a-f]{64}$'" in ddl
     assert "input_snapshot_hash ~ '^[0-9a-f]{64}$'" in ddl
     assert "idx_parsed_fact_candidates_calculation" in ddl
+
+
+def test_parser_v2_rls_migration_covers_every_tenant_table_and_fails_closed() -> None:
+    migration = (postgres.MIGRATIONS_DIR / "0007_parser_v2_rls.sql").read_text(
+        encoding="utf-8"
+    )
+    tenant_expression = (
+        "tenant_id = NULLIF(current_setting('realytics.tenant_id', true), '')"
+    )
+
+    assert len(_PARSER_V2_TENANT_TABLES) == 19
+    assert migration.count("ENABLE ROW LEVEL SECURITY;") == len(
+        _PARSER_V2_TENANT_TABLES
+    )
+    assert migration.count("FORCE ROW LEVEL SECURITY;") == len(
+        _PARSER_V2_TENANT_TABLES
+    )
+    assert migration.count("CREATE POLICY parser_v2_tenant_isolation") == len(
+        _PARSER_V2_TENANT_TABLES
+    )
+    assert migration.count(tenant_expression) == 2 * len(_PARSER_V2_TENANT_TABLES)
+
+    for table in _PARSER_V2_TENANT_TABLES:
+        assert f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;" in migration
+        assert f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;" in migration
+        assert (
+            f"DROP POLICY IF EXISTS parser_v2_tenant_isolation ON {table};"
+            in migration
+        )
+        assert f"CREATE POLICY parser_v2_tenant_isolation ON {table}" in migration
+
+    assert "runtime_outbox_events" not in migration
+
+
+def test_parser_v2_rls_migration_uses_splitter_safe_static_sql() -> None:
+    migration = (postgres.MIGRATIONS_DIR / "0007_parser_v2_rls.sql").read_text(
+        encoding="utf-8"
+    )
+    ddl = "\n".join(postgres.schema_ddl())
+
+    assert "DO $$" not in migration
+    assert "EXECUTE format" not in migration
+    for table in _PARSER_V2_TENANT_TABLES:
+        assert f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;" in ddl
+        assert f"CREATE POLICY parser_v2_tenant_isolation ON {table}" in ddl

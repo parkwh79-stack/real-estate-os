@@ -9,16 +9,48 @@ Postgres + the live data migration is the deployment step; this module is
 unit-tested for config/DSN/DDL without a live database.
 """
 
+import hashlib
 import json
 import os
+import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import quote_plus
 
 # Authoritative schema lives in a versioned .sql migration so a DBA and the app
 # share one source of truth (faithful mirror of storage._ensure_sqlite_schema).
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 INITIAL_SCHEMA_FILE = MIGRATIONS_DIR / "0001_initial_schema.sql"
+MIGRATION_LOCK_KEY = 7_731_590_012
+PARSER_V2_RLS_TABLES = (
+    "parser_document_versions",
+    "parser_project_profiles",
+    "parser_runs",
+    "parser_run_events",
+    "parser_candidate_set_seals",
+    "parsed_fact_candidates",
+    "parser_candidate_inputs",
+    "parser_validation_findings",
+    "parser_validation_finding_events",
+    "parser_review_decisions",
+    "parser_source_conflicts",
+    "parser_source_conflict_events",
+    "parser_conflict_candidates",
+    "parser_review_decision_conflicts",
+    "parser_canonical_selections",
+    "parser_approved_snapshots",
+    "parser_snapshot_selections",
+    "parser_snapshot_source_runs",
+    "parser_validity_events",
+)
+
+
+class MigrationChecksumMismatch(RuntimeError):
+    """Raised when an already-applied migration was edited in place."""
+
+
+class ParserV2RuntimeReadinessError(RuntimeError):
+    """Normalized Parser V2 cannot safely serve traffic with this DB role/schema."""
 
 
 def postgres_configured() -> bool:
@@ -114,10 +146,119 @@ JSONB_STORE_TABLES: List[str] = [
 
 
 def _split_sql_statements(sql: str) -> List[str]:
-    """Split a .sql file into executable statements, dropping comments/blank lines."""
-    lines = [line for line in sql.splitlines() if not line.lstrip().startswith("--")]
-    body = "\n".join(lines)
-    return [f"{stmt.strip()};" for stmt in body.split(";") if stmt.strip()]
+    """Split PostgreSQL SQL without cutting quoted bodies or comments.
+
+    Migrations contain COMMENT strings and may contain PL/pgSQL dollar-quoted
+    bodies. A plain ``str.split(';')`` corrupts either form, so this scanner
+    treats only a top-level semicolon as a statement terminator.
+    """
+
+    statements: List[str] = []
+    current: List[str] = []
+    index = 0
+    state = "normal"
+    dollar_tag = ""
+    block_depth = 0
+
+    while index < len(sql):
+        char = sql[index]
+        following = sql[index : index + 2]
+
+        if state == "line_comment":
+            if char in "\r\n":
+                current.append("\n")
+                state = "normal"
+            index += 1
+            continue
+
+        if state == "block_comment":
+            if following == "/*":
+                block_depth += 1
+                index += 2
+                continue
+            if following == "*/":
+                block_depth -= 1
+                index += 2
+                if block_depth == 0:
+                    current.append(" ")
+                    state = "normal"
+                continue
+            index += 1
+            continue
+
+        if state == "single_quote":
+            current.append(char)
+            if char == "'":
+                if index + 1 < len(sql) and sql[index + 1] == "'":
+                    current.append("'")
+                    index += 2
+                    continue
+                state = "normal"
+            index += 1
+            continue
+
+        if state == "double_quote":
+            current.append(char)
+            if char == '"':
+                if index + 1 < len(sql) and sql[index + 1] == '"':
+                    current.append('"')
+                    index += 2
+                    continue
+                state = "normal"
+            index += 1
+            continue
+
+        if state == "dollar_quote":
+            if sql.startswith(dollar_tag, index):
+                current.append(dollar_tag)
+                index += len(dollar_tag)
+                state = "normal"
+                continue
+            current.append(char)
+            index += 1
+            continue
+
+        if following == "--":
+            state = "line_comment"
+            index += 2
+            continue
+        if following == "/*":
+            state = "block_comment"
+            block_depth = 1
+            index += 2
+            continue
+        if char == "'":
+            current.append(char)
+            state = "single_quote"
+            index += 1
+            continue
+        if char == '"':
+            current.append(char)
+            state = "double_quote"
+            index += 1
+            continue
+        if char == "$":
+            match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", sql[index:])
+            if match is not None:
+                dollar_tag = match.group(0)
+                current.append(dollar_tag)
+                index += len(dollar_tag)
+                state = "dollar_quote"
+                continue
+        if char == ";":
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(f"{statement};")
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+
+    trailing = "".join(current).strip()
+    if trailing:
+        statements.append(f"{trailing};")
+    return statements
 
 
 def schema_ddl() -> List[str]:
@@ -142,12 +283,231 @@ def schema_ddl() -> List[str]:
     ]
 
 
+def _migration_files() -> List[Path]:
+    return sorted(MIGRATIONS_DIR.glob("*.sql"))
+
+
+def _migration_checksum(path: Path) -> str:
+    # Git and deployment packaging may materialize CRLF or LF.  Migration
+    # identity is based on canonical SQL text, not the host line-ending style.
+    canonical_text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace(
+        "\r", "\n"
+    )
+    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+
+
+def _read_migration_ledger(cursor) -> Dict[str, str] | None:
+    # Resolve the ledger only in the active application schema.  An
+    # unqualified ``to_regclass`` can fall through to a later search_path entry
+    # (commonly ``public``), causing a fresh tenant/application schema to appear
+    # fully migrated when only the public schema has a ledger.
+    cursor.execute(
+        """
+        SELECT c.oid
+        FROM pg_class AS c
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND c.relname = 'schema_migrations'
+          AND c.relkind IN ('r', 'p')
+        """
+    )
+    relation = cursor.fetchone()
+    if not relation or relation[0] is None:
+        return None
+    cursor.execute("SELECT version, checksum FROM schema_migrations")
+    return {
+        str(version): str(checksum)
+        for version, checksum in cursor.fetchall()
+    }
+
+
+def _assert_recorded_checksums(
+    expected: Mapping[str, str], applied: Mapping[str, str]
+) -> None:
+    changed = sorted(
+        version
+        for version, checksum in expected.items()
+        if version in applied and applied[version] != checksum
+    )
+    if changed:
+        raise MigrationChecksumMismatch(
+            "Applied PostgreSQL migration checksum differs from the repository copy: "
+            + ", ".join(changed)
+            + ". Create a new migration instead of editing an applied migration."
+        )
+
+
 def ensure_schema(conn) -> None:
-    """Apply the schema DDL on an open psycopg connection (requires a live DB)."""
-    with conn.cursor() as cur:
-        for statement in schema_ddl():
-            cur.execute(statement)
-    conn.commit()
+    """Apply each immutable migration once, guarded by checksum and a DB lock.
+
+    Runtime repositories still call this compatibility seam before doing work,
+    so the ledger is intentionally cheap on the steady-state path.  All pending
+    migrations are applied in one transaction and the transaction-scoped
+    advisory lock prevents two application instances from racing at startup.
+    """
+    try:
+        with conn.cursor() as cur:
+            migration_files = _migration_files()
+            expected = {
+                path.name: _migration_checksum(path)
+                for path in migration_files
+            }
+            applied = _read_migration_ledger(cur)
+            if applied is not None:
+                _assert_recorded_checksums(expected, applied)
+                if set(expected).issubset(applied):
+                    # Steady-state runtime path: read-only verification only.
+                    # The serving role therefore does not need DDL privileges.
+                    conn.commit()
+                    return
+
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_KEY,))
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    checksum TEXT NOT NULL,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            applied = _read_migration_ledger(cur) or {}
+            _assert_recorded_checksums(expected, applied)
+
+            if not migration_files:
+                for statement in schema_ddl():
+                    cur.execute(statement)
+            else:
+                for migration_file in migration_files:
+                    version = migration_file.name
+                    checksum = _migration_checksum(migration_file)
+                    recorded_checksum = applied.get(version)
+                    if recorded_checksum is not None:
+                        continue
+                    for statement in _split_sql_statements(
+                        migration_file.read_text(encoding="utf-8")
+                    ):
+                        cur.execute(statement)
+                    cur.execute(
+                        "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
+                        (version, checksum),
+                    )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def assert_parser_v2_runtime_ready() -> None:
+    """Fail fast unless migrations, RLS, and the application role are safe.
+
+    This probe is deliberately read-only and must run with the runtime DSN, not
+    the deployment/migration DSN.  FORCE RLS is defense in depth; the serving
+    role must still be neither privileged nor the owner of Parser V2 tables.
+    """
+    conn = connect()
+    try:
+        expected = {
+            path.name: _migration_checksum(path)
+            for path in _migration_files()
+        }
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SELECT version, checksum FROM schema_migrations")
+                applied = {
+                    str(version): str(checksum)
+                    for version, checksum in cur.fetchall()
+                }
+            except Exception as exc:
+                raise ParserV2RuntimeReadinessError(
+                    "PostgreSQL migrations are not initialized; run the deployment "
+                    "migration command with the migration role before startup."
+                ) from exc
+
+            missing = sorted(set(expected).difference(applied))
+            changed = sorted(
+                version
+                for version, checksum in expected.items()
+                if version in applied and applied[version] != checksum
+            )
+            if missing or changed:
+                details = []
+                if missing:
+                    details.append("missing=" + ",".join(missing))
+                if changed:
+                    details.append("checksum_mismatch=" + ",".join(changed))
+                raise ParserV2RuntimeReadinessError(
+                    "PostgreSQL migration state is not current (" + "; ".join(details) + ")"
+                )
+
+            cur.execute(
+                "SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, "
+                "rolinherit, rolbypassrls "
+                "FROM pg_roles WHERE rolname = current_user"
+            )
+            role = cur.fetchone()
+            if role is None or any(bool(value) for value in role[1:]):
+                raise ParserV2RuntimeReadinessError(
+                    "Parser V2 runtime role must not be superuser, CREATEDB, "
+                    "CREATEROLE, INHERIT, or BYPASSRLS"
+                )
+
+            cur.execute(
+                """
+                SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+                       pg_get_userbyid(c.relowner) = current_user AS owned_by_runtime
+                FROM pg_class AS c
+                JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema() AND c.relname = ANY(%s)
+                """,
+                (list(PARSER_V2_RLS_TABLES),),
+            )
+            states = {
+                str(name): (bool(enabled), bool(forced), bool(owned))
+                for name, enabled, forced, owned in cur.fetchall()
+            }
+            unsafe = sorted(
+                table
+                for table in PARSER_V2_RLS_TABLES
+                if table not in states
+                or not states[table][0]
+                or not states[table][1]
+                or states[table][2]
+            )
+            if unsafe:
+                raise ParserV2RuntimeReadinessError(
+                    "Parser V2 tables are missing, not FORCE-RLS protected, or owned "
+                    "by the runtime role: " + ", ".join(unsafe)
+                )
+
+            cur.execute("SELECT current_schema()")
+            schema_row = cur.fetchone()
+            schema_name = str(schema_row[0] or "") if schema_row else ""
+            from db.postgres_runtime_privileges import (  # noqa: WPS433
+                RuntimePrivilegeProvisioningError,
+                audit_runtime_privileges,
+            )
+
+            try:
+                missing_privileges, forbidden_privileges = audit_runtime_privileges(
+                    cur,
+                    schema_name=schema_name,
+                )
+            except RuntimePrivilegeProvisioningError as exc:
+                raise ParserV2RuntimeReadinessError(str(exc)) from exc
+            if missing_privileges or forbidden_privileges:
+                details = []
+                if missing_privileges:
+                    details.append("missing=" + ",".join(missing_privileges))
+                if forbidden_privileges:
+                    details.append("forbidden=" + ",".join(forbidden_privileges))
+                raise ParserV2RuntimeReadinessError(
+                    "Parser V2 runtime privilege manifest is unsafe ("
+                    + "; ".join(details)
+                    + ")"
+                )
+    finally:
+        conn.close()
 
 
 _TYPED_JSONB_TABLES: Dict[str, Dict[str, Any]] = {
