@@ -8,6 +8,7 @@ from use_cases.async_jobs import (
     process_next_pf_review_job,
     submit_pf_review_job,
 )
+from agent_platform.pf_review_runtime import _idempotency_key
 
 
 PROJECT = {
@@ -15,6 +16,13 @@ PROJECT = {
     "feasibility_input": {"total_revenue": 2800, "total_cost": 2050, "land_cost": 640, "construction_cost": 850},
     "pf_structure": [{"tranche": "Senior", "amount": 1200, "priority": 1, "interest_rate": 0.058}],
 }
+
+
+def test_pf_review_idempotency_key_changes_with_agent_version():
+    first = _idempotency_key("project-1", PROJECT, {}, agent_version="1.0.0")
+    upgraded = _idempotency_key("project-1", PROJECT, {}, agent_version="1.0.1")
+
+    assert first != upgraded
 
 
 class _RepoStub:
