@@ -37,7 +37,11 @@ class ProjectRepository:
             self.persist()
 
     def list(self) -> list[Dict[str, Any]]:
-        return list(self.projects_store.values())
+        # Historical/imported records may predate the canonical project
+        # envelope.  Keep the stored evidence untouched while returning a
+        # stable API projection so clients never have to guess whether core
+        # identity fields exist.
+        return [self._contract_projection(record) for record in self.projects_store.values()]
 
     def exists(self, project_id: str) -> bool:
         return project_id in self.projects_store
@@ -103,12 +107,27 @@ class ProjectRepository:
             }
         project["id"] = project_id
         project.setdefault("name", record.get("name", f"Project {project_id}"))
+        project["type"] = project.get("type") or record.get("type") or "unknown"
         project.setdefault("status", "draft")
         record["project"] = project
         record["id"] = project_id
         record.setdefault("_meta", {})
         record["_meta"].setdefault("created_at", now)
         record["_meta"]["updated_at"] = now
+        return record
+
+    @staticmethod
+    def _contract_projection(source: Dict[str, Any]) -> Dict[str, Any]:
+        record = dict(source or {})
+        project = dict(record.get("project") or {})
+        project_id = str(project.get("id") or record.get("id") or "")
+        project["id"] = project_id
+        project["name"] = project.get("name") or record.get("name") or f"Project {project_id}"
+        project["type"] = project.get("type") or record.get("type") or "unknown"
+        project["status"] = project.get("status") or record.get("status") or "draft"
+        record["project"] = project
+        if project_id:
+            record["id"] = project_id
         return record
 
     @staticmethod

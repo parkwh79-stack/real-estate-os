@@ -12,7 +12,11 @@ from schemas.orchestration import (
     PF_REVIEW_STEPS,
     PF_REVIEW_WORKFLOW,
 )
-from storage import upsert_calculation_run_record, upsert_deal_state_record
+from storage import (
+    upsert_calculation_run_record,
+    upsert_deal_state_record,
+    upsert_orchestration_run,
+)
 
 
 _DISCOUNT_TRIGGER_EXAMPLE = (
@@ -23,21 +27,13 @@ _DISCOUNT_TRIGGER_EXAMPLE = (
 def project_with_discount_triggers(client: TestClient) -> str:
     """A project id whose covenants carry discount triggers.
 
-    Hermetic: reuse a runtime project if one exists, otherwise seed one from the
-    Daegu Bondong example (which defines covenants.discount_triggers). Previously
-    this depended on the developer's runtime SQLite already holding such a
-    project, so it broke whenever the seed drifted (StopIteration).
+    Always seed an isolated fixture project. Reusing a developer runtime project
+    made tests parse real uploads, inherit accumulated risks, and mutate the
+    user's deal state while claiming to be hermetic.
     """
-    projects = client.get("/projects/").json()
-    existing = next(
-        (item["project"]["id"] for item in projects if item.get("covenants", {}).get("discount_triggers")),
-        None,
-    )
-    if existing is not None:
-        return existing
-
     with _DISCOUNT_TRIGGER_EXAMPLE.open("r", encoding="utf-8") as fp:
         payload = json.load(fp)
+    payload.setdefault("project", {})["name"] = "Pytest Discount Trigger Fixture"
     created = client.post("/projects/", json=payload).json()
     return created.get("id") or created["project"]["id"]
 
@@ -897,11 +893,49 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
         f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",
         json={"approved_by": "credit_officer", "comment": "Reviewed for workflow QA"},
     ).json()
-    assert approved["status"] == "approved"
+    assert approved["status"] == "completed"
+    assert approved["executionStatus"] == "completed"
+    assert approved["approvalStatus"] == "approved"
     assert approved["approval"]["approved_by"] == "credit_officer"
 
     summaries = client.get(f"/projects/{project_id}/orchestrations").json()
-    assert any(item["run_id"] == run["run_id"] and item["status"] == "approved" for item in summaries)
+    assert any(
+        item["run_id"] == run["run_id"]
+        and item["executionStatus"] == "completed"
+        and item["approvalStatus"] == "approved"
+        for item in summaries
+    )
+
+
+def test_orchestration_written_by_external_worker_is_visible(monkeypatch, tmp_path):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "external-worker.sqlite3"))
+    client = TestClient(app)
+    project_id = project_with_discount_triggers(client)
+    run_id = "external-worker-run"
+    run = {
+        "run_id": run_id,
+        "project_id": project_id,
+        "workflow": PF_REVIEW_WORKFLOW,
+        "status": "completed",
+        "executionStatus": "completed",
+        "approvalStatus": "not_ready",
+        "reportStatus": "quality_pass",
+        "started_at": "2026-07-15T12:00:00+00:00",
+        "completed_at": "2026-07-15T12:01:00+00:00",
+        "steps": [],
+        "errors": [],
+        "artifacts": {},
+    }
+    assert upsert_orchestration_run(project_id, run_id, run) is True
+
+    fetched = client.get(f"/projects/{project_id}/orchestrations/{run_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["executionStatus"] == "completed"
+
+    listed = client.get(f"/projects/{project_id}/orchestrations")
+    assert listed.status_code == 200
+    assert any(item["run_id"] == run_id for item in listed.json())
 
 
 def test_upload_and_run_creates_orchestration(monkeypatch):

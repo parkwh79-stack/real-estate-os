@@ -14,7 +14,7 @@ def test_legal_pod_persists_parcel_review_risks_and_pf_handoff():
             "regulation": {},
             "schedule": {},
         },
-        {},
+        {"lawContext": {"connected": False, "source": "test_unconfigured", "references": []}},
     )
 
     assert result["legalReview"]["parcelLegalReviews"][0]["status"] == "needs_review"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from core.calculations import calculate_cashflow_max_minus_details
 
@@ -9,7 +9,9 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     """Run a deterministic baseline cash-flow analysis from CashFlowRunRequest."""
     months = _project_month_count(request)
     sales_schedule = _sales_collection_schedule(request, months)
-    cost_schedule = _cost_schedule(request, months)
+    cost_schedule, cost_schedule_provenance = _cost_schedule(request, months)
+    allocation_policy = _collection_allocation_policy(request)
+    sales_schedule_provenance = _sales_schedule_provenance(request)
     tranche_limits = _tranche_limits(request)
     pf_limit = sum(tranche["remaining"] for tranche in tranche_limits)
 
@@ -19,14 +21,24 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     cumulative_before_pf = 0.0
     pre_pf_net_cashflows = []
     total_pf_draw = 0.0
+    cumulative_sales_collection = 0.0
+    total_revenue = _total_revenue(request)
 
     for month_index in range(months + 1):
         period = f"M{month_index}"
         sales_collection = sales_schedule[month_index] if month_index < len(sales_schedule) else {}
         cost_out = cost_schedule[month_index] if month_index < len(cost_schedule) else {}
         cash_in_before_pf = sum(sales_collection.values())
+        cumulative_sales_collection += cash_in_before_pf
         cash_out = sum(cost_out.values())
-        sales_allocation = _allocate_sales_collection(sales_collection, month_index, months)
+        cumulative_sales_rate = cumulative_sales_collection / total_revenue if total_revenue > 0 else 0.0
+        sales_allocation = _allocate_sales_collection(
+            sales_collection,
+            month_index,
+            months,
+            cumulative_sales_rate,
+            allocation_policy,
+        )
         pre_pf_net = cash_in_before_pf - cash_out
         cumulative_before_pf += pre_pf_net
         pre_pf_net_cashflows.append(pre_pf_net)
@@ -70,13 +82,32 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
             "endingCash": ending_cash,
             "cumulativeCashFlowBeforePfDraw": cumulative_before_pf,
             "remainingPfLimit": remaining_pf_limit,
+            "scheduleBasis": {
+                "costSchedule": cost_schedule_provenance["sourceMode"],
+                "collectionAllocation": allocation_policy["sourceMode"],
+            },
         })
         beginning_operating_cash = ending_operating_cash
         beginning_repayment_reserve = ending_repayment_reserve
 
     max_minus_details = calculate_cashflow_max_minus_details(pre_pf_net_cashflows)
     max_minus = max_minus_details["max_minus"]
-    risk_flags = _risk_flags(max_minus, pf_limit, total_pf_draw, sum(tranche["remaining"] for tranche in tranche_limits))
+    schedule_provenance = {
+        "costSchedule": cost_schedule_provenance,
+        "salesCollection": sales_schedule_provenance,
+        "collectionAllocation": allocation_policy,
+    }
+    schedule_provenance["reportEligible"] = all(
+        bool(item.get("reportEligible"))
+        for item in (cost_schedule_provenance, sales_schedule_provenance, allocation_policy)
+    )
+    risk_flags = _risk_flags(
+        max_minus,
+        pf_limit,
+        total_pf_draw,
+        sum(tranche["remaining"] for tranche in tranche_limits),
+        schedule_provenance,
+    )
     summary = {
         "projectId": request.get("project", {}).get("projectId"),
         "projectName": request.get("project", {}).get("projectName"),
@@ -96,13 +127,14 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "analysisType": "realytics_cash_flow_engine_v1",
         "status": "completed",
-        "dataStatus": "complete" if not request.get("mappingDiagnostics", {}).get("warnings") else "partial",
+        "dataStatus": "complete" if not request.get("mappingDiagnostics", {}).get("warnings") and schedule_provenance["reportEligible"] else "partial",
         "summary": summary,
         "monthlyCashFlow": rows,
         "pfDrawSchedule": _pf_draw_schedule(rows),
         "salesCollectionSchedule": sales_schedule,
         "riskFlags": risk_flags,
-        "reportFragments": _report_fragments(summary, risk_flags),
+        "scheduleProvenance": schedule_provenance,
+        "reportFragments": _report_fragments(summary, risk_flags, schedule_provenance),
         "sourceMetadata": request.get("sourceMetadata", {}),
     }
 
@@ -200,8 +232,29 @@ def _collection_template(collection: str, months: int) -> List[Dict[str, Any]]:
     return [{"label": "balance", "month": months, "rate": 1.0}]
 
 
-def _cost_schedule(request: Dict[str, Any], months: int) -> List[Dict[str, float]]:
+def _cost_schedule(request: Dict[str, Any], months: int) -> Tuple[List[Dict[str, float]], Dict[str, Any]]:
     costs = request.get("sourcesAndUses", {}).get("cost", {})
+    explicit = request.get("costSchedule") or request.get("cost_schedule") or {}
+    explicit_rows = explicit.get("rows") if isinstance(explicit, dict) else explicit
+    if isinstance(explicit_rows, list) and explicit_rows:
+        mapped = _explicit_cost_schedule(explicit_rows, months)
+        if any(sum(row.values()) for row in mapped):
+            approval_status = str((explicit if isinstance(explicit, dict) else {}).get("approvalStatus") or "unapproved")
+            locator = (explicit if isinstance(explicit, dict) else {}).get("sourceLocator") or _row_source_locator(explicit_rows)
+            source_mode = "approved_schedule" if approval_status == "approved" else "evidence_schedule" if locator else "explicit_estimate"
+            totals_warning = _cost_schedule_reconciliation_warning(mapped, costs)
+            report_eligible = source_mode == "approved_schedule" and not totals_warning
+            warnings = [totals_warning] if totals_warning else []
+            if source_mode != "approved_schedule":
+                warnings.append("monthly_cost_schedule_not_approved")
+            return mapped, {
+                "sourceMode": source_mode,
+                "approvalStatus": approval_status,
+                "sourceLocator": locator,
+                "reportEligible": report_eligible,
+                "warnings": warnings,
+            }
+
     schedule = [
         {
             "landCost": 0.0,
@@ -215,14 +268,89 @@ def _cost_schedule(request: Dict[str, Any], months: int) -> List[Dict[str, float
     construction = float(costs.get("directConstructionCost") or 0.0)
     financial = float(costs.get("financialCost") or 0.0)
     other = float(costs.get("otherCost") or 0.0)
-    monthly_construction = construction / max(1, months)
+    construction_weights = _s_curve_weights(months)
     monthly_financial = financial / max(1, months)
-    monthly_other = other / max(1, months)
     for month in range(1, months + 1):
-        schedule[month]["constructionCost"] = monthly_construction
+        weight = construction_weights[month - 1]
+        schedule[month]["constructionCost"] = construction * weight
         schedule[month]["financialCost"] = monthly_financial
-        schedule[month]["otherCost"] = monthly_other
+        schedule[month]["otherCost"] = other * weight
+    return schedule, {
+        "sourceMode": "benchmark_estimate",
+        "approvalStatus": "unapproved",
+        "sourceLocator": None,
+        "reportEligible": False,
+        "warnings": [
+            "monthly_cost_schedule_missing",
+            "construction_and_other_costs_use_deterministic_s_curve_estimate",
+            "financial_cost_uses_even_monthly_estimate",
+        ],
+    }
+
+
+def _explicit_cost_schedule(rows: List[Dict[str, Any]], months: int) -> List[Dict[str, float]]:
+    schedule = [
+        {"landCost": 0.0, "constructionCost": 0.0, "financialCost": 0.0, "otherCost": 0.0}
+        for _ in range(months + 1)
+    ]
+    aliases = {
+        "landCost": ("landCost", "land_cost"),
+        "constructionCost": ("constructionCost", "directConstructionCost", "construction_cost"),
+        "financialCost": ("financialCost", "financeCost", "financial_cost"),
+        "otherCost": ("otherCost", "indirectCost", "other_cost"),
+    }
+    for fallback_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        try:
+            month_index = int(row.get("monthIndex", row.get("month_index", fallback_index)))
+        except (TypeError, ValueError):
+            continue
+        if month_index < 0 or month_index > months:
+            continue
+        for target, source_keys in aliases.items():
+            for source_key in source_keys:
+                if source_key in row:
+                    try:
+                        schedule[month_index][target] += abs(float(row.get(source_key) or 0.0))
+                    except (TypeError, ValueError):
+                        pass
+                    break
     return schedule
+
+
+def _s_curve_weights(months: int) -> List[float]:
+    if months <= 0:
+        return []
+    raw = []
+    for month in range(1, months + 1):
+        x = month / (months + 1)
+        raw.append(max(0.0, x * (1.0 - x)))
+    denominator = sum(raw) or 1.0
+    return [value / denominator for value in raw]
+
+
+def _row_source_locator(rows: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("sourceLocator"), dict) and row["sourceLocator"]:
+            return row["sourceLocator"]
+    return None
+
+
+def _cost_schedule_reconciliation_warning(schedule: List[Dict[str, float]], costs: Dict[str, Any]) -> str | None:
+    expected = {
+        "landCost": float(costs.get("landCost") or 0.0),
+        "constructionCost": float(costs.get("directConstructionCost") or 0.0),
+        "financialCost": float(costs.get("financialCost") or 0.0),
+        "otherCost": float(costs.get("otherCost") or 0.0),
+    }
+    actual = {key: sum(row.get(key, 0.0) for row in schedule) for key in expected}
+    for key, expected_amount in expected.items():
+        if expected_amount <= 0:
+            continue
+        if abs(actual[key] - expected_amount) > max(1.0, expected_amount * 0.001):
+            return f"cost_schedule_total_mismatch:{key}"
+    return None
 
 
 def _pf_limit(request: Dict[str, Any]) -> float:
@@ -260,7 +388,62 @@ def _draw_by_priority(required_draw: float, tranche_limits: List[Dict[str, Any]]
     return draw_by_tranche
 
 
-def _allocate_sales_collection(sales_collection: Dict[str, float], month_index: int, completion_month: int) -> Dict[str, float]:
+def _collection_allocation_policy(request: Dict[str, Any]) -> Dict[str, Any]:
+    raw = request.get("collectionAllocationRules") or request.get("collection_allocation_rules") or {}
+    rules = raw.get("rules") if isinstance(raw, dict) else raw
+    rules = [dict(item) for item in rules if isinstance(item, dict)] if isinstance(rules, list) else []
+    approval_status = str((raw if isinstance(raw, dict) else {}).get("approvalStatus") or "unapproved")
+    locator = (raw if isinstance(raw, dict) else {}).get("sourceLocator")
+    if rules:
+        source_mode = "approved_rule" if approval_status == "approved" else "evidence_rule" if locator else "explicit_estimate"
+        return {
+            "rules": rules,
+            "sourceMode": source_mode,
+            "approvalStatus": approval_status,
+            "sourceLocator": locator,
+            "reportEligible": source_mode == "approved_rule",
+            "warnings": [] if source_mode == "approved_rule" else ["collection_allocation_rule_not_approved"],
+        }
+    return {
+        "rules": [],
+        "sourceMode": "benchmark_estimate",
+        "approvalStatus": "unapproved",
+        "sourceLocator": None,
+        "reportEligible": False,
+        "warnings": ["collection_allocation_rule_missing", "benchmark_75_25_rule_used_for_analysis_only"],
+    }
+
+
+def _sales_schedule_provenance(request: Dict[str, Any]) -> Dict[str, Any]:
+    products = [row for row in request.get("productMix", []) if isinstance(row, dict)]
+    explicit = [row for row in products if row.get("collectionSteps")]
+    locators = [row.get("collectionSourceLocator") for row in explicit if isinstance(row.get("collectionSourceLocator"), dict)]
+    approval_status = str((request.get("sourceMetadata") or {}).get("approvalStatus") or "unapproved")
+    if explicit:
+        source_mode = "approved_schedule" if approval_status == "approved" else "evidence_schedule" if locators else "explicit_estimate"
+        return {
+            "sourceMode": source_mode,
+            "approvalStatus": approval_status,
+            "sourceLocator": locators[0] if locators else None,
+            "reportEligible": source_mode == "approved_schedule",
+            "warnings": [] if source_mode == "approved_schedule" else ["sales_collection_schedule_not_approved"],
+        }
+    return {
+        "sourceMode": "asset_template_estimate",
+        "approvalStatus": "unapproved",
+        "sourceLocator": None,
+        "reportEligible": False,
+        "warnings": ["sales_collection_schedule_missing", "asset_template_used_for_analysis_only"],
+    }
+
+
+def _allocate_sales_collection(
+    sales_collection: Dict[str, float],
+    month_index: int,
+    completion_month: int,
+    cumulative_sales_rate: float,
+    policy: Dict[str, Any],
+) -> Dict[str, float]:
     """Allocate sales proceeds into operating and repayment-reserve accounts.
 
     Baseline rule:
@@ -269,6 +452,24 @@ def _allocate_sales_collection(sales_collection: Dict[str, float], month_index: 
     - At or after completion, all sales proceeds are swept to repayment reserve.
     """
     total = sum(sales_collection.values())
+    rule = _matching_allocation_rule(policy.get("rules") or [], month_index, completion_month, cumulative_sales_rate)
+    if rule:
+        all_to_repayment = _rate(rule, "allSalesProceedsToRepayment", "all_sales_proceeds_to_repayment")
+        if all_to_repayment is not None:
+            repayment = total * all_to_repayment
+            return {"operating": total - repayment, "repaymentReserve": repayment}
+        contract_and_interim = float(sales_collection.get("contract") or 0.0) + float(sales_collection.get("interim") or 0.0)
+        balance = float(sales_collection.get("balance") or 0.0)
+        repayment_rate = _rate(rule, "contractAndInterimToRepayment", "contract_and_interim_to_repayment")
+        operating_rate = _rate(rule, "contractAndInterimToOperating", "contract_and_interim_to_operating")
+        if repayment_rate is None:
+            repayment_rate = 1.0 - (operating_rate if operating_rate is not None else 0.0)
+        balance_repayment_rate = _rate(rule, "balanceToRepayment", "balance_to_repayment")
+        if balance_repayment_rate is None:
+            balance_repayment_rate = 1.0
+        repayment = contract_and_interim * repayment_rate + balance * balance_repayment_rate
+        return {"operating": total - repayment, "repaymentReserve": repayment}
+
     if month_index >= completion_month:
         return {"operating": 0.0, "repaymentReserve": total}
 
@@ -279,6 +480,41 @@ def _allocate_sales_collection(sales_collection: Dict[str, float], month_index: 
     return {"operating": operating, "repaymentReserve": repayment}
 
 
+def _matching_allocation_rule(
+    rules: List[Dict[str, Any]],
+    month_index: int,
+    completion_month: int,
+    cumulative_sales_rate: float,
+) -> Dict[str, Any] | None:
+    after_completion = month_index >= completion_month
+    for rule in rules:
+        phase = str(rule.get("phase") or rule.get("condition") or "").casefold()
+        if "after_completion" in phase and not after_completion:
+            continue
+        if "before_completion" in phase and after_completion:
+            continue
+        minimum = _rate(rule, "minSalesRate", "min_sales_rate")
+        maximum = _rate(rule, "maxSalesRate", "max_sales_rate")
+        if minimum is not None and cumulative_sales_rate < minimum:
+            continue
+        if maximum is not None and cumulative_sales_rate > maximum:
+            continue
+        return rule
+    return None
+
+
+def _rate(payload: Dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        if key not in payload:
+            continue
+        try:
+            value = float(payload[key])
+        except (TypeError, ValueError):
+            return None
+        return min(1.0, max(0.0, value))
+    return None
+
+
 def _total_revenue(request: Dict[str, Any]) -> float:
     return float(request.get("sourcesAndUses", {}).get("revenue", {}).get("totalSalesRevenue") or 0.0)
 
@@ -287,7 +523,13 @@ def _total_project_cost(request: Dict[str, Any]) -> float:
     return float(request.get("sourcesAndUses", {}).get("cost", {}).get("totalProjectCost") or 0.0)
 
 
-def _risk_flags(max_minus: float, pf_limit: float, total_pf_draw: float, remaining_pf_limit: float) -> List[Dict[str, Any]]:
+def _risk_flags(
+    max_minus: float,
+    pf_limit: float,
+    total_pf_draw: float,
+    remaining_pf_limit: float,
+    schedule_provenance: Dict[str, Any],
+) -> List[Dict[str, Any]]:
     flags = []
     if abs(max_minus) > pf_limit:
         flags.append({
@@ -300,6 +542,17 @@ def _risk_flags(max_minus: float, pf_limit: float, total_pf_draw: float, remaini
             "code": "PF_LIMIT_FULLY_DRAWN",
             "severity": "medium",
             "message": "PF limit is fully drawn during the cash-flow period.",
+        })
+    for component, provenance in schedule_provenance.items():
+        if component == "reportEligible" or not isinstance(provenance, dict):
+            continue
+        if provenance.get("reportEligible"):
+            continue
+        flags.append({
+            "code": f"CASH_FLOW_{component.upper()}_ESTIMATED",
+            "severity": "high" if component == "costSchedule" else "medium",
+            "message": f"{component} is not backed by an approved schedule and is not report-eligible.",
+            "sourceLocator": provenance.get("sourceLocator"),
         })
     return flags
 
@@ -318,11 +571,17 @@ def _pf_draw_schedule(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
-def _report_fragments(summary: Dict[str, Any], risk_flags: List[Dict[str, Any]]) -> Dict[str, str]:
+def _report_fragments(
+    summary: Dict[str, Any],
+    risk_flags: List[Dict[str, Any]],
+    schedule_provenance: Dict[str, Any],
+) -> Dict[str, Any]:
     risk_text = "No critical cash-flow risk flag was generated." if not risk_flags else "; ".join(flag["code"] for flag in risk_flags)
     return {
+        "reportEligible": bool(schedule_provenance.get("reportEligible")),
+        "usageRestriction": None if schedule_provenance.get("reportEligible") else "review_required_not_for_approval_or_final_report",
         "cashFlowSummary": (
-            f"Base cash-flow analysis estimates Max Minus at {summary['maxMinus']:,.0f} KRW "
+            f"{'Approved' if schedule_provenance.get('reportEligible') else 'Preliminary'} cash-flow analysis estimates Max Minus at {summary['maxMinus']:,.0f} KRW "
             f"and required PF limit at {summary['requiredPfLimit']:,.0f} KRW."
         ),
         "pfDrawSummary": (

@@ -15,6 +15,8 @@ node_modules
 # Testing
 coverage
 .pytest_cache/
+apps/web/test-results/
+apps/web/playwright-report/
 
 # Turbo
 .turbo

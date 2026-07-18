@@ -52,11 +52,11 @@ def test_factory_selects_s3_when_configured(monkeypatch):
     assert store._full_key("p1/doc.bin") == "pf/p1/doc.bin"
 
 
-def test_factory_falls_back_to_local_when_s3_misconfigured(tmp_path, monkeypatch):
+def test_factory_fails_closed_when_s3_misconfigured(tmp_path, monkeypatch):
     monkeypatch.setenv("REALYTICS_OBJECT_STORAGE", "s3")
     monkeypatch.delenv("REALYTICS_S3_BUCKET", raising=False)
-    store = get_object_storage(default_base_dir=tmp_path)
-    assert store.backend == "local"
+    with pytest.raises(RuntimeError, match="REALYTICS_S3_BUCKET"):
+        get_object_storage(default_base_dir=tmp_path)
 
 
 def test_s3_backend_errors_clearly_without_boto3(monkeypatch):

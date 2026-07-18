@@ -6,7 +6,7 @@ REALYTICS x PLATFORM9 is an alpha-stage monorepo for building AI agents that hel
 
 ## Current Development Snapshot
 
-Updated: 2026-07-14
+Updated: 2026-07-15
 
 The repository currently includes:
 
@@ -28,6 +28,11 @@ The repository currently includes:
 - Project-level real pilot input package UI for archiving business plans, land ledgers, feasibility workbooks, land evidence JSON, and approved data-quality overrides before PF review runs.
 - Kakao Login and KakaoTalk notification baseline with mobile file intake, mobile review action center, Kakao OAuth callback, REALYTICS session handoff, safe message preview, and audit logging.
 - Agent Platform control plane with typed Agent/Brain/Tool contracts, six-Pod durable execution, child Domain Agent runs, deadline/budget/lease controls, transactional outbox, provider health and routing audit, governed learning candidates, and isolated Coding Pod jobs.
+- Hardened runtime profiles that fail startup in staging/production when strict RBAC, tenant isolation, OIDC/JWKS, PostgreSQL, S3, external workers, Secret Manager, or HTTPS CORS configuration is missing.
+- Durable PF review jobs with persisted cancellation, retry/recovery leases, and an external-worker mode; `ThreadPoolExecutor` is no longer accepted as an operational execution mode.
+- Source-document binaries behind an Object Storage repository with SHA-256 verification, S3/local parity, UTF-8-safe downloads, and remote PDF address-mining support.
+- First-class `assumption_proposals` and immutable `project_versions` records so consensus changes require reviewer approval before they become a new project version.
+- CI gates for Python tests, PostgreSQL migrations, TypeScript, zero-warning ESLint, production build, and desktop/mobile Playwright login coverage.
 
 ### Implementation Level
 
@@ -35,7 +40,8 @@ The current repository is a **controlled internal-pilot build**, not a productio
 
 - Deterministic calculations and source evidence remain authoritative; LLM output is used for evidence-aware review, reconciliation, and report drafting.
 - Agent and Pod execution can be persisted through the Durable Agent Runtime, with idempotency, retry, cancellation, lease recovery, Brain usage audit, and transactional outbox support.
-- Production deployment still requires strict authentication and tenant isolation, native PostgreSQL migration completion, external Secret Manager and object storage, report-grade Cash Flow assumptions, and removal of every synthetic financial or land-data fallback.
+- Synthetic product, PF tranche, PNU, and land-data fallbacks have been removed from the reviewed critical paths. Missing inputs return `insufficient_input` or `sourceUnavailable` and do not create report-grade evidence.
+- Production deployment still requires a live PostgreSQL migration/concurrency rehearsal, real S3/MinIO and Secret Manager credentials, external worker deployment, organization IdP configuration, and approved cost/allocation schedules for report-grade Cash Flow.
 - Approval Readiness is separate from execution completion. A completed run must not be interpreted as an approved deal.
 
 ## Main Capabilities
@@ -71,8 +77,9 @@ Implemented baseline calculation functions:
 
 Important calculation boundary:
 
-- Current baseline `calculate_ltv` is sales-value leverage (`PF amount / total sales revenue`) and must not be represented as appraisal LTV without an explicit denominator and evidence reference.
-- Current simple all-in cost and fallback monthly cost schedules remain controlled-pilot calculations. Report-grade output requires tranche cash-date XIRR, approved project schedules, and covenant-driven account allocation.
+- Leverage is separated by basis: `sales_value_ltv`, `appraisal_ltv`, `unsold_ltv`, `senior_ltv`, and `total_ltv`. A generic `ltv` alias is retained only for migration compatibility and must not be presented without its denominator.
+- Tranche all-in cost supports dated cash-flow XIRR. A nominal rate-plus-fee proxy is explicitly marked non-report-grade when draw/repayment dates are unavailable.
+- Cash Flow applies schedule precedence in this order: approved workbook schedule, evidence-backed explicit schedule, then marked estimation. Estimated cost timing or collection allocation makes the result ineligible for report-grade promotion.
 - Missing source inputs must produce an incomplete-data state, not invented product units, PF tranches, prices, or land evidence.
 
 Key files:

@@ -12,7 +12,8 @@ def approve_orchestration_run_use_case(
     approved_at: str,
 ) -> Dict[str, Any]:
     """Approve a completed orchestration run."""
-    if run["status"] not in {"completed", "completed_with_warnings"}:
+    execution_status = run.get("executionStatus") or run.get("status")
+    if execution_status not in {"completed", "completed_with_warnings"}:
         raise ValueError("Only completed runs can be approved")
 
     unresolved_handoffs = unresolved_handoff_reviews(run)
@@ -31,8 +32,23 @@ def approve_orchestration_run_use_case(
         )
         raise ValueError(f"Unresolved risk register reviews must be cleared before approval: {labels}")
 
+    pending_proposals = [
+        item
+        for item in ((run.get("artifacts", {}).get("assumptionProposals") or {}).get("proposals") or [])
+        if isinstance(item, dict) and item.get("status") == "pending"
+    ]
+    if pending_proposals:
+        raise ValueError(
+            f"{len(pending_proposals)} assumption proposal(s) must be approved or rejected before run approval"
+        )
+
     input_data = input_data or {}
-    run["status"] = "approved"
+    run["executionStatus"] = execution_status
+    run["approvalStatus"] = "approved"
+    run.setdefault("reportStatus", "not_started")
+    # ``status`` remains the legacy execution-status alias. Approval is a
+    # separate state and must not make a failed/incomplete execution look done.
+    run["status"] = execution_status
     run["approval"] = {
         "approved_at": approved_at,
         "approved_by": input_data.get("approved_by", "system"),

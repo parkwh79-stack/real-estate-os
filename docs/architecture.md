@@ -1,6 +1,6 @@
 # REALYTICS x PLATFORM9 Architecture
 
-Updated: 2026-07-13
+Updated: 2026-07-15
 
 ## 1. Purpose
 
@@ -55,7 +55,7 @@ Important current implementation locations:
 | Domain | Current Location | Notes |
 |---|---|---|
 | Web app | `apps/web` | Next.js app with dashboard, project, land, risk, orchestration, report, feasibility, finance, and cash-flow screens |
-| API routes | `services/api-server/routers` | Main project API router is currently concentrated in `projects.py` |
+| API routes | `services/api-server/routers` | Project jobs, assumption approval/versioning, and source-document delivery are split routers; calculation/evidence/report endpoints remain concentrated in `projects.py` and will move incrementally |
 | Use cases | `services/api-server/use_cases` | Application workflow layer shared by API, MCP tools, and future background jobs |
 | Agents | `services/api-server/agents` | Development feasibility, cash flow, marketability, land ledger, legal, parser, orchestration, and report agents |
 | Calculations | `services/api-server/core` | Pure calculation functions, logistics helpers, and risk assessment |
@@ -142,6 +142,7 @@ Operational records use typed SQLite/PostgreSQL tables:
 - `tool_calls`
 - `learning_candidates`, `learning_evaluations`, `learning_promotions`
 - `coding_pod_jobs`
+- `async_jobs`, `assumption_proposals`, `project_versions`
 
 Every Chief Pod uses the common Pod runtime. Principal inner Domain Agents use the
 common Domain Agent runtime and keep deterministic engines authoritative. A Pod

@@ -11,6 +11,8 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import {
+  apiBase,
+  authHeaders,
   clearStoredAuthSession,
   getStoredAuthSession,
   resolveCurrentIdentity,
@@ -28,7 +30,7 @@ export interface AuthContextValue {
   /** Re-run the session check (e.g. after creating a session in settings). */
   refresh: () => void;
   /** Clear the stored session; the provider reacts via the change event. */
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -47,9 +49,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [nonce, setNonce] = useState(0);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
-  const logout = useCallback(() => {
-    // Dispatches the change event, which triggers refresh() and re-checks below.
-    clearStoredAuthSession();
+  const logout = useCallback(async () => {
+    try {
+      const stored = getStoredAuthSession();
+      if (stored?.session?.sessionId) {
+        await fetch(`${apiBase}/auth/ai-credentials/current`, {
+          method: "DELETE",
+          headers: authHeaders("web"),
+        });
+        await fetch(`${apiBase}/auth/session/current`, {
+          method: "DELETE",
+          headers: authHeaders("web"),
+        });
+      }
+    } finally {
+      // Always clear local state, even when the API is unavailable. The server
+      // session expires independently and hardened deployments revoke at IdP.
+      clearStoredAuthSession();
+    }
   }, []);
 
   useEffect(() => {

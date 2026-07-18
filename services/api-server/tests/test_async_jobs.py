@@ -1,6 +1,13 @@
 import time
+from uuid import uuid4
 
-from use_cases.async_jobs import JobStore, submit_pf_review_job, TERMINAL_STATUSES
+from use_cases.async_jobs import (
+    JobStore,
+    TERMINAL_STATUSES,
+    cancel_pf_review_job,
+    process_next_pf_review_job,
+    submit_pf_review_job,
+)
 
 
 PROJECT = {
@@ -36,7 +43,9 @@ def test_job_store_lifecycle():
 def test_submit_sync_runs_and_completes_with_run_id():
     store = JobStore()
     repo = _RepoStub()
-    job = submit_pf_review_job(repo, "job1", dict(PROJECT), {}, background=False, store=store)
+    project_id = f"job-sync-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+    job = submit_pf_review_job(repo, project_id, project, {}, background=False, store=store)
     assert job["status"] == "completed"
     assert job["status"] in TERMINAL_STATUSES
     assert job["runId"]  # run_id propagated from the saved run
@@ -51,7 +60,14 @@ def test_submit_records_failure():
         def save_run(self, *a, **k):
             raise RuntimeError("boom")
 
-    job = submit_pf_review_job(_BoomRepo(), "job1", dict(PROJECT), {}, background=False, store=store)
+    project_id = f"job-failure-{uuid4()}"
+    failing_project = {
+        **PROJECT,
+        "project": {**PROJECT["project"], "id": project_id},
+    }
+    job = submit_pf_review_job(
+        _BoomRepo(), project_id, failing_project, {}, background=False, store=store,
+    )
     assert job["status"] == "failed"
     assert "boom" in job["error"]
 
@@ -59,7 +75,9 @@ def test_submit_records_failure():
 def test_submit_background_eventually_completes():
     store = JobStore()
     repo = _RepoStub()
-    job = submit_pf_review_job(repo, "job1", dict(PROJECT), {}, background=True, store=store)
+    project_id = f"job-background-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+    job = submit_pf_review_job(repo, project_id, project, {}, background=True, store=store)
     assert job["status"] in {"queued", "running", "completed"}
     # Poll the in-memory store until terminal (threaded run finishes quickly).
     deadline = time.time() + 30
@@ -105,3 +123,63 @@ def test_recover_interrupted_jobs_marks_and_resubmits(tmp_path):
     assert done["jobId"] not in result["interrupted"]  # terminal jobs are untouched
     assert len(result["resubmitted"]) == 1
     assert store.get(running["jobId"])["status"] == "interrupted"
+
+
+def test_external_worker_mode_queues_then_claims(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ASYNC_JOB_MODE", "external_worker")
+    store = JobStore()
+    repo = _RepoStub()
+    project_id = f"external-worker-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+
+    queued = submit_pf_review_job(
+        repo, project_id, project, {}, background=True, store=store,
+    )
+    assert queued["status"] == "queued"
+
+    completed = process_next_pf_review_job(repo, worker_id="worker:test", store=store)
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert completed["agentRunId"]
+
+
+def test_cancel_queued_job_is_terminal():
+    store = JobStore()
+    job = store.create("pf_review", "cancel-project", {})
+
+    cancelled = cancel_pf_review_job(job["jobId"], reason="test", store=store)
+
+    assert cancelled is not None
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["cancellationRequested"] is True
+    assert cancelled["cancellationReason"] == "test"
+
+
+def test_worker_does_not_overwrite_cancellation_with_completed(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ASYNC_JOB_MODE", "external_worker")
+    store = JobStore()
+    project_id = f"cancel-running-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+    queued = submit_pf_review_job(
+        _RepoStub(), project_id, project, {}, background=True, store=store,
+    )
+
+    def _cancel_during_execution(*args, **kwargs):
+        current = store.get(queued["jobId"])
+        assert current and current["agentRunId"]
+        cancel_pf_review_job(queued["jobId"], reason="operator_cancelled", store=store)
+        return {
+            "output": {"run_id": "must-not-be-saved"},
+            "agentRunId": current["agentRunId"],
+            "agentRunStatus": "completed",
+            "replayed": False,
+            "stepIds": [],
+        }
+
+    monkeypatch.setattr("use_cases.async_jobs.run_pf_review_with_durable_runtime", _cancel_during_execution)
+    result = process_next_pf_review_job(_RepoStub(), worker_id="worker:cancel", store=store)
+
+    assert result is not None
+    assert result["status"] == "cancelled"
+    assert result["result"] is None
+    assert result["runId"] is None

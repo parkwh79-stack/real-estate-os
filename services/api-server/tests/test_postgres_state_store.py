@@ -115,7 +115,8 @@ def test_storage_seam_routes_to_postgres(monkeypatch):
         lambda table, where=None, limit=100, **kw: [
             payload
             for (stored_table, project_id, _), payload in typed.items()
-            if stored_table == table and project_id == (where or {}).get("project_id")
+            if stored_table == table
+            and ((where or {}).get("project_id") is None or project_id == (where or {}).get("project_id"))
         ][:limit],
     )
 
@@ -127,6 +128,33 @@ def test_storage_seam_routes_to_postgres(monkeypatch):
     assert any(r.get("key") == "k1" for r in records)
     assert "doc" in shared  # persisted via the Postgres document store
     assert any(key[0] == "deal_state_records" for key in typed)
+
+
+def test_postgres_typed_project_is_authoritative_over_legacy_document(monkeypatch):
+    import storage
+
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "postgres")
+    monkeypatch.setattr(
+        postgres,
+        "load_state_document",
+        lambda **kw: {
+            "version": storage.STATE_VERSION,
+            "projects": {"p1": {"project": {"id": "p1", "name": "stale"}}},
+        },
+    )
+    monkeypatch.setattr(
+        postgres,
+        "list_typed_jsonb_records",
+        lambda table, **kw: (
+            [{"project": {"id": "p1", "name": "typed-authority"}}]
+            if table == "projects" else []
+        ),
+    )
+
+    state = storage._load_json_state()
+
+    assert state is not None
+    assert state["projects"]["p1"]["project"]["name"] == "typed-authority"
 
 
 class _TypedCursor:

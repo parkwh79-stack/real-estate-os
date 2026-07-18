@@ -1,12 +1,10 @@
-"""Durable async job runner for orchestration.
+"""Durable asynchronous PF review queue.
 
-Lets the API enqueue a PF review run and return immediately, so clients poll
-for status instead of blocking on the full synchronous run. Jobs are persisted
-write-through to a JSON file under the runtime dir, so they survive a process
-restart and can be recovered/re-submitted via recover_interrupted_jobs.
-Execution is still in-process (ThreadPoolExecutor); a distributed Redis/DB-backed
-worker queue remains the production target (see docs/architecture.md and
-docs/product/ir-deck-implementation-gap.md).
+Production requests are persisted in ``async_jobs`` and claimed by an external
+worker. Each claimed job executes through ``DurableAgentRuntime`` so lifecycle,
+steps, idempotency, retry, cancellation and outbox events are stored in the same
+Agent ledger. A daemon thread is retained only as a development convenience;
+hardened profiles require ``REALYTICS_ASYNC_JOB_MODE=external_worker``.
 """
 
 from __future__ import annotations
@@ -14,106 +12,114 @@ from __future__ import annotations
 import json
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
-from use_cases.pf_review import run_and_save_pf_review_use_case
+from agent_platform.pf_review_runtime import run_pf_review_with_durable_runtime
 
-JOB_SCHEMA_VERSION = "realytics-async-job-v1"
-TERMINAL_STATUSES = {"completed", "failed"}
-NON_TERMINAL_STATUSES = {"queued", "running"}
+
+JOB_SCHEMA_VERSION = "realytics-async-job-v2"
+TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+NON_TERMINAL_STATUSES = {"queued", "running", "retrying"}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _default_jobs_file() -> Path:
-    """Durable jobs file under the runtime dir (follows REALYTICS_SQLITE_FILE)."""
-    override = os.environ.get("REALYTICS_JOBS_FILE")
-    if override:
-        return Path(override)
-    from storage import sqlite_file_path
-
-    return sqlite_file_path().parent / "jobs.json"
-
-
 class JobStore:
-    """Thread-safe job registry.
+    """Async job repository.
 
-    In-memory by default (process-local). When `path` is given the store is
-    durable: every change is written through to a JSON file and reloaded on
-    construction, so jobs survive a process restart and can be recovered.
+    ``persistent=True`` uses the configured REALYTICS storage backend. ``path``
+    and the default in-memory mode exist for isolated unit tests only.
     """
 
-    def __init__(self, path: Optional[str | Path] = None) -> None:
+    def __init__(self, path: Optional[str | Path] = None, *, persistent: bool = False) -> None:
         self._jobs: Dict[str, Dict[str, Any]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._path = Path(path) if path else None
+        self._persistent = bool(persistent)
         if self._path:
-            self._load()
+            self._load_file()
 
-    def _load(self) -> None:
+    def _load_file(self) -> None:
         try:
             if self._path and self._path.exists():
                 with self._path.open("r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 if isinstance(data, dict):
-                    self._jobs = {k: v for k, v in data.items() if isinstance(v, dict)}
+                    self._jobs = {key: value for key, value in data.items() if isinstance(value, dict)}
         except Exception:
             self._jobs = {}
 
-    def _persist_locked(self) -> None:
+    def _persist_file_locked(self) -> None:
         if not self._path:
             return
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-            with tmp.open("w", encoding="utf-8") as fh:
-                json.dump(self._jobs, fh, ensure_ascii=False)
-            tmp.replace(self._path)
-        except Exception:
-            pass  # durability is best-effort; in-memory state remains authoritative
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(self._jobs, fh, ensure_ascii=False)
+        tmp.replace(self._path)
 
-    def create(self, kind: str, project_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def create(
+        self,
+        kind: str,
+        project_id: str,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        tenant_id: str | None = None,
+        max_attempts: int = 3,
+    ) -> Dict[str, Any]:
         job = {
             "schemaVersion": JOB_SCHEMA_VERSION,
             "jobId": str(uuid4()),
             "kind": kind,
             "projectId": project_id,
+            "tenantId": tenant_id or "default",
             "status": "queued",
-            "params": params or {},
+            "params": _without_secrets(params or {}),
             "createdAt": _now(),
+            "updatedAt": _now(),
             "startedAt": None,
             "completedAt": None,
+            "leaseOwner": None,
+            "leaseExpiresAt": None,
+            "attemptCount": 0,
+            "maxAttempts": max(1, int(max_attempts)),
+            "agentRunId": None,
             "runId": None,
             "result": None,
             "error": None,
             "recoveredFrom": None,
+            "cancellationRequested": False,
         }
-        with self._lock:
-            self._jobs[job["jobId"]] = job
-            self._persist_locked()
-        return dict(job)
+        return self._save(job)
 
     def update(self, job_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return None
-            job.update(fields)
-            self._persist_locked()
-            return dict(job)
+        current = self.get(job_id)
+        if current is None:
+            return None
+        current.update(fields)
+        current["updatedAt"] = _now()
+        return self._save(current)
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
+        if self._persistent:
+            from storage import get_async_job_record
+
+            return get_async_job_record(job_id)
         with self._lock:
             job = self._jobs.get(job_id)
             return dict(job) if job else None
 
     def list(self, project_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        if self._persistent:
+            from storage import list_async_job_records
+
+            return list_async_job_records(project_id=project_id, limit=limit)
         with self._lock:
             jobs = [dict(job) for job in self._jobs.values()]
         if project_id is not None:
@@ -121,11 +127,44 @@ class JobStore:
         jobs.sort(key=lambda job: job.get("createdAt") or "", reverse=True)
         return jobs[:limit]
 
+    def claim(self, *, worker_id: str, lease_seconds: int = 1800) -> Optional[Dict[str, Any]]:
+        if self._persistent:
+            from storage import claim_async_job_record
 
-# Module-level singletons used by the API. The shared store is durable so jobs
-# survive a process restart and can be recovered.
-_STORE = JobStore(path=_default_jobs_file())
-_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pf-review-job")
+            return claim_async_job_record(worker_id=worker_id, lease_seconds=lease_seconds)
+        with self._lock:
+            candidates = [
+                item for item in self._jobs.values()
+                if item.get("status") == "queued"
+                and int(item.get("attemptCount") or 0) < int(item.get("maxAttempts") or 3)
+            ]
+            if not candidates:
+                return None
+            candidates.sort(key=lambda item: item.get("createdAt") or "")
+            job = dict(candidates[0])
+            job.update(
+                {
+                    "status": "running",
+                    "startedAt": job.get("startedAt") or _now(),
+                    "attemptCount": int(job.get("attemptCount") or 0) + 1,
+                    "leaseOwner": worker_id,
+                    "leaseExpiresAt": None,
+                }
+            )
+            return self._save(job)
+
+    def _save(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        if self._persistent:
+            from storage import upsert_async_job_record
+
+            return upsert_async_job_record(job)
+        with self._lock:
+            self._jobs[str(job["jobId"])] = dict(job)
+            self._persist_file_locked()
+            return dict(job)
+
+
+_STORE = JobStore(persistent=True)
 
 
 def get_job_store() -> JobStore:
@@ -140,47 +179,89 @@ def submit_pf_review_job(
     *,
     background: bool = True,
     store: Optional[JobStore] = None,
-    executor: Optional[ThreadPoolExecutor] = None,
+    executor: Any = None,
     resume_payload: Optional[Dict[str, Any]] = None,
     recovered_from: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Enqueue a PF review run. Returns the job record immediately.
-
-    background=True schedules on the thread pool (non-blocking); background=False
-    runs inline (used by tests for deterministic assertions). `resume_payload`
-    persists the original request input so an interrupted job can be recovered
-    after a restart; `recovered_from` links a recovery attempt to its origin.
-    """
+    """Persist a PF review job and execute inline, locally, or by external worker."""
+    if executor is not None:
+        raise ValueError("ThreadPoolExecutor is no longer supported; use the durable PF review worker")
     store = store or _STORE
+    options = dict(options or {})
+    tenant_id = str(
+        options.get("tenantId")
+        or ((project_data.get("_meta") or {}).get("tenantId") if isinstance(project_data.get("_meta"), dict) else "")
+        or "default"
+    )
     job = store.create(
         "pf_review",
         project_id,
-        {"hasOptions": bool(options), "options": options or {}, "inputData": resume_payload or {}},
+        {
+            "options": options,
+            "inputData": resume_payload or {},
+            "projectData": project_data,
+        },
+        tenant_id=tenant_id,
+        max_attempts=int(options.get("maxAttempts") or 3),
     )
-    job_id = job["jobId"]
     if recovered_from:
-        store.update(job_id, recoveredFrom=recovered_from)
+        job = store.update(job["jobId"], recoveredFrom=recovered_from) or job
+    if not background:
+        return _execute_job(job, orchestration_repository, store)
 
-    def _work() -> None:
-        store.update(job_id, status="running", startedAt=_now())
+    mode = (os.environ.get("REALYTICS_ASYNC_JOB_MODE") or "development_thread").lower()
+    if mode == "external_worker":
+        return job
+    thread = threading.Thread(
+        target=_execute_job,
+        args=(job, orchestration_repository, store),
+        name=f"pf-review-job-{job['jobId'][:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return store.get(job["jobId"]) or job
+
+
+def process_next_pf_review_job(
+    orchestration_repository: Any,
+    *,
+    worker_id: str,
+    store: Optional[JobStore] = None,
+) -> Dict[str, Any] | None:
+    store = store or _STORE
+    job = store.claim(worker_id=worker_id)
+    if job is None:
+        return None
+    return _execute_job(job, orchestration_repository, store, already_claimed=True)
+
+
+def cancel_pf_review_job(job_id: str, *, reason: str, store: Optional[JobStore] = None) -> Dict[str, Any] | None:
+    store = store or _STORE
+    job = store.get(job_id)
+    if job is None or job.get("status") in TERMINAL_STATUSES:
+        return job
+    agent_run_id = job.get("agentRunId")
+    cancellation_warning = None
+    if agent_run_id:
+        from agent_platform.runtime import StorageAgentRunRepository
+
         try:
-            run = run_and_save_pf_review_use_case(orchestration_repository, project_id, project_data, options or {})
-            run_id = _extract_run_id(run)
-            store.update(
-                job_id,
-                status="completed",
-                completedAt=_now(),
-                runId=run_id,
-                result=_result_summary(run),
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            store.update(job_id, status="failed", completedAt=_now(), error=f"{exc.__class__.__name__}: {exc}")
-
-    if background:
-        (executor or _EXECUTOR).submit(_work)
-        return store.get(job_id) or job
-    _work()
-    return store.get(job_id) or job
+            StorageAgentRunRepository().request_cancellation(agent_run_id, reason=reason)
+        except Exception as exc:
+            # The job owns the cancellation decision. The Agent run row may not
+            # exist yet during the short claim-to-runtime creation window; the
+            # worker re-check below prevents a later completed overwrite.
+            cancellation_warning = f"agent_run_cancellation_deferred:{exc.__class__.__name__}"
+    return store.update(
+        job_id,
+        status="cancelled",
+        cancellationRequested=True,
+        cancellationReason=reason,
+        completedAt=_now(),
+        leaseOwner=None,
+        leaseExpiresAt=None,
+        cancellationWarning=cancellation_warning,
+    )
 
 
 def recover_interrupted_jobs(
@@ -189,13 +270,6 @@ def recover_interrupted_jobs(
     project_id: Optional[str] = None,
     store: Optional[JobStore] = None,
 ) -> Dict[str, Any]:
-    """Recover jobs left non-terminal by a crash/restart.
-
-    A job still in queued/running on startup means the process died mid-run.
-    Each is marked 'interrupted' (never silently lost) and re-submitted via
-    resubmit_fn, which rebuilds project_data from the persisted request input.
-    Returns the interrupted and freshly-resubmitted job ids.
-    """
     store = store or _STORE
     candidates = [
         job for job in store.list(project_id=project_id, limit=1000)
@@ -220,6 +294,86 @@ def recover_interrupted_jobs(
     }
 
 
+class PFReviewJobWorker:
+    def __init__(self, repository_factory: Callable[[], Any], *, worker_id: str | None = None) -> None:
+        self.repository_factory = repository_factory
+        self.worker_id = worker_id or f"pf-review-worker:{uuid4()}"
+
+    def run_once(self) -> Dict[str, Any] | None:
+        return process_next_pf_review_job(
+            self.repository_factory(),
+            worker_id=self.worker_id,
+        )
+
+    def run_forever(self, *, poll_seconds: float = 1.0) -> None:
+        while True:
+            if self.run_once() is None:
+                time.sleep(max(0.1, poll_seconds))
+
+
+def _execute_job(
+    job: Dict[str, Any],
+    orchestration_repository: Any,
+    store: JobStore,
+    already_claimed: bool = False,
+) -> Dict[str, Any]:
+    job_id = str(job["jobId"])
+    agent_run_id = str(job.get("agentRunId") or f"agent-run:pf-review:{uuid4()}")
+    if not already_claimed:
+        job = store.update(
+            job_id,
+            status="running",
+            startedAt=job.get("startedAt") or _now(),
+            attemptCount=int(job.get("attemptCount") or 0) + 1,
+            agentRunId=agent_run_id,
+        ) or job
+    elif job.get("agentRunId") != agent_run_id:
+        job = store.update(job_id, agentRunId=agent_run_id) or {**job, "agentRunId": agent_run_id}
+    try:
+        params = dict(job.get("params") or {})
+        durable = run_pf_review_with_durable_runtime(
+            orchestration_repository,
+            str(job["projectId"]),
+            dict(params.get("projectData") or {}),
+            dict(params.get("options") or {}),
+            agent_run_id=agent_run_id,
+        )
+        output = durable["output"]
+        current = store.get(job_id) or job
+        if current.get("cancellationRequested") or durable.get("agentRunStatus") == "cancelled":
+            return store.update(
+                job_id,
+                status="cancelled",
+                completedAt=current.get("completedAt") or _now(),
+                leaseOwner=None,
+                leaseExpiresAt=None,
+                agentRunId=durable.get("agentRunId") or agent_run_id,
+                result=None,
+            ) or current
+        return store.update(
+            job_id,
+            status="completed",
+            completedAt=_now(),
+            leaseOwner=None,
+            leaseExpiresAt=None,
+            agentRunId=durable.get("agentRunId") or agent_run_id,
+            runId=_extract_run_id(output),
+            result=_result_summary(output),
+            error=None,
+        ) or job
+    except Exception as exc:
+        current = store.get(job_id) or job
+        exhausted = int(current.get("attemptCount") or 0) >= int(current.get("maxAttempts") or 3)
+        return store.update(
+            job_id,
+            status="failed" if exhausted or not _retryable(exc) else "queued",
+            completedAt=_now() if exhausted else None,
+            leaseOwner=None,
+            leaseExpiresAt=None,
+            error=f"{exc.__class__.__name__}: {exc}",
+        ) or current
+
+
 def _extract_run_id(run: Any) -> Optional[str]:
     if not isinstance(run, dict):
         return None
@@ -238,8 +392,28 @@ def _result_summary(run: Any) -> Dict[str, Any]:
     credit = artifacts.get("creditReviewDecision") or {}
     return {
         "status": inner.get("status") if isinstance(inner, dict) else None,
+        "executionStatus": inner.get("executionStatus") if isinstance(inner, dict) else None,
+        "approvalStatus": inner.get("approvalStatus") if isinstance(inner, dict) else None,
+        "reportStatus": inner.get("reportStatus") if isinstance(inner, dict) else None,
         "stepCount": len(inner.get("steps", [])) if isinstance(inner, dict) else None,
         "approvalReadiness": gate.get("status") or (gate.get("summary") or {}).get("readiness"),
         "creditDecision": credit.get("decision"),
         "errorCount": len(inner.get("errors", [])) if isinstance(inner, dict) else None,
     }
+
+
+def _without_secrets(value: Any) -> Any:
+    secret_keys = {"apikey", "api_key", "authorization", "token", "secret", "password"}
+    if isinstance(value, dict):
+        return {
+            key: _without_secrets(item)
+            for key, item in value.items()
+            if str(key).lower() not in secret_keys
+        }
+    if isinstance(value, list):
+        return [_without_secrets(item) for item in value]
+    return value
+
+
+def _retryable(exc: Exception) -> bool:
+    return bool(getattr(exc, "retryable", False))

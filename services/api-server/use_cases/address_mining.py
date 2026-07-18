@@ -88,6 +88,19 @@ def _pdf_text(path: Path) -> str:
         doc.close()
 
 
+def _pdf_text_bytes(content: bytes) -> str:
+    import fitz
+
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+    except Exception:
+        return ""
+    try:
+        return "".join(page.get_text() for page in doc[:_MAX_PAGES])[:_MAX_CHARS]
+    finally:
+        doc.close()
+
+
 def _default_archive_root() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "runtime" / "uploads"
 
@@ -97,6 +110,7 @@ def mine_project_address(
     project_data: Dict[str, Any],
     *,
     archive_root: Optional[Path] = None,
+    upload_archive_repository=None,
 ) -> Optional[Dict[str, Any]]:
     """Best jibun address mined from the project's archived documents.
 
@@ -104,8 +118,11 @@ def mine_project_address(
     or None when nothing matches — never invents an address.
     """
     root = (archive_root or _default_archive_root()) / str(project_id)
-    if not root.exists():
-        return None
+    archive_repository = upload_archive_repository
+    if archive_repository is None and archive_root is None:
+        from db.repositories.upload_archive_repository import UploadArchiveRepository
+
+        archive_repository = UploadArchiveRepository()
 
     documents = list(project_data.get("source_documents") or [])
     # Scan classified documents first (provenance-rich), then any leftover PDFs.
@@ -121,12 +138,31 @@ def mine_project_address(
         archive_id = str(doc.get("archiveId") or doc.get("originalFileHash") or "")
         if not archive_id:
             continue
-        suffix = Path(str(doc.get("originalFileName") or "")).suffix.lower() or ".pdf"
-        path = root / f"{archive_id}{suffix}"
-        if not path.exists() or path.suffix.lower() != ".pdf" or str(path) in scanned:
+        filename = str(doc.get("originalFileName") or "")
+        suffix = Path(filename).suffix.lower() or ".pdf"
+        if suffix != ".pdf":
             continue
-        scanned.add(str(path))
-        for hit in mine_addresses_from_text(_pdf_text(path)):
+        text = ""
+        source_identity = ""
+        if archive_repository is not None:
+            resolved = archive_repository.resolve_download_metadata(project_id, doc)
+            if resolved:
+                resolved_path = resolved.get("path")
+                if resolved_path:
+                    source_identity = str(resolved_path)
+                    text = _pdf_text(Path(resolved_path))
+                elif resolved.get("content") is not None:
+                    source_identity = str(resolved.get("archiveObjectKey") or archive_id)
+                    text = _pdf_text_bytes(resolved["content"])
+        if not text:
+            path = root / f"{archive_id}{suffix}"
+            if path.exists():
+                source_identity = str(path)
+                text = _pdf_text(path)
+        if not text or source_identity in scanned:
+            continue
+        scanned.add(source_identity)
+        for hit in mine_addresses_from_text(text):
             candidates.append(
                 {
                     "address": hit["address"],
@@ -141,7 +177,7 @@ def mine_project_address(
         if candidates:
             break  # first document with addresses wins (usually the business plan)
 
-    if not candidates:
+    if not candidates and root.exists():
         # Fallback: any archived PDF not tracked in source_documents metadata.
         for path in sorted(root.glob("*.pdf")):
             if str(path) in scanned:

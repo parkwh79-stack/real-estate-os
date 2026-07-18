@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from typing import List, Dict, Any, Optional
 
 def sqm_to_py(sqm: float) -> float:
@@ -68,9 +69,65 @@ def calculate_feasibility_metrics(input_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def calculate_ltv(pf_amount: float, total_revenue: float) -> float:
-    if total_revenue <= 0:
+    """Deprecated compatibility alias for sales-value LTV.
+
+    New code must use a basis-specific function.  Total sales revenue is not
+    an appraisal value and must never be labelled simply as collateral LTV.
+    """
+    return calculate_sales_value_ltv(pf_amount, total_revenue)
+
+def calculate_sales_value_ltv(debt_amount: float, total_sales_value: float) -> float:
+    """Debt divided by gross sales value (분양가 기준 LTV)."""
+    if total_sales_value <= 0:
         return 0.0
-    return pf_amount / total_revenue
+    return debt_amount / total_sales_value
+
+def calculate_appraisal_ltv(debt_amount: float, appraisal_value: float) -> float:
+    """Debt divided by an evidenced appraisal value."""
+    if appraisal_value <= 0:
+        return 0.0
+    return debt_amount / appraisal_value
+
+def calculate_unsold_value_ltv(exposure: float, adjusted_unsold_value: float) -> float:
+    """Outstanding exposure divided by discounted/haircut unsold value."""
+    if adjusted_unsold_value <= 0:
+        return 0.0
+    return exposure / adjusted_unsold_value
+
+def calculate_senior_ltv(senior_amount: float, collateral_value: float) -> float:
+    """Senior debt divided by the explicitly selected collateral value."""
+    if collateral_value <= 0:
+        return 0.0
+    return senior_amount / collateral_value
+
+def calculate_total_ltv(total_debt: float, collateral_value: float) -> float:
+    """All debt tranches divided by the explicitly selected collateral value."""
+    if collateral_value <= 0:
+        return 0.0
+    return total_debt / collateral_value
+
+def calculate_ltv_bundle(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only ratios whose denominator basis is explicitly available."""
+    total_debt = _to_float(input_data.get("total_debt", input_data.get("pf_amount", 0.0)))
+    senior_debt = _to_float(input_data.get("senior_debt", input_data.get("senior_amount", 0.0)))
+    sales_value = _to_float(input_data.get("sales_value", input_data.get("total_revenue", 0.0)))
+    appraisal_value = _to_float(input_data.get("appraisal_value", 0.0))
+    adjusted_unsold_value = _to_float(input_data.get("adjusted_unsold_value", 0.0))
+    unsold_exposure = _to_float(input_data.get("unsold_exposure", total_debt))
+    collateral_value = _to_float(input_data.get("collateral_value", appraisal_value))
+    return {
+        "sales_value_ltv": calculate_sales_value_ltv(total_debt, sales_value) if sales_value > 0 else None,
+        "appraisal_ltv": calculate_appraisal_ltv(total_debt, appraisal_value) if appraisal_value > 0 else None,
+        "unsold_ltv": calculate_unsold_value_ltv(unsold_exposure, adjusted_unsold_value) if adjusted_unsold_value > 0 else None,
+        "senior_ltv": calculate_senior_ltv(senior_debt, collateral_value) if senior_debt > 0 and collateral_value > 0 else None,
+        "total_ltv": calculate_total_ltv(total_debt, collateral_value) if collateral_value > 0 else None,
+        "bases": {
+            "salesValue": sales_value or None,
+            "appraisalValue": appraisal_value or None,
+            "adjustedUnsoldValue": adjusted_unsold_value or None,
+            "collateralValue": collateral_value or None,
+        },
+    }
 
 def calculate_ltc(pf_amount: float, total_cost: float) -> float:
     if total_cost <= 0:
@@ -83,11 +140,119 @@ def calculate_dscr(net_operating_income: float, debt_service: float) -> float:
     return net_operating_income / debt_service
 
 def calculate_all_in_cost(principal: float, interest_rate: float, fee_rate: float) -> float:
+    """Nominal compatibility estimate; not report-grade All-in Cost.
+
+    Use ``calculate_tranche_xirr`` for PF review.  This function remains only
+    for legacy callers that explicitly request a nominal rate-plus-fee proxy.
+    """
     if principal <= 0:
         return 0.0
-    # simplified all-in-cost calculation for MVP: (Interest + Fees) / Principal annualized.
-    # Assuming 1 year term for simplicity in this pure function, can be extended to term-based.
+    # This is deliberately named as a nominal proxy in every API response.
+    # Report-grade All-in Cost is produced only by calculate_tranche_xirr().
     return interest_rate + fee_rate
+
+def calculate_xnpv(rate: float, cashflows: List[Dict[str, Any]]) -> float:
+    """Net present value for irregular dated cash flows."""
+    dated = _dated_cashflows(cashflows)
+    if not dated:
+        return 0.0
+    if rate <= -1.0:
+        raise ValueError("XNPV rate must be greater than -100%")
+    origin = dated[0][0]
+    return sum(amount / ((1.0 + rate) ** ((when - origin).days / 365.0)) for when, amount in dated)
+
+def calculate_xirr(cashflows: List[Dict[str, Any]], *, tolerance: float = 1e-9, max_iterations: int = 300) -> Optional[float]:
+    """Annual effective XIRR for explicit dated cash flows."""
+    dated = _dated_cashflows(cashflows)
+    amounts = [amount for _, amount in dated]
+    if len(dated) < 2 or not any(value < 0 for value in amounts) or not any(value > 0 for value in amounts):
+        return None
+    normalized = [{"date": when.isoformat(), "amount": amount} for when, amount in dated]
+    low = -0.999999
+    high = 1.0
+    low_value = calculate_xnpv(low, normalized)
+    high_value = calculate_xnpv(high, normalized)
+    while low_value * high_value > 0 and high < 1_000_000:
+        high *= 2.0
+        high_value = calculate_xnpv(high, normalized)
+    if low_value * high_value > 0:
+        return None
+    for _ in range(max_iterations):
+        middle = (low + high) / 2.0
+        value = calculate_xnpv(middle, normalized)
+        if abs(value) <= tolerance:
+            return middle
+        if low_value * value <= 0:
+            high = middle
+        else:
+            low = middle
+            low_value = value
+    return (low + high) / 2.0
+
+def calculate_tranche_xirr(tranche: Dict[str, Any]) -> Dict[str, Any]:
+    """Calculate borrower All-in Cost from actual draw/fee/repayment dates.
+
+    Positive amounts are borrower receipts and negative amounts are borrower
+    payments.  Explicit ``cashFlows`` are preferred.  Otherwise dated draws,
+    fees, interest payments, and repayments are combined without inventing a
+    maturity date or payment amount.
+    """
+    explicit = tranche.get("cashFlows") or tranche.get("cash_flows")
+    cashflows: List[Dict[str, Any]] = [dict(item) for item in explicit if isinstance(item, dict)] if isinstance(explicit, list) else []
+    if not cashflows:
+        for key, sign in (("drawdowns", 1.0), ("fees", -1.0), ("interestPayments", -1.0), ("repayments", -1.0)):
+            values = tranche.get(key) or tranche.get(_camel_to_snake(key)) or []
+            for item in values if isinstance(values, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                amount = abs(_to_float(item.get("amount", item.get("value", 0.0)))) * sign
+                cashflows.append({"date": item.get("date") or item.get("paymentDate"), "amount": amount})
+    try:
+        normalized = [
+            {"date": when.isoformat(), "amount": amount}
+            for when, amount in _dated_cashflows(cashflows)
+        ]
+    except (TypeError, ValueError) as exc:
+        return {"value": None, "status": "invalid_cashflow", "method": "xirr", "error": str(exc), "cashFlows": []}
+    value = calculate_xirr(normalized) if normalized else None
+    return {
+        "value": value,
+        "status": "calculated" if value is not None else "insufficient_input",
+        "method": "dated_borrower_cashflow_xirr",
+        "cashFlows": normalized,
+        "requiredInputs": [] if value is not None else ["dated_drawdowns", "dated_fees", "dated_interest_payments", "dated_repayments"],
+    }
+
+def _dated_cashflows(cashflows: List[Dict[str, Any]]) -> List[tuple[date, float]]:
+    result: List[tuple[date, float]] = []
+    for item in cashflows or []:
+        if not isinstance(item, dict):
+            continue
+        raw_date = item.get("date") or item.get("paymentDate") or item.get("period")
+        if not raw_date:
+            raise ValueError("Every XIRR cash flow requires a date")
+        when = _parse_cashflow_date(raw_date)
+        result.append((when, _to_float(item.get("amount", item.get("value", 0.0)))))
+    return sorted(result, key=lambda row: row[0])
+
+def _parse_cashflow_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if len(text) == 7:
+        text = f"{text}-01"
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+
+def _camel_to_snake(value: str) -> str:
+    chars = []
+    for char in value:
+        if char.isupper():
+            chars.extend(("_", char.lower()))
+        else:
+            chars.append(char)
+    return "".join(chars)
 
 def calculate_exit_sale_rate(pf_amount: float, other_priority_costs: float, total_revenue: float) -> float:
     """Calculates the percentage of units that must be sold to cover PF and priority costs."""
@@ -207,27 +372,47 @@ def calculate_pf_metrics(input_data: Dict[str, Any]) -> Dict[str, Any]:
     tranche_results = []
     annual_debt_service = 0.0
     fee_total = 0.0
-    for tranche in sorted(tranches, key=lambda item: item.get("priority", 99)):
+    for tranche in sorted(tranches, key=_tranche_priority_rank):
         amount = _to_float(tranche.get("amount", 0.0))
         interest_rate = _to_float(tranche.get("interest_rate", tranche.get("rate", 0.0)))
         fee_rate = _to_float(tranche.get("fee_rate", 0.0))
         interest_amount = amount * interest_rate
         fee_amount = amount * fee_rate
+        dated_all_in_cost = calculate_tranche_xirr(tranche)
         annual_debt_service += interest_amount
         fee_total += fee_amount
         tranche_results.append({
             "tranche": tranche.get("tranche", tranche.get("name", "Unknown")),
             "priority": tranche.get("priority"),
+            "priority_rank": _tranche_priority_rank(tranche),
             "amount": amount,
             "interest_rate": interest_rate,
             "fee_rate": fee_rate,
-            "all_in_cost": calculate_all_in_cost(amount, interest_rate, fee_rate),
+            "all_in_cost": dated_all_in_cost["value"],
+            "all_in_cost_status": dated_all_in_cost["status"],
+            "all_in_cost_method": dated_all_in_cost["method"],
+            "all_in_cost_cashflows": dated_all_in_cost["cashFlows"],
+            "nominal_rate_plus_fee_proxy": calculate_all_in_cost(amount, interest_rate, fee_rate),
             "annual_interest": interest_amount,
             "fee_amount": fee_amount,
         })
 
     effective_debt_service = debt_service or annual_debt_service
-    ltv = calculate_ltv(total_pf, total_revenue)
+    senior_amount = sum(
+        _to_float(tranche.get("amount", 0.0))
+        for tranche in tranches
+        if _tranche_priority_rank(tranche) == 1
+    )
+    ltv_bundle = calculate_ltv_bundle({
+        "total_debt": total_pf,
+        "senior_debt": senior_amount,
+        "sales_value": total_revenue,
+        "appraisal_value": input_data.get("appraisal_value", input_data.get("appraisalValue", 0.0)),
+        "adjusted_unsold_value": input_data.get("adjusted_unsold_value", input_data.get("adjustedUnsoldValue", 0.0)),
+        "unsold_exposure": input_data.get("unsold_exposure", input_data.get("unsoldExposure", total_pf)),
+        "collateral_value": input_data.get("collateral_value", input_data.get("collateralValue", input_data.get("appraisal_value", 0.0))),
+    })
+    sales_value_ltv = ltv_bundle["sales_value_ltv"] or 0.0
     ltc = calculate_ltc(total_pf, total_cost)
     dscr = calculate_dscr(noi, effective_debt_service)
     exit_sale_rate = calculate_exit_sale_rate(total_pf, other_priority_costs, total_revenue)
@@ -240,7 +425,21 @@ def calculate_pf_metrics(input_data: Dict[str, Any]) -> Dict[str, Any]:
         "annual_debt_service": effective_debt_service,
         "fee_total": fee_total,
         "metrics": {
-            "ltv": {"value": ltv, "status": _lower_is_better_status(ltv, 0.60, 0.75, 0.90)},
+            "sales_value_ltv": {
+                "value": ltv_bundle["sales_value_ltv"],
+                "basis": "gross_sales_value",
+                "status": _lower_is_better_status(sales_value_ltv, 0.60, 0.75, 0.90),
+            },
+            "appraisal_ltv": _optional_ltv_metric(ltv_bundle["appraisal_ltv"], "appraisal_value"),
+            "unsold_ltv": _optional_ltv_metric(ltv_bundle["unsold_ltv"], "discounted_haircut_unsold_value"),
+            "senior_ltv": _optional_ltv_metric(ltv_bundle["senior_ltv"], "selected_collateral_value"),
+            "total_ltv": _optional_ltv_metric(ltv_bundle["total_ltv"], "selected_collateral_value"),
+            "ltv": {
+                "value": ltv_bundle["sales_value_ltv"],
+                "basis": "gross_sales_value",
+                "deprecatedAlias": True,
+                "status": _lower_is_better_status(sales_value_ltv, 0.60, 0.75, 0.90),
+            },
             "ltc": {"value": ltc, "status": _lower_is_better_status(ltc, 0.70, 0.85, 1.00)},
             "dscr": {"value": dscr, "status": _higher_is_better_status(dscr, 1.30, 1.10, 1.00)},
             "exit_sale_rate": {
@@ -248,8 +447,16 @@ def calculate_pf_metrics(input_data: Dict[str, Any]) -> Dict[str, Any]:
                 "status": _lower_is_better_status(exit_sale_rate, 0.60, 0.75, 0.90),
             },
         },
+        "ltv_bases": ltv_bundle["bases"],
         "tranches": tranche_results,
-        "summary": _pf_metric_summary(ltv, ltc, dscr, exit_sale_rate),
+        "summary": _pf_metric_summary(sales_value_ltv, ltc, dscr, exit_sale_rate),
+    }
+
+def _optional_ltv_metric(value: Optional[float], basis: str) -> Dict[str, Any]:
+    return {
+        "value": value,
+        "basis": basis,
+        "status": "insufficient_input" if value is None else _lower_is_better_status(value, 0.60, 0.75, 0.90),
     }
 
 def simulate_waterfall(cash_available: float, tranches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -258,11 +465,11 @@ def simulate_waterfall(cash_available: float, tranches: List[Dict[str, Any]]) ->
     results = []
     
     # Sort by priority ascending (1 is highest)
-    sorted_tranches = sorted(tranches, key=lambda x: x.get('priority', 99))
+    sorted_tranches = sorted(tranches, key=_tranche_priority_rank)
     
     for tranche in sorted_tranches:
-        amount_owed = tranche.get('amount', 0)
-        interest_owed = amount_owed * tranche.get('interest_rate', 0.0)
+        amount_owed = _to_float(tranche.get('amount', 0))
+        interest_owed = amount_owed * _to_float(tranche.get('interest_rate', 0.0))
         total_owed = amount_owed + interest_owed
         
         payment = min(remaining_cash, total_owed)
@@ -280,8 +487,8 @@ def simulate_waterfall(cash_available: float, tranches: List[Dict[str, Any]]) ->
             
     # For any remaining tranches that received nothing
     for tranche in sorted_tranches[len(results):]:
-        amount_owed = tranche.get('amount', 0)
-        total_owed = amount_owed + (amount_owed * tranche.get('interest_rate', 0.0))
+        amount_owed = _to_float(tranche.get('amount', 0))
+        total_owed = amount_owed + (amount_owed * _to_float(tranche.get('interest_rate', 0.0)))
         results.append({
             "tranche": tranche.get("tranche", "Unknown"),
             "amount_owed": total_owed,
@@ -580,6 +787,50 @@ def _to_float(value: Any) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+def _tranche_priority_rank(tranche: Dict[str, Any]) -> int:
+    """Normalize numeric and industry-label tranche priorities.
+
+    Imported workbooks use both ordinal numbers and labels such as
+    ``senior``/``mezzanine``/``junior``.  The deterministic engines must not
+    fail or reorder claims merely because one source uses the label form.
+    """
+    aliases = {
+        "senior": 1,
+        "first": 1,
+        "1st": 1,
+        "tr.a": 1,
+        "tranche a": 1,
+        "a": 1,
+        "mezzanine": 2,
+        "mezz": 2,
+        "middle": 2,
+        "second": 2,
+        "2nd": 2,
+        "tr.b": 2,
+        "tranche b": 2,
+        "b": 2,
+        "junior": 3,
+        "third": 3,
+        "3rd": 3,
+        "tr.c": 3,
+        "tranche c": 3,
+        "c": 3,
+        "equity": 4,
+    }
+    for value in (tranche.get("priority"), tranche.get("name"), tranche.get("tranche")):
+        if value is None or isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return int(value)
+        normalized = str(value).strip().casefold()
+        if normalized in aliases:
+            return aliases[normalized]
+        try:
+            return int(float(normalized))
+        except ValueError:
+            continue
+    return 99
 
 def _lower_is_better_status(value: float, safe: float, caution: float, high: float) -> str:
     if value <= safe:

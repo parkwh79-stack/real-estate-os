@@ -1,8 +1,28 @@
 ﻿# Product Backlog
 
-Updated: 2026-07-14
+Updated: 2026-07-15
 
 Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
+
+## Production-critical remediation update (2026-07-15)
+
+| Priority | Module | Task | Status | Notes |
+|---|---|---|---|---|
+| P0 | API regression | Isolate contract tests from developer runtime and cloud AI keys | Done | Full-suite runs use a disposable SQLite DB; the autouse test guard clears cloud provider keys loaded from local `.env`, and strict-RBAC reviewer analysis uses a source-backed runnable fixture instead of whichever runtime project happens to sort first. |
+| P0 | External worker | Refresh orchestration reads from durable storage | Done | Project run detail/list reads merge the authoritative store into the API cache, so a PF Review completed by a separate worker process is visible without restarting the API. |
+| P0 | CalculationRun | Fix approved-workbook source locator persistence | Done | `run_source_locator` regression fixed and approved schedule E2E passes. |
+| P0 | Financial integrity | Remove synthetic product/PF fallback values | Done | Missing product mix or PF structure now returns `insufficient_input`; no CalculationRun is created. Demo data must be supplied explicitly. |
+| P0 | Land evidence | Remove fixed PNU fallback | Done | PNU lookup returns `sourceUnavailable` on missing configuration/upstream failure and never emits fabricated evidence. |
+| P0 | Cash Flow | Schedule provenance and report eligibility | Done | Approved/evidence/estimated precedence is persisted per schedule component; estimates cannot silently become report-grade. |
+| P0 | Financial metrics | Explicit LTV bases and dated all-in XIRR | Done | Sales-value/appraisal/unsold/senior/total leverage are separated; nominal proxy is labeled when dated XIRR is unavailable. |
+| P0 | Security | Hardened deployment profile | Done | Staging/production fail fast without strict RBAC, tenant isolation, OIDC/JWKS, PostgreSQL, S3, Secret Manager, external worker, and HTTPS CORS. |
+| P0 | BYOK | Dedicated credential ingest and logout revocation | Done | Inline secrets are rejected; browser/API use `credentialRef`; explicit credential revocation supports local and OIDC identities. |
+| P1 | Persistence | Typed project and async job authority | In Progress | Typed PostgreSQL project/job access is active; the legacy `app_state` row remains only for stores not yet promoted. |
+| P1 | Assumptions | First-class proposals and project versions | Done | Consensus output is persisted as reviewable proposals; approval writes immutable version records and preserves the project snapshot/hash. |
+| P1 | Object Storage | S3/local source document parity | Controlled | Archive, integrity verification, download, and PDF address mining use the Object Storage boundary. Live S3 lifecycle/IAM/restore rehearsal remains. |
+| P1 | Router architecture | Split project jobs, assumptions, and source documents | In Progress | Three coherent domains are outside the monolithic project router; calculation, evidence, and report routes remain to be extracted incrementally. |
+| P1 | Operations | Live PostgreSQL/S3/worker rehearsal | Planned | Apply migrations to an isolated real database, run multi-worker lease/cancellation tests, and verify S3 object lifecycle before external pilot. Reconcile the local `default`/`legacy` orphan outbox dead letters before importing any runtime state. |
+| P1 | Supply chain | Resolve residual moderate npm advisories | Planned | Next patched to 16.2.10 and high-risk `tmp` removed. Residual Next/PostCSS and ExcelJS/UUID advisories require upstream-safe upgrades and workbook regression testing; do not force downgrade. |
 
 ## Agent Platform control plane v1
 

@@ -9,6 +9,9 @@ from core.calculations import (
     npv, calculate_irr, annualize_rate, calculate_irr_annualized,
     calculate_equity_multiple, calculate_payback_period, calculate_icr,
     calculate_return_metrics,
+    calculate_sales_value_ltv, calculate_appraisal_ltv, calculate_unsold_value_ltv,
+    calculate_senior_ltv, calculate_total_ltv, calculate_ltv_bundle,
+    calculate_xnpv, calculate_xirr, calculate_tranche_xirr,
 )
 from core.risk_assessment import build_basic_risk_matrix
 
@@ -64,6 +67,25 @@ def test_calculate_ltv():
     assert calculate_ltv(500, 1000) == 0.5
     assert calculate_ltv(500, 0) == 0.0
 
+def test_basis_specific_ltv_metrics_are_not_conflated():
+    assert calculate_sales_value_ltv(500, 1000) == 0.5
+    assert calculate_appraisal_ltv(500, 800) == 0.625
+    assert calculate_unsold_value_ltv(300, 400) == 0.75
+    assert calculate_senior_ltv(400, 800) == 0.5
+    assert calculate_total_ltv(600, 800) == 0.75
+    bundle = calculate_ltv_bundle({
+        "total_debt": 600,
+        "senior_debt": 400,
+        "sales_value": 1000,
+        "appraisal_value": 800,
+        "adjusted_unsold_value": 500,
+        "unsold_exposure": 300,
+    })
+    assert bundle["sales_value_ltv"] == 0.6
+    assert bundle["appraisal_ltv"] == 0.75
+    assert bundle["unsold_ltv"] == 0.6
+    assert bundle["senior_ltv"] == 0.5
+
 def test_calculate_ltc():
     assert calculate_ltc(800, 1000) == 0.8
     assert calculate_ltc(800, 0) == 0.0
@@ -75,6 +97,23 @@ def test_calculate_dscr():
 def test_calculate_all_in_cost():
     assert calculate_all_in_cost(1000, 0.05, 0.02) == 0.07
     assert calculate_all_in_cost(0, 0.05, 0.02) == 0.0
+
+def test_tranche_all_in_cost_uses_dated_xirr():
+    cashflows = [
+        {"date": "2026-01-01", "amount": 980},
+        {"date": "2027-01-01", "amount": -1050},
+    ]
+    assert calculate_xnpv(0.0, cashflows) == -70
+    assert calculate_xirr(cashflows) == pytest.approx(1050 / 980 - 1, abs=1e-8)
+    result = calculate_tranche_xirr({"cashFlows": cashflows})
+    assert result["status"] == "calculated"
+    assert result["method"] == "dated_borrower_cashflow_xirr"
+    assert result["value"] == pytest.approx(1050 / 980 - 1, abs=1e-8)
+
+def test_tranche_all_in_cost_requires_dated_cashflows():
+    result = calculate_tranche_xirr({"amount": 1000, "interest_rate": 0.05, "fee_rate": 0.02})
+    assert result["value"] is None
+    assert result["status"] == "insufficient_input"
 
 def test_calculate_exit_sale_rate():
     assert calculate_exit_sale_rate(500, 100, 1000) == 0.6
@@ -133,6 +172,25 @@ def test_simulate_waterfall():
     assert res2[0]["shortfall"] == 55
     assert res2[1]["payment_received"] == 0
 
+def test_tranche_priority_labels_are_normalized_for_pf_metrics_and_waterfall():
+    tranches = [
+        {"tranche": "Tr.B", "amount": 200, "interest_rate": 0.10, "priority": "mezzanine"},
+        {"tranche": "Tr.A", "amount": 100, "interest_rate": 0.05, "priority": "senior"},
+    ]
+    waterfall = simulate_waterfall(105, tranches)
+    assert waterfall[0]["tranche"] == "Tr.A"
+    assert waterfall[0]["payment_received"] == 105
+
+    metrics = calculate_pf_metrics({
+        "tranches": tranches,
+        "total_revenue": 1000,
+        "total_cost": 800,
+        "collateral_value": 200,
+    })
+    assert metrics["metrics"]["senior_ltv"]["value"] == 0.5
+    assert metrics["tranches"][0]["priority_rank"] == 1
+    assert metrics["tranches"][1]["priority_rank"] == 2
+
 def test_calculate_unsold_ltv():
     assert calculate_unsold_ltv(500, 100, 10, 100) == 0.5 # 500 / 1000
     assert calculate_unsold_ltv(500, 100, 10, 100, discount_rate=0.2) == 0.625 # 500 / 800
@@ -158,7 +216,12 @@ def test_calculate_pf_metrics_returns_statuses_and_tranche_costs():
     assert result["metrics"]["ltv"]["value"] == pytest.approx(0.6666666667)
     assert result["metrics"]["ltc"]["value"] == 0.8
     assert result["metrics"]["exit_sale_rate"]["value"] == 0.75
-    assert result["tranches"][0]["all_in_cost"] == pytest.approx(0.07)
+    assert result["metrics"]["sales_value_ltv"]["value"] == pytest.approx(0.6666666667)
+    assert result["metrics"]["ltv"]["basis"] == "gross_sales_value"
+    assert result["metrics"]["appraisal_ltv"]["status"] == "insufficient_input"
+    assert result["tranches"][0]["all_in_cost"] is None
+    assert result["tranches"][0]["all_in_cost_status"] == "insufficient_input"
+    assert result["tranches"][0]["nominal_rate_plus_fee_proxy"] == pytest.approx(0.07)
     assert result["metrics"]["dscr"]["status"] in {"safe", "caution", "high", "critical"}
 
 def test_npv_discounts_future_cashflows():

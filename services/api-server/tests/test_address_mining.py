@@ -1,6 +1,32 @@
 import fitz
 
+from db.repositories.upload_archive_repository import UploadArchiveRepository
 from use_cases.address_mining import mine_addresses_from_text, mine_project_address
+
+
+class _RemoteObjectStorage:
+    backend = "s3"
+
+    def __init__(self):
+        self.objects = {}
+
+    def put(self, key, content, *, content_type=None):
+        from db.object_storage import sha256_bytes
+
+        self.objects[key] = bytes(content)
+        return {"key": key, "size": len(content), "sha256": sha256_bytes(content)}
+
+    def get(self, key):
+        return self.objects[key]
+
+    def exists(self, key):
+        return key in self.objects
+
+    def delete_prefix(self, prefix):
+        return False
+
+    def local_path(self, key):
+        return None
 
 
 def test_mines_no_space_cover_address():
@@ -46,3 +72,35 @@ def test_mine_project_address_reads_archived_pdf(tmp_path, monkeypatch):
 
 def test_mine_project_address_missing_archive_returns_none(tmp_path):
     assert mine_project_address("999", {"source_documents": []}, archive_root=tmp_path) is None
+
+
+def test_mine_project_address_reads_remote_object_storage(tmp_path, monkeypatch):
+    import use_cases.address_mining as mod
+
+    object_storage = _RemoteObjectStorage()
+    repository = UploadArchiveRepository(api_server_root=tmp_path, object_storage=object_storage)
+    archive = repository.archive_upload("p-remote", b"pdf-bytes", "원본사업계획서.pdf", "application/pdf")
+    monkeypatch.setattr(
+        mod,
+        "_pdf_text_bytes",
+        lambda content: "위치: 경기도용인시기흥구상갈동13번지일대",
+    )
+    project = {
+        "source_documents": [
+            {
+                **archive,
+                "documentType": "business_plan",
+                "originalFileName": "원본사업계획서.pdf",
+            }
+        ]
+    }
+
+    mined = mine_project_address(
+        "p-remote",
+        project,
+        upload_archive_repository=repository,
+    )
+
+    assert mined is not None
+    assert mined["address"] == "경기도 용인시 기흥구 상갈동 13"
+    assert mined["provenance"]["documentFileName"] == "원본사업계획서.pdf"

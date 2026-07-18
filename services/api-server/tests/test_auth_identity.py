@@ -106,6 +106,49 @@ def test_project_list_scopes_to_authenticated_session_owner():
     assert "Owner B Project" not in names_for_a
 
 
+def test_strict_tenant_isolation_blocks_cross_tenant_project_access(monkeypatch):
+    client = TestClient(app)
+    for user_id, tenant_id in (("tenant-owner", "tenant-one"), ("tenant-outsider", "tenant-two")):
+        client.post("/auth/tenants", json={"tenantId": tenant_id, "name": tenant_id})
+        client.post(
+            "/auth/users",
+            json={
+                "userId": user_id,
+                "tenantId": tenant_id,
+                "displayName": user_id,
+                "role": "reviewer",
+            },
+        )
+    owner_session = client.post(
+        "/auth/session",
+        json={"userId": "tenant-owner", "tenantId": "tenant-one", "provider": "local-test"},
+    ).json()["session"]["sessionId"]
+    outsider_session = client.post(
+        "/auth/session",
+        json={"userId": "tenant-outsider", "tenantId": "tenant-two", "provider": "local-test"},
+    ).json()["session"]["sessionId"]
+    project = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": owner_session},
+        json={"project": {"name": "Tenant Isolated Project", "type": "residential"}},
+    ).json()
+    project_id = project["project"]["id"]
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+
+    allowed = client.get(
+        f"/projects/{project_id}",
+        headers={"x-realytics-session-id": owner_session},
+    )
+    blocked = client.get(
+        f"/projects/{project_id}",
+        headers={"x-realytics-session-id": outsider_session},
+    )
+
+    assert allowed.status_code == 200
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"]["error"] == "tenant_scope_mismatch"
+
+
 def test_auth_me_returns_anonymous_context_when_user_missing():
     client = TestClient(app)
 
@@ -161,6 +204,41 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
 def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
     client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Reviewer Analysis Contract", "type": "mixed_use"},
+            "source_documents": [
+                {
+                    "documentType": "business_plan",
+                    "originalFileName": "reviewer-analysis-fixture.json",
+                    "archiveId": "reviewer-analysis-fixture",
+                }
+            ],
+            "land": {
+                "pnu": "1111010100100010000",
+                "area_sqm": 1000,
+                "officialLandPricePerSqm": 1000000,
+            },
+            "regulation": {"zoning": "general_commercial"},
+            "legal": {"permitStatus": "reviewed", "securityTrustStatus": "reviewed"},
+            "landEvidence": {"officialLandPrice": {"pricePerSqm": 1000000}},
+            "market": {"manualComparables": [{"id": "comp-1", "pricePerSqm": 10000000}]},
+            "product_mix": [
+                {
+                    "type": "A",
+                    "units": 10,
+                    "avgUnitPrice": 100000000,
+                    "totalRevenue": 1000000000,
+                }
+            ],
+            "feasibility_input": {"total_revenue": 1000000000, "total_cost": 800000000},
+            "schedule": {"months": 24},
+            "pf_structure": [{"tranche": "Senior", "amount": 500000000, "priority": 1}],
+        },
+    )
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
     session = client.post(
         "/auth/session",
         json={
@@ -170,11 +248,13 @@ def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
             "provider": "local-test",
         },
     ).json()["session"]["sessionId"]
-    project_id = client.get("/projects/").json()[0]["project"]["id"]
     response = client.post(
         f"/projects/{project_id}/chief-orchestration/run-pod",
         headers={"x-realytics-session-id": session},
-        json={"podKey": "land_legal", "options": {"useLiveConnectors": False}},
+        json={
+            "podKey": "land_legal",
+            "options": {"useLiveConnectors": False, "autoEnrichLand": False},
+        },
     )
     assert response.status_code == 200
 
@@ -259,6 +339,78 @@ def test_idp_status_does_not_return_secret(monkeypatch):
     assert body["provider"] == "okta"
     assert body["hs256SecretConfigured"] is True
     assert "super-secret-value" not in rendered
+
+
+def test_byok_uses_dedicated_credential_ingest_and_is_revoked_on_logout(monkeypatch):
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
+    client = TestClient(app)
+    user_id = "byok-session-user"
+    tenant_id = "byok-session-tenant"
+    client.post("/auth/tenants", json={"tenantId": tenant_id, "name": "BYOK Tenant"})
+    client.post(
+        "/auth/users",
+        json={
+            "userId": user_id,
+            "tenantId": tenant_id,
+            "role": "reviewer",
+            "displayName": "BYOK User",
+        },
+    )
+    session_id = client.post(
+        "/auth/session",
+        json={"userId": user_id, "tenantId": tenant_id, "provider": "local-test"},
+    ).json()["session"]["sessionId"]
+    headers = {"x-realytics-session-id": session_id}
+
+    rejected = client.post(
+        "/auth/ai-profile",
+        headers=headers,
+        json={"provider": "gemini", "apiKey": "must-not-enter-profile"},
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"]["error"] == "secret_ingest_endpoint_required"
+
+    ingested = client.post(
+        "/auth/ai-credentials",
+        headers=headers,
+        json={
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "apiKey": "test-secret-key-123456",
+        },
+    )
+    assert ingested.status_code == 200
+    body = ingested.json()
+    rendered = json.dumps(body)
+    assert body["profile"]["apiKeyConfigured"] is True
+    assert body["profile"]["credentialRefConfigured"] is True
+    assert "test-secret-key-123456" not in rendered
+    assert "session-secret://" not in rendered
+
+    revoked = client.delete("/auth/ai-credentials/current", headers=headers)
+    assert revoked.status_code == 200
+    assert revoked.json()["credentialRevoked"] is True
+    profile_after_revoke = client.get("/auth/ai-profile", headers=headers).json()["profile"]
+    assert profile_after_revoke["apiKeyConfigured"] is False
+
+    reingested = client.post(
+        "/auth/ai-credentials",
+        headers=headers,
+        json={
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "apiKey": "replacement-secret-key-654321",
+        },
+    )
+    assert reingested.status_code == 200
+
+    logout = client.delete("/auth/session/current", headers=headers)
+    assert logout.status_code == 200
+    assert logout.json()["sessionRevoked"] is True
+    assert logout.json()["profileCredentialRevoked"] is True
+
+    me_after_logout = client.get("/auth/me", headers=headers)
+    assert me_after_logout.json()["authenticated"] is False
 
 
 def _make_hs256_token(claims: dict, secret: str) -> str:

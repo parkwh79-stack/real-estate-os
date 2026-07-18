@@ -159,17 +159,22 @@ def get_object_storage(default_base_dir: Path | str | None = None) -> ObjectStor
 
     REALYTICS_OBJECT_STORAGE = local (default) | s3. For s3, set
     REALYTICS_S3_BUCKET (+ optional REALYTICS_S3_PREFIX / _ENDPOINT_URL / _REGION).
-    Falls back to local on any misconfiguration so the app keeps working.
+    Local storage is a development default. Selecting S3 without a bucket is a
+    configuration error; silently falling back would split the document source
+    of truth across worker hosts.
     """
     backend = (os.environ.get("REALYTICS_OBJECT_STORAGE") or "local").strip().lower()
     if backend == "s3":
         bucket = os.environ.get("REALYTICS_S3_BUCKET")
-        if bucket:
-            return S3ObjectStorage(
-                bucket,
-                os.environ.get("REALYTICS_S3_PREFIX", ""),
-                endpoint_url=os.environ.get("REALYTICS_S3_ENDPOINT_URL"),
-                region=os.environ.get("REALYTICS_S3_REGION"),
-            )
+        if not bucket:
+            raise RuntimeError("REALYTICS_S3_BUCKET is required when REALYTICS_OBJECT_STORAGE=s3")
+        return S3ObjectStorage(
+            bucket,
+            os.environ.get("REALYTICS_S3_PREFIX", ""),
+            endpoint_url=os.environ.get("REALYTICS_S3_ENDPOINT_URL"),
+            region=os.environ.get("REALYTICS_S3_REGION"),
+        )
+    if backend != "local":
+        raise RuntimeError(f"Unsupported REALYTICS_OBJECT_STORAGE backend: {backend}")
     base = default_base_dir or (Path(__file__).resolve().parents[1] / "data" / "runtime" / "uploads")
     return LocalObjectStorage(base)

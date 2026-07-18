@@ -56,7 +56,9 @@ def test_pf_structure_endpoint_returns_metric_statuses():
     assert body["total_pf_amount"] == 700
     assert body["metrics"]["ltv"]["value"] == 0.7
     assert body["metrics"]["ltv"]["status"] == "caution"
-    assert body["tranches"][0]["all_in_cost"] == pytest.approx(0.07)
+    assert body["tranches"][0]["all_in_cost"] is None
+    assert body["tranches"][0]["all_in_cost_status"] == "insufficient_input"
+    assert body["tranches"][0]["nominal_rate_plus_fee_proxy"] == pytest.approx(0.07)
 
 
 def test_risk_assess_endpoint_returns_basic_matrix():
@@ -135,6 +137,26 @@ def test_scenario_restructuring_endpoint_returns_cure_plan():
     assert body["unsoldLtvFix"]["status"] == "action_required"
     assert body["unsoldLtvFix"]["requiredPfReductionOrEquityIncrease"] > 0
     assert body["approvalPath"]["currentStatus"] in {"rework_required", "conditional_approval_candidate"}
+
+
+def test_scenario_engine_rejects_missing_financial_inputs_without_synthetic_values():
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={"project": {"name": "Insufficient Scenario Input", "type": "mixed_use"}},
+    )
+    project_id = created.json()["project"]["id"]
+
+    response = client.post(f"/projects/{project_id}/scenarios/recovery", json={})
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "insufficient_input"
+    assert set(detail["missingFields"]) == {"productMix", "pfStructure"}
+    assert detail["evidenceEligible"] is False
+    runs = client.get(f"/projects/{project_id}/calculation-runs").json()["records"]
+    assert runs == []
+    client.delete(f"/projects/{project_id}")
 
 
 def test_discount_stress_endpoint_persists_calculation_run_and_metrics():
@@ -269,5 +291,28 @@ def test_recovery_scenario_persists_engine_runs_and_risk_locators():
     unsold_breach = next(row for row in unsold_risks if row["key"] == "UNSOLD_LTV_BREACH")
     assert unsold_breach["sourceLocator"]["sourceType"] == "scenario_matrix_cell"
     assert "unsoldLtvMatrix" in unsold_breach["sourceLocator"]["path"]
+
+    client.delete(f"/projects/{project_id}")
+
+
+def test_recovery_scenario_rejects_missing_product_mix_and_pf_structure():
+    client = TestClient(app)
+    created = client.post(
+        "/projects/",
+        json={
+            "project": {"name": "Scenario Missing Inputs"},
+            "feasibility_input": {"total_revenue": 100_000_000},
+        },
+    )
+    project_id = created.json()["project"]["id"]
+
+    response = client.post(f"/projects/{project_id}/scenarios/recovery", json={})
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "insufficient_input"
+    assert detail["dataStatus"] == "insufficient_input"
+    assert set(detail["missingFields"]) == {"productMix", "pfStructure"}
+    assert detail["evidenceEligible"] is False
 
     client.delete(f"/projects/{project_id}")

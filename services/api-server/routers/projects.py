@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response, Query
-from fastapi.responses import FileResponse
 from typing import Dict, Any
 from datetime import datetime, timezone
 import base64
@@ -122,7 +121,8 @@ from use_cases.legal_pod import run_legal_pod_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
-from use_cases.async_jobs import submit_pf_review_job, get_job_store, recover_interrupted_jobs
+from routers.project_jobs import build_project_jobs_router
+from routers.project_source_documents import build_project_source_documents_router
 from use_cases.term_annotation import annotate_terms_use_case
 from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
 from use_cases.covenant_monitoring import (
@@ -167,7 +167,6 @@ from use_cases.report_templates import (
 from use_cases.source_documents import (
     archive_source_document_use_case,
     delete_project_upload_archive_use_case,
-    get_source_document_download_use_case,
     list_source_documents_use_case,
     save_source_document_metadata_use_case,
 )
@@ -297,6 +296,19 @@ def ai_context_from_request(
     user = context.get("user") or {}
     session = context.get("session") or {}
     override = dict(payload_ai_context or {})
+    inline_secret_fields = sorted(
+        key for key in override
+        if str(key).lower() in {"apikey", "api_key", "token", "secret", "password"}
+    )
+    if inline_secret_fields:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "secret_ingest_endpoint_required",
+                "message": "AI credential은 /auth/ai-credentials에서 먼저 등록한 뒤 credentialRef로 사용해야 합니다.",
+                "fields": inline_secret_fields,
+            },
+        )
     if explicit_provider:
         override["provider"] = explicit_provider
     user_id = user.get("userId") or explicit_user_id or "anonymous"
@@ -2717,16 +2729,10 @@ def build_scenario_request_from_project(project: Dict[str, Any], input_data: Dic
                 "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or item.get("price") or 0.0),
                 "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or item.get("revenue") or 0.0)
             })
-    # Fallback if empty
-    if not product_mix:
-        feas_in = project.get("feasibility_input", {})
-        total_rev = float(feas_in.get("total_revenue") or feas_in.get("sales_revenue") or 100000000)
-        product_mix.append({
-            "type": "General",
-            "units": 100,
-            "avgUnitPrice": total_rev / 100.0,
-            "totalRevenue": total_rev
-        })
+    product_mix = [
+        item for item in product_mix
+        if item["units"] > 0 and item["totalRevenue"] > 0
+    ]
 
     # 2. PF Structure
     raw_pf = (
@@ -2748,15 +2754,27 @@ def build_scenario_request_from_project(project: Dict[str, Any], input_data: Dic
                 "interestRate": float(item.get("interestRate") or item.get("interest_rate") or item.get("rate") or 0.0),
                 "feeRate": float(item.get("feeRate") or item.get("fee_rate") or 0.0)
             })
-    # Fallback if empty
+    pf_structure = [item for item in pf_structure if item["amount"] > 0]
+
+    missing_fields = []
+    if not product_mix:
+        missing_fields.append("productMix")
     if not pf_structure:
-        pf_structure.append({
-            "tranche": "Senior",
-            "amount": float(project.get("pf_amount") or 10000000),
-            "priority": 1,
-            "interestRate": 0.065,
-            "feeRate": 0.01
-        })
+        missing_fields.append("pfStructure")
+    if missing_fields:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "insufficient_input",
+                "dataStatus": "insufficient_input",
+                "missingFields": missing_fields,
+                "message": (
+                    "Scenario calculation requires source-backed product mix and PF tranche inputs. "
+                    "No synthetic units, revenue, tranche amount, interest rate, or fee rate was generated."
+                ),
+                "evidenceEligible": False,
+            },
+        )
 
     # 3. Drivers
     drivers = input_data.get("scenarioDrivers") or {}
@@ -3006,12 +3024,6 @@ def analyze_marketability(
             raise HTTPException(status_code=404, detail="Project not found")
     return result
 
-@router.get("/{project_id}/source-documents")
-def list_project_source_documents(project_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return list_source_documents_use_case(source_document_repository(), project_id)
-
 @router.get("/{project_id}/land-evidence")
 def list_project_land_evidence(project_id: str, request: Request, pnu: str | None = None, evidence_type: str | None = None):
     if project_id not in PROJECTS_DB:
@@ -3156,40 +3168,6 @@ def upsert_project_restructuring_cure(project_id: str, request: Request, input_d
         "count": len(records),
         "records": records,
     }
-
-@router.get("/{project_id}/source-documents/{archive_id}/download")
-def download_project_source_document(project_id: str, archive_id: str, request: Request):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    authz = authorize_request(request, "evidence:read")
-    download = get_source_document_download_use_case(
-        source_document_repository(),
-        upload_archive_repository(),
-        project_id,
-        archive_id,
-    )
-    if not download:
-        raise HTTPException(status_code=404, detail="Source document not found")
-
-    record_sensitive_project_event(
-        request,
-        event_type="source_document_download",
-        project_id=project_id,
-        metadata={
-            "archiveId": archive_id,
-            "filename": download.get("filename"),
-            "mediaType": download.get("mediaType"),
-            "fileSizeBytes": download.get("fileSizeBytes"),
-            "archiveIntegrityStatus": download.get("archiveIntegrityStatus"),
-            "authorization": authz.get("authorization"),
-        },
-    )
-
-    return FileResponse(
-        download["path"],
-        media_type=download["mediaType"],
-        filename=download["filename"],
-    )
 
 @router.get("/{project_id}/market-evidence")
 def list_project_market_evidence(project_id: str, run_id: str | None = None):
@@ -4836,9 +4814,14 @@ def run_orchestration_workflow(project_id: str, input_data: Dict[str, Any] | Non
 
 
 @router.post("/{project_id}/orchestrations/pf-review")
-def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | None = None):
+def start_pf_review_orchestration(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:analyze")
 
     input_data = input_data or {}
     source_data = _hydrated_project_source(project_id, input_data)
@@ -4848,71 +4831,6 @@ def start_pf_review_orchestration(project_id: str, input_data: Dict[str, Any] | 
         source_data,
         input_data.get("options", {}),
     )
-
-
-@router.post("/{project_id}/orchestrations/pf-review/async")
-def start_pf_review_orchestration_async(project_id: str, input_data: Dict[str, Any] | None = None):
-    """Enqueue a PF review run and return a job immediately (non-blocking).
-
-    Poll `GET /projects/{id}/jobs/{job_id}` for status/result. In-process MVP
-    queue — see use_cases/async_jobs.py.
-    """
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    input_data = input_data or {}
-    source_data = _hydrated_project_source(project_id, input_data)
-    job = submit_pf_review_job(
-        orchestration_repository(),
-        project_id,
-        source_data,
-        input_data.get("options", {}),
-        background=True,
-    )
-    return {"job": job}
-
-
-@router.get("/{project_id}/jobs")
-def list_project_jobs(project_id: str, limit: int = 50):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return {"jobs": get_job_store().list(project_id=project_id, limit=limit)}
-
-
-@router.get("/{project_id}/jobs/{job_id}")
-def get_project_job(project_id: str, job_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    job = get_job_store().get(job_id)
-    if job is None or job.get("projectId") != project_id:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-def _resubmit_pf_review_job(old_job: Dict[str, Any]) -> Dict[str, Any] | None:
-    """Rebuild project_data from a persisted job and re-enqueue it (recovery)."""
-    project_id = old_job.get("projectId")
-    if project_id not in PROJECTS_DB:
-        return None
-    payload = (old_job.get("params") or {}).get("inputData") or {}
-    source_data = _hydrated_project_source(project_id, payload)
-    return submit_pf_review_job(
-        orchestration_repository(),
-        project_id,
-        source_data,
-        payload.get("options", {}),
-        background=True,
-        resume_payload=payload,
-        recovered_from=old_job.get("jobId"),
-    )
-
-
-@router.post("/{project_id}/jobs/recover")
-def recover_project_jobs(project_id: str, request: Request):
-    """Recover this project's interrupted jobs (queued/running left by a restart)."""
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:read")
-    return recover_interrupted_jobs(_resubmit_pf_review_job, project_id=project_id)
 
 
 @router.get("/{project_id}/orchestrations")
@@ -5233,6 +5151,21 @@ def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# Job lifecycle routes are isolated from this domain router while reusing its
+# canonical project hydration and orchestration repositories.
+jobs_router = build_project_jobs_router(
+    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+    source_builder=_hydrated_project_source,
+    orchestration_repository_factory=orchestration_repository,
+)
+source_documents_router = build_project_source_documents_router(
+    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+    source_document_repository_factory=source_document_repository,
+    upload_archive_repository_factory=upload_archive_repository,
+    audit_recorder=record_sensitive_project_event,
+)
 
 @router.post("/{project_id}/orchestrations/{run_id}/handoffs/{handoff_id}/review")
 def review_project_orchestration_handoff(
