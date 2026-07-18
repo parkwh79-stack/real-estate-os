@@ -7,6 +7,7 @@ import time
 from fastapi.testclient import TestClient
 
 from main import app
+from routers import projects
 
 
 def test_auth_identity_session_and_me_context():
@@ -208,13 +209,6 @@ def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
         "/projects/",
         json={
             "project": {"name": "Reviewer Analysis Contract", "type": "mixed_use"},
-            "source_documents": [
-                {
-                    "documentType": "business_plan",
-                    "originalFileName": "reviewer-analysis-fixture.json",
-                    "archiveId": "reviewer-analysis-fixture",
-                }
-            ],
             "land": {
                 "pnu": "1111010100100010000",
                 "area_sqm": 1000,
@@ -239,6 +233,14 @@ def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
     )
     assert created.status_code == 200
     project_id = created.json()["project"]["id"]
+    projects.source_document_repository().save_upload_metadata(
+        project_id,
+        {
+            "documentType": "business_plan",
+            "originalFileName": "reviewer-analysis-fixture.json",
+            "archiveId": "reviewer-analysis-fixture",
+        },
+    )
     session = client.post(
         "/auth/session",
         json={

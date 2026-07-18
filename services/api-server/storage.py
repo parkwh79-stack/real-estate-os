@@ -1702,6 +1702,137 @@ def list_land_evidence_records(
     return records
 
 
+PUBLIC_REUSABLE_LAND_EVIDENCE_TYPES = {
+    "cadastral_characteristics",
+    "land_use_planning",
+    "building_use",
+    "land_characteristics",
+    "official_land_price",
+}
+PUBLIC_REUSABLE_LAND_EVIDENCE_SOURCE_TYPES = {"public_api", "official_public_api"}
+_PUBLIC_LAND_EVIDENCE_HASH_EXCLUDED_FIELDS = {
+    "projectId",
+    "recordKey",
+    "evidenceId",
+    "parcelKey",
+    "sourceLocator",
+    "createdAt",
+    "updatedAt",
+    "cacheReuse",
+    "payloadHash",
+    "cacheExpiresAt",
+    "publicData",
+    "reuseEligible",
+    "verificationStatus",
+}
+_PUBLIC_LAND_EVIDENCE_PRIVATE_FIELDS = {
+    "tenantId",
+    "tenant_id",
+    "userId",
+    "user_id",
+}
+
+
+def public_land_evidence_payload_hash(record: Dict[str, Any]) -> str:
+    """Hash only immutable public-source payload fields.
+
+    Project/cache bookkeeping is intentionally excluded so the same official
+    response can be linked to another project without changing its integrity
+    identity. Null storage defaults are ignored to keep pre/post-persistence
+    canonicalization identical.
+    """
+    canonical = {
+        key: value
+        for key, value in record.items()
+        if key not in _PUBLIC_LAND_EVIDENCE_HASH_EXCLUDED_FIELDS
+        and key not in _PUBLIC_LAND_EVIDENCE_PRIVATE_FIELDS
+        and value is not None
+    }
+    body = json.dumps(canonical, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def list_reusable_public_land_evidence_records(
+    pnus: list[str],
+    *,
+    as_of: datetime | None = None,
+) -> list[Dict[str, Any]]:
+    """Return fresh public-API parcel facts reusable across projects.
+
+    Private registry, ownership, contracts, and manually uploaded evidence are
+    deliberately excluded. Returned records omit their originating project ID
+    and retain only public-source/version provenance.
+    """
+    normalized_pnus = sorted({str(pnu).strip() for pnu in pnus if str(pnu).strip()})
+    if not normalized_pnus:
+        return []
+    if _use_document_store():
+        state = _load_json_state() or default_state()
+        records = [
+            record
+            for project_records in state.get("land_evidence", {}).values()
+            for record in project_records.values()
+            if isinstance(record, dict) and str(record.get("pnu") or "") in normalized_pnus
+        ]
+    else:
+        placeholders = ",".join("?" for _ in normalized_pnus)
+        query = (
+            "SELECT payload_json FROM land_evidence "
+            f"WHERE pnu IN ({placeholders}) ORDER BY updated_at DESC, record_key"
+        )
+        with _connect_sqlite() as conn:
+            records = [
+                json.loads(row["payload_json"])
+                for row in conn.execute(query, normalized_pnus)
+            ]
+
+    now = as_of or datetime.now(timezone.utc)
+    eligible = []
+    for record in records:
+        if record.get("publicData") is not True or record.get("reuseEligible") is not True:
+            continue
+        if record.get("evidenceType") not in PUBLIC_REUSABLE_LAND_EVIDENCE_TYPES:
+            continue
+        if str(record.get("sourceType") or "").lower() not in PUBLIC_REUSABLE_LAND_EVIDENCE_SOURCE_TYPES:
+            continue
+        if str(record.get("verificationStatus") or "").lower() != "source_verified":
+            continue
+        if any(record.get(field) not in (None, "") for field in _PUBLIC_LAND_EVIDENCE_PRIVATE_FIELDS):
+            continue
+        payload_hash = str(record.get("payloadHash") or "").lower()
+        if payload_hash != public_land_evidence_payload_hash(record):
+            continue
+        expires_at = record.get("cacheExpiresAt")
+        if not expires_at:
+            continue
+        try:
+            if _parse_datetime(expires_at) <= now:
+                continue
+        except (TypeError, ValueError):
+            continue
+        eligible.append(record)
+
+    eligible.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+    latest: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for record in eligible:
+        key = (str(record.get("pnu") or ""), str(record.get("evidenceType") or ""))
+        if key in latest:
+            continue
+        sanitized = {
+            key: value
+            for key, value in record.items()
+            if key != "projectId" and key not in _PUBLIC_LAND_EVIDENCE_PRIVATE_FIELDS
+        }
+        sanitized["cacheReuse"] = {
+            "scope": "public_pnu_evidence",
+            "payloadHash": record.get("payloadHash"),
+            "cachedAt": record.get("updatedAt") or record.get("createdAt"),
+            "expiresAt": record.get("cacheExpiresAt"),
+        }
+        latest[key] = sanitized
+    return list(latest.values())
+
+
 def _stable_deal_state_id(*parts: Any) -> str:
     raw = "|".join(str(part) for part in parts if part is not None and str(part) != "")
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

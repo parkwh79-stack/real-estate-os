@@ -19,6 +19,10 @@ from storage import (
     list_legal_review_records,
     list_permit_review_records,
 )
+from use_cases.legal_review_decisions import (
+    legal_evidence_readiness,
+    legal_human_review_status,
+)
 
 RESOLVED_REVIEW_STATUSES = {"approved", "waived", "resolved"}
 APPROVED_ASSUMPTION_STATUSES = {"approved", "active", "resolved"}
@@ -34,6 +38,24 @@ AUTO_SUPPLEMENT_REVIEW_RISK_TOKENS = {
 # by SEVERITY, excluding only advisory categories. An LLM opinion alone can never
 # gate PASS/FAIL (AGENTS.md §1).
 ADVISORY_REVIEW_CATEGORIES = {"guardrail", "info", "note"}
+LEGAL_REVIEW_COMPLETE_STATUSES = {
+    "clear",
+    "caution",
+    "reviewed",
+    "approved",
+    "conditional",
+}
+PERMIT_REVIEW_COMPLETE_STATUSES = {
+    "clear",
+    "caution",
+    "reviewed",
+    "approved",
+}
+PERMIT_PARSER_VERIFIED_STATUSES = {
+    "verified",
+    "completed",
+    "approved",
+}
 
 
 def _deterministic_review_findings(review: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -156,7 +178,23 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
     latest_permit = permit_reviews[0] if permit_reviews else None
     legal_status = str((latest_legal or {}).get("status") or "not_run").lower()
     permit_status = str((latest_permit or {}).get("status") or "not_run").lower()
-    law_context_connected = bool((latest_legal or {}).get("mcp", {}).get("connected"))
+    permit_parser_status = str(
+        (latest_permit or {}).get("parserStatus") or "not_available"
+    ).lower()
+    permit_evidence_status = str(
+        (latest_permit or {}).get("evidenceStatus") or "missing"
+    ).lower()
+    permit_verified_evidence_count = _non_negative_int(
+        (latest_permit or {}).get("verifiedEvidenceCount")
+    )
+    permit_source_locators = (
+        (latest_permit or {}).get("sourceLocators")
+        if isinstance((latest_permit or {}).get("sourceLocators"), list)
+        else []
+    )
+    legal_evidence = legal_evidence_readiness(latest_legal)
+    legal_human_status = legal_human_review_status(latest_legal)
+    legal_human_review_complete = legal_human_status in {"approved", "counsel_approved"}
     legal_blocking_risks = [
         record for record in risk_records
         if str(record.get("category") or "").lower() == "legal"
@@ -197,11 +235,22 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
             for b in pod_ai_review_blockers[:8]
         ],
         "legalReviewStatus": legal_status,
+        "legalHumanReviewStatus": legal_human_status,
+        "legalEvidenceStatus": legal_evidence["evidenceStatus"],
+        "legalEvidenceVerifiedReferenceCount": legal_evidence["verifiedReferenceCount"],
+        "legalEvidenceVerifiedCitationCount": legal_evidence["verifiedCitationCount"],
+        "legalEvidenceRequiredClaimCount": legal_evidence["requiredClaimCount"],
+        "legalEvidenceVerifiedClaimCount": legal_evidence["verifiedClaimCount"],
+        "legalEvidenceClaimCoverageComplete": legal_evidence["claimCoverageComplete"],
+        "legalEvidenceSnapshotId": legal_evidence["evidenceSnapshotId"],
+        "legalEvidenceSnapshotGateEligible": legal_evidence["snapshotGateEligible"],
+        "legalEvidenceStale": legal_evidence["stale"],
+        "legalEvidenceOpenConflictCount": legal_evidence["openConflictCount"],
         "permitReviewStatus": permit_status,
+        "permitParserStatus": permit_parser_status,
+        "permitEvidenceStatus": permit_evidence_status,
+        "permitVerifiedEvidenceCount": permit_verified_evidence_count,
         "legalBlockingRiskCount": len(legal_blocking_risks),
-        "koreanLawMcpStatus": (latest_legal or {}).get("mcp", {}).get("status", "not_run"),
-        "koreanLawMcpFailureReason": (latest_legal or {}).get("mcp", {}).get("failureReason"),
-        "koreanLawMcpConnected": law_context_connected,
     })
 
     context["gates"].extend([
@@ -279,20 +328,42 @@ def build_deal_state_approval_readiness(project_id: str) -> Dict[str, Any]:
         ),
         _gate(
             "LEGAL_POD_REVIEW_COMPLETE",
-            bool(latest_legal) and not legal_blocking_risks,
+            bool(latest_legal)
+            and legal_status in LEGAL_REVIEW_COMPLETE_STATUSES
+            and not legal_blocking_risks,
             "Legal Pod review must be run and all blocking legal issues must be resolved, waived, or cured.",
             "blocking",
         ),
         _gate(
             "PERMIT_REVIEW_AVAILABLE",
-            bool(latest_permit) and permit_status not in {"not_run", "missing"},
-            "Permit review evidence and status must be available before approval readiness.",
+            bool(latest_permit)
+            and permit_status in PERMIT_REVIEW_COMPLETE_STATUSES
+            and permit_parser_status in PERMIT_PARSER_VERIFIED_STATUSES
+            and permit_evidence_status == "verified"
+            and permit_verified_evidence_count > 0
+            and bool(permit_source_locators),
+            (
+                "Permit/regulation review requires approved parser output, "
+                "at least one verified source-located evidence item, and a "
+                "non-blocking review status."
+            ),
             "blocking",
         ),
         _gate(
             "KOREAN_LAW_EVIDENCE_AVAILABLE",
-            bool(latest_legal) and law_context_connected,
-            "Korean Law MCP or official law API evidence must be connected for approval-grade legal review.",
+            bool(latest_legal) and legal_evidence["pass"],
+            (
+                "Legal Intelligence evidence must have a gate-eligible sealed "
+                "snapshot, at least one exact verified citation, current "
+                "source lineage, complete required-claim coverage, and no "
+                "open conflicts."
+            ),
+            "blocking",
+        ),
+        _gate(
+            "LEGAL_HUMAN_REVIEW_COMPLETE",
+            bool(latest_legal) and legal_human_review_complete,
+            "A trusted legal reviewer or counsel must approve the Legal Pod review.",
             "blocking",
         ),
     ])
@@ -315,7 +386,8 @@ def deal_state_approval_actions(gates: List[Dict[str, Any]]) -> List[str]:
         "DEAL_STATE_SOURCE_LOCATOR_COMPLETENESS_SUFFICIENT": "Resolve SOURCE_LOCATOR_MISSING or EVIDENCE_TRACE_WEAK risks before approval.",
         "LEGAL_POD_REVIEW_COMPLETE": "Run Legal Pod, attach parcel-level registry/encumbrance evidence, and resolve or waive legal blockers.",
         "PERMIT_REVIEW_AVAILABLE": "Attach permit, zoning, law, or contract review evidence and run the permit review.",
-        "KOREAN_LAW_EVIDENCE_AVAILABLE": "Configure the Korean Law MCP bridge or LAW_OC and rerun Legal Pod so statutory references and citation checks are persisted.",
+        "KOREAN_LAW_EVIDENCE_AVAILABLE": "Refresh Legal Intelligence from an authoritative source, resolve citation conflicts, and persist at least one verified statutory reference.",
+        "LEGAL_HUMAN_REVIEW_COMPLETE": "Have an authorized legal reviewer or counsel approve the verified Legal Pod review.",
     }
     return list(dict.fromkeys(
         action_by_code.get(gate.get("code"), gate.get("message", "Review Deal State approval gate."))
@@ -507,3 +579,10 @@ def _sample_keys(records: List[Dict[str, Any]], limit: int = 5) -> List[str]:
         str(record.get("key") or record.get("recordId") or record.get("calculationRunId") or "unknown")
         for record in records[:limit]
     ]
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0

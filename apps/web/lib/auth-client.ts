@@ -1,3 +1,6 @@
+import type { Session as SupabaseSession } from "@supabase/supabase-js";
+import { getSupabaseBrowserClient } from "./supabase-client";
+
 // Browser calls stay same-origin so local browser security extensions do not
 // block the API. Next.js forwards /api/backend/* to the FastAPI service.
 export const apiBase = typeof window === "undefined" ? "http://127.0.0.1:8000" : "/api/backend";
@@ -25,10 +28,23 @@ export interface StoredAuthSession {
   user: RealyticsUser;
   session: RealyticsSession;
   permissions: string[];
+  authProvider?: "realytics" | "supabase";
+  accessToken?: string;
+  accessTokenExpiresAt?: number;
 }
 
 const STORAGE_KEY = "realytics.auth.session.v1";
 const TRANSIENT_AI_SECRET_PREFIX = "realytics.ai.session.";
+
+export interface ResolvedIdentity {
+  authenticated: boolean;
+  user: RealyticsUser;
+  session?: RealyticsSession;
+  permissions?: string[];
+  authSource?: string;
+  identityProvider?: Record<string, unknown>;
+  limitations?: string[];
+}
 
 export function getStoredAuthSession(): StoredAuthSession | null {
   if (typeof window === "undefined") return null;
@@ -43,10 +59,15 @@ export function getStoredAuthSession(): StoredAuthSession | null {
   }
 }
 
-export function setStoredAuthSession(value: StoredAuthSession) {
+export function setStoredAuthSession(
+  value: StoredAuthSession,
+  options: { notify?: boolean } = {},
+) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
-  window.dispatchEvent(new CustomEvent("realytics-auth-session-changed"));
+  if (options.notify !== false) {
+    window.dispatchEvent(new CustomEvent("realytics-auth-session-changed"));
+  }
 }
 
 export function clearStoredAuthSession() {
@@ -74,6 +95,13 @@ export function clearTransientAiSecrets() {
 
 export function authHeaders(fallbackUserId = "web"): Record<string, string> {
   const stored = getStoredAuthSession();
+  if (stored?.authProvider === "supabase" && stored.accessToken) {
+    return {
+      Authorization: `Bearer ${stored.accessToken}`,
+      "X-REALYTICS-USER-ID": stored.user.userId,
+      ...(stored.user.tenantId ? { "X-REALYTICS-TENANT-ID": stored.user.tenantId } : {}),
+    };
+  }
   if (stored?.session?.sessionId) {
     return {
       "X-REALYTICS-SESSION-ID": stored.session.sessionId,
@@ -82,6 +110,76 @@ export function authHeaders(fallbackUserId = "web"): Record<string, string> {
     };
   }
   return { "X-REALYTICS-USER-ID": fallbackUserId };
+}
+
+export async function signInWithSupabasePassword(input: {
+  email: string;
+  password: string;
+}) {
+  const client = getSupabaseBrowserClient();
+  const { data, error } = await client.auth.signInWithPassword({
+    email: input.email.trim(),
+    password: input.password,
+  });
+  if (error) throw new Error(error.message);
+  if (!data.session) throw new Error("Supabase 로그인 세션을 만들지 못했습니다.");
+  return await persistSupabaseSession(data.session);
+}
+
+export async function signUpWithSupabasePassword(input: {
+  email: string;
+  password: string;
+  displayName?: string;
+}) {
+  const client = getSupabaseBrowserClient();
+  const { data, error } = await client.auth.signUp({
+    email: input.email.trim(),
+    password: input.password,
+    options: {
+      data: {
+        display_name: input.displayName?.trim() || input.email.trim(),
+      },
+    },
+  });
+  if (error) throw new Error(error.message);
+  if (!data.session) {
+    return {
+      stored: null,
+      requiresEmailConfirmation: true,
+    };
+  }
+  return {
+    stored: await persistSupabaseSession(data.session),
+    requiresEmailConfirmation: false,
+  };
+}
+
+export async function refreshSupabaseStoredSession(
+  stored: StoredAuthSession,
+): Promise<StoredAuthSession | null> {
+  if (stored.authProvider !== "supabase") return stored;
+  const client = getSupabaseBrowserClient();
+  const { data, error } = await client.auth.getSession();
+  if (error || !data.session) return null;
+  const refreshed: StoredAuthSession = {
+    ...stored,
+    accessToken: data.session.access_token,
+    accessTokenExpiresAt: data.session.expires_at,
+    session: {
+      ...stored.session,
+      expiresAt: data.session.expires_at
+        ? new Date(data.session.expires_at * 1000).toISOString()
+        : stored.session.expiresAt,
+    },
+  };
+  setStoredAuthSession(refreshed, { notify: false });
+  return refreshed;
+}
+
+export async function signOutSupabaseSession() {
+  const client = getSupabaseBrowserClient();
+  const { error } = await client.auth.signOut();
+  if (error) throw new Error(error.message);
 }
 
 export async function createLocalPilotSession(input: {
@@ -180,20 +278,51 @@ export async function loginLocalPilotSession(input: {
 }
 
 
-export async function resolveCurrentIdentity(sessionId?: string) {
+export async function resolveCurrentIdentity(
+  sessionId?: string,
+  bearerToken?: string,
+): Promise<ResolvedIdentity> {
   const headers: Record<string, string> = {};
-  const resolvedSessionId = sessionId ?? getStoredAuthSession()?.session.sessionId;
-  if (resolvedSessionId) headers["X-REALYTICS-SESSION-ID"] = resolvedSessionId;
+  const stored = getStoredAuthSession();
+  const resolvedBearerToken = bearerToken
+    ?? (stored?.authProvider === "supabase" ? stored.accessToken : undefined);
+  if (resolvedBearerToken) {
+    headers.Authorization = `Bearer ${resolvedBearerToken}`;
+  } else {
+    const resolvedSessionId = sessionId ?? stored?.session.sessionId;
+    if (resolvedSessionId) headers["X-REALYTICS-SESSION-ID"] = resolvedSessionId;
+  }
   const res = await fetch(`${apiBase}/auth/me`, { cache: "no-store", headers }).then(assertOk);
-  return await res.json() as {
-    authenticated: boolean;
-    user: RealyticsUser;
-    session?: RealyticsSession;
-    permissions?: string[];
-    authSource?: string;
-    identityProvider?: Record<string, unknown>;
-    limitations?: string[];
+  return await res.json() as ResolvedIdentity;
+}
+
+export async function persistSupabaseSession(
+  supabaseSession: SupabaseSession,
+): Promise<StoredAuthSession> {
+  const identity = await resolveCurrentIdentity(undefined, supabaseSession.access_token);
+  if (!identity.authenticated) {
+    throw new Error("Supabase 계정이 REALYTICS 사용자로 승인되지 않았습니다.");
+  }
+  const stored: StoredAuthSession = {
+    authProvider: "supabase",
+    accessToken: supabaseSession.access_token,
+    accessTokenExpiresAt: supabaseSession.expires_at,
+    user: identity.user,
+    session: {
+      sessionId: `supabase:${supabaseSession.user.id}`,
+      userId: identity.user.userId,
+      tenantId: identity.user.tenantId,
+      provider: "supabase",
+      host: "web",
+      createdAt: new Date().toISOString(),
+      expiresAt: supabaseSession.expires_at
+        ? new Date(supabaseSession.expires_at * 1000).toISOString()
+        : undefined,
+    },
+    permissions: identity.permissions ?? [],
   };
+  setStoredAuthSession(stored);
+  return stored;
 }
 
 async function assertOk(res: Response) {

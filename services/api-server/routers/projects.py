@@ -13,7 +13,11 @@ from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
 from agents.parser_provenance import attach_parser_field_provenance
 from agents.risk_report_workbook_importer import import_risk_report_workbook
 
-from core.authz import authorize_request, identity_context_from_request
+from core.authz import (
+    authorize_request,
+    enforce_project_tenant_scope,
+    identity_context_from_request,
+)
 from core.calculations import (
     calculate_cashflow_max_minus,
     build_monthly_cash_flow,
@@ -40,6 +44,10 @@ from db.repositories.project_snapshot_repository import ProjectSnapshotRepositor
 from db.repositories.report_repository import ReportRepository
 from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
+from db.repositories.legal_intelligence_repository import (
+    PostgresLegalTenantOverlayRepository,
+)
+from db.postgres import postgres_configured
 from storage import (
     get_evidence_graph_record,
     get_chief_pod_artifact_record,
@@ -83,8 +91,9 @@ from storage import (
     upsert_restructuring_cure_record,
     upsert_risk_register_record,
     upsert_calculation_run_record,
+    upsert_legal_review_record,
 )
-from use_cases.cash_flow import run_cash_flow_use_case
+from use_cases.cash_flow import build_cash_flow_request_use_case, run_cash_flow_use_case
 from agent_platform.runtime import StorageAgentRunRepository
 from agent_platform.contracts import LearningCandidate
 from agent_platform.learning import LearningLifecycleService
@@ -119,12 +128,15 @@ from use_cases.parsed_fact_validation import validate_parsed_facts_for_pod
 from use_cases.calculation_run_capture import scenario_engine_run_payloads, stress_test_run_payload
 from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.legal_pod import run_legal_pod_use_case
+from use_cases.legal_review_decisions import decide_legal_review_use_case
+from use_cases.legal_intelligence import seal_legal_review_evidence_snapshot
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
 from routers.project_jobs import build_project_jobs_router
 from routers.project_parser_v2 import build_project_parser_v2_router
 from routers.project_source_documents import build_project_source_documents_router
+from use_cases.parser_v2_records import ParserV2RecordStore
 from use_cases.parser_v2_runtime import build_parser_v2_runtime_dependencies
 from use_cases.term_annotation import annotate_terms_use_case
 from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
@@ -176,6 +188,7 @@ from use_cases.source_documents import (
 from use_cases.workbook_import_approval import (
     approve_feasibility_workbook_import_use_case,
     approve_risk_report_workbook_import_use_case,
+    feasibility_study_draft_hash,
     persist_feasibility_workbook_candidate_use_case,
 )
 
@@ -193,6 +206,7 @@ REPORTS_DB = {}
 MARKET_EVIDENCE_DB = {}
 PROJECT_SNAPSHOTS_DB = {}
 project_id_counter = 1
+PARSER_V2_RUNTIME_DEPENDENCIES: Dict[str, Any] = {}
 
 def persist_state() -> None:
     save_state(
@@ -257,6 +271,10 @@ def source_document_repository() -> SourceDocumentRepository:
 
 def upload_archive_repository() -> UploadArchiveRepository:
     return UploadArchiveRepository()
+
+def parser_v2_record_store() -> ParserV2RecordStore:
+    factory = PARSER_V2_RUNTIME_DEPENDENCIES.get("record_store_factory")
+    return factory() if callable(factory) else ParserV2RecordStore()
 
 def market_evidence_repository() -> MarketEvidenceRepository:
     return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state)
@@ -342,6 +360,75 @@ def stamp_project_identity(project_data: Dict[str, Any], request: Request) -> Di
     metadata["last_updated_by"] = user.get("userId")
     record["_meta"] = metadata
     return record
+
+
+_SERVER_MANAGED_PROJECT_AUTHORITY_FIELDS = frozenset(
+    {
+        "_meta",
+        "source_documents",
+        "sourceDocuments",
+        "canonicalFeasibilityStudyV2",
+        "canonical_feasibility_study_v2",
+        "feasibilityStudyV2",
+        "feasibility_study_v2",
+        "feasibilityStudyV2Draft",
+        "feasibility_study_v2_draft",
+        "approvedInputSnapshot",
+        "approved_input_snapshot",
+        "buildableEnvelope",
+        "buildable_envelope",
+        "regulatoryConstraintSnapshot",
+        "regulatory_constraint_snapshot",
+        "legalPermitReview",
+        "legal_permit_review",
+    }
+)
+
+
+def reject_server_managed_project_authority_fields(project_data: Dict[str, Any]) -> None:
+    """Keep general project CRUD outside server-owned evidence/approval authority."""
+    attempted_fields = sorted(
+        field for field in project_data if field in _SERVER_MANAGED_PROJECT_AUTHORITY_FIELDS
+    )
+    if attempted_fields:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "server_managed_project_fields",
+                "message": "Server-managed project fields require their dedicated workflow endpoint.",
+                "fields": attempted_fields,
+            },
+        )
+
+
+def verified_workbook_approval_source_documents(project_id: str) -> list[Dict[str, Any]]:
+    """Return only project-scoped archive metadata backed by matching source bytes."""
+    archive_repository = upload_archive_repository()
+    verified_documents: list[Dict[str, Any]] = []
+    for document in list_source_documents_use_case(source_document_repository(), project_id):
+        if not isinstance(document, dict):
+            continue
+        resolved = archive_repository.resolve_download_metadata(project_id, document)
+        if not resolved:
+            continue
+        archive_id = str(resolved.get("archiveId") or "").strip()
+        claimed_ids = {
+            str(document.get(key) or "").strip()
+            for key in ("archiveId", "originalFileHash", "sha256")
+            if str(document.get(key) or "").strip()
+        }
+        if not archive_id or any(claimed_id != archive_id for claimed_id in claimed_ids):
+            continue
+        verified_documents.append(
+            {
+                **document,
+                "archiveId": archive_id,
+                "originalFileHash": archive_id,
+                "sha256": archive_id,
+                "archiveIntegrityStatus": "verified",
+            }
+        )
+    return verified_documents
 
 def project_visible_to_identity(project: Dict[str, Any], request: Request) -> bool:
     """Keep login dashboards scoped to the authenticated user's stored projects."""
@@ -1187,10 +1274,16 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
         feasibility_study_v2_draft = None
         try:
             validation = validate_feasibility_workbook(tmp_path)
+            validation["sourceDocumentHash"] = upload_meta["originalFileHash"]
+            upload_meta["validationStatus"] = validation.get("status")
+            upload_meta["validation"] = validation
             feasibility_study_v2_draft = import_feasibility_study_from_workbook(
                 tmp_path,
                 project_id=project_id,
                 source_document=upload_meta,
+            )
+            upload_meta["feasibilityStudyV2DraftHash"] = feasibility_study_draft_hash(
+                feasibility_study_v2_draft
             )
         except Exception as exc:
             validation = {
@@ -1201,7 +1294,9 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
                     "Upload an .xlsx workbook compatible with the realytics-fs-xlsx-v1 contract or legacy Bonri workbook profile."
                 ],
             }
+        validation["sourceDocumentHash"] = upload_meta["originalFileHash"]
         upload_meta["validationStatus"] = validation.get("status")
+        upload_meta["validation"] = validation
         return {
             "project_id": project_id,
             "upload": upload_meta,
@@ -1462,6 +1557,7 @@ def check_intake_continuation(request: Request, input_data: Dict[str, Any] | Non
 
 @router.post("/")
 def create_project(project_data: Dict[str, Any], request: Request):
+    reject_server_managed_project_authority_fields(project_data)
     return create_project_use_case(project_repository(), stamp_project_identity(project_data, request))
 
 @router.get("/{project_id}")
@@ -1473,6 +1569,7 @@ def get_project(project_id: str):
 
 @router.put("/{project_id}")
 def update_project(project_id: str, project_data: Dict[str, Any]):
+    reject_server_managed_project_authority_fields(project_data)
     project = update_project_use_case(project_repository(), project_id, project_data)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1910,14 +2007,52 @@ def approve_project_feasibility_workbook_import(
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "assumption:override")
+    authenticated_actor = str(
+        ((authz.get("user") or {}).get("userId") or user_id_from_request(request))
+    )
+    claimed_approver = str(
+        input_data.get("approvedBy")
+        or input_data.get("approved_by")
+        or ""
+    ).strip()
+    if (
+        authz.get("authenticated") is True
+        and claimed_approver
+        and claimed_approver != authenticated_actor
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "approval_actor_mismatch",
+                "message": (
+                    "approvedBy must match the authenticated reviewer identity"
+                ),
+            },
+        )
+    # Legacy permissive mode keeps the explicit actor only for local/offline
+    # fixtures. Hardened deployments always bind approval to the verified
+    # principal above, so callers cannot impersonate another reviewer.
+    approved_by = (
+        authenticated_actor
+        if authz.get("authenticated") is True
+        else claimed_approver or authenticated_actor
+    )
+    project_metadata = dict((PROJECTS_DB.get(project_id) or {}).get("_meta") or {})
+    tenant_id = str(
+        tenant_id_from_request(request)
+        or project_metadata.get("tenantId")
+        or project_metadata.get("tenant_id")
+        or "default"
+    )
     try:
         result = approve_feasibility_workbook_import_use_case(
             project_repository(),
             project_id,
             input_data,
-            approved_by=input_data.get("approvedBy")
-            or input_data.get("approved_by")
-            or user_id_from_request(request),
+            approved_by=approved_by,
+            known_source_documents=verified_workbook_approval_source_documents(project_id),
+            parser_v2_record_store=parser_v2_record_store(),
+            tenant_id=tenant_id,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1942,7 +2077,7 @@ def persist_project_feasibility_workbook_candidate(
     request: Request,
     input_data: Dict[str, Any],
 ):
-    """Persist a validated workbook draft for Pod calculations without approval."""
+    """Persist a reviewable workbook draft without changing Pod authority."""
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "project:analyze")
@@ -1957,7 +2092,7 @@ def persist_project_feasibility_workbook_candidate(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    auto = _maybe_auto_reanalyze(project_id, ["feasibility_workbook"])
+    auto = {"triggered": False, "reason": "candidate_requires_explicit_approval"}
     result["autoReanalysis"] = auto
     record_sensitive_project_event(
         request,
@@ -1967,7 +2102,7 @@ def persist_project_feasibility_workbook_candidate(
             "importId": result.get("importId"),
             "status": result.get("status"),
             "authorization": authz.get("authorization"),
-            "autoReanalysisTriggered": bool(auto),
+            "autoReanalysisTriggered": bool(auto.get("triggered")),
         },
     )
     return result
@@ -2578,11 +2713,12 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
 def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = None):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    request_data = input_data or {}
-    if request_data.get("requestType") != "cash_flow_run_request_v1" and request_data.get("cashFlowRunRequest", {}).get("requestType") != "cash_flow_run_request_v1" and request_data.get("cashFlowRunRequestDraft", {}).get("requestType") != "cash_flow_run_request_v1":
-        request_data = analyze_development_feasibility_use_case(PROJECTS_DB[project_id], request_data).get("cashFlowRunRequestDraft") or request_data
     project = PROJECTS_DB[project_id]
-    result = run_cash_flow_use_case(project, request_data)
+    try:
+        request_data = build_cash_flow_request_use_case(project, input_data or {})
+        result = run_cash_flow_use_case(project, request_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data=request_data)
 
     # A Cash Flow rerun is the financial starting point for the four review
@@ -3187,23 +3323,102 @@ def review_project_market_evidence(project_id: str, input_data: Dict[str, Any]):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @router.post("/{project_id}/legal/review")
-def review_legal_and_permits(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
+def review_legal_and_permits(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
+    project = PROJECTS_DB.get(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    return review_legal_and_permits_use_case(PROJECTS_DB[project_id], input_data)
+    authorization = authorize_request(request, "project:analyze")
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "authentication_required",
+                "scope": "legal_review",
+            },
+        )
+    enforce_project_tenant_scope(request, project)
+    return review_legal_and_permits_use_case(project, input_data)
 
 
 @router.post("/{project_id}/legal-pod/run")
 def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Run the independent Legal Pod and persist its PF handoff/evidence ledger."""
-    if project_id not in PROJECTS_DB:
+    project = PROJECTS_DB.get(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "project:analyze")
-    project_data = dict(PROJECTS_DB[project_id])
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "authentication_required",
+                "scope": "legal_pod",
+            },
+        )
+    enforce_project_tenant_scope(request, project)
+    project_data = dict(project)
     project_data["landEvidence"] = {
         "records": list_land_evidence_records(project_id),
     }
     result = run_legal_pod_use_case(project_id, project_data, input_data or {})
+    user = authorization.get("user") or {}
+    metadata = (
+        project.get("_meta")
+        if isinstance(project.get("_meta"), dict)
+        else {}
+    )
+    tenant_id = str(
+        user.get("tenantId")
+        or metadata.get("tenantId")
+        or metadata.get("tenant_id")
+        or ""
+    ).strip()
+    actor_id = str(user.get("userId") or "").strip()
+    snapshot_persistence: Dict[str, Any] = {
+        "sealed": False,
+        "reason": (
+            "postgres_not_configured"
+            if not postgres_configured()
+            else "trusted_tenant_or_actor_missing"
+        ),
+    }
+    if postgres_configured() and tenant_id and actor_id:
+        try:
+            overlay = PostgresLegalTenantOverlayRepository(
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+            sealed = seal_legal_review_evidence_snapshot(
+                result["legalReview"],
+                repository=overlay,
+                created_by=actor_id,
+            )
+            result["legalReview"] = sealed["legalReview"]
+            upsert_legal_review_record(project_id, result["legalReview"])
+            snapshot_persistence = {
+                key: value
+                for key, value in sealed.items()
+                if key != "legalReview"
+            }
+        except (TypeError, ValueError) as exc:
+            # Contract/lineage failures stay visible but never promote the
+            # review. Avoid returning SQL/provider details to the caller.
+            snapshot_persistence = {
+                "sealed": False,
+                "reason": "verified_snapshot_contract_rejected",
+                "errorType": type(exc).__name__,
+            }
+        except Exception as exc:
+            snapshot_persistence = {
+                "sealed": False,
+                "reason": "verified_snapshot_store_unavailable",
+                "errorType": type(exc).__name__,
+            }
+    result["evidenceSnapshotPersistence"] = snapshot_persistence
     project_data["legalPermitReview"] = result["legalReview"]
     project_data["legalReview"] = result["legalReview"]
     project_data["permitReview"] = result["permitReview"]
@@ -3222,6 +3437,20 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
             "permitReviewId": result["permitReview"].get("reviewId"),
             "status": result["legalReview"].get("status"),
             "mcp": result["legalReview"].get("mcp"),
+            "evidenceSnapshot": {
+                "sealed": snapshot_persistence.get("sealed"),
+                "reason": snapshot_persistence.get("reason"),
+                "legalEvidenceSnapshotId": (
+                    (snapshot_persistence.get("snapshot") or {}).get(
+                        "legalEvidenceSnapshotId"
+                    )
+                    if isinstance(
+                        snapshot_persistence.get("snapshot"),
+                        dict,
+                    )
+                    else None
+                ),
+            },
             "authorization": authorization.get("authorization"),
         },
     )
@@ -3230,18 +3459,115 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
 
 @router.get("/{project_id}/legal-reviews")
 def list_project_legal_reviews(project_id: str, request: Request, limit: int = Query(20, ge=1, le=200)):
-    if project_id not in PROJECTS_DB:
+    project = PROJECTS_DB.get(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:read")
+    authorization = authorize_request(request, "project:read")
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "authentication_required", "scope": "legal_review"},
+        )
+    enforce_project_tenant_scope(request, project)
     from storage import list_legal_review_records
     return {"projectId": project_id, "items": list_legal_review_records(project_id, limit)}
 
 
+@router.post("/{project_id}/legal-reviews/{review_id}/decision")
+def decide_project_legal_review(
+    project_id: str,
+    review_id: str,
+    request: Request,
+    payload: Dict[str, Any],
+):
+    """Record an append-only, principal-bound legal human decision."""
+
+    project = PROJECTS_DB.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    authorization = authorize_request(request, "legal:review")
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "authenticated_reviewer_required",
+                "message": (
+                    "Legal review decisions require an authenticated reviewer; "
+                    "permissive pilot identity is not sufficient."
+                ),
+            },
+        )
+    enforce_project_tenant_scope(request, project)
+    user = authorization.get("user") or {}
+    reviewer_id = str(user.get("userId") or "").strip()
+    app_role = str(authorization.get("role") or user.get("role") or "").lower()
+    legal_role_by_app_role = {
+        "admin": "tenant_admin",
+        "legal_reviewer": "legal_reviewer",
+        "external_counsel": "external_counsel",
+        "compliance_officer": "compliance_officer",
+    }
+    reviewer_role = legal_role_by_app_role.get(app_role)
+    if reviewer_role is None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "legal_reviewer_role_required",
+                "role": app_role,
+            },
+        )
+    metadata = project.get("_meta") if isinstance(project.get("_meta"), dict) else {}
+    tenant_id = str(user.get("tenantId") or metadata.get("tenantId") or "").strip()
+    decision_writer = None
+    if postgres_configured() and tenant_id:
+        normalized_repository = PostgresLegalTenantOverlayRepository(
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        decision_writer = normalized_repository.append_review_decision
+    try:
+        result = decide_legal_review_use_case(
+            project_id,
+            review_id,
+            payload,
+            reviewer_id=reviewer_id,
+            reviewer_role=reviewer_role,
+            decision_writer=decision_writer,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="legal_review_decision",
+        project_id=project_id,
+        metadata={
+            "legalReviewId": review_id,
+            "decisionId": result["decision"].get("decisionId"),
+            "decisionStatus": result["decision"].get("decisionStatus"),
+            "reviewerRole": reviewer_role,
+            "normalizedDecisionPersistence": result.get(
+                "normalizedDecisionPersistence"
+            ),
+            "authorization": authorization.get("authorization"),
+        },
+    )
+    return result
+
+
 @router.get("/{project_id}/permit-reviews")
 def list_project_permit_reviews(project_id: str, request: Request, limit: int = Query(20, ge=1, le=200)):
-    if project_id not in PROJECTS_DB:
+    project = PROJECTS_DB.get(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:read")
+    authorization = authorize_request(request, "project:read")
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "authentication_required", "scope": "permit_review"},
+        )
+    enforce_project_tenant_scope(request, project)
     from storage import list_permit_review_records
     return {"projectId": project_id, "items": list_permit_review_records(project_id, limit)}
 
@@ -3249,9 +3575,16 @@ def list_project_permit_reviews(project_id: str, request: Request, limit: int = 
 @router.get("/{project_id}/legal-pod/law-changes")
 def list_project_legal_law_changes(project_id: str, request: Request, limit: int = Query(100, ge=1, le=500)):
     """Return source-backed legal reference changes across Legal Pod runs."""
-    if project_id not in PROJECTS_DB:
+    project = PROJECTS_DB.get(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:read")
+    authorization = authorize_request(request, "project:read")
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "authentication_required", "scope": "legal_change"},
+        )
+    enforce_project_tenant_scope(request, project)
     records = [
         record for record in list_deal_state_records(project_id)
         if record.get("recordType") == "legal_law_change"
@@ -4774,7 +5107,11 @@ def kakao_intake_plan(project_id: str, input_data: Dict[str, Any] | None = None)
 
 
 @router.post("/{project_id}/orchestration/run-workflow")
-def run_orchestration_workflow(project_id: str, input_data: Dict[str, Any] | None = None):
+def run_orchestration_workflow(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
     """Run only the agents required by a user-selected workflow key.
 
     When ``channel == 'kakao'`` the response also carries a KakaoTalk-safe
@@ -4782,6 +5119,16 @@ def run_orchestration_workflow(project_id: str, input_data: Dict[str, Any] | Non
     """
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
+    authorization = authorize_request(request, "project:analyze")
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "authentication_required",
+                "scope": "orchestration_workflow",
+            },
+        )
+    enforce_project_tenant_scope(request, PROJECTS_DB[project_id])
     input_data = input_data or {}
     workflow = input_data.get("workflow")
     if not workflow:
@@ -4818,7 +5165,16 @@ def start_pf_review_orchestration(
 ):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:analyze")
+    authorization = authorize_request(request, "project:analyze")
+    if not authorization.get("authenticated"):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "authentication_required",
+                "scope": "pf_review_orchestration",
+            },
+        )
+    enforce_project_tenant_scope(request, PROJECTS_DB[project_id])
 
     input_data = input_data or {}
     source_data = _hydrated_project_source(project_id, input_data)
@@ -5163,14 +5519,15 @@ source_documents_router = build_project_source_documents_router(
     upload_archive_repository_factory=upload_archive_repository,
     audit_recorder=record_sensitive_project_event,
 )
+PARSER_V2_RUNTIME_DEPENDENCIES = build_parser_v2_runtime_dependencies(
+    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+)
 parser_v2_router = build_project_parser_v2_router(
     project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
     source_document_repository_factory=source_document_repository,
     upload_archive_repository_factory=upload_archive_repository,
     audit_recorder=record_sensitive_project_event,
-    **build_parser_v2_runtime_dependencies(
-        project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
-    ),
+    **PARSER_V2_RUNTIME_DEPENDENCIES,
 )
 
 @router.post("/{project_id}/orchestrations/{run_id}/handoffs/{handoff_id}/review")

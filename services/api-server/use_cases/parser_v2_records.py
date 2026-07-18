@@ -4,11 +4,19 @@ import copy
 import hashlib
 import hmac
 import json
-import re
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
 
-from parsing_platform.contracts import SourceLocator
+from parsing_platform.canonical_fields import (
+    CANONICAL_FIELD_NAMESPACE_VERSION,
+    CanonicalFieldResolution,
+    resolve_canonical_field,
+)
+from parsing_platform.contracts import (
+    CANDIDATE_SET_SEAL_SCHEMA_VERSION,
+    ApprovedInputSnapshot,
+    SourceLocator,
+)
 from parsing_platform.field_registry import (
     FIELD_REGISTRY_VERSION,
     validate_candidate_against_registry,
@@ -489,7 +497,16 @@ class ParserV2RecordStore:
         as_of_date: Any = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        canonical_field = _canonical_field(canonical_field)
+        field_resolution = _field_resolution(canonical_field)
+        canonical_field = field_resolution.canonical_field_key
+        candidate_metadata = copy.deepcopy(dict(metadata or {}))
+        candidate_metadata[
+            "canonicalFieldNamespaceVersion"
+        ] = CANONICAL_FIELD_NAMESPACE_VERSION
+        if field_resolution.was_legacy_alias:
+            candidate_metadata[
+                "canonicalFieldLineage"
+            ] = field_resolution.lineage_metadata()
         normalized = value if normalized_value is _UNSET else normalized_value
         _assert_bounded_json(
             value if raw_value is None else raw_value,
@@ -502,11 +519,29 @@ class ParserV2RecordStore:
             max_bytes=MAX_CANDIDATE_VALUE_BYTES,
         )
         _assert_bounded_json(
-            dict(metadata or {}),
+            candidate_metadata,
             label="candidate metadata",
             max_bytes=MAX_CANDIDATE_METADATA_BYTES,
         )
         run = self.get_parsing_run(tenant_id, project_id, run_id)
+        if run.get("executionStatus") in {"failed", "cancelled"}:
+            raise ParserV2ApprovalError(
+                "candidates cannot be added to a failed or cancelled parsing run"
+            )
+        orchestration_artifact = run.get("orchestrationArtifact")
+        if (
+            run.get("executionStatus")
+            in {"completed", "completed_with_warnings"}
+            and isinstance(orchestration_artifact, Mapping)
+            and isinstance(
+                orchestration_artifact.get("candidateCollection"),
+                Mapping,
+            )
+        ):
+            raise ParserV2ApprovalError(
+                "automatic domain candidate collection is closed; "
+                "create a new parsing run for additional candidates"
+            )
         if self._find_candidate_set_seal(tenant_id, project_id, run_id) is not None:
             raise ParserV2ApprovalError(
                 "candidate set is sealed; create a new parsing run for additional candidates"
@@ -514,6 +549,19 @@ class ParserV2RecordStore:
         document = self.get_document_version(
             tenant_id, project_id, document_version_id
         )
+        document_authority = _required(
+            document.get("sourceAuthority"),
+            "document source authority",
+        )
+        candidate_authority = _required(authority, "authority")
+        if not hmac.compare_digest(
+            candidate_authority,
+            document_authority,
+        ):
+            raise ParserV2ReferenceError(
+                "candidate authority must exactly match the archived "
+                "document source authority"
+            )
         raw_evidence = list(evidence or [])
         if len(raw_evidence) > MAX_CANDIDATE_EVIDENCE_ITEMS:
             raise ParserV2RecordError("candidate evidence count exceeds the controlled limit")
@@ -554,7 +602,10 @@ class ParserV2RecordStore:
                 tenant_id, project_id, supersedes_candidate_id
             )
             if (
-                superseded_candidate.get("canonicalField") != canonical_field
+                _canonical_field(
+                    superseded_candidate.get("canonicalField")
+                )
+                != canonical_field
                 or superseded_candidate.get("entityId") != entity_id
             ):
                 raise ParserV2ReferenceError(
@@ -705,6 +756,7 @@ class ParserV2RecordStore:
             evidence=evidence_items,
             presence_status=presence_status,
             origin_type=origin_type,
+            metadata=candidate_metadata,
         )
         effective_validation_codes = list(
             dict.fromkeys(
@@ -747,7 +799,7 @@ class ParserV2RecordStore:
                 "conflictStatus": "none",
                 "approvalStatus": "not_requested",
                 "confidence": confidence,
-                "authority": _required(authority, "authority"),
+                "authority": candidate_authority,
                 "sourceType": "parser_v2_candidate",
                 "sourceLocator": _authoritative_source_locator(
                     evidence_items,
@@ -772,7 +824,7 @@ class ParserV2RecordStore:
                 "supersedesCandidateId": supersedes_candidate_id,
                 "effectiveDate": _date_wire_value(effective_date),
                 "asOfDate": _date_wire_value(as_of_date),
-                "metadata": copy.deepcopy(dict(metadata or {})),
+                "metadata": candidate_metadata,
                 "targetModules": sorted(
                     {str(item) for item in target_modules or []}
                 ),
@@ -824,7 +876,10 @@ class ParserV2RecordStore:
             self.get_candidate(tenant_id, project_id, candidate_id)
             for candidate_id in unique_ids
         ]
-        if any(item.get("canonicalField") != canonical_field for item in candidates):
+        if any(
+            _canonical_field(item.get("canonicalField")) != canonical_field
+            for item in candidates
+        ):
             raise ParserV2ReferenceError(
                 "all conflicting candidates must target the same canonical field"
             )
@@ -847,6 +902,31 @@ class ParserV2RecordStore:
         effective_detection_run_id = detection_run_id or (
             source_run_ids[0] if len(source_run_ids) == 1 else None
         )
+        existing_conflict = next(
+            (
+                item
+                for item in self.list_source_conflicts(tenant_id, project_id)
+                if item.get("conflictId") == conflict_id
+            ),
+            None,
+        )
+        sealed_source_run_ids = [
+            run_id
+            for run_id in source_run_ids
+            if self._find_candidate_set_seal(
+                tenant_id,
+                project_id,
+                run_id,
+            )
+            is not None
+        ]
+        if existing_conflict is None and sealed_source_run_ids:
+            raise ParserV2ApprovalError(
+                "a new source conflict cannot be added to a sealed candidate "
+                "set; reconcile before sealing or inside the atomic "
+                "conflict-and-seal transaction: "
+                + ", ".join(sealed_source_run_ids)
+            )
         run = runs[0]
         record = self._base_record(
             record_type=SOURCE_CONFLICT_RECORD_TYPE,
@@ -1034,6 +1114,12 @@ class ParserV2RecordStore:
         actor_id: str,
         expected_candidate_ids: Sequence[str],
         expected_conflict_ids: Sequence[str] | None = None,
+        expected_module_ids: Sequence[str] | None = None,
+        completed_module_ids: Sequence[str] | None = None,
+        unresolved_module_ids: Sequence[str] | None = None,
+        blocking_diagnostic_codes: Sequence[str] | None = None,
+        reconciliation_source_candidate_ids: Sequence[str] | None = None,
+        reconciliation_bound: bool = False,
     ) -> Dict[str, Any]:
         """Freeze the complete review package for one successful parsing run.
 
@@ -1051,13 +1137,9 @@ class ParserV2RecordStore:
         expected_candidates = sorted(
             {str(item) for item in expected_candidate_ids if str(item).strip()}
         )
-        if not expected_candidates:
-            raise ParserV2ApprovalError(
-                "candidate set seal requires at least one expected candidate"
-            )
         if len(expected_candidates) != len(list(expected_candidate_ids)):
             raise ParserV2RecordError(
-                "expected_candidate_ids must be non-empty and unique"
+                "expected_candidate_ids must be unique and contain no empty values"
             )
         expected_conflicts = sorted(
             {str(item) for item in expected_conflict_ids or [] if str(item).strip()}
@@ -1065,6 +1147,43 @@ class ParserV2RecordStore:
         if len(expected_conflicts) != len(list(expected_conflict_ids or [])):
             raise ParserV2RecordError(
                 "expected_conflict_ids must be non-empty and unique"
+            )
+        expected_modules = _unique_nonempty_strings(
+            expected_module_ids, "expected_module_ids"
+        )
+        completed_modules = _unique_nonempty_strings(
+            completed_module_ids, "completed_module_ids"
+        )
+        unresolved_modules = _unique_nonempty_strings(
+            unresolved_module_ids, "unresolved_module_ids"
+        )
+        blocking_codes = _unique_nonempty_strings(
+            blocking_diagnostic_codes, "blocking_diagnostic_codes"
+        )
+        reconciliation_ids = _unique_nonempty_strings(
+            reconciliation_source_candidate_ids,
+            "reconciliation_source_candidate_ids",
+        )
+        if (
+            not set(completed_modules).issubset(expected_modules)
+            or not set(unresolved_modules).issubset(expected_modules)
+            or set(completed_modules).intersection(unresolved_modules)
+            or set(completed_modules).union(unresolved_modules)
+            != set(expected_modules)
+        ):
+            raise ParserV2RecordError(
+                "completed_module_ids and unresolved_module_ids must "
+                "partition expected_module_ids"
+            )
+        if reconciliation_bound and reconciliation_ids != expected_candidates:
+            raise ParserV2RecordError(
+                "reconciliation_source_candidate_ids must exactly match "
+                "expected_candidate_ids"
+            )
+        if not reconciliation_bound and reconciliation_ids:
+            raise ParserV2RecordError(
+                "reconciliation_source_candidate_ids requires "
+                "reconciliation_bound=True"
             )
         state = self._candidate_set_state(tenant_id, project_id, run_id)
         if state["candidateIds"] != expected_candidates:
@@ -1075,11 +1194,27 @@ class ParserV2RecordStore:
             raise ImmutableRecordConflict(
                 "source conflict set changed; reload the run package before sealing"
             )
+        collection_manifest = {
+            "schemaVersion": "realytics-parser-module-collection-manifest-v1",
+            "parsingRunId": run_id,
+            "candidateIds": state["candidateIds"],
+            "conflictIds": state["conflictIds"],
+            "expectedModuleIds": expected_modules,
+            "completedModuleIds": completed_modules,
+            "unresolvedModuleIds": unresolved_modules,
+            "blockingDiagnosticCodes": blocking_codes,
+            "reconciliationSourceCandidateIds": reconciliation_ids,
+            "reconciliationBound": bool(reconciliation_bound),
+        }
+        collection_manifest_hash = _stable_json_hash(collection_manifest)
         existing = self._find_candidate_set_seal(tenant_id, project_id, run_id)
         if existing is not None:
             if hmac.compare_digest(
                 str(existing.get("candidateSetHash") or ""),
                 str(state["candidateSetHash"]),
+            ) and hmac.compare_digest(
+                str(existing.get("collectionManifestHash") or ""),
+                collection_manifest_hash,
             ):
                 return existing
             raise ImmutableRecordConflict(
@@ -1097,12 +1232,22 @@ class ParserV2RecordStore:
         record.update(
             {
                 "sealId": f"candidate-set-seal:{run_id}",
+                "candidateSetSealSchemaVersion": (
+                    CANDIDATE_SET_SEAL_SCHEMA_VERSION
+                ),
                 "parsingRunId": run_id,
                 "documentVersionId": run["documentVersionId"],
                 "candidateIds": state["candidateIds"],
                 "candidateCount": len(state["candidateIds"]),
                 "conflictIds": state["conflictIds"],
                 "conflictCount": len(state["conflictIds"]),
+                "expectedModuleIds": expected_modules,
+                "completedModuleIds": completed_modules,
+                "unresolvedModuleIds": unresolved_modules,
+                "blockingDiagnosticCodes": blocking_codes,
+                "reconciliationSourceCandidateIds": reconciliation_ids,
+                "reconciliationBound": bool(reconciliation_bound),
+                "collectionManifestHash": collection_manifest_hash,
                 "candidateSetHash": state["candidateSetHash"],
                 "sealedAt": record["createdAt"],
                 "sealedBy": actor_id,
@@ -1149,6 +1294,42 @@ class ParserV2RecordStore:
         if seal is None:
             raise ParserV2ApprovalError(
                 "review decision requires a sealed candidate and conflict set"
+            )
+        unresolved_modules = list(seal.get("unresolvedModuleIds") or [])
+        if unresolved_modules:
+            raise ParserV2ApprovalError(
+                "review decision is blocked by unresolved parser modules: "
+                + ", ".join(sorted(str(item) for item in unresolved_modules))
+            )
+        conflict_diagnostic_codes = {
+            "CROSS_SOURCE_VALUE_CONFLICT",
+            "CROSS_SOURCE_BASIS_CONFLICT",
+            "CROSS_SOURCE_UNIT_CONFLICT",
+        }
+        blocking_codes = {
+            str(item)
+            for item in seal.get("blockingDiagnosticCodes") or []
+        }
+        represented_conflict_codes = (
+            blocking_codes.intersection(conflict_diagnostic_codes)
+            if seal.get("conflictIds")
+            else set()
+        )
+        unresolved_diagnostic_codes = (
+            blocking_codes - represented_conflict_codes
+        )
+        if unresolved_diagnostic_codes:
+            raise ParserV2ApprovalError(
+                "review decision is blocked by parser diagnostics: "
+                + ", ".join(sorted(unresolved_diagnostic_codes))
+            )
+        if (
+            "feasibility_reconciliation"
+            in set(seal.get("expectedModuleIds") or [])
+            and not seal.get("reconciliationBound")
+        ):
+            raise ParserV2ApprovalError(
+                "review decision requires an exact reconciliation candidate-set binding"
             )
         current_state = self._candidate_set_state(
             tenant_id, project_id, str(candidate["parsingRunId"])
@@ -1291,20 +1472,45 @@ class ParserV2RecordStore:
             ),
             None,
         )
-        if existing_selection is not None:
-            if (
-                existing_selection.get("candidateId") == candidate_id
-                and existing_selection.get("reviewDecisionId") == review_decision_id
-                and int(existing_selection.get("selectionVersion") or 0)
-                == int(selection_version)
-                and existing_selection.get("supersedesSelectionId")
-                == supersedes_selection_id
-            ):
-                return existing_selection
-            raise ImmutableRecordConflict(
-                "immutable canonical selection ID reused with different content"
-            )
         candidate = self.get_candidate(tenant_id, project_id, candidate_id)
+        candidate_field = _canonical_field(
+            candidate.get("canonicalField") or candidate.get("fieldKey")
+        )
+        candidate_registry_version = str(
+            candidate.get("fieldRegistryVersion") or ""
+        )
+        if candidate_registry_version != FIELD_REGISTRY_VERSION:
+            raise ParserV2ApprovalError(
+                "candidate fieldRegistryVersion does not match the current "
+                f"governed registry: expected {FIELD_REGISTRY_VERSION}, "
+                f"got {candidate_registry_version or 'missing'}"
+            )
+        current_registry_issues = validate_candidate_against_registry(
+            ontology_version=str(candidate.get("ontologyVersion") or ""),
+            field_key=candidate_field,
+            normalized_value=copy.deepcopy(candidate.get("normalizedValue")),
+            unit=candidate.get("unit"),
+            entity_id=candidate.get("entityId"),
+            evidence=[
+                copy.deepcopy(dict(item))
+                for item in candidate.get("evidence") or []
+                if isinstance(item, Mapping)
+            ],
+            presence_status=str(candidate.get("presenceStatus") or ""),
+            origin_type=str(candidate.get("originType") or ""),
+            metadata=copy.deepcopy(dict(candidate.get("metadata") or {})),
+        )
+        current_blocking_codes = list(
+            dict.fromkeys(
+                item.code for item in current_registry_issues if item.blocking
+            )
+        )
+        if current_blocking_codes:
+            raise ParserV2ApprovalError(
+                "candidate has blocking validation findings under current "
+                "governed field-registry revalidation: "
+                + ", ".join(current_blocking_codes)
+            )
         decision = self.get_review_decision(
             tenant_id, project_id, review_decision_id
         )
@@ -1333,6 +1539,19 @@ class ParserV2RecordStore:
             )
         if candidate.get("conflictStatus") == "open":
             raise ParserV2ApprovalError("a candidate with an open conflict cannot be selected")
+        if existing_selection is not None:
+            if (
+                existing_selection.get("candidateId") == candidate_id
+                and existing_selection.get("reviewDecisionId") == review_decision_id
+                and int(existing_selection.get("selectionVersion") or 0)
+                == int(selection_version)
+                and existing_selection.get("supersedesSelectionId")
+                == supersedes_selection_id
+            ):
+                return existing_selection
+            raise ImmutableRecordConflict(
+                "immutable canonical selection ID reused with different content"
+            )
         open_conflict_ids = [
             str(item["conflictId"])
             for item in self.list_source_conflicts(tenant_id, project_id)
@@ -1378,7 +1597,7 @@ class ParserV2RecordStore:
         historical_for_field = [
             item
             for item in self.list_canonical_selections(tenant_id, project_id)
-            if item.get("fieldKey") == candidate.get("fieldKey")
+            if _canonical_field(item.get("fieldKey")) == candidate_field
             and item.get("entityId") == candidate.get("entityId")
         ]
         latest_historical = (
@@ -1403,7 +1622,7 @@ class ParserV2RecordStore:
                     f"superseded selection not found: {supersedes_selection_id}"
                 )
             if (
-                previous.get("fieldKey") != candidate.get("fieldKey")
+                _canonical_field(previous.get("fieldKey")) != candidate_field
                 or previous.get("entityId") != candidate.get("entityId")
             ):
                 raise ParserV2ReferenceError(
@@ -1426,7 +1645,7 @@ class ParserV2RecordStore:
                 for item in self.list_canonical_selections(
                     tenant_id, project_id, active_only=True
                 )
-                if item.get("fieldKey") == candidate.get("fieldKey")
+                if _canonical_field(item.get("fieldKey")) == candidate_field
                 and item.get("entityId") == candidate.get("entityId")
             ]
             if competing_active:
@@ -1464,9 +1683,9 @@ class ParserV2RecordStore:
                 "objectVersion": candidate["objectVersion"],
                 "sourceHash": candidate["sourceHash"],
                 "sha256": candidate["sha256"],
-                "key": candidate["canonicalField"],
-                "fieldKey": candidate["canonicalField"],
-                "canonicalField": candidate["canonicalField"],
+                "key": candidate_field,
+                "fieldKey": candidate_field,
+                "canonicalField": candidate_field,
                 "value": copy.deepcopy(candidate.get("value")),
                 "normalizedValue": copy.deepcopy(candidate.get("normalizedValue")),
                 "unit": candidate.get("unit"),
@@ -1487,6 +1706,7 @@ class ParserV2RecordStore:
                 "asOfDate": candidate.get("asOfDate"),
                 "sourceLocator": copy.deepcopy(candidate.get("sourceLocator") or {}),
                 "fieldRegistryVersion": candidate.get("fieldRegistryVersion"),
+                "metadata": copy.deepcopy(candidate.get("metadata") or {}),
                 "approvalStatus": "approved",
                 "conflictStatus": candidate.get("conflictStatus") or "none",
                 "validityStatus": "active",
@@ -1560,6 +1780,33 @@ class ParserV2RecordStore:
             self._get_active_selection(tenant_id, project_id, selection_id)
             for selection_id in unique_ids
         ]
+        outdated_selection_ids = [
+            str(item["selectionId"])
+            for item in selections
+            if item.get("fieldRegistryVersion") != FIELD_REGISTRY_VERSION
+        ]
+        if outdated_selection_ids:
+            raise ParserV2ApprovalError(
+                "approved snapshot selections must use the current "
+                f"fieldRegistryVersion={FIELD_REGISTRY_VERSION}: "
+                + ", ".join(outdated_selection_ids)
+            )
+        namespace_mismatch_ids = [
+            str(item["selectionId"])
+            for item in selections
+            if (
+                (item.get("metadata") or {}).get(
+                    "canonicalFieldNamespaceVersion"
+                )
+                != CANONICAL_FIELD_NAMESPACE_VERSION
+            )
+        ]
+        if namespace_mismatch_ids:
+            raise ParserV2ApprovalError(
+                "approved snapshot selections must preserve "
+                f"canonicalFieldNamespaceVersion={CANONICAL_FIELD_NAMESPACE_VERSION}: "
+                + ", ".join(namespace_mismatch_ids)
+            )
         selected_candidate_ids = {
             str(item.get("candidateId") or "") for item in selections
         }
@@ -1577,7 +1824,8 @@ class ParserV2RecordStore:
                 + ", ".join(missing_dependency_ids)
             )
         fields = [
-            (str(item["fieldKey"]), item.get("entityId")) for item in selections
+            (_canonical_field(item["fieldKey"]), item.get("entityId"))
+            for item in selections
         ]
         if len(fields) != len(set(fields)):
             raise ParserV2ApprovalError(
@@ -1699,8 +1947,8 @@ class ParserV2RecordStore:
         )
         input_items = [
             {
-                "fieldKey": item["fieldKey"],
-                "canonicalField": item["canonicalField"],
+                "fieldKey": _canonical_field(item["fieldKey"]),
+                "canonicalField": _canonical_field(item["canonicalField"]),
                 "entityId": item.get("entityId"),
                 "normalizedValue": copy.deepcopy(item.get("normalizedValue")),
                 "unit": item.get("unit"),
@@ -1726,6 +1974,7 @@ class ParserV2RecordStore:
                 "asOfDate": item.get("asOfDate"),
                 "fieldRegistryVersion": item.get("fieldRegistryVersion"),
                 "versionContext": _version_context(item),
+                "metadata": copy.deepcopy(item.get("metadata") or {}),
             }
             for item in selections
         ]
@@ -1737,6 +1986,9 @@ class ParserV2RecordStore:
                 "purpose": _required(purpose, "purpose"),
                 "inputSchemaVersion": "realytics-parser-approved-inputs-v1",
                 "fieldRegistryVersion": FIELD_REGISTRY_VERSION,
+                "canonicalFieldNamespaceVersion": (
+                    CANONICAL_FIELD_NAMESPACE_VERSION
+                ),
                 "selectionIds": unique_ids,
                 "selections": [_selection_wire_payload(item) for item in selections],
                 "documentVersionIds": sorted(
@@ -1748,7 +2000,9 @@ class ParserV2RecordStore:
                 "sourceDocuments": source_documents,
                 "inputItems": input_items,
                 "inputs": {
-                    str(item["fieldKey"]): copy.deepcopy(item.get("normalizedValue"))
+                    _canonical_field(item["fieldKey"]): copy.deepcopy(
+                        item.get("normalizedValue")
+                    )
                     for item in selections
                     if item.get("entityId") is None
                 },
@@ -1766,6 +2020,7 @@ class ParserV2RecordStore:
                 "sourceType": "approved_parser_v2_snapshot",
             }
         )
+        approved_input_snapshot_wire_payload(record)
         if self._persist_batch is not None:
             records = [record]
             if (
@@ -2336,6 +2591,11 @@ class ParserV2RecordStore:
         document_version_id: str | None = None,
         canonical_field: str | None = None,
     ) -> List[Dict[str, Any]]:
+        normalized_field = (
+            _canonical_field(canonical_field)
+            if canonical_field is not None
+            else None
+        )
         records = self._created_records(
             tenant_id, project_id, PARSED_FACT_CANDIDATE_RECORD_TYPE
         )
@@ -2348,8 +2608,8 @@ class ParserV2RecordStore:
                 or item.get("documentVersionId") == document_version_id
             )
             and (
-                canonical_field is None
-                or item.get("canonicalField") == canonical_field
+                normalized_field is None
+                or _canonical_field(item.get("canonicalField")) == normalized_field
             )
         ]
 
@@ -2838,12 +3098,7 @@ def _selection_wire_payload(selection: Mapping[str, Any]) -> Dict[str, Any]:
         "effectiveDate": selection.get("effectiveDate"),
         "asOfDate": selection.get("asOfDate"),
         "supersedesSelectionId": selection.get("supersedesSelectionId"),
-        "metadata": {
-            "parsingRunId": selection["parsingRunId"],
-            "documentVersionId": selection["documentVersionId"],
-            "sha256": selection["sha256"],
-            "sourceLocator": copy.deepcopy(selection.get("sourceLocator") or {}),
-        },
+        "metadata": copy.deepcopy(selection.get("metadata") or {}),
     }
 
 
@@ -2862,6 +3117,7 @@ def approved_input_snapshot_wire_payload(
         "purpose",
         "inputSchemaVersion",
         "fieldRegistryVersion",
+        "canonicalFieldNamespaceVersion",
         "selectionIds",
         "selections",
         "ontologyVersion",
@@ -2878,11 +3134,16 @@ def approved_input_snapshot_wire_payload(
         "supersedesSnapshotId",
         "metadata",
     )
-    return {
+    payload = {
         key: copy.deepcopy(snapshot[key])
         for key in public_keys
         if key in snapshot
     }
+    return ApprovedInputSnapshot.model_validate(payload).model_dump(
+        by_alias=True,
+        mode="json",
+        exclude_none=True,
+    )
 
 
 def validate_source_locator_attestations(
@@ -2997,13 +3258,29 @@ def _required(value: Any, name: str) -> str:
     return text
 
 
-def _canonical_field(value: Any) -> str:
-    field_key = _required(value, "canonical_field")
-    if re.fullmatch(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*", field_key) is None:
+def _unique_nonempty_strings(
+    values: Sequence[str] | None,
+    label: str,
+) -> list[str]:
+    raw = list(values or [])
+    normalized = sorted({str(item).strip() for item in raw if str(item).strip()})
+    if len(normalized) != len(raw):
         raise ParserV2RecordError(
-            "canonical_field must be a lower snake_case dotted path"
+            f"{label} must be unique and contain no empty values"
         )
-    return field_key
+    return normalized
+
+
+def _canonical_field(value: Any) -> str:
+    return _field_resolution(value).canonical_field_key
+
+
+def _field_resolution(value: Any) -> CanonicalFieldResolution:
+    field_key = _required(value, "canonical_field")
+    try:
+        return resolve_canonical_field(field_key)
+    except ValueError as exc:
+        raise ParserV2RecordError(str(exc)) from exc
 
 
 def _assert_bounded_json(value: Any, *, label: str, max_bytes: int) -> None:
@@ -3089,7 +3366,9 @@ def _inputs_by_entity(
         entity_id = item.get("entityId")
         if entity_id is None:
             continue
-        grouped.setdefault(str(entity_id), {})[str(item["fieldKey"])] = copy.deepcopy(
+        grouped.setdefault(str(entity_id), {})[
+            _canonical_field(item["fieldKey"])
+        ] = copy.deepcopy(
             item.get("normalizedValue")
         )
     return grouped

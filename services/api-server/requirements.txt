@@ -13,5 +13,5 @@ pytest>=9.0.3,<10.0.0
 # Production infrastructure (optional at dev/MVP; required for the matching
 # backend at deploy). Code lazy-imports these so the app runs without them.
 psycopg[binary]>=3.1  # PostgreSQL/PostGIS backend
-PyJWT[crypto]>=2.8     # OIDC RS256/JWKS verification
+PyJWT[crypto]>=2.8     # OIDC ES256/RS256 JWKS verification
 boto3>=1.34            # S3/R2/MinIO object storage backend

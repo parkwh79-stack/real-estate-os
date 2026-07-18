@@ -5,14 +5,24 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from parsing_platform.contracts import SourceLocator
+from parsing_platform.canonical_fields import resolve_canonical_field
+from parsing_platform.contracts import ApprovedInputItem, SourceLocator
 from parsing_platform.domain_standards import RealEstateDomain, get_domain_standard
+from parsing_platform.handoff_policies import (
+    APPROVED_POLICY_STATUS,
+    evaluate_handoff_completeness,
+    get_domain_handoff_policy,
+)
 from schemas.orchestration import AgentHandoffEnvelope
-from use_cases.parser_v2_records import ParserV2ApprovalError, ParserV2RecordStore
+from use_cases.parser_v2_records import (
+    ParserV2ApprovalError,
+    ParserV2RecordStore,
+    approved_input_snapshot_wire_payload,
+)
 
 
 APPROVED_SNAPSHOT_HANDOFF_SCHEMA_VERSION = (
-    "realytics-parser-v2-approved-snapshot-handoff-v1"
+    "realytics-parser-v2-approved-snapshot-handoff-v3"
 )
 
 
@@ -34,18 +44,27 @@ def build_approved_snapshot_handoff(
     candidate, document version, source hash, and exact source locator.
     """
 
-    snapshot = _active_snapshot(
+    snapshot_record = _active_snapshot(
         record_store=record_store,
         tenant_id=tenant_id,
         project_id=project_id,
         snapshot_id=snapshot_id,
     )
+    try:
+        snapshot = approved_input_snapshot_wire_payload(
+            snapshot_record
+        )
+    except ValueError as exc:
+        raise ParserV2ApprovalError(
+            "handoff requires a strict ApprovedInputSnapshot contract"
+        ) from exc
     if snapshot.get("approvalStatus") != "approved":
         raise ParserV2ApprovalError("handoff requires approvalStatus=approved")
     if snapshot.get("validityStatus") != "active":
         raise ParserV2ApprovalError("handoff requires an active approved snapshot")
 
     standard = get_domain_standard(target_domain)
+    handoff_policy = get_domain_handoff_policy(standard.domain.value)
     selected_inputs = [
         dict(item)
         for item in snapshot.get("inputItems") or []
@@ -81,8 +100,26 @@ def build_approved_snapshot_handoff(
         for item in validated_inputs
         if isinstance(item.get("versionContext"), Mapping)
     )
-    completeness_policy_approved = standard.handoff_policy_status == "approved"
-    blocked = not validated_inputs or not completeness_policy_approved
+    completeness_policy_approved = handoff_policy.status == APPROVED_POLICY_STATUS
+    completeness = evaluate_handoff_completeness(
+        handoff_policy,
+        validated_inputs,
+        snapshot_metadata=(
+            snapshot.get("metadata")
+            if isinstance(snapshot.get("metadata"), Mapping)
+            else {}
+        ),
+    )
+    incomplete_entity_groups = tuple(
+        item
+        for item in completeness.entity_scoped_coverage
+        if not item.complete
+    )
+    blocked = (
+        not validated_inputs
+        or not completeness_policy_approved
+        or not completeness.complete
+    )
     blocking_issues: list[str] = []
     limitations = []
     if not validated_inputs:
@@ -93,7 +130,21 @@ def build_approved_snapshot_handoff(
     if not completeness_policy_approved:
         blocking_issues.append("DOMAIN_HANDOFF_COMPLETENESS_POLICY_NOT_APPROVED")
         limitations.append(
-            "The target domain has no approved minimum-input/completeness policy; inputs may be reviewed but the Pod must not execute authoritatively."
+            "The target domain has no approved minimum-input/completeness "
+            "policy; inputs may be reviewed but the Pod must not execute "
+            "authoritatively."
+        )
+    if completeness.missing_required_fields:
+        blocking_issues.append("DOMAIN_HANDOFF_REQUIRED_APPROVED_FIELDS_MISSING")
+        limitations.append(
+            "The approved snapshot is missing one or more exact canonical fields "
+            "required by the target domain completeness policy."
+        )
+    if incomplete_entity_groups:
+        blocking_issues.append("DOMAIN_HANDOFF_ENTITY_COVERAGE_INCOMPLETE")
+        limitations.append(
+            "The approved snapshot does not carry every required field on the "
+            "same entity or does not cover the expected entity IDs/count."
         )
 
     handoff_id = _semantic_id(
@@ -119,9 +170,25 @@ def build_approved_snapshot_handoff(
         "approvedBy": snapshot.get("approvedBy"),
         "targetDomain": standard.domain.value,
         "targetPod": standard.owner_pod,
-        "handoffPolicyStatus": standard.handoff_policy_status,
-        "requiredApprovedFieldGroups": [
-            list(group) for group in standard.required_approved_field_groups
+        "fieldRegistryVersion": snapshot["fieldRegistryVersion"],
+        "canonicalFieldNamespaceVersion": snapshot[
+            "canonicalFieldNamespaceVersion"
+        ],
+        "handoffPolicyVersion": handoff_policy.version,
+        "handoffPolicyStatus": handoff_policy.status,
+        "requiredApprovedFields": list(
+            handoff_policy.required_approved_fields
+        ),
+        "missingApprovedFields": list(
+            completeness.missing_required_fields
+        ),
+        "entityScopedRequiredFieldGroups": [
+            group.to_dict()
+            for group in handoff_policy.entity_scoped_required_field_groups
+        ],
+        "entityScopedCoverage": [
+            coverage.to_dict()
+            for coverage in completeness.entity_scoped_coverage
         ],
         "approvedInputs": validated_inputs,
         "selectionIds": selection_ids,
@@ -206,14 +273,48 @@ def _validate_approved_input(
         raise ParserV2ApprovalError(
             "approved snapshot locator belongs to another document version"
         )
+    if locator.file_sha256 != source_hash:
+        raise ParserV2ApprovalError(
+            "approved snapshot locator source hash does not match the approved input"
+        )
     payload = dict(value)
+    try:
+        field_resolution = resolve_canonical_field(payload["fieldKey"])
+    except ValueError as exc:
+        raise ParserV2ApprovalError(
+            "approved snapshot input has an invalid canonical field"
+        ) from exc
+    payload["fieldKey"] = field_resolution.canonical_field_key
+    payload["canonicalField"] = field_resolution.canonical_field_key
+    if field_resolution.was_legacy_alias:
+        metadata = dict(payload.get("metadata") or {})
+        lineage = field_resolution.lineage_metadata()
+        lineage["namespaceVersion"] = metadata.get(
+            "canonicalFieldNamespaceVersion"
+        )
+        metadata["canonicalFieldLineage"] = lineage
+        payload["metadata"] = metadata
     payload["sourceLocator"] = locator.model_dump(by_alias=True, mode="json", exclude_none=True)
+    try:
+        payload = ApprovedInputItem.model_validate(payload).model_dump(
+            by_alias=True,
+            mode="json",
+            exclude_none=True,
+        )
+    except ValueError as exc:
+        raise ParserV2ApprovalError(
+            "approved snapshot input violates the strict ApprovedInputItem contract"
+        ) from exc
     payload["projectId"] = project_id
     return payload
 
 
 def _matches_prefix(field_key: str, prefixes: tuple[str, ...]) -> bool:
-    return any(field_key.startswith(prefix) for prefix in prefixes)
+    try:
+        canonical_field = resolve_canonical_field(field_key).canonical_field_key
+    except ValueError:
+        return False
+    return any(canonical_field.startswith(prefix) for prefix in prefixes)
 
 
 def _semantic_id(payload: Mapping[str, Any]) -> str:

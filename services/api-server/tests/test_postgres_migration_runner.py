@@ -116,8 +116,11 @@ class _ReadinessCursor:
                     False,
                     False,
                     False,
+                    self.connection.replication,
                 )
             ]
+        elif "FROM pg_auth_members AS membership" in normalized:
+            self.rows = [(role,) for role in self.connection.member_of]
         elif "FROM pg_class AS c" in normalized:
             self.rows = [
                 (table, True, True, False)
@@ -162,12 +165,16 @@ class _ReadinessConnection:
         missing_privilege=None,
         forbidden_privilege=None,
         schema_create=False,
+        replication=False,
+        member_of=(),
     ):
         self.ledger = dict(ledger)
         self.superuser = superuser
         self.missing_privilege = missing_privilege
         self.forbidden_privilege = forbidden_privilege
         self.schema_create = schema_create
+        self.replication = replication
+        self.member_of = tuple(member_of)
         self.closed = False
 
     def cursor(self):
@@ -291,6 +298,34 @@ def test_parser_v2_runtime_readiness_rejects_privileged_role(monkeypatch, tmp_pa
 @pytest.mark.parametrize(
     ("connection_kwargs", "expected"),
     [
+        ({"replication": True}, "REPLICATION"),
+        ({"member_of": ("privileged_parent",)}, "privileged_parent"),
+    ],
+)
+def test_parser_v2_runtime_readiness_rejects_replication_and_membership(
+    monkeypatch,
+    tmp_path,
+    connection_kwargs,
+    expected,
+):
+    migration = tmp_path / "0007_parser_v2_rls.sql"
+    migration.write_text("SELECT 1;", encoding="utf-8")
+    monkeypatch.setattr(postgres, "MIGRATIONS_DIR", tmp_path)
+    connection = _ReadinessConnection(
+        {migration.name: postgres._migration_checksum(migration)},
+        **connection_kwargs,
+    )
+    monkeypatch.setattr(postgres, "connect", lambda: connection)
+
+    with pytest.raises(postgres.ParserV2RuntimeReadinessError, match=expected):
+        postgres.assert_parser_v2_runtime_ready()
+
+    assert connection.closed is True
+
+
+@pytest.mark.parametrize(
+    ("connection_kwargs", "expected"),
+    [
         (
             {"missing_privilege": ("schema_migrations", "SELECT")},
             "missing=schema_migrations.SELECT",
@@ -301,7 +336,7 @@ def test_parser_v2_runtime_readiness_rejects_privileged_role(monkeypatch, tmp_pa
         ),
         (
             {"schema_create": True},
-            "forbidden=schema:public.CREATE",
+            "schema:public.CREATE",
         ),
     ],
 )

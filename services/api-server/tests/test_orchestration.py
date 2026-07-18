@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from agents.orchestration_agent import OrchestrationAgent
 from main import app
+from routers import projects
 from schemas.orchestration import (
     AgentHandoffEnvelope,
     AgentProgress,
@@ -16,12 +17,30 @@ from storage import (
     upsert_calculation_run_record,
     upsert_deal_state_record,
     upsert_orchestration_run,
+    upsert_user,
 )
 
 
 _DISCOUNT_TRIGGER_EXAMPLE = (
     Path(__file__).resolve().parents[1] / "data" / "examples" / "daegu_bondong_mixed_use_pf.json"
 )
+
+
+def orchestration_auth_headers(
+    *,
+    user_id: str = "pytest-orchestrator",
+    tenant_id: str = "pytest-tenant",
+    role: str = "admin",
+) -> dict[str, str]:
+    upsert_user(
+        {
+            "userId": user_id,
+            "tenantId": tenant_id,
+            "role": role,
+            "status": "active",
+        }
+    )
+    return {"x-realytics-user-id": user_id}
 
 
 def project_with_discount_triggers(client: TestClient) -> str:
@@ -57,7 +76,16 @@ def _approval_ready_base_run(project_id: str) -> dict:
         "handoffs": [],
         "artifacts": {
             "qualityCheck": {"pass": True},
-            "legalPermitReview": {"status": "clear"},
+            "legalPermitReview": {
+                "status": "clear",
+                "legalIntelligence": {
+                    "evidenceStatus": "verified",
+                    "verifiedReferenceCount": 1,
+                    "verifiedCitationCount": 1,
+                    "citationCoverageComplete": True,
+                    "claimCoverageComplete": True,
+                },
+            },
             "dataQualityReview": {"status": "clear"},
             "reconciliationGate": {"status": "clear"},
             "riskRegister": {"status": "clear", "risks": []},
@@ -76,6 +104,111 @@ def _approval_ready_base_run(project_id: str) -> dict:
     }
 
 
+def test_approval_readiness_gate_requires_verified_legal_evidence():
+    run = _approval_ready_base_run("legal-evidence-gate-project")
+    run["artifacts"]["legalPermitReview"]["legalIntelligence"] = {
+        "evidenceStatus": "candidate",
+        "verifiedReferenceCount": 0,
+        "verifiedCitationCount": 0,
+        "citationCoverageComplete": False,
+        "claimCoverageComplete": False,
+    }
+
+    blocked = OrchestrationAgent()._approval_readiness_gate(run)
+    blocked_by_code = {item["code"]: item for item in blocked["gates"]}
+
+    assert blocked_by_code["LEGAL_EVIDENCE_TRUSTED"]["pass"] is False
+    assert "LEGAL_EVIDENCE_TRUSTED" in {
+        item["code"] for item in blocked["blockers"]
+    }
+
+    run = _approval_ready_base_run("legal-evidence-gate-project")
+    trusted = OrchestrationAgent()._approval_readiness_gate(run)
+    trusted_by_code = {item["code"]: item for item in trusted["gates"]}
+
+    assert trusted_by_code["LEGAL_EVIDENCE_TRUSTED"]["pass"] is True
+
+
+def test_legacy_orchestration_routes_require_an_authenticated_actor():
+    project_id = "legacy-orchestration-auth-project"
+    projects.PROJECTS_DB[project_id] = {
+        "project": {"id": project_id, "name": "Auth Boundary"},
+        "_meta": {"tenantId": "tenant-auth"},
+    }
+    client = TestClient(app)
+
+    try:
+        pf_response = client.post(
+            f"/projects/{project_id}/orchestrations/pf-review",
+            json={},
+        )
+        workflow_response = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            json={"workflow": "cash_flow"},
+        )
+    finally:
+        projects.PROJECTS_DB.pop(project_id, None)
+
+    assert pf_response.status_code == 401
+    assert pf_response.json()["detail"]["scope"] == "pf_review_orchestration"
+    assert workflow_response.status_code == 401
+    assert (
+        workflow_response.json()["detail"]["scope"]
+        == "orchestration_workflow"
+    )
+
+
+def test_legacy_workflow_enforces_permission_and_tenant_scope(monkeypatch):
+    project_id = "legacy-orchestration-tenant-project"
+    projects.PROJECTS_DB[project_id] = {
+        "project": {"id": project_id, "name": "Tenant Boundary"},
+        "_meta": {"tenantId": "tenant-a"},
+    }
+    client = TestClient(app)
+    viewer_headers = orchestration_auth_headers(
+        user_id="pytest-viewer",
+        tenant_id="tenant-a",
+        role="viewer",
+    )
+
+    try:
+        forbidden = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            headers=viewer_headers,
+            json={"workflow": "cash_flow"},
+        )
+
+        monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+        mismatch = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            headers=orchestration_auth_headers(
+                user_id="pytest-other-tenant-analyst",
+                tenant_id="tenant-b",
+                role="analyst",
+            ),
+            json={"workflow": "cash_flow"},
+        )
+        scoped = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            headers=orchestration_auth_headers(
+                user_id="pytest-tenant-analyst",
+                tenant_id="tenant-a",
+                role="analyst",
+            ),
+            json={},
+        )
+    finally:
+        projects.PROJECTS_DB.pop(project_id, None)
+
+    assert forbidden.status_code == 403
+    assert forbidden.json()["detail"]["requiredPermission"] == "project:analyze"
+    assert mismatch.status_code == 403
+    assert mismatch.json()["detail"]["error"] == "tenant_scope_mismatch"
+    # Missing workflow reaches route validation only after auth and tenant checks.
+    assert scoped.status_code == 422
+    assert scoped.json()["detail"] == "Missing 'workflow' selection"
+
+
 def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     # Force the deterministic consensus coordinator so this test verifies the
     # deterministic path regardless of any AI provider key in the dev .env
@@ -86,7 +219,23 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
 
     res = client.post(
         f"/projects/{project_id}/orchestrations/pf-review",
-        json={"options": {"requested_by": "pytest"}},
+        headers=orchestration_auth_headers(),
+        json={
+            "options": {
+                "requested_by": "pytest",
+                "law_context": {
+                    "connected": True,
+                    "references": [
+                        {
+                            "lawId": "caller-only-law",
+                            "lawName": "Caller-only legal assertion",
+                            "url": "https://untrusted.example/legal",
+                            "apiKey": "must-not-persist",
+                        }
+                    ],
+                },
+            }
+        },
     )
 
     assert res.status_code == 200
@@ -128,7 +277,7 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert run["agentProgress"]["cross_agent_reconciliation"]["status"] == "completed"
     deal_opt = run["artifacts"]["dealOptimization"]
     assert deal_opt["analysisType"] == "deal_optimization"
-    assert deal_opt["verdict"] in {"approvable", "negotiable_conditional", "not_recommended"}
+    assert deal_opt["verdict"] in {"approvable", "negotiable_conditional", "rework_required", "not_recommended"}
     assert "verdictLabel" in deal_opt
     assert run["agentProgress"]["deal_optimization"]["status"] == "completed"
     consensus = run["artifacts"]["consensusResolution"]
@@ -144,6 +293,21 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert run["artifacts"]["developerFeasibility"]["analysisType"] == "developer_and_pf_feasibility"
     assert run["artifacts"]["marketabilityAnalysis"]["applicable"] is True
     assert run["artifacts"]["legalPermitReview"]["mcp"]["requested"] is True
+    legal_intelligence = run["artifacts"]["legalPermitReview"][
+        "legalIntelligence"
+    ]
+    assert legal_intelligence["evidenceStatus"] == "unverified"
+    assert legal_intelligence["verifiedReferenceCount"] == 0
+    assert legal_intelligence["candidateReferenceCount"] == 1
+    assert run["artifacts"]["legalPermitReview"]["reportEligible"] is False
+    assert run["artifacts"]["approvalReadinessGate"]["pass"] is False
+    assert "LEGAL_EVIDENCE_TRUSTED" in {
+        gate["code"]
+        for gate in run["artifacts"]["approvalReadinessGate"]["blockers"]
+    }
+    assert "must-not-persist" not in str(
+        legal_intelligence["candidateReferences"]
+    )
     assert run["artifacts"]["riskRegister"]["analysisType"] == "risk_register"
     assert run["agentProgress"]["risk_register_generation"]["status"] == "completed"
     assert run["artifacts"]["creditReviewDecision"]["analysisType"] == "credit_review_decision"
@@ -152,7 +316,10 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "completed"
     developability = run["artifacts"]["developabilityScore"]
     assert developability["analysisType"] == "developability_score_v1"
-    assert developability["grade"] in {"A", "B", "C", "D", "E"}
+    # This fixture has no server-verified regulatory snapshot. The
+    # developability contract must not invent a report-grade score from
+    # unverified legal inputs, so ``not_assessable`` is the safe result.
+    assert developability["grade"] in {"A", "B", "C", "D", "E", "not_assessable"}
     assert isinstance(developability["overallScore"], (int, float))
     assert run["agentProgress"]["developability_score"]["status"] == "completed"
     assert (
@@ -245,7 +412,6 @@ def test_chief_deal_orchestration_plan_endpoint_returns_ai_deal_room_contract():
         "/projects/",
         json={
             "project": {"name": "Chief Deal Test", "status": "draft"},
-            "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf"}],
             "land": {"pnu": "1111010100100010000"},
             "feasibility_input": {"total_revenue": 1000, "total_cost": 800},
         },
@@ -253,6 +419,10 @@ def test_chief_deal_orchestration_plan_endpoint_returns_ai_deal_room_contract():
     )
     assert created.status_code == 200
     project_id = created.json()["project"]["id"]
+    projects.source_document_repository().save_upload_metadata(
+        project_id,
+        {"documentType": "business_plan", "originalFileName": "business.pdf"},
+    )
 
     res = client.post(
         f"/projects/{project_id}/chief-orchestration/plan",
@@ -814,6 +984,7 @@ def test_restructuring_cure_is_attached_to_next_pf_review_run():
 
     run = client.post(
         f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
         json={"options": {"requested_by": "pytest-cure"}},
     ).json()
     adopted = run["artifacts"]["restructuringPlan"]["adoptedCures"]
@@ -832,7 +1003,11 @@ def test_restructuring_cure_is_attached_to_next_pf_review_run():
 def test_pf_review_orchestration_can_be_retrieved_and_approved():
     client = TestClient(app)
     project_id = project_with_discount_triggers(client)
-    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
 
     fetched = client.get(f"/projects/{project_id}/orchestrations/{run['run_id']}").json()
     assert fetched["run_id"] == run["run_id"]
@@ -1051,7 +1226,11 @@ def test_pf_review_persists_market_evidence_records():
     ).json()
     project_id = created["project"]["id"]
 
-    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
     records = client.get(f"/projects/{project_id}/market-evidence", params={"run_id": run["run_id"]}).json()
 
     assert run["artifacts"]["marketEvidenceReview"]["evidenceSummary"]["evidenceRecordCount"] == 2
@@ -1112,7 +1291,11 @@ def test_approved_assumption_override_is_attached_to_pf_review_run():
     listed = client.get(f"/projects/{project_id}/assumption-overrides").json()
     assert listed["records"][0]["checkKey"] == "sales_revenue_consistency"
 
-    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
     data_quality = run["artifacts"]["dataQualityReview"]
     sales_check = next(check for check in data_quality["checks"] if check["key"] == "sales_revenue_consistency")
     assert sales_check["status"] == "overridden"
@@ -1130,7 +1313,11 @@ def test_approved_assumption_override_is_attached_to_pf_review_run():
     assert revoke_response.status_code == 200
     assert revoke_response.json()["records"][0]["status"] == "revoked"
 
-    revoked_run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    revoked_run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
     revoked_data_quality = revoked_run["artifacts"]["dataQualityReview"]
     revoked_sales_check = next(check for check in revoked_data_quality["checks"] if check["key"] == "sales_revenue_consistency")
     assert revoked_sales_check["status"] != "overridden"

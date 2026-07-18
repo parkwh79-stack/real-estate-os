@@ -29,3 +29,22 @@ def _force_offline_external_connectors(monkeypatch):
         "TOGETHER_API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
+    # Deployment OIDC/RBAC settings are also loaded from the developer .env at
+    # import time. Contract tests opt into those controls explicitly, so clear
+    # the live Supabase configuration to prevent cross-test issuer/audience and
+    # strict-tenant leakage.
+    for key in (
+        "REALYTICS_IDP_PROVIDER",
+        "REALYTICS_IDP_ISSUER",
+        "REALYTICS_OIDC_ISSUER",
+        "REALYTICS_IDP_AUDIENCE",
+        "REALYTICS_OIDC_AUDIENCE",
+        "REALYTICS_IDP_JWKS_URL",
+        "REALYTICS_OIDC_JWKS_URL",
+        "REALYTICS_IDP_PERSONAL_TENANT_FALLBACK",
+        "REALYTICS_IDP_PERSONAL_TENANT_ROLE",
+        "REALYTICS_RBAC_MODE",
+        "REALYTICS_TENANT_ISOLATION_MODE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "off")

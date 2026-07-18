@@ -15,10 +15,18 @@ import {
   authHeaders,
   clearStoredAuthSession,
   getStoredAuthSession,
+  persistSupabaseSession,
+  refreshSupabaseStoredSession,
   resolveCurrentIdentity,
+  setStoredAuthSession,
+  signOutSupabaseSession,
   type RealyticsSession,
   type RealyticsUser,
 } from "../../lib/auth-client";
+import {
+  getSupabaseBrowserClient,
+  supabaseConfigured,
+} from "../../lib/supabase-client";
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
@@ -57,10 +65,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           method: "DELETE",
           headers: authHeaders("web"),
         });
-        await fetch(`${apiBase}/auth/session/current`, {
-          method: "DELETE",
-          headers: authHeaders("web"),
-        });
+        if (stored.authProvider === "supabase") {
+          await signOutSupabaseSession();
+        } else {
+          await fetch(`${apiBase}/auth/session/current`, {
+            method: "DELETE",
+            headers: authHeaders("web"),
+          });
+        }
       }
     } finally {
       // Always clear local state, even when the API is unavailable. The server
@@ -86,8 +98,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setPermissions(stored.permissions ?? []);
 
     let cancelled = false;
-    resolveCurrentIdentity(stored.session.sessionId)
-      .then((identity) => {
+    const validate = async () => {
+      const activeStored = stored.authProvider === "supabase"
+        ? await refreshSupabaseStoredSession(stored)
+        : stored;
+      if (!activeStored) {
+        throw new Error("Supabase session expired.");
+      }
+      const identity = await resolveCurrentIdentity(
+        activeStored.authProvider === "supabase"
+          ? undefined
+          : activeStored.session.sessionId,
+        activeStored.accessToken,
+      );
+      return { activeStored, identity };
+    };
+    validate()
+      .then(({ activeStored, identity }) => {
         if (cancelled) return;
         if (!identity.authenticated) {
           clearStoredAuthSession();
@@ -98,8 +125,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return;
         }
         setUser(identity.user);
-        setSession(identity.session ?? stored.session);
-        setPermissions(identity.permissions ?? stored.permissions ?? []);
+        setSession(identity.session ?? activeStored.session);
+        setPermissions(identity.permissions ?? activeStored.permissions ?? []);
+        setStoredAuthSession(
+          {
+            ...activeStored,
+            user: identity.user,
+            session: identity.session ?? activeStored.session,
+            permissions: identity.permissions ?? activeStored.permissions ?? [],
+          },
+          { notify: false },
+        );
         setStatus("authenticated");
       })
       .catch(() => {
@@ -117,6 +153,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, [nonce]);
+
+  useEffect(() => {
+    if (!supabaseConfigured()) return;
+    const client = getSupabaseBrowserClient();
+    const { data } = client.auth.onAuthStateChange((_event, supabaseSession) => {
+      const stored = getStoredAuthSession();
+      if (!stored && supabaseSession) {
+        void persistSupabaseSession(supabaseSession).catch(() => {
+          // A valid Supabase session may still lack REALYTICS tenant/RBAC
+          // authorization. Keep the app logged out when the API rejects it.
+        });
+        return;
+      }
+      if (stored?.authProvider !== "supabase") return;
+      if (!supabaseSession) {
+        clearStoredAuthSession();
+        return;
+      }
+      if (stored.accessToken === supabaseSession.access_token) return;
+      setStoredAuthSession({
+        ...stored,
+        accessToken: supabaseSession.access_token,
+        accessTokenExpiresAt: supabaseSession.expires_at,
+        session: {
+          ...stored.session,
+          expiresAt: supabaseSession.expires_at
+            ? new Date(supabaseSession.expires_at * 1000).toISOString()
+            : stored.session.expiresAt,
+        },
+      });
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     const onChange = () => refresh();

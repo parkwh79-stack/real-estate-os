@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import pytest
 
@@ -40,6 +41,45 @@ def test_no_matching_kid_rejected():
     tok = _token({"alg": "RS256", "kid": "nope"}, {"sub": "u"})
     with pytest.raises(ValueError, match="No matching JWKS key"):
         oidc.verify_oidc_token(tok, jwks={"keys": [{"kid": "k1", "kty": "RSA"}]})
+
+
+def test_es256_token_verifies_against_supabase_style_jwk():
+    jwt = pytest.importorskip("jwt")
+    ec = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ec")
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_jwk = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(private_key.public_key()))
+    public_jwk.update({"kid": "supabase-es256", "alg": "ES256", "use": "sig"})
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "sub": "supabase-user",
+            "iss": "https://project.supabase.co/auth/v1",
+            "aud": "authenticated",
+            "iat": now,
+            "exp": now + 300,
+        },
+        private_key,
+        algorithm="ES256",
+        headers={"kid": "supabase-es256"},
+    )
+
+    claims = oidc.verify_oidc_token(
+        token,
+        jwks={"keys": [public_jwk]},
+        issuer="https://project.supabase.co/auth/v1",
+        audience="authenticated",
+    )
+
+    assert claims["sub"] == "supabase-user"
+
+
+def test_algorithm_and_jwk_type_must_match():
+    token = _token({"alg": "ES256", "kid": "wrong-type"}, {"sub": "u"})
+    with pytest.raises(ValueError, match="requires JWKS key type EC"):
+        oidc.verify_oidc_token(
+            token,
+            jwks={"keys": [{"kid": "wrong-type", "alg": "ES256", "kty": "RSA"}]},
+        )
 
 
 def test_verify_errors_clearly_without_pyjwt():

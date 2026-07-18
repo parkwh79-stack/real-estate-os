@@ -9,14 +9,26 @@ blocking for canonical approval until a versioned field definition is added.
 """
 
 import copy
+import hashlib
+import hmac
+import json
 import re
+import types
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, Union, get_args, get_origin
+
+from parsing_platform.canonical_fields import (
+    CANONICAL_FIELD_NAMESPACE_VERSION,
+    LEGACY_CANONICAL_FIELD_ALIASES,
+    canonical_field_key,
+    resolve_canonical_field,
+)
+from parsing_platform.fact_basis import validate_monetary_fact_basis
 
 
-FIELD_REGISTRY_VERSION = "realytics-parser-field-registry-v1"
+FIELD_REGISTRY_VERSION = "realytics-parser-field-registry-v2"
 SUPPORTED_ONTOLOGY_VERSIONS = frozenset(
     {
         "realytics-real-estate-domain-standard-v1",
@@ -67,6 +79,7 @@ class FieldProjection:
     target_path: str
     value_type: str
     unit: str | None = None
+    adapter: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +89,7 @@ class FieldProjection:
             "targetPath": self.target_path,
             "valueType": self.value_type,
             "unit": self.unit,
+            "adapter": self.adapter,
         }
 
 
@@ -87,6 +101,72 @@ class FieldValidationIssue:
 
     def to_dict(self) -> dict[str, Any]:
         return {"code": self.code, "message": self.message, "blocking": self.blocking}
+
+
+_PRODUCT_ASSET_TYPES = (
+    "apartment",
+    "officetel",
+    "knowledge_industry_center",
+    "mixed_use",
+    "commercial",
+    "logistics",
+    "lodging",
+    "residential_land",
+    "other",
+)
+_COST_LINE_ITEM_CATEGORIES = (
+    "land",
+    "demolition",
+    "site_preparation",
+    "construction",
+    "design_engineering",
+    "professional",
+    "permit_fee",
+    "tax",
+    "marketing_sales",
+    "financing",
+    "contingency",
+    "operating",
+    "other",
+)
+_SCHEDULE_MILESTONE_TYPES = (
+    "land_acquisition",
+    "zoning_application",
+    "zoning_approval",
+    "building_permit_application",
+    "building_permit_approval",
+    "financing_close",
+    "construction_start",
+    "presale_start",
+    "construction_completion",
+    "occupancy_approval",
+    "sales_completion",
+    "other",
+)
+_SALES_COLLECTION_STAGES = (
+    "reservation",
+    "contract",
+    "interim",
+    "balance",
+    "other",
+)
+_TRANCHE_REPAYMENT_METHODS = (
+    "bullet",
+    "amortizing",
+    "balloon",
+    "cash_sweep",
+    "sculpted",
+    "other",
+)
+_TRANCHE_REPAYMENT_SOURCES = (
+    "sales_proceeds",
+    "refinancing",
+    "asset_sale",
+    "operating_cash_flow",
+    "sponsor_support",
+    "mixed",
+    "other",
+)
 
 
 _FIELDS: tuple[FieldDefinition, ...] = (
@@ -125,14 +205,14 @@ _FIELDS: tuple[FieldDefinition, ...] = (
         minimum=0,
     ),
     FieldDefinition(
-        "feasibility.gross_floor_area_sqm",
+        "program.gross_floor_area_sqm",
         "development_feasibility",
         "number",
         ("sqm",),
         minimum=0,
     ),
     FieldDefinition(
-        "feasibility.total_revenue",
+        "revenue.total_sales_revenue",
         "development_feasibility",
         "number",
         ("krw",),
@@ -168,15 +248,177 @@ _FIELDS: tuple[FieldDefinition, ...] = (
         minimum=0,
         maximum=1,
     ),
+    # P1 feasibility domain pack.  Every field in a repeatable group requires
+    # the same stable entityId so values from different product/line/schedule
+    # rows cannot silently overwrite one another.
     FieldDefinition(
-        "cash_flow.total_sales_revenue",
-        "cashflow_waterfall",
-        "number",
-        ("krw",),
+        "program.product.asset_type",
+        "development_feasibility",
+        "string",
+        entity_cardinality="entity_required",
+        allowed_values=_PRODUCT_ASSET_TYPES,
+    ),
+    FieldDefinition(
+        "program.product.name",
+        "development_feasibility",
+        "string",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "program.product.unit_count",
+        "development_feasibility",
+        "integer",
+        ("count",),
+        "entity_required",
         minimum=0,
     ),
     FieldDefinition(
-        "cash_flow.land_cost", "cashflow_waterfall", "number", ("krw",), minimum=0
+        "program.product.exclusive_area_sqm",
+        "development_feasibility",
+        "number",
+        ("sqm",),
+        "entity_required",
+        minimum=0,
+    ),
+    FieldDefinition(
+        "program.product.saleable_area_sqm",
+        "development_feasibility",
+        "number",
+        ("sqm",),
+        "entity_required",
+        minimum=0,
+    ),
+    FieldDefinition(
+        "program.product.contract_area_sqm",
+        "development_feasibility",
+        "number",
+        ("sqm",),
+        "entity_required",
+        minimum=0,
+    ),
+    FieldDefinition(
+        "revenue.product.average_sale_price_per_sqm",
+        "development_feasibility",
+        "number",
+        ("krw_per_sqm",),
+        "entity_required",
+        minimum=0,
+    ),
+    FieldDefinition(
+        "revenue.product.average_sale_price_per_py",
+        "development_feasibility",
+        "number",
+        ("krw_per_py",),
+        "entity_required",
+        minimum=0,
+    ),
+    FieldDefinition(
+        "revenue.product.total_sales_revenue",
+        "development_feasibility",
+        "number",
+        ("krw",),
+        "entity_required",
+        minimum=0,
+    ),
+    FieldDefinition(
+        "cost.line_item.name",
+        "cost_schedule",
+        "string",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "cost.line_item.category",
+        "cost_schedule",
+        "string",
+        entity_cardinality="entity_required",
+        allowed_values=_COST_LINE_ITEM_CATEGORIES,
+    ),
+    FieldDefinition(
+        "cost.line_item.amount",
+        "cost_schedule",
+        "number",
+        ("krw",),
+        "entity_required",
+        minimum=0,
+    ),
+    FieldDefinition(
+        "schedule.milestone.name",
+        "cost_schedule",
+        "string",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "schedule.milestone.type",
+        "cost_schedule",
+        "string",
+        entity_cardinality="entity_required",
+        allowed_values=_SCHEDULE_MILESTONE_TYPES,
+    ),
+    FieldDefinition(
+        "schedule.milestone.planned_date",
+        "cost_schedule",
+        "date",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "schedule.milestone.actual_date",
+        "cost_schedule",
+        "date",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "schedule.milestone.month_index",
+        "cost_schedule",
+        "integer",
+        ("month",),
+        "entity_required",
+        minimum=0,
+        maximum=600,
+    ),
+    FieldDefinition(
+        "sales_collection.step.stage",
+        "development_feasibility",
+        "string",
+        entity_cardinality="entity_required",
+        allowed_values=_SALES_COLLECTION_STAGES,
+    ),
+    FieldDefinition(
+        "sales_collection.step.sequence",
+        "development_feasibility",
+        "integer",
+        entity_cardinality="entity_required",
+        minimum=1,
+        maximum=100,
+    ),
+    FieldDefinition(
+        "sales_collection.step.collection_ratio",
+        "development_feasibility",
+        "number",
+        ("ratio",),
+        "entity_required",
+        minimum=0,
+        maximum=1,
+    ),
+    FieldDefinition(
+        "sales_collection.step.due_month_index",
+        "development_feasibility",
+        "integer",
+        ("month",),
+        "entity_required",
+        minimum=0,
+        maximum=600,
+    ),
+    FieldDefinition(
+        "sales_collection.step.due_date",
+        "development_feasibility",
+        "date",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "sales_collection.step.product_entity_id",
+        "development_feasibility",
+        "string",
+        entity_cardinality="entity_required",
     ),
     # Parcel-level enrichment.  Codes and display names are kept separately so
     # a source codebook can be changed without rewriting the source wording.
@@ -372,6 +614,83 @@ _FIELDS: tuple[FieldDefinition, ...] = (
         entity_cardinality="entity_required",
         minimum=1,
         maximum=3,
+    ),
+    FieldDefinition(
+        "financing.tranche.name",
+        "pf_credit",
+        "string",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "financing.tranche.interest_rate_type",
+        "pf_credit",
+        "string",
+        entity_cardinality="entity_required",
+        allowed_values=("fixed", "floating", "zero_coupon", "other"),
+    ),
+    FieldDefinition(
+        "financing.tranche.base_rate_name",
+        "pf_credit",
+        "string",
+        entity_cardinality="entity_required",
+    ),
+    FieldDefinition(
+        "financing.tranche.spread_rate",
+        "pf_credit",
+        "number",
+        ("ratio",),
+        "entity_required",
+        minimum=0,
+        maximum=1,
+    ),
+    FieldDefinition(
+        "financing.tranche.fee_rate",
+        "pf_credit",
+        "number",
+        ("ratio",),
+        "entity_required",
+        minimum=0,
+        maximum=1,
+        metadata={"rateEncoding": "decimal_fraction"},
+    ),
+    FieldDefinition(
+        "financing.tranche.term_months",
+        "pf_credit",
+        "integer",
+        ("month",),
+        "entity_required",
+        minimum=1,
+        maximum=600,
+    ),
+    FieldDefinition(
+        "financing.tranche.draw_priority",
+        "pf_credit",
+        "integer",
+        entity_cardinality="entity_required",
+        minimum=1,
+        maximum=99,
+    ),
+    FieldDefinition(
+        "financing.tranche.repayment_priority",
+        "pf_credit",
+        "integer",
+        entity_cardinality="entity_required",
+        minimum=1,
+        maximum=99,
+    ),
+    FieldDefinition(
+        "financing.tranche.repayment_method",
+        "pf_credit",
+        "string",
+        entity_cardinality="entity_required",
+        allowed_values=_TRANCHE_REPAYMENT_METHODS,
+    ),
+    FieldDefinition(
+        "financing.tranche.repayment_source",
+        "pf_credit",
+        "string",
+        entity_cardinality="entity_required",
+        allowed_values=_TRANCHE_REPAYMENT_SOURCES,
     ),
     # Monthly schedule values remain individual repeatable facts.  A stable
     # entityId binds all fields from the same month without embedding a table.
@@ -569,24 +888,33 @@ _FIELDS: tuple[FieldDefinition, ...] = (
 
 _PROJECTIONS: tuple[FieldProjection, ...] = (
     FieldProjection(
-        "project.name", "realytics-feasibility-study-v2", "2.0", "project.name", "string"
-    ),
-    FieldProjection(
-        "project.type", "realytics-feasibility-study-v2", "2.0", "project.type", "string"
-    ),
-    FieldProjection(
-        "feasibility.gross_floor_area_sqm",
+        "project.name",
         "realytics-feasibility-study-v2",
         "2.0",
-        "program.grossFloorAreaSqm",
+        "project_name",
+        "string",
+    ),
+    FieldProjection(
+        "project.type",
+        "realytics-feasibility-study-v2",
+        "2.0",
+        "asset_type",
+        "string",
+    ),
+    FieldProjection(
+        "program.gross_floor_area_sqm",
+        "realytics-feasibility-study-v2",
+        "2.0",
+        "program.gross_floor_area_sqm.value",
         "number",
         "sqm",
+        "feasibility_value",
     ),
     FieldProjection(
-        "feasibility.total_revenue",
+        "revenue.total_sales_revenue",
         "realytics-feasibility-study-v2",
         "2.0",
-        "revenue.totalSalesRevenue",
+        "metrics.total_revenue",
         "number",
         "krw",
     ),
@@ -594,7 +922,7 @@ _PROJECTIONS: tuple[FieldProjection, ...] = (
         "cost.total_project_cost",
         "realytics-feasibility-study-v2",
         "2.0",
-        "cost.totalProjectCost",
+        "metrics.total_cost",
         "number",
         "krw",
     ),
@@ -602,9 +930,10 @@ _PROJECTIONS: tuple[FieldProjection, ...] = (
         "financing.pf_amount",
         "realytics-feasibility-study-v2",
         "2.0",
-        "financing.pfAmount",
+        "financing[].amount",
         "number",
         "krw",
+        "feasibility_pf_aggregate",
     ),
     FieldProjection(
         "land.pnu",
@@ -653,7 +982,7 @@ _PROJECTIONS: tuple[FieldProjection, ...] = (
         "number",
     ),
     FieldProjection(
-        "cash_flow.total_sales_revenue",
+        "revenue.total_sales_revenue",
         "realytics-cash-flow-run-request-v1",
         "1.0",
         "sourcesAndUses.revenue.totalSalesRevenue",
@@ -661,7 +990,7 @@ _PROJECTIONS: tuple[FieldProjection, ...] = (
         "krw",
     ),
     FieldProjection(
-        "cash_flow.land_cost",
+        "cost.land_cost",
         "realytics-cash-flow-run-request-v1",
         "1.0",
         "sourcesAndUses.cost.landCost",
@@ -685,6 +1014,8 @@ FIELD_DEFINITIONS = {item.field_key: item for item in _FIELDS}
 def field_registry_catalog() -> dict[str, Any]:
     return {
         "schemaVersion": FIELD_REGISTRY_VERSION,
+        "canonicalFieldNamespaceVersion": CANONICAL_FIELD_NAMESPACE_VERSION,
+        "legacyFieldAliases": dict(LEGACY_CANONICAL_FIELD_ALIASES),
         "status": "internal_controlled_baseline",
         "normativeIndustryStandardCompliance": False,
         "supportedOntologyVersions": sorted(SUPPORTED_ONTOLOGY_VERSIONS),
@@ -703,6 +1034,7 @@ def validate_candidate_against_registry(
     evidence: Sequence[Mapping[str, Any]],
     presence_status: str = "present",
     origin_type: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> list[FieldValidationIssue]:
     issues: list[FieldValidationIssue] = []
     if ontology_version not in SUPPORTED_ONTOLOGY_VERSIONS:
@@ -713,6 +1045,7 @@ def validate_candidate_against_registry(
             )
         )
         return issues
+    field_key = canonical_field_key(field_key)
     definition = FIELD_DEFINITIONS.get(field_key)
     if definition is None:
         issues.append(
@@ -784,6 +1117,20 @@ def validate_candidate_against_registry(
                     "The candidate unit is absent or not allowed by the field definition.",
                 )
             )
+    if presence_status == "present":
+        issues.extend(
+            FieldValidationIssue(
+                item.code,
+                item.message,
+                item.blocking,
+            )
+            for item in validate_monetary_fact_basis(
+                field_key=field_key,
+                allowed_units=definition.allowed_units,
+                unit=unit,
+                metadata=metadata,
+            )
+        )
     if definition.entity_cardinality == "entity_required" and not str(entity_id or "").strip():
         issues.append(
             FieldValidationIssue(
@@ -829,70 +1176,297 @@ def validate_candidate_against_registry(
 
 def project_approved_inputs(
     *,
-    snapshot_id: str,
-    ontology_version: str,
     target_schema_id: str,
     target_schema_version: str,
-    input_items: Sequence[Mapping[str, Any]],
+    approved_snapshot: Any | None = None,
+    requested_selection_ids: Sequence[str] | None = None,
+    expected_snapshot_hash: str | None = None,
+    # Retained as assertion-only compatibility parameters.  They no longer
+    # establish an authoritative boundary without the strict snapshot itself.
+    snapshot_id: str | None = None,
+    ontology_version: str | None = None,
+    input_items: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Project approved snapshot inputs without silent overwrite.
+    """Project a strict, active ``ApprovedInputSnapshot`` without data loss.
 
-    The output includes a lineage sidecar because target schemas predate Parser
-    V2 and cannot themselves carry selection/candidate/evidence identities.
+    ``snapshot_id``/``ontology_version``/``input_items`` used to let callers
+    assert an approved boundary using ad-hoc mappings.  The parameters remain
+    in the signature so callers receive an actionable migration error, but the
+    snapshot model (or its exact wire payload) is now the sole authority.
+
+    The output includes a content hash and lineage sidecar because target
+    schemas predate Parser V2 and cannot themselves carry
+    selection/candidate/evidence identities.
     """
 
-    if ontology_version not in SUPPORTED_ONTOLOGY_VERSIONS:
+    # Imported lazily because contracts imports this module to validate
+    # ApprovedInputItem against the same registry.
+    from parsing_platform.contracts import ApprovedInputSnapshot
+
+    if approved_snapshot is None:
+        raise ValueError(
+            "approved_snapshot is required; ad-hoc input_items cannot establish "
+            "an approved_snapshot_only projection boundary"
+        )
+    if input_items is not None:
+        raise ValueError(
+            "input_items is no longer accepted as projection authority; use "
+            "approved_snapshot and optional requested_selection_ids"
+        )
+    if isinstance(approved_snapshot, ApprovedInputSnapshot):
+        snapshot = approved_snapshot
+    elif isinstance(approved_snapshot, Mapping):
+        snapshot = ApprovedInputSnapshot.model_validate(dict(approved_snapshot))
+    else:
+        raise TypeError(
+            "approved_snapshot must be an ApprovedInputSnapshot or its wire payload"
+        )
+
+    if snapshot.approval_status.value != "approved":
+        raise ValueError("projection requires approvalStatus=approved")
+    if snapshot.validity_status != "active":
+        raise ValueError("projection requires validityStatus=active")
+    if snapshot.field_registry_version != FIELD_REGISTRY_VERSION:
+        raise ValueError(
+            "projection requires the current fieldRegistryVersion="
+            f"{FIELD_REGISTRY_VERSION}"
+        )
+    if (
+        snapshot.canonical_field_namespace_version
+        != CANONICAL_FIELD_NAMESPACE_VERSION
+    ):
+        raise ValueError(
+            "projection requires the current canonicalFieldNamespaceVersion="
+            f"{CANONICAL_FIELD_NAMESPACE_VERSION}"
+        )
+    if snapshot.ontology_version not in SUPPORTED_ONTOLOGY_VERSIONS:
         raise ValueError("ontology version is not registered for projection")
+    required_snapshot_collections = {
+        "selectionIds": snapshot.selection_ids,
+        "documentVersionIds": snapshot.document_version_ids,
+        "sourceHashes": snapshot.source_hashes,
+        "sourceDocuments": snapshot.source_documents,
+        "versionContexts": snapshot.version_contexts,
+    }
+    missing_snapshot_collections = [
+        name
+        for name, value in required_snapshot_collections.items()
+        if not value
+    ]
+    if snapshot.input_schema_version is None or missing_snapshot_collections:
+        details = ["inputSchemaVersion"] if snapshot.input_schema_version is None else []
+        details.extend(missing_snapshot_collections)
+        raise ValueError(
+            "projection requires complete approved snapshot lineage: "
+            + ", ".join(details)
+        )
+    if snapshot_id is not None and snapshot_id != snapshot.snapshot_id:
+        raise ValueError("snapshot_id does not match approved_snapshot.snapshotId")
+    if ontology_version is not None and ontology_version != snapshot.ontology_version:
+        raise ValueError(
+            "ontology_version does not match approved_snapshot.ontologyVersion"
+        )
+
+    snapshot_wire = snapshot.model_dump(
+        by_alias=True,
+        mode="json",
+        exclude_none=True,
+    )
+    snapshot_hash = _approved_snapshot_content_hash(snapshot_wire)
+    if expected_snapshot_hash is not None:
+        normalized_expected_hash = str(expected_snapshot_hash).strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized_expected_hash):
+            raise ValueError("expected_snapshot_hash must be a SHA-256 hex digest")
+        if not hmac.compare_digest(normalized_expected_hash, snapshot_hash):
+            raise ValueError("approved snapshot content hash mismatch")
+
+    snapshot_items = list(snapshot.input_items or [])
+    if not snapshot_items:
+        raise ValueError(
+            "approved_snapshot.inputItems is required for projection authority"
+        )
+    items_by_selection_id = {
+        item.selection_id: item for item in snapshot_items
+    }
+    if len(items_by_selection_id) != len(snapshot_items):
+        # The contract currently catches this through selection alignment, but
+        # keep the projection boundary independently fail-closed.
+        raise ValueError("approved_snapshot.inputItems repeats a selectionId")
+    if requested_selection_ids is None:
+        selected_items = snapshot_items
+    else:
+        normalized_selection_ids = [
+            str(item).strip() for item in requested_selection_ids
+        ]
+        if not normalized_selection_ids or any(
+            not item for item in normalized_selection_ids
+        ):
+            raise ValueError("requested_selection_ids must not be empty")
+        if len(set(normalized_selection_ids)) != len(normalized_selection_ids):
+            raise ValueError("requested_selection_ids must not contain duplicates")
+        missing_selection_ids = [
+            item
+            for item in normalized_selection_ids
+            if item not in items_by_selection_id
+        ]
+        if missing_selection_ids:
+            raise ValueError(
+                "requested selection is absent from approved_snapshot.inputItems: "
+                + ", ".join(missing_selection_ids)
+            )
+        selected_items = [
+            items_by_selection_id[item] for item in normalized_selection_ids
+        ]
+
     projections = {
         item.field_key: item
         for item in _PROJECTIONS
         if item.target_schema_id == target_schema_id
         and item.target_schema_version == target_schema_version
     }
-    payload: dict[str, Any] = {}
+    if not projections:
+        raise ValueError(
+            "target schema/version has no registered field projections: "
+            f"{target_schema_id}@{target_schema_version}"
+        )
+    missing_projection_fields: list[str] = []
+    for item in selected_items:
+        resolution = resolve_canonical_field(item.field_key)
+        if (
+            resolution.was_legacy_alias
+            or resolution.canonical_field_key != item.field_key
+        ):
+            raise ValueError(
+                "approved snapshot input must use the current canonical field key: "
+                f"{item.field_key}"
+            )
+        if (
+            item.metadata.get("canonicalFieldNamespaceVersion")
+            != CANONICAL_FIELD_NAMESPACE_VERSION
+        ):
+            raise ValueError(
+                "approved snapshot input does not preserve the current "
+                f"canonicalFieldNamespaceVersion: {item.selection_id}"
+            )
+        if (
+            item.source_locator.document_version_id is not None
+            and item.source_locator.document_version_id
+            != item.document_version_id
+        ):
+            raise ValueError(
+                "approved input sourceLocator.documentVersionId does not match "
+                f"its lineage: {item.selection_id}"
+            )
+        if (
+            item.source_locator.file_sha256 is not None
+            and item.source_locator.file_sha256 != item.source_hash
+        ):
+            raise ValueError(
+                "approved input sourceLocator.fileSha256 does not match its "
+                f"sourceHash: {item.selection_id}"
+            )
+        if item.field_key not in projections:
+            missing_projection_fields.append(item.field_key)
+    if missing_projection_fields:
+        raise ValueError(
+            "requested approved input has no registered projection for "
+            f"{target_schema_id}@{target_schema_version}: "
+            + ", ".join(sorted(set(missing_projection_fields)))
+        )
+
+    payload = _projection_seed(
+        target_schema_id=target_schema_id,
+        snapshot_id=snapshot.snapshot_id,
+    )
     lineage: list[dict[str, Any]] = []
-    for raw_item in input_items:
-        item = dict(raw_item)
-        field_key = str(item.get("fieldKey") or "")
+    for approved_item in selected_items:
+        item = approved_item.model_dump(
+            by_alias=True,
+            mode="json",
+            exclude_none=True,
+        )
+        field_resolution = resolve_canonical_field(approved_item.field_key)
+        field_key = field_resolution.canonical_field_key
         projection = projections.get(field_key)
-        if projection is None:
-            continue
-        selection_id = str(item.get("selectionId") or "").strip()
-        candidate_id = str(item.get("candidateId") or "").strip()
-        if not selection_id or not candidate_id:
-            raise ValueError("projection accepts approved selection items only")
         value = copy.deepcopy(item.get("normalizedValue"))
         if not _matches_value_type(value, projection.value_type):
             raise ValueError(f"projection value type mismatch for {field_key}")
-        _set_projected_path(
+        _set_projection_value(
             payload,
-            projection.target_path,
+            projection,
             value,
             entity_id=item.get("entityId"),
         )
-        lineage.append(
-            {
-                "fieldKey": field_key,
-                "targetPath": projection.target_path,
-                "selectionId": selection_id,
-                "candidateId": candidate_id,
-                "entityId": item.get("entityId"),
-                "sourceLocator": copy.deepcopy(item.get("sourceLocator") or {}),
+        lineage_item = {
+            "fieldKey": field_key,
+            "inputFieldKey": field_resolution.input_field_key,
+            "canonicalFieldNamespaceVersion": (
+                CANONICAL_FIELD_NAMESPACE_VERSION
+            ),
+            "fieldRegistryVersion": FIELD_REGISTRY_VERSION,
+            "fieldKeyNormalization": "identity",
+            "targetPath": projection.target_path,
+            "selectionId": approved_item.selection_id,
+            "candidateId": approved_item.candidate_id,
+            "reviewDecisionId": approved_item.review_decision_id,
+            "parsingRunId": approved_item.parsing_run_id,
+            "documentVersionId": approved_item.document_version_id,
+            "sourceHash": approved_item.source_hash,
+            "sourceApprovedSnapshotHash": snapshot_hash,
+            "entityId": approved_item.entity_id,
+            "unit": approved_item.unit,
+            "originType": approved_item.origin_type.value,
+            "sourceLocator": copy.deepcopy(item["sourceLocator"]),
+        }
+        basis = approved_item.metadata.get("basis")
+        if isinstance(basis, Mapping):
+            lineage_item["factBasis"] = copy.deepcopy(dict(basis))
+        if approved_item.origin_type.value == "derived":
+            lineage_item["calculationLineage"] = {
+                "formulaId": approved_item.formula_id,
+                "formulaVersion": approved_item.formula_version,
+                "inputFactIds": list(approved_item.input_fact_ids),
+                "calculationRunId": approved_item.calculation_run_id,
+                "calculationEngineVersion": (
+                    approved_item.calculation_engine_version
+                ),
+                "calculationOutputPath": approved_item.calculation_output_path,
+                "calculationOutputHash": approved_item.calculation_output_hash,
+                "inputSnapshotHash": approved_item.input_snapshot_hash,
             }
-        )
+        lineage.append(lineage_item)
+    if not lineage:
+        raise ValueError("projection requires at least one approved input")
+
+    payload = _validate_and_canonicalize_runtime_projection(
+        target_schema_id=target_schema_id,
+        payload=payload,
+    )
     return {
         "schemaVersion": target_schema_version,
         "schemaId": target_schema_id,
         "projectionRegistryVersion": FIELD_REGISTRY_VERSION,
-        "sourceApprovedSnapshotId": snapshot_id,
+        "canonicalFieldNamespaceVersion": CANONICAL_FIELD_NAMESPACE_VERSION,
+        "sourceApprovedSnapshotId": snapshot.snapshot_id,
+        "sourceApprovedSnapshotHash": snapshot_hash,
         "payload": payload,
         "lineage": lineage,
         "authoritativeInputBoundary": "approved_snapshot_only",
     }
 
 
+def _approved_snapshot_content_hash(snapshot_wire: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        snapshot_wire,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def validate_projection_registry() -> list[str]:
-    """Return drift codes against the active OS schema registry."""
+    """Return drift codes against active registry and runtime Pydantic models."""
 
     from core.schema_registry import get_schema_contract
 
@@ -906,12 +1480,181 @@ def validate_projection_registry() -> list[str]:
             errors.append(
                 f"SCHEMA_VERSION_MISMATCH:{projection.target_schema_id}:{projection.field_key}"
             )
+        runtime_model = _runtime_projection_model(projection.target_schema_id)
+        if runtime_model is not None:
+            if not _runtime_model_has_path(runtime_model, projection.target_path):
+                errors.append(
+                    "UNKNOWN_RUNTIME_MODEL_PATH:"
+                    f"{projection.target_schema_id}:{projection.target_path}"
+                )
+            continue
         known_paths = {str(item.get("path")) for item in contract.get("fields") or []}
         if projection.target_path not in known_paths:
             errors.append(
                 f"UNKNOWN_TARGET_PATH:{projection.target_schema_id}:{projection.target_path}"
             )
     return errors
+
+
+def _projection_seed(
+    *,
+    target_schema_id: str,
+    snapshot_id: str,
+) -> dict[str, Any]:
+    if target_schema_id != "realytics-feasibility-study-v2":
+        return {}
+    from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION
+
+    return {
+        "version": FEASIBILITY_STUDY_SCHEMA_VERSION,
+        "input_references": {
+            "approved_input_snapshot_id": snapshot_id,
+        },
+    }
+
+
+def _set_projection_value(
+    payload: dict[str, Any],
+    projection: FieldProjection,
+    value: Any,
+    *,
+    entity_id: Any,
+) -> None:
+    if projection.adapter == "feasibility_value":
+        value_path, separator, leaf = projection.target_path.rpartition(".")
+        if not separator or leaf != "value":
+            raise ValueError(
+                "feasibility_value projection must target a FeasibilityValue.value path"
+            )
+        value_container = _ensure_object_path(payload, value_path)
+        value_container.setdefault("key", projection.field_key)
+        value_container.setdefault(
+            "label",
+            projection.field_key.rsplit(".", 1)[-1].replace("_", " ").title(),
+        )
+        amount_unit = {
+            "krw": "KRW",
+            "sqm": "SQM",
+            "py": "PY",
+            "percent": "PERCENT",
+            "count": "COUNT",
+            "month": "MONTH",
+        }.get(str(projection.unit or "").casefold())
+        if amount_unit is not None:
+            value_container.setdefault("unit", amount_unit)
+        _set_projected_path(
+            payload,
+            projection.target_path,
+            value,
+            entity_id=entity_id,
+        )
+        return
+
+    if projection.adapter == "feasibility_pf_aggregate":
+        if projection.target_path != "financing[].amount":
+            raise ValueError(
+                "feasibility_pf_aggregate projection must target financing[].amount"
+            )
+        rows = payload.setdefault("financing", [])
+        if not isinstance(rows, list):
+            raise ValueError("projection target collision at financing")
+        aggregate = next(
+            (
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and row.get("tranche_id") == "parser-v2-pf-aggregate"
+            ),
+            None,
+        )
+        if aggregate is None:
+            aggregate = {
+                "tranche_id": "parser-v2-pf-aggregate",
+                "name": "Approved aggregate PF amount",
+                "priority": "other",
+            }
+            rows.append(aggregate)
+        if "amount" in aggregate and aggregate["amount"] != value:
+            raise ValueError(
+                f"projection would silently overwrite {projection.target_path}"
+            )
+        aggregate["amount"] = value
+        return
+
+    if projection.adapter is not None:
+        raise ValueError(f"unknown projection adapter: {projection.adapter}")
+    _set_projected_path(
+        payload,
+        projection.target_path,
+        value,
+        entity_id=entity_id,
+    )
+
+
+def _ensure_object_path(root: dict[str, Any], path: str) -> dict[str, Any]:
+    current = root
+    for part in path.split("."):
+        if part.endswith("[]"):
+            raise ValueError(f"object projection seed cannot target an array: {path}")
+        child = current.setdefault(part, {})
+        if not isinstance(child, dict):
+            raise ValueError(f"projection target collision at {part}")
+        current = child
+    return current
+
+
+def _runtime_projection_model(target_schema_id: str) -> type[Any] | None:
+    if target_schema_id == "realytics-feasibility-study-v2":
+        from schemas.feasibility_study import FeasibilityStudyV2
+
+        return FeasibilityStudyV2
+    return None
+
+
+def _validate_and_canonicalize_runtime_projection(
+    *,
+    target_schema_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    runtime_model = _runtime_projection_model(target_schema_id)
+    if runtime_model is None:
+        return payload
+    validated = runtime_model.model_validate(payload)
+    canonical_payload = validated.model_dump(mode="json", exclude_unset=True)
+    # Exercise the serialized boundary as well: Python-mode validation alone
+    # can conceal enum/date serialization drift seen by API and worker callers.
+    runtime_model.model_validate(canonical_payload)
+    return canonical_payload
+
+
+def _runtime_model_has_path(model_type: type[Any], path: str) -> bool:
+    current_type: Any = model_type
+    for raw_part in path.split("."):
+        is_array = raw_part.endswith("[]")
+        part = raw_part[:-2] if is_array else raw_part
+        current_type = _unwrap_optional_type(current_type)
+        model_fields = getattr(current_type, "model_fields", None)
+        if not isinstance(model_fields, Mapping) or part not in model_fields:
+            return False
+        current_type = _unwrap_optional_type(model_fields[part].annotation)
+        if is_array:
+            if get_origin(current_type) is not list:
+                return False
+            arguments = get_args(current_type)
+            if len(arguments) != 1:
+                return False
+            current_type = arguments[0]
+    return True
+
+
+def _unwrap_optional_type(annotation: Any) -> Any:
+    current = annotation
+    while get_origin(current) in (Union, types.UnionType):
+        arguments = tuple(item for item in get_args(current) if item is not type(None))
+        if len(arguments) != 1:
+            return current
+        current = arguments[0]
+    return current
 
 
 def _matches_value_type(value: Any, value_type: str) -> bool:

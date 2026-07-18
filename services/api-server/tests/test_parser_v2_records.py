@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from parsing_platform.canonical_fields import CANONICAL_FIELD_NAMESPACE_VERSION
+from parsing_platform.field_registry import FIELD_REGISTRY_VERSION
 from parsing_platform.contracts import (
     ApprovedInputSnapshot,
     CanonicalSelection,
@@ -134,6 +136,31 @@ def _json_hash(value) -> str:
     ).hexdigest()
 
 
+def _revenue_cost_basis_metadata(**overrides) -> dict:
+    return {
+        "basis": {
+            "vatTreatment": "included",
+            "amountScope": "gross",
+            "allocationBasis": "direct",
+            "currency": "KRW",
+            **overrides,
+        }
+    }
+
+
+def _financing_basis_metadata(**overrides) -> dict:
+    return {
+        "basis": {
+            "vatTreatment": "not_applicable",
+            "amountScope": "not_applicable",
+            "allocationBasis": "not_applicable",
+            "currency": "KRW",
+            "financingBalanceBasis": "commitment",
+            **overrides,
+        }
+    }
+
+
 def _document(
     store: ParserV2RecordStore,
     *,
@@ -192,7 +219,20 @@ def _candidate(
     run_id: str = "run-1",
     document_version_id: str = "docv-1",
     canonical_field: str = "feasibility.total_revenue",
+    unit: str = "KRW",
+    metadata: dict | None = None,
+    authority: str = "unknown",
 ) -> dict:
+    if metadata is None:
+        basis_metadata = (
+            _financing_basis_metadata()
+            if canonical_field.startswith("financing.")
+            else _revenue_cost_basis_metadata()
+        )
+        metadata = {
+            "extractionProfile": "business_plan_v2",
+            **basis_metadata,
+        }
     return store.create_candidate(
         tenant_id=TENANT,
         project_id=PROJECT,
@@ -203,8 +243,9 @@ def _candidate(
         canonical_field=canonical_field,
         value=value,
         raw_value=f"{value:,}원",
-        unit="KRW",
+        unit=unit,
         confidence=0.98,
+        authority=authority,
         evidence=[
             {
                 "documentVersionId": document_version_id,
@@ -226,7 +267,7 @@ def _candidate(
         target_modules=["feasibility_cashflow", "pf_credit"],
         effective_date="2026-06-30",
         as_of_date="2026-07-01",
-        metadata={"extractionProfile": "business_plan_v2"},
+        metadata=metadata,
     )
 
 
@@ -514,6 +555,22 @@ def test_candidate_is_immutable_idempotent_multilocator_and_reparse_uses_new_ids
     )
 
 
+def test_candidate_authority_is_bound_to_archived_document_authority() -> None:
+    store, _ = _ready_candidate_store()
+
+    with pytest.raises(
+        ParserV2ReferenceError,
+        match="must exactly match the archived document source authority",
+    ):
+        _candidate(
+            store,
+            candidate_id="candidate-elevated-authority",
+            authority="signed_report",
+        )
+
+    assert store.list_candidates(TENANT, PROJECT) == []
+
+
 def test_open_conflict_blocks_selection_until_explicit_resolution() -> None:
     store, _ = _ready_candidate_store()
     first = _candidate(store)
@@ -655,11 +712,27 @@ def test_review_selection_and_snapshot_require_current_explicit_approval() -> No
     )
 
     assert snapshot["inputs"] == {
-        "feasibility.total_revenue": 100_000_000_000
+        "revenue.total_sales_revenue": 100_000_000_000
     }
     assert snapshot["sourceHashes"] == [HASH_A]
     assert snapshot["documentVersionIds"] == ["docv-1"]
     assert snapshot["sourceParsingRunIds"] == ["run-1"]
+    assert candidate["fieldRegistryVersion"] == FIELD_REGISTRY_VERSION
+    assert selection["metadata"] == candidate["metadata"]
+    assert snapshot["canonicalFieldNamespaceVersion"] == (
+        CANONICAL_FIELD_NAMESPACE_VERSION
+    )
+    assert snapshot["selections"][0]["metadata"] == candidate["metadata"]
+    assert snapshot["inputItems"][0]["metadata"] == candidate["metadata"]
+    assert snapshot["inputItems"][0]["metadata"]["basis"] == (
+        _revenue_cost_basis_metadata()["basis"]
+    )
+    public_snapshot = approved_input_snapshot_wire_payload(snapshot)
+    assert public_snapshot["canonicalFieldNamespaceVersion"] == (
+        CANONICAL_FIELD_NAMESPACE_VERSION
+    )
+    assert public_snapshot["selections"][0]["metadata"] == candidate["metadata"]
+    assert public_snapshot["inputItems"][0]["metadata"] == candidate["metadata"]
 
     ReviewDecision.model_validate(
         {
@@ -681,8 +754,83 @@ def test_review_selection_and_snapshot_require_current_explicit_approval() -> No
     )
     CanonicalSelection.model_validate(snapshot["selections"][0])
     ApprovedInputSnapshot.model_validate(
-        approved_input_snapshot_wire_payload(snapshot)
+        public_snapshot
     )
+
+
+def test_selection_rejects_candidate_from_previous_field_registry_version() -> None:
+    store, backend = _ready_candidate_store()
+    candidate = _candidate(store)
+    _seal_run(store)
+    decision = store.append_review_decision(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        candidate_id=candidate["candidateId"],
+        actor_id=ACTOR,
+        action="approve",
+        reason="Candidate was reviewed under its original registry.",
+    )
+    backend.rows[PROJECT][candidate["recordId"]][
+        "fieldRegistryVersion"
+    ] = "realytics-parser-field-registry-v1"
+
+    with pytest.raises(ParserV2ApprovalError, match="fieldRegistryVersion"):
+        store.create_canonical_selection(
+            tenant_id=TENANT,
+            project_id=PROJECT,
+            selection_id="selection-stale-registry",
+            actor_id=ACTOR,
+            candidate_id=candidate["candidateId"],
+            review_decision_id=decision["reviewDecisionId"],
+        )
+
+
+def test_selection_revalidates_all_governed_candidate_inputs_at_approval() -> None:
+    store, backend = _ready_candidate_store()
+    candidate = _candidate(store)
+    _seal_run(store)
+    decision = store.append_review_decision(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        candidate_id=candidate["candidateId"],
+        actor_id=ACTOR,
+        action="approve",
+        reason="Stored validation is stale and must not be trusted.",
+    )
+    stale = backend.rows[PROJECT][candidate["recordId"]]
+    stale["normalizedValue"] = "not-a-number"
+    stale["unit"] = "USD"
+    stale["entityId"] = "unexpected-project-entity"
+    stale["originType"] = "extracted"
+    stale["evidence"][0].setdefault("metadata", {})[
+        "workbookFormula"
+    ] = "=SUM(A1:A2)"
+    stale["metadata"] = {
+        "canonicalFieldNamespaceVersion": CANONICAL_FIELD_NAMESPACE_VERSION
+    }
+    stale["validationStatus"] = "passed"
+    stale["validationCodes"] = []
+    stale["validationFindings"] = []
+
+    with pytest.raises(
+        ParserV2ApprovalError,
+        match="current governed field-registry revalidation",
+    ) as exc_info:
+        store.create_canonical_selection(
+            tenant_id=TENANT,
+            project_id=PROJECT,
+            selection_id="selection-revalidation-blocked",
+            actor_id=ACTOR,
+            candidate_id=candidate["candidateId"],
+            review_decision_id=decision["reviewDecisionId"],
+        )
+
+    message = str(exc_info.value)
+    assert "CANONICAL_VALUE_TYPE_MISMATCH" in message
+    assert "CANONICAL_UNIT_INVALID" in message
+    assert "CANONICAL_ENTITY_ID_NOT_ALLOWED" in message
+    assert "FACT_BASIS_REQUIRED" in message
+    assert "WORKBOOK_FORMULA_RECALCULATION_REQUIRED" in message
 
 
 def test_document_change_appends_invalidation_events_and_preserves_originals() -> None:
@@ -845,6 +993,36 @@ def test_candidate_rejects_noncanonical_camel_case_field_key() -> None:
             value=1,
             evidence=[{"documentVersionId": "docv-1", "pageNumber": 1}],
         )
+
+
+def test_candidate_normalizes_legacy_field_and_preserves_key_lineage() -> None:
+    store, _ = _store()
+    _document(store)
+    _run(store)
+
+    candidate = _candidate(
+        store,
+        canonical_field="feasibility.total_revenue",
+    )
+
+    assert candidate["fieldKey"] == "revenue.total_sales_revenue"
+    assert candidate["canonicalField"] == "revenue.total_sales_revenue"
+    assert candidate["metadata"]["extractionProfile"] == "business_plan_v2"
+    assert (
+        candidate["metadata"]["canonicalFieldNamespaceVersion"]
+        == CANONICAL_FIELD_NAMESPACE_VERSION
+    )
+    assert candidate["metadata"]["canonicalFieldLineage"] == {
+        "namespaceVersion": CANONICAL_FIELD_NAMESPACE_VERSION,
+        "inputFieldKey": "feasibility.total_revenue",
+        "canonicalFieldKey": "revenue.total_sales_revenue",
+        "normalization": "legacy_alias",
+    }
+    assert store.list_candidates(
+        TENANT,
+        PROJECT,
+        canonical_field="feasibility.total_revenue",
+    )[0]["candidateId"] == candidate["candidateId"]
 
 
 def test_candidate_does_not_persist_raw_source_excerpt() -> None:
@@ -1013,6 +1191,68 @@ def test_unregistered_field_remains_candidate_but_cannot_be_selected() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("canonical_field", "unit", "metadata", "expected_code"),
+    (
+        (
+            "cost.total_project_cost",
+            "KRW",
+            {"extractionProfile": "business_plan_v2"},
+            "FACT_BASIS_REQUIRED",
+        ),
+        (
+            "financing.pf_amount",
+            "KRW",
+            _revenue_cost_basis_metadata(),
+            "FACT_BASIS_INVALID",
+        ),
+        (
+            "cost.total_project_cost",
+            "USD",
+            _revenue_cost_basis_metadata(),
+            "FACT_BASIS_UNIT_CONFLICT",
+        ),
+    ),
+)
+def test_monetary_basis_findings_preserve_candidate_but_block_selection(
+    canonical_field,
+    unit,
+    metadata,
+    expected_code,
+) -> None:
+    store, _ = _ready_candidate_store()
+    candidate = _candidate(
+        store,
+        candidate_id=f"candidate-basis-{expected_code.lower()}",
+        canonical_field=canonical_field,
+        unit=unit,
+        metadata=metadata,
+    )
+    _seal_run(store)
+    decision = store.append_review_decision(
+        tenant_id=TENANT,
+        project_id=PROJECT,
+        candidate_id=candidate["candidateId"],
+        actor_id=ACTOR,
+        action="approve",
+        reason="The candidate remains reviewable while its basis is unresolved.",
+    )
+
+    assert candidate["validationStatus"] == "blocked"
+    assert expected_code in candidate["validationCodes"]
+    if expected_code == "FACT_BASIS_REQUIRED":
+        assert "basis" not in candidate["metadata"]
+    with pytest.raises(ParserV2ApprovalError, match="blocking validation"):
+        store.create_canonical_selection(
+            tenant_id=TENANT,
+            project_id=PROJECT,
+            selection_id=f"selection-{candidate['candidateId']}",
+            actor_id=ACTOR,
+            candidate_id=candidate["candidateId"],
+            review_decision_id=decision["reviewDecisionId"],
+        )
+
+
 def test_candidate_payload_size_is_bounded_before_persistence() -> None:
     store, _ = _ready_candidate_store()
     with pytest.raises(ParserV2RecordError, match="storage limit"):
@@ -1110,6 +1350,7 @@ def test_derived_candidate_binds_exact_calculation_output_and_snapshot_closure()
         value=output_value,
         unit="KRW",
         evidence=evidence,
+        metadata=_revenue_cost_basis_metadata(),
         **binding,
     )
     assert derived["calculationOutputHash"] == _json_hash(output_value)
@@ -1135,6 +1376,7 @@ def test_derived_candidate_binds_exact_calculation_output_and_snapshot_closure()
             value=output_value + 1,
             unit="KRW",
             evidence=evidence,
+            metadata=_revenue_cost_basis_metadata(),
             **binding,
         )
 
@@ -1243,7 +1485,7 @@ def test_same_review_content_can_be_appended_again_at_a_new_sequence() -> None:
     assert third["decisionSequence"] == 3
 
 
-def test_new_conflict_invalidates_active_approvals_and_stales_the_original_seal() -> None:
+def test_new_conflict_after_seal_is_rejected_without_invalidating_approvals() -> None:
     store, _ = _ready_candidate_store()
     winner = _candidate(store, candidate_id="candidate-conflict-winner", value=100)
     _seal_run(store)
@@ -1298,31 +1540,40 @@ def test_new_conflict_invalidates_active_approvals_and_stales_the_original_seal(
         run_id="run-2",
     )
 
-    store.create_source_conflict(
-        tenant_id=TENANT,
-        project_id=PROJECT,
-        conflict_id="conflict-after-approval",
-        actor_id=ACTOR,
-        canonical_field="feasibility.total_revenue",
-        candidate_ids=[winner["candidateId"], loser["candidateId"]],
-        conflict_code="SOURCE_VALUE_MISMATCH",
-    )
-
-    assert store.list_canonical_selections(TENANT, PROJECT, active_only=True) == []
-    assert store.list_approved_input_snapshots(TENANT, PROJECT, active_only=True) == []
-
-    with pytest.raises(ParserV2ApprovalError, match="changed after sealing"):
-        store.append_review_decision(
+    with pytest.raises(
+        ParserV2ApprovalError,
+        match="new source conflict cannot be added to a sealed candidate set",
+    ):
+        store.create_source_conflict(
             tenant_id=TENANT,
             project_id=PROJECT,
-            candidate_id=winner["candidateId"],
+            conflict_id="conflict-after-approval",
             actor_id=ACTOR,
-            action="approve",
-            reason="A new reconciliation run is required.",
-            conflict_ids=["conflict-after-approval"],
-            expected_decision_sequence=1,
+            canonical_field="feasibility.total_revenue",
+            candidate_ids=[winner["candidateId"], loser["candidateId"]],
+            conflict_code="SOURCE_VALUE_MISMATCH",
         )
 
+    assert store.list_source_conflicts(TENANT, PROJECT) == []
+    assert [
+        item["selectionId"]
+        for item in store.list_canonical_selections(
+            TENANT, PROJECT, active_only=True
+        )
+    ] == ["selection-before-conflict"]
+    assert [
+        item["snapshotId"]
+        for item in store.list_approved_input_snapshots(
+            TENANT, PROJECT, active_only=True
+        )
+    ] == ["snapshot-before-conflict"]
+    assert len(
+        store.list_review_decisions(
+            TENANT,
+            PROJECT,
+            candidate_id=winner["candidateId"],
+        )
+    ) == 1
     assert first_snapshot["snapshotId"] == "snapshot-before-conflict"
 
 

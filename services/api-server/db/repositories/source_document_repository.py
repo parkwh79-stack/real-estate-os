@@ -38,12 +38,21 @@ class SourceDocumentRepository:
         project["_meta"]["upload"] = upload_meta
         documents = project.setdefault("source_documents", [])
         upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
-        already_listed = any(
-            (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
-            for document in documents
+        existing_index = next(
+            (
+                index
+                for index, document in enumerate(documents)
+                if (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
+            ),
+            None,
         )
-        if not already_listed:
+        if existing_index is None:
             documents.append(upload_meta)
+        else:
+            # The archive identifier is content-addressed. A later validation
+            # of the same bytes must enrich the existing metadata record rather
+            # than silently retain an earlier record without validation facts.
+            documents[existing_index] = {**documents[existing_index], **upload_meta}
         if self.persist_project is not None:
             self.persist_project(project_id)
         else:

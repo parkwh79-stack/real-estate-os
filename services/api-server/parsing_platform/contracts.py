@@ -12,15 +12,20 @@ import json
 import math
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from agent_platform.contracts.models import SourceLocator as PlatformSourceLocator
+from parsing_platform.field_registry import (
+    FIELD_REGISTRY_VERSION,
+    validate_candidate_against_registry,
+)
 
 
 CANONICAL_FIELD_KEY_PATTERN = r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$"
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
+CANDIDATE_SET_SEAL_SCHEMA_VERSION = "realytics-candidate-set-seal-v2"
 
 
 def _to_camel(value: str) -> str:
@@ -321,30 +326,81 @@ class ParsingRun(ParsingContract):
 
 
 class CandidateSetSeal(ParsingContract):
-    schema_version: str = "realytics-candidate-set-seal-v1"
+    schema_version: Literal[CANDIDATE_SET_SEAL_SCHEMA_VERSION] = (
+        CANDIDATE_SET_SEAL_SCHEMA_VERSION
+    )
     seal_id: str = Field(..., min_length=1)
     tenant_id: str = Field(..., min_length=1)
     project_id: str = Field(..., min_length=1)
     parsing_run_id: str = Field(..., min_length=1)
     document_version_id: str = Field(..., min_length=1)
-    candidate_ids: list[str] = Field(..., min_length=1)
-    candidate_count: int = Field(..., ge=1)
+    candidate_ids: list[str] = Field(...)
+    candidate_count: int = Field(..., ge=0)
     conflict_ids: list[str] = Field(default_factory=list)
     conflict_count: int = Field(0, ge=0)
+    expected_module_ids: list[str] = Field(default_factory=list)
+    completed_module_ids: list[str] = Field(default_factory=list)
+    unresolved_module_ids: list[str] = Field(default_factory=list)
+    blocking_diagnostic_codes: list[str] = Field(default_factory=list)
+    reconciliation_source_candidate_ids: list[str] = Field(
+        default_factory=list
+    )
+    reconciliation_bound: bool = False
+    collection_manifest_hash: str = Field(..., pattern=SHA256_PATTERN)
     candidate_set_hash: str = Field(..., pattern=SHA256_PATTERN)
     sealed_at: datetime
     sealed_by: str = Field(..., min_length=1)
 
     @model_validator(mode="after")
     def validate_membership_counts(self) -> "CandidateSetSeal":
-        if len(set(self.candidate_ids)) != len(self.candidate_ids):
-            raise ValueError("candidateIds must not contain duplicates")
-        if len(set(self.conflict_ids)) != len(self.conflict_ids):
-            raise ValueError("conflictIds must not contain duplicates")
+        for name, values in (
+            ("candidateIds", self.candidate_ids),
+            ("conflictIds", self.conflict_ids),
+            ("expectedModuleIds", self.expected_module_ids),
+            ("completedModuleIds", self.completed_module_ids),
+            ("unresolvedModuleIds", self.unresolved_module_ids),
+            ("blockingDiagnosticCodes", self.blocking_diagnostic_codes),
+            (
+                "reconciliationSourceCandidateIds",
+                self.reconciliation_source_candidate_ids,
+            ),
+        ):
+            if any(not item.strip() for item in values):
+                raise ValueError(f"{name} must not contain empty values")
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} must not contain duplicates")
         if self.candidate_count != len(self.candidate_ids):
             raise ValueError("candidateCount must match candidateIds")
         if self.conflict_count != len(self.conflict_ids):
             raise ValueError("conflictCount must match conflictIds")
+        expected = set(self.expected_module_ids)
+        completed = set(self.completed_module_ids)
+        unresolved = set(self.unresolved_module_ids)
+        if (
+            not completed.issubset(expected)
+            or not unresolved.issubset(expected)
+            or completed.intersection(unresolved)
+            or completed.union(unresolved) != expected
+        ):
+            raise ValueError(
+                "completedModuleIds and unresolvedModuleIds must partition "
+                "expectedModuleIds"
+            )
+        if self.reconciliation_bound and (
+            sorted(self.reconciliation_source_candidate_ids)
+            != sorted(self.candidate_ids)
+        ):
+            raise ValueError(
+                "reconciliationSourceCandidateIds must match candidateIds "
+                "when reconciliationBound is true"
+            )
+        if (
+            not self.reconciliation_bound
+            and self.reconciliation_source_candidate_ids
+        ):
+            raise ValueError(
+                "reconciliationSourceCandidateIds requires reconciliationBound=true"
+            )
         return self
 
 
@@ -601,7 +657,7 @@ class ApprovedInputItem(ParsingContract):
     source_hash: str = Field(..., pattern=SHA256_PATTERN)
     sha256: str = Field(..., pattern=SHA256_PATTERN)
     source_locator: SourceLocator
-    origin_type: OriginType | None = None
+    origin_type: OriginType
     formula_id: str | None = Field(None, min_length=1)
     formula_version: str | None = Field(None, min_length=1)
     input_fact_ids: list[str] = Field(default_factory=list)
@@ -612,8 +668,9 @@ class ApprovedInputItem(ParsingContract):
     input_snapshot_hash: str | None = Field(None, pattern=SHA256_PATTERN)
     effective_date: date | None = None
     as_of_date: date | None = None
-    field_registry_version: str | None = Field(None, min_length=1)
+    field_registry_version: Literal[FIELD_REGISTRY_VERSION]
     version_context: ParserVersionContext
+    metadata: dict[str, JsonValue] = Field(...)
 
     @model_validator(mode="after")
     def validate_item_identity(self) -> "ApprovedInputItem":
@@ -653,6 +710,38 @@ class ApprovedInputItem(ParsingContract):
             raise ValueError(
                 "calculation lineage is allowed only for a derived approved input"
             )
+        namespace_version = self.metadata.get(
+            "canonicalFieldNamespaceVersion"
+        )
+        if not isinstance(namespace_version, str) or not namespace_version:
+            raise ValueError(
+                "approved input metadata requires canonicalFieldNamespaceVersion"
+            )
+        registry_issues = validate_candidate_against_registry(
+            ontology_version=self.version_context.ontology_version,
+            field_key=self.field_key,
+            normalized_value=self.normalized_value,
+            unit=self.unit,
+            entity_id=self.entity_id,
+            evidence=[
+                self.source_locator.model_dump(
+                    by_alias=True,
+                    mode="json",
+                    exclude_none=True,
+                )
+            ],
+            presence_status="present",
+            origin_type=self.origin_type.value,
+            metadata=self.metadata,
+        )
+        blocking_codes = [
+            item.code for item in registry_issues if item.blocking
+        ]
+        if blocking_codes:
+            raise ValueError(
+                "approved input violates the current field registry: "
+                + ", ".join(blocking_codes)
+            )
         return self
 
 
@@ -669,7 +758,11 @@ class ApprovedInputSnapshot(ParsingContract):
         None,
         pattern=r"^realytics-parser-approved-inputs-v[1-9][0-9]*$",
     )
-    field_registry_version: str | None = Field(None, min_length=1)
+    field_registry_version: Literal[FIELD_REGISTRY_VERSION]
+    canonical_field_namespace_version: str = Field(
+        ...,
+        pattern=r"^realytics-canonical-fact-namespace-v[1-9][0-9]*$",
+    )
     selection_ids: list[str] | None = None
     selections: list[CanonicalSelection] = Field(..., min_length=1)
     ontology_version: str = Field(..., min_length=1)
@@ -705,6 +798,17 @@ class ApprovedInputSnapshot(ParsingContract):
         if unapproved:
             raise ValueError(
                 "ApprovedInputSnapshot accepts approved selections only: " + ", ".join(unapproved)
+            )
+        mismatched_selection_namespaces = [
+            selection.selection_id
+            for selection in self.selections
+            if selection.metadata.get("canonicalFieldNamespaceVersion")
+            != self.canonical_field_namespace_version
+        ]
+        if mismatched_selection_namespaces:
+            raise ValueError(
+                "selections must preserve the snapshot canonicalFieldNamespaceVersion: "
+                + ", ".join(mismatched_selection_namespaces)
             )
         semantic_keys = [(item.field_key, item.entity_id) for item in self.selections]
         if len(set(semantic_keys)) != len(semantic_keys):
@@ -769,6 +873,7 @@ class ApprovedInputSnapshot(ParsingContract):
                     or item.review_decision_id != selection.review_decision_id
                     or item.normalized_value != selection.normalized_value
                     or item.unit != selection.unit
+                    or item.metadata != selection.metadata
                 ):
                     raise ValueError(
                         "inputItems must preserve their canonical selection identity and value"
@@ -782,7 +887,7 @@ class ApprovedInputSnapshot(ParsingContract):
                 item.source_hash not in self.source_hashes for item in self.input_items
             ):
                 raise ValueError("inputItems reference undeclared sourceHashes")
-            if self.field_registry_version is not None and any(
+            if any(
                 item.field_registry_version != self.field_registry_version
                 for item in self.input_items
             ):

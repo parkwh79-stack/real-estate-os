@@ -32,7 +32,11 @@ class LegalReviewAgent:
                 "connected": normalized_context["connected"],
                 "source": normalized_context.get("source", "not_connected"),
                 "adapter": normalized_context.get("version"),
-                "note": "Korean Law MCP sidecar results are normalized into law_context and merged into this legal precheck.",
+                "note": (
+                    "Compatibility projection only. Connected means the Legal "
+                    "Intelligence Core supplied verified official evidence; MCP "
+                    "transport success alone is never sufficient."
+                ),
             },
             "status": "blocking_issue" if blocking else "caution" if caution else "clear",
             "checks": checks,
@@ -210,9 +214,9 @@ class LegalReviewAgent:
         if not law_context.get("connected"):
             return self._check(
                 "korean_law_mcp",
-                "Korean Law MCP evidence",
+                "Verified legal-source evidence",
                 "caution",
-                ["Korean Law MCP sidecar results were not supplied as law_context."],
+                ["No current, hash-bound official legal evidence was supplied."],
             )
 
         citation_verification = law_context.get("citationVerification", {})
@@ -220,7 +224,7 @@ class LegalReviewAgent:
         if failures:
             return self._check(
                 "korean_law_mcp",
-                "Korean Law MCP evidence",
+                "Verified legal-source evidence",
                 "blocking",
                 [f"Citation verification failed: {failures}"],
             )
@@ -228,7 +232,7 @@ class LegalReviewAgent:
         references = law_context.get("references", [])
         return self._check(
             "korean_law_mcp",
-            "Korean Law MCP evidence",
+            "Verified legal-source evidence",
             "clear" if references else "caution",
             [f"{len(references)} legal references were connected."] if references else ["law_context was supplied but references is empty."],
         )

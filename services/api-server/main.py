@@ -30,7 +30,7 @@ _load_local_env()
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import agent_platform, audit, auth, glossary, kakao, google, valuemap, projects, project_assumptions, ops, market
+from routers import agent_platform, audit, auth, glossary, kakao, google, legal_intelligence, valuemap, projects, project_assumptions, ops, market
 from core.authz import enforce_project_tenant_scope
 from core.idp import principal_from_request
 from core.runtime_profile import cors_origins, validate_security_configuration
@@ -134,6 +134,7 @@ app.include_router(project_assumptions.router)
 app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(glossary.router)
+app.include_router(legal_intelligence.router)
 app.include_router(kakao.router)
 app.include_router(google.router)
 app.include_router(ops.router)

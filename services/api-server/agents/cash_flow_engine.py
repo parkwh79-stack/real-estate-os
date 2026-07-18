@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Tuple
 from core.calculations import calculate_cashflow_max_minus_details
 from core.schedule import schedule_event_map
 
+MAX_CASH_FLOW_HORIZON_MONTHS = 600
+
 
 def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     """Run a deterministic baseline cash-flow analysis from CashFlowRunRequest."""
@@ -144,9 +146,47 @@ def _project_month_count(request: Dict[str, Any]) -> int:
     schedule = schedule_event_map(request.get("schedule"))
     start = _planned_date(schedule.get("construction_start"))
     completion = _planned_date(schedule.get("completion"))
-    if start and completion:
-        return max(1, _month_diff(start, completion))
-    return 36
+    candidates = [max(1, _month_diff(start, completion)) if start and completion else 36]
+
+    explicit_cost = request.get("costSchedule") or request.get("cost_schedule") or {}
+    cost_rows = explicit_cost.get("rows") if isinstance(explicit_cost, dict) else explicit_cost
+    for fallback_index, row in enumerate(cost_rows or []):
+        if isinstance(row, dict):
+            candidates.append(
+                _non_negative_int(row.get("monthIndex", row.get("month_index", fallback_index)), fallback_index)
+            )
+
+    for product in request.get("productMix") or []:
+        if not isinstance(product, dict):
+            continue
+        for step in product.get("collectionSteps") or []:
+            if not isinstance(step, dict):
+                continue
+            monthly_amounts = step.get("monthlyCollectionAmounts")
+            if isinstance(monthly_amounts, list) and monthly_amounts:
+                candidates.append(len(monthly_amounts) - 1)
+            candidates.append(_non_negative_int(step.get("dueMonth"), 0))
+
+    for tranche in request.get("pfStructure") or []:
+        if isinstance(tranche, dict):
+            candidates.append(_non_negative_int(tranche.get("maturityMonths"), 0))
+    for event in schedule.values():
+        if isinstance(event, dict) and event.get("monthIndex") is not None:
+            candidates.append(_non_negative_int(event.get("monthIndex"), 0))
+    horizon = max(candidates)
+    if horizon > MAX_CASH_FLOW_HORIZON_MONTHS:
+        raise ValueError(
+            f"cash-flow horizon {horizon} exceeds the supported maximum "
+            f"of {MAX_CASH_FLOW_HORIZON_MONTHS} months"
+        )
+    return horizon
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _sales_collection_schedule(request: Dict[str, Any], months: int) -> List[Dict[str, float]]:

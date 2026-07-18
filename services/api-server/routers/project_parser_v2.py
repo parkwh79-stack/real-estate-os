@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
 from core.authz import authorize_request, enforce_project_tenant_scope
 from parsing_platform.adapters import ArchivedDocument
@@ -33,15 +33,23 @@ from parsing_platform.contracts import (
     generate_contract_json_schemas,
 )
 from parsing_platform.default_modules import (
-    build_default_intake_orchestrator,
     intake_core_profile,
 )
+from parsing_platform.canonical_fields import canonical_field_key
 from parsing_platform.domain_standards import domain_standard_catalog
+from parsing_platform.document_taxonomy import (
+    DOCUMENT_TAXONOMY_VERSION,
+    canonical_document_types,
+    document_taxonomy_catalog,
+)
 from parsing_platform.field_registry import field_registry_catalog
 from parsing_platform.orchestrator import (
     ParsingOrchestrationError,
     ParsingOrchestrator,
     ProjectParsingProfile,
+)
+from parsing_platform.runtime_modules import (
+    build_parser_v2_runtime_orchestrator,
 )
 from use_cases.parser_v2_pipeline import run_structural_parsing_use_case
 from use_cases.parser_v2_profiles import (
@@ -82,16 +90,38 @@ class ParsingStageProfileInput(ParsingContract):
 class ProjectParsingProfileInput(ParsingContract):
     profile_id: str = Field(..., min_length=1)
     version: str = Field(..., min_length=1)
+    document_taxonomy_version: str = Field(..., min_length=1)
     selected_modules: list[str] = Field(default_factory=list)
     excluded_modules: list[str] = Field(default_factory=list)
     ordered_stages: list[ParsingStageProfileInput] = Field(default_factory=list)
     failure_policy: Literal["fail_closed", "preserve_partial"] = "fail_closed"
     project_id: str | None = Field(None, min_length=1)
-    document_types: list[str] = Field(default_factory=list)
+    document_types: list[str] = Field(..., min_length=1)
     asset_types: list[str] = Field(default_factory=list)
     deal_types: list[str] = Field(default_factory=list)
     capability_bindings: dict[str, list[str]] = Field(default_factory=dict)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @field_validator("document_taxonomy_version")
+    @classmethod
+    def require_current_document_taxonomy(cls, value: str) -> str:
+        if value != DOCUMENT_TAXONOMY_VERSION:
+            raise ValueError(
+                "documentTaxonomyVersion must equal "
+                f"{DOCUMENT_TAXONOMY_VERSION}"
+            )
+        return value
+
+    @field_validator("document_types")
+    @classmethod
+    def require_canonical_document_types(
+        cls,
+        value: list[str],
+    ) -> list[str]:
+        try:
+            return list(canonical_document_types(value))
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class StructuralParsingRunInput(ParsingContract):
@@ -220,7 +250,9 @@ def build_project_parser_v2_router(
 
     router = APIRouter(tags=["parser-v2"])
     make_store = record_store_factory or ParserV2RecordStore
-    make_orchestrator = orchestrator_factory or build_default_intake_orchestrator
+    make_orchestrator = (
+        orchestrator_factory or build_parser_v2_runtime_orchestrator
+    )
 
     def is_review_pilot_enabled() -> bool:
         if review_pilot_enabled is not None:
@@ -408,6 +440,10 @@ def build_project_parser_v2_router(
                     "version": manifest["version"],
                     "capabilities": manifest["capabilities"],
                     "supportedDocumentTypes": manifest["supported_document_types"],
+                    "documentTaxonomyVersion": manifest[
+                        "document_taxonomy_version"
+                    ],
+                    "documentTypeScope": manifest["document_type_scope"],
                     "supportedAssetTypes": manifest["supported_asset_types"],
                     "supportedDealTypes": manifest["supported_deal_types"],
                     "requires": manifest["requires"],
@@ -426,13 +462,15 @@ def build_project_parser_v2_router(
                 }
             )
         return {
-            "schemaVersion": "realytics-parser-v2-module-catalog-v1",
+            "schemaVersion": "realytics-parser-v2-module-catalog-v2",
             "candidateOnly": True,
             "authoritativeProjectionAllowed": False,
             "reviewPilotEnabled": is_review_pilot_enabled(),
             "executionMode": "inline_controlled_implementation",
             "externalWorkerDispatchReady": False,
             "modules": modules,
+            "documentTaxonomyVersion": DOCUMENT_TAXONOMY_VERSION,
+            "documentTaxonomy": document_taxonomy_catalog(),
             "schemaContracts": orchestrator.schema_registry.snapshot(),
             "defaultProfile": default_profile.model_dump(mode="json", by_alias=True),
             "domainStandard": domain_standard_catalog(),
@@ -901,7 +939,12 @@ def build_project_parser_v2_router(
                 raise ParserV2ReferenceError(
                     "the route parsing run must be one of the conflict source runs"
                 )
-            if any(item.get("fieldKey") != input_data.field_key for item in candidates):
+            conflict_field_key = canonical_field_key(input_data.field_key)
+            if any(
+                canonical_field_key(str(item.get("fieldKey") or ""))
+                != conflict_field_key
+                for item in candidates
+            ):
                 raise ParserV2ReferenceError(
                     "all conflict candidates must target fieldKey"
                 )
@@ -916,7 +959,7 @@ def build_project_parser_v2_router(
                 projectId=project_id,
                 parsingRunId=run_id,
                 sourceParsingRunIds=source_run_ids,
-                fieldKey=input_data.field_key,
+                fieldKey=conflict_field_key,
                 entityId=entity_id,
                 candidateIds=input_data.candidate_ids,
                 conflictType=input_data.conflict_type,
@@ -929,7 +972,7 @@ def build_project_parser_v2_router(
                 project_id=project_id,
                 conflict_id=input_data.conflict_id,
                 actor_id=actor_id,
-                canonical_field=input_data.field_key,
+                canonical_field=conflict_field_key,
                 candidate_ids=input_data.candidate_ids,
                 conflict_code=input_data.conflict_type,
                 severity=input_data.severity,
@@ -945,7 +988,7 @@ def build_project_parser_v2_router(
             run_id=run_id,
             metadata={
                 "conflictId": input_data.conflict_id,
-                "fieldKey": input_data.field_key,
+                "fieldKey": conflict_field_key,
                 "candidateIds": input_data.candidate_ids,
                 "sourceParsingRunIds": source_run_ids,
                 "authorization": authz.get("authorization"),

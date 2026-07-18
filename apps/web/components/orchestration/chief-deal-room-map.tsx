@@ -24,6 +24,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
+import { LegalIntelligencePanel } from "../legal/legal-intelligence-panel";
 import {
   getStoredWorkflowTrack,
   getTrackWorkflowDefinition,
@@ -110,6 +111,27 @@ interface LegalPodRun {
   legalReview?: {
     reviewId?: string;
     status?: string;
+    reviewStatus?: string;
+    humanReviewStatus?: string;
+    requiresHumanReview?: boolean;
+    reviewedAt?: string;
+    reviewComment?: string;
+    waiverReason?: string;
+    legalIntelligence?: {
+      evidenceStatus?: string;
+      verificationStatus?: string;
+      verifiedReferenceCount?: number | string;
+      verifiedCitationCount?: number | string;
+      requiredClaimCount?: number | string;
+      verifiedClaimCount?: number | string;
+      claimCoverageComplete?: boolean;
+      evidenceSnapshotId?: string;
+      snapshotGateEligible?: boolean;
+      gateEligible?: boolean;
+      stale?: boolean;
+      openConflictCount?: number | string;
+      openConflicts?: unknown[] | Record<string, unknown> | boolean;
+    };
     mcp?: { status?: string; connected?: boolean; failureReason?: string | null; transport?: string; diagnostics?: Array<{ status?: string; connector?: string; message?: string; pnu?: string }> };
     checks?: Array<{ title?: string; severity?: string; findings?: string[] }>;
     parcelLegalReviews?: Array<{ status?: string; pnu?: string; encumbrancePresent?: boolean }>;
@@ -906,7 +928,15 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         onSubmit={() => void applyCureAndRerun()}
       />
 
-      <LegalPodPanel run={legalPodRun} running={legalPodRunning} onRun={() => void runLegalPod()} />
+      <LegalPodPanel
+        projectId={projectId}
+        run={legalPodRun}
+        running={legalPodRunning}
+        onRun={() => void runLegalPod()}
+        onDecisionSaved={loadLegalPod}
+      />
+
+      <LegalIntelligencePanel />
 
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
@@ -1080,8 +1110,21 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   );
 }
 
-function LegalPodPanel({ run, running, onRun }: { run: LegalPodRun | null; running: boolean; onRun: () => void }) {
+function LegalPodPanel({
+  projectId,
+  run,
+  running,
+  onRun,
+  onDecisionSaved,
+}: {
+  projectId: string;
+  run: LegalPodRun | null;
+  running: boolean;
+  onRun: () => void;
+  onDecisionSaved: () => Promise<void>;
+}) {
   const review = run?.legalReview;
+  const reviewId = review?.reviewId;
   const checks = review?.checks ?? [];
   const parcels = review?.parcelLegalReviews ?? [];
   const unresolvedParcels = parcels.filter((parcel) => parcel.status === "needs_review").length;
@@ -1094,6 +1137,96 @@ function LegalPodPanel({ run, running, onRun }: { run: LegalPodRun | null; runni
   const enrichmentSkipped = enrichmentDiagnostics.filter((item) => item.status?.startsWith("skipped_")).length;
   const enrichmentFailures = enrichmentDiagnostics.filter((item) => item.status?.endsWith("failed") || item.status === "no_record" || item.status === "record_missing_price").length;
   const enrichmentSummary = landEnrichment ? `${landEnrichment.pnuResolutions?.length ?? 0} PNU · ${landEnrichment.cadastralCharacteristics?.length ?? 0}건 지적자료 · ${landEnrichment.landUsePlanningRecords?.length ?? 0}건 토지이용계획 · ${landEnrichment.officialLandPrices?.length ?? 0}건 공시지가` : "자동 보강 미실행";
+  const intelligence = review?.legalIntelligence;
+  const evidenceStatus = (intelligence?.evidenceStatus ?? intelligence?.verificationStatus ?? "missing").toLowerCase();
+  const verifiedReferenceCount = Math.max(0, Number(intelligence?.verifiedReferenceCount ?? intelligence?.verifiedCitationCount ?? 0) || 0);
+  const verifiedCitationCount = Math.max(0, Number(intelligence?.verifiedCitationCount ?? 0) || 0);
+  const requiredClaimCount = Math.max(0, Number(intelligence?.requiredClaimCount ?? 0) || 0);
+  const verifiedClaimCount = Math.max(0, Number(intelligence?.verifiedClaimCount ?? 0) || 0);
+  const claimCoverageComplete = (
+    intelligence?.claimCoverageComplete === true
+    && requiredClaimCount > 0
+    && verifiedClaimCount === requiredClaimCount
+  );
+  const evidenceSnapshotId = intelligence?.evidenceSnapshotId?.trim() ?? "";
+  const snapshotGateEligible = intelligence?.snapshotGateEligible === true || intelligence?.gateEligible === true;
+  const evidenceStale = intelligence?.stale !== false;
+  const openConflictCount = (() => {
+    const explicit = Number(intelligence?.openConflictCount);
+    if (Number.isFinite(explicit)) return Math.max(0, explicit);
+    if (Array.isArray(intelligence?.openConflicts)) return intelligence.openConflicts.length;
+    if (intelligence?.openConflicts && typeof intelligence.openConflicts === "object") return Object.keys(intelligence.openConflicts).length;
+    return intelligence?.openConflicts === true ? 1 : 0;
+  })();
+  const canApprove = (
+    ["verified", "citation_verified", "human_reviewed"].includes(evidenceStatus)
+    && verifiedReferenceCount > 0
+    && verifiedCitationCount > 0
+    && claimCoverageComplete
+    && Boolean(evidenceSnapshotId)
+    && snapshotGateEligible
+    && !evidenceStale
+    && openConflictCount === 0
+  );
+  const [comment, setComment] = useState("");
+  const [waiverReason, setWaiverReason] = useState("");
+  const [decisionSubmitting, setDecisionSubmitting] = useState<string | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [decisionSuccess, setDecisionSuccess] = useState<string | null>(null);
+  const [savedHumanReviewStatus, setSavedHumanReviewStatus] = useState<string | null>(null);
+  const humanReviewStatus = savedHumanReviewStatus ?? review?.humanReviewStatus ?? review?.reviewStatus ?? "pending";
+
+  useEffect(() => {
+    setDecisionError(null);
+    setDecisionSuccess(null);
+    setSavedHumanReviewStatus(null);
+  }, [reviewId]);
+
+  const submitDecision = async (decisionStatus: "approved" | "needs_revision" | "rejected" | "waived") => {
+    if (!reviewId || decisionSubmitting) return;
+    if (decisionStatus === "approved" && !canApprove) {
+      setDecisionError("승인은 정확한 인용이 포함된 gate-eligible 봉인 스냅샷이 있고, 근거가 최신이며, 미해결 충돌이 없을 때만 가능합니다.");
+      return;
+    }
+    const normalizedWaiverReason = waiverReason.trim();
+    if (decisionStatus === "waived" && !normalizedWaiverReason) {
+      setDecisionError("Waiver 사유를 입력해야 면제 결정을 저장할 수 있습니다.");
+      return;
+    }
+    setDecisionSubmitting(decisionStatus);
+    setDecisionError(null);
+    setDecisionSuccess(null);
+    try {
+      const payload: { decisionStatus: string; comment?: string; waiverReason?: string } = { decisionStatus };
+      if (comment.trim()) payload.comment = comment.trim();
+      if (decisionStatus === "waived") payload.waiverReason = normalizedWaiverReason;
+      const res = await fetch(`${apiBase}/projects/${projectId}/legal-reviews/${encodeURIComponent(reviewId)}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders("web") },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = typeof body?.detail === "string"
+          ? body.detail
+          : typeof body?.detail?.message === "string"
+            ? body.detail.message
+            : "법무 검토 결정을 저장하지 못했습니다.";
+        throw new Error(detail);
+      }
+      const savedStatus = body?.legalReview?.humanReviewStatus ?? body?.decision?.decisionStatus ?? decisionStatus;
+      setSavedHumanReviewStatus(String(savedStatus));
+      setDecisionSuccess(`법무 검토 결정(${legalDecisionLabel(decisionStatus)})이 저장되었습니다.`);
+      setComment("");
+      if (decisionStatus === "waived") setWaiverReason("");
+      await onDecisionSaved();
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "법무 검토 결정 저장 중 오류가 발생했습니다.");
+    } finally {
+      setDecisionSubmitting(null);
+    }
+  };
+
   return (
     <section className="rounded-lg border border-violet-200 bg-violet-50/70 p-4 shadow-sm dark:border-violet-900/70 dark:bg-violet-950/20">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1115,10 +1248,116 @@ function LegalPodPanel({ run, running, onRun }: { run: LegalPodRun | null; runni
         <LegalMetric label="법무 상태" value={review?.status ?? "미실행"} />
         <LegalMetric label="필지 검토" value={`${parcels.length - unresolvedParcels}/${parcels.length}`} />
         <LegalMetric label="인허가 검토" value={run?.permitReview?.status ?? "미실행"} />
-        <LegalMetric label="Korean Law MCP" value={mcpStatus === "connected" ? "연결" : "미연결"} />
+        <LegalMetric label="검증 근거(호환)" value={mcpStatus === "connected" ? "확보" : "미확보"} />
         <LegalMetric label="토지이용계획" value={`${landEnrichment?.landUsePlanningRecords?.length ?? 0}건`} />
       </div>
-      {review?.mcp?.failureReason ? <p className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">법령 MCP 미연결 사유: {review.mcp.failureReason}</p> : null}
+      <div className="mt-3 rounded-md border border-violet-200 bg-white/80 p-3 dark:border-violet-800 dark:bg-slate-950/50">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="text-sm font-black text-slate-950 dark:text-white">Legal Intelligence 증거 준비도</p>
+            <p className="mt-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+              검증 상태·근거 수·최신성·충돌을 모두 충족해야 승인 버튼이 활성화됩니다.
+            </p>
+          </div>
+          <span className={`rounded-full border px-2 py-1 text-[10px] font-black ${canApprove ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200" : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"}`}>
+            {canApprove ? "승인 증거 충족" : "승인 증거 미충족"}
+          </span>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-8">
+          <LegalMetric label="증거 상태" value={evidenceStatus} />
+          <LegalMetric label="검증된 근거" value={`${verifiedReferenceCount}건`} />
+          <LegalMetric label="정확 인용" value={`${verifiedCitationCount}건`} />
+          <LegalMetric label="필수 쟁점 커버" value={`${verifiedClaimCount}/${requiredClaimCount}`} />
+          <LegalMetric label="봉인 스냅샷" value={snapshotGateEligible && evidenceSnapshotId ? "Gate 가능" : "미봉인/차단"} />
+          <LegalMetric label="최신성" value={evidenceStale ? "오래됨/미확인" : "최신"} />
+          <LegalMetric label="열린 충돌" value={`${openConflictCount}건`} />
+          <LegalMetric label="Human Review" value={legalDecisionLabel(humanReviewStatus)} />
+        </div>
+      </div>
+      {reviewId ? (
+        <div className="mt-3 rounded-md border border-slate-200 bg-white/80 p-3 dark:border-slate-700 dark:bg-slate-950/50">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-black text-slate-950 dark:text-white">법무 담당자 결정</p>
+              <p className="mt-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                로그인한 검토자 정보는 서버가 인증 세션에서 확정합니다. 화면에서는 신원 필드를 전송하지 않습니다.
+              </p>
+            </div>
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+              현재: {legalDecisionLabel(humanReviewStatus)}
+            </span>
+          </div>
+          <label className="mt-3 block text-xs font-black text-slate-700 dark:text-slate-200">
+            검토 의견
+            <textarea
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              rows={2}
+              maxLength={4000}
+              placeholder="승인 조건, 보완 요청 또는 거절 사유를 기록하세요."
+              className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 outline-none focus:border-violet-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            />
+          </label>
+          <label className="mt-2 block text-xs font-black text-slate-700 dark:text-slate-200">
+            Waiver 사유 <span className="font-semibold text-slate-500">(면제 선택 시 필수)</span>
+            <textarea
+              value={waiverReason}
+              onChange={(event) => setWaiverReason(event.target.value)}
+              rows={2}
+              maxLength={4000}
+              placeholder="왜 일반 승인 요건을 면제하는지 조건과 책임 근거를 명시하세요."
+              className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 outline-none focus:border-violet-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            />
+          </label>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void submitDecision("approved")}
+              disabled={!canApprove || decisionSubmitting !== null}
+              title={canApprove ? "검증 근거를 승인합니다." : "검증 상태·근거 수·최신성·충돌 조건을 먼저 충족해야 합니다."}
+              className="inline-flex h-9 items-center gap-2 rounded-md bg-emerald-700 px-3 text-xs font-black text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {decisionSubmitting === "approved" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+              승인
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitDecision("needs_revision")}
+              disabled={decisionSubmitting !== null}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 text-xs font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
+            >
+              {decisionSubmitting === "needs_revision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              보완 요청
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitDecision("rejected")}
+              disabled={decisionSubmitting !== null}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-rose-300 bg-rose-50 px-3 text-xs font-black text-rose-800 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200"
+            >
+              {decisionSubmitting === "rejected" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldAlert className="h-4 w-4" />}
+              거절
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitDecision("waived")}
+              disabled={!waiverReason.trim() || decisionSubmitting !== null}
+              title={waiverReason.trim() ? "명시한 사유로 면제 결정을 저장합니다." : "Waiver 사유를 먼저 입력하세요."}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-300 bg-slate-100 px-3 text-xs font-black text-slate-800 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            >
+              {decisionSubmitting === "waived" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardCheck className="h-4 w-4" />}
+              사유부 면제
+            </button>
+          </div>
+          {decisionError ? <p role="alert" className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">{decisionError}</p> : null}
+          {decisionSuccess ? <p role="status" className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200">{decisionSuccess}</p> : null}
+        </div>
+      ) : (
+        <p className="mt-3 rounded-md border border-slate-200 bg-white/80 px-3 py-2 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-300">
+          Legal Pod 실행 후 review ID가 생성되면 담당자 결정을 기록할 수 있습니다.
+        </p>
+      )}
+      {review?.mcp?.failureReason ? <p className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">검증 법률 근거 미확보 사유: {review.mcp.failureReason}</p> : null}
       {run?.permitReview?.parserFailureReason ? <p className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">문서 파서 상태: {run.permitReview.parserFailureReason}</p> : null}
       {review?.landPodHandoff ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50/80 p-3 text-xs dark:border-amber-800 dark:bg-amber-950/20">
         <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-black text-amber-900 dark:text-amber-100">토지 Pod → 법무 검토 연결</span><span className="rounded-full bg-white px-2 py-1 font-black text-amber-800 dark:bg-slate-950 dark:text-amber-200">{review.landPodHandoff.status ?? "needs_review"}</span></div>
@@ -1145,6 +1384,17 @@ function LegalPodPanel({ run, running, onRun }: { run: LegalPodRun | null; runni
 
 function LegalMetric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-violet-200 bg-white/80 px-2 py-2 dark:border-violet-800 dark:bg-slate-950/50"><p className="text-[10px] font-bold text-slate-500">{label}</p><p className="mt-1 text-sm font-black text-slate-950 dark:text-white">{value}</p></div>;
+}
+
+function legalDecisionLabel(status?: string) {
+  return {
+    pending: "검토 대기",
+    approved: "승인",
+    counsel_approved: "외부 법률자문 승인",
+    needs_revision: "보완 요청",
+    rejected: "거절",
+    waived: "사유부 면제",
+  }[status ?? ""] ?? cleanText(status, "검토 대기");
 }
 
 function ApprovalReadinessPanel({

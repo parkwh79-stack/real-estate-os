@@ -13,6 +13,14 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Protocol, runtime_checkable
 
+from parsing_platform.document_taxonomy import (
+    DOCUMENT_TAXONOMY_VERSION,
+    DOCUMENT_TYPE_SCOPE_ALL,
+    DOCUMENT_TYPE_SCOPE_LISTED,
+    DOCUMENT_TYPE_SCOPES,
+    canonical_document_types,
+)
+
 
 FAILURE_POLICIES = frozenset({"fail_closed", "preserve_partial"})
 EXECUTION_CLASSES = frozenset({"deterministic", "ai_assisted", "external_service"})
@@ -101,8 +109,10 @@ class ParserModuleManifest:
 
     module_id: str
     version: str
+    document_taxonomy_version: str
     capabilities: tuple[str, ...] = ()
     supported_document_types: tuple[str, ...] = ()
+    document_type_scope: str = DOCUMENT_TYPE_SCOPE_LISTED
     supported_asset_types: tuple[str, ...] = ()
     supported_deal_types: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
@@ -133,6 +143,59 @@ class ParserModuleManifest:
             "conditional_provides",
         ):
             object.__setattr__(self, name, _strings(getattr(self, name), label=name))
+        document_type_scope = str(self.document_type_scope or "").strip().lower()
+        if "*" in self.supported_document_types:
+            raise InvalidManifestError(
+                "Legacy '*' document support is forbidden; declare "
+                "document_type_scope='all' with a taxonomy version"
+            )
+        if document_type_scope not in DOCUMENT_TYPE_SCOPES:
+            raise InvalidManifestError(
+                "document_type_scope must be one of: "
+                + ", ".join(sorted(DOCUMENT_TYPE_SCOPES))
+            )
+        if (
+            document_type_scope == DOCUMENT_TYPE_SCOPE_ALL
+            and self.supported_document_types
+        ):
+            raise InvalidManifestError(
+                "All-types modules must not also list supported_document_types"
+            )
+        object.__setattr__(self, "document_type_scope", document_type_scope)
+        taxonomy_version = str(self.document_taxonomy_version or "").strip()
+        if not taxonomy_version:
+            raise InvalidManifestError(
+                "document_taxonomy_version is required for every parser module"
+            )
+        if taxonomy_version != DOCUMENT_TAXONOMY_VERSION:
+            raise InvalidManifestError(
+                "Unsupported document taxonomy version: "
+                f"{taxonomy_version}; expected {DOCUMENT_TAXONOMY_VERSION}"
+            )
+        try:
+            canonical_types = canonical_document_types(
+                self.supported_document_types
+            )
+        except ValueError as exc:
+            raise InvalidManifestError(str(exc)) from exc
+        object.__setattr__(
+            self,
+            "supported_document_types",
+            canonical_types,
+        )
+        if (
+            document_type_scope == DOCUMENT_TYPE_SCOPE_LISTED
+            and not canonical_types
+        ):
+            raise InvalidManifestError(
+                "Listed document-type scope requires at least one canonical "
+                "supported document type"
+            )
+        object.__setattr__(
+            self,
+            "document_taxonomy_version",
+            taxonomy_version,
+        )
         execution_class = str(self.execution_class or "").strip().lower()
         if execution_class not in EXECUTION_CLASSES:
             raise InvalidManifestError(
@@ -183,6 +246,8 @@ class ParserModuleManifest:
             "version": self.version,
             "capabilities": list(self.capabilities),
             "supported_document_types": list(self.supported_document_types),
+            "document_taxonomy_version": self.document_taxonomy_version,
+            "document_type_scope": self.document_type_scope,
             "supported_asset_types": list(self.supported_asset_types),
             "supported_deal_types": list(self.supported_deal_types),
             "requires": list(self.requires),
@@ -209,6 +274,18 @@ class ParserModuleManifest:
             capabilities=_field(data, "capabilities", default=()),
             supported_document_types=_field(
                 data, "supported_document_types", "supportedDocumentTypes", ()
+            ),
+            document_taxonomy_version=_field(
+                data,
+                "document_taxonomy_version",
+                "documentTaxonomyVersion",
+                None,
+            ),
+            document_type_scope=_field(
+                data,
+                "document_type_scope",
+                "documentTypeScope",
+                DOCUMENT_TYPE_SCOPE_LISTED,
             ),
             supported_asset_types=_field(data, "supported_asset_types", "supportedAssetTypes", ()),
             supported_deal_types=_field(data, "supported_deal_types", "supportedDealTypes", ()),
@@ -344,7 +421,7 @@ class ParserModuleRegistry:
         asset_type: str | None = None,
         deal_type: str | None = None,
     ) -> list[ParserModuleManifest]:
-        """Find active compatible modules; an empty support list means unrestricted."""
+        """Find active modules compatible with the requested versioned taxonomy type."""
 
         result: list[ParserModuleManifest] = []
         for manifest in self.list_active():
@@ -355,7 +432,12 @@ class ParserModuleRegistry:
             )
             if capability and capability not in declared_capabilities:
                 continue
-            if not _supports(manifest.supported_document_types, document_type):
+            if not _supports(
+                manifest.supported_document_types,
+                document_type,
+                scope=manifest.document_type_scope,
+                taxonomy_version=manifest.document_taxonomy_version,
+            ):
                 continue
             if not _supports(manifest.supported_asset_types, asset_type):
                 continue
@@ -368,11 +450,27 @@ class ParserModuleRegistry:
         return [manifest.to_dict() for manifest in self.list_active()]
 
 
-def _supports(supported: tuple[str, ...], requested: str | None) -> bool:
-    if not requested or not supported:
+def _supports(
+    supported: tuple[str, ...],
+    requested: str | None,
+    *,
+    scope: str = DOCUMENT_TYPE_SCOPE_LISTED,
+    taxonomy_version: str | None = None,
+) -> bool:
+    if requested is None:
         return True
-    requested_key = str(requested).casefold()
-    return any(item == "*" or item.casefold() == requested_key for item in supported)
+    if taxonomy_version != DOCUMENT_TAXONOMY_VERSION:
+        return False
+    requested_key = str(requested).strip().casefold()
+    try:
+        requested_key = canonical_document_types((requested_key,))[0]
+    except (IndexError, ValueError):
+        return False
+    if scope == DOCUMENT_TYPE_SCOPE_ALL:
+        return True
+    if scope != DOCUMENT_TYPE_SCOPE_LISTED or not supported:
+        return False
+    return any(item.casefold() == requested_key for item in supported)
 
 
 __all__ = [
@@ -380,6 +478,8 @@ __all__ = [
     "DATA_CLASSIFICATIONS",
     "EXECUTION_CLASSES",
     "LOCATOR_PRECISIONS",
+    "DOCUMENT_TYPE_SCOPE_ALL",
+    "DOCUMENT_TYPE_SCOPE_LISTED",
     "InvalidManifestError",
     "ParserModuleManifest",
     "ParserModuleRegistry",

@@ -51,6 +51,23 @@ def test_dump_workbook_cells_includes_sheet_and_coords(tmp_path):
     assert "손익!I1=853951767.7" in dump
 
 
+def test_dump_workbook_cells_keeps_content_past_legacy_24000_character_limit(tmp_path):
+    p = tmp_path / "large.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Large"
+    for row in range(1, 400):
+        sheet.cell(row, 1, f"row-{row}-" + ("x" * 80))
+    sheet["B400"] = "TAIL_CELL_MUST_SURVIVE"
+    workbook.save(str(p))
+
+    dump = dump_workbook_cells(str(p))
+
+    assert len(dump) > 24_000
+    assert "Large!B400=TAIL_CELL_MUST_SURVIVE" in dump
+    assert "truncated" not in dump
+
+
 def test_extract_builds_candidate_and_drops_nulls(tmp_path):
     p = tmp_path / "wb.xlsx"
     _make_workbook(p)
@@ -87,6 +104,54 @@ def test_extract_handles_unavailable_llm(tmp_path):
     draft = extract_feasibility_fields_via_llm(str(p), {}, ai=_NoData())
     assert draft["parsingSource"] == "llm_unavailable"
     assert draft["feasibilityInputCandidate"] == {}
+
+
+def test_chunked_workbook_extraction_flags_conflicting_values(tmp_path):
+    p = tmp_path / "chunked.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Large"
+    for row in range(1, 40):
+        sheet.cell(row, 1, f"row-{row}-" + ("x" * 40))
+    workbook.save(str(p))
+
+    class ConflictingAI:
+        def __init__(self):
+            self.calls = 0
+
+        def extract_json(self, prompt, system=None, ai_context=None):
+            self.calls += 1
+            value = 100 if self.calls == 1 else 200
+            return SimpleNamespace(
+                data={
+                    "fields": {
+                        "total_revenue": {
+                            "value_krw": value,
+                            "source": f"Large!A{self.calls}",
+                            "unit": "KRW",
+                            "raw": value,
+                        }
+                    }
+                },
+                error=None,
+                meta={"provider": "fake"},
+            )
+
+    fake = ConflictingAI()
+    draft = extract_feasibility_fields_via_llm(
+        str(p),
+        {},
+        ai=fake,
+        chunk_chars=256,
+    )
+
+    assert fake.calls > 1
+    assert draft["inputCoverage"] == "complete"
+    assert draft["analysisOnly"] is True
+    assert draft["reportEligible"] is False
+    assert draft["fields"]["total_revenue"]["status"] == "conflict"
+    assert "total_revenue" not in draft["feasibilityInputCandidate"]
+    assert draft["sourceConflicts"][0]["fieldKey"] == "total_revenue"
 
 
 def test_apply_persists_cleaned_input():

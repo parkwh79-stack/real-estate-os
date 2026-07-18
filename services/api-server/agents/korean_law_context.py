@@ -65,10 +65,8 @@ def normalize_law_context(law_context: Dict[str, Any] | None) -> Dict[str, Any]:
 
 def build_korean_law_mcp_query_plan(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     project = project_data.get("project", {})
-    land = project_data.get("land", {})
     regulation = project_data.get("regulation", {})
     project_type = str(project.get("type", "")).lower()
-    address = land.get("address", "")
     zoning = regulation.get("zoning", "")
 
     queries = [
@@ -79,7 +77,9 @@ def build_korean_law_mcp_query_plan(project_data: Dict[str, Any]) -> List[Dict[s
         },
         {
             "tool": "chain_procedure_detail",
-            "query": f"\uac74\ucd95\ubc95 \uac74\ucd95\ud5c8\uac00 \ucc29\uacf5 \uc0ac\uc6a9\uc2b9\uc778 \uc808\ucc28 {address}".strip(),
+            # Project addresses and parcel identifiers are not needed to
+            # retrieve the generally applicable statutory procedure.
+            "query": "\uac74\ucd95\ubc95 \uac74\ucd95\ud5c8\uac00 \ucc29\uacf5 \uc0ac\uc6a9\uc2b9\uc778 \uc808\ucc28",
             "purpose": "Confirm building permit, construction start, and use approval procedures.",
         },
         {

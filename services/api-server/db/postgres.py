@@ -43,6 +43,16 @@ PARSER_V2_RLS_TABLES = (
     "parser_snapshot_source_runs",
     "parser_validity_events",
 )
+LEGAL_INTELLIGENCE_RLS_TABLES = (
+    "legal_query_runs",
+    "legal_query_run_events",
+    "project_legal_resource_links",
+    "legal_findings",
+    "legal_evidence_snapshots",
+    "legal_evidence_snapshot_items",
+    "legal_review_decisions",
+)
+LEGAL_INTELLIGENCE_MIGRATION = "0008_legal_intelligence_core.sql"
 
 
 class MigrationChecksumMismatch(RuntimeError):
@@ -403,7 +413,10 @@ def assert_parser_v2_runtime_ready() -> None:
 
     This probe is deliberately read-only and must run with the runtime DSN, not
     the deployment/migration DSN.  FORCE RLS is defense in depth; the serving
-    role must still be neither privileged nor the owner of Parser V2 tables.
+    role must still be neither privileged nor the owner of Parser V2 or Legal
+    Intelligence tenant tables.  The public function name is retained because
+    deployment and startup callers already use it as the normalized-runtime
+    readiness seam.
     """
     conn = connect()
     try:
@@ -442,15 +455,36 @@ def assert_parser_v2_runtime_ready() -> None:
 
             cur.execute(
                 "SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, "
-                "rolinherit, rolbypassrls "
+                "rolinherit, rolbypassrls, rolreplication "
                 "FROM pg_roles WHERE rolname = current_user"
             )
             role = cur.fetchone()
             if role is None or any(bool(value) for value in role[1:]):
                 raise ParserV2RuntimeReadinessError(
                     "Parser V2 runtime role must not be superuser, CREATEDB, "
-                    "CREATEROLE, INHERIT, or BYPASSRLS"
+                    "CREATEROLE, INHERIT, BYPASSRLS, or REPLICATION"
                 )
+
+            cur.execute(
+                """
+                SELECT parent.rolname
+                FROM pg_auth_members AS membership
+                JOIN pg_roles AS member ON member.oid = membership.member
+                JOIN pg_roles AS parent ON parent.oid = membership.roleid
+                WHERE member.rolname = current_user
+                ORDER BY parent.rolname
+                """
+            )
+            inherited_roles = [str(row[0]) for row in cur.fetchall()]
+            if inherited_roles:
+                raise ParserV2RuntimeReadinessError(
+                    "Parser V2 runtime role must not be a member of other "
+                    "database roles: " + ", ".join(inherited_roles)
+                )
+
+            required_rls_tables = list(PARSER_V2_RLS_TABLES)
+            if LEGAL_INTELLIGENCE_MIGRATION in expected:
+                required_rls_tables.extend(LEGAL_INTELLIGENCE_RLS_TABLES)
 
             cur.execute(
                 """
@@ -460,7 +494,7 @@ def assert_parser_v2_runtime_ready() -> None:
                 JOIN pg_namespace AS n ON n.oid = c.relnamespace
                 WHERE n.nspname = current_schema() AND c.relname = ANY(%s)
                 """,
-                (list(PARSER_V2_RLS_TABLES),),
+                (required_rls_tables,),
             )
             states = {
                 str(name): (bool(enabled), bool(forced), bool(owned))
@@ -468,7 +502,7 @@ def assert_parser_v2_runtime_ready() -> None:
             }
             unsafe = sorted(
                 table
-                for table in PARSER_V2_RLS_TABLES
+                for table in required_rls_tables
                 if table not in states
                 or not states[table][0]
                 or not states[table][1]
@@ -476,22 +510,33 @@ def assert_parser_v2_runtime_ready() -> None:
             )
             if unsafe:
                 raise ParserV2RuntimeReadinessError(
-                    "Parser V2 tables are missing, not FORCE-RLS protected, or owned "
-                    "by the runtime role: " + ", ".join(unsafe)
+                    "Parser V2 / Legal Intelligence tables are missing, not "
+                    "FORCE-RLS protected, or owned by the runtime role: "
+                    + ", ".join(unsafe)
                 )
 
             cur.execute("SELECT current_schema()")
             schema_row = cur.fetchone()
             schema_name = str(schema_row[0] or "") if schema_row else ""
             from db.postgres_runtime_privileges import (  # noqa: WPS433
+                DEFAULT_POSTGIS_SCHEMA,
+                POSTGIS_SCHEMA_ENV,
                 RuntimePrivilegeProvisioningError,
                 audit_runtime_privileges,
+                revoke_public_database_temporary_enabled,
             )
 
             try:
                 missing_privileges, forbidden_privileges = audit_runtime_privileges(
                     cur,
                     schema_name=schema_name,
+                    postgis_schema_name=os.environ.get(
+                        POSTGIS_SCHEMA_ENV,
+                        DEFAULT_POSTGIS_SCHEMA,
+                    ),
+                    require_no_database_temporary=(
+                        revoke_public_database_temporary_enabled()
+                    ),
                 )
             except RuntimePrivilegeProvisioningError as exc:
                 raise ParserV2RuntimeReadinessError(str(exc)) from exc

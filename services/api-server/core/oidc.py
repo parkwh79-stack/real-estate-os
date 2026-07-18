@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""OIDC RS256 / JWKS token verification (production auth hardening).
+"""OIDC asymmetric JWT / JWKS token verification.
 
 Complements the existing pilot HS256 path (core/idp.py). Fetches the IdP's JWKS,
-selects the signing key by `kid`, and verifies an RS256 ID/access token with
-issuer/audience/expiry checks. RS256 signature verification is delegated to PyJWT
+selects the signing key by `kid`, and verifies an RS256 or ES256 token with
+issuer/audience/expiry checks. Signature verification is delegated to PyJWT
 (lazy-imported — no hand-rolled crypto); JWKS fetch/selection and claim/config
 logic are pure-stdlib and unit-tested. Live verification needs PyJWT installed
 and a reachable JWKS endpoint.
@@ -13,9 +13,16 @@ and a reachable JWKS endpoint.
 import base64
 import json
 import os
+import threading
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional
+
+
+ALLOWED_ASYMMETRIC_ALGORITHMS = frozenset({"RS256", "ES256"})
+_JWK_TYPES_BY_ALGORITHM = {"RS256": "RSA", "ES256": "EC"}
+_JWKS_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_JWKS_CACHE_LOCK = threading.Lock()
 
 
 def oidc_configured() -> bool:
@@ -58,12 +65,26 @@ def select_jwk(jwks: Dict[str, Any], kid: Optional[str]) -> Optional[Dict[str, A
     return keys[0] if len(keys) == 1 else None
 
 
-def fetch_jwks(jwks_url: Optional[str] = None, *, timeout: float = 5.0) -> Dict[str, Any]:
+def fetch_jwks(
+    jwks_url: Optional[str] = None,
+    *,
+    timeout: float = 5.0,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
     jwks_url = jwks_url or oidc_config()["jwksUrl"]
     if not jwks_url:
         raise RuntimeError("REALYTICS_OIDC_JWKS_URL is not configured.")
+    cache_ttl = max(0, int(os.environ.get("REALYTICS_OIDC_JWKS_CACHE_SECONDS") or 600))
+    now = time.monotonic()
+    with _JWKS_CACHE_LOCK:
+        cached = _JWKS_CACHE.get(jwks_url)
+        if not force_refresh and cached and cached[0] > now:
+            return cached[1]
     with urllib.request.urlopen(jwks_url, timeout=timeout) as response:  # noqa: S310 (configured URL)
-        return json.loads(response.read().decode("utf-8"))
+        payload = json.loads(response.read().decode("utf-8"))
+    with _JWKS_CACHE_LOCK:
+        _JWKS_CACHE[jwks_url] = (now + cache_ttl, payload)
+    return payload
 
 
 def verify_oidc_token(
@@ -73,7 +94,7 @@ def verify_oidc_token(
     audience: Optional[str] = None,
     issuer: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Verify an RS256 OIDC token against the IdP JWKS. Returns the claims.
+    """Verify an asymmetric OIDC token against the IdP JWKS.
 
     jwks can be injected (tests / cached); otherwise it is fetched from the
     configured endpoint. Raises ValueError on validation failure, or RuntimeError
@@ -81,24 +102,38 @@ def verify_oidc_token(
     """
     header = decode_unverified_header(token)
     alg = header.get("alg")
-    if alg != "RS256":
-        raise ValueError(f"Unsupported token alg '{alg}'; OIDC path requires RS256.")
+    if alg not in ALLOWED_ASYMMETRIC_ALGORITHMS:
+        raise ValueError(
+            f"Unsupported token alg '{alg}'; OIDC path requires RS256 or ES256."
+        )
 
-    jwks = jwks if jwks is not None else fetch_jwks()
+    injected_jwks = jwks is not None
+    jwks = jwks if injected_jwks else fetch_jwks()
     jwk = select_jwk(jwks, header.get("kid"))
+    if not jwk and not injected_jwks:
+        # Refresh once immediately so a rotated signing key does not have to
+        # wait for the normal in-process cache window.
+        jwks = fetch_jwks(force_refresh=True)
+        jwk = select_jwk(jwks, header.get("kid"))
     if not jwk:
         raise ValueError("No matching JWKS key for token kid.")
+    if jwk.get("alg") and jwk.get("alg") != alg:
+        raise ValueError("Token algorithm does not match the selected JWKS key.")
+    expected_kty = _JWK_TYPES_BY_ALGORITHM[alg]
+    if jwk.get("kty") != expected_kty:
+        raise ValueError(
+            f"Token algorithm {alg} requires JWKS key type {expected_kty}."
+        )
 
     try:
         import jwt  # PyJWT, lazy-imported
-        from jwt.algorithms import RSAAlgorithm
     except ImportError as exc:  # pragma: no cover - depends on deploy env
         raise RuntimeError(
-            "OIDC RS256 verification selected but PyJWT[crypto] is not installed. "
+            "OIDC asymmetric verification selected but PyJWT[crypto] is not installed. "
             "Add PyJWT[crypto] to requirements and `pip install -r requirements.txt`."
         ) from exc
 
-    public_key = RSAAlgorithm.from_jwk(json.dumps(jwk))
+    public_key = jwt.PyJWK.from_dict(jwk, algorithm=alg).key
     config = oidc_config()
     audience = audience or config["audience"]
     issuer = issuer or config["issuer"]
@@ -107,7 +142,7 @@ def verify_oidc_token(
         claims = jwt.decode(
             token,
             public_key,
-            algorithms=["RS256"],
+            algorithms=[alg],
             audience=audience,
             issuer=issuer,
             options=options,
@@ -129,8 +164,13 @@ def oidc_status() -> Dict[str, Any]:
         "issuer": config["issuer"],
         "audience": config["audience"],
         "jwksUrlConfigured": bool(config["jwksUrl"]),
+        "asymmetricVerifierAvailable": pyjwt_available,
         "rs256Available": pyjwt_available,
-        "note": "OIDC RS256/JWKS verification; pilot HS256 remains available (core/idp.py).",
+        "allowedAlgorithms": sorted(ALLOWED_ASYMMETRIC_ALGORITHMS),
+        "jwksCacheSeconds": max(
+            0, int(os.environ.get("REALYTICS_OIDC_JWKS_CACHE_SECONDS") or 600)
+        ),
+        "note": "OIDC ES256/RS256 JWKS verification; pilot HS256 remains available (core/idp.py).",
     }
 
 

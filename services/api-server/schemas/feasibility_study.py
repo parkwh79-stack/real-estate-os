@@ -3,11 +3,19 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 FEASIBILITY_STUDY_SCHEMA_VERSION = "realytics-feasibility-study-v2"
 FEASIBILITY_WORKBOOK_VERSION = "realytics-fs-xlsx-v1"
+FinancingTranchePriority = Literal[
+    "senior",
+    "mezzanine",
+    "junior",
+    "equity",
+    "bridge",
+    "other",
+]
 
 
 class AssetType(str, Enum):
@@ -63,6 +71,34 @@ class FormulaBinding(BaseModel):
     depends_on: List[str] = Field(default_factory=list)
     editable: bool = True
     locked_in_template: bool = False
+
+
+class FeasibilityInputReferences(BaseModel):
+    """Immutable Parser/parcel/legal inputs used by a feasibility run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approved_input_snapshot_id: Optional[str] = None
+    approved_input_snapshot_hash: Optional[str] = Field(None, pattern=r"^[0-9a-fA-F]{64}$")
+    source_snapshot_id: Optional[str] = None
+    site_parcel_snapshot_id: Optional[str] = None
+    parcel_set_hash: Optional[str] = Field(None, pattern=r"^[0-9a-fA-F]{64}$")
+    regulatory_constraint_snapshot_id: Optional[str] = None
+    buildable_envelope_id: Optional[str] = None
+    constraint_as_of_date: Optional[str] = None
+    formula_versions: Dict[str, str] = Field(default_factory=dict)
+
+
+class FormulaTraceRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    formula_id: str
+    formula_version: str
+    output_path: str
+    input_paths: List[str] = Field(default_factory=list)
+    intermediate_values: Dict[str, float | str | bool | None] = Field(default_factory=dict)
+    rounding_policy: Optional[str] = None
+    source_locator: Optional[Dict[str, Any]] = None
 
 
 class FeasibilityValue(BaseModel):
@@ -138,13 +174,20 @@ class FinancingTranche(BaseModel):
 
     tranche_id: str
     name: str
-    priority: Literal["senior", "middle", "junior", "equity", "bridge", "other"]
+    priority: FinancingTranchePriority
     amount: Optional[float] = None
     interest_rate: Optional[float] = None
     fee_rate: Optional[float] = None
     term_months: Optional[int] = None
     repayment_source: Optional[str] = None
     excel_row_id: Optional[str] = None
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_legacy_priority(cls, value: Any) -> Any:
+        """Accept the historic name at the boundary, never in canonical data."""
+
+        return "mezzanine" if value == "middle" else value
 
 
 class ScheduleMilestone(BaseModel):
@@ -169,6 +212,31 @@ class ScenarioAssumption(BaseModel):
     interest_rate_addition: float = 0.0
     sales_rate: Optional[float] = None
     delay_months: int = 0
+    scenario_class: Literal[
+        "current_rights",
+        "approved_permit",
+        "conditional_incentive",
+        "speculative_rezoning",
+    ] = "current_rights"
+    constraint_snapshot_id: Optional[str] = None
+    program_candidate_id: Optional[str] = None
+    approval_decision_id: Optional[str] = None
+    eligibility: Optional[Literal["eligible", "conditional", "ineligible", "not_assessable"]] = None
+    blocking_constraint_ids: List[str] = Field(default_factory=list)
+    condition_ids: List[str] = Field(default_factory=list)
+    report_grade: bool = False
+
+    @model_validator(mode="after")
+    def validate_report_grade_lineage(self) -> "ScenarioAssumption":
+        if not self.report_grade:
+            return self
+        if self.eligibility != "eligible":
+            raise ValueError("report_grade scenario must be eligible")
+        if not self.constraint_snapshot_id:
+            raise ValueError("report_grade scenario requires constraint_snapshot_id")
+        if not self.approval_decision_id:
+            raise ValueError("report_grade scenario requires approval_decision_id")
+        return self
 
 
 class MonthlyCashFlowRow(BaseModel):
@@ -182,6 +250,10 @@ class MonthlyCashFlowRow(BaseModel):
     cash_out: Dict[str, float] = Field(default_factory=dict)
     pf_draw: Dict[str, float] = Field(default_factory=dict)
     loan_repayment: Dict[str, float] = Field(default_factory=dict)
+    equity_contribution: Dict[str, float] = Field(default_factory=dict)
+    equity_recovery: Dict[str, float] = Field(default_factory=dict)
+    other_financing_inflow: Dict[str, float] = Field(default_factory=dict)
+    other_financing_outflow: Dict[str, float] = Field(default_factory=dict)
     operating_account_inflow: Optional[float] = None
     operating_account_outflow: Optional[float] = None
     repayment_reserve_inflow: Optional[float] = None
@@ -291,6 +363,8 @@ class FeasibilityStudyV2(BaseModel):
     project_name: Optional[str] = None
     asset_type: AssetType = AssetType.other
     currency: Literal["KRW"] = "KRW"
+    calculation_date: Optional[str] = None
+    input_references: FeasibilityInputReferences = Field(default_factory=FeasibilityInputReferences)
     site: SiteInputs = Field(default_factory=SiteInputs)
     program: ProgramInputs = Field(default_factory=ProgramInputs)
     product_mix: List[ProductMixRow] = Field(default_factory=list)
@@ -299,7 +373,18 @@ class FeasibilityStudyV2(BaseModel):
     financing: List[FinancingTranche] = Field(default_factory=list)
     schedule: List[ScheduleMilestone] = Field(default_factory=list)
     scenarios: List[ScenarioAssumption] = Field(default_factory=list)
+    formula_traces: List[FormulaTraceRecord] = Field(default_factory=list)
     monthly_cash_flow: List[MonthlyCashFlowRow] = Field(default_factory=list)
     workbook: WorkbookMapping = Field(default_factory=default_workbook_mapping)
     metrics: Optional[FeasibilityMetrics] = None
     raw_import: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_report_grade_input_snapshot(self) -> "FeasibilityStudyV2":
+        if not any(scenario.report_grade for scenario in self.scenarios):
+            return self
+        if not self.input_references.approved_input_snapshot_id:
+            raise ValueError("report-grade scenarios require approved_input_snapshot_id")
+        if not self.input_references.approved_input_snapshot_hash:
+            raise ValueError("report-grade scenarios require approved_input_snapshot_hash")
+        return self

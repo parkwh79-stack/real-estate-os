@@ -20,6 +20,8 @@ ROLE_PERMISSIONS = {
         "project:read",
         "project:write",
         "project:analyze",
+        "project:review",
+        "legal:review",
         "evidence:read",
         "report:read",
         "report:export",
@@ -40,6 +42,7 @@ ROLE_PERMISSIONS = {
     "reviewer": {
         "project:read",
         "project:analyze",
+        "project:review",
         "evidence:read",
         "report:read",
         "report:export",
@@ -67,6 +70,33 @@ ROLE_PERMISSIONS = {
         "project:read",
         "report:read",
         "tool:read",
+    },
+    "legal_reviewer": {
+        "project:read",
+        "project:analyze",
+        "project:review",
+        "legal:review",
+        "evidence:read",
+        "report:read",
+        "risk:review",
+        "audit:read",
+    },
+    "external_counsel": {
+        "project:read",
+        "project:review",
+        "legal:review",
+        "evidence:read",
+        "report:read",
+        "audit:read:self",
+    },
+    "compliance_officer": {
+        "project:read",
+        "project:review",
+        "legal:review",
+        "evidence:read",
+        "report:read",
+        "risk:review",
+        "audit:read",
     },
 }
 
@@ -214,14 +244,24 @@ def _identity_assurance(claims: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(raw_amr, str):
         amr = [raw_amr]
     elif isinstance(raw_amr, list):
-        amr = [str(item) for item in raw_amr]
+        amr = []
+        for item in raw_amr:
+            if isinstance(item, dict):
+                method = item.get("method") or item.get("amr")
+                if method:
+                    amr.append(str(method))
+            elif item:
+                amr.append(str(item))
     else:
         amr = []
     acr = str(claims.get("acr") or "") or None
+    aal = str(claims.get("aal") or "").casefold() or None
     mfa_markers = {"mfa", "otp", "hwk", "swk", "fido", "webauthn"}
     return {
         "amr": amr,
         "acr": acr,
-        "mfaVerified": bool(mfa_markers.intersection(item.casefold() for item in amr)),
+        "aal": aal,
+        "mfaVerified": aal == "aal2"
+        or bool(mfa_markers.intersection(item.casefold() for item in amr)),
         "source": "verified_bearer_claims",
     }

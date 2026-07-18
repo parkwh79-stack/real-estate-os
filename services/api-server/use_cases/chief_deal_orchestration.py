@@ -1331,6 +1331,13 @@ def _execute_pod_artifact(
             executor=lambda: run_legal_pod_use_case(project_id, project_data, options),
             output_schema_name="LegalPodResult",
         )
+        legal_review = legal_pod_result.get("legalReview") if isinstance(legal_pod_result, dict) else None
+        buildable_envelope = legal_pod_result.get("buildableEnvelope") if isinstance(legal_pod_result, dict) else None
+        developability_project_data = {
+            **project_data,
+            "legalPermitReview": legal_review,
+            "buildableEnvelope": buildable_envelope,
+        }
         developability_score = run_child_agent(
             agent_id="DevelopabilityScoreAgent",
             task_type="developability_score",
@@ -1338,9 +1345,11 @@ def _execute_pod_artifact(
             input_snapshot={
                 "land": project_data.get("land"),
                 "landLedger": project_data.get("landLedger"),
-                "legal": legal_pod_result.get("legalReview") if isinstance(legal_pod_result, dict) else None,
+                "regulation": project_data.get("regulation"),
+                "legal": legal_review,
+                "buildableEnvelope": buildable_envelope,
             },
-            executor=lambda: score_developability_use_case(project_data),
+            executor=lambda: score_developability_use_case(developability_project_data),
             output_schema_name="DevelopabilityScore",
         )
         artifact: Dict[str, Any] = {
@@ -1349,6 +1358,7 @@ def _execute_pod_artifact(
             "standardArtifacts": workflow_artifacts,
             "legalPermitReview": legal_pod_result["legalReview"],
             "developabilityScore": developability_score,
+            "buildableEnvelope": buildable_envelope,
         }
         # Keep the legal review as a first-class, auditable result.  The pod is
         # the execution unit, but LegalReviewAgent remains visible to the Deal
@@ -1388,6 +1398,7 @@ def _execute_pod_artifact(
                 }
         project_data["legal"] = artifact["legalPermitReview"]
         project_data["legalPermitReview"] = artifact["legalPermitReview"]
+        project_data["buildableEnvelope"] = buildable_envelope
         project_data["developabilityScore"] = artifact["developabilityScore"]
         return finalize(artifact)
 

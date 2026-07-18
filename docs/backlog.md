@@ -1,20 +1,29 @@
 ﻿# Product Backlog
 
-Updated: 2026-07-15
+Updated: 2026-07-16
 
 Detailed execution plan: `docs/product/realytics-os-next-work-roadmap.md`
 
-## Production-critical remediation update (2026-07-15)
+## Production-critical remediation update (2026-07-16)
 
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
+| P0 | Feasibility workbook authority | Isolate candidates and enforce validation before canonical promotion | Done | 2026-07-16: candidate imports persist only `feasibilityStudyV2Draft` plus audit metadata and return a non-authoritative preview. Approval requires the actual project-scoped archive object, re-reads its bytes, recomputes SHA-256, and binds that digest to server-issued validation and the server-extracted draft hash; mutable project metadata alone cannot establish source authority. It rejects blocking formula errors, external workbook links, blank required cells/sheets, failed reconciliations, and conflicts embedded in that validation. `build_feasibility_input_draft` reads only an explicitly approved canonical study. Direct lookup of Parser V2 `SourceConflict` records is not implemented, so this row does not claim repository-wide conflict closure. |
+| P0 | Project authority boundary | Reject server-managed authority fields through generic CRUD | Done | Ordinary project create/update payloads cannot inject source-document/archive metadata, canonical feasibility state, approval records, or regulatory/buildable-envelope authority fields. These fields may be written only by their dedicated server workflows. |
+| P0 | Bonri workbook / Cash Flow | Normalize legacy transaction rows and preserve approved schedules | Done | 2026-07-16: the audit contract is versioned at `services/api-server/tests/fixtures/bonri/source_manifest.json`; the source remains correctly `failed` for canonical approval because of blocking formula errors. `F:BQ` is detected as exactly 64 periods (four pre-month events plus months 1-60). `F35:BQ119` now separates operating `cash_in`/`cash_out`, `pf_draw`, `loan_repayment`, `equity_contribution`, `equity_recovery`, and other financing transfers, converts KRW million to KRW, and reconciles row 122 and row 130 through rows 123/129. Approved canonical V2 maps directly to Cash Flow, and Equity is excluded from PF capacity. A full monthly tranche debt ledger and replay remain P1. |
+| P0 | Parcel/Legal eligibility | Replace max-parcel FAR with parcel-weighted envelope and block legal breaches | Done | 2026-07-16: preliminary envelope uses `sum(parcel area × parcel legal FAR / 100)`, validates PNU uniqueness/coverage, area/FAR coverage, and declared site-area reconciliation. Missing facts are `not_assessable`; applied FAR above legal FAR is ineligible and excluded from product-value ranking. Deal Optimization cannot clear its legal gate from caller/project-supplied `reportGrade` or passing-check booleans and requires a separately verified regulatory approval decision. Production call sites are not yet connected to the authoritative regulatory approval repository, so report-grade remains false until the P1 binding is completed. |
+| P0 | Same-PNU public evidence cache | Reuse fresh public parcel facts before external lookup | Done | 2026-07-16: unexpired records marked `publicData=true` and `reuseEligible=true` are reusable by PNU for cadastral characteristics, land-use planning, building use, land characteristics, and official land price. Originating project IDs are stripped; registry, ownership, contracts, private uploads, and manual evidence are excluded. This cache is not the future property knowledge base. |
+| P1 | Property knowledge base | Promote public cache/history to typed and versioned PostgreSQL records | Planned | Add effective-date/source-version/authority selection, deterministic invalidation, retention, audit, and access policy for non-public evidence. Preserve the current public/private boundary instead of treating all same-PNU facts as globally reusable. |
+| P1 | Approval repository binding | Join workbook and regulatory gates to their authoritative approval stores | In Progress | Parser V2 has conflict contracts/repository logic and the regulatory envelope has exact binding checks, but feasibility-workbook approval does not query Parser V2 open conflicts and production envelope call sites do not resolve a regulatory decision from an approval repository. Bind by tenant/project, document version/candidate set, snapshot, source hash, and decision ID before report-grade promotion. |
+| P1 | CalculationRun immutability | Make completed runs append-only and supersede by new run ID | Planned | Current persistence can still upsert an existing `calculationRunId`. Reject mutation of completed runs and require a new ID plus `supersedesRunId` for recalculation. |
+| P1 | Feasibility numeric/lineage | Decimal/Excel rounding and approved snapshot/formula trace foundation | In Progress | 2026-07-16: added integer-KRW value object, Decimal area/rate/quantity, Excel ROUND/ROUNDDOWN/ROUNDUP, FeasibilityStudyV2 approved input/parcel/legal references, scenario eligibility, and formula traces. Full mixed-use revenue/VAT/cost allocation, 11,982-formula mapping, append-only CalculationRun enforcement, and tranche monthly ledger remain. See `docs/engineering/bonri-feasibility-gap-analysis.md`. |
 | P0 | Parser Platform V2 | Establish modular candidate-only parsing contracts, project profiles, approval snapshots, and normalized PostgreSQL foundation | In Progress | Controlled foundation and migration are documented in `docs/product/modular-document-parsing-platform.md`. Runtime records still use the backend-neutral `deal_state_records` projection. Real OCR/HWP, malware scanning, authority matrix, review UI, production monitoring, typed PostgreSQL repositories, and approved-snapshot Pod cutover remain explicit TODO-SDD gates. |
 | P0 | API regression | Isolate contract tests from developer runtime and cloud AI keys | Done | Full-suite runs use a disposable SQLite DB; the autouse test guard clears cloud provider keys loaded from local `.env`, and strict-RBAC reviewer analysis uses a source-backed runnable fixture instead of whichever runtime project happens to sort first. |
 | P0 | External worker | Refresh orchestration reads from durable storage | Done | Project run detail/list reads merge the authoritative store into the API cache, so a PF Review completed by a separate worker process is visible without restarting the API. |
 | P0 | CalculationRun | Fix approved-workbook source locator persistence | Done | `run_source_locator` regression fixed and approved schedule E2E passes. |
 | P0 | Financial integrity | Remove synthetic product/PF fallback values | Done | Missing product mix or PF structure now returns `insufficient_input`; no CalculationRun is created. Demo data must be supplied explicitly. |
 | P0 | Land evidence | Remove fixed PNU fallback | Done | PNU lookup returns `sourceUnavailable` on missing configuration/upstream failure and never emits fabricated evidence. |
-| P0 | Cash Flow | Schedule provenance and report eligibility | Done | Approved/evidence/estimated precedence is persisted per schedule component; estimates cannot silently become report-grade. |
+| P0 | Cash Flow | Schedule provenance and report eligibility | Done | Approved/evidence/estimated precedence is persisted per schedule component; estimates cannot silently become report-grade. Externally supplied `requestType`, `cashFlowRunRequest`, and `cashFlowRunRequestDraft` payloads are deep-copied, rebound to the route project, and forced to `candidate`/`unapproved`; caller-supplied source, cost-schedule, allocation-rule, or report-eligibility flags cannot authorize a run. The server-generated request from an approved canonical study retains its provenance. |
 | P0 | Financial metrics | Explicit LTV bases and dated all-in XIRR | Done | Sales-value/appraisal/unsold/senior/total leverage are separated; nominal proxy is labeled when dated XIRR is unavailable. |
 | P0 | Security | Hardened deployment profile | Done | Staging/production fail fast without strict RBAC, tenant isolation, OIDC/JWKS, PostgreSQL, S3, Secret Manager, external worker, and HTTPS CORS. |
 | P0 | BYOK | Dedicated credential ingest and logout revocation | Done | Inline secrets are rejected; browser/API use `credentialRef`; explicit credential revocation supports local and OIDC identities. |
@@ -501,7 +510,7 @@ contract and limitations:
 ## Calculation and Pilot Integration Update (2026-07-10)
 
 - [x] Store the full deterministic calculation result snapshot on every CalculationRun so monthly Cash Flow and scenario matrices can be read without recomputation.
-- [x] Map the legacy Bonri workbook monthly block `2.현금흐름!J100:CH158` into `FeasibilityStudyV2.monthly_cash_flow` with Excel source locators.
+- [x] Map the legacy Bonri workbook period/event block `2.현금흐름!F35:BQ119` into 64 `FeasibilityStudyV2.monthly_cash_flow` rows with Excel source locators and distinct operating, debt, and Equity buckets.
 - [x] Materialize monthly Cash Flow metrics into `deal_state_records` with `calculationRunId` and month-level source locators.
 - [x] Persist Waterfall and Unsold LTV row metrics, Tranche Recovery metrics, and Discount Stress metrics in the CalculationRun registry.
 - [x] Make the web Cash Flow client query the latest `cash_flow_engine` CalculationRun before using legacy artifact fallback.
@@ -555,12 +564,15 @@ contract and limitations:
 
 ## Feasibility Workbook to Pod Wiring (2026-07-13)
 
-- [x] Parse the real Bonri sample workbook into revenue, cost, product mix, financing, schedule, and 77 monthly cash-flow rows with Excel locators.
+- [x] Parse the real Bonri sample workbook into revenue, cost, product mix, financing, schedule, and 64 cash-flow period/event rows (four pre-month events plus months 1-60) with Excel locators.
 - [x] Persist validated workbook drafts as `candidate` FeasibilityStudyV2 records without falsely marking them approved.
-- [x] Materialize candidate values into `feasibility_input`, `product_mix`, `schedule`, and `pf_structure` so Missing Input Register and Feasibility-Cashflow read the same project state.
+- [x] Retire direct candidate materialization into `feasibility_input`, `product_mix`, `schedule`, and `pf_structure`; keep candidate values in the draft preview and promote canonical values only through explicit approval.
 - [x] Add automatic downstream Pod cascade for single-Pod Cost/Market/Land changes when `autoCascade` is enabled.
 - [x] Re-run the sample import and cascade regression suite: 19 tests passed.
-- [ ] Add an explicit reviewer approval action in Input Package to promote candidate workbook values to `approved` and re-evaluate Approval Readiness Gate.
+- [x] Add explicit reviewer approval to promote candidate workbook values only after the project-scoped archive object is reopened, its byte SHA-256 is recomputed, and server-validation, source-hash, and draft-hash checks pass. Parser V2 repository conflict binding remains in the P1 approval-store item above.
+- [x] Reject source/archive metadata, canonical feasibility values, approval records, and regulatory authority fields submitted through generic project CRUD.
+- [x] Treat complete externally supplied Cash Flow requests as project-bound `candidate`/`unapproved` scenarios even when the caller submits forged approval or report-eligibility flags.
+- [x] Require a separately verified regulatory approval decision before Deal Optimization can clear its legal gate; production approval-repository resolution remains in the P1 item above.
 
 ## FeasibilityStudyV2 product collection schedule bridge (2026-07-13)
 

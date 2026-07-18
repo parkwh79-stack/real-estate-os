@@ -20,6 +20,13 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
+from parsing_platform.document_taxonomy import (
+    DOCUMENT_TAXONOMY_VERSION,
+    DOCUMENT_TYPE_SCOPE_ALL,
+    DOCUMENT_TYPE_SCOPE_LISTED,
+    canonical_document_type,
+    canonical_document_types,
+)
 from parsing_platform.registry import (
     FAILURE_POLICIES,
     ParserModuleManifest,
@@ -189,6 +196,7 @@ class ProjectParsingProfile:
 
     profile_id: str
     version: str
+    document_taxonomy_version: str
     selected_modules: tuple[str, ...] = ()
     excluded_modules: tuple[str, ...] = ()
     ordered_stages: tuple[ParsingStageProfile, ...] = ()
@@ -208,6 +216,21 @@ class ProjectParsingProfile:
         if not version:
             raise InvalidProfileError("profile version is required")
         object.__setattr__(self, "version", version)
+        taxonomy_version = str(self.document_taxonomy_version or "").strip()
+        if not taxonomy_version:
+            raise InvalidProfileError(
+                "document_taxonomy_version is required for every parsing profile"
+            )
+        if taxonomy_version != DOCUMENT_TAXONOMY_VERSION:
+            raise InvalidProfileError(
+                "Unsupported document taxonomy version: "
+                f"{taxonomy_version}; expected {DOCUMENT_TAXONOMY_VERSION}"
+            )
+        object.__setattr__(
+            self,
+            "document_taxonomy_version",
+            taxonomy_version,
+        )
         object.__setattr__(
             self, "selected_modules", _strings(self.selected_modules, label="selected_modules")
         )
@@ -224,7 +247,20 @@ class ProjectParsingProfile:
             raise InvalidProfileError("ordered_stages cannot contain duplicate stage IDs")
         object.__setattr__(self, "failure_policy", _failure_policy(self.failure_policy))
         object.__setattr__(self, "project_id", str(self.project_id) if self.project_id else None)
-        for name in ("document_types", "asset_types", "deal_types"):
+        raw_document_types = _strings(
+            self.document_types,
+            label="document_types",
+        )
+        if not raw_document_types:
+            raise InvalidProfileError(
+                "document_types must list at least one canonical taxonomy type"
+            )
+        try:
+            document_types = canonical_document_types(raw_document_types)
+        except ValueError as exc:
+            raise InvalidProfileError(str(exc)) from exc
+        object.__setattr__(self, "document_types", document_types)
+        for name in ("asset_types", "deal_types"):
             object.__setattr__(self, name, _strings(getattr(self, name), label=name))
         normalized_bindings: dict[str, tuple[str, ...]] = {}
         for capability, module_refs in dict(self.capability_bindings or {}).items():
@@ -249,6 +285,12 @@ class ProjectParsingProfile:
         return cls(
             profile_id=_field(data, "profile_id", "profileId", ""),
             version=_field(data, "version", default=""),
+            document_taxonomy_version=_field(
+                data,
+                "document_taxonomy_version",
+                "documentTaxonomyVersion",
+                None,
+            ),
             selected_modules=_field(data, "selected_modules", "selectedModules", ()),
             excluded_modules=_field(data, "excluded_modules", "excludedModules", ()),
             ordered_stages=tuple(ParsingStageProfile.from_value(item) for item in raw_stages),
@@ -268,6 +310,7 @@ class ProjectParsingProfile:
         return {
             "profile_id": self.profile_id,
             "version": self.version,
+            "document_taxonomy_version": self.document_taxonomy_version,
             "selected_modules": list(self.selected_modules),
             "excluded_modules": list(self.excluded_modules),
             "ordered_stages": [stage.to_dict() for stage in self.ordered_stages],
@@ -1006,17 +1049,47 @@ def _manifest_matches_profile(
     profile: ProjectParsingProfile,
 ) -> bool:
     return (
-        _supports_any(manifest.supported_document_types, profile.document_types)
+        manifest.document_taxonomy_version
+        == profile.document_taxonomy_version
+        and _supports_document_types(
+            manifest.supported_document_types,
+            profile.document_types,
+            scope=manifest.document_type_scope,
+        )
         and _supports_any(manifest.supported_asset_types, profile.asset_types)
         and _supports_any(manifest.supported_deal_types, profile.deal_types)
     )
 
 
-def _supports_any(supported: Sequence[str], requested: Sequence[str]) -> bool:
-    if not supported or not requested or "*" in supported:
+def _supports_document_types(
+    supported: Sequence[str],
+    requested: Sequence[str],
+    *,
+    scope: str,
+) -> bool:
+    if not requested:
+        return False
+    if scope == DOCUMENT_TYPE_SCOPE_ALL:
+        return True
+    if scope != DOCUMENT_TYPE_SCOPE_LISTED or not supported:
+        return False
+    supported_keys = {value.casefold() for value in supported}
+    requested_keys = {
+        canonical_document_type(value)
+        for value in requested
+    }
+    return bool(requested_keys.intersection(supported_keys))
+
+
+def _supports_any(
+    supported: Sequence[str],
+    requested: Sequence[str],
+) -> bool:
+    if not requested or not supported:
         return True
     supported_keys = {value.casefold() for value in supported}
-    return any(value.casefold() in supported_keys for value in requested)
+    requested_keys = {value.casefold() for value in requested}
+    return bool(requested_keys.intersection(supported_keys))
 
 
 def _normalize_upstream_results(value: Any) -> dict[str, ModuleExecutionResult]:

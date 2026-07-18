@@ -552,14 +552,51 @@ def test_legal_review_agent_blocks_on_citation_failures():
 
 def test_marketability_and_legal_review_endpoints():
     client = TestClient(app)
-    project_id = next(
-        item["project"]["id"]
+    project = next(
+        item
         for item in client.get("/projects/").json()
         if item["project"]["type"] == "mixed_use"
     )
+    project_id = project["project"]["id"]
+    tenant_id = project.get("_meta", {}).get("tenantId") or "default"
+    client.post(
+        "/auth/tenants",
+        json={"tenantId": tenant_id, "name": "Legal Endpoint Test Tenant"},
+    )
+    client.post(
+        "/auth/users",
+        json={
+            "userId": "legal-endpoint-analyst",
+            "tenantId": tenant_id,
+            "displayName": "Legal Endpoint Analyst",
+            "role": "analyst",
+        },
+    )
+    session = client.post(
+        "/auth/session",
+        json={
+            "userId": "legal-endpoint-analyst",
+            "tenantId": tenant_id,
+            "provider": "local-test",
+        },
+    )
+    assert session.status_code == 200
+    headers = {"x-realytics-session-id": session.json()["session"]["sessionId"]}
 
-    marketability = client.post(f"/projects/{project_id}/marketability/analyze", json={}).json()
-    legal = client.post(f"/projects/{project_id}/legal/review", json={}).json()
+    marketability_response = client.post(
+        f"/projects/{project_id}/marketability/analyze",
+        headers=headers,
+        json={},
+    )
+    legal_response = client.post(
+        f"/projects/{project_id}/legal/review",
+        headers=headers,
+        json={},
+    )
 
+    assert marketability_response.status_code == 200
+    assert legal_response.status_code == 200
+    marketability = marketability_response.json()
+    legal = legal_response.json()
     assert marketability["applicable"] is True
     assert legal["reviewType"] == "korean_real_estate_pf_legal_precheck"

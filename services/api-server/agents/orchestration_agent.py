@@ -13,7 +13,6 @@ from agents.deal_optimization_agent import DealOptimizationAgent
 from agents.developability_score_agent import DevelopabilityScoreAgent
 from schemas.credit_policy import resolve_credit_policy
 from agents.evidence_graph_agent import EvidenceGraphAgent
-from agents.legal_review_agent import LegalReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.marketability_agent import MarketabilityAgent
 from integrations.market_data import MolitRtmsConnector
@@ -25,6 +24,7 @@ from use_cases.market_comparables import (
 )
 from use_cases.glossary import capture_unmapped_term_surface_candidates_use_case
 from use_cases.approval_readiness_gate import build_deal_state_approval_readiness
+from use_cases.legal_review import review_legal_and_permits_use_case
 from agents.report_agent import ReportAgent
 from agents.restructuring_agent import RestructuringAgent
 from agents.risk_register_agent import RiskRegisterAgent
@@ -458,6 +458,12 @@ class OrchestrationAgent:
                 "pendingProposalCount": len(proposals),
             }, artifact_key="consensusResolution")
 
+            supplied_law_context = options.get("law_context")
+            candidate_law_context = (
+                supplied_law_context
+                if isinstance(supplied_law_context, dict)
+                else None
+            )
             legal_review = self._run_domain_agent(
                 run,
                 project_data=project_data,
@@ -468,12 +474,16 @@ class OrchestrationAgent:
                 input_snapshot={
                     "land": project_data.get("land"),
                     "landLedger": project_data.get("landLedger"),
-                    "legalContext": options.get("law_context"),
+                    "candidateLawContextSupplied": bool(
+                        candidate_law_context
+                    ),
                     "sourceDocuments": project_data.get("source_documents"),
                 },
-                executor=lambda: LegalReviewAgent().review(
+                executor=lambda: review_legal_and_permits_use_case(
                     project_data,
-                    options.get("law_context"),
+                    {
+                        "lawContext": candidate_law_context,
+                    },
                 ),
                 output_schema_name="LegalReviewResult",
             )
@@ -1769,6 +1779,24 @@ class OrchestrationAgent:
         risk_register = artifacts.get("riskRegister") or {}
         credit_review = artifacts.get("creditReviewDecision") or {}
         legal_review = artifacts.get("legalPermitReview") or {}
+        legal_intelligence = legal_review.get("legalIntelligence") or {}
+        verified_reference_count = legal_intelligence.get(
+            "verifiedReferenceCount"
+        )
+        verified_citation_count = legal_intelligence.get(
+            "verifiedCitationCount"
+        )
+        legal_evidence_trusted = (
+            legal_intelligence.get("evidenceStatus") == "verified"
+            and isinstance(verified_reference_count, int)
+            and not isinstance(verified_reference_count, bool)
+            and verified_reference_count > 0
+            and isinstance(verified_citation_count, int)
+            and not isinstance(verified_citation_count, bool)
+            and verified_citation_count > 0
+            and legal_intelligence.get("citationCoverageComplete") is True
+            and legal_intelligence.get("claimCoverageComplete") is True
+        )
         data_quality = artifacts.get("dataQualityReview") or {}
         reconciliation = artifacts.get("reconciliationGate") or {}
         quality = artifacts.get("qualityCheck") or {}
@@ -1793,6 +1821,16 @@ class OrchestrationAgent:
                 "LEGAL_NOT_BLOCKING",
                 legal_review.get("status") != "blocking_issue",
                 f"Legal review status is {legal_review.get('status')}.",
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
+                "LEGAL_EVIDENCE_TRUSTED",
+                legal_evidence_trusted,
+                (
+                    "Legal evidence must be verified, exact-citation complete, "
+                    "and complete for every required research claim. "
+                    "Caller-supplied law_context remains candidate-only."
+                ),
                 severity="blocking",
             ),
             self._approval_readiness_check(

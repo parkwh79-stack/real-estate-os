@@ -20,8 +20,14 @@ from use_cases.calculation_run_capture import (
 
 
 _POD_INPUT_KEYS: Dict[str, tuple[str, ...]] = {
-    "land_legal": ("land", "landLedger", "landEvidence", "legalContext", "source_documents"),
-    "market_product": ("market", "marketEvidence", "product_mix", "productMix", "land", "source_documents"),
+    "land_legal": (
+        "land", "landLedger", "landEvidence", "regulation", "regulatoryConstraintSnapshot",
+        "schedule", "covenants", "legalContext", "source_documents",
+    ),
+    "market_product": (
+        "market", "marketEvidence", "product_mix", "productMix", "land", "landLedger",
+        "regulation", "regulatoryConstraintSnapshot", "buildableEnvelope", "source_documents",
+    ),
     "cost_schedule": ("feasibility_input", "costs", "schedule", "project_schedule", "source_documents"),
     "feasibility_cashflow": (
         "feasibility_input",
@@ -31,6 +37,8 @@ _POD_INPUT_KEYS: Dict[str, tuple[str, ...]] = {
         "schedule",
         "pf_structure",
         "marketabilityAnalysis",
+        "regulatoryConstraintSnapshot",
+        "buildableEnvelope",
     ),
     "pf_credit": (
         "pf_structure",
@@ -40,6 +48,9 @@ _POD_INPUT_KEYS: Dict[str, tuple[str, ...]] = {
         "marketabilityAnalysis",
         "landEvidence",
         "adoptedRestructuringCures",
+        "legalPermitReview",
+        "regulatoryConstraintSnapshot",
+        "buildableEnvelope",
     ),
     "public_policy": ("land", "landLedger", "legalContext", "developabilityScore", "source_documents"),
 }

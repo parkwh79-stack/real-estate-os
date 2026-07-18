@@ -11,12 +11,15 @@ reviewable draft so a human confirms/corrects (unit mis-reads are possible) befo
 the values are applied to the project via the audited apply endpoint.
 """
 
-from typing import Any, Dict, List, Optional
+import hashlib
+import json
+from typing import Any, Dict, List, Mapping, Optional
 
 import openpyxl
 
 from agents.ai_connection import AIConnection, resolve_ai_context
 from agents.agent_policy import system_prompt_for
+from core.text_chunking import chunk_text_preserving_context
 
 EXTRACT_FIELDS = [
     "total_revenue",
@@ -42,8 +45,11 @@ _PROMPT_HEADER = (
 )
 
 
-def dump_workbook_cells(path: str, max_chars: int = 24000) -> str:
-    """Compact `Sheet!Cell=value` dump of non-empty cells (data_only), capped."""
+WORKBOOK_EXTRACTION_CHUNK_CHARS = 24_000
+
+
+def dump_workbook_cells(path: str) -> str:
+    """Return every non-empty cell as compact ``Sheet!Cell=value`` text."""
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     lines: List[str] = []
     try:
@@ -58,12 +64,9 @@ def dump_workbook_cells(path: str, max_chars: int = 24000) -> str:
                     if isinstance(value, float):
                         value = round(value, 4)
                     lines.append(f"{name}!{cell.coordinate}={value}")
-                    if sum(len(x) for x in lines) > max_chars:
-                        lines.append("...(truncated)")
-                        return "\n".join(lines)[:max_chars]
     finally:
         workbook.close()
-    return "\n".join(lines)[:max_chars]
+    return "\n".join(lines)
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -80,6 +83,7 @@ def extract_feasibility_fields_via_llm(
     ai_context: Dict[str, Any] | None = None,
     *,
     ai: AIConnection | None = None,
+    chunk_chars: int = WORKBOOK_EXTRACTION_CHUNK_CHARS,
 ) -> Dict[str, Any]:
     """Return a reviewable extraction draft (fields + evidence + candidate input).
 
@@ -88,51 +92,163 @@ def extract_feasibility_fields_via_llm(
     """
     context = resolve_ai_context(ai_context)
     dump = dump_workbook_cells(path)
-    client = ai or AIConnection()
-    result = client.extract_json(
-        _PROMPT_HEADER + dump,
-        system=system_prompt_for(
-            "feasibility_workbook",
-            base="You are a precise financial data extractor for Korean real-estate PF. Output only JSON.",
-        ),
-        ai_context=context,
+    chunks = chunk_text_preserving_context(
+        dump,
+        max_chars=chunk_chars,
+        is_context_line=lambda line: line.startswith("### SHEET:"),
     )
-    if result.data is None:
+    client = ai or AIConnection()
+    system = system_prompt_for(
+        "feasibility_workbook",
+        base="You are a precise financial data extractor for Korean real-estate PF. Output only JSON.",
+    )
+    successful: list[tuple[int, Mapping[str, Any], Mapping[str, Any]]] = []
+    failed_chunks: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        result = client.extract_json(
+            _PROMPT_HEADER + chunk,
+            system=system,
+            ai_context=context,
+        )
+        if isinstance(result.data, Mapping):
+            successful.append((index, result.data, result.meta or {}))
+        else:
+            failed_chunks.append(
+                {
+                    "chunkIndex": index,
+                    "error": result.error or "LLM extraction unavailable",
+                }
+            )
+    if not successful:
         return {
             "schemaVersion": "realytics-feasibility-llm-extract-v1",
             "parsingSource": "llm_unavailable",
-            "error": result.error,
+            "error": "; ".join(item["error"] for item in failed_chunks),
             "fields": {},
             "feasibilityInputCandidate": {},
+            "sourceWorkbookTextSha256": _sha256_text(dump),
+            "chunkCount": len(chunks),
+            "completedChunkCount": 0,
+            "inputCoverage": "failed",
+            "analysisOnly": True,
+            "reportEligible": False,
         }
 
-    raw_fields = result.data.get("fields") if isinstance(result.data, dict) else None
-    fields: Dict[str, Any] = {}
-    candidate: Dict[str, Any] = {}
-    if isinstance(raw_fields, dict):
-        for key in EXTRACT_FIELDS:
-            entry = raw_fields.get(key)
-            if not isinstance(entry, dict):
-                continue
-            value_krw = _coerce_int(entry.get("value_krw"))
-            fields[key] = {
-                "value_krw": value_krw,
-                "source": entry.get("source"),
-                "unit": entry.get("unit"),
-                "raw": entry.get("raw"),
-            }
-            if value_krw is not None:
-                candidate[key] = value_krw
+    fields, candidate, source_conflicts = _merge_workbook_chunk_fields(successful)
+    extraction_empty = not candidate and not source_conflicts
+    complete = not failed_chunks and not source_conflicts and not extraction_empty
 
     return {
         "schemaVersion": "realytics-feasibility-llm-extract-v1",
-        "parsingSource": "llm",
-        "aiConnection": result.meta,
+        "parsingSource": "llm" if len(chunks) == 1 else "llm_chunked",
+        "aiConnection": successful[0][2],
         "fields": fields,
         "feasibilityInputCandidate": candidate,
+        "sourceConflicts": source_conflicts,
+        "sourceWorkbookTextSha256": _sha256_text(dump),
+        "chunkCount": len(chunks),
+        "completedChunkCount": len(successful),
+        "failedChunks": failed_chunks,
+        "extractionEmpty": extraction_empty,
+        "inputCoverage": "complete" if not failed_chunks else "partial",
+        "analysisOnly": not complete,
+        "reportEligible": complete,
         "reviewRequired": True,
         "note": "LLM 추출 결과(증거 포함)입니다. 단위 오인 가능 — 검토·수정 후 apply 하세요.",
     }
+
+
+def _merge_workbook_chunk_fields(
+    chunks: List[tuple[int, Mapping[str, Any], Mapping[str, Any]]],
+) -> tuple[Dict[str, Any], Dict[str, int], List[Dict[str, Any]]]:
+    fields: Dict[str, Any] = {}
+    candidate: Dict[str, int] = {}
+    conflicts: List[Dict[str, Any]] = []
+    for key in EXTRACT_FIELDS:
+        entries: list[dict[str, Any]] = []
+        for chunk_index, payload, _meta in chunks:
+            raw_fields = payload.get("fields")
+            raw_entry = raw_fields.get(key) if isinstance(raw_fields, Mapping) else None
+            if not isinstance(raw_entry, Mapping):
+                continue
+            value_krw = _coerce_int(raw_entry.get("value_krw"))
+            if value_krw is None:
+                continue
+            entry = {
+                "value_krw": value_krw,
+                "source": raw_entry.get("source"),
+                "unit": raw_entry.get("unit"),
+                "raw": raw_entry.get("raw"),
+                "chunkIndex": chunk_index,
+            }
+            signature = _stable_json(
+                {
+                    "value_krw": entry["value_krw"],
+                    "source": entry["source"],
+                    "unit": entry["unit"],
+                    "raw": entry["raw"],
+                }
+            )
+            if all(item["_signature"] != signature for item in entries):
+                entries.append({**entry, "_signature": signature})
+        unique_values = {entry["value_krw"] for entry in entries}
+        if len(unique_values) > 1:
+            public_entries = [
+                {
+                    item_key: item_value
+                    for item_key, item_value in entry.items()
+                    if item_key != "_signature"
+                }
+                for entry in entries
+            ]
+            fields[key] = {
+                "value_krw": None,
+                "status": "conflict",
+                "candidates": public_entries,
+            }
+            conflicts.append(
+                {
+                    "fieldKey": key,
+                    "status": "open",
+                    "candidates": public_entries,
+                }
+            )
+            continue
+        if not entries:
+            continue
+        chosen = entries[0]
+        fields[key] = {
+            item_key: item_value
+            for item_key, item_value in chosen.items()
+            if item_key not in {"_signature", "chunkIndex"}
+        }
+        fields[key]["evidence"] = [
+            {
+                "source": entry.get("source"),
+                "unit": entry.get("unit"),
+                "raw": entry.get("raw"),
+                "chunkIndex": entry.get("chunkIndex"),
+            }
+            for entry in entries
+        ]
+        candidate[key] = int(chosen["value_krw"])
+    return fields, candidate, conflicts
+
+
+def _stable_json(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 FEASIBILITY_INPUT_KEYS = {

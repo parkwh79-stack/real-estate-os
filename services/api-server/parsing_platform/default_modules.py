@@ -11,6 +11,11 @@ from parsing_platform.adapters import (
     detect_document_instruction_text,
     inspect_archived_document,
 )
+from parsing_platform.document_taxonomy import (
+    CLASSIFIER_DOCUMENT_TYPES,
+    DOCUMENT_TAXONOMY_VERSION,
+    DOCUMENT_TYPE_SCOPE_ALL,
+)
 from parsing_platform.orchestrator import ParsingOrchestrator, ProjectParsingProfile
 from parsing_platform.registry import ParserModuleManifest, ParserModuleRegistry
 from parsing_platform.schema_contracts import (
@@ -39,7 +44,8 @@ class DocumentInspectionModule:
         module_id="document_inspection",
         version="1.0.0",
         capabilities=("document.security", "document.integrity"),
-        supported_document_types=("*",),
+        document_taxonomy_version=DOCUMENT_TAXONOMY_VERSION,
+        document_type_scope=DOCUMENT_TYPE_SCOPE_ALL,
         provides=("document.inspection_completed",),
         conditional_provides=("document.safe",),
         execution_class="deterministic",
@@ -68,7 +74,8 @@ class StructuralExtractionModule:
         module_id="structural_extraction",
         version="1.0.0",
         capabilities=("document.native_structure",),
-        supported_document_types=("*",),
+        document_taxonomy_version=DOCUMENT_TAXONOMY_VERSION,
+        document_type_scope=DOCUMENT_TYPE_SCOPE_ALL,
         requires=("document.safe",),
         provides=("document.structure",),
         execution_class="deterministic",
@@ -133,7 +140,8 @@ class DocumentClassificationModule:
         module_id="document_classification",
         version="1.0.0",
         capabilities=("document.routing",),
-        supported_document_types=("*",),
+        supported_document_types=CLASSIFIER_DOCUMENT_TYPES,
+        document_taxonomy_version=DOCUMENT_TAXONOMY_VERSION,
         requires=("document.structure",),
         provides=("document.classified",),
         execution_class="deterministic",
@@ -186,6 +194,8 @@ def intake_core_profile(*, project_id: str | None = None) -> ProjectParsingProfi
         {
             "profileId": "realytics.intake_core",
             "version": "1.0.0",
+            "documentTaxonomyVersion": DOCUMENT_TAXONOMY_VERSION,
+            "documentTypes": list(CLASSIFIER_DOCUMENT_TYPES),
             "projectId": project_id,
             "failurePolicy": "fail_closed",
             "orderedStages": [
@@ -275,6 +285,7 @@ def _redact_sensitive_transport(value: Any) -> None:
         "content",
         "documenttext",
         "formula",
+        "normalizedvalue",
         "prompt",
         "rawbody",
         "rawcontent",

@@ -119,7 +119,7 @@ class _LiveDatabase:
         conn = _POSTGRES_CONNECT(self.dsn)
         with conn.cursor() as cursor:
             cursor.execute(
-                sql.SQL("SET search_path TO {}, public").format(
+                sql.SQL("SET search_path TO {}, public, pg_temp").format(
                     sql.Identifier(self.schema_name)
                 )
             )
@@ -143,6 +143,188 @@ def _migration_ledger(conn: Any) -> dict[str, str]:
     with conn.cursor() as cursor:
         cursor.execute("SELECT version, checksum FROM schema_migrations")
         return {str(version): str(checksum) for version, checksum in cursor.fetchall()}
+
+
+def _insert_live_legal_gate_case(
+    cursor: Any,
+    *,
+    suffix: str,
+    declared_count: int,
+    item_has_provision: bool = True,
+    version_verification_status: str = "schema_verified",
+    version_has_verified_at: bool = True,
+    fetch_status: str = "succeeded",
+) -> None:
+    """Insert one complete legal lineage plus a deferred gate snapshot."""
+
+    now = "2026-07-18T00:00:00+00:00"
+    provider_id = f"legal-live-provider-{suffix}"
+    source_fetch_id = f"legal-live-fetch-{suffix}"
+    resource_id = f"legal-live-resource-{suffix}"
+    version_id = f"legal-live-version-{suffix}"
+    provision_id = f"legal-live-provision-{suffix}"
+    snapshot_id = f"legal-live-snapshot-{suffix}"
+
+    cursor.execute(
+        "SELECT set_config('realytics.tenant_id', %s, true)",
+        (TENANT_A,),
+    )
+    cursor.execute(
+        """
+        INSERT INTO legal_source_providers(
+            provider_id, provider_key, provider_revision, source_authority,
+            authority_tier, provider_kind, canonical_base_url,
+            adapter_version, provider_status, configured_by, configured_at
+        ) VALUES (
+            %s, %s, 1, 'law_go_kr', 'official_primary', 'official_api',
+            'https://www.law.go.kr', 'live-test-v1', 'active',
+            'live-test', %s
+        )
+        """,
+        (provider_id, provider_id, now),
+    )
+    cursor.execute(
+        """
+        INSERT INTO legal_source_fetches(
+            source_fetch_id, provider_id, transport, endpoint_key,
+            sanitized_source_locator, request_fingerprint, response_status,
+            fetch_status, raw_object_key, raw_object_version, raw_sha256,
+            raw_size_bytes, fetched_at
+        ) VALUES (
+            %s, %s, 'direct_api', 'live-gate-test', %s, %s, %s,
+            %s, %s, 'v1', %s, 1, %s
+        )
+        """,
+        (
+            source_fetch_id,
+            provider_id,
+            f"https://www.law.go.kr/live/{suffix}",
+            _stable_hash(f"request:{suffix}"),
+            200 if fetch_status == "succeeded" else 500,
+            fetch_status,
+            f"legal-live/{suffix}.json",
+            _stable_hash(f"raw:{suffix}"),
+            now,
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO legal_resources(
+            legal_resource_id, provider_id, resource_type,
+            official_identifier, issuing_authority, identity_hash,
+            first_observed_at
+        ) VALUES (%s, %s, 'statute', %s, '법제처', %s, %s)
+        """,
+        (
+            resource_id,
+            provider_id,
+            f"live-law-{suffix}",
+            _stable_hash(f"identity:{suffix}"),
+            now,
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO legal_resource_versions(
+            legal_resource_version_id, legal_resource_id, provider_id,
+            source_fetch_id, official_version_identifier, version_sequence,
+            canonical_title, observed_at, fetched_at, verified_at,
+            verification_status, normalized_sha256, parser_schema_version
+        ) VALUES (
+            %s, %s, %s, %s, %s, 1, '라이브 법령', %s, %s, %s, %s, %s,
+            'legal-parser-v1'
+        )
+        """,
+        (
+            version_id,
+            resource_id,
+            provider_id,
+            source_fetch_id,
+            f"live-version-{suffix}",
+            now,
+            now,
+            now if version_has_verified_at else None,
+            version_verification_status,
+            _stable_hash(f"normalized:{suffix}"),
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO legal_provisions(
+            legal_provision_id, legal_resource_version_id, legal_resource_id,
+            provision_type, provision_identifier, display_path, body_text,
+            provision_sha256, source_locator
+        ) VALUES (
+            %s, %s, %s, 'article', '제1조', '제1조', '라이브 조문',
+            %s, '제1조'
+        )
+        """,
+        (
+            provision_id,
+            version_id,
+            resource_id,
+            _stable_hash(f"provision:{suffix}"),
+        ),
+    )
+
+    coverage = {
+        "coverageComplete": True,
+        "expectedCitationCount": declared_count,
+        "sealedCitationCount": declared_count,
+        "claimCoverageComplete": True,
+        "expectedClaimCount": declared_count,
+        "verifiedClaimCount": declared_count,
+    }
+    cursor.execute(
+        """
+        INSERT INTO legal_evidence_snapshots(
+            legal_evidence_snapshot_id, tenant_id, project_id,
+            snapshot_version, as_of_date, freshness_policy_version,
+            snapshot_sha256, citation_verification_status,
+            has_open_conflicts, is_stale, gate_eligible,
+            created_by, created_at, metadata_json
+        ) VALUES (
+            %s, %s, %s, %s, DATE '2026-07-18', 'live-policy-v1',
+            %s, 'verified', FALSE, FALSE, TRUE, 'live-test', %s, %s::jsonb
+        )
+        """,
+        (
+            snapshot_id,
+            TENANT_A,
+            PROJECT_A,
+            int(suffix[:7], 16) + 1,
+            _stable_hash(f"snapshot:{suffix}"),
+            now,
+            json.dumps(coverage),
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO legal_evidence_snapshot_items(
+            legal_evidence_item_id, tenant_id, project_id,
+            legal_evidence_snapshot_id, legal_resource_id,
+            legal_resource_version_id, legal_provision_id, source_fetch_id,
+            exact_locator, claim_text_sha256, excerpt_sha256,
+            citation_verification_status, verified_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, '제1조',
+            %s, %s, 'verified', %s
+        )
+        """,
+        (
+            f"legal-live-item-{suffix}",
+            TENANT_A,
+            PROJECT_A,
+            snapshot_id,
+            resource_id,
+            version_id,
+            provision_id if item_has_provision else None,
+            source_fetch_id,
+            _stable_hash(f"claim:{suffix}"),
+            _stable_hash(f"excerpt:{suffix}"),
+            now,
+        ),
+    )
 
 
 def _seed_tenants_projects_and_profiles(conn: Any) -> None:
@@ -243,7 +425,7 @@ def live_database() -> _LiveDatabase:
                 sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name))
             )
             cursor.execute(
-                sql.SQL("SET search_path TO {}, public").format(
+                sql.SQL("SET search_path TO {}, public, pg_temp").format(
                     sql.Identifier(schema_name)
                 )
             )
@@ -351,6 +533,169 @@ def test_live_migrations_apply_once_and_are_idempotent(
         assert [row[0] for row in rows] == sorted(postgres.PARSER_V2_RLS_TABLES)
         assert all(bool(row[1]) and bool(row[2]) for row in rows)
     finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    (
+        "declared_count",
+        "item_has_provision",
+        "version_verification_status",
+        "version_has_verified_at",
+        "fetch_status",
+        "expected_constraint",
+    ),
+    (
+        pytest.param(
+            1,
+            True,
+            "schema_verified",
+            True,
+            "succeeded",
+            None,
+            id="verified-exact-provision",
+        ),
+        pytest.param(
+            5,
+            True,
+            "schema_verified",
+            True,
+            "succeeded",
+            "ck_legal_evidence_snapshot_gate_item_counts",
+            id="inflated-coverage",
+        ),
+        pytest.param(
+            1,
+            False,
+            "schema_verified",
+            True,
+            "succeeded",
+            "ck_legal_evidence_snapshot_gate_lineage",
+            id="resource-level-item",
+        ),
+        pytest.param(
+            1,
+            True,
+            "unverified",
+            False,
+            "succeeded",
+            "ck_legal_evidence_snapshot_gate_lineage",
+            id="unverified-version",
+        ),
+        pytest.param(
+            1,
+            True,
+            "schema_verified",
+            False,
+            "succeeded",
+            "ck_legal_evidence_snapshot_gate_lineage",
+            id="missing-version-verification-time",
+        ),
+        pytest.param(
+            1,
+            True,
+            "schema_verified",
+            True,
+            "failed",
+            "ck_legal_evidence_snapshot_gate_lineage",
+            id="failed-source-fetch",
+        ),
+    ),
+)
+def test_live_gate_snapshot_reconciles_counts_and_corpus_lineage(
+    live_database: _LiveDatabase,
+    declared_count: int,
+    item_has_provision: bool,
+    version_verification_status: str,
+    version_has_verified_at: bool,
+    fetch_status: str,
+    expected_constraint: str | None,
+) -> None:
+    import psycopg
+
+    conn = live_database.connect_admin()
+    try:
+        suffix = uuid4().hex
+        with conn.cursor() as cursor:
+            _insert_live_legal_gate_case(
+                cursor,
+                suffix=suffix,
+                declared_count=declared_count,
+                item_has_provision=item_has_provision,
+                version_verification_status=version_verification_status,
+                version_has_verified_at=version_has_verified_at,
+                fetch_status=fetch_status,
+            )
+
+        if expected_constraint is None:
+            conn.commit()
+        else:
+            with pytest.raises(psycopg.Error) as exc_info:
+                conn.commit()
+            assert exc_info.value.sqlstate == "23514"
+            assert exc_info.value.diag.constraint_name == expected_constraint
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_live_successful_source_fetch_requires_immutable_object_version(
+    live_database: _LiveDatabase,
+) -> None:
+    import psycopg
+
+    conn = live_database.connect_admin()
+    try:
+        suffix = uuid4().hex
+        provider_id = f"legal-live-version-provider-{suffix}"
+        now = "2026-07-18T00:00:00+00:00"
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO legal_source_providers(
+                    provider_id, provider_key, provider_revision,
+                    source_authority, authority_tier, provider_kind,
+                    canonical_base_url, adapter_version, provider_status,
+                    configured_by, configured_at
+                ) VALUES (
+                    %s, %s, 1, 'law_go_kr', 'official_primary',
+                    'official_api', 'https://www.law.go.kr', 'live-test-v1',
+                    'active', 'live-test', %s
+                )
+                """,
+                (provider_id, provider_id, now),
+            )
+            with pytest.raises(psycopg.Error) as exc_info:
+                cursor.execute(
+                    """
+                    INSERT INTO legal_source_fetches(
+                        source_fetch_id, provider_id, transport, endpoint_key,
+                        sanitized_source_locator, request_fingerprint,
+                        response_status, fetch_status, raw_object_key,
+                        raw_object_version, raw_sha256, raw_size_bytes,
+                        fetched_at
+                    ) VALUES (
+                        %s, %s, 'direct_api', 'live-object-version-test',
+                        %s, %s, 200, 'succeeded', %s, NULL, %s, 1, %s
+                    )
+                    """,
+                    (
+                        f"legal-live-version-fetch-{suffix}",
+                        provider_id,
+                        f"https://www.law.go.kr/live/version/{suffix}",
+                        _stable_hash(f"version-request:{suffix}"),
+                        f"legal-live/version/{suffix}.json",
+                        _stable_hash(f"version-raw:{suffix}"),
+                        now,
+                    ),
+                )
+        assert exc_info.value.sqlstate == "23514"
+        assert exc_info.value.diag.constraint_name in {
+            "ck_legal_source_fetch_raw_object_tuple",
+            "ck_legal_source_fetch_success_has_immutable_object",
+        }
+    finally:
+        conn.rollback()
         conn.close()
 
 

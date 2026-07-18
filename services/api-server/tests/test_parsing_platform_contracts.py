@@ -6,7 +6,10 @@ from copy import deepcopy
 import pytest
 from pydantic import ValidationError
 
+from parsing_platform.canonical_fields import CANONICAL_FIELD_NAMESPACE_VERSION
+from parsing_platform.field_registry import FIELD_REGISTRY_VERSION
 from parsing_platform import (
+    CANDIDATE_SET_SEAL_SCHEMA_VERSION,
     ApprovalStatus,
     ApprovedInputSnapshot,
     CandidateSetSeal,
@@ -28,6 +31,16 @@ from parsing_platform import (
 NOW = "2026-07-15T01:00:00Z"
 LATER = "2026-07-15T01:05:00Z"
 SHA256 = "a" * 64
+FINANCING_METADATA = {
+    "canonicalFieldNamespaceVersion": CANONICAL_FIELD_NAMESPACE_VERSION,
+    "basis": {
+        "vatTreatment": "not_applicable",
+        "amountScope": "not_applicable",
+        "allocationBasis": "not_applicable",
+        "currency": "KRW",
+        "financingBalanceBasis": "commitment",
+    },
+}
 
 
 def test_candidate_set_seal_counts_are_part_of_the_public_contract():
@@ -41,13 +54,48 @@ def test_candidate_set_seal_counts_are_part_of_the_public_contract():
         "candidateCount": 2,
         "conflictIds": ["conflict-1"],
         "conflictCount": 1,
+        "collectionManifestHash": SHA256,
         "candidateSetHash": SHA256,
         "sealedAt": NOW,
         "sealedBy": "parser-worker-1",
     }
-    assert CandidateSetSeal.model_validate(payload).candidate_count == 2
+    parsed = CandidateSetSeal.model_validate(payload)
+    assert parsed.candidate_count == 2
+    assert parsed.schema_version == CANDIDATE_SET_SEAL_SCHEMA_VERSION
+    with pytest.raises(ValidationError, match="candidate-set-seal-v2"):
+        CandidateSetSeal.model_validate(
+            {
+                **payload,
+                "schemaVersion": "realytics-candidate-set-seal-v1",
+            }
+        )
     with pytest.raises(ValidationError, match="candidateCount must match"):
         CandidateSetSeal.model_validate({**payload, "candidateCount": 1})
+
+
+def test_candidate_set_seal_v2_supports_empty_immutable_collection():
+    parsed = CandidateSetSeal.model_validate(
+        {
+            "sealId": "seal-empty",
+            "tenantId": "tenant-001",
+            "projectId": "project-001",
+            "parsingRunId": "run-empty",
+            "documentVersionId": "document-version-empty",
+            "candidateIds": [],
+            "candidateCount": 0,
+            "expectedModuleIds": ["feasibility_reconciliation"],
+            "completedModuleIds": ["feasibility_reconciliation"],
+            "unresolvedModuleIds": [],
+            "reconciliationSourceCandidateIds": [],
+            "reconciliationBound": True,
+            "collectionManifestHash": SHA256,
+            "candidateSetHash": SHA256,
+            "sealedAt": NOW,
+            "sealedBy": "parser-worker-1",
+        }
+    )
+    assert parsed.candidate_ids == []
+    assert parsed.reconciliation_bound is True
 
 
 def _candidate_payload(**overrides):
@@ -57,7 +105,7 @@ def _candidate_payload(**overrides):
         "projectId": "project-001",
         "parsingRunId": "parse-001",
         "documentVersionId": "docv-001",
-        "fieldKey": "capital_stack.senior.loan_amount",
+        "fieldKey": "financing.senior.loan_amount",
         "rawValue": "1,000,000,000원",
         "normalizedValue": 1_000_000_000,
         "unit": "KRW",
@@ -103,7 +151,7 @@ def _selection_payload(**overrides):
         "selectionId": "selection-001",
         "tenantId": "tenant-001",
         "projectId": "project-001",
-        "fieldKey": "capital_stack.senior.loan_amount",
+        "fieldKey": "financing.senior.loan_amount",
         "candidateId": "fact-001",
         "reviewDecisionId": "review-001",
         "approvalStatus": "approved",
@@ -112,6 +160,7 @@ def _selection_payload(**overrides):
         "unit": "KRW",
         "selectedBy": "user-001",
         "selectedAt": LATER,
+        "metadata": deepcopy(FINANCING_METADATA),
     }
     payload.update(overrides)
     return payload
@@ -234,8 +283,10 @@ def test_approved_snapshot_rejects_pending_or_duplicate_selections():
         "tenantId": "tenant-001",
         "projectId": "project-001",
         "approvalStatus": "approved",
+        "fieldRegistryVersion": FIELD_REGISTRY_VERSION,
+        "canonicalFieldNamespaceVersion": CANONICAL_FIELD_NAMESPACE_VERSION,
         "selections": [pending.model_dump(mode="json", by_alias=True)],
-        "ontologyVersion": "real-estate-finance@2.0.0",
+        "ontologyVersion": "realytics-real-estate-domain-standard-v1",
         "sourceParsingRunIds": ["parse-001"],
         "approvedBy": "user-001",
         "approvedAt": LATER,
@@ -267,7 +318,7 @@ def test_run_lifecycle_keeps_execution_and_approval_independent():
         "executionStatus": "running",
         "approvalStatus": "not_requested",
         "parserVersion": "parser-core@2.0.0",
-        "ontologyVersion": "real-estate-finance@2.0.0",
+        "ontologyVersion": "realytics-real-estate-domain-standard-v1",
         "promptVersion": "pf-term-sheet@2.0.0",
         "modelVersion": "gpt-5.0-2026-07-01",
         "profileId": "pf-review.standard",
@@ -380,7 +431,7 @@ def test_review_decision_accepts_materialized_identity_and_sequence_fields():
 def test_approved_snapshot_accepts_and_cross_checks_materialized_input_package():
     version_context = {
         "parserVersion": "parser-core@2.0.0",
-        "ontologyVersion": "real-estate-finance@2.0.0",
+        "ontologyVersion": "realytics-real-estate-domain-standard-v1",
         "promptVersion": "pf-term-sheet@2.0.0",
         "modelVersion": "deterministic-only",
     }
@@ -388,6 +439,7 @@ def test_approved_snapshot_accepts_and_cross_checks_materialized_input_package()
         "documentVersionId": "docv-001",
         "fileSha256": SHA256,
         "pageNumber": 12,
+        "paragraphIndex": 0,
         "rawTextSha256": SHA256,
         "parserMethod": "native_pdf_text",
     }
@@ -398,12 +450,13 @@ def test_approved_snapshot_accepts_and_cross_checks_materialized_input_package()
         "projectId": "project-001",
         "purpose": "monthly_cash_flow",
         "inputSchemaVersion": "realytics-parser-approved-inputs-v1",
-        "fieldRegistryVersion": "realytics-parser-field-registry-v1",
+        "fieldRegistryVersion": FIELD_REGISTRY_VERSION,
+        "canonicalFieldNamespaceVersion": CANONICAL_FIELD_NAMESPACE_VERSION,
         "approvalStatus": "approved",
         "validityStatus": "active",
         "selectionIds": ["selection-001"],
         "selections": [_selection_payload()],
-        "ontologyVersion": "real-estate-finance@2.0.0",
+        "ontologyVersion": "realytics-real-estate-domain-standard-v1",
         "documentVersionIds": ["docv-001"],
         "sourceHashes": [SHA256],
         "sourceDocuments": [
@@ -418,8 +471,8 @@ def test_approved_snapshot_accepts_and_cross_checks_materialized_input_package()
         ],
         "inputItems": [
             {
-                "fieldKey": "capital_stack.senior.loan_amount",
-                "canonicalField": "capital_stack.senior.loan_amount",
+                "fieldKey": "financing.senior.loan_amount",
+                "canonicalField": "financing.senior.loan_amount",
                 "normalizedValue": 1_000_000_000,
                 "unit": "KRW",
                 "authority": "executed_contract",
@@ -433,11 +486,12 @@ def test_approved_snapshot_accepts_and_cross_checks_materialized_input_package()
                 "sourceLocator": source_locator,
                 "originType": "extracted",
                 "inputFactIds": [],
-                "fieldRegistryVersion": "realytics-parser-field-registry-v1",
+                "fieldRegistryVersion": FIELD_REGISTRY_VERSION,
                 "versionContext": version_context,
+                "metadata": deepcopy(FINANCING_METADATA),
             }
         ],
-        "inputs": {"capital_stack.senior.loan_amount": 1_000_000_000},
+        "inputs": {"financing.senior.loan_amount": 1_000_000_000},
         "inputsByEntity": {},
         "versionContexts": [version_context],
         "sourceParsingRunIds": ["parse-001"],
@@ -449,6 +503,25 @@ def test_approved_snapshot_accepts_and_cross_checks_materialized_input_package()
     assert snapshot.snapshot_version == 1
     assert snapshot.purpose == "monthly_cash_flow"
     assert snapshot.input_items and snapshot.input_items[0].source_hash == SHA256
+    assert snapshot.input_items[0].metadata == snapshot.selections[0].metadata
+
+    mismatched_metadata = deepcopy(payload)
+    mismatched_metadata["inputItems"][0]["metadata"]["basis"][
+        "financingBalanceBasis"
+    ] = "drawn"
+    with pytest.raises(
+        ValidationError,
+        match="preserve their canonical selection identity and value",
+    ):
+        ApprovedInputSnapshot.model_validate(mismatched_metadata)
+
+    without_namespace_version = deepcopy(payload)
+    without_namespace_version.pop("canonicalFieldNamespaceVersion")
+    with pytest.raises(
+        ValidationError,
+        match="canonicalFieldNamespaceVersion",
+    ):
+        ApprovedInputSnapshot.model_validate(without_namespace_version)
 
     with pytest.raises(ValidationError, match="selectionIds must match"):
         ApprovedInputSnapshot.model_validate(

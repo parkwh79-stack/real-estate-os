@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import os
 from typing import Any
 
+import openpyxl
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from parsing_platform.contracts import ApprovedInputSnapshot
 from parsing_platform.default_modules import build_default_intake_orchestrator
+from parsing_platform.document_taxonomy import DOCUMENT_TAXONOMY_VERSION
+from parsing_platform.feasibility_domain_modules import (
+    CANONICAL_WORKBOOK_MAPPING_VERSION,
+    canonical_workbook_mapping_hash,
+    feasibility_domain_profile,
+)
+from parsing_platform.pdf_enrichment_modules import pdf_enrichment_profile
 from routers.project_parser_v2 import build_project_parser_v2_router
 from use_cases.parser_v2_records import ParserV2RecordStore
 
@@ -41,12 +50,18 @@ class MemoryRecords:
 
 
 class SourceDocuments:
-    def __init__(self, archive_ids: list[str]) -> None:
+    def __init__(
+        self,
+        archive_ids: list[str],
+        *,
+        original_file_name: str = "business-plan.txt",
+        content_type: str = "text/plain",
+    ) -> None:
         self.documents = {
             archive_id: {
                 "archiveId": archive_id,
-                "originalFileName": "business-plan.txt",
-                "contentType": "text/plain",
+                "originalFileName": original_file_name,
+                "contentType": content_type,
                 "sourceAuthority": "submitted_document",
             }
             for archive_id in archive_ids
@@ -59,8 +74,16 @@ class SourceDocuments:
 
 
 class UploadArchive:
-    def __init__(self, contents: dict[str, bytes]) -> None:
+    def __init__(
+        self,
+        contents: dict[str, bytes],
+        *,
+        filename: str = "business-plan.txt",
+        media_type: str = "text/plain",
+    ) -> None:
         self.contents = contents
+        self.filename = filename
+        self.media_type = media_type
 
     @staticmethod
     def is_valid_archive_id(value: Any) -> bool:
@@ -77,8 +100,8 @@ class UploadArchive:
             "archiveObjectKey": f"p-1/{archive_id}.txt",
             "archiveId": archive_id,
             "archiveIntegrityStatus": "verified",
-            "mediaType": "text/plain",
-            "filename": "business-plan.txt",
+            "mediaType": self.media_type,
+            "filename": self.filename,
             "fileSizeBytes": len(content),
         }
 
@@ -88,6 +111,10 @@ def _client(
     *,
     review_pilot_enabled: bool = True,
     principal_type: str | None = "human",
+    orchestrator_factory=build_default_intake_orchestrator,
+    primary_content: bytes | None = None,
+    primary_filename: str = "business-plan.txt",
+    primary_media_type: str = "text/plain",
 ):
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
     monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
@@ -131,15 +158,21 @@ def _client(
         "routers.project_parser_v2.enforce_project_tenant_scope",
         lambda request, project: fake_authorize_request(request, "project:read"),
     )
-    content = b"Project Alpha\nGross floor area 100 sqm\n"
+    content = primary_content or b"Project Alpha\nGross floor area 100 sqm\n"
     second_content = b"Project Alpha revised\nGross floor area 110 sqm\n"
     archive_id = hashlib.sha256(content).hexdigest()
     second_archive_id = hashlib.sha256(second_content).hexdigest()
     memory = MemoryRecords()
     store = ParserV2RecordStore(upsert_fn=memory.upsert, list_fn=memory.list)
-    source_documents = SourceDocuments([archive_id, second_archive_id])
+    source_documents = SourceDocuments(
+        [archive_id, second_archive_id],
+        original_file_name=primary_filename,
+        content_type=primary_media_type,
+    )
     upload_archive = UploadArchive(
-        {archive_id: content, second_archive_id: second_content}
+        {archive_id: content, second_archive_id: second_content},
+        filename=primary_filename,
+        media_type=primary_media_type,
     )
     projects = {
         "p-1": {
@@ -159,7 +192,7 @@ def _client(
         upload_archive_repository_factory=lambda: upload_archive,
         audit_recorder=audit_recorder,
         record_store_factory=lambda: store,
-        orchestrator_factory=build_default_intake_orchestrator,
+        orchestrator_factory=orchestrator_factory,
         profile_upsert_fn=memory.upsert,
         profile_list_fn=memory.list,
         review_pilot_enabled=review_pilot_enabled,
@@ -175,6 +208,8 @@ def _profile_payload() -> dict[str, Any]:
     return {
         "profileId": "pilot.intake",
         "version": "1.0.0",
+        "documentTaxonomyVersion": DOCUMENT_TAXONOMY_VERSION,
+        "documentTypes": ["business_plan"],
         "failurePolicy": "fail_closed",
         "orderedStages": [
             {"stageId": "security", "moduleRefs": ["document_inspection@1.0.0"]},
@@ -262,10 +297,59 @@ def test_catalog_and_immutable_project_profile_api(monkeypatch):
         "document_inspection",
         "structural_extraction",
     ]
+    assert (
+        catalog.json()["documentTaxonomyVersion"]
+        == DOCUMENT_TAXONOMY_VERSION
+    )
+    assert (
+        catalog.json()["documentTaxonomy"]["schemaVersion"]
+        == DOCUMENT_TAXONOMY_VERSION
+    )
+    assert all(
+        item["documentTaxonomyVersion"] == DOCUMENT_TAXONOMY_VERSION
+        and item["documentTypeScope"] in {"listed", "all"}
+        for item in catalog.json()["modules"]
+    )
+    assert (
+        catalog.json()["defaultProfile"]["documentTaxonomyVersion"]
+        == DOCUMENT_TAXONOMY_VERSION
+    )
     assert catalog.json()["domainStandard"]["autoSourceSelectionAllowed"] is False
 
     bad = {**_profile_payload(), "unexpectedAuthorityOverride": True}
     assert client.post("/projects/p-1/parsing-v2/profiles", json=bad).status_code == 422
+
+    unversioned = _profile_payload()
+    unversioned.pop("documentTaxonomyVersion")
+    assert (
+        client.post(
+            "/projects/p-1/parsing-v2/profiles",
+            json=unversioned,
+        ).status_code
+        == 422
+    )
+
+    legacy_taxonomy = _profile_payload()
+    legacy_taxonomy["documentTaxonomyVersion"] = (
+        "realytics-document-taxonomy-v0"
+    )
+    assert (
+        client.post(
+            "/projects/p-1/parsing-v2/profiles",
+            json=legacy_taxonomy,
+        ).status_code
+        == 422
+    )
+
+    noncanonical_document_type = _profile_payload()
+    noncanonical_document_type["documentTypes"] = ["pdf"]
+    assert (
+        client.post(
+            "/projects/p-1/parsing-v2/profiles",
+            json=noncanonical_document_type,
+        ).status_code
+        == 422
+    )
 
     saved = client.post(
         "/projects/p-1/parsing-v2/profiles", json=_profile_payload()
@@ -281,6 +365,156 @@ def test_catalog_and_immutable_project_profile_api(monkeypatch):
     changed["failurePolicy"] = "preserve_partial"
     conflict = client.post("/projects/p-1/parsing-v2/profiles", json=changed)
     assert conflict.status_code == 409
+
+
+def test_default_runtime_catalog_composes_optional_packs_but_default_run_stays_intake(
+    monkeypatch,
+):
+    client, archive_id, _, _ = _client(
+        monkeypatch,
+        orchestrator_factory=None,
+    )
+
+    catalog_response = client.get("/parser-v2/catalog")
+    assert catalog_response.status_code == 200
+    catalog = catalog_response.json()
+    module_ids = {item["moduleId"] for item in catalog["modules"]}
+    assert {
+        "document_inspection",
+        "structural_extraction",
+        "document_classification",
+        "canonical_workbook_fact_mapping",
+        "feasibility_product_mix",
+        "feasibility_cost",
+        "feasibility_schedule",
+        "feasibility_sales_collection",
+        "feasibility_pf_terms",
+        "feasibility_reconciliation",
+        "pdf_native_table_extraction",
+        "semantic_section_indexing",
+        "pdf_ocr_assessment_dispatch_plan",
+    } == module_ids
+    default_refs = [
+        module_ref
+        for stage in catalog["defaultProfile"]["orderedStages"]
+        for module_ref in stage["moduleRefs"]
+    ]
+    assert default_refs == [
+        "document_inspection@1.0.0",
+        "structural_extraction@1.0.0",
+        "document_classification@1.0.0",
+    ]
+
+    feasibility_profile = feasibility_domain_profile(
+        project_id="p-1",
+        canonical_workbook_mapping={
+            "schemaVersion": CANONICAL_WORKBOOK_MAPPING_VERSION,
+            "documentType": "feasibility_workbook",
+            "entries": [],
+        },
+    )
+    saved_feasibility = client.post(
+        "/projects/p-1/parsing-v2/profiles",
+        json=feasibility_profile.to_dict(),
+    )
+    assert saved_feasibility.status_code == 201, saved_feasibility.text
+
+    saved_pdf = client.post(
+        "/projects/p-1/parsing-v2/profiles",
+        json=pdf_enrichment_profile(project_id="p-1").to_dict(),
+    )
+    assert saved_pdf.status_code == 201, saved_pdf.text
+
+    run_response = client.post(
+        "/projects/p-1/parsing-v2/runs",
+        json={
+            "archiveId": archive_id,
+            "documentId": "runtime-default-document",
+            "documentVersionId": "runtime-default-document-v1",
+            "parsingRunId": "runtime-default-run-1",
+        },
+    )
+    assert run_response.status_code == 201, run_response.text
+    result = run_response.json()
+    assert set(result["orchestration"]["results"]) == {
+        "document_inspection",
+        "structural_extraction",
+        "document_classification",
+    }
+    assert result["parsingRun"]["profileId"] == "realytics.intake_core"
+
+
+def test_saved_feasibility_profile_runs_pinned_mapping_through_http_route(
+    monkeypatch,
+):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Feasibility"
+    sheet["A1"] = 1234
+    body = io.BytesIO()
+    workbook.save(body)
+    workbook.close()
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    client, archive_id, _, _ = _client(
+        monkeypatch,
+        orchestrator_factory=None,
+        primary_content=body.getvalue(),
+        primary_filename="feasibility.xlsx",
+        primary_media_type=media_type,
+    )
+    mapping = {
+        "schemaVersion": CANONICAL_WORKBOOK_MAPPING_VERSION,
+        "documentType": "feasibility_workbook",
+        "entries": [
+            {
+                "domain": "product_mix",
+                "fieldKey": "program.gross_floor_area_sqm",
+                "sheetName": "Feasibility",
+                "cellReference": "A1",
+                "unit": "sqm",
+            }
+        ],
+    }
+    profile = feasibility_domain_profile(
+        project_id="p-1",
+        canonical_workbook_mapping=mapping,
+    )
+    saved = client.post(
+        "/projects/p-1/parsing-v2/profiles",
+        json=profile.to_dict(),
+    )
+    assert saved.status_code == 201, saved.text
+
+    response = client.post(
+        "/projects/p-1/parsing-v2/runs",
+        json={
+            "archiveId": archive_id,
+            "profileId": profile.profile_id,
+            "profileVersion": profile.version,
+            "documentId": "feasibility-document",
+            "documentVersionId": "feasibility-document-v1",
+            "parsingRunId": "feasibility-route-run-1",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["candidateCollection"]["candidateCount"] == 1
+    assert result["candidateCollection"]["unresolvedModuleIds"] == []
+    assert result["candidateCollection"]["reconciliationBound"] is True
+    assert result["candidateSetSeal"]["candidateCount"] == 1
+    package = client.get(
+        "/projects/p-1/parsing-v2/runs/feasibility-route-run-1"
+    )
+    assert package.status_code == 200, package.text
+    candidates = package.json()["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["normalizedValue"] == 1234
+    assert candidates[0]["metadata"]["mappingAttestationHash"] == (
+        canonical_workbook_mapping_hash(mapping)
+    )
 
 
 def test_default_intake_profile_is_project_scoped_and_persisted_before_run(monkeypatch):

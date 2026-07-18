@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 from core.calculations import normalize_tranche_priority
@@ -67,6 +68,7 @@ def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
     raw_import = dict(study.raw_import or {})
     approval_status = str(raw_import.get("canonicalStatus") or "candidate")
     rows: List[Dict[str, Any]] = []
+    excluded_financing_transfers: List[Dict[str, Any]] = []
     for row in study.monthly_cash_flow:
         cash_out = dict(row.cash_out or {})
         if not cash_out:
@@ -82,6 +84,14 @@ def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
             try:
                 amount = abs(float(raw_amount or 0.0))
             except (TypeError, ValueError):
+                continue
+            if _is_financing_transfer_key(key):
+                excluded_financing_transfers.append({
+                    "monthIndex": row.month_index,
+                    "sourceKey": str(key),
+                    "amount": amount,
+                    "reason": "financing_transfer_not_project_cost",
+                })
                 continue
             source_breakdown[str(key)] = amount
             classified[_cost_bucket(key)] += amount
@@ -99,11 +109,22 @@ def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
         "approvalStatus": approval_status,
         "sourceType": "approved_excel_schedule" if approval_status == "approved" else "workbook_schedule_candidate",
         "sourceLocator": _first_source_locator(rows),
+        "excludedFinancingTransfers": excluded_financing_transfers,
     }
 
 
 def _cost_bucket(value: Any) -> str:
     text = str(value or "").strip().casefold()
+    row_number = _legacy_row_number(text)
+    if row_number is not None:
+        if 58 <= row_number <= 62:
+            return "constructionCost"
+        if 63 <= row_number <= 68:
+            return "landCost"
+        if 97 <= row_number <= 110:
+            return "financialCost"
+        if 70 <= row_number <= 92 or 112 <= row_number <= 119:
+            return "otherCost"
     if any(token in text for token in ("land", "site acquisition", "토지", "용지", "매입")):
         return "landCost"
     if any(token in text for token in ("construction", "contractor", "공사", "도급", "기성")):
@@ -111,6 +132,27 @@ def _cost_bucket(value: Any) -> str:
     if any(token in text for token in ("finance", "interest", "fee", "금융", "이자", "수수료")):
         return "financialCost"
     return "otherCost"
+
+
+def _legacy_row_number(value: Any) -> int | None:
+    match = re.match(r"^row_(\d+)_", str(value or "").strip().casefold())
+    return int(match.group(1)) if match else None
+
+
+def _is_financing_transfer_key(value: Any) -> bool:
+    row_number = _legacy_row_number(value)
+    if row_number is not None and (93 <= row_number <= 96 or row_number in {108, 111}):
+        return True
+    text = str(value or "").strip().casefold()
+    return any(token in text for token in (
+        "loan_repayment",
+        "debt_repayment",
+        "equity_recovery",
+        "equity_distribution",
+        "대출금상환",
+        "차입금상환",
+        "투자자금회수",
+    ))
 
 
 def _first_source_locator(rows: List[Dict[str, Any]]) -> Dict[str, Any] | None:
@@ -348,7 +390,11 @@ def _cost_uses(study: FeasibilityStudyV2) -> Dict[str, Any]:
 
 
 def _funding_sources(study: FeasibilityStudyV2) -> Dict[str, Any]:
-    pf_loan = sum(tranche.amount or 0 for tranche in study.financing if tranche.priority in {"senior", "middle", "junior", "other"})
+    pf_loan = sum(
+        tranche.amount or 0
+        for tranche in study.financing
+        if tranche.priority in {"senior", "mezzanine", "junior", "other"}
+    )
     equity = sum(tranche.amount or 0 for tranche in study.financing if tranche.priority == "equity")
     bridge = sum(tranche.amount or 0 for tranche in study.financing if tranche.priority == "bridge")
     return {
@@ -372,6 +418,7 @@ def _pf_structure(study: FeasibilityStudyV2) -> List[Dict[str, Any]]:
             "repaymentSource": tranche.repayment_source,
         }
         for tranche in study.financing
+        if tranche.priority != "equity"
     ]
 
 

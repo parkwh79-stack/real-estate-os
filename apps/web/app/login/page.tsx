@@ -4,15 +4,29 @@ import { FormEvent, useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, BrainCircuit, CheckCircle2, Database, KeyRound, ShieldAlert, Sparkles, TrendingUp, Users } from "lucide-react";
 import Image from "next/image";
-import { apiBase, createLocalPilotSession, getStoredAuthSession, loginLocalPilotSession } from "../../lib/auth-client";
+import {
+  apiBase,
+  createLocalPilotSession,
+  getStoredAuthSession,
+  loginLocalPilotSession,
+  signInWithSupabasePassword,
+  signUpWithSupabasePassword,
+} from "../../lib/auth-client";
+import { supabaseConfigured } from "../../lib/supabase-client";
 
-type AuthTab = "social" | "direct";
+type AuthTab = "social" | "supabase" | "direct";
 
 export default function LoginPage() {
   const router = useRouter();
   const [tab, setTab] = useState<AuthTab>("social");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [supabaseMode, setSupabaseMode] = useState<"login" | "signup">("login");
+  const [supabaseEmail, setSupabaseEmail] = useState("");
+  const [supabasePassword, setSupabasePassword] = useState("");
+  const [supabaseDisplayName, setSupabaseDisplayName] = useState("");
+  const hasSupabase = supabaseConfigured();
 
   // Stats state (Initialized to 0 to fetch real DB values)
   const [stats, setStats] = useState({
@@ -131,6 +145,41 @@ export default function LoginPage() {
       router.replace(resolveNextPath());
     } catch (err) {
       setError(err instanceof Error ? err.message : "요청을 처리하지 못했습니다.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function onSupabaseSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (!hasSupabase) {
+        throw new Error("Supabase 환경변수가 설정되지 않았습니다.");
+      }
+      if (supabaseMode === "login") {
+        await signInWithSupabasePassword({
+          email: supabaseEmail,
+          password: supabasePassword,
+        });
+        router.replace(resolveNextPath());
+        return;
+      }
+      const result = await signUpWithSupabasePassword({
+        email: supabaseEmail,
+        password: supabasePassword,
+        displayName: supabaseDisplayName,
+      });
+      if (result.requiresEmailConfirmation) {
+        setNotice("확인 메일을 보냈습니다. 이메일 인증 후 로그인해 주세요.");
+        setSupabaseMode("login");
+        return;
+      }
+      router.replace(resolveNextPath());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Supabase 인증에 실패했습니다.");
     } finally {
       setSubmitting(false);
     }
@@ -283,7 +332,7 @@ export default function LoginPage() {
             </p>
           </div>
 
-          <div className="mt-8 grid grid-cols-2 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
+          <div className="mt-8 grid grid-cols-3 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
             <button
               type="button"
               onClick={() => setTab("social")}
@@ -294,6 +343,18 @@ export default function LoginPage() {
               }`}
             >
               소셜 연동 (보안)
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("supabase")}
+              disabled={!hasSupabase}
+              className={`h-11 rounded-lg text-sm font-bold transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-40 ${
+                tab === "supabase"
+                  ? "bg-white text-slate-950 shadow-md dark:bg-slate-950 dark:text-white"
+                  : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
+              }`}
+            >
+              Supabase
             </button>
             <button
               type="button"
@@ -358,6 +419,76 @@ export default function LoginPage() {
                 </p>
               </div>
             </div>
+          ) : tab === "supabase" ? (
+            <form
+              onSubmit={onSupabaseSubmit}
+              className="mt-8 space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-500"
+            >
+              <div className="flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setSupabaseMode("login")}
+                  className={`flex-1 rounded-md py-2 text-xs font-bold ${
+                    supabaseMode === "login"
+                      ? "bg-white text-slate-900 shadow-sm dark:bg-slate-950 dark:text-white"
+                      : "text-slate-500"
+                  }`}
+                >
+                  이메일 로그인
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSupabaseMode("signup")}
+                  className={`flex-1 rounded-md py-2 text-xs font-bold ${
+                    supabaseMode === "signup"
+                      ? "bg-white text-slate-900 shadow-sm dark:bg-slate-950 dark:text-white"
+                      : "text-slate-500"
+                  }`}
+                >
+                  이메일 회원가입
+                </button>
+              </div>
+
+              <p className="text-sm leading-6 text-slate-500 dark:text-slate-400">
+                Supabase Auth로 인증하며, access token은 FastAPI의 JWKS 검증과
+                REALYTICS tenant/RBAC 검사를 모두 통과해야 합니다.
+              </p>
+              <Field
+                label="이메일"
+                value={supabaseEmail}
+                onChange={setSupabaseEmail}
+                type="email"
+                autoComplete="email"
+              />
+              <Field
+                label="비밀번호"
+                value={supabasePassword}
+                onChange={setSupabasePassword}
+                type="password"
+                autoComplete={supabaseMode === "login" ? "current-password" : "new-password"}
+              />
+              {supabaseMode === "signup" ? (
+                <Field
+                  label="표시 이름"
+                  value={supabaseDisplayName}
+                  onChange={setSupabaseDisplayName}
+                  autoComplete="name"
+                />
+              ) : null}
+
+              <button
+                type="submit"
+                disabled={submitting || !supabaseEmail || supabasePassword.length < 6}
+                className="mt-6 flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-base font-bold text-white shadow-lg transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {submitting
+                  ? "Supabase 인증 중..."
+                  : supabaseMode === "login"
+                    ? "Supabase로 로그인"
+                    : "Supabase 계정 만들기"}
+                <ArrowRight className="h-5 w-5" />
+              </button>
+            </form>
           ) : (
             <form onSubmit={onDirectSubmit} className="mt-8 space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-500">
               <div className="flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
@@ -410,6 +541,12 @@ export default function LoginPage() {
             </form>
           )}
 
+          {notice ? (
+            <p className="mt-6 animate-in fade-in rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">
+              {notice}
+            </p>
+          ) : null}
+
           {error ? (
             <p className="mt-6 animate-in fade-in rounded-xl bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700 border border-rose-100 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
               {error}
@@ -432,15 +569,21 @@ function Field({
   label,
   value,
   onChange,
+  type = "text",
+  autoComplete,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  type?: "text" | "email" | "password";
+  autoComplete?: string;
 }) {
   return (
     <label className="block">
       <span className="text-sm font-bold text-slate-700 dark:text-slate-300">{label}</span>
       <input
+        type={type}
+        autoComplete={autoComplete}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="mt-2 h-12 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold outline-none transition-colors focus:border-sky-500 focus:ring-1 focus:ring-sky-500 dark:border-slate-700 dark:bg-slate-950"

@@ -4,6 +4,17 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
+from parsing_platform.document_taxonomy import (
+    DOCUMENT_TAXONOMY_VERSION,
+    canonical_document_types,
+)
+from parsing_platform.handoff_policies import (
+    APPROVED_POLICY_STATUS,
+    DOMAIN_HANDOFF_POLICY_VERSION,
+    EntityScopedRequiredFieldGroup,
+    get_domain_handoff_policy,
+)
+
 
 DOMAIN_STANDARD_VERSION = "realytics-real-estate-domain-standard-v1"
 
@@ -34,21 +45,55 @@ class DomainStandard:
     document_types: tuple[str, ...]
     critical_field_prefixes: tuple[str, ...]
     downstream_pods: tuple[str, ...]
-    handoff_policy_status: str = "draft_not_approved"
-    required_approved_field_groups: tuple[tuple[str, ...], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "document_types",
+            canonical_document_types(self.document_types),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        handoff_policy = get_domain_handoff_policy(self.domain.value)
         payload["domain"] = self.domain.value
         payload["required_capabilities"] = list(self.required_capabilities)
         payload["provided_capabilities"] = list(self.provided_capabilities)
         payload["document_types"] = list(self.document_types)
         payload["critical_field_prefixes"] = list(self.critical_field_prefixes)
         payload["downstream_pods"] = list(self.downstream_pods)
-        payload["required_approved_field_groups"] = [
-            list(group) for group in self.required_approved_field_groups
+        payload["handoff_policy_version"] = handoff_policy.version
+        payload["handoff_policy_status"] = handoff_policy.status
+        payload["required_approved_fields"] = list(
+            handoff_policy.required_approved_fields
+        )
+        payload["entity_scoped_required_field_groups"] = [
+            group.to_dict()
+            for group in handoff_policy.entity_scoped_required_field_groups
         ]
         return payload
+
+    @property
+    def handoff_policy_version(self) -> str:
+        return get_domain_handoff_policy(self.domain.value).version
+
+    @property
+    def handoff_policy_status(self) -> str:
+        return get_domain_handoff_policy(self.domain.value).status
+
+    @property
+    def required_approved_fields(self) -> tuple[str, ...]:
+        return get_domain_handoff_policy(
+            self.domain.value
+        ).required_approved_fields
+
+    @property
+    def entity_scoped_required_field_groups(
+        self,
+    ) -> tuple[EntityScopedRequiredFieldGroup, ...]:
+        return get_domain_handoff_policy(
+            self.domain.value
+        ).entity_scoped_required_field_groups
 
 
 DOMAIN_STANDARDS: tuple[DomainStandard, ...] = (
@@ -85,7 +130,7 @@ DOMAIN_STANDARDS: tuple[DomainStandard, ...] = (
         ("candidate.zoning", "document.structure"),
         ("candidate.building_program", "candidate.product_mix"),
         ("architectural_plan", "business_plan", "sales_plan"),
-        ("building.", "product_mix."),
+        ("program.", "building.", "product_mix."),
         ("market_product_pod", "development_feasibility_pod", "cost_schedule_pod"),
     ),
     DomainStandard(
@@ -103,7 +148,7 @@ DOMAIN_STANDARDS: tuple[DomainStandard, ...] = (
         ("candidate.product_mix", "candidate.market"),
         ("candidate.revenue", "candidate.cost", "candidate.feasibility_input"),
         ("feasibility_workbook", "business_plan", "budget"),
-        ("feasibility.", "revenue.", "cost."),
+        ("program.", "revenue.", "cost.", "feasibility."),
         ("cashflow_waterfall_pod", "pf_credit_pod", "risk_approval_pod"),
     ),
     DomainStandard(
@@ -230,8 +275,22 @@ STANDARD_BUNDLES: dict[str, tuple[RealEstateDomain, ...]] = {
 
 
 def domain_standard_catalog() -> dict[str, Any]:
+    standards = [item.to_dict() for item in DOMAIN_STANDARDS]
+    approved_policy_domains = [
+        item["domain"]
+        for item in standards
+        if item["handoff_policy_status"] == APPROVED_POLICY_STATUS
+    ]
     return {
         "schemaVersion": DOMAIN_STANDARD_VERSION,
+        "documentTaxonomyVersion": DOCUMENT_TAXONOMY_VERSION,
+        "handoffPolicyVersion": DOMAIN_HANDOFF_POLICY_VERSION,
+        "handoffPolicyStatus": (
+            APPROVED_POLICY_STATUS
+            if len(approved_policy_domains) == len(standards)
+            else "partially_approved"
+        ),
+        "approvedHandoffPolicyDomains": approved_policy_domains,
         "catalogStatus": "internal_controlled_baseline",
         "normativeIndustryStandardCompliance": False,
         "executableBundles": False,
@@ -240,8 +299,10 @@ def domain_standard_catalog() -> dict[str, Any]:
         "knownCompositionGaps": [
             "Domain bundles are taxonomy/grouping aids until dependency closure and provider bindings are approved.",
             "candidate.reconciled has no production reconciliation provider in this foundation.",
+            "Prefix-only handoff policies remain review-only until exact field "
+            "and entity-cardinality requirements are approved.",
         ],
-        "domains": [item.to_dict() for item in DOMAIN_STANDARDS],
+        "domains": standards,
         "bundles": {
             key: [domain.value for domain in domains]
             for key, domains in STANDARD_BUNDLES.items()

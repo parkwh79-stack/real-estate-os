@@ -6,6 +6,19 @@ from fastapi.testclient import TestClient
 from agents.orchestration_agent import OrchestrationAgent
 from main import app
 from routers import projects
+from storage import upsert_user
+
+
+def _land_analyst_headers() -> dict[str, str]:
+    upsert_user(
+        {
+            "userId": "land-analyst",
+            "tenantId": "pytest-tenant",
+            "role": "analyst",
+            "status": "active",
+        }
+    )
+    return {"x-realytics-user-id": "land-analyst"}
 
 
 def _bondong_project_id(client: TestClient) -> str:
@@ -296,6 +309,7 @@ def test_land_acquisition_status_record_clears_acquisition_gate():
 
     run = client.post(
         f"/projects/{project_id}/orchestrations/pf-review",
+        headers=_land_analyst_headers(),
         json={"requestedBy": "test"},
     )
     assert run.status_code == 200
@@ -358,7 +372,7 @@ def test_pf_review_run_consumes_persisted_land_evidence():
 
     run = client.post(
         f"/projects/{project_id}/orchestrations/pf-review",
-        headers={"x-realytics-user-id": "land-analyst"},
+        headers=_land_analyst_headers(),
         json={},
     )
 

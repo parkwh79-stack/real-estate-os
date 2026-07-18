@@ -53,6 +53,7 @@ def test_development_feasibility_agent_builds_developer_and_pf_metrics():
     assert result["feasibilityStudyV2Draft"]["version"] == "realytics-feasibility-study-v2"
     assert result["feasibilityStudyV2Draft"]["metrics"]["total_revenue"] == 150_000_000_000
     assert result["feasibilityStudyV2Draft"]["financing"][0]["priority"] == "senior"
+    assert result["feasibilityStudyV2Draft"]["financing"][1]["priority"] == "mezzanine"
     assert result["assetCalculationProfiles"]["profiles"]["mixed_use"]["revenueMode"] == "mixed_presale_by_component"
     assert result["feasibilityStudyV2Draft"]["raw_import"]["assetCalculationProfiles"]["profileVersion"] == "asset-calculation-profile-v1"
     assert result["cashFlowRunRequestDraft"]["requestType"] == "cash_flow_run_request_v1"

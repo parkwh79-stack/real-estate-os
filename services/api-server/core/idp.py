@@ -15,6 +15,7 @@ from core.runtime_profile import security_default
 
 
 SECRET_HINT_KEYS = {"secret", "token", "key", "password"}
+REALYTICS_ROLES = frozenset({"admin", "reviewer", "analyst", "viewer"})
 
 
 @dataclass
@@ -185,27 +186,78 @@ def _validate_standard_claims(claims: Dict[str, Any]) -> None:
 
 
 def _principal_from_claims(claims: Dict[str, Any]) -> IdpPrincipal:
-    user_id = (
-        claims.get("realytics_user_id")
-        or claims.get("preferred_username")
-        or claims.get("email")
-        or claims.get("sub")
-    )
+    app_metadata = claims.get("app_metadata")
+    if not isinstance(app_metadata, dict):
+        app_metadata = {}
+    user_metadata = claims.get("user_metadata")
+    if not isinstance(user_metadata, dict):
+        user_metadata = {}
+    provider = os.environ.get("REALYTICS_IDP_PROVIDER") or claims.get("iss") or "external-idp"
+    is_supabase = _is_supabase_claims(claims, provider=str(provider))
+    if is_supabase:
+        user_id = (
+            claims.get("realytics_user_id")
+            or app_metadata.get("realytics_user_id")
+            or claims.get("sub")
+        )
+    else:
+        user_id = (
+            claims.get("realytics_user_id")
+            or app_metadata.get("realytics_user_id")
+            or claims.get("preferred_username")
+            or claims.get("email")
+            or claims.get("sub")
+        )
     if not user_id:
         raise HTTPException(status_code=401, detail={"error": "missing_user_claim"})
-    tenant_id = claims.get("realytics_tenant_id") or claims.get("tenant_id") or claims.get("tid")
+    tenant_id = (
+        claims.get("realytics_tenant_id")
+        or app_metadata.get("realytics_tenant_id")
+        or claims.get("tenant_id")
+        or app_metadata.get("tenant_id")
+        or claims.get("tid")
+    )
+    if (
+        not tenant_id
+        and is_supabase
+        and _env_flag("REALYTICS_IDP_PERSONAL_TENANT_FALLBACK")
+        and claims.get("sub")
+    ):
+        prefix = (
+            os.environ.get("REALYTICS_IDP_PERSONAL_TENANT_PREFIX")
+            or "supabase-user"
+        ).strip()
+        tenant_id = f"{prefix}:{claims['sub']}"
     if not tenant_id:
         raise HTTPException(status_code=401, detail={"error": "missing_tenant_claim"})
-    role = claims.get("realytics_role") or claims.get("role") or _first_role(claims) or "viewer"
+    explicit_role = claims.get("realytics_role") or app_metadata.get("realytics_role")
+    if is_supabase:
+        # Supabase's top-level role is a Postgres API role such as
+        # "authenticated"; it is not a REALYTICS RBAC role. Only server-owned
+        # app_metadata/custom claims may grant a shared-tenant role.
+        role = explicit_role
+        if not role and _env_flag("REALYTICS_IDP_PERSONAL_TENANT_FALLBACK"):
+            role = os.environ.get("REALYTICS_IDP_PERSONAL_TENANT_ROLE") or "analyst"
+    else:
+        role = explicit_role or claims.get("role") or _first_role(claims)
+    role = str(role or "viewer").casefold()
+    if role not in REALYTICS_ROLES:
+        role = "viewer"
     email = claims.get("email")
-    display_name = claims.get("name") or claims.get("display_name") or str(user_id)
+    display_name = (
+        claims.get("name")
+        or claims.get("display_name")
+        or user_metadata.get("full_name")
+        or user_metadata.get("name")
+        or str(user_id)
+    )
     return IdpPrincipal(
         user_id=str(user_id),
         tenant_id=str(tenant_id),
         email=str(email) if email else None,
         display_name=str(display_name),
         role=str(role),
-        provider=os.environ.get("REALYTICS_IDP_PROVIDER") or claims.get("iss") or "external-idp",
+        provider=str(provider),
         principal_type=_principal_type_from_claims(claims),
         claims=claims,
         token_id=claims.get("jti"),
@@ -221,7 +273,14 @@ def _principal_type_from_claims(claims: Dict[str, Any]) -> str:
     unknown and therefore fails closed at the Parser V2 approval boundary.
     """
 
-    explicit = str(claims.get("realytics_principal_type") or "").casefold()
+    app_metadata = claims.get("app_metadata")
+    if not isinstance(app_metadata, dict):
+        app_metadata = {}
+    explicit = str(
+        claims.get("realytics_principal_type")
+        or app_metadata.get("realytics_principal_type")
+        or ""
+    ).casefold()
     if explicit in {"human", "service"}:
         return explicit
     grant_type = str(claims.get("gty") or claims.get("grant_type") or "").casefold()
@@ -229,7 +288,34 @@ def _principal_type_from_claims(claims: Dict[str, Any]) -> str:
     identity_type = str(claims.get("idtyp") or "").casefold()
     if grant_type == "client_credentials" or token_use == "client" or identity_type == "app":
         return "service"
+    if (
+        _is_supabase_claims(
+            claims,
+            provider=os.environ.get("REALYTICS_IDP_PROVIDER") or "",
+        )
+        and claims.get("sub")
+        and claims.get("session_id")
+        and claims.get("is_anonymous") is not True
+    ):
+        return "human"
     return "unknown"
+
+
+def _is_supabase_claims(claims: Dict[str, Any], *, provider: str) -> bool:
+    issuer = str(claims.get("iss") or "").rstrip("/")
+    return provider.casefold() == "supabase" or (
+        issuer.endswith(".supabase.co/auth/v1")
+        or issuer.endswith(".supabase.in/auth/v1")
+    )
+
+
+def _env_flag(key: str) -> bool:
+    return (os.environ.get(key) or "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _first_role(claims: Dict[str, Any]) -> str | None:
@@ -245,7 +331,7 @@ def _allow_unsigned_dev_tokens() -> bool:
 
 def _limitations(mode: str) -> list[str]:
     if mode in {"oidc", "jwks", "rs256"}:
-        return ["OIDC RS256/JWKS signature, issuer, audience, and expiry validation is enabled."]
+        return ["OIDC ES256/RS256 JWKS signature, issuer, audience, and expiry validation is enabled."]
     if mode in {"hs256", "jwt_hs256"}:
         return [
             "HS256 JWT verification is enabled for pilot/enterprise proxy integrations.",

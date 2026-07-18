@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from parsing_platform.document_taxonomy import DOCUMENT_TAXONOMY_VERSION
 from parsing_platform.orchestrator import (
     DependencyCycleError,
     InvalidProfileError,
@@ -21,6 +22,15 @@ from parsing_platform.schema_contracts import (
     UnknownSchemaContractError,
     build_default_schema_contract_registry,
 )
+
+
+def _taxonomy_profile_fields(
+    *document_types: str,
+) -> dict[str, Any]:
+    return {
+        "documentTaxonomyVersion": DOCUMENT_TAXONOMY_VERSION,
+        "documentTypes": list(document_types or ("business_plan",)),
+    }
 
 
 class FakeModel:
@@ -76,12 +86,17 @@ def _manifest(
     requires: tuple[str, ...] = (),
     provides: tuple[str, ...] = (),
     version: str = "1.0.0",
-    supported_document_types: tuple[str, ...] = ("pdf", "xlsx"),
+    supported_document_types: tuple[str, ...] = (
+        "business_plan",
+        "feasibility_workbook",
+    ),
 ) -> dict[str, Any]:
     return {
         "moduleId": module_id,
         "version": version,
         "capabilities": [f"execute.{module_id}"],
+        "documentTaxonomyVersion": DOCUMENT_TAXONOMY_VERSION,
+        "documentTypeScope": "listed",
         "supportedDocumentTypes": list(supported_document_types),
         "supportedAssetTypes": ["residential", "logistics"],
         "supportedDealTypes": ["development_pf", "acquisition_finance"],
@@ -176,7 +191,10 @@ def profile():
             "selectedModules": module_ids,
             "excludedModules": [],
             "failurePolicy": "preserve_partial",
-            "documentTypes": ["pdf", "xlsx"],
+            **_taxonomy_profile_fields(
+                "business_plan",
+                "feasibility_workbook",
+            ),
             "assetTypes": ["residential"],
             "dealTypes": ["development_pf"],
             "orderedStages": [
@@ -205,7 +223,10 @@ def test_registry_accepts_model_manifest_selects_latest_and_filters_candidates()
 
     assert registry.get("native_extractor") is v2
     assert registry.resolve("native_extractor@1.2.0") is v1
-    assert [item.ref for item in registry.find_candidates(document_type="pdf")] == [
+    assert [
+        item.ref
+        for item in registry.find_candidates(document_type="business_plan")
+    ] == [
         "native_extractor@1.2.0",
         "native_extractor@1.10.0",
     ]
@@ -222,6 +243,7 @@ def test_project_version_pin_overrides_an_unpinned_stage_reference():
     profile = {
         "profile_id": "pinned-project",
         "version": "1",
+        **_taxonomy_profile_fields(),
         "selected_modules": ["native_extractor@1.2.0"],
         "ordered_stages": [
             {"stage_id": "extraction", "module_refs": ["native_extractor"]}
@@ -286,6 +308,7 @@ def test_cycle_is_detected_deterministically():
     profile = {
         "profile_id": "cycle-test",
         "version": "1",
+        **_taxonomy_profile_fields(),
         "selected_modules": ["cycle_a", "cycle_b"],
         "ordered_stages": [
             {"stage_id": "cycle", "module_refs": ["cycle_a", "cycle_b"]}
@@ -310,6 +333,7 @@ def test_non_mapping_module_result_is_a_traced_boundary_failure():
     profile = {
         "profile_id": "bad-result",
         "version": "1",
+        **_taxonomy_profile_fields(),
         "selected_modules": ["bad_result"],
         "failure_policy": "preserve_partial",
     }
@@ -472,9 +496,9 @@ def test_explicit_module_must_match_profile_document_type():
     registry.register(
         RecordingModule(
             _manifest(
-                "pdf_only",
-                provides=("content.pdf",),
-                supported_document_types=("pdf",),
+                "business_plan_only",
+                provides=("content.business_plan",),
+                supported_document_types=("business_plan",),
             )
         )
     )
@@ -482,10 +506,10 @@ def test_explicit_module_must_match_profile_document_type():
     with pytest.raises(InvalidProfileError, match="not compatible"):
         ParsingOrchestrator(registry).build_plan(
             {
-                "profileId": "xlsx-project",
+                "profileId": "feasibility-project",
                 "version": "1",
-                "documentTypes": ["xlsx"],
-                "selectedModules": ["pdf_only"],
+                **_taxonomy_profile_fields("feasibility_workbook"),
+                "selectedModules": ["business_plan_only"],
             }
         )
 
@@ -512,6 +536,7 @@ def test_module_exception_details_are_not_exposed():
         {
             "profileId": "secret-test",
             "version": "1",
+            **_taxonomy_profile_fields(),
             "selectedModules": ["secret_failure"],
             "failurePolicy": "preserve_partial",
         },
@@ -542,6 +567,7 @@ def test_capability_binding_version_must_match_resolved_provider():
             {
                 "profileId": "binding-version",
                 "version": "1",
+                **_taxonomy_profile_fields(),
                 "selectedModules": ["provider@1", "consumer"],
                 "capabilityBindings": {"value.ready": ["provider@2"]},
             }
@@ -574,6 +600,7 @@ def test_explicit_unknown_schema_fails_during_plan_and_execute():
     profile = {
         "profileId": "unknown-schema",
         "version": "1",
+        **_taxonomy_profile_fields(),
         "selectedModules": ["unknown_schema_module"],
     }
 
@@ -609,6 +636,7 @@ def test_input_schema_blocks_module_call_without_leaking_rejected_payload():
         {
             "profileId": "input-schema-guard",
             "version": "1",
+            **_taxonomy_profile_fields(),
             "selectedModules": ["input_guarded"],
             "failurePolicy": "preserve_partial",
         },
@@ -645,6 +673,7 @@ def test_output_schema_rejects_bad_shape_without_leaking_module_output():
         {
             "profileId": "output-schema-guard",
             "version": "1",
+            **_taxonomy_profile_fields(),
             "selectedModules": ["output_guarded"],
             "failurePolicy": "preserve_partial",
         },

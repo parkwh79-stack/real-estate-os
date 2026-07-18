@@ -15,18 +15,22 @@ this only routes documents.
 import os
 from typing import Any, Dict, List, Optional
 
+from parsing_platform.document_taxonomy import (
+    CLASSIFIER_DOCUMENT_TYPES,
+    DOCUMENT_TAXONOMY_VERSION,
+    document_type_contract,
+)
+
+
 DOCUMENT_CLASSIFIER_SCHEMA_VERSION = "realytics-document-classifier-v1"
 
-# documentType -> (Korean label, target action/handler)
+# Compatibility export: labels/actions now come from the canonical taxonomy.
 DOC_TYPES = {
-    "business_plan": ("사업계획서 / IR", "upload_and_parse"),
-    "basic_architectural_plan": ("기본설계 도서", "upload_and_parse"),
-    "land_ledger": ("토지대장 / 토지조서", "land_ledger_import"),
-    "feasibility_workbook": ("사업수지 / 현금흐름 워크북", "feasibility_workbook_validate"),
-    "risk_report_workbook": ("리스크 보고서 워크북", "risk_report_workbook_validate"),
-    "land_evidence": ("토지 증빙 (공시지가·등기 등)", "land_evidence_import"),
-    "market_evidence": ("시장·실거래 자료", "market_evidence_attach"),
-    "unknown": ("미분류", "manual_review"),
+    document_type: (
+        document_type_contract(document_type).label,
+        document_type_contract(document_type).suggested_action,
+    )
+    for document_type in CLASSIFIER_DOCUMENT_TYPES
 }
 
 # Keyword cues (lowercased, spaces stripped) → document type. Korean + English.
@@ -132,6 +136,7 @@ def classify_document(
     label, action = DOC_TYPES[best_type]
     return {
         "schemaVersion": DOCUMENT_CLASSIFIER_SCHEMA_VERSION,
+        "taxonomyVersion": DOCUMENT_TAXONOMY_VERSION,
         "filename": filename,
         "ext": ext,
         "contentType": content_type,

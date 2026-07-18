@@ -1,7 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
 
+from db.repositories.upload_archive_repository import UploadArchiveRepository
 from main import app
 from routers import projects
+from use_cases.workbook_import_approval import feasibility_study_draft_hash
 from storage import (
     get_risk_register_record,
     list_deal_state_records,
@@ -10,6 +13,126 @@ from storage import (
     upsert_evidence_graph_record,
     upsert_risk_register_record,
 )
+
+
+SERVER_MANAGED_PROJECT_FIELDS = (
+    "_meta",
+    "source_documents",
+    "sourceDocuments",
+    "canonicalFeasibilityStudyV2",
+    "canonical_feasibility_study_v2",
+    "feasibilityStudyV2",
+    "feasibility_study_v2",
+    "feasibilityStudyV2Draft",
+    "feasibility_study_v2_draft",
+    "approvedInputSnapshot",
+    "approved_input_snapshot",
+    "buildableEnvelope",
+    "buildable_envelope",
+    "regulatoryConstraintSnapshot",
+    "regulatory_constraint_snapshot",
+    "legalPermitReview",
+    "legal_permit_review",
+)
+
+
+def _isolated_upload_archive(tmp_path, monkeypatch):
+    repository = UploadArchiveRepository(
+        api_server_root=tmp_path,
+        archive_root=tmp_path / "uploads",
+    )
+    monkeypatch.setattr(projects, "upload_archive_repository", lambda: repository)
+    return repository
+
+
+def _validated_workbook_source_record(draft, archive_meta, *, status="passed", blocking_formula_errors=False):
+    source_hash = archive_meta["archiveId"]
+    validation = {
+        "status": status,
+        "profile": "legacy-bonri-mixed-use-pf-feasibility",
+        "sourceDocumentHash": source_hash,
+        "formulaIntegrity": {
+            "hasBlockingFormulaErrors": blocking_formula_errors,
+            "hasExternalWorkbookReferences": False,
+        },
+        "requiredSheetChecks": [{"sheetName": "사업수지", "present": True}],
+        "requiredKeyCellChecks": [{"key": "total_revenue", "passed": True}],
+        "reconciliationChecks": [{"name": "profit", "passed": True}],
+        "sourceConflicts": [],
+    }
+    source = {
+        **archive_meta,
+        "originalFileName": "server-validated-feasibility.xlsx",
+        "originalFileHash": source_hash,
+        "documentType": "feasibility_workbook",
+        "validationStatus": status,
+        "validation": validation,
+        "feasibilityStudyV2DraftHash": feasibility_study_draft_hash(draft),
+    }
+    return source, validation
+
+
+def _server_validated_workbook_source(project_id, draft, *, status="passed", blocking_formula_errors=False):
+    workbook_bytes = (
+        f"REALYTICS dummy feasibility workbook\n"
+        f"project={project_id}\n"
+        f"draft={feasibility_study_draft_hash(draft)}\n"
+    ).encode("utf-8")
+    archive_meta = projects.upload_archive_repository().archive_upload(
+        project_id,
+        workbook_bytes,
+        "server-validated-feasibility.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    source, validation = _validated_workbook_source_record(
+        draft,
+        archive_meta,
+        status=status,
+        blocking_formula_errors=blocking_formula_errors,
+    )
+    projects.source_document_repository().save_upload_metadata(project_id, source)
+    return source, validation
+
+
+@pytest.mark.parametrize("field_name", SERVER_MANAGED_PROJECT_FIELDS)
+def test_project_create_rejects_server_managed_authority_fields(field_name, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    response = TestClient(app).post(
+        "/projects/",
+        json={
+            "project": {"name": "Authority Injection Create"},
+            field_name: {"attackerControlled": True},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "server_managed_project_fields"
+    assert response.json()["detail"]["fields"] == [field_name]
+
+
+@pytest.mark.parametrize("field_name", SERVER_MANAGED_PROJECT_FIELDS)
+def test_project_update_rejects_server_managed_authority_fields(field_name, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    client = TestClient(app)
+    project_id = client.post(
+        "/projects/",
+        json={"project": {"name": "Authority Injection Update"}},
+    ).json()["project"]["id"]
+
+    response = client.put(
+        f"/projects/{project_id}",
+        json={field_name: {"attackerControlled": True}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "server_managed_project_fields"
+    assert response.json()["detail"]["fields"] == [field_name]
+    persisted = client.get(f"/projects/{project_id}").json()
+    if field_name == "_meta":
+        assert "attackerControlled" not in persisted["_meta"]
+    else:
+        assert field_name not in persisted
+    client.delete(f"/projects/{project_id}")
 
 
 def test_project_crud_create_update_delete_cascades_runtime_records(monkeypatch):
@@ -445,6 +568,7 @@ def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatc
     monkeypatch.setattr(projects, "persist_state", lambda: None)
     monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval.sqlite3"))
     monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    _isolated_upload_archive(tmp_path, monkeypatch)
     client = TestClient(app)
     created = client.post("/projects/", json={"project": {"name": "Import Approval Project"}}).json()
     project_id = created["project"]["id"]
@@ -453,6 +577,14 @@ def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatc
         "project_id": project_id,
         "project_name": "Import Approval Project",
         "asset_type": "mixed_use",
+        "program": {
+            "gross_floor_area_sqm": {
+                "key": "gross_floor_area_sqm",
+                "label": "Gross floor area",
+                "value": 45_000,
+                "unit": "SQM",
+            }
+        },
         "metrics": {
             "total_revenue": 100000000000,
             "total_cost": 85000000000,
@@ -468,7 +600,62 @@ def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatc
                 "amount": 60000000000,
             }
         ],
+        "raw_import": {
+            "mappedCells": {
+                "grossFloorArea": "Inputs!D15",
+                "totalRevenue": "Business Summary!I24",
+                "totalCost": "Business Summary!I81",
+                "pfAmount": "Cash Flow!D34",
+            },
+            "governedFactBasis": {
+                "revenue.total_sales_revenue": {
+                    "vatTreatment": "included",
+                    "amountScope": "gross",
+                    "allocationBasis": "direct",
+                    "currency": "KRW",
+                },
+                "cost.total_project_cost": {
+                    "vatTreatment": "included",
+                    "amountScope": "gross",
+                    "allocationBasis": "mixed",
+                    "allocationMethod": "approved_workbook_total",
+                    "currency": "KRW",
+                },
+                "financing.pf_amount": {
+                    "vatTreatment": "not_applicable",
+                    "amountScope": "not_applicable",
+                    "allocationBasis": "not_applicable",
+                    "financingBalanceBasis": "commitment",
+                    "currency": "KRW",
+                },
+            },
+        },
     }
+    source, validation = _server_validated_workbook_source(project_id, draft)
+
+    candidate = client.post(
+        f"/projects/{project_id}/feasibility-workbook/import-candidate",
+        json={
+            "importId": "fs-import-test",
+            "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+    assert candidate.status_code == 200
+
+    same_actor_approval = client.post(
+        f"/projects/{project_id}/feasibility-workbook/approve",
+        json={
+            "importId": "fs-import-test",
+            "approvedBy": "anonymous",
+            "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+    assert same_actor_approval.status_code == 400
+    assert "maker-checker" in str(same_actor_approval.json()["detail"])
 
     approved = client.post(
         f"/projects/{project_id}/feasibility-workbook/approve",
@@ -477,12 +664,27 @@ def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatc
             "approvedBy": "credit-officer",
             "comment": "Use signed workbook as canonical feasibility.",
             "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
         },
     )
 
     assert approved.status_code == 200
     body = approved.json()
     assert body["canonicalFeasibilityStudyV2"]["raw_import"]["canonicalStatus"] == "approved"
+    assert body["approvedInputSnapshot"]["approvalStatus"] == "approved"
+    assert body["parserV2Bridge"]["approvedFields"] == [
+        "program.gross_floor_area_sqm",
+        "revenue.total_sales_revenue",
+        "cost.total_project_cost",
+        "financing.pf_amount",
+    ]
+    assert (
+        body["canonicalFeasibilityStudyV2"]["input_references"][
+            "approved_input_snapshot_id"
+        ]
+        == body["approvedInputSnapshot"]["snapshotId"]
+    )
     assert body["feasibilityInput"]["total_revenue"] == 100000000000
     fetched = client.get(f"/projects/{project_id}").json()
     assert fetched["feasibilityStudyV2"]["project_name"] == "Import Approval Project"
@@ -491,12 +693,254 @@ def test_feasibility_workbook_approve_persists_canonical_v2(tmp_path, monkeypatc
     client.delete(f"/projects/{project_id}")
 
 
-def test_feasibility_workbook_candidate_feeds_pods_without_claiming_approval(tmp_path, monkeypatch):
+def test_authenticated_workbook_approval_rejects_spoofed_reviewer(
+    monkeypatch,
+):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    client = TestClient(app)
+    project_id = client.post(
+        "/projects/",
+        json={"project": {"name": "Reviewer Identity Project"}},
+    ).json()["project"]["id"]
+    verified_context = {
+        "authenticated": True,
+        "user": {
+            "userId": "verified-reviewer",
+            "tenantId": "tenant-a",
+            "status": "active",
+        },
+        "session": None,
+        "role": "reviewer",
+        "permissions": ["assumption:override"],
+        "authorization": {
+            "allowed": True,
+            "permission": "assumption:override",
+        },
+    }
+    monkeypatch.setattr(
+        projects,
+        "authorize_request",
+        lambda _request, _permission: verified_context,
+    )
+    monkeypatch.setattr(
+        projects,
+        "identity_context_from_request",
+        lambda _request: verified_context,
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/feasibility-workbook/approve",
+        json={
+            "approvedBy": "impersonated-reviewer",
+            "feasibilityStudyV2Draft": {},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "approval_actor_mismatch"
+    client.delete(f"/projects/{project_id}")
+
+
+def test_feasibility_workbook_approval_rejects_metadata_without_archive_object(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-metadata-only.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    _isolated_upload_archive(tmp_path, monkeypatch)
+    client = TestClient(app)
+    project_id = client.post(
+        "/projects/",
+        json={"project": {"name": "Metadata Only Workbook"}},
+    ).json()["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": project_id,
+        "project_name": "Metadata Only Workbook",
+        "asset_type": "mixed_use",
+        "metrics": {"total_revenue": 100_000_000_000, "total_cost": 85_000_000_000},
+    }
+    forged_hash = "f" * 64
+    source, validation = _validated_workbook_source_record(
+        draft,
+        {
+            "archiveId": forged_hash,
+            "archiveObjectKey": f"{project_id}/{forged_hash}.xlsx",
+            "archiveStored": True,
+        },
+    )
+    projects.source_document_repository().save_upload_metadata(project_id, source)
+
+    response = client.post(
+        f"/projects/{project_id}/feasibility-workbook/approve",
+        json={
+            "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "not archived for this project" in response.json()["detail"]
+    assert not client.get(f"/projects/{project_id}").json().get("canonicalFeasibilityStudyV2")
+    client.delete(f"/projects/{project_id}")
+
+
+def test_feasibility_workbook_approval_rejects_cross_project_archive_object(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-cross-archive.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    archive_repository = _isolated_upload_archive(tmp_path, monkeypatch)
+    client = TestClient(app)
+    source_project_id = client.post(
+        "/projects/",
+        json={"project": {"name": "Archive Owner Project"}},
+    ).json()["project"]["id"]
+    route_project_id = client.post(
+        "/projects/",
+        json={"project": {"name": "Archive Claim Project"}},
+    ).json()["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": route_project_id,
+        "project_name": "Archive Claim Project",
+        "asset_type": "mixed_use",
+        "metrics": {"total_revenue": 100_000_000_000, "total_cost": 85_000_000_000},
+    }
+    archive_meta = archive_repository.archive_upload(
+        source_project_id,
+        b"dummy workbook bytes owned by another project",
+        "cross-project.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    source, validation = _validated_workbook_source_record(draft, archive_meta)
+    projects.source_document_repository().save_upload_metadata(route_project_id, source)
+
+    response = client.post(
+        f"/projects/{route_project_id}/feasibility-workbook/approve",
+        json={
+            "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "not archived for this project" in response.json()["detail"]
+    assert not client.get(f"/projects/{route_project_id}").json().get("canonicalFeasibilityStudyV2")
+    client.delete(f"/projects/{source_project_id}")
+    client.delete(f"/projects/{route_project_id}")
+
+
+def test_feasibility_workbook_approval_rejects_tampered_archive_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-archive-tamper.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    archive_repository = _isolated_upload_archive(tmp_path, monkeypatch)
+    client = TestClient(app)
+    project_id = client.post(
+        "/projects/",
+        json={"project": {"name": "Tampered Archive Workbook"}},
+    ).json()["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": project_id,
+        "project_name": "Tampered Archive Workbook",
+        "asset_type": "mixed_use",
+        "metrics": {"total_revenue": 100_000_000_000, "total_cost": 85_000_000_000},
+    }
+    source, validation = _server_validated_workbook_source(project_id, draft)
+    resolved = archive_repository.resolve_download_metadata(project_id, source)
+    assert resolved is not None and resolved["path"] is not None
+    resolved["path"].write_bytes(b"tampered after validation")
+
+    response = client.post(
+        f"/projects/{project_id}/feasibility-workbook/approve",
+        json={
+            "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "not archived for this project" in response.json()["detail"]
+    assert not client.get(f"/projects/{project_id}").json().get("canonicalFeasibilityStudyV2")
+    client.delete(f"/projects/{project_id}")
+
+
+def test_feasibility_workbook_approval_rejects_tampered_server_draft(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-tamper.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    _isolated_upload_archive(tmp_path, monkeypatch)
+    client = TestClient(app)
+    project_id = client.post("/projects/", json={"project": {"name": "Draft Hash Project"}}).json()["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": project_id,
+        "project_name": "Draft Hash Project",
+        "asset_type": "mixed_use",
+        "metrics": {"total_revenue": 100_000_000_000, "total_cost": 85_000_000_000},
+    }
+    source, validation = _server_validated_workbook_source(project_id, draft)
+    tampered = {**draft, "metrics": {**draft["metrics"], "total_revenue": 120_000_000_000}}
+
+    response = client.post(
+        f"/projects/{project_id}/feasibility-workbook/approve",
+        json={
+            "feasibilityStudyV2Draft": tampered,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "differs from the server-extracted source draft" in response.json()["detail"]
+    assert not client.get(f"/projects/{project_id}").json().get("canonicalFeasibilityStudyV2")
+    client.delete(f"/projects/{project_id}")
+
+
+def test_feasibility_workbook_approval_rejects_cross_project_draft(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-cross-project.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    _isolated_upload_archive(tmp_path, monkeypatch)
+    client = TestClient(app)
+    source_project_id = client.post("/projects/", json={"project": {"name": "Source Project"}}).json()["project"]["id"]
+    route_project_id = client.post("/projects/", json={"project": {"name": "Route Project"}}).json()["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": source_project_id,
+        "project_name": "Source Project",
+        "asset_type": "mixed_use",
+        "metrics": {"total_revenue": 100_000_000_000, "total_cost": 85_000_000_000},
+    }
+    source, validation = _server_validated_workbook_source(route_project_id, draft)
+
+    response = client.post(
+        f"/projects/{route_project_id}/feasibility-workbook/approve",
+        json={
+            "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "project_id does not match" in response.json()["detail"]
+    assert not client.get(f"/projects/{route_project_id}").json().get("canonicalFeasibilityStudyV2")
+    client.delete(f"/projects/{source_project_id}")
+    client.delete(f"/projects/{route_project_id}")
+
+
+def test_feasibility_workbook_candidate_isolated_from_canonical_inputs(tmp_path, monkeypatch):
     monkeypatch.setattr(projects, "persist_state", lambda: None)
     monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "candidate.sqlite3"))
     monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
     client = TestClient(app)
-    created = client.post("/projects/", json={"project": {"name": "Workbook Candidate Project"}}).json()
+    created = client.post("/projects/", json={
+        "project": {"name": "Workbook Candidate Project"},
+        "feasibility_input": {"total_revenue": 123},
+    }).json()
     project_id = created["project"]["id"]
     draft = {
         "version": "realytics-feasibility-study-v2",
@@ -521,12 +965,52 @@ def test_feasibility_workbook_candidate_feeds_pods_without_claiming_approval(tmp
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "candidate"
-    assert body["feasibilityInput"]["total_revenue"] == 100000000000
+    assert body["authoritative"] is False
+    assert body["feasibilityInputPreview"]["total_revenue"] == 100000000000
     fetched = client.get(f"/projects/{project_id}").json()
-    assert fetched["_meta"]["feasibilityInputApprovalStatus"] == "candidate"
-    assert fetched["product_mix"][0]["asset_type"] == "apartment"
-    assert fetched["pf_structure"][0]["priority"] == "senior"
+    assert fetched["_meta"]["feasibilityWorkbookCandidateStatus"] == "candidate"
+    assert fetched["feasibility_input"]["total_revenue"] == 123
+    assert not fetched.get("canonicalFeasibilityStudyV2")
+    assert not fetched.get("feasibilityStudyV2")
+    assert not fetched.get("product_mix")
+    assert not fetched.get("pf_structure")
 
+    client.delete(f"/projects/{project_id}")
+
+
+def test_feasibility_workbook_approval_rejects_blocking_formula_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "persist_state", lambda: None)
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "approval-blocked.sqlite3"))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    _isolated_upload_archive(tmp_path, monkeypatch)
+    client = TestClient(app)
+    project_id = client.post("/projects/", json={"project": {"name": "Blocked Workbook"}}).json()["project"]["id"]
+    draft = {
+        "version": "realytics-feasibility-study-v2",
+        "project_id": project_id,
+        "project_name": "Blocked Workbook",
+        "raw_import": {"validationStatus": "warning"},
+    }
+    source, validation = _server_validated_workbook_source(
+        project_id,
+        draft,
+        status="warning",
+        blocking_formula_errors=True,
+    )
+
+    response = client.post(
+        f"/projects/{project_id}/feasibility-workbook/approve",
+        json={
+            "feasibilityStudyV2Draft": draft,
+            "sourceDocument": source,
+            "validation": validation,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "not approval-ready" in response.json()["detail"]
+    fetched = client.get(f"/projects/{project_id}").json()
+    assert not fetched.get("canonicalFeasibilityStudyV2")
     client.delete(f"/projects/{project_id}")
 
 

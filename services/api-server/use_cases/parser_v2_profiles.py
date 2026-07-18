@@ -36,6 +36,7 @@ def save_project_parsing_profile(
     scoped_profile = ProjectParsingProfile(
         profile_id=profile.profile_id,
         version=profile.version,
+        document_taxonomy_version=profile.document_taxonomy_version,
         selected_modules=profile.selected_modules,
         excluded_modules=profile.excluded_modules,
         ordered_stages=profile.ordered_stages,
@@ -61,6 +62,7 @@ def save_project_parsing_profile(
     canonical_profile = ProjectParsingProfile(
         profile_id=scoped_profile.profile_id,
         version=scoped_profile.version,
+        document_taxonomy_version=scoped_profile.document_taxonomy_version,
         selected_modules=tuple(entry.manifest.ref for entry in initial_plan.modules),
         excluded_modules=scoped_profile.excluded_modules,
         ordered_stages=tuple(

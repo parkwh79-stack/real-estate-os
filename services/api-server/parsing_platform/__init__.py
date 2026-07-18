@@ -1,6 +1,7 @@
 """Public contracts for Realytics Parser V2."""
 
 from parsing_platform.contracts import (
+    CANDIDATE_SET_SEAL_SCHEMA_VERSION,
     CONTRACT_MODELS,
     ApprovalStatus,
     ApprovedInputSnapshot,
@@ -27,6 +28,7 @@ from parsing_platform.contracts import (
 )
 
 __all__ = [
+    "CANDIDATE_SET_SEAL_SCHEMA_VERSION",
     "CONTRACT_MODELS",
     "ApprovalStatus",
     "ApprovedInputSnapshot",

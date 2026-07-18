@@ -88,7 +88,14 @@ def test_market_findings_flag_missing_sales_agent_and_overvaluation():
 def test_market_product_depth_endpoint(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch, "market-depth.sqlite3")
     client = TestClient(app)
-    project_id = client.post("/projects/", json=_project_with_sources()).json()["project"]["id"]
+    project_data = _project_with_sources()
+    source_documents = project_data.pop("source_documents")
+    project_id = client.post("/projects/", json=project_data).json()["project"]["id"]
+    for index, source_document in enumerate(source_documents):
+        projects.source_document_repository().save_upload_metadata(
+            project_id,
+            {**source_document, "archiveId": f"market-depth-fixture-{index}"},
+        )
     res = client.post(
         f"/projects/{project_id}/market-product-depth/analyze",
         json={"options": {"podAiReviewMode": "deterministic"}},

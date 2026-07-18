@@ -720,10 +720,10 @@ class DevelopmentFeasibilityAgent:
         if value in {"1", "senior"} or "senior" in tranche_name or "tr.a" in tranche_name or "tranche a" in tranche_name:
             return "senior"
         if value in {"2", "middle", "mezzanine"} or "mezz" in tranche_name or "middle" in tranche_name or "tr.b" in tranche_name or "tranche b" in tranche_name:
-            return "middle"
+            return "mezzanine"
         if value in {"3", "junior"} or "junior" in tranche_name or "tr.c" in tranche_name or "tranche c" in tranche_name:
             return "junior"
-        return "other" if index > 3 else ["senior", "middle", "junior"][index - 1]
+        return "other" if index > 3 else ["senior", "mezzanine", "junior"][index - 1]
 
     def _py_to_sqm_or_none(self, value: Any) -> float | None:
         if value in (None, ""):

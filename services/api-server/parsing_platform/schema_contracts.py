@@ -18,6 +18,10 @@ from threading import RLock
 from typing import Any
 
 from parsing_platform.adapters import ArchivedDocument
+from parsing_platform.document_taxonomy import (
+    DOCUMENT_TAXONOMY_VERSION,
+    canonical_document_type,
+)
 
 
 GENERIC_MODULE_INPUT_SCHEMA = "realytics-parser-module-input-v1"
@@ -466,6 +470,7 @@ def _validate_classification_output(value: Any) -> None:
         classification,
         (
             "schemaVersion",
+            "taxonomyVersion",
             "filename",
             "ext",
             "contentType",
@@ -481,6 +486,14 @@ def _validate_classification_output(value: Any) -> None:
         ),
         "classification_record_fields_invalid",
     )
+    if classification["taxonomyVersion"] != DOCUMENT_TAXONOMY_VERSION:
+        raise _ContractViolation("classification_taxonomy_version_invalid")
+    try:
+        canonical_type = canonical_document_type(classification["documentType"])
+    except ValueError:
+        raise _ContractViolation("classification_document_type_invalid") from None
+    if canonical_type != classification["documentType"]:
+        raise _ContractViolation("classification_document_type_not_canonical")
     if not isinstance(classification["confidence"], (int, float)):
         raise _ContractViolation("classification_confidence_invalid")
     if type(classification["needsReview"]) is not bool:
@@ -494,6 +507,16 @@ def _validate_classification_output(value: Any) -> None:
             ("documentType", "label", "score"),
             "classification_candidate_fields_invalid",
         )
+        try:
+            candidate_type = canonical_document_type(item["documentType"])
+        except ValueError:
+            raise _ContractViolation(
+                "classification_candidate_document_type_invalid"
+            ) from None
+        if candidate_type != item["documentType"]:
+            raise _ContractViolation(
+                "classification_candidate_document_type_not_canonical"
+            )
 
 
 __all__ = [

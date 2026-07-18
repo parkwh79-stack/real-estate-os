@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -9,12 +10,98 @@ from openpyxl.utils.datetime import from_excel
 
 from agents.feasibility_workbook_validator import validate_feasibility_workbook
 from agents.legacy_bonri_workbook_profile import legacy_bonri_registry_context
+from domains.feasibility.numeric import excel_round_int, to_decimal
 from schemas.feasibility_study import FeasibilityStudyV2
 
 
 KRW_PER_THOUSAND = 1_000
 KRW_PER_MILLION = 1_000_000
 SQM_PER_PY = 3.305785
+GOVERNED_FACT_BASIS_CONTRACT_VERSION = (
+    "realytics-workbook-governed-fact-basis-v1"
+)
+_GOVERNED_MONETARY_FIELD_KEYS = (
+    "revenue.total_sales_revenue",
+    "cost.total_project_cost",
+    "financing.pf_amount",
+)
+_CONTROLLED_REALYTICS_SCHEMA_VERSION = "realytics-fs-xlsx-v1-draft"
+
+# These are versioned workbook-profile meanings, not generic defaults.
+# - Bonri is eligible only when the workbook itself states ``VAT 별도``.
+# - REALYTICS is eligible only for the exact controlled schema version whose
+#   import contract defines total revenue, summed project cost, and requested
+#   PF / tranche principal.
+_PROFILE_GOVERNED_FACT_BASIS = {
+    "legacy-bonri-mixed-use-pf-feasibility": {
+        "revenue.total_sales_revenue": {
+            "vatTreatment": "excluded",
+            "amountScope": "gross",
+            "allocationBasis": "direct",
+            "currency": "KRW",
+        },
+        "cost.total_project_cost": {
+            "vatTreatment": "excluded",
+            "amountScope": "gross",
+            "allocationBasis": "mixed",
+            "allocationMethod": "sum_of_profile_cost_categories",
+            "currency": "KRW",
+        },
+        "financing.pf_amount": {
+            "vatTreatment": "not_applicable",
+            "amountScope": "not_applicable",
+            "allocationBasis": "not_applicable",
+            "financingBalanceBasis": "commitment",
+            "currency": "KRW",
+        },
+    },
+    "realytics-formula-cash-flow-export": {
+        "revenue.total_sales_revenue": {
+            "vatTreatment": "excluded",
+            "amountScope": "gross",
+            "allocationBasis": "direct",
+            "currency": "KRW",
+        },
+        "cost.total_project_cost": {
+            "vatTreatment": "excluded",
+            "amountScope": "gross",
+            "allocationBasis": "mixed",
+            "allocationMethod": "sum_of_profile_cost_categories",
+            "currency": "KRW",
+        },
+        "financing.pf_amount": {
+            "vatTreatment": "not_applicable",
+            "amountScope": "not_applicable",
+            "allocationBasis": "not_applicable",
+            "financingBalanceBasis": "commitment",
+            "currency": "KRW",
+        },
+    },
+}
+
+# Bonri cash-flow rows are not sign-coded transactions. Operating receipts,
+# financing transfers, operating costs, debt repayment, and equity recovery
+# must remain distinct or the Cash Flow Engine will incorrectly refinance
+# principal repayment and sponsor distributions as project costs.
+LEGACY_CF_ROW_KIND = {
+    **{row: "cash_in" for row in (35, 36, 41, 46, 54)},
+    **{row: "pf_draw" for row in (48, 49, 50, 51, 53)},
+    52: "other_financing_inflow",
+    55: "equity_contribution",
+    **{row: "cash_out" for row in (*range(58, 69), *range(70, 93), *range(97, 108), 109, 110, *range(112, 120))},
+    **{row: "loan_repayment" for row in (*range(93, 97), 108)},
+    111: "equity_recovery",
+}
+LEGACY_CF_OPPOSITE_KIND = {
+    "cash_in": "cash_out",
+    "cash_out": "cash_in",
+    "pf_draw": "loan_repayment",
+    "loan_repayment": "pf_draw",
+    "equity_contribution": "equity_recovery",
+    "equity_recovery": "equity_contribution",
+    "other_financing_inflow": "other_financing_outflow",
+    "other_financing_outflow": "other_financing_inflow",
+}
 
 
 def import_feasibility_study_from_workbook(
@@ -86,6 +173,24 @@ def _import_yongin_public_rental(workbook_path: Path, validation: Dict[str, Any]
                 "net_cash_flow": net * KRW_PER_THOUSAND,
                 "source_locator": {"sourceType": "excel_column", "sourceDocument": source_name, "sheetName": cash.title, "cell": f"{_column_name(column)}1:{_column_name(column)}{cash.max_row}"},
             })
+        raw_import = {
+            "profile": validation.get("profile"),
+            "validationStatus": validation.get("status"),
+            "sourceWorkbook": source_name,
+            "sourceDocument": source_document or {},
+            "mappedCells": {
+                "grossFloorArea": f"{overview.title}!D15",
+                "totalRevenue": f"{profit.title}!I24",
+                "totalCost": f"{profit.title}!I81",
+                "developmentProfit": f"{profit.title}!I82",
+                "pfAmount": f"{cash.title}!D34",
+                "productMix": f"{overview.title}!A18:M25",
+            },
+            "limitations": [
+                "Product-level rental conversion and legal approval conditions remain subject to review."
+            ],
+        }
+        _attach_profile_governed_fact_basis(raw_import)
         return {
             "project_id": project_id,
             "project_name": _cell_value(profit, "A1"),
@@ -99,7 +204,7 @@ def _import_yongin_public_rental(workbook_path: Path, validation: Dict[str, Any]
             "schedule": [{"key": "construction_start", "label": "construction start", "planned_date": "2027-04", "provenance": _provenance(source_name, "xlsx", profit.title, "A3", None)}],
             "monthly_cash_flow": monthly_cash_flow,
             "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, min((row.get("net_cash_flow") or 0) for row in monthly_cash_flow) if monthly_cash_flow else None),
-            "raw_import": {"profile": validation.get("profile"), "validationStatus": validation.get("status"), "sourceWorkbook": source_name, "sourceDocument": source_document or {}, "mappedCells": {"totalRevenue": f"{profit.title}!I24", "totalCost": f"{profit.title}!I81", "developmentProfit": f"{profit.title}!I82", "pfAmount": f"{cash.title}!D34", "productMix": f"{overview.title}!A18:M25"}, "limitations": ["Product-level rental conversion and legal approval conditions remain subject to review."]},
+            "raw_import": raw_import,
         }
     finally:
         workbook.close()
@@ -143,6 +248,33 @@ def _import_legacy_bonri(
             _line_item("finance_cost", "금융비용", "finance", _krw_from_thousand(_cell_value(business, "D62")), "사업수지", "D62", source_name),
             _line_item("other_cost", "기타사업비", "other", _krw_from_thousand(_cell_value(business, "D71")), "사업수지", "D71", source_name),
         ]
+        raw_import = {
+            "profile": validation.get("profile"),
+            "sampleProfile": legacy_bonri_registry_context(source_name),
+            "validationStatus": validation.get("status"),
+            "sourceWorkbook": source_name,
+            "unitScale": {
+                "사업수지": "KRW_THOUSAND",
+                "2.현금흐름": "KRW_MILLION",
+            },
+            "sourceDocument": source_document or {},
+            "mappedCells": {
+                "grossFloorArea": "입력!F19",
+                "totalRevenue": "사업수지!D11",
+                "totalCost": "사업수지!D72",
+                "developmentProfit": "사업수지!D74",
+                "pfAmount": "2.현금흐름!E48:E51",
+                "productMix": "분양!21,30,40 and 입력!M5:M8",
+            },
+            "limitations": [
+                "Legacy sample workbook has no REALYTICS named ranges; mapping uses a fixed Bonri-style cell profile.",
+                "PF tranche terms beyond principal are not fully available in the workbook and require PF review documents.",
+            ],
+        }
+        _attach_profile_governed_fact_basis(
+            raw_import,
+            legacy_vat_statement=_cell_value(business, "A2"),
+        )
 
         return {
             "project_id": project_id,
@@ -170,28 +302,7 @@ def _import_legacy_bonri(
             "scenarios": _default_scenarios(),
             "monthly_cash_flow": _legacy_monthly_cash_flow(cash_flow, source_name),
             "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, _max_minus_from_cash_flow(cash_flow)),
-            "raw_import": {
-                "profile": validation.get("profile"),
-                "sampleProfile": legacy_bonri_registry_context(source_name),
-                "validationStatus": validation.get("status"),
-                "sourceWorkbook": source_name,
-                "unitScale": {
-                    "사업수지": "KRW_THOUSAND",
-                    "2.현금흐름": "KRW_MILLION",
-                },
-                "sourceDocument": source_document or {},
-                "mappedCells": {
-                    "totalRevenue": "사업수지!D11",
-                    "totalCost": "사업수지!D72",
-                    "developmentProfit": "사업수지!D74",
-                    "pfAmount": "2.현금흐름!E48:E51",
-                    "productMix": "분양!21,30,40 and 입력!M5:M8",
-                },
-                "limitations": [
-                    "Legacy sample workbook has no REALYTICS named ranges; mapping uses a fixed Bonri-style cell profile.",
-                    "PF tranche terms beyond principal are not fully available in the workbook and require PF review documents.",
-                ],
-            },
+            "raw_import": raw_import,
         }
     finally:
         workbook.close()
@@ -208,6 +319,9 @@ def _import_realytics_formula_export(
     workbook = load_workbook(workbook_path, data_only=True, read_only=True)
 
     try:
+        schema_version = (
+            named.get("realytics_fs_schema_version") or {}
+        ).get("value")
         total_revenue = _to_float((named.get("fs_total_revenue") or {}).get("value"))
         total_cost = _to_float((named.get("fs_total_project_cost") or {}).get("value"))
         pf_amount = _to_float((named.get("fs_pf_loan") or {}).get("value"))
@@ -230,6 +344,33 @@ def _import_realytics_formula_export(
             )
 
         development_profit = total_revenue - total_cost if total_revenue and total_cost else None
+        raw_import = {
+            "profile": validation.get("profile"),
+            "validationStatus": validation.get("status"),
+            "sourceWorkbook": source_name,
+            "schemaVersion": schema_version,
+            "namedRangeValues": named,
+            "mappedCells": {
+                key: value
+                for key, value in {
+                    "totalRevenue": _named_range_anchor(
+                        named, "fs_total_revenue"
+                    ),
+                    "totalCost": _named_range_anchor(
+                        named, "fs_total_project_cost"
+                    ),
+                    "pfAmount": _named_range_anchor(named, "fs_pf_loan"),
+                }.items()
+                if value is not None
+            },
+            "productMonthlySalesRateScenarios": product_monthly_scenarios,
+            "sourceDocument": source_document or {},
+            "limitations": limitations,
+        }
+        _attach_profile_governed_fact_basis(
+            raw_import,
+            schema_version=str(schema_version or ""),
+        )
         draft = {
             "project_id": project_id,
             "project_name": None,
@@ -251,16 +392,7 @@ def _import_realytics_formula_export(
                 }
             ] if pf_amount else [],
             "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, _to_float((named.get("cf_max_minus") or {}).get("value"))),
-            "raw_import": {
-                "profile": validation.get("profile"),
-                "validationStatus": validation.get("status"),
-                "sourceWorkbook": source_name,
-                "schemaVersion": (named.get("realytics_fs_schema_version") or {}).get("value"),
-                "namedRangeValues": named,
-                "productMonthlySalesRateScenarios": product_monthly_scenarios,
-                "sourceDocument": source_document or {},
-                "limitations": limitations,
-            },
+            "raw_import": raw_import,
         }
         return draft
     finally:
@@ -317,7 +449,7 @@ def _legacy_product_mix(sales: Any, input_sheet: Any, source_name: str) -> List[
 def _legacy_financing(cash_flow: Any) -> List[Dict[str, Any]]:
     tranche_rows = [
         ("tr_a", "Tr.A", "senior", "E48"),
-        ("tr_b", "Tr.B", "middle", "E49"),
+        ("tr_b", "Tr.B", "mezzanine", "E49"),
         ("tr_c", "Tr.C", "junior", "E50"),
         ("tr_d", "Tr.D", "other", "E51"),
     ]
@@ -416,22 +548,30 @@ def _metrics(
 
 
 def _legacy_monthly_cash_flow(cash_flow: Any, source_name: str) -> List[Dict[str, Any]]:
-    """Map the legacy monthly CF block without inventing missing semantics.
+    """Normalize the source-backed legacy transaction rows into KRW.
 
-    The legacy sheet is row-oriented (line items in rows 100:158 and periods
-    in columns J:CH). We preserve the complete row matrix in each canonical
-    period's ``cashIn``/``cashOut`` buckets and keep the exact Excel range as
-    provenance. A later workbook adapter can classify individual rows into
-    named buckets without losing this imported source data.
+    The source workbook stores four pre-month events plus 60 monthly periods in
+    F:BQ, followed by non-period total/check columns. The last period is derived
+    from row 4 instead of a hard-coded worksheet maximum. Rows 120:158 are
+    subtotals, account balances, or assumptions and are not re-imported as
+    transactions.
     """
     rows: List[Dict[str, Any]] = []
-    start_col, end_col = 10, min(int(getattr(cash_flow, "max_column", 86) or 86), 86)
-    start_row, end_row = 100, min(int(getattr(cash_flow, "max_row", 158) or 158), 158)
+    start_col = 6
+    end_col = _last_period_column(cash_flow, start_col=start_col, header_row=4)
+    if end_col is None:
+        return rows
+    start_row, end_row = 35, min(int(getattr(cash_flow, "max_row", 119) or 119), 119)
     # ``iter_rows`` is important here: repeated random access on an
     # openpyxl read-only worksheet is disproportionately slow for legacy
     # workbooks with large shared-string tables.
     period_row = next(cash_flow.iter_rows(min_row=4, max_row=4, min_col=start_col, max_col=end_col, values_only=True), ())
     source_rows = list(cash_flow.iter_rows(min_row=start_row, max_row=end_row, min_col=2, max_col=end_col, values_only=True))
+    current_cash_row = next(cash_flow.iter_rows(min_row=122, max_row=122, min_col=start_col, max_col=end_col, values_only=True), ())
+    carry_cash_row = next(cash_flow.iter_rows(min_row=123, max_row=123, min_col=start_col, max_col=end_col, values_only=True), ())
+    financing_adjustment_row = next(cash_flow.iter_rows(min_row=129, max_row=129, min_col=start_col, max_col=end_col, values_only=True), ())
+    cumulative_cash_row = next(cash_flow.iter_rows(min_row=130, max_row=130, min_col=start_col, max_col=end_col, values_only=True), ())
+    prior_source_cumulative_krw: Optional[int] = None
     for col in range(start_col, end_col + 1):
         month_index = col - start_col
         period_offset = col - start_col
@@ -439,37 +579,135 @@ def _legacy_monthly_cash_flow(cash_flow: Any, source_name: str) -> List[Dict[str
         period = period or f"M{month_index}"
         cash_in: Dict[str, float] = {}
         cash_out: Dict[str, float] = {}
+        pf_draw: Dict[str, float] = {}
+        loan_repayment: Dict[str, float] = {}
+        equity_contribution: Dict[str, float] = {}
+        equity_recovery: Dict[str, float] = {}
+        other_financing_inflow: Dict[str, float] = {}
+        other_financing_outflow: Dict[str, float] = {}
+        buckets = {
+            "cash_in": cash_in,
+            "cash_out": cash_out,
+            "pf_draw": pf_draw,
+            "loan_repayment": loan_repayment,
+            "equity_contribution": equity_contribution,
+            "equity_recovery": equity_recovery,
+            "other_financing_inflow": other_financing_inflow,
+            "other_financing_outflow": other_financing_outflow,
+        }
         for row_offset, values in enumerate(source_rows):
             row = start_row + row_offset
+            kind = LEGACY_CF_ROW_KIND.get(row)
+            if kind is None:
+                continue
             # values begins at column B; the month value is offset by one
             # because J is the tenth worksheet column.
             value_offset = col - 2
             value = _to_float(values[value_offset]) if value_offset < len(values) else None
-            if value is None:
+            if value is None or value == 0:
                 continue
-            label = values[0] or (values[1] if len(values) > 1 else None) or f"row_{row}"
+            label = next((item for item in values[:3] if item not in (None, "", 0)), f"row_{row}")
             key = f"row_{row}_{str(label).strip()}"
-            # Preserve sign and original line item. Classification is only a
-            # display aid; the source row remains authoritative.
-            target = cash_in if value >= 0 else cash_out
-            target[key] = value
-        total_in = sum(cash_in.values())
-        total_out = sum(abs(v) for v in cash_out.values())
+            normalized_krw = excel_round_int(to_decimal(value) * KRW_PER_MILLION)
+            target_kind = kind if normalized_krw >= 0 else LEGACY_CF_OPPOSITE_KIND[kind]
+            target = buckets[target_kind]
+            target[key] = abs(normalized_krw)
+        total_in = (
+            sum(cash_in.values())
+            + sum(pf_draw.values())
+            + sum(equity_contribution.values())
+            + sum(other_financing_inflow.values())
+        )
+        total_out = (
+            sum(cash_out.values())
+            + sum(loan_repayment.values())
+            + sum(equity_recovery.values())
+            + sum(other_financing_outflow.values())
+        )
+        net_cash_flow = total_in - total_out
+        source_current = _to_float(current_cash_row[period_offset]) if period_offset < len(current_cash_row) else None
+        source_carry = _to_float(carry_cash_row[period_offset]) if period_offset < len(carry_cash_row) else None
+        source_financing_adjustment = _to_float(financing_adjustment_row[period_offset]) if period_offset < len(financing_adjustment_row) else None
+        source_cumulative = _to_float(cumulative_cash_row[period_offset]) if period_offset < len(cumulative_cash_row) else None
+        expected_current_krw = excel_round_int(to_decimal(source_current) * KRW_PER_MILLION) if source_current is not None else None
+        source_carry_krw = excel_round_int(to_decimal(source_carry) * KRW_PER_MILLION) if source_carry is not None else None
+        source_financing_adjustment_krw = excel_round_int(to_decimal(source_financing_adjustment) * KRW_PER_MILLION) if source_financing_adjustment is not None else None
+        source_cumulative_krw = excel_round_int(to_decimal(source_cumulative) * KRW_PER_MILLION) if source_cumulative is not None else None
+        expected_cumulative_krw = (
+            source_carry_krw + expected_current_krw + (source_financing_adjustment_krw or 0)
+            if source_carry_krw is not None and expected_current_krw is not None
+            else None
+        )
+        reset_detected = bool(
+            prior_source_cumulative_krw not in (None, 0)
+            and source_carry_krw == 0
+        )
         rows.append({
             "month_index": month_index,
             "period": str(period),
             "cash_in": cash_in,
             "cash_out": cash_out,
-            "net_cash_flow": total_in - total_out,
+            "pf_draw": pf_draw,
+            "loan_repayment": loan_repayment,
+            "equity_contribution": equity_contribution,
+            "equity_recovery": equity_recovery,
+            "other_financing_inflow": other_financing_inflow,
+            "other_financing_outflow": other_financing_outflow,
+            "net_cash_flow": net_cash_flow,
+            "cumulative_cash_flow": source_cumulative_krw,
             "source_locator": {
                 "sourceType": "excel_range",
                 "sourceDocument": source_name,
                 "sheetName": "2.현금흐름",
                 "cell": f"{_column_name(col)}{start_row}:{_column_name(col)}{end_row}",
-                "rowRange": f"B{start_row}:CH{end_row}",
+                "rowRange": f"B{start_row}:{_column_name(end_col)}{end_row}",
+                "sourceUnit": "KRW_MILLION",
+                "normalizedUnit": "KRW",
+                "normalizationFactor": KRW_PER_MILLION,
+                "transactionRowPolicy": "legacy_bonri_explicit_rows_v1",
+                "currentCashCheck": {
+                    "cell": f"{_column_name(col)}122",
+                    "expectedKrw": expected_current_krw,
+                    "actualKrw": net_cash_flow,
+                    "differenceKrw": net_cash_flow - expected_current_krw if expected_current_krw is not None else None,
+                    "passed": abs(net_cash_flow - expected_current_krw) <= 1 if expected_current_krw is not None else False,
+                },
+                "legacyCumulativeCashFlowCheck": {
+                    "cell": f"{_column_name(col)}130",
+                    "carryCell": f"{_column_name(col)}123",
+                    "carryKrw": source_carry_krw,
+                    "currentKrw": expected_current_krw,
+                    "financingAdjustmentCell": f"{_column_name(col)}129",
+                    "financingAdjustmentKrw": source_financing_adjustment_krw,
+                    "expectedKrw": expected_cumulative_krw,
+                    "actualKrw": source_cumulative_krw,
+                    "differenceKrw": source_cumulative_krw - expected_cumulative_krw if source_cumulative_krw is not None and expected_cumulative_krw is not None else None,
+                    "passed": abs(source_cumulative_krw - expected_cumulative_krw) <= 1 if source_cumulative_krw is not None and expected_cumulative_krw is not None else False,
+                    "carryResetDetected": reset_detected,
+                },
             },
         })
+        prior_source_cumulative_krw = source_cumulative_krw
     return rows
+
+
+def _last_period_column(cash_flow: Any, *, start_col: int, header_row: int) -> Optional[int]:
+    max_col = int(getattr(cash_flow, "max_column", start_col) or start_col)
+    header_values = next(
+        cash_flow.iter_rows(
+            min_row=header_row,
+            max_row=header_row,
+            min_col=start_col,
+            max_col=max_col,
+            values_only=True,
+        ),
+        (),
+    )
+    populated_offsets = [
+        offset for offset, value in enumerate(header_values)
+        if value not in (None, "")
+    ]
+    return start_col + max(populated_offsets) if populated_offsets else None
 
 
 def _default_scenarios() -> List[Dict[str, Any]]:
@@ -610,21 +848,176 @@ def _eok_to_krw(value: Optional[float]) -> Optional[float]:
     return value * 100_000_000 if value is not None else None
 
 
+def _attach_profile_governed_fact_basis(
+    raw_import: Dict[str, Any],
+    *,
+    schema_version: str = "",
+    legacy_vat_statement: Any = None,
+) -> None:
+    """Attach only basis attested by a controlled workbook profile.
+
+    Unknown profiles and the Yongin public-rental profile intentionally remain
+    ineligible.  In particular, the Yongin workbook mixes sale and rental
+    columns but does not state one VAT treatment or whether ``cash!D34`` is a
+    commitment, drawn balance, or outstanding balance.
+    """
+
+    profile = str(raw_import.get("profile") or "")
+    evidence: List[Dict[str, Any]]
+    if profile == "legacy-bonri-mixed-use-pf-feasibility":
+        rendered_statement = str(legacy_vat_statement or "").strip()
+        normalized_statement = rendered_statement.casefold().replace(" ", "")
+        if "vat" not in normalized_statement or "\ubcc4\ub3c4" not in normalized_statement:
+            _set_incomplete_basis_coverage(
+                raw_import,
+                reason=(
+                    "legacy Bonri basis requires an explicit workbook VAT "
+                    "separate statement"
+                ),
+                missing_evidence=["사업수지!A2 VAT 별도"],
+            )
+            return
+        evidence = [
+            {
+                "evidenceType": "workbook_cell",
+                "sheetName": "사업수지",
+                "cellReference": "A2",
+                "observedText": rendered_statement,
+                "attests": [
+                    "revenue.total_sales_revenue.vatTreatment",
+                    "cost.total_project_cost.vatTreatment",
+                ],
+            },
+            {
+                "evidenceType": "versioned_profile_formula",
+                "profileContract": "legacy-bonri-mixed-use-pf-feasibility-v3",
+                "cellReferences": [
+                    "사업수지!D11",
+                    "사업수지!D72",
+                    "2.현금흐름!E48:E51",
+                ],
+                "attests": [
+                    "gross project totals",
+                    "mixed cost-category sum",
+                    "planned PF tranche principal commitment",
+                ],
+            },
+        ]
+    elif profile == "realytics-formula-cash-flow-export":
+        if schema_version != _CONTROLLED_REALYTICS_SCHEMA_VERSION:
+            _set_incomplete_basis_coverage(
+                raw_import,
+                reason=(
+                    "REALYTICS monetary basis is attested only for the exact "
+                    "controlled workbook schema version"
+                ),
+                missing_evidence=[
+                    f"schemaVersion={_CONTROLLED_REALYTICS_SCHEMA_VERSION}"
+                ],
+            )
+            return
+        evidence = [
+            {
+                "evidenceType": "versioned_profile_contract",
+                "schemaVersion": schema_version,
+                "namedRanges": [
+                    "fs_total_revenue",
+                    "fs_total_project_cost",
+                    "fs_pf_loan",
+                ],
+                "attests": [
+                    "VAT-excluded total sales revenue",
+                    "summed gross project cost categories",
+                    "requested PF / tranche principal commitment",
+                ],
+            }
+        ]
+    else:
+        _set_incomplete_basis_coverage(
+            raw_import,
+            reason="the detected workbook profile has no governed monetary basis contract",
+            missing_evidence=[
+                "vatTreatment",
+                "amountScope",
+                "allocationBasis",
+                "financingBalanceBasis",
+            ],
+        )
+        return
+
+    basis = _PROFILE_GOVERNED_FACT_BASIS[profile]
+    raw_import["governedFactBasis"] = copy.deepcopy(basis)
+    raw_import["governedFactBasisAttestation"] = {
+        "schemaVersion": GOVERNED_FACT_BASIS_CONTRACT_VERSION,
+        "profile": profile,
+        "status": "attested",
+        "evidence": evidence,
+    }
+    raw_import["governedFactBasisCoverage"] = {
+        "schemaVersion": GOVERNED_FACT_BASIS_CONTRACT_VERSION,
+        "status": "complete",
+        "fieldKeys": list(_GOVERNED_MONETARY_FIELD_KEYS),
+        "approvalEligible": True,
+    }
+
+
+def _set_incomplete_basis_coverage(
+    raw_import: Dict[str, Any],
+    *,
+    reason: str,
+    missing_evidence: List[str],
+) -> None:
+    raw_import.pop("governedFactBasis", None)
+    raw_import.pop("governedFactBasisAttestation", None)
+    raw_import["governedFactBasisCoverage"] = {
+        "schemaVersion": GOVERNED_FACT_BASIS_CONTRACT_VERSION,
+        "status": "insufficient_data",
+        "fieldKeys": list(_GOVERNED_MONETARY_FIELD_KEYS),
+        "reason": reason,
+        "missingEvidence": list(missing_evidence),
+        "analysisOnly": True,
+        "reportEligible": False,
+        "approvalEligible": False,
+    }
+
+
+def _named_range_anchor(
+    named_range_values: Dict[str, Any],
+    name: str,
+) -> Optional[str]:
+    item = named_range_values.get(name)
+    if not isinstance(item, dict):
+        return None
+    destinations = item.get("destinations")
+    if not isinstance(destinations, list) or len(destinations) != 1:
+        return None
+    destination = destinations[0]
+    if not isinstance(destination, dict):
+        return None
+    sheet_name = str(destination.get("sheetName") or "").strip()
+    cell_range = str(destination.get("range") or "").replace("$", "").strip()
+    if not sheet_name or not cell_range:
+        return None
+    return f"'{sheet_name}'!{cell_range}"
+
+
 def _minimal_draft(
     project_id: Optional[str],
     validation: Dict[str, Any],
     source_document: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    raw_import = {
+        "profile": validation.get("profile"),
+        "validationStatus": validation.get("status"),
+        "sourceDocument": source_document or {},
+        "limitations": ["No workbook importer profile is available for this file."],
+    }
+    _attach_profile_governed_fact_basis(raw_import)
     return {
         "project_id": project_id,
         "asset_type": "other",
         "metrics": {},
-        "raw_import": {
-            "profile": validation.get("profile"),
-            "validationStatus": validation.get("status"),
-            "sourceDocument": source_document or {},
-            "limitations": ["No workbook importer profile is available for this file."],
-        },
+        "raw_import": raw_import,
     }
 
 
@@ -693,8 +1086,11 @@ def _pf_amount_from_cash_flow(cash_flow: Any) -> float:
 
 def _max_minus_from_cash_flow(cash_flow: Any) -> Optional[float]:
     values = []
+    end_col = _last_period_column(cash_flow, start_col=6, header_row=4)
+    if end_col is None:
+        return None
     for row in [128, 130]:
-        for col in range(6, cash_flow.max_column + 1):
+        for col in range(6, end_col + 1):
             value = _to_float(cash_flow.cell(row, col).value)
             if value is not None:
                 values.append(value * KRW_PER_MILLION)
@@ -740,14 +1136,14 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
-def _krw_from_thousand(value: Any) -> Optional[float]:
+def _krw_from_thousand(value: Any) -> Optional[int]:
     raw = _to_float(value)
-    return raw * KRW_PER_THOUSAND if raw is not None else None
+    return excel_round_int(to_decimal(raw) * KRW_PER_THOUSAND) if raw is not None else None
 
 
-def _krw_from_million(value: Any) -> Optional[float]:
+def _krw_from_million(value: Any) -> Optional[int]:
     raw = _to_float(value)
-    return raw * KRW_PER_MILLION if raw is not None else None
+    return excel_round_int(to_decimal(raw) * KRW_PER_MILLION) if raw is not None else None
 
 
 def _py_to_sqm(value: Any) -> Optional[float]:

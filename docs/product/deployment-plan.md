@@ -1,6 +1,6 @@
 # Deployment Plan
 
-Updated: 2026-07-15
+Updated: 2026-07-18
 
 Status: **Controlled implementation; not production-ready**
 
@@ -30,12 +30,13 @@ multi-worker incident rehearsal remain deployment blockers.
 
 ## 2. Immutable PostgreSQL migrations
 
-Numbered SQL files in `services/api-server/db/migrations` are the schema source of
-truth. The migration runner records each filename and SHA-256 checksum in
-`schema_migrations`. Checksums normalize host line endings, but otherwise an
-applied migration is immutable. If a recorded checksum differs from the
-repository copy, deployment fails and the change must be delivered as a new
-numbered migration.
+Numbered SQL files in `services/api-server/db/migrations` are the schema source
+of truth. The migration runner records each filename and SHA-256 checksum in the
+active application schema's `schema_migrations` table. On Supabase that table is
+`realytics.schema_migrations`. Checksums normalize host line endings, but
+otherwise an applied migration is immutable. If a recorded checksum differs
+from the repository copy, deployment fails and the change must be delivered as
+a new numbered migration.
 
 The runner holds a PostgreSQL advisory transaction lock while applying pending
 migrations, so concurrent deploy jobs cannot independently advance the ledger.
@@ -75,15 +76,66 @@ $env:REALYTICS_RUNTIME_DATABASE_ROLE = 'realytics_runtime'
 python services/api-server/scripts/provision_postgres_runtime.py
 ```
 
-Set `REALYTICS_DATABASE_SCHEMA` only when the deployment uses a schema other
-than `public`, and configure both migration and runtime DSNs so their first
-`search_path` entry is that same schema. The commands fail before applying DDL
-or grants when `current_schema()` does not match. Role/schema names are validated
-as simple PostgreSQL identifiers.
+For Supabase set `REALYTICS_DATABASE_SCHEMA=realytics` and
+`REALYTICS_POSTGIS_SCHEMA=extensions`. The migration DSN uses
+`search_path=realytics,extensions,public,pg_temp`; the least-privilege runtime
+DSN uses `search_path=realytics,extensions,pg_temp` and does not fall through to
+`public`. Both paths therefore make `current_schema()` equal to `realytics`
+while resolving PostGIS from `extensions`. Explicitly placing `pg_temp` last
+prevents PostgreSQL from searching the temporary schema first; `pg_catalog`
+remains implicitly searched before the listed schemas. The commands fail before
+applying DDL or grants when `current_schema()` does not match. Role/schema names
+are validated as simple PostgreSQL identifiers.
+
 The provisioner rechecks migrations, takes the migration advisory lock, rejects
 an owning or privileged runtime role, revokes `CREATE` on the application schema
 from `PUBLIC`, and applies grants in one transaction. Do not provide
 `REALYTICS_MIGRATION_DATABASE_URL` to the serving process.
+
+### 2.1 Supabase CLI bridge
+
+Supabase deployment keeps the canonical files above and deterministically
+renders wrappers under `supabase/migrations`:
+
+```powershell
+npm run supabase:migrations:render
+npm run supabase:migrations:check
+```
+
+Generated wrappers are never edited directly. They normalize canonical SQL to
+LF, establish the private `realytics` schema and `extensions`-hosted PostGIS,
+revoke unsafe schema creation, set the deployment search path, and guard the
+REALYTICS filename/SHA-256 ledger before executing source SQL. A successful
+wrapper records its checksum in `realytics.schema_migrations`.
+
+Supabase CLI independently owns `supabase_migrations.schema_migrations`.
+The renderer never writes that CLI ledger, and the CLI ledger does not replace
+the REALYTICS checksum ledger. This dual-ledger bridge lets `db push` control
+remote ordering while application startup continues to verify the canonical
+REALYTICS checksums.
+
+The controlled remote sequence is:
+
+```powershell
+npm run supabase:migrations:check
+npm run supabase:db:push:dry-run
+# Review the complete SQL/version plan and obtain deployment approval.
+npm run supabase:db:push
+```
+
+The npm commands pin Supabase CLI `2.109.1` via `npx` and use
+`--include-roles`, so the reviewed, password-free `supabase/roles.sql` bootstrap
+is included in both dry-run and apply. They do not add an unlocked package
+dependency. CI runs the renderer's read-only `--check` mode and fails when
+generated output is absent or stale.
+
+Use a direct Supabase connection on port `5432` for migration when the runner
+supports IPv6. An IPv4-only application network may use the Supavisor **session**
+pooler on port `5432` for long-lived runtime connections. The transaction
+pooler on port `6543` is outside the qualified migration/runtime contract and
+must not be substituted without dedicated repository, RLS, tenant-setting, and
+multi-worker tests. See [Supabase integration](./supabase-integration.md) for
+the full DSN and secret-handling contract.
 
 ## 3. Database role separation
 
@@ -92,18 +144,21 @@ Provision at least two roles:
 | Role | Required capability | Prohibited capability |
 |---|---|---|
 | Migration/deployment | create/alter schema objects, create policies, update migration ledger, grant runtime privileges | application traffic |
-| Runtime application | `LOGIN`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`, `NOBYPASSRLS`, and only the manifest below | Parser V2 ownership, migration DDL, schema creation, inherited broad roles |
+| Runtime application | Bootstrap as `NOLOGIN`; activate `LOGIN` only with a secret-manager credential; keep `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`, `NOREPLICATION`, `NOBYPASSRLS`, and only the manifest below | Parser V2 ownership, migration DDL, schema creation, inherited broad roles |
 
 Create the runtime role through approved DBA/IAM automation before running the
-provisioner. For a passwordless/IAM-managed baseline, the role attributes are:
+provisioner. A safe bootstrap identity has no credential and cannot log in:
 
 ```sql
 CREATE ROLE realytics_runtime
-    LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+    NOINHERIT NOREPLICATION NOBYPASSRLS;
 ```
 
-Credential creation/rotation remains in the managed secret/IAM workflow and
-must not be embedded in repository SQL or shell history.
+The grant/RLS audit can run against that `NOLOGIN` role. Activate `LOGIN` and
+inject its credential only in the managed secret/IAM workflow after the audit
+passes. Password creation/rotation must not be embedded in repository SQL,
+committed environment files, command arguments, or shell history.
 
 The Parser V2 privilege manifest is deliberately narrower than the complete
 application role manifest:
