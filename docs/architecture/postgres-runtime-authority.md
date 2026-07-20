@@ -17,15 +17,19 @@ API process uses `api` and `identity` pools; the isolated PF worker uses only
 and statement/lock/idle timeouts with `SET LOCAL`. Migration connections are a
 separate direct-connection path.
 
-Migration `0013_core_tenant_rls.sql` enables and forces a restrictive policy
-on every tenant-bearing core relation. The policy compares `tenant_id` with
-the transaction-local setting and has a matching `WITH CHECK`, so an unset or
-spoofed tenant context cannot read or write tenant data. Principals, tenants,
+Migration `0013_core_tenant_rls.sql` enables and forces RLS on every
+tenant-bearing core relation. Migration `0014` supplies the required
+permissive base policy with an exact tenant predicate and matching `WITH
+CHECK`; `0015` removes older duplicate domain policies. An unset or spoofed
+tenant context cannot read or write tenant data. Principals, tenants,
 memberships, users, and sessions remain global identity-directory relations;
 they are read by the identity pool before a tenant-scoped transaction is
-opened.
+opened. The live inventory contains 83 RLS-protected business relations and
+four identity bootstrap relations (`tenants`, `tenant_memberships`, `users`,
+and `sessions`).
 
-The remaining release gate is live execution: apply the authoritative
-migrations and generated Supabase wrappers to an isolated PostgreSQL/PostGIS
-database, provision least-privilege role grants, then run cross-tenant,
-multi-worker, revocation, and pool-budget smoke tests.
+The hosted Supabase project has replayed migrations through `0015`; live
+cross-tenant and two-session `SKIP LOCKED` worker claims passed. The remaining
+deployment gate is provisioning separate API, identity, and PF-worker login
+principals with rotated secrets, applying their least-privilege grants, and
+running the Python pool checkout from the deployed network.

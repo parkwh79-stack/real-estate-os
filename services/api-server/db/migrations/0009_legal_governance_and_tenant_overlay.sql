@@ -2363,6 +2363,8 @@ AS $legal_project_matter_chain$
 DECLARE
     predecessor RECORD;
     predecessor_count INTEGER := 0;
+    root_creator TEXT;
+    snapshot_creator TEXT;
 BEGIN
     -- ``created_at`` is the authoritative governance-event time.  It is
     -- assigned by PostgreSQL so a caller cannot backdate a matter mutation

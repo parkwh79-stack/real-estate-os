@@ -37,6 +37,13 @@ def test_coverage_migration_registers_exact_required_target_set():
     assert len(target_rows) == 8
 
 
+def test_coverage_identity_regexes_respect_postgres_repeat_limits():
+    sql = _sql()
+
+    assert "{2,299}" not in sql
+    assert sql.count("BETWEEN 3 AND 300") == 5
+
+
 def test_coverage_migration_is_append_only_and_concurrency_safe():
     sql = _sql()
 

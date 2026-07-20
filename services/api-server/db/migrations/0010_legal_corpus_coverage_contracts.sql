@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS legal_corpus_required_target_contracts (
         CHECK (
             provider_key ~ '^[a-z0-9][a-z0-9-]{2,79}$'
             AND coverage_contract_version
-                ~ '^[a-z0-9][a-z0-9._-]{2,299}$'
+                ~ '^[a-z0-9][a-z0-9._-]+$'
+            AND char_length(coverage_contract_version) BETWEEN 3 AND 300
             AND resource_kind ~ '^[a-z][a-z0-9_]{1,79}$'
             AND provider_target ~ '^[A-Za-z0-9]{1,80}$'
             AND btrim(registered_by) <> ''
@@ -93,9 +94,11 @@ CREATE TABLE IF NOT EXISTS legal_corpus_coverage_registries (
                 ~ '^legal-corpus-coverage-registry:[0-9a-f]{64}$'
             AND provider_key ~ '^[a-z0-9][a-z0-9-]{2,79}$'
             AND provider_revision >= 1
-            AND registry_version ~ '^[a-z0-9][a-z0-9._-]{2,299}$'
+            AND registry_version ~ '^[a-z0-9][a-z0-9._-]+$'
+            AND char_length(registry_version) BETWEEN 3 AND 300
             AND coverage_contract_version
-                ~ '^[a-z0-9][a-z0-9._-]{2,299}$'
+                ~ '^[a-z0-9][a-z0-9._-]+$'
+            AND char_length(coverage_contract_version) BETWEEN 3 AND 300
             AND expected_contract_count >= 1
             AND expected_contracts_sha256 ~ '^[0-9a-f]{64}$'
             AND btrim(registered_by) <> ''
@@ -149,9 +152,11 @@ CREATE TABLE IF NOT EXISTS legal_corpus_coverage_contracts (
             AND provider_target ~ '^[A-Za-z0-9]{1,80}$'
             AND query_sha256 ~ '^[0-9a-f]{64}$'
             AND source_adapter_version
-                ~ '^[a-z0-9][a-z0-9._-]{2,299}$'
+                ~ '^[a-z0-9][a-z0-9._-]+$'
+            AND char_length(source_adapter_version) BETWEEN 3 AND 300
             AND boundary_contract_version
-                ~ '^[a-z0-9][a-z0-9._-]{2,299}$'
+                ~ '^[a-z0-9][a-z0-9._-]+$'
+            AND char_length(boundary_contract_version) BETWEEN 3 AND 300
             AND coverage_identity_sha256 ~ '^[0-9a-f]{64}$'
             AND btrim(registered_by) <> ''
         ),

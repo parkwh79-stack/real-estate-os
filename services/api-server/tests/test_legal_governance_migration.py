@@ -464,6 +464,9 @@ def test_project_legal_matter_is_a_single_server_timed_leaf_chain() -> None:
     assert "predecessor.status = 'waived'" in chain
     assert "'resolved'" in chain
     assert "predecessor.status = 'superseded'" in chain
+    assert "root_creator TEXT;" in chain
+    assert "snapshot_creator TEXT;" in chain
+    assert "INTO root_creator, snapshot_creator" in chain
     assert (
         "REVOKE ALL ON FUNCTION legal_assert_project_legal_matter_chain()"
         in MIGRATION

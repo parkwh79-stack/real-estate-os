@@ -1,8 +1,10 @@
 # Supabase integration
 
-Status: Auth connected and CLI project linked. The private PostgreSQL deployment
-path is versioned, but a remote migration is not complete until the dry run,
-apply, role provisioning, and live RLS checks below all pass.
+Status: Auth connected, CLI project linked, and authoritative migrations
+0001-0015 applied to the hosted project. Cross-tenant RLS and two-session job
+claim smoke tests pass. Deployment is still controlled until separate
+API/identity/PF-worker login principals, secret injection, and deployed pool
+checkout complete.
 
 ## 1. Authentication path
 
@@ -296,6 +298,21 @@ REALYTICS_DATABASE_URL=<secret-injected least-privilege runtime DSN>
 ```
 
 ## 7. Required live evidence
+
+Captured on 2026-07-20:
+
+- PostGIS is installed in `extensions`.
+- Supabase and REALYTICS migration ledgers contain 0001-0015.
+- All 83 tenant-scoped business relations have enabled and forced RLS; the
+  four global identity-directory bootstrap relations remain behind the
+  identity boundary.
+- Tenant A, tenant B, and unset-context rollback-only probes returned 1, 1,
+  and 0 visible project rows respectively.
+- Two concurrent `FOR UPDATE SKIP LOCKED` sessions claimed distinct jobs once;
+  every smoke fixture was removed.
+- Supabase security advisor returned no findings after migration 0015.
+- The full API suite passed in isolated Windows process shards: 1,905 passed
+  and 17 environment-gated tests skipped. Web typecheck and lint also passed.
 
 The remote deployment is not complete until all of the following are captured:
 

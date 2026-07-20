@@ -611,27 +611,25 @@ def test_verified_attestation_requires_version_and_effective_window_membership()
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    "case",
     (
-        {
-            "observed_at": datetime.now(timezone.utc)
-            + timedelta(minutes=10),
-        },
-        {
-            "fetched_at": datetime.now(timezone.utc)
-            + timedelta(minutes=10),
-        },
-        {
-            "verified_at": datetime.now(timezone.utc)
-            + timedelta(minutes=10),
-        },
-        {
-            "fetched_at": NOW,
-            "verified_at": NOW - timedelta(seconds=1),
-        },
+        "future_observed_at",
+        "future_fetched_at",
+        "future_verified_at",
+        "verified_before_fetched",
     ),
 )
-def test_verified_attestation_rejects_future_or_noncausal_times(overrides):
+def test_verified_attestation_rejects_future_or_noncausal_times(case):
+    if case == "verified_before_fetched":
+        overrides = {
+            "fetched_at": NOW,
+            "verified_at": NOW - timedelta(seconds=1),
+        }
+    else:
+        field = case.removeprefix("future_")
+        overrides = {
+            field: datetime.now(timezone.utc) + timedelta(minutes=10),
+        }
     with pytest.raises(ValueError):
         _verified_attestation(**overrides)
 

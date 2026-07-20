@@ -21,6 +21,8 @@ EXPECTED_MIGRATIONS = (
     "0011_postgres_security_and_rls_policy_hardening.sql",
     "0012_core_tenant_authority_expand.sql",
     "0013_core_tenant_rls.sql",
+    "0014_core_tenant_rls_permissive_base.sql",
+    "0015_supabase_security_and_rls_policy_cleanup.sql",
 )
 
 
