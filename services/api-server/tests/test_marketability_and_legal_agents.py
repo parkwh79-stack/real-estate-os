@@ -2,7 +2,12 @@ import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
+from agents.korean_law_context import (
+    build_server_issued_law_context,
+    normalize_law_context,
+)
 from agents.legal_review_agent import LegalReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.marketability_agent import MarketabilityAgent
@@ -12,6 +17,48 @@ from main import app
 def load_example(filename: str):
     path = Path(__file__).parents[1] / "data" / "examples" / filename
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _verified_law_context_reference() -> dict:
+    return {
+        "type": "provision",
+        "title": "건축법",
+        "lawName": "건축법",
+        "citation": "제11조",
+        "article": "제11조",
+        "lawId": "law:building-act",
+        "resourceId": "legal-resource:building-act",
+        "resourceVersionId": "legal-version:building-act:2026",
+        "officialVersionId": "building-act-2026-01-01",
+        "sourceFetchId": "legal-fetch:building-act:2026",
+        "provisionId": "legal-provision:building-act:11",
+        "effectiveDate": "2026-01-01",
+        "asOfDate": "2026-07-18",
+        "requestedAsOfDate": "2026-07-18",
+        "verifiedEffectiveDate": "2026-01-01",
+        "effectiveFrom": "2026-01-01",
+        "effectiveTo": "2026-12-31",
+        "observedAt": "2026-07-18T00:00:00+00:00",
+        "fetchedAt": "2026-07-18T00:00:01+00:00",
+        "verifiedAt": "2026-07-18T00:00:02+00:00",
+        "url": "https://www.law.go.kr/법령/건축법/제11조",
+        "locator": "https://www.law.go.kr/법령/건축법/제11조",
+        "summary": "건축허가",
+        "verified": True,
+        "sourceAuthority": "central_government",
+        "transport": "local_verified_snapshot",
+        "verificationStatus": "verified_snapshot",
+        "contentHash": "sha256:" + ("a" * 64),
+        "normalizedContentSha256": "sha256:" + ("b" * 64),
+        "rawTool": "legal_intelligence_core",
+        "claimContexts": [
+            {
+                "tool": "search_law",
+                "query": "건축법 제11조",
+                "purpose": "건축허가 근거 확인",
+            }
+        ],
+    }
 
 
 def test_marketability_agent_applies_to_saleable_mixed_use_project():
@@ -491,9 +538,10 @@ def test_legal_review_agent_flags_missing_korean_law_mcp_context():
     assert result["recommendedMcpQueries"]
 
 
-def test_legal_review_agent_normalizes_korean_law_mcp_context():
+def test_legal_review_agent_keeps_caller_mcp_context_untrusted():
     law_context = {
         "source": "korean-law-mcp",
+        "connected": True,
         "tool_results": [
             {
                 "tool": "search_law",
@@ -526,17 +574,189 @@ def test_legal_review_agent_normalizes_korean_law_mcp_context():
 
     result = LegalReviewAgent().review(load_example("daegu_bondong_mixed_use_pf.json"), law_context)
 
-    assert result["mcp"]["connected"] is True
+    assert result["mcp"]["connected"] is False
+    assert result["mcp"]["verifiedEvidenceAvailable"] is False
     assert result["mcp"]["adapter"] == "realytics-law-context-v1"
-    assert len(result["lawReferences"]) == 2
-    assert any(reference["lawName"] == "건축법" for reference in result["lawReferences"])
-    assert result["citationVerification"]["status"] == "passed"
-    assert any(check["key"] == "korean_law_mcp" and check["severity"] == "clear" for check in result["checks"])
+    assert result["lawReferences"] == []
+    assert result["citationVerification"]["status"] == "not_requested"
+    assert any(
+        check["key"] == "korean_law_mcp" and check["severity"] == "caution"
+        for check in result["checks"]
+    )
 
 
-def test_legal_review_agent_blocks_on_citation_failures():
+def test_legal_review_agent_accepts_only_server_issued_verified_context():
+    law_context = build_server_issued_law_context({
+        "version": "realytics-legal-intelligence-v1",
+        "source": "legal-intelligence-core",
+        "connected": False,
+        "retrievedAt": "2026-07-18T00:00:03+00:00",
+        "references": [_verified_law_context_reference()],
+        "citationVerification": {
+            "status": "verified",
+            "checkedCount": 1,
+            "verifiedCount": 1,
+            "failures": [],
+        },
+        "queryPlan": [],
+    })
+
+    result = LegalReviewAgent().review(
+        load_example("daegu_bondong_mixed_use_pf.json"),
+        law_context,
+    )
+
+    assert result["mcp"]["connected"] is False
+    assert result["mcp"]["verifiedEvidenceAvailable"] is True
+    assert len(result["lawReferences"]) == 1
+    assert any(
+        check["key"] == "korean_law_mcp" and check["severity"] == "clear"
+        for check in result["checks"]
+    )
+
+
+def test_server_issued_law_context_rejects_caller_asserted_trust_flag():
+    with pytest.raises(ValueError, match="verifiedEvidenceAvailable"):
+        build_server_issued_law_context({
+            "version": "realytics-legal-intelligence-v1",
+            "source": "legal-intelligence-core",
+            "connected": False,
+            "retrievedAt": "2026-07-18T00:00:03+00:00",
+            "verifiedEvidenceAvailable": True,
+            "references": [_verified_law_context_reference()],
+            "citationVerification": {
+                "status": "verified",
+                "checkedCount": 1,
+                "verifiedCount": 1,
+                "failures": [],
+            },
+        })
+
+
+def test_server_issued_law_context_is_deeply_immutable_and_derives_evidence():
+    reference = _verified_law_context_reference()
+    payload = {
+        "version": "realytics-legal-intelligence-v1",
+        "source": "legal-intelligence-core",
+        "connected": False,
+        "retrievedAt": "2026-07-18T00:00:03+00:00",
+        "references": [reference],
+        "citationVerification": {
+            "status": "verified",
+            "checkedCount": 1,
+            "verifiedCount": 1,
+            "failures": [],
+        },
+    }
+    context = build_server_issued_law_context(payload)
+    reference["title"] = "변조된 법령"
+    context["references"][0]["title"] = "소비자 변조"
+
+    normalized = normalize_law_context(context)
+
+    assert normalized["verifiedEvidenceAvailable"] is True
+    assert normalized["references"][0]["title"] == "건축법"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("transport", "remote_mcp"),
+        ("verificationStatus", "source_attested"),
+        ("resourceVersionId", ""),
+        ("officialVersionId", ""),
+        ("verifiedEffectiveDate", None),
+        ("normalizedContentSha256", "sha256:invalid"),
+        ("verifiedAt", None),
+    ),
+)
+def test_server_issued_law_context_rejects_incomplete_verified_lineage(
+    field,
+    value,
+):
+    reference = _verified_law_context_reference()
+    reference[field] = value
+
+    with pytest.raises(ValueError):
+        build_server_issued_law_context({
+            "version": "realytics-legal-intelligence-v1",
+            "source": "legal-intelligence-core",
+            "connected": False,
+            "retrievedAt": "2026-07-18T00:00:03+00:00",
+            "references": [reference],
+            "citationVerification": {
+                "status": "verified",
+                "checkedCount": 1,
+                "verifiedCount": 1,
+                "failures": [],
+            },
+        })
+
+
+def test_server_issued_law_context_rejects_invalid_validity_and_time_order():
+    outside_window = _verified_law_context_reference()
+    outside_window["asOfDate"] = "2027-01-01"
+    outside_window["requestedAsOfDate"] = "2027-01-01"
+    with pytest.raises(ValueError, match="verified validity window"):
+        build_server_issued_law_context({
+            "version": "realytics-legal-intelligence-v1",
+            "source": "legal-intelligence-core",
+            "connected": False,
+            "retrievedAt": "2026-07-18T00:00:03+00:00",
+            "references": [outside_window],
+            "citationVerification": {
+                "status": "verified",
+                "checkedCount": 1,
+                "verifiedCount": 1,
+                "failures": [],
+            },
+        })
+
+    noncausal = _verified_law_context_reference()
+    noncausal["fetchedAt"] = "2026-07-18T00:00:03+00:00"
+    noncausal["verifiedAt"] = "2026-07-18T00:00:02+00:00"
+    with pytest.raises(ValueError, match="fetchedAt"):
+        build_server_issued_law_context({
+            "version": "realytics-legal-intelligence-v1",
+            "source": "legal-intelligence-core",
+            "connected": False,
+            "retrievedAt": "2026-07-18T00:00:04+00:00",
+            "references": [noncausal],
+            "citationVerification": {
+                "status": "verified",
+                "checkedCount": 1,
+                "verifiedCount": 1,
+                "failures": [],
+            },
+        })
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("observedAt", "fetchedAt", "verifiedAt"),
+)
+def test_server_issued_law_context_rejects_future_reference_times(field):
+    reference = _verified_law_context_reference()
+    reference[field] = "2099-01-01T00:00:00+00:00"
+    with pytest.raises(ValueError, match="future"):
+        build_server_issued_law_context({
+            "version": "realytics-legal-intelligence-v1",
+            "source": "legal-intelligence-core",
+            "connected": False,
+            "retrievedAt": "2026-07-18T00:00:03+00:00",
+            "references": [reference],
+            "citationVerification": {
+                "status": "verified",
+                "checkedCount": 1,
+                "verifiedCount": 1,
+                "failures": [],
+            },
+        })
+
+
+def test_legal_review_agent_ignores_caller_citation_failure_claims():
     law_context = {
-        "source": "korean-law-mcp",
+        "source": "caller-context",
         "references": [{"title": "형법", "article": "제9999조"}],
         "citationVerification": {
             "status": "failed",
@@ -546,8 +766,11 @@ def test_legal_review_agent_blocks_on_citation_failures():
 
     result = LegalReviewAgent().review(load_example("daegu_bondong_mixed_use_pf.json"), law_context)
 
-    assert result["status"] == "blocking_issue"
-    assert any(check["key"] == "korean_law_mcp" and check["severity"] == "blocking" for check in result["checks"])
+    assert result["citationVerification"]["status"] == "not_requested"
+    assert not any(
+        check["key"] == "korean_law_mcp" and check["severity"] == "blocking"
+        for check in result["checks"]
+    )
 
 
 def test_marketability_and_legal_review_endpoints():

@@ -46,6 +46,9 @@ from legal_intelligence.corpus_identity import (
     OfficialResourceIdentity,
     legal_resource_crosswalk_id,
 )
+from legal_intelligence.corpus_coverage import (
+    OfficialCorpusCoverageIdentity,
+)
 from legal_intelligence.effective_time import (
     EFFECTIVE_CONTINUITY_POLICIES,
 )
@@ -424,6 +427,7 @@ class LegalCorpusSyncRequest:
     source_verification: OfficialSourceVerification
     requested_scope: str
     requested_by: str
+    coverage_identity: OfficialCorpusCoverageIdentity | None = None
     request_identity: Mapping[str, Any] = field(default_factory=dict)
     canonical_base_url: str | None = None
     terms_version: str | None = None
@@ -733,12 +737,26 @@ class LegalCorpusSyncService:
         requested_scope = sanitize_requested_scope(
             request.requested_scope
         )
-        requested_scope_hash = _stable_hash(
-            {
-                "providerId": provider_id,
-                "requestedScope": requested_scope,
-            }
-        )
+        if request.coverage_identity is None:
+            requested_scope_hash = _stable_hash(
+                {
+                    "providerId": provider_id,
+                    "requestedScope": requested_scope,
+                }
+            )
+            coverage_identity_payload = None
+        else:
+            request.coverage_identity.assert_provider(
+                provider_key=request.provider_key,
+                provider_revision=request.provider_revision,
+                provider_id=provider_id,
+            )
+            requested_scope_hash = request.coverage_identity.scope_hash(
+                requested_scope=requested_scope
+            )
+            coverage_identity_payload = dict(
+                request.coverage_identity.as_dict()
+            )
         checkpoint_before = sanitize_checkpoint(request.checkpoint_before)
         checkpoint_after = sanitize_checkpoint(request.checkpoint_after)
         default_idempotency_key = "legal-corpus:" + _stable_hash(
@@ -837,11 +855,17 @@ class LegalCorpusSyncService:
                 "pageHash": page_hash,
                 "pageRecordCount": len(prepared),
                 "rawSha256": raw_sha256,
+                "coverageIdentity": coverage_identity_payload,
                 "normalizedSha256ByVersion": {
                     item["versionId"]: item["normalizedSha256"]
                     for item in prepared
                 },
             },
+            coverage_contract_id=(
+                request.coverage_identity.coverage_contract_id
+                if request.coverage_identity is not None
+                else None
+            ),
         )
 
         expected_records = tuple(
@@ -1015,6 +1039,7 @@ class LegalCorpusSyncService:
             ]
             fetch_metadata: dict[str, Any] = {
                 **redact_secrets(request.fetch_metadata),
+                "coverageIdentity": coverage_identity_payload,
                 "legalResourceIds": [
                     item["resourceId"] for item in prepared
                 ],
@@ -1138,6 +1163,11 @@ def _page_request_envelope(
         "rawContentType": request.raw_content_type,
         "requestedScope": request.requested_scope,
         "requestedBy": request.requested_by,
+        "coverageIdentity": (
+            dict(request.coverage_identity.as_dict())
+            if request.coverage_identity is not None
+            else None
+        ),
         "requestIdentity": request.request_identity,
         "canonicalBaseUrl": request.canonical_base_url,
         "termsVersion": request.terms_version,

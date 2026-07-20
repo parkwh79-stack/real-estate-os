@@ -5,11 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    model_validator,
+)
 
 
 class SourceAuthority(str, Enum):
@@ -19,6 +25,7 @@ class SourceAuthority(str, Enum):
     """
 
     LAW_GO_KR = "law_go_kr"
+    COURT = "court"
     SUPREME_COURT = "supreme_court"
     CONSTITUTIONAL_COURT = "constitutional_court"
     CENTRAL_GOVERNMENT = "central_government"
@@ -94,6 +101,7 @@ class FreshnessStatus(str, Enum):
 
 class ProviderStatus(str, Enum):
     SUCCESS = "success"
+    PARTIAL = "partial"
     NO_MATCH = "no_match"
     SKIPPED = "skipped"
     FAILED = "failed"
@@ -140,23 +148,143 @@ class CitationAttestation(BaseModel):
     official_resource_id: str = Field(min_length=1)
     official_version_id: str | None = None
     locator: str = Field(min_length=1)
-    as_of: date
+    requested_as_of_date: date
     content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     fetched_at: datetime
+    observed_at: datetime
     verified_at: datetime | None = None
+    verified_effective_date: date | None = None
     effective_from: date | None = None
     effective_to: date | None = None
     article: str | None = None
 
     @model_validator(mode="after")
     def _validate_temporal_and_trust_contract(self) -> "CitationAttestation":
+        timestamps = ("observed_at", "fetched_at", "verified_at")
+        for name in timestamps:
+            value = getattr(self, name)
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError(f"{name} must be timezone-aware")
+        latest_credible_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+        for name in timestamps:
+            value = getattr(self, name)
+            if value is not None and value > latest_credible_time:
+                raise ValueError(f"{name} must not be in the future")
         if self.effective_from and self.effective_to and self.effective_from > self.effective_to:
             raise ValueError("effective_from must not be after effective_to")
+        if self.observed_at > self.fetched_at:
+            raise ValueError("observed_at must not be after fetched_at")
+        if self.verified_at and self.fetched_at > self.verified_at:
+            raise ValueError("fetched_at must not be after verified_at")
         if self.trust_level in {TrustLevel.VERIFIED_SNAPSHOT, TrustLevel.HUMAN_REVIEWED} and not self.verified_at:
             raise ValueError("verified snapshots and human-reviewed citations require verified_at")
+        if self.verified_effective_date and not self.verified_at:
+            raise ValueError("verified_effective_date requires verified_at")
         if self.source_authority == SourceAuthority.CALLER_SUPPLIED and self.trust_level != TrustLevel.UNTRUSTED_CANDIDATE:
             raise ValueError("caller-supplied material cannot be authoritative")
+        if (
+            self.source_transport
+            in {
+                SourceTransport.SELF_HOSTED_MCP,
+                SourceTransport.REMOTE_MCP,
+                SourceTransport.CALLER_CONTEXT,
+            }
+            and self.trust_level != TrustLevel.UNTRUSTED_CANDIDATE
+        ):
+            raise ValueError(
+                "MCP and caller-context transports are discovery candidates only"
+            )
+        allowed_transports = {
+            TrustLevel.SOURCE_ATTESTED: {
+                SourceTransport.LAW_GO_KR_DIRECT_API,
+            },
+            TrustLevel.VERIFIED_SNAPSHOT: {
+                SourceTransport.LOCAL_VERIFIED_SNAPSHOT,
+            },
+            TrustLevel.HUMAN_REVIEWED: {
+                SourceTransport.LOCAL_VERIFIED_SNAPSHOT,
+            },
+        }
+        expected_transports = allowed_transports.get(self.trust_level)
+        if (
+            expected_transports is not None
+            and self.source_transport not in expected_transports
+        ):
+            raise ValueError(
+                f"{self.trust_level.value} is not allowed for "
+                f"{self.source_transport.value}"
+            )
+        if (
+            self.trust_level != TrustLevel.UNTRUSTED_CANDIDATE
+            and self.source_authority
+            in {SourceAuthority.CALLER_SUPPLIED, SourceAuthority.UNKNOWN}
+        ):
+            raise ValueError(
+                "trusted attestations require a known issuing authority"
+            )
+        verified_applicability_levels = {
+            TrustLevel.VERIFIED_SNAPSHOT,
+            TrustLevel.HUMAN_REVIEWED,
+        }
+        if self.trust_level in verified_applicability_levels:
+            if not self.official_version_id:
+                raise ValueError(
+                    "verified applicability requires official_version_id"
+                )
+            if self.verified_effective_date is None:
+                raise ValueError(
+                    "verified applicability requires verified_effective_date"
+                )
+            window_start = (
+                self.effective_from or self.verified_effective_date
+            )
+            if (
+                self.effective_from is not None
+                and self.verified_effective_date != self.effective_from
+            ):
+                raise ValueError(
+                    "verified_effective_date must match effective_from"
+                )
+            if (
+                self.verified_effective_date < window_start
+                or self.effective_to is not None
+                and self.verified_effective_date > self.effective_to
+            ):
+                raise ValueError(
+                    "verified_effective_date is outside the validity window"
+                )
+            if (
+                self.requested_as_of_date < window_start
+                or self.effective_to is not None
+                and self.requested_as_of_date > self.effective_to
+            ):
+                raise ValueError(
+                    "requested_as_of_date is outside the verified validity "
+                    "window"
+                )
+        elif self.trust_level == TrustLevel.SOURCE_ATTESTED and any(
+            value is not None
+            for value in (
+                self.verified_at,
+                self.verified_effective_date,
+                self.effective_from,
+                self.effective_to,
+            )
+        ):
+            raise ValueError(
+                "source-attested discovery candidates cannot assert verified "
+                "historical applicability"
+            )
         return self
+
+    @computed_field
+    @property
+    def as_of(self) -> date:
+        """Compatibility accessor for callers migrating to requested_as_of_date."""
+
+        return self.requested_as_of_date
 
     def verifies(self, content: Any) -> bool:
         return canonical_content_hash(content) == self.content_hash
@@ -178,6 +306,15 @@ class CitationAttestation(BaseModel):
             and bool(self.content_hash)
         )
 
+    @property
+    def is_applicability_verified(self) -> bool:
+        """Whether the exact official version is valid for the requested date."""
+
+        return self.trust_level in {
+            TrustLevel.VERIFIED_SNAPSHOT,
+            TrustLevel.HUMAN_REVIEWED,
+        }
+
 
 def build_attestation(
     *,
@@ -188,14 +325,26 @@ def build_attestation(
     resource_kind: LegalResourceKind,
     official_resource_id: str,
     locator: str,
-    as_of: date,
+    as_of: date | None = None,
+    requested_as_of_date: date | None = None,
     fetched_at: datetime | None = None,
+    observed_at: datetime | None = None,
     verified_at: datetime | None = None,
+    verified_effective_date: date | None = None,
     official_version_id: str | None = None,
     effective_from: date | None = None,
     effective_to: date | None = None,
     article: str | None = None,
 ) -> CitationAttestation:
+    requested_date = requested_as_of_date or as_of
+    if requested_date is None:
+        raise ValueError("requested_as_of_date is required")
+    if (
+        requested_as_of_date is not None
+        and as_of is not None
+        and requested_as_of_date != as_of
+    ):
+        raise ValueError("as_of and requested_as_of_date must match")
     now = fetched_at or datetime.now(timezone.utc)
     return CitationAttestation(
         source_authority=source_authority,
@@ -205,10 +354,12 @@ def build_attestation(
         official_resource_id=official_resource_id,
         official_version_id=official_version_id,
         locator=locator,
-        as_of=as_of,
+        requested_as_of_date=requested_date,
         content_hash=canonical_content_hash(content),
         fetched_at=now,
+        observed_at=observed_at or now,
         verified_at=verified_at,
+        verified_effective_date=verified_effective_date,
         effective_from=effective_from,
         effective_to=effective_to,
         article=article,
@@ -259,6 +410,8 @@ class ProviderDiagnostic(BaseModel):
     message: str
     retryable: bool = False
     sanitized_url: str | None = None
+    target: str | None = None
+    retry_after_seconds: float | None = Field(default=None, ge=0)
 
 
 class ProviderResult(BaseModel):
@@ -291,6 +444,7 @@ class LegalSearchResponse(BaseModel):
     candidate_hits: tuple[SearchHit, ...]
     provider_trace: tuple[ProviderResult, ...]
     satisfied_by_local_snapshot: bool = False
+    query_run_id: str | None = None
 
     @model_validator(mode="after")
     def _enforce_authority_partition(self) -> "LegalSearchResponse":

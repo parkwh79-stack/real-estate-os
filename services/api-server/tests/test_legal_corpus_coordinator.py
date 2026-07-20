@@ -9,19 +9,40 @@ from db.repositories.legal_corpus_repository import (
     PublishedCorpusPage,
     PublishedCorpusVersion,
 )
+from legal_intelligence.corpus_coverage import (
+    OfficialCorpusCoverageIdentity,
+)
 from use_cases.legal_corpus_coordinator import (
     LegalCorpusBatchCoordinator,
     LegalCorpusCoordinationError,
     OfficialCorpusPage,
+    OfficialCorpusPageDiagnostic,
 )
 from use_cases.legal_corpus_sync import (
     _deterministic_id,
-    _stable_hash,
     sanitize_requested_scope,
 )
 
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+QUERY_SHA256 = "1" * 64
+
+
+def coverage_identity(
+    *,
+    provider_revision: int = 1,
+) -> OfficialCorpusCoverageIdentity:
+    return OfficialCorpusCoverageIdentity(
+        provider_key="law-go-kr",
+        provider_revision=provider_revision,
+        registry_version="official-corpus-registry-v1",
+        resource_kind="statute",
+        target="law",
+        query_sha256=QUERY_SHA256,
+        source_adapter_version="test-source-adapter-v1",
+        boundary_contract_version="test-boundary-v1",
+        coverage_contract_version="official-corpus-coverage-v1",
+    )
 
 
 def request(
@@ -32,16 +53,21 @@ def request(
     resource_id,
     provider_revision=1,
     requested_scope="full_corpus",
+    sync_kind="initial",
 ):
     return SimpleNamespace(
         provider_key="law-go-kr",
         provider_revision=provider_revision,
         requested_scope=requested_scope,
         requested_by="legal-sync-worker",
+        sync_kind=sync_kind,
         checkpoint_before=before,
         checkpoint_after=after,
         page_hash=page_hash,
         resource_id=resource_id,
+        coverage_identity=coverage_identity(
+            provider_revision=provider_revision
+        ),
     )
 
 
@@ -69,13 +95,10 @@ class FakeSyncService:
                 "providerRevision": value.provider_revision,
             },
         )
-        scope_hash = _stable_hash(
-            {
-                "providerId": provider_id,
-                "requestedScope": sanitize_requested_scope(
-                    value.requested_scope
-                ),
-            }
+        scope_hash = value.coverage_identity.scope_hash(
+            requested_scope=sanitize_requested_scope(
+                value.requested_scope
+            )
         )
         records = tuple(
             PublishedCorpusVersion(
@@ -168,6 +191,48 @@ def test_coordinator_seals_ordered_terminal_page_manifest():
     assert attestation.page_hashes == ("a" * 64, "b" * 64)
     assert repository.attestations == [attestation]
     assert source.checkpoints == [None, "checkpoint-1"]
+
+
+def test_coordinator_refuses_to_certify_partial_provider_page():
+    source = FakeSource(
+        [
+            OfficialCorpusPage(
+                requests=(
+                    request(
+                        before=None,
+                        after="checkpoint-1",
+                        page_hash="a" * 64,
+                        resource_id="resource-a",
+                    ),
+                ),
+                terminal=True,
+                partial=True,
+                diagnostics=(
+                    OfficialCorpusPageDiagnostic(
+                        code="DETAIL_FETCH_FAILED",
+                        message="one record could not be normalized",
+                        retryable=True,
+                    ),
+                ),
+            )
+        ]
+    )
+    service, repository, _ = coordinator(source)
+
+    with pytest.raises(
+        LegalCorpusCoordinationError,
+        match="partial",
+    ) as raised:
+        service.run(source)
+
+    assert repository.attestations == []
+    assert raised.value.partial is True
+    assert raised.value.retryable is True
+    assert raised.value.completed_page_count == 0
+    assert (
+        raised.value.diagnostics[0].code
+        == "DETAIL_FETCH_FAILED"
+    )
 
 
 def test_coordinator_rejects_provider_checkpoint_discontinuity():
@@ -316,3 +381,38 @@ def test_coordinator_attests_the_redacted_scope_used_by_sync():
 
     assert attestation.requested_scope == "full_corpus token=***"
     assert "secret" not in attestation.requested_scope
+
+
+def test_coordinator_wraps_later_source_failure_with_resume_progress():
+    class FailingSecondPageSource:
+        calls = 0
+
+        def fetch_page(self, *, checkpoint_before):
+            self.calls += 1
+            if self.calls == 2:
+                raise TimeoutError("provider timeout")
+            return OfficialCorpusPage(
+                requests=(
+                    request(
+                        before=checkpoint_before,
+                        after="checkpoint-1",
+                        page_hash="a" * 64,
+                        resource_id="resource-a",
+                    ),
+                ),
+                terminal=False,
+            )
+
+    source = FailingSecondPageSource()
+    service, repository, _ = coordinator(source)
+
+    with pytest.raises(
+        LegalCorpusCoordinationError,
+        match="fetch failed",
+    ) as raised:
+        service.run(source)
+
+    assert raised.value.partial is True
+    assert raised.value.completed_page_count == 1
+    assert raised.value.last_checkpoint == "checkpoint-1"
+    assert repository.attestations == []

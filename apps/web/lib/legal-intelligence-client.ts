@@ -9,6 +9,7 @@ import type {
   LegalSearchResponse,
   LegalSourceAuthority,
   LegalTransport,
+  LegalTrustTier,
   LegalVerificationStatus,
 } from "./legal-intelligence-types";
 
@@ -36,7 +37,7 @@ export async function searchLegalResources(
   if (!response.ok) {
     throw new Error(apiErrorMessage(body, `법률정보 검색에 실패했습니다. (${response.status})`));
   }
-  return normalizeSearchResponse(body, input);
+  return normalizeLegalSearchResponse(body, input);
 }
 
 export async function getLegalResource(
@@ -75,7 +76,7 @@ function apiErrorMessage(body: unknown, fallback: string): string {
   return firstString(record, "message", "error") ?? fallback;
 }
 
-function normalizeSearchResponse(
+export function normalizeLegalSearchResponse(
   body: unknown,
   input: LegalSearchParams,
 ): LegalSearchResponse {
@@ -103,6 +104,16 @@ function normalizeSearchResponse(
           candidate.resourceVersionId === item.resourceVersionId,
       ) === index,
     );
+  const authoritativeCount = results.filter(isAuthoritativeResource).length;
+  const officialCandidateCount = results.filter(
+    (item) => legalResourceTrustTier(item) === "official_search_candidate",
+  ).length;
+  const verifiedSnapshotCount = results.filter(
+    (item) => legalResourceTrustTier(item) === "verified_corpus_snapshot",
+  ).length;
+  const humanReviewedCount = results.filter(
+    (item) => legalResourceTrustTier(item) === "human_reviewed",
+  ).length;
 
   return {
     query:
@@ -120,14 +131,13 @@ function normalizeSearchResponse(
           (input.resourceType === "all" ? undefined : input.resourceType),
       ),
     results,
-    authoritativeCount: numberOr(
-      record.authoritativeCount ?? record.authoritative_count,
-      authoritative.length || results.filter(isVerifiedResource).length,
-    ),
-    candidateCount: numberOr(
-      record.candidateCount ?? record.candidate_count,
-      candidates.length || results.filter((item) => !isVerifiedResource(item)).length,
-    ),
+    // Recompute after normalization/deduplication so a source-attested
+    // official search candidate can never be rendered as authoritative.
+    authoritativeCount,
+    candidateCount: Math.max(0, results.length - authoritativeCount),
+    officialCandidateCount,
+    verifiedSnapshotCount,
+    humanReviewedCount,
     satisfiedByLocalSnapshot: booleanOr(
       record.satisfiedByLocalSnapshot ?? record.satisfied_by_local_snapshot,
       false,
@@ -143,6 +153,48 @@ function normalizeSearchResponse(
       "external_egress_policy",
     ),
   };
+}
+
+export function legalResourceTrustTier(
+  item: Pick<
+    LegalResourceSummary,
+    | "verificationStatus"
+    | "transport"
+    | "sourceAuthority"
+    | "resourceId"
+    | "resourceVersionId"
+    | "verifiedAt"
+    | "normalizedContentSha256"
+  >,
+): LegalTrustTier {
+  const hasBoundVersion =
+    Boolean(item.resourceId)
+    && Boolean(item.resourceVersionId)
+    && Boolean(item.verifiedAt)
+    && /^sha256:[0-9a-f]{64}$/i.test(item.normalizedContentSha256 ?? "");
+  if (
+    item.verificationStatus === "human_reviewed"
+    && ["local_verified_snapshot", "local_database"].includes(item.transport)
+    && hasBoundVersion
+  ) {
+    return "human_reviewed";
+  }
+  if (
+    item.verificationStatus === "verified_snapshot"
+    && item.transport === "local_verified_snapshot"
+    && hasBoundVersion
+  ) {
+    return "verified_corpus_snapshot";
+  }
+  if (
+    item.verificationStatus === "source_attested"
+    && item.transport === "law_go_kr_direct_api"
+    && !["unknown", "caller_supplied"].includes(item.sourceAuthority)
+    && Boolean(item.resourceId)
+  ) {
+    return "official_search_candidate";
+  }
+  return "other_candidate";
 }
 
 function normalizeResource(
@@ -231,8 +283,50 @@ function normalizeResource(
     freshnessStatus: stale ? "stale" : freshnessStatus,
     stale,
     asOfDate:
-      firstString(record, "asOfDate", "as_of_date", "asOf", "as_of") ??
-      firstString(attestation, "asOf", "as_of"),
+      firstString(
+        record,
+        "requestedAsOfDate",
+        "requested_as_of_date",
+        "asOfDate",
+        "as_of_date",
+        "asOf",
+        "as_of",
+      ) ??
+      firstString(
+        attestation,
+        "requestedAsOfDate",
+        "requested_as_of_date",
+        "asOf",
+        "as_of",
+      ),
+    requestedAsOfDate:
+      firstString(
+        record,
+        "requestedAsOfDate",
+        "requested_as_of_date",
+        "asOfDate",
+        "as_of_date",
+        "asOf",
+        "as_of",
+      ) ??
+      firstString(
+        attestation,
+        "requestedAsOfDate",
+        "requested_as_of_date",
+        "asOf",
+        "as_of",
+      ),
+    verifiedEffectiveDate:
+      firstString(
+        record,
+        "verifiedEffectiveDate",
+        "verified_effective_date",
+      ) ??
+      firstString(
+        attestation,
+        "verifiedEffectiveDate",
+        "verified_effective_date",
+      ),
     effectiveFrom:
       firstString(record, "effectiveFrom", "effective_from", "validFrom", "valid_from") ??
       firstString(attestation, "effectiveFrom", "effective_from"),
@@ -256,7 +350,9 @@ function normalizeResource(
     article:
       firstString(record, "article", "provision") ??
       firstString(attestation, "article"),
-    observedAt: firstString(record, "observedAt", "observed_at"),
+    observedAt:
+      firstString(record, "observedAt", "observed_at") ??
+      firstString(attestation, "observedAt", "observed_at"),
     fetchedAt:
       firstString(record, "fetchedAt", "fetched_at") ??
       firstString(attestation, "fetchedAt", "fetched_at"),
@@ -287,14 +383,11 @@ function freshnessFromProviderTrace(items: unknown[]): LegalFreshnessStatus {
   return hasFresh ? "fresh" : "unknown";
 }
 
-function isVerifiedResource(item: LegalResourceSummary): boolean {
+function isAuthoritativeResource(item: LegalResourceSummary): boolean {
   return [
     "human_reviewed",
-    "verified_snapshot",
-    "source_attested",
-    "citation_verified",
-    "verified",
-  ].includes(item.verificationStatus);
+    "verified_corpus_snapshot",
+  ].includes(legalResourceTrustTier(item));
 }
 
 function normalizeResourceType(value: unknown): LegalResourceType {
@@ -330,6 +423,7 @@ function normalizeAuthority(value: unknown): LegalSourceAuthority {
   const normalized = enumText(value);
   const values: LegalSourceAuthority[] = [
     "law_go_kr",
+    "court",
     "supreme_court",
     "constitutional_court",
     "national_tax_service",
@@ -435,10 +529,6 @@ function firstArrayString(record: JsonRecord, ...keys: string[]): string | undef
 
 function booleanOr(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
-}
-
-function numberOr(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function urlString(value: unknown): string | undefined {

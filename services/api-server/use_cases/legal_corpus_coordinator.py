@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 import re
 from typing import Callable, Protocol, Sequence
 
+from legal_intelligence.corpus_coverage import (
+    OfficialCorpusCoverageIdentity,
+)
 from db.repositories.legal_corpus_repository import PublishedCorpusPage
 from use_cases.legal_corpus_sync import (
     LegalCorpusSyncRequest,
@@ -21,18 +24,59 @@ from use_cases.legal_corpus_sync import (
 class LegalCorpusCoordinationError(RuntimeError):
     """A provider page sequence cannot be certified as complete."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: Sequence["OfficialCorpusPageDiagnostic"] = (),
+        completed_page_count: int = 0,
+        last_checkpoint: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = tuple(diagnostics)
+        self.completed_page_count = completed_page_count
+        self.last_checkpoint = last_checkpoint
+        self.partial = bool(self.diagnostics or completed_page_count)
+        self.retryable = any(item.retryable for item in self.diagnostics)
+
+
+@dataclass(frozen=True)
+class OfficialCorpusPageDiagnostic:
+    code: str
+    message: str
+    retryable: bool = False
+    official_identifier: str | None = None
+    target: str | None = None
+    retry_after_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.code.strip() or not self.message.strip():
+            raise ValueError("page diagnostic code and message are required")
+        if (
+            self.retry_after_seconds is not None
+            and self.retry_after_seconds < 0
+        ):
+            raise ValueError(
+                "retry_after_seconds must not be negative"
+            )
+
 
 @dataclass(frozen=True)
 class OfficialCorpusPage:
     requests: tuple[LegalCorpusSyncRequest, ...]
     terminal: bool
+    partial: bool = False
+    diagnostics: tuple[OfficialCorpusPageDiagnostic, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "requests", tuple(self.requests))
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         if not self.requests:
             raise ValueError(
                 "an official corpus page requires at least one record"
             )
+        if self.partial and not self.diagnostics:
+            raise ValueError("a partial official corpus page requires diagnostics")
 
 
 class OfficialCorpusPageSource(Protocol):
@@ -51,6 +95,9 @@ class LegalCorpusScopeCompletionAttestation:
     provider_id: str
     requested_scope: str
     requested_scope_hash: str
+    coverage_identity: OfficialCorpusCoverageIdentity
+    coverage_mode: str
+    baseline_completion_attestation_id: str | None
     first_checkpoint_sequence: int
     last_checkpoint_sequence: int
     terminal_checkpoint: str
@@ -73,6 +120,7 @@ class LegalCorpusScopeCompletionAttestation:
             "terminal_checkpoint",
             "manifest_sha256",
             "attested_by",
+            "coverage_mode",
         ):
             if not str(getattr(self, name) or "").strip():
                 raise ValueError(f"{name} is required")
@@ -81,6 +129,19 @@ class LegalCorpusScopeCompletionAttestation:
                 r"[0-9a-f]{64}", str(getattr(self, name))
             ):
                 raise ValueError(f"{name} must be a lowercase SHA-256")
+        if self.coverage_mode not in {"initial", "incremental"}:
+            raise ValueError("coverage_mode must be initial or incremental")
+        if self.coverage_mode == "initial":
+            if self.baseline_completion_attestation_id is not None:
+                raise ValueError(
+                    "initial coverage cannot reference a baseline completion"
+                )
+        elif not str(
+            self.baseline_completion_attestation_id or ""
+        ).strip():
+            raise ValueError(
+                "incremental coverage requires a baseline completion"
+            )
         if any(
             not re.fullmatch(r"[0-9a-f]{64}", page_hash)
             for page_hash in self.page_hashes
@@ -145,18 +206,60 @@ class LegalCorpusBatchCoordinator:
         source: OfficialCorpusPageSource,
         *,
         initial_checkpoint: str | None = None,
+        baseline_completion_attestation_id: str | None = None,
     ) -> LegalCorpusScopeCompletionAttestation:
         started_at = _aware(self._clock(), "clock")
         checkpoint = sanitize_checkpoint(initial_checkpoint)
-        baseline: tuple[str, int, str, str] | None = None
+        baseline: tuple[str, int, str, str, str, str] | None = None
+        coverage_identity: OfficialCorpusCoverageIdentity | None = None
+        coverage_mode: str | None = None
         results: list[PublishedCorpusPage] = []
         seen_page_hashes: set[str] = set()
         resources: set[str] = set()
 
         for _page_index in range(1, self._max_pages + 1):
-            page = source.fetch_page(checkpoint_before=checkpoint)
+            try:
+                page = source.fetch_page(checkpoint_before=checkpoint)
+            except LegalCorpusCoordinationError:
+                raise
+            except Exception as exc:
+                raise LegalCorpusCoordinationError(
+                    "provider page fetch failed "
+                    f"({type(exc).__name__})",
+                    completed_page_count=len(results),
+                    last_checkpoint=checkpoint,
+                ) from exc
+            if page.partial:
+                codes = ", ".join(
+                    diagnostic.code for diagnostic in page.diagnostics
+                )
+                raise LegalCorpusCoordinationError(
+                    "provider page is partial and cannot be certified as "
+                    f"complete ({codes})",
+                    diagnostics=page.diagnostics,
+                    completed_page_count=len(results),
+                    last_checkpoint=checkpoint,
+                )
             requests = tuple(page.requests)
             first = requests[0]
+            page_coverage_identity = getattr(
+                first, "coverage_identity", None
+            )
+            if not isinstance(
+                page_coverage_identity,
+                OfficialCorpusCoverageIdentity,
+            ):
+                raise LegalCorpusCoordinationError(
+                    "certified completion requires a code-owned coverage "
+                    "identity"
+                )
+            page_coverage_mode = str(
+                getattr(first, "sync_kind", "")
+            ).strip()
+            if page_coverage_mode not in {"initial", "incremental"}:
+                raise LegalCorpusCoordinationError(
+                    "certified completion requires initial or incremental mode"
+                )
             canonical_scope = sanitize_requested_scope(
                 first.requested_scope
             )
@@ -165,13 +268,17 @@ class LegalCorpusBatchCoordinator:
                 first.provider_revision,
                 canonical_scope,
                 first.requested_by,
+                page_coverage_identity.coverage_identity_sha256,
+                page_coverage_mode,
             )
             if baseline is None:
                 baseline = current_baseline
+                coverage_identity = page_coverage_identity
+                coverage_mode = page_coverage_mode
             elif current_baseline != baseline:
                 raise LegalCorpusCoordinationError(
-                    "provider, revision, scope, and attestor must remain "
-                    "constant across a completion run"
+                    "provider, revision, scope, attestor, coverage identity, "
+                    "and mode must remain constant across a completion run"
                 )
             for request in requests:
                 if (
@@ -190,7 +297,17 @@ class LegalCorpusBatchCoordinator:
                         "every certified page must advance its checkpoint"
                     )
 
-            result = self._sync_service.sync_page(requests)
+            try:
+                result = self._sync_service.sync_page(requests)
+            except LegalCorpusCoordinationError:
+                raise
+            except Exception as exc:
+                raise LegalCorpusCoordinationError(
+                    "provider page publication failed "
+                    f"({type(exc).__name__})",
+                    completed_page_count=len(results),
+                    last_checkpoint=checkpoint,
+                ) from exc
             expected_provider_id = _deterministic_id(
                 "legal-provider",
                 {
@@ -198,11 +315,8 @@ class LegalCorpusBatchCoordinator:
                     "providerRevision": first.provider_revision,
                 },
             )
-            expected_scope_hash = _stable_hash(
-                {
-                    "providerId": expected_provider_id,
-                    "requestedScope": canonical_scope,
-                }
+            expected_scope_hash = page_coverage_identity.scope_hash(
+                requested_scope=canonical_scope
             )
             expected_after = sanitize_checkpoint(
                 first.checkpoint_after
@@ -238,9 +352,35 @@ class LegalCorpusBatchCoordinator:
             raise LegalCorpusCoordinationError(
                 "completion run has no terminal checkpoint"
             )
-        provider_key, provider_revision, requested_scope, attested_by = (
-            baseline
-        )
+        (
+            provider_key,
+            provider_revision,
+            requested_scope,
+            attested_by,
+            _coverage_identity_sha256,
+            resolved_coverage_mode,
+        ) = baseline
+        assert coverage_identity is not None
+        assert coverage_mode == resolved_coverage_mode
+        if coverage_mode == "initial":
+            if initial_checkpoint is not None:
+                raise LegalCorpusCoordinationError(
+                    "initial coverage must begin without a prior checkpoint"
+                )
+            if baseline_completion_attestation_id is not None:
+                raise LegalCorpusCoordinationError(
+                    "initial coverage cannot reference a baseline completion"
+                )
+        elif (
+            initial_checkpoint is None
+            or not str(
+                baseline_completion_attestation_id or ""
+            ).strip()
+        ):
+            raise LegalCorpusCoordinationError(
+                "incremental coverage requires a checkpoint and baseline "
+                "completion"
+            )
         provider_id = _deterministic_id(
             "legal-provider",
             {
@@ -248,16 +388,23 @@ class LegalCorpusBatchCoordinator:
                 "providerRevision": provider_revision,
             },
         )
-        requested_scope_hash = _stable_hash(
-            {
-                "providerId": provider_id,
-                "requestedScope": requested_scope,
-            }
+        coverage_identity.assert_provider(
+            provider_key=provider_key,
+            provider_revision=provider_revision,
+            provider_id=provider_id,
+        )
+        requested_scope_hash = coverage_identity.scope_hash(
+            requested_scope=requested_scope
         )
         manifest_payload = {
             "providerId": provider_id,
             "requestedScope": requested_scope,
             "requestedScopeHash": requested_scope_hash,
+            "coverageIdentity": dict(coverage_identity.as_dict()),
+            "coverageMode": coverage_mode,
+            "baselineCompletionAttestationId": (
+                baseline_completion_attestation_id
+            ),
             "terminalCheckpoint": checkpoint,
             "pages": [
                 {
@@ -289,6 +436,13 @@ class LegalCorpusBatchCoordinator:
                 {
                     "providerId": provider_id,
                     "requestedScopeHash": requested_scope_hash,
+                    "coverageIdentitySha256": (
+                        coverage_identity.coverage_identity_sha256
+                    ),
+                    "coverageMode": coverage_mode,
+                    "baselineCompletionAttestationId": (
+                        baseline_completion_attestation_id
+                    ),
                     "terminalCheckpoint": checkpoint,
                     "manifestSha256": manifest_sha256,
                 },
@@ -296,6 +450,11 @@ class LegalCorpusBatchCoordinator:
             provider_id=provider_id,
             requested_scope=requested_scope,
             requested_scope_hash=requested_scope_hash,
+            coverage_identity=coverage_identity,
+            coverage_mode=coverage_mode,
+            baseline_completion_attestation_id=(
+                baseline_completion_attestation_id
+            ),
             first_checkpoint_sequence=results[0].checkpoint_sequence,
             last_checkpoint_sequence=results[-1].checkpoint_sequence,
             terminal_checkpoint=checkpoint,
@@ -308,9 +467,19 @@ class LegalCorpusBatchCoordinator:
             completed_at=completed_at,
             attested_by=attested_by,
         )
-        return self._completion_repository.attest_scope_completion(
-            attestation
-        )
+        try:
+            return self._completion_repository.attest_scope_completion(
+                attestation
+            )
+        except LegalCorpusCoordinationError:
+            raise
+        except Exception as exc:
+            raise LegalCorpusCoordinationError(
+                "completion attestation persistence failed "
+                f"({type(exc).__name__})",
+                completed_page_count=len(results),
+                last_checkpoint=checkpoint,
+            ) from exc
 
 
 def _aware(value: datetime, name: str) -> datetime:
@@ -325,5 +494,6 @@ __all__ = [
     "LegalCorpusCoordinationError",
     "LegalCorpusScopeCompletionAttestation",
     "OfficialCorpusPage",
+    "OfficialCorpusPageDiagnostic",
     "OfficialCorpusPageSource",
 ]

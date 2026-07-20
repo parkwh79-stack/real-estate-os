@@ -139,7 +139,8 @@ _OPERATIONAL_RECORD_SPECS: Dict[str, Dict[str, Any]] = {
 def storage_backend() -> str:
     configured = os.environ.get("REALYTICS_STORAGE_BACKEND")
     if configured:
-        return configured.lower()
+        normalized = configured.lower()
+        return "postgres" if normalized == "postgresql" else normalized
     if os.environ.get("REALYTICS_STATE_FILE") and not os.environ.get("REALYTICS_SQLITE_FILE"):
         return "json"
     return "sqlite"
@@ -153,7 +154,7 @@ def _use_document_store() -> bool:
     Postgres `app_state` JSONB row). The sqlite backend keeps its per-table
     incremental fast path and is never a document store.
     """
-    return storage_backend() in ("json", "postgres")
+    return storage_backend() in ("json", "postgres", "postgresql")
 
 
 def state_file_path() -> Path:
@@ -279,7 +280,7 @@ def save_state(
         user_activity_logs = _load_existing_user_activity_logs()
     identity = _load_existing_identity_records()
     if _use_document_store():
-        if storage_backend() == "postgres":
+        if storage_backend() in {"postgres", "postgresql"}:
             for project_id, project_payload in projects.items():
                 upsert_project_record(str(project_id), project_payload, project_id_counter)
         _save_json_state(projects, reports, orchestrations, project_id_counter, market_evidence, land_evidence, risk_registers, evidence_graphs, chief_pod_artifacts, prompt_artifacts, assumption_overrides, restructuring_cures, project_snapshots, user_activity_logs, identity, glossary_term_candidates=glossary_term_candidates, pod_ai_reviews=pod_ai_reviews)
@@ -296,7 +297,7 @@ def save_state(
 
 def upsert_project_record(project_id: str, payload: Dict[str, Any], project_id_counter: int | None = None) -> bool:
     """Persist a single project row in the authoritative typed store."""
-    if storage_backend() == "postgres":
+    if storage_backend() in {"postgres", "postgresql"}:
         from db import postgres
 
         metadata = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}

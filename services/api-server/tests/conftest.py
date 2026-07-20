@@ -16,6 +16,13 @@ def _force_offline_external_connectors(monkeypatch):
     monkeypatch.delenv("REALYTICS_KOREAN_LAW_MCP_URL", raising=False)
     monkeypatch.delenv("REALYTICS_LAW_OC", raising=False)
     monkeypatch.delenv("LAW_OC", raising=False)
+    # Local identity bootstrap and social-login mocks are never implicit. The
+    # contract suite opts in explicitly; hardened-profile tests clear these
+    # flags before validating deployment configuration.
+    monkeypatch.setenv("REALYTICS_ENVIRONMENT", "test")
+    monkeypatch.setenv("REALYTICS_ENABLE_LOCAL_AUTH", "true")
+    monkeypatch.setenv("REALYTICS_ENABLE_OAUTH_MOCKS", "true")
+    monkeypatch.setenv("REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS", "true")
     # ``main`` loads the developer .env during test collection.  Provider keys
     # from that file must not make contract tests call a cloud model or silently
     # route an explicitly unavailable provider to a different configured one.
@@ -43,6 +50,7 @@ def _force_offline_external_connectors(monkeypatch):
         "REALYTICS_OIDC_JWKS_URL",
         "REALYTICS_IDP_PERSONAL_TENANT_FALLBACK",
         "REALYTICS_IDP_PERSONAL_TENANT_ROLE",
+        "REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY",
         "REALYTICS_RBAC_MODE",
         "REALYTICS_TENANT_ISOLATION_MODE",
     ):

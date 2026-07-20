@@ -1,5 +1,6 @@
 import pytest
 
+from agents.korean_law_context import build_server_issued_law_context
 from use_cases.legal_pod import _reusable_public_record, run_legal_pod_use_case
 from storage import (
     list_deal_state_records,
@@ -104,37 +105,49 @@ def test_legal_pod_persists_law_evidence_and_lifecycle_coverage(monkeypatch):
         "lawId": "law-1",
         "lawName": "주택법",
         "title": "주택법",
+        "citation": "제15조",
         "article": "제15조",
         "effectiveDate": "2026-01-01",
         "url": "https://www.law.go.kr/test",
+        "locator": "https://www.law.go.kr/test",
         "sourceAuthority": "law_go_kr",
         "transport": "local_verified_snapshot",
         "verificationStatus": "verified_snapshot",
         "resourceId": "legal-resource:law-1",
         "resourceVersionId": "legal-resource-version:law-1:2026",
+        "officialVersionId": "law-1-2026-01-01",
         "sourceFetchId": "legal-source-fetch:law-1:2026",
         "provisionId": "legal-provision:law-1:15",
         "normalizedContentSha256": "sha256:" + ("b" * 64),
         "contentHash": "sha256:" + ("a" * 64),
         "asOfDate": "2026-07-18",
+        "requestedAsOfDate": "2026-07-18",
+        "verifiedEffectiveDate": "2026-01-01",
+        "effectiveFrom": "2026-01-01",
+        "effectiveTo": "2026-12-31",
+        "observedAt": "2026-07-18T00:00:00+00:00",
         "fetchedAt": "2026-07-18T00:00:00+00:00",
         "verifiedAt": "2026-07-18T00:00:01+00:00",
         "verified": True,
+        "rawTool": "legal_intelligence_core",
     }
     monkeypatch.setattr(
         legal_pod,
         "resolve_project_legal_context",
         lambda project_data, caller_context=None: {
-            "lawContext": {
+            "lawContext": build_server_issued_law_context({
+                "version": "realytics-legal-intelligence-v1",
                 "source": "legal-intelligence-core",
-                "connected": True,
+                "connected": False,
+                "retrievedAt": "2026-07-18T00:00:02+00:00",
                 "references": [verified_reference],
                 "citationVerification": {
                     "status": "verified",
                     "checkedCount": 1,
+                    "verifiedCount": 1,
                     "failures": [],
                 },
-            },
+            }),
             "legalIntelligence": {
                 "schemaVersion": "realytics-legal-intelligence-v1",
                 "evidenceStatus": "verified",
@@ -177,6 +190,7 @@ def test_legal_pod_persists_law_evidence_and_lifecycle_coverage(monkeypatch):
     records = list_deal_state_records(project_id)
     law_records = [record for record in records if record.get("recordType") == "legal_evidence"]
     assert law_records
+    assert law_records[0]["evidenceLocator"]["effectiveDate"] == "2026-01-01"
     assert law_records[0]["sourceLocator"]["effectiveDate"] == "2026-01-01"
     assert law_records[0]["sourceLocator"]["contentHash"].startswith("sha256:")
     assert result["handoff"]["requiresHumanReview"] is True

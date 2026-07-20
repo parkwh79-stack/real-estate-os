@@ -49,6 +49,48 @@ def test_search_router_forwards_typed_query(monkeypatch):
     assert captured["public_query_acknowledged"] is True
 
 
+def test_project_scoped_search_forwards_normalized_audit_context(
+    monkeypatch,
+):
+    captured = {}
+    monkeypatch.setattr(
+        legal_router,
+        "authorize_request",
+        lambda request, permission: {
+            "authenticated": True,
+            "user": {
+                "userId": "analyst-1",
+                "tenantId": "tenant-1",
+            },
+            "authorization": {"allowed": True},
+        },
+    )
+
+    def fake_search(query, **kwargs):
+        captured.update({"query": query, **kwargs})
+        return {"query": query, "results": []}
+
+    monkeypatch.setattr(
+        legal_router,
+        "search_legal_resources",
+        fake_search,
+    )
+    app = FastAPI()
+    app.include_router(legal_router.router)
+    response = TestClient(app).get(
+        "/legal/search",
+        params={"q": "Housing Act", "projectId": "project-1"},
+        headers={"x-idempotency-key": "legal-search:router-1"},
+    )
+
+    assert response.status_code == 200
+    context = captured["audit_context"]
+    assert context.tenant_id == "tenant-1"
+    assert context.project_id == "project-1"
+    assert context.requested_by == "analyst-1"
+    assert context.idempotency_key == "legal-search:router-1"
+
+
 def test_resource_router_returns_canonical_envelope(monkeypatch):
     captured = {}
 

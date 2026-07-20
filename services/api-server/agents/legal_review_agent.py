@@ -30,12 +30,16 @@ class LegalReviewAgent:
             "mcp": {
                 "requested": True,
                 "connected": normalized_context["connected"],
+                "verifiedEvidenceAvailable": normalized_context.get(
+                    "verifiedEvidenceAvailable",
+                    False,
+                ),
                 "source": normalized_context.get("source", "not_connected"),
                 "adapter": normalized_context.get("version"),
                 "note": (
-                    "Compatibility projection only. Connected means the Legal "
-                    "Intelligence Core supplied verified official evidence; MCP "
-                    "transport success alone is never sufficient."
+                    "Connectivity only. MCP transport success is never approval "
+                    "evidence; verifiedEvidenceAvailable is supplied separately "
+                    "by the Legal Intelligence Core."
                 ),
             },
             "status": "blocking_issue" if blocking else "caution" if caution else "clear",
@@ -211,7 +215,7 @@ class LegalReviewAgent:
         )
 
     def _law_context_check(self, law_context: Dict[str, Any]) -> Dict[str, Any]:
-        if not law_context.get("connected"):
+        if not law_context.get("verifiedEvidenceAvailable"):
             return self._check(
                 "korean_law_mcp",
                 "Verified legal-source evidence",

@@ -13,9 +13,10 @@ import {
   ShieldCheck,
   UserRoundCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getLegalResource,
+  legalResourceTrustTier,
   searchLegalResources,
 } from "../../lib/legal-intelligence-client";
 import type {
@@ -48,7 +49,8 @@ const RESOURCE_LABEL: Record<LegalResourceType, string> = Object.fromEntries(
 
 const AUTHORITY_LABEL: Record<string, string> = {
   law_go_kr: "국가법령정보센터",
-  supreme_court: "대한민국 법원",
+  court: "각급 법원",
+  supreme_court: "대법원",
   constitutional_court: "헌법재판소",
   central_government: "중앙행정기관",
   local_government: "지방자치단체",
@@ -162,11 +164,6 @@ export function LegalIntelligencePanel() {
       if (!controller.signal.aborted) setSearching(false);
     }
   }, [asOf, loadDetail, publicQueryAcknowledged, query, resourceType]);
-
-  const verifiedCount = useMemo(
-    () => searchResult?.results.filter((item) => isVerified(item.verificationStatus)).length ?? 0,
-    [searchResult],
-  );
 
   return (
     <section className="overflow-hidden rounded-lg border border-cyan-200 bg-white shadow-sm dark:border-cyan-900 dark:bg-slate-900">
@@ -283,9 +280,23 @@ export function LegalIntelligencePanel() {
           <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-4 py-2 text-[11px] font-bold text-slate-600 dark:border-slate-800 dark:text-slate-300">
             <span>검색 결과 {searchResult.results.length}건</span>
             <span>·</span>
-            <span className="text-emerald-700 dark:text-emerald-300">
-              검증 상태 {verifiedCount}건
+            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+              1 공식 검색 후보 {searchResult.officialCandidateCount}건
             </span>
+            <span className="rounded-full bg-cyan-100 px-2 py-0.5 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-200">
+              2 검증 corpus snapshot {searchResult.verifiedSnapshotCount}건
+            </span>
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
+              3 사람 검토 완료 {searchResult.humanReviewedCount}건
+            </span>
+            {searchResult.candidateCount > searchResult.officialCandidateCount ? (
+              <span>
+                기타 후보{" "}
+                {searchResult.candidateCount -
+                  searchResult.officialCandidateCount}
+                건
+              </span>
+            ) : null}
             <span>·</span>
             <span>기준일 {formatDate(searchResult.asOfDate ?? asOf)}</span>
             {searchResult.satisfiedByLocalSnapshot ? (
@@ -354,6 +365,14 @@ function LegalResultButton({
   selected: boolean;
   onSelect: () => void;
 }) {
+  const tier = legalResourceTrustTier(item);
+  const effectiveDateLabel = item.verifiedEffectiveDate
+    ? `검증 시행일 ${formatDate(item.verifiedEffectiveDate)}`
+    : tier === "official_search_candidate"
+      ? "시행일 미검증 · 공식 검색 후보"
+      : tier === "verified_corpus_snapshot" || tier === "human_reviewed"
+        ? "Corpus 검증 · 시행일 연혁 미검증"
+        : "시행일 미검증 · 비권위 후보";
   return (
     <button
       type="button"
@@ -367,7 +386,7 @@ function LegalResultButton({
     >
       <div className="flex flex-wrap items-center gap-1.5">
         <Badge tone="slate">{RESOURCE_LABEL[item.resourceType]}</Badge>
-        <VerificationBadge status={item.verificationStatus} />
+        <VerificationBadge item={item} />
         {item.stale ? <Badge tone="amber">기준일 확인 필요</Badge> : null}
       </div>
       <p className="mt-2 text-sm font-black text-slate-950 dark:text-white">
@@ -385,7 +404,7 @@ function LegalResultButton({
       ) : null}
       <p className="mt-2 text-[11px] font-semibold text-slate-500">
         {AUTHORITY_LABEL[item.sourceAuthority] ?? item.sourceAuthority} ·{" "}
-        {formatDate(item.effectiveFrom)}~{formatDate(item.effectiveTo)}
+        {effectiveDateLabel}
       </p>
     </button>
   );
@@ -400,6 +419,13 @@ function LegalResourceDetailView({
   loading: boolean;
   error: string | null;
 }) {
+  const tier = legalResourceTrustTier(item);
+  const sourceLinkLabel =
+    tier === "official_search_candidate"
+      ? "공식 검색 결과 위치 열기"
+      : tier === "verified_corpus_snapshot" || tier === "human_reviewed"
+        ? "검증된 Evidence Locator 열기"
+        : "연결된 자료 위치 열기";
   return (
     <div className="relative">
       {loading ? (
@@ -411,8 +437,14 @@ function LegalResourceDetailView({
       <div className="pr-28">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone="slate">{RESOURCE_LABEL[item.resourceType]}</Badge>
-          <VerificationBadge status={item.verificationStatus} />
-          <Badge tone={item.stale ? "amber" : "emerald"}>
+          <VerificationBadge item={item} />
+          <Badge
+            tone={
+              item.stale || item.freshnessStatus === "unknown"
+                ? "amber"
+                : "emerald"
+            }
+          >
             {item.stale
               ? "Stale · 승인근거 사용 금지"
               : item.freshnessStatus === "unknown"
@@ -439,11 +471,20 @@ function LegalResourceDetailView({
       <dl className="mt-4 grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs sm:grid-cols-2 dark:border-slate-800 dark:bg-slate-950">
         <Meta label="출처기관" value={AUTHORITY_LABEL[item.sourceAuthority] ?? item.sourceAuthority} />
         <Meta label="조회경로" value={TRANSPORT_LABEL[item.transport] ?? item.transport} />
-        <Meta label="검색 기준일" value={formatDate(item.asOfDate)} />
         <Meta
-          label="법적 유효기간"
-          value={`${formatDate(item.effectiveFrom)} ~ ${formatDate(item.effectiveTo)}`}
+          label="요청 기준일"
+          value={formatDate(item.requestedAsOfDate ?? item.asOfDate)}
         />
+        <Meta
+          label="검증된 시행일"
+          value={
+            item.verifiedEffectiveDate
+              ? formatDate(item.verifiedEffectiveDate)
+              : "미검증 · 상세 연혁 조회 필요"
+          }
+        />
+        <Meta label="관측시각" value={formatTimestamp(item.observedAt)} />
+        <Meta label="수집시각" value={formatTimestamp(item.fetchedAt)} />
         <Meta label="검증시각" value={formatTimestamp(item.verifiedAt)} />
         <Meta label="공식 Resource ID" value={item.resourceId || "미확인"} />
       </dl>
@@ -455,7 +496,7 @@ function LegalResourceDetailView({
           rel="noreferrer"
           className="mt-3 inline-flex items-center gap-1 rounded-md border border-cyan-200 px-3 py-2 text-xs font-black text-cyan-800 hover:bg-cyan-50 dark:border-cyan-800 dark:text-cyan-200 dark:hover:bg-cyan-950/30"
         >
-          정확한 공식 원문 위치 열기
+          {sourceLinkLabel}
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
       ) : (
@@ -543,17 +584,28 @@ function ContentSection({
   );
 }
 
-function VerificationBadge({ status }: { status: LegalVerificationStatus }) {
-  const verified = isVerified(status);
+function VerificationBadge({ item }: { item: LegalResourceSummary }) {
+  const status: LegalVerificationStatus = item.verificationStatus;
+  const tier = legalResourceTrustTier(item);
   const failed = status === "failed";
+  const tone =
+    tier === "human_reviewed"
+      ? "emerald"
+      : tier === "verified_corpus_snapshot"
+        ? "cyan"
+        : failed
+          ? "rose"
+          : "amber";
   return (
-    <Badge tone={verified ? "emerald" : failed ? "rose" : "amber"}>
-      {verified ? (
+    <Badge tone={tone}>
+      {tier === "human_reviewed" ? (
         <CheckCircle2 className="h-3 w-3" />
+      ) : tier === "verified_corpus_snapshot" ? (
+        <ShieldCheck className="h-3 w-3" />
       ) : failed ? (
         <AlertTriangle className="h-3 w-3" />
       ) : (
-        <ShieldCheck className="h-3 w-3" />
+        <FileSearch className="h-3 w-3" />
       )}
       {verificationLabel(status)}
     </Badge>
@@ -631,23 +683,13 @@ function LegalDetailSkeleton() {
   );
 }
 
-function isVerified(status: LegalVerificationStatus): boolean {
-  return [
-    "human_reviewed",
-    "verified_snapshot",
-    "source_attested",
-    "citation_verified",
-    "verified",
-  ].includes(status);
-}
-
 function verificationLabel(status: LegalVerificationStatus): string {
   return {
-    human_reviewed: "사람 검토 완료",
-    verified_snapshot: "검증 스냅샷",
-    source_attested: "공식 출처 확인",
-    citation_verified: "인용 검증",
-    verified: "검증됨",
+    human_reviewed: "3 사람 검토 완료",
+    verified_snapshot: "2 검증 corpus snapshot",
+    source_attested: "1 공식 검색 후보 · 승인 근거 아님",
+    citation_verified: "인용 확인 후보 · 스냅샷 필요",
+    verified: "레거시 검증 표시 · 스냅샷 확인 필요",
     candidate: "검증 후보",
     untrusted_candidate: "비신뢰 후보",
     failed: "검증 실패",

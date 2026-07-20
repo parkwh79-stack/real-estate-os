@@ -1946,7 +1946,17 @@ class OrchestrationAgent:
 
         project_id = run.get("project_id") or run.get("projectId")
         deal_state_context = (
-            build_deal_state_approval_readiness(str(project_id))
+            build_deal_state_approval_readiness(
+                str(project_id),
+                tenant_id=(
+                    str(
+                        run.get("tenant_id")
+                        or run.get("tenantId")
+                        or ""
+                    ).strip()
+                    or None
+                ),
+            )
             if project_id
             else self._deal_state_approval_context(run)
         )
@@ -2039,7 +2049,17 @@ class OrchestrationAgent:
                 "warnings": [],
                 "requiredActions": [],
             }
-        return build_deal_state_approval_readiness(str(project_id))
+        return build_deal_state_approval_readiness(
+            str(project_id),
+            tenant_id=(
+                str(
+                    run.get("tenant_id")
+                    or run.get("tenantId")
+                    or ""
+                ).strip()
+                or None
+            ),
+        )
 
     def _unresolved_handoff_reviews(self, run: Dict[str, Any]) -> List[Dict[str, Any]]:
         unresolved = []

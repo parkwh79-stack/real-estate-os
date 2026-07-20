@@ -16,6 +16,11 @@ EXPECTED_MIGRATIONS = (
     "0006_parser_v2_platform.sql",
     "0007_parser_v2_rls.sql",
     "0008_legal_intelligence_core.sql",
+    "0009_legal_governance_and_tenant_overlay.sql",
+    "0010_legal_corpus_coverage_contracts.sql",
+    "0011_postgres_security_and_rls_policy_hardening.sql",
+    "0012_core_tenant_authority_expand.sql",
+    "0013_core_tenant_rls.sql",
 )
 
 

@@ -12,10 +12,25 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from agents.korean_law_context import build_korean_law_mcp_query_plan
+from agents.korean_law_context import (
+    build_korean_law_mcp_query_plan,
+    build_server_issued_law_context,
+)
 from db.postgres import postgres_configured
+from db.legal_operations_database import (
+    legal_operations_database_configured,
+)
+from db.repositories.legal_query_run_repository import (
+    LegalQueryAuditContext,
+    PostgresLegalQueryRunRepository,
+)
 from db.repositories.legal_intelligence_repository import (
     PostgresVerifiedLegalSnapshotProvider,
+)
+from db.repositories.legal_provider_operations_repository import (
+    FailureIsolatedLegalProviderOperationsSink,
+    LegalProviderOperationsSink,
+    PostgresLegalProviderOperationsSink,
 )
 from legal_intelligence.models import (
     CoverageStatus,
@@ -32,12 +47,17 @@ from legal_intelligence.models import (
 )
 from legal_intelligence.orchestrator import LegalIntelligenceOrchestrator
 from legal_intelligence.providers import (
+    DEFAULT_PROVIDER_JSON_MAX_COLLECTION_ITEMS,
+    DEFAULT_PROVIDER_JSON_MAX_DEPTH,
+    DEFAULT_PROVIDER_JSON_MAX_NODES,
+    DEFAULT_PROVIDER_MAX_RESPONSE_BYTES,
     DEFAULT_LAW_GO_KR_ALLOWED_HOSTS,
     LawGoKrDirectProvider,
     McpBridgeProvider,
     ProviderProtocol,
 )
 from legal_intelligence.search import InMemoryVerifiedSnapshotProvider
+from legal_intelligence.resilience import shared_provider_rate_limiter
 
 
 LEGAL_INTELLIGENCE_SCHEMA_VERSION = "realytics-legal-intelligence-v1"
@@ -76,6 +96,7 @@ class UnavailableLegalProvider:
 class LegalIntelligenceService:
     orchestrator: LegalIntelligenceOrchestrator
     local_provider: ProviderProtocol
+    query_run_repository: Any | None = None
 
     def search(
         self,
@@ -90,6 +111,7 @@ class LegalIntelligenceService:
             DataClassification.PROJECT_CONFIDENTIAL
         ),
         caller_context: Mapping[str, Any] | None = None,
+        audit_context: LegalQueryAuditContext | None = None,
     ) -> LegalSearchResponse:
         contract = LegalSearchQuery(
             text=query,
@@ -100,10 +122,27 @@ class LegalIntelligenceService:
             limit=limit,
             data_classification=data_classification,
         )
-        return self.orchestrator.search(
+        response = self.orchestrator.search(
             contract,
             caller_context=caller_context,
         )
+        if audit_context is not None:
+            if self.query_run_repository is None:
+                raise RuntimeError(
+                    "project-scoped legal search requires the normalized "
+                    "query-run repository"
+                )
+            query_run_id = self.query_run_repository.record_search(
+                audit_context,
+                contract,
+                response,
+                freshness_policy_version=LEGAL_FRESHNESS_POLICY_VERSION,
+                ranking_policy_version=LEGAL_RANKING_POLICY_VERSION,
+            )
+            response = response.model_copy(
+                update={"query_run_id": query_run_id}
+            )
+        return response
 
     def get_resource(
         self,
@@ -129,8 +168,18 @@ def build_legal_intelligence_service(
     environ: Mapping[str, str] | None = None,
     local_provider: ProviderProtocol | None = None,
     official_provider: ProviderProtocol | None = None,
+    provider_operations_sink: LegalProviderOperationsSink | None = None,
 ) -> LegalIntelligenceService:
-    env = environ or os.environ
+    env = os.environ if environ is None else environ
+    operations_sink = provider_operations_sink
+    if (
+        operations_sink is None
+        and postgres_configured()
+        and legal_operations_database_configured(environ=env)
+    ):
+        operations_sink = FailureIsolatedLegalProviderOperationsSink(
+            PostgresLegalProviderOperationsSink()
+        )
     if local_provider is None:
         local_provider = (
             PostgresVerifiedLegalSnapshotProvider()
@@ -151,6 +200,18 @@ def build_legal_intelligence_service(
         for item in configured_law_hosts.split(",")
         if item.strip()
     ) or tuple(sorted(DEFAULT_LAW_GO_KR_ALLOWED_HOSTS))
+    provider_rate_limiter = shared_provider_rate_limiter(
+        capacity=_positive_float(
+            env.get("REALYTICS_LEGAL_PROVIDER_RATE_LIMIT_BURST"),
+            default=30.0,
+            label="REALYTICS_LEGAL_PROVIDER_RATE_LIMIT_BURST",
+        ),
+        refill_tokens_per_second=_positive_float(
+            env.get("REALYTICS_LEGAL_PROVIDER_RATE_LIMIT_PER_SECOND"),
+            default=5.0,
+            label="REALYTICS_LEGAL_PROVIDER_RATE_LIMIT_PER_SECOND",
+        ),
+    )
     if official_provider is None:
         official_provider = (
             LawGoKrDirectProvider(
@@ -160,6 +221,40 @@ def build_legal_intelligence_service(
                     or "https://www.law.go.kr/DRF/lawSearch.do"
                 ).strip(),
                 allowed_hosts=allowed_law_hosts,
+                max_response_bytes=_positive_int(
+                    env.get(
+                        "REALYTICS_LEGAL_PROVIDER_MAX_RESPONSE_BYTES"
+                    ),
+                    default=DEFAULT_PROVIDER_MAX_RESPONSE_BYTES,
+                    label=(
+                        "REALYTICS_LEGAL_PROVIDER_MAX_RESPONSE_BYTES"
+                    ),
+                ),
+                json_max_depth=_positive_int(
+                    env.get("REALYTICS_LEGAL_PROVIDER_JSON_MAX_DEPTH"),
+                    default=DEFAULT_PROVIDER_JSON_MAX_DEPTH,
+                    label="REALYTICS_LEGAL_PROVIDER_JSON_MAX_DEPTH",
+                ),
+                json_max_collection_items=_positive_int(
+                    env.get(
+                        "REALYTICS_LEGAL_PROVIDER_JSON_MAX_COLLECTION_ITEMS"
+                    ),
+                    default=(
+                        DEFAULT_PROVIDER_JSON_MAX_COLLECTION_ITEMS
+                    ),
+                    label=(
+                        "REALYTICS_LEGAL_PROVIDER_JSON_MAX_COLLECTION_ITEMS"
+                    ),
+                ),
+                json_max_nodes=_positive_int(
+                    env.get("REALYTICS_LEGAL_PROVIDER_JSON_MAX_NODES"),
+                    default=DEFAULT_PROVIDER_JSON_MAX_NODES,
+                    label="REALYTICS_LEGAL_PROVIDER_JSON_MAX_NODES",
+                ),
+                rate_limiter=provider_rate_limiter,
+                quarantine_sink=operations_sink,
+                dead_letter_sink=operations_sink,
+                telemetry=operations_sink,
             )
             if law_oc
             else UnavailableLegalProvider()
@@ -183,6 +278,10 @@ def build_legal_intelligence_service(
         McpBridgeProvider(
             url=local_mcp_url,
             allowed_hosts=local_mcp_allowed_hosts,
+            rate_limiter=provider_rate_limiter,
+            quarantine_sink=operations_sink,
+            dead_letter_sink=operations_sink,
+            telemetry=operations_sink,
         )
         if local_mcp_url
         else None
@@ -192,6 +291,10 @@ def build_legal_intelligence_service(
             url=remote_mcp_url,
             remote=True,
             allow_remote=remote_enabled,
+            rate_limiter=provider_rate_limiter,
+            quarantine_sink=operations_sink,
+            dead_letter_sink=operations_sink,
+            telemetry=operations_sink,
         )
         if remote_mcp_url
         else None
@@ -202,10 +305,16 @@ def build_legal_intelligence_service(
         self_hosted_mcp=self_hosted_mcp,
         remote_mcp=remote_mcp,
         allow_remote_mcp=remote_enabled,
+        telemetry=operations_sink,
     )
     return LegalIntelligenceService(
         orchestrator=orchestrator,
         local_provider=local_provider,
+        query_run_repository=(
+            PostgresLegalQueryRunRepository()
+            if postgres_configured()
+            else None
+        ),
     )
 
 
@@ -216,6 +325,7 @@ def search_legal_resources(
     as_of: date | None = None,
     limit: int = 10,
     public_query_acknowledged: bool = False,
+    audit_context: LegalQueryAuditContext | None = None,
     service: LegalIntelligenceService | None = None,
 ) -> dict[str, Any]:
     kinds = (
@@ -233,6 +343,7 @@ def search_legal_resources(
             if public_query_acknowledged
             else DataClassification.PROJECT_CONFIDENTIAL
         ),
+        audit_context=audit_context,
     )
     payload = serialize_legal_search_response(response)
     payload["externalEgressAcknowledged"] = public_query_acknowledged
@@ -416,6 +527,35 @@ def seal_legal_review_evidence_snapshot(
         # contract and therefore cannot become approval-grade.
         expected_claim_count = max(1, len(references))
         verified_claim_count = 0
+    required_claim_set_id = str(
+        intelligence.get("requiredClaimSetId") or ""
+    ).strip()
+    if not required_claim_set_id:
+        resolver = getattr(
+            repository,
+            "latest_approved_required_claim_set_id",
+            None,
+        )
+        if callable(resolver):
+            required_claim_set_id = str(resolver() or "").strip()
+    if not required_claim_set_id:
+        intelligence.update(
+            {
+                "evidenceSnapshotStatus": "not_sealed",
+                "evidenceSnapshotId": None,
+                "snapshotGateEligible": False,
+                "verifiedCitationCount": 0,
+                "claimCoverageComplete": False,
+            }
+        )
+        updated_review["legalIntelligence"] = intelligence
+        return {
+            "sealed": False,
+            "reason": "approved_required_claim_set_missing",
+            "eligibleReferenceCount": len(exact_items),
+            "skippedReferences": skipped,
+            "legalReview": updated_review,
+        }
     snapshot = repository.append_verified_evidence_snapshot(
         {
             "asOfDate": intelligence.get("asOfDate"),
@@ -428,6 +568,7 @@ def seal_legal_review_evidence_snapshot(
             "expectedCitationCount": len(references),
             "expectedClaimCount": expected_claim_count,
             "verifiedClaimCount": verified_claim_count,
+            "requiredClaimSetId": required_claim_set_id,
             "references": exact_items,
             "metadata": {
                 "legalReviewId": review_id,
@@ -445,6 +586,7 @@ def seal_legal_review_evidence_snapshot(
         {
             "evidenceSnapshotStatus": "sealed",
             "evidenceSnapshotId": snapshot["legalEvidenceSnapshotId"],
+            "snapshotCreatedBy": snapshot.get("createdBy") or created_by,
             "snapshotSha256": snapshot["snapshotSha256"],
             "snapshotVersion": snapshot["snapshotVersion"],
             "snapshotGateEligible": gate_eligible,
@@ -453,6 +595,13 @@ def seal_legal_review_evidence_snapshot(
             "requiredClaimCount": snapshot["expectedClaimCount"],
             "verifiedClaimCount": snapshot["verifiedClaimCount"],
             "claimCoverageComplete": snapshot["claimCoverageComplete"],
+            "requiredClaimSetId": snapshot["requiredClaimSetId"],
+            "requiredClaimSetVersion": snapshot[
+                "requiredClaimSetVersion"
+            ],
+            "requiredClaimSetSha256": snapshot[
+                "requiredClaimSetSha256"
+            ],
             "stale": snapshot["stale"],
             "openConflictCount": int(
                 bool(snapshot["hasOpenConflicts"])
@@ -631,8 +780,15 @@ def resolve_project_legal_context(
         else "partial"
     )
     retrieved_at = datetime.now(timezone.utc).isoformat()
+    provider_trace_payload = [_provider_payload(item) for item in traces]
+    mcp_connected = any(
+        item.get("transport") in {"self_hosted_mcp", "remote_mcp"}
+        and item.get("status") in {"success", "partial", "no_match"}
+        for item in provider_trace_payload
+    )
     legal_intelligence = {
         "schemaVersion": LEGAL_INTELLIGENCE_SCHEMA_VERSION,
+        "legalQueryRunId": response.query_run_id,
         "evidenceStatus": verification_status,
         "verifiedReferenceCount": len(verified_references),
         "verifiedCitationCount": verified_citation_count,
@@ -691,22 +847,20 @@ def resolve_project_legal_context(
         },
         "references": verified_references,
         "candidateReferences": candidate_references,
-        "providerTrace": [_provider_payload(item) for item in traces],
+        "providerTrace": provider_trace_payload,
         "retrievedAt": retrieved_at,
     }
-    law_context = {
+    law_context = build_server_issued_law_context({
         "version": LEGAL_INTELLIGENCE_SCHEMA_VERSION,
         "source": "legal-intelligence-core",
-        # Compatibility only.  It means verified evidence exists; it does not
-        # mean that an MCP transport returned HTTP 200.
-        "connected": bool(verified_references) and not stale,
+        # Connectivity and evidence authority are deliberately independent.
+        "connected": mcp_connected,
         "retrievedAt": retrieved_at,
         "references": verified_references,
         "candidateReferences": candidate_references,
         "citationVerification": legal_intelligence["citationVerification"],
         "queryPlan": unique_queries,
-        "providerTrace": legal_intelligence["providerTrace"],
-    }
+    })
     return {
         "lawContext": law_context,
         "legalIntelligence": legal_intelligence,
@@ -785,6 +939,7 @@ def _hit_payload(
             content.get("resourceVersionId")
             or attestation.official_version_id
         ),
+        "officialVersionId": attestation.official_version_id,
         "sourceFetchId": content.get("sourceFetchId"),
         "title": hit.title,
         "citation": attestation.article,
@@ -801,10 +956,18 @@ def _hit_payload(
         "freshnessStatus": freshness.value,
         "stale": stale,
         "asOfDate": attestation.as_of.isoformat(),
+        "requestedAsOfDate": attestation.requested_as_of_date.isoformat(),
+        "verifiedEffectiveDate": _iso(
+            attestation.verified_effective_date
+        ),
         "effectiveFrom": _iso(attestation.effective_from),
         "effectiveTo": _iso(attestation.effective_to),
+        "observedAt": _iso(attestation.observed_at),
         "fetchedAt": _iso(attestation.fetched_at),
         "verifiedAt": _iso(attestation.verified_at),
+        "applicabilityVerified": (
+            attestation.is_applicability_verified
+        ),
         "sourceUrl": (
             locator if locator.startswith(("http://", "https://")) else None
         ),
@@ -869,7 +1032,11 @@ def _legacy_reference(hit: SearchHit) -> dict[str, Any]:
         "article": attestation.article or "",
         "lawId": attestation.official_resource_id,
         "resourceId": content.get("resourceId"),
-        "resourceVersionId": content.get("resourceVersionId"),
+        "resourceVersionId": (
+            content.get("resourceVersionId")
+            or attestation.official_version_id
+        ),
+        "officialVersionId": attestation.official_version_id,
         "sourceFetchId": content.get("sourceFetchId"),
         "provisionId": content.get("provisionId")
         or content.get("legalProvisionId"),
@@ -888,6 +1055,13 @@ def _legacy_reference(hit: SearchHit) -> dict[str, Any]:
         "contentHash": attestation.content_hash,
         "normalizedContentSha256": content.get("normalizedContentSha256"),
         "asOfDate": attestation.as_of.isoformat(),
+        "requestedAsOfDate": attestation.requested_as_of_date.isoformat(),
+        "verifiedEffectiveDate": _iso(
+            attestation.verified_effective_date
+        ),
+        "effectiveFrom": _iso(attestation.effective_from),
+        "effectiveTo": _iso(attestation.effective_to),
+        "observedAt": attestation.observed_at.isoformat(),
         "fetchedAt": attestation.fetched_at.isoformat(),
         "verifiedAt": _iso(attestation.verified_at),
         "rawTool": "legal_intelligence_core",
@@ -1081,6 +1255,40 @@ def _truthy(value: Any) -> bool:
         "yes",
         "on",
     }
+
+
+def _positive_float(
+    value: Any,
+    *,
+    default: float,
+    label: str,
+) -> float:
+    if value is None or not str(value).strip():
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive number") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive number")
+    return parsed
+
+
+def _positive_int(
+    value: Any,
+    *,
+    default: int,
+    label: str,
+) -> int:
+    if value is None or not str(value).strip():
+        return default
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return parsed
 
 
 __all__ = [

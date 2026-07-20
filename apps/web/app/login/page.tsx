@@ -7,11 +7,13 @@ import Image from "next/image";
 import {
   apiBase,
   createLocalPilotSession,
-  getStoredAuthSession,
   loginLocalPilotSession,
+  resolveCurrentIdentity,
   signInWithSupabasePassword,
+  signInWithSupabaseOAuth,
   signUpWithSupabasePassword,
 } from "../../lib/auth-client";
+import { localPilotAuthEnabled } from "../../lib/auth-policy";
 import { supabaseConfigured } from "../../lib/supabase-client";
 
 type AuthTab = "social" | "supabase" | "direct";
@@ -27,6 +29,7 @@ export default function LoginPage() {
   const [supabasePassword, setSupabasePassword] = useState("");
   const [supabaseDisplayName, setSupabaseDisplayName] = useState("");
   const hasSupabase = supabaseConfigured();
+  const hasLocalPilot = localPilotAuthEnabled();
 
   // Stats state (Initialized to 0 to fetch real DB values)
   const [stats, setStats] = useState({
@@ -44,10 +47,11 @@ export default function LoginPage() {
   const [role, setRole] = useState("analyst");
 
   useEffect(() => {
-    const stored = getStoredAuthSession();
-    if (stored?.session?.sessionId) {
-      router.replace(resolveNextPath());
-    }
+    void resolveCurrentIdentity()
+      .then((identity) => {
+        if (identity.authenticated) router.replace(resolveNextPath());
+      })
+      .catch(() => undefined);
 
     // Fetch real DB stats. These hero numbers are cosmetic, so a failure (e.g. the
     // API server momentarily down) must NOT surface a dev error overlay — swallow it.
@@ -75,22 +79,8 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const nextPath = resolveNextPath();
-      const res = await fetch(`${apiBase}/integrations/kakao/login/authorize-url`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirectPath: nextPath }),
-      });
-      
-      if (!res.ok) {
-        throw new Error("카카오 로그인 설정이 서버에 준비되지 않았습니다.");
-      }
-      const data = await res.json();
-      if (!data.authorizeUrl) {
-        throw new Error("카카오 인증 URL을 가져오지 못했습니다.");
-      }
-      
-      window.location.href = data.authorizeUrl;
+      if (!hasSupabase) throw new Error("Supabase Auth가 설정되지 않았습니다.");
+      await signInWithSupabaseOAuth("kakao", resolveNextPath());
     } catch (err) {
       setError(err instanceof Error ? err.message : "카카오 로그인 연동에 실패했습니다.");
       setSubmitting(false);
@@ -101,22 +91,8 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const nextPath = resolveNextPath();
-      const res = await fetch(`${apiBase}/integrations/google/login/authorize-url`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirectPath: nextPath }),
-      });
-      
-      if (!res.ok) {
-        throw new Error("구글 로그인 설정이 서버에 준비되지 않았습니다.");
-      }
-      const data = await res.json();
-      if (!data.authorizeUrl) {
-        throw new Error("구글 인증 URL을 가져오지 못했습니다.");
-      }
-      
-      window.location.href = data.authorizeUrl;
+      if (!hasSupabase) throw new Error("Supabase Auth가 설정되지 않았습니다.");
+      await signInWithSupabaseOAuth("google", resolveNextPath());
     } catch (err) {
       setError(err instanceof Error ? err.message : "구글 로그인 연동에 실패했습니다.");
       setSubmitting(false);
@@ -128,6 +104,9 @@ export default function LoginPage() {
     setSubmitting(true);
     setError(null);
     try {
+      if (!hasLocalPilot) {
+        throw new Error("로컬 파일럿 인증은 개발·테스트 환경에서만 사용할 수 있습니다.");
+      }
       if (directMode === "login") {
         await loginLocalPilotSession({
           tenantId: tenantId.trim() || "realytics-pilot",
@@ -294,7 +273,12 @@ export default function LoginPage() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">Authentication</p>
-              <h2 className="mt-1 text-3xl font-black text-slate-950 dark:text-white">보안 로그인</h2>
+              <h2
+                data-testid="login-heading"
+                className="mt-1 text-3xl font-black text-slate-950 dark:text-white"
+              >
+                보안 로그인
+              </h2>
             </div>
             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 shadow-sm dark:bg-emerald-950/40 dark:text-emerald-300">
               <CheckCircle2 className="h-4 w-4" /> DB 연동
@@ -332,7 +316,7 @@ export default function LoginPage() {
             </p>
           </div>
 
-          <div className="mt-8 grid grid-cols-3 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
+          <div className={`mt-8 grid ${hasLocalPilot ? "grid-cols-3" : "grid-cols-2"} rounded-xl bg-slate-100 p-1 dark:bg-slate-800`}>
             <button
               type="button"
               onClick={() => setTab("social")}
@@ -356,30 +340,34 @@ export default function LoginPage() {
             >
               Supabase
             </button>
-            <button
-              type="button"
-              onClick={() => setTab("direct")}
-              className={`h-11 rounded-lg text-sm font-bold transition-all duration-200 ${
-                tab === "direct"
-                  ? "bg-white text-slate-950 shadow-md dark:bg-slate-950 dark:text-white"
-                  : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
-              }`}
-            >
-              파일럿 ID 로그인
-            </button>
+            {hasLocalPilot ? (
+              <button
+                data-testid="local-pilot-login-tab"
+                type="button"
+                onClick={() => setTab("direct")}
+                className={`h-11 rounded-lg text-sm font-bold transition-all duration-200 ${
+                  tab === "direct"
+                    ? "bg-white text-slate-950 shadow-md dark:bg-slate-950 dark:text-white"
+                    : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
+                }`}
+              >
+                파일럿 ID 로그인
+              </button>
+            ) : null}
           </div>
 
           {tab === "social" ? (
             <div className="mt-8 space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-500">
               <p className="text-sm leading-6 text-slate-500 dark:text-slate-400">
-                실제 카카오 계정으로 안전하게 연동 인증 후 세션을 데이터베이스(DB)에 등록하여 즉시 심사를 진행하실 수 있습니다.
+                Supabase Auth의 PKCE 흐름으로 카카오·구글 계정을 인증하고,
+                검증된 세션으로 REALYTICS 심사를 진행합니다.
               </p>
 
               {/* Kakao Button */}
               <button
                 type="button"
                 onClick={handleKakaoLogin}
-                disabled={submitting}
+                disabled={submitting || !hasSupabase}
                 className="group relative flex h-14 w-full items-center justify-center gap-3 rounded-xl bg-[#FEE500] px-4 font-bold text-[#191919] shadow-lg shadow-[#FEE500]/20 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-[#FEE500]/30 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
               >
                 <svg className="h-6 w-6 fill-current" viewBox="0 0 24 24">
@@ -392,7 +380,7 @@ export default function LoginPage() {
               <button
                 type="button"
                 onClick={handleGoogleLogin}
-                disabled={submitting}
+                disabled={submitting || !hasSupabase}
                 className="group relative flex h-14 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white px-4 font-bold text-slate-700 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md hover:border-slate-300 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-600"
               >
                 <svg className="h-6 w-6" viewBox="0 0 24 24">
@@ -489,7 +477,7 @@ export default function LoginPage() {
                 <ArrowRight className="h-5 w-5" />
               </button>
             </form>
-          ) : (
+          ) : hasLocalPilot ? (
             <form onSubmit={onDirectSubmit} className="mt-8 space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-500">
               <div className="flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
                 <button
@@ -539,7 +527,7 @@ export default function LoginPage() {
                 <ArrowRight className="h-5 w-5" />
               </button>
             </form>
-          )}
+          ) : null}
 
           {notice ? (
             <p className="mt-6 animate-in fade-in rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">

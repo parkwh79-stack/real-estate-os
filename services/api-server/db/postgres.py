@@ -52,7 +52,36 @@ LEGAL_INTELLIGENCE_RLS_TABLES = (
     "legal_evidence_snapshot_items",
     "legal_review_decisions",
 )
+LEGAL_GOVERNANCE_RLS_TABLES = (
+    "legal_approval_delegations",
+    "legal_required_claim_sets",
+    "legal_required_claims",
+    "project_legal_matters",
+    "legal_waivers",
+    "counsel_opinions",
+    "legal_analysis_versions",
+    "project_legal_annotations",
+    "tenant_legal_term_aliases",
+    "tenant_legal_term_alias_review_events",
+    "project_legal_review_versions",
+    "project_permit_review_versions",
+    "project_legal_citation_review_versions",
+    "project_legal_citation_review_events",
+    "project_legal_relation_review_versions",
+    "project_legal_relation_review_events",
+    "legal_provider_replay_objects",
+    "legal_provider_replay_approval_events",
+    "legal_provider_replay_requests",
+    "legal_provider_replay_events",
+)
+LEGAL_PROVIDER_REPLAY_RLS_TABLES = (
+    "legal_provider_replay_objects",
+    "legal_provider_replay_approval_events",
+    "legal_provider_replay_requests",
+    "legal_provider_replay_events",
+)
 LEGAL_INTELLIGENCE_MIGRATION = "0008_legal_intelligence_core.sql"
+LEGAL_GOVERNANCE_MIGRATION = "0009_legal_governance_and_tenant_overlay.sql"
 
 
 class MigrationChecksumMismatch(RuntimeError):
@@ -485,6 +514,8 @@ def assert_parser_v2_runtime_ready() -> None:
             required_rls_tables = list(PARSER_V2_RLS_TABLES)
             if LEGAL_INTELLIGENCE_MIGRATION in expected:
                 required_rls_tables.extend(LEGAL_INTELLIGENCE_RLS_TABLES)
+            if LEGAL_GOVERNANCE_MIGRATION in expected:
+                required_rls_tables.extend(LEGAL_GOVERNANCE_RLS_TABLES)
 
             cur.execute(
                 """

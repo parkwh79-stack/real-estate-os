@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .models import (
     CoverageStatus,
@@ -24,6 +25,11 @@ from .models import (
     sort_hits,
 )
 from .providers import ProviderProtocol
+from .resilience import (
+    NoOpProviderTelemetrySink,
+    ProviderMetric,
+    ProviderTelemetrySink,
+)
 
 
 class LegalIntelligenceOrchestrator:
@@ -37,12 +43,16 @@ class LegalIntelligenceOrchestrator:
         self_hosted_mcp: ProviderProtocol | None = None,
         remote_mcp: ProviderProtocol | None = None,
         allow_remote_mcp: bool = False,
+        telemetry: ProviderTelemetrySink | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._local = local_provider
         self._official = official_provider
         self._self_hosted_mcp = self_hosted_mcp
         self._remote_mcp = remote_mcp
         self._allow_remote_mcp = allow_remote_mcp
+        self._telemetry = telemetry or NoOpProviderTelemetrySink()
+        self._monotonic = monotonic
 
     def search(
         self,
@@ -53,7 +63,23 @@ class LegalIntelligenceOrchestrator:
         trace: list[ProviderResult] = []
         candidate_hits = _caller_candidate_hits(query, caller_context)
 
+        local_started_at = self._monotonic()
         local = self._local.search(query)
+        self._telemetry.record(
+            ProviderMetric(
+                provider_id=local.provider_id,
+                operation="orchestrator_local_lookup",
+                outcome=local.status.value,
+                latency_ms=max(
+                    0.0,
+                    (self._monotonic() - local_started_at) * 1000,
+                ),
+                attempts=local.attempts,
+                local_hit=local.can_satisfy_from_verified_local_snapshot,
+                freshness=local.freshness.value,
+                tags={"transport": local.transport.value},
+            )
+        )
         trace.append(local)
         authoritative, candidates = _partition_hits(local.hits)
         candidate_hits.extend(candidates)

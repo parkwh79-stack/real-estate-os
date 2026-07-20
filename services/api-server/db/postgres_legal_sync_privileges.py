@@ -12,6 +12,9 @@ LEGAL_SYNC_SCHEMA_ENV = "REALYTICS_DATABASE_SCHEMA"
 LEGAL_SYNC_POSTGIS_SCHEMA_ENV = "REALYTICS_POSTGIS_SCHEMA"
 
 LEGAL_SYNC_TABLE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "legal_corpus_required_target_contracts": ("SELECT",),
+    "legal_corpus_coverage_registries": ("SELECT",),
+    "legal_corpus_coverage_contracts": ("SELECT",),
     "legal_source_providers": ("SELECT", "INSERT"),
     "legal_sync_runs": ("SELECT", "INSERT"),
     "legal_sync_run_events": ("SELECT", "INSERT"),
@@ -31,6 +34,8 @@ LEGAL_SYNC_TABLE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "legal_relation_assertions": ("SELECT", "INSERT"),
     "legal_term_definitions": ("SELECT", "INSERT"),
     "legal_term_provision_links": ("SELECT", "INSERT"),
+    "legal_term_source_links": ("SELECT", "INSERT"),
+    "legal_term_relations": ("SELECT", "INSERT"),
     "legal_semantic_artifacts": ("SELECT", "INSERT"),
     "legal_raw_object_reconciliation_runs": ("SELECT", "INSERT"),
     "legal_raw_object_reconciliation_items": ("SELECT", "INSERT"),

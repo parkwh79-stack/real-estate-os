@@ -18,6 +18,9 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from schemas.legal_review_projection import (
+    LegalReviewDecisionProjectionBinding,
+)
 from storage import (
     list_legal_review_records,
     record_user_activity_log,
@@ -38,9 +41,18 @@ VERIFIED_EVIDENCE_STATUSES = {
 }
 LEGAL_REVIEWER_ROLES = {
     "legal_reviewer",
+    "legal_counsel_approver",
     "external_counsel",
     "compliance_officer",
-    "tenant_admin",
+}
+FINAL_LEGAL_DECISION_ROLES = {
+    "legal_counsel_approver",
+    "external_counsel",
+}
+FINAL_LEGAL_DECISION_STATUSES = {
+    "approved",
+    "rejected",
+    "waived",
 }
 NORMALIZED_DECISION_TYPES = {
     "approved": "approve",
@@ -92,10 +104,40 @@ def decide_legal_review_use_case(
 
     payload = dict(input_data or {})
     decision_status = _decision_status(payload)
+    if (
+        decision_status in FINAL_LEGAL_DECISION_STATUSES
+        and trusted_reviewer_role not in FINAL_LEGAL_DECISION_ROLES
+    ):
+        allowed_roles = ", ".join(sorted(FINAL_LEGAL_DECISION_ROLES))
+        raise ValueError(
+            "final legal decisions require a dedicated counsel approver role: "
+            f"{allowed_roles}"
+        )
     waiver_reason = _clean_text(payload.get("waiverReason") or payload.get("waiver_reason"))
+    waiver_valid_until = _clean_text(
+        payload.get("waiverValidUntil") or payload.get("waiver_valid_until")
+    )
+    waiver_conditions = payload.get("waiverConditions")
+    if waiver_conditions is None:
+        waiver_conditions = payload.get("waiver_conditions")
+    waiver_conditions = (
+        list(waiver_conditions)
+        if isinstance(waiver_conditions, Sequence)
+        and not isinstance(waiver_conditions, (str, bytes, bytearray))
+        else []
+    )
     comment = _clean_text(payload.get("comment") or payload.get("reviewComment"))
     if decision_status == "waived" and not waiver_reason:
         raise ValueError("waiverReason is required when decisionStatus is waived")
+    if decision_status == "waived" and not waiver_valid_until:
+        raise ValueError(
+            "waiverValidUntil is required when decisionStatus is waived"
+        )
+    if decision_status == "waived" and not waiver_conditions:
+        raise ValueError(
+            "waiverConditions must contain at least one condition when "
+            "decisionStatus is waived"
+        )
 
     records = review_loader(project_key, 500)
     review = next(
@@ -109,8 +151,22 @@ def decide_legal_review_use_case(
     if review is None:
         raise LookupError("Legal review not found")
 
+    projection_binding = _normalized_projection_binding(review)
+    if (
+        decision_status in FINAL_LEGAL_DECISION_STATUSES
+        and projection_binding is None
+    ):
+        raise ValueError(
+            "final legal decisions require the latest normalized legal review "
+            "projection ID, version, and projection hash"
+        )
+
     evidence = legal_evidence_readiness(review)
-    if decision_status == "approved" and not evidence["pass"]:
+    if (
+        decision_status == "approved"
+        and decision_writer is None
+        and not evidence["pass"]
+    ):
         raise ValueError(
             "Legal review approval requires a gate-eligible sealed evidence "
             "snapshot with at least one exact verified citation, current "
@@ -120,10 +176,40 @@ def decide_legal_review_use_case(
     timestamp = reviewed_at or datetime.now(timezone.utc).isoformat()
     intelligence = review.get("legalIntelligence")
     intelligence = intelligence if isinstance(intelligence, Mapping) else {}
+    snapshot_created_by = _clean_text(
+        intelligence.get("snapshotCreatedBy")
+        or intelligence.get("createdBy")
+    )
+    if (
+        decision_status in {"approved", "waived"}
+        and decision_writer is None
+        and not snapshot_created_by
+    ):
+        raise ValueError(
+            "final legal approval requires the authenticated snapshot maker "
+            "identity"
+        )
+    if (
+        decision_status in FINAL_LEGAL_DECISION_STATUSES
+        and decision_writer is None
+        and snapshot_created_by
+        and snapshot_created_by == trusted_reviewer
+    ):
+        raise ValueError(
+            "maker-checker separation requires a reviewer other than the "
+            "evidence snapshot creator"
+        )
     evidence_snapshot_id = _clean_text(
         intelligence.get("evidenceSnapshotId")
         or review.get("legalEvidenceSnapshotId")
     )
+    if (
+        decision_status in FINAL_LEGAL_DECISION_STATUSES
+        and not evidence_snapshot_id
+    ):
+        raise ValueError(
+            "final legal decisions require a normalized evidence snapshot"
+        )
     legal_finding_id = _clean_text(
         review.get("legalFindingId")
         or intelligence.get("legalFindingId")
@@ -132,16 +218,51 @@ def decide_legal_review_use_case(
     evidence_snapshot_sha256 = _clean_text(
         intelligence.get("snapshotSha256")
     )
+    legal_approval_delegation_id = _clean_text(
+        payload.get("legalApprovalDelegationId")
+        or payload.get("legal_approval_delegation_id")
+    )
+    expected_latest_decision_id = _clean_text(
+        payload.get("expectedLatestDecisionId")
+        or payload.get("expected_latest_decision_id")
+    )
+    if (
+        decision_status in FINAL_LEGAL_DECISION_STATUSES
+        and trusted_reviewer_role == "external_counsel"
+        and not legal_approval_delegation_id
+    ):
+        raise ValueError(
+            "external counsel final decisions require an explicit active "
+            "legalApprovalDelegationId"
+        )
     decision_reason = (
         waiver_reason
         or comment
         or _default_decision_reason(decision_status)
     )
+    projection_id = (
+        projection_binding.review_version_id
+        if projection_binding is not None
+        else None
+    )
+    projection_version = (
+        projection_binding.review_version
+        if projection_binding is not None
+        else None
+    )
+    projection_sha256 = (
+        projection_binding.projection_sha256
+        if projection_binding is not None
+        else None
+    )
     decision = {
-        "schemaVersion": "realytics-legal-review-decision-v1",
+        "schemaVersion": "realytics-legal-review-decision-v2",
         "decisionId": f"legal-review-decision:{uuid4()}",
         "projectId": project_key,
         "legalReviewId": review_key,
+        "legalReviewProjectionId": projection_id,
+        "legalReviewProjectionVersion": projection_version,
+        "legalReviewProjectionSha256": projection_sha256,
         "decisionStatus": decision_status,
         "reviewStatus": decision_status,
         "decisionType": NORMALIZED_DECISION_TYPES[decision_status],
@@ -159,6 +280,10 @@ def decide_legal_review_use_case(
         "reviewedAt": timestamp,
         "comment": comment,
         "waiverReason": waiver_reason,
+        "waiverValidUntil": waiver_valid_until,
+        "waiverConditions": waiver_conditions,
+        "legalApprovalDelegationId": legal_approval_delegation_id,
+        "expectedLatestDecisionId": expected_latest_decision_id,
         "evidenceAssessment": {
             "evidenceStatus": evidence["evidenceStatus"],
             "verifiedReferenceCount": evidence["verifiedReferenceCount"],
@@ -170,6 +295,9 @@ def decide_legal_review_use_case(
             "snapshotGateEligible": evidence["snapshotGateEligible"],
             "evidenceSnapshotVersion": evidence_snapshot_version,
             "evidenceSnapshotSha256": evidence_snapshot_sha256,
+            "legalReviewProjectionId": projection_id,
+            "legalReviewProjectionVersion": projection_version,
+            "legalReviewProjectionSha256": projection_sha256,
             "stale": evidence["stale"],
             "openConflictCount": evidence["openConflictCount"],
             "eligibleForApproval": evidence["pass"],
@@ -179,8 +307,16 @@ def decide_legal_review_use_case(
             "decisionStatus": decision_status,
             "evidenceSnapshotVersion": evidence_snapshot_version,
             "evidenceSnapshotSha256": evidence_snapshot_sha256,
+            "legalReviewProjectionId": projection_id,
+            "legalReviewProjectionVersion": projection_version,
+            "legalReviewProjectionSha256": projection_sha256,
             "comment": comment,
             "waiverReason": waiver_reason,
+            "waiverValidUntil": waiver_valid_until,
+            "waiverConditions": waiver_conditions,
+            "snapshotCreatedBy": snapshot_created_by,
+            "legalApprovalDelegationId": legal_approval_delegation_id,
+            "expectedLatestDecisionId": expected_latest_decision_id,
             "evidenceAssessment": {
                 "evidenceStatus": evidence["evidenceStatus"],
                 "verifiedReferenceCount": evidence["verifiedReferenceCount"],
@@ -188,9 +324,12 @@ def decide_legal_review_use_case(
                 "requiredClaimCount": evidence["requiredClaimCount"],
                 "verifiedClaimCount": evidence["verifiedClaimCount"],
                 "claimCoverageComplete": evidence["claimCoverageComplete"],
-                "evidenceSnapshotId": evidence["evidenceSnapshotId"],
-                "snapshotGateEligible": evidence["snapshotGateEligible"],
-                "stale": evidence["stale"],
+                    "evidenceSnapshotId": evidence["evidenceSnapshotId"],
+                    "snapshotGateEligible": evidence["snapshotGateEligible"],
+                    "legalReviewProjectionId": projection_id,
+                    "legalReviewProjectionVersion": projection_version,
+                    "legalReviewProjectionSha256": projection_sha256,
+                    "stale": evidence["stale"],
                 "openConflictCount": evidence["openConflictCount"],
                 "eligibleForApproval": evidence["pass"],
             },
@@ -207,7 +346,8 @@ def decide_legal_review_use_case(
     updated["reviewStatus"] = decision_status
     updated["humanReviewStatus"] = (
         "counsel_approved"
-        if decision_status == "approved" and trusted_reviewer_role == "external_counsel"
+        if decision_status == "approved"
+        and trusted_reviewer_role in FINAL_LEGAL_DECISION_ROLES
         else decision_status
     )
     updated["reviewedBy"] = trusted_reviewer
@@ -215,12 +355,14 @@ def decide_legal_review_use_case(
     updated["reviewComment"] = comment
     if waiver_reason:
         updated["waiverReason"] = waiver_reason
+        updated["waiverValidUntil"] = waiver_valid_until
+        updated["waiverConditions"] = waiver_conditions
     updated["requiresHumanReview"] = decision_status not in {"approved", "waived"}
 
     # A normalized repository implements an INSERT-only writer.  Write that
     # durable event before refreshing the mutable legacy projection.
     normalized_decision_persisted = False
-    if decision_writer is not None and evidence_snapshot_id:
+    if decision_writer is not None:
         decision_writer(deepcopy(decision))
         normalized_decision_persisted = True
     saved = review_writer(project_key, updated)
@@ -257,7 +399,7 @@ def decide_legal_review_use_case(
                 else (
                     "decision_writer_not_configured"
                     if decision_writer is None
-                    else "legal_evidence_snapshot_id_missing"
+                    else "normalized_decision_not_persisted"
                 )
             ),
         },
@@ -347,6 +489,23 @@ def legal_human_review_status(review: Mapping[str, Any] | None) -> str:
             human_review.get("status") or human_review.get("reviewStatus") or "pending"
         ).strip().lower()
     return "pending"
+
+
+def _normalized_projection_binding(
+    review: Mapping[str, Any],
+) -> LegalReviewDecisionProjectionBinding | None:
+    """Read only the immutable fields emitted by the normalized repository."""
+
+    try:
+        return LegalReviewDecisionProjectionBinding.model_validate(
+            {
+                "reviewVersionId": review.get("reviewVersionId"),
+                "reviewVersion": review.get("reviewVersion"),
+                "projectionSha256": review.get("projectionSha256"),
+            }
+        )
+    except ValueError:
+        return None
 
 
 def _decision_status(payload: Mapping[str, Any]) -> str:

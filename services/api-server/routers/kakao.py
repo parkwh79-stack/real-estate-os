@@ -2,9 +2,13 @@ import os
 from typing import Any, Dict
 from uuid import uuid4
 from urllib.parse import quote
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 
+from core.runtime_profile import (
+    legacy_oauth_sessions_enabled,
+    oauth_mock_callbacks_enabled,
+)
 from integrations.kakao import (
     build_kakao_authorize_url,
     build_safe_kakao_message_preview,
@@ -45,9 +49,28 @@ def create_kakao_authorize_url(payload: Dict[str, Any] | None = None):
         prompt=payload.get("prompt"),
     )
     if not res.get("ready") or not res.get("authorizeUrl"):
+        if not oauth_mock_callbacks_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "kakao_oauth_not_configured",
+                    "message": "Kakao OAuth is unavailable and mock callbacks are disabled.",
+                },
+            )
         base_url = os.environ.get("REALYTICS_API_BASE_URL", "http://127.0.0.1:8000")
         res["ready"] = True
         res["authorizeUrl"] = f"{base_url}/integrations/kakao/mock-callback?redirect_path={quote(redirect_path)}"
+    elif not legacy_oauth_sessions_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "legacy_oauth_session_disabled",
+                "message": (
+                    "API-owned Kakao OAuth sessions are disabled. "
+                    "Use the configured Supabase/OIDC login flow."
+                ),
+            },
+        )
     return res
 
 
@@ -56,6 +79,14 @@ def kakao_mock_callback(
     request: Request,
     redirect_path: str = Query("/start"),
 ):
+    if not oauth_mock_callbacks_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "kakao_oauth_mock_disabled",
+                "message": "Kakao mock callbacks are disabled outside explicit local/test use.",
+            },
+        )
     if redirect_path in {"/", "/dashboard"} or not redirect_path.startswith("/") or redirect_path.startswith("//") or "://" in redirect_path:
         redirect_path = "/start"
     tenant_id = "kakao-workspace"

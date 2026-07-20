@@ -10,7 +10,9 @@ from db.postgres_runtime_privileges import (
     FORBIDDEN_READ_ONLY_PRIVILEGES,
     LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
     LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
+    LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS,
     LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
+    LEGAL_PROVIDER_OPERATIONS_PRIVILEGES,
     PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
     PARSER_V2_TABLE_PRIVILEGES,
     REVOKE_PUBLIC_DATABASE_TEMPORARY_ENV,
@@ -40,9 +42,13 @@ def test_privilege_manifest_covers_every_parser_rls_table_exactly() -> None:
 
 
 def test_privilege_manifest_covers_legal_corpus_and_tenant_overlay_exactly() -> None:
-    assert set(LEGAL_INTELLIGENCE_TENANT_PRIVILEGES) == set(
-        postgres.LEGAL_INTELLIGENCE_RLS_TABLES
-    )
+    assert set(LEGAL_INTELLIGENCE_TENANT_PRIVILEGES) == {
+        *postgres.LEGAL_INTELLIGENCE_RLS_TABLES,
+        *(
+            set(postgres.LEGAL_GOVERNANCE_RLS_TABLES)
+            - set(postgres.LEGAL_PROVIDER_REPLAY_RLS_TABLES)
+        ),
+    }
     assert set(LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES) == {
         "legal_source_providers",
         "legal_sync_runs",
@@ -50,6 +56,9 @@ def test_privilege_manifest_covers_legal_corpus_and_tenant_overlay_exactly() -> 
         "legal_sync_scope_lease_events",
         "legal_sync_checkpoint_events",
         "legal_corpus_scope_completion_attestations",
+        "legal_corpus_required_target_contracts",
+        "legal_corpus_coverage_registries",
+        "legal_corpus_coverage_contracts",
         "legal_source_fetches",
         "legal_resources",
         "legal_resource_identity_crosswalks",
@@ -57,19 +66,47 @@ def test_privilege_manifest_covers_legal_corpus_and_tenant_overlay_exactly() -> 
         "legal_resource_version_lineages",
         "legal_provisions",
         "legal_citations",
+        "legal_citation_review_events",
         "legal_relation_assertions",
+        "legal_relation_review_events",
         "legal_term_definitions",
         "legal_term_provision_links",
+        "legal_term_source_links",
+        "legal_term_relations",
         "legal_semantic_artifacts",
     }
     assert set(LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES.values()) == {
-        ("SELECT",)
+        ("SELECT",),
+        (),
     }
+    assert LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES[
+        "legal_citation_review_events"
+    ] == ()
+    assert LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES[
+        "legal_relation_review_events"
+    ] == ()
     assert set(LEGAL_INTELLIGENCE_TENANT_PRIVILEGES.values()) == {
-        ("SELECT", "INSERT")
+        ("SELECT", "INSERT"),
+        ("SELECT",),
     }
+    for table in (
+        "project_legal_citation_review_versions",
+        "project_legal_citation_review_events",
+        "project_legal_relation_review_versions",
+        "project_legal_relation_review_events",
+    ):
+        assert LEGAL_INTELLIGENCE_TENANT_PRIVILEGES[table] == ("SELECT",)
     assert LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES == {
         "glossary_terms": ("SELECT",)
+    }
+    assert LEGAL_PROVIDER_OPERATIONS_PRIVILEGES == {
+        "legal_provider_quarantine": (),
+        "legal_provider_dead_letters": (),
+        "legal_provider_metrics": (),
+        "legal_provider_replay_objects": (),
+        "legal_provider_replay_approval_events": (),
+        "legal_provider_replay_requests": (),
+        "legal_provider_replay_events": (),
     }
     assert "INSERT" in FORBIDDEN_READ_ONLY_PRIVILEGES
     for table, privileges in LEGAL_INTELLIGENCE_TENANT_PRIVILEGES.items():
@@ -160,6 +197,8 @@ def test_privilege_audit_rejects_legal_corpus_write_and_overlay_update() -> None
     grants.add(("legal_resource_versions", "INSERT"))
     grants.add(("legal_review_decisions", "UPDATE"))
     grants.add(("glossary_terms", "DELETE"))
+    grants.add(("legal_provider_dead_letters", "INSERT"))
+    grants.add(("legal_provider_replay_requests", "SELECT"))
 
     missing, forbidden = audit_runtime_privileges(
         _AuditCursor(grants),
@@ -169,6 +208,8 @@ def test_privilege_audit_rejects_legal_corpus_write_and_overlay_update() -> None
     assert missing == []
     assert forbidden == [
         "glossary_terms.DELETE",
+        "legal_provider_dead_letters.INSERT",
+        "legal_provider_replay_requests.SELECT",
         "legal_resource_versions.INSERT",
         "legal_review_decisions.UPDATE",
     ]
@@ -282,6 +323,13 @@ def test_provisioner_revokes_parser_tables_and_grants_only_manifest() -> None:
         'GRANT USAGE ON SCHEMA "extensions" TO "realytics_runtime"'
         in sql
     )
+    assert LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS == (
+        "digest(bytea, text)",
+    )
+    assert (
+        'GRANT EXECUTE ON FUNCTION "extensions".digest(bytea, text) '
+        'TO "realytics_runtime"'
+    ) in sql
     assert (
         'ALTER ROLE "realytics_runtime" IN DATABASE "postgres" '
         'SET search_path TO "realytics", "extensions", "pg_temp"'
@@ -302,9 +350,19 @@ def test_provisioner_revokes_parser_tables_and_grants_only_manifest() -> None:
         'TO "realytics_runtime"'
     ) in sql
     assert (
-        'GRANT SELECT, INSERT ON TABLE "realytics"."legal_review_decisions" '
+        'GRANT SELECT ON TABLE "realytics"."legal_review_decisions" '
         'TO "realytics_runtime"'
     ) in sql
+    assert (
+        'GRANT SELECT ON TABLE '
+        '"realytics"."project_legal_citation_review_versions" '
+        'TO "realytics_runtime"'
+    ) in sql
+    assert (
+        'GRANT SELECT, INSERT ON TABLE '
+        '"realytics"."project_legal_citation_review_versions"'
+        not in sql
+    )
     assert (
         'GRANT SELECT ON TABLE "realytics"."glossary_terms" '
         'TO "realytics_runtime"'
@@ -317,6 +375,19 @@ def test_provisioner_revokes_parser_tables_and_grants_only_manifest() -> None:
         'GRANT UPDATE ON TABLE "realytics"."legal_review_decisions"'
         not in sql
     )
+    assert (
+        'GRANT INSERT ON TABLE "realytics"."legal_provider_dead_letters"'
+        not in sql
+    )
+    assert (
+        'GRANT SELECT ON TABLE "realytics"."legal_provider_replay_requests"'
+        not in sql
+    )
+    assert (
+        'REVOKE ALL PRIVILEGES ON TABLE '
+        '"realytics"."legal_provider_replay_requests" '
+        'FROM "realytics_runtime"'
+    ) in sql
     assert 'GRANT UPDATE ON TABLE "realytics"."parser_runs"' not in sql
     assert 'GRANT DELETE' not in sql
     assert 'TO "anon"' not in sql
@@ -346,6 +417,11 @@ def test_rendered_manifest_matches_private_schema_contract() -> None:
     ) in sql
     assert 'GRANT USAGE ON SCHEMA "extensions" TO "realytics_runtime"' in sql
     assert 'GRANT CREATE ON SCHEMA "extensions"' not in sql
+    assert (
+        'GRANT EXECUTE ON FUNCTION '
+        '"realytics".legal_try_timestamptz(TEXT) '
+        'TO "realytics_runtime"'
+    ) in sql
     assert 'TO "anon"' not in sql
     assert 'TO "authenticated"' not in sql
     assert 'TO "service_role"' not in sql

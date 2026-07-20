@@ -10,6 +10,7 @@ from db.legal_raw_object_storage import (
     S3ImmutableLegalRawObjectStore,
     get_immutable_legal_raw_object_store,
 )
+from db.legal_sync_database import connect_legal_sync_database
 from db.repositories.legal_corpus_completion_repository import (
     PostgresLegalCorpusCompletionRepository,
 )
@@ -20,7 +21,20 @@ from db.repositories.legal_corpus_repository import (
 from use_cases.legal_corpus_coordinator import (
     LegalCorpusBatchCoordinator,
 )
+from use_cases.legal_corpus_registry import (
+    VersionedOfficialCorpusSourceRegistry,
+    build_default_official_corpus_source_registry,
+)
 from use_cases.legal_corpus_sync import LegalCorpusSyncService
+from use_cases.legal_corpus_worker import (
+    LegalCorpusProgressRepository,
+    LegalCorpusRuntimeConfiguration,
+    LegalCorpusScheduler,
+    LegalCorpusWorker,
+    LegalCorpusWorkerConfigurationError,
+    PostgresLegalCorpusProgressRepository,
+    load_legal_corpus_runtime_configuration,
+)
 
 
 def build_legal_corpus_batch_coordinator(
@@ -84,4 +98,87 @@ def _positive_integer_env(name: str, default: int) -> int:
     return value
 
 
-__all__ = ["build_legal_corpus_batch_coordinator"]
+def build_legal_corpus_worker(
+    *,
+    configuration: LegalCorpusRuntimeConfiguration | None = None,
+    registry: VersionedOfficialCorpusSourceRegistry | None = None,
+    coordinator: LegalCorpusBatchCoordinator | None = None,
+    progress_repository: LegalCorpusProgressRepository | None = None,
+    connection_factory: Callable[[], Any] | None = None,
+    raw_object_store: S3ImmutableLegalRawObjectStore | None = None,
+    clock: Callable[[], datetime] | None = None,
+    verify_storage: bool = True,
+) -> LegalCorpusWorker:
+    """Build the external worker without an API-runtime fallback."""
+
+    resolved_configuration = (
+        configuration or load_legal_corpus_runtime_configuration()
+    )
+    if not resolved_configuration.worker_enabled:
+        raise LegalCorpusWorkerConfigurationError(
+            "REALYTICS_LEGAL_CORPUS_WORKER_ENABLED must be true"
+        )
+    resolved_coordinator = coordinator or (
+        build_legal_corpus_batch_coordinator(
+            connection_factory=connection_factory,
+            raw_object_store=raw_object_store,
+            clock=clock,
+            verify_storage=verify_storage,
+        )
+    )
+    resolved_progress = progress_repository or (
+        PostgresLegalCorpusProgressRepository(
+            connection_factory=(
+                connection_factory
+                if connection_factory is not None
+                else connect_legal_sync_database
+            ),
+            search_path=os.environ.get(
+                "REALYTICS_LEGAL_SYNC_SEARCH_PATH",
+                "realytics,extensions,public,pg_temp",
+            ),
+        )
+    )
+    return LegalCorpusWorker(
+        coordinator=resolved_coordinator,
+        registry=(
+            registry or build_default_official_corpus_source_registry()
+        ),
+        progress_repository=resolved_progress,
+        configuration=resolved_configuration,
+        clock=clock,
+    )
+
+
+def build_legal_corpus_scheduler(
+    *,
+    configuration: LegalCorpusRuntimeConfiguration | None = None,
+    worker: LegalCorpusWorker | None = None,
+    **worker_options: Any,
+) -> LegalCorpusScheduler:
+    resolved_configuration = (
+        configuration or load_legal_corpus_runtime_configuration()
+    )
+    if (
+        not resolved_configuration.worker_enabled
+        or resolved_configuration.schedule_seconds is None
+    ):
+        raise LegalCorpusWorkerConfigurationError(
+            "legal corpus worker and schedule must be configured"
+        )
+    resolved_worker = worker or build_legal_corpus_worker(
+        configuration=resolved_configuration,
+        **worker_options,
+    )
+    return LegalCorpusScheduler(
+        resolved_worker,
+        interval_seconds=resolved_configuration.schedule_seconds,
+        run_on_startup=resolved_configuration.run_on_startup,
+    )
+
+
+__all__ = [
+    "build_legal_corpus_batch_coordinator",
+    "build_legal_corpus_scheduler",
+    "build_legal_corpus_worker",
+]

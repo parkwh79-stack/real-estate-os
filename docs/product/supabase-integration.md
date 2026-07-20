@@ -7,17 +7,45 @@ apply, role provisioning, and live RLS checks below all pass.
 ## 1. Authentication path
 
 ```text
-Next.js Supabase client
-  -> email/password Supabase Auth
-  -> Supabase access token
-  -> Authorization: Bearer <token>
-  -> Next.js same-origin API proxy
+Browser
+  -> Next.js Supabase Auth Route Handler
+       email/password: /api/auth/supabase/password
+       Google/Kakao PKCE: /api/auth/supabase/oauth -> /auth/callback
+  -> request-scoped @supabase/ssr server client
+  -> HttpOnly + Secure(production) + SameSite=Lax session cookies
+  -> Next.js same-origin FastAPI BFF
+  -> getClaims() signature/expiry verification
+  -> getSession() access-token retrieval only after verified claims
+  -> server-to-server Authorization: Bearer <token>
   -> FastAPI ES256/RS256 JWKS verification
   -> REALYTICS tenant/RBAC authorization
 ```
 
-- The browser uses only `NEXT_PUBLIC_SUPABASE_URL` and the publishable key.
+- `@supabase/ssr` is pinned to `0.12.3` and `@supabase/supabase-js` to
+  `2.110.7`; the lockfile is committed.
+- The browser never receives or stores a REALYTICS session ID, Supabase access
+  token, or refresh token in `localStorage`/`sessionStorage` or application
+  React state. Legacy `realytics.auth.session.v1` data is deleted on startup.
+- Supabase password, OAuth start, PKCE code exchange, refresh, and logout all
+  execute through request-scoped Next.js server clients. The BFF profile
+  intentionally makes the SSR cookies HttpOnly, so browser-side Supabase Auth
+  clients must not be reintroduced for session maintenance.
+- OAuth redirects contain a short-lived PKCE authorization code, never a
+  REALYTICS `session_id`. Google and Kakao must be enabled in Supabase Auth and
+  `/auth/callback` must be in the redirect allow list.
+- Production requires an explicit HTTPS `REALYTICS_WEB_ORIGIN`; OAuth start and
+  callback return `503` instead of trusting a request/forwarded Host fallback
+  when that canonical origin is missing or invalid.
+- The browser uses only the Supabase URL and publishable key as public build
+  configuration; the publishable key is consumed by server Route Handlers in
+  this BFF profile.
 - The publishable key never grants server administration or bypasses RLS.
+- The FastAPI BFF strips caller-supplied `Authorization`,
+  `X-REALYTICS-SESSION-ID`, `X-REALYTICS-USER-ID`, and tenant headers. It injects
+  a bearer only after `getClaims()` succeeds. `getSession()` alone is never an
+  authorization decision.
+- Authenticated responses are `private, no-store`, and cross-site mutation
+  requests are rejected before contacting FastAPI.
 - FastAPI validates issuer, audience, expiry, algorithm, key type, and `kid`.
 - JWKS is cached for ten minutes and refreshed once immediately when a rotated
   signing key is not found.
@@ -30,6 +58,14 @@ Next.js Supabase client
 
 User-controlled `user_metadata` is display-only and must never grant tenant or
 role authority.
+
+Local tenant/user/session bootstrap is an explicit development/test feature. It
+requires both `NEXT_PUBLIC_REALYTICS_ENABLE_LOCAL_AUTH=true` in the Web build
+and `REALYTICS_ENABLE_LOCAL_AUTH=true` on the Web/API servers, and is
+unconditionally disabled in a production Next.js build. The legacy
+`/auth/kakao/session?session_id=...` compatibility exchange additionally
+requires `REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS=true`; it returns 404 by
+default and in production. Production social login uses Supabase PKCE only.
 
 For a shared workspace, disable
 `REALYTICS_IDP_PERSONAL_TENANT_FALLBACK` and issue the following claims through a

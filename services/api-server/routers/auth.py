@@ -9,6 +9,10 @@ from fastapi.responses import RedirectResponse
 
 from core.authz import identity_context_from_request, permissions_for_role
 from core.idp import idp_status
+from core.runtime_profile import (
+    legacy_oauth_sessions_enabled,
+    local_auth_bootstrap_enabled,
+)
 from core.secret_vault import ingest_user_credential, revoke_credential, revoke_session_credentials
 from integrations.kakao import (
     build_kakao_identity_records,
@@ -35,8 +39,24 @@ from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_contex
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _require_local_auth_bootstrap() -> None:
+    if local_auth_bootstrap_enabled():
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "local_auth_disabled",
+            "message": (
+                "Local tenant, user, and session bootstrap is disabled. "
+                "Use a verified bearer token or an approved identity-provider flow."
+            ),
+        },
+    )
+
+
 @router.post("/tenants")
 def create_or_update_tenant(payload: Dict[str, Any]):
+    _require_local_auth_bootstrap()
     tenant = upsert_tenant(payload)
     return {
         "schemaVersion": "realytics-tenant-v1",
@@ -46,6 +66,7 @@ def create_or_update_tenant(payload: Dict[str, Any]):
 
 @router.post("/users")
 def create_or_update_user(payload: Dict[str, Any]):
+    _require_local_auth_bootstrap()
     try:
         user = upsert_user(payload)
     except ValueError as exc:
@@ -61,6 +82,7 @@ def get_users(
     tenant_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
 ):
+    _require_local_auth_bootstrap()
     return {
         "schemaVersion": "realytics-user-list-v1",
         "users": list_users(tenant_id=tenant_id, limit=limit),
@@ -69,6 +91,7 @@ def get_users(
 
 @router.post("/session")
 def create_session(payload: Dict[str, Any]):
+    _require_local_auth_bootstrap()
     try:
         session = create_user_session(payload)
     except ValueError as exc:
@@ -394,6 +417,17 @@ def kakao_oidc_callback(
     error: str | None = Query(None),
     error_description: str | None = Query(None),
 ):
+    if not legacy_oauth_sessions_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "legacy_oauth_session_disabled",
+                "message": (
+                    "API-owned Kakao OAuth sessions are disabled. "
+                    "Use the configured Supabase/OIDC login flow."
+                ),
+            },
+        )
     if error:
         record_user_activity_log(
             {

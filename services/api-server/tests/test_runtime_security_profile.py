@@ -4,7 +4,14 @@ import pytest
 
 from core import idp, oidc
 from core.authz import rbac_mode
-from core.runtime_profile import cors_origins, validate_security_configuration
+from core.runtime_profile import (
+    cors_origins,
+    legacy_oauth_sessions_enabled,
+    local_auth_bootstrap_enabled,
+    oauth_mock_callbacks_enabled,
+    server_issued_sessions_enabled,
+    validate_security_configuration,
+)
 
 
 SECURITY_ENV_KEYS = [
@@ -26,6 +33,11 @@ SECURITY_ENV_KEYS = [
     "REALYTICS_ASYNC_JOB_MODE",
     "REALYTICS_OBJECT_STORAGE",
     "REALYTICS_S3_BUCKET",
+    "REALYTICS_ENABLE_LOCAL_AUTH",
+    "REALYTICS_ENABLE_OAUTH_MOCKS",
+    "REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS",
+    "REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY",
+    "REALYTICS_IDP_PERSONAL_TENANT_FALLBACK",
 ]
 
 
@@ -72,6 +84,26 @@ def test_hardened_profile_accepts_strict_oidc_and_https_origin(monkeypatch):
     assert rbac_mode() == "strict"
     assert idp.tenant_isolation_mode() == "strict"
     assert cors_origins() == ["https://app.realytics.example"]
+
+
+def test_hardened_profile_cannot_enable_legacy_auth_or_oauth_mocks(monkeypatch):
+    _clear_security_env(monkeypatch)
+    monkeypatch.setenv("REALYTICS_ENVIRONMENT", "staging")
+    monkeypatch.setenv("REALYTICS_ENABLE_LOCAL_AUTH", "true")
+    monkeypatch.setenv("REALYTICS_ENABLE_OAUTH_MOCKS", "true")
+    monkeypatch.setenv("REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS", "true")
+
+    assert local_auth_bootstrap_enabled() is False
+    assert server_issued_sessions_enabled() is False
+    assert oauth_mock_callbacks_enabled() is False
+    assert legacy_oauth_sessions_enabled() is False
+    with pytest.raises(RuntimeError) as exc_info:
+        validate_security_configuration()
+
+    message = str(exc_info.value)
+    assert "REALYTICS_ENABLE_LOCAL_AUTH=false" in message
+    assert "REALYTICS_ENABLE_OAUTH_MOCKS=false" in message
+    assert "REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS=false" in message
 
 
 def test_oidc_mode_verifies_token_before_building_principal(monkeypatch):

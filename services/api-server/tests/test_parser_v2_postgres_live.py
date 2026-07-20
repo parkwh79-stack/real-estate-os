@@ -15,6 +15,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,6 +30,9 @@ from db.postgres_runtime_privileges import (
 from db.repositories.parser_v2_repository import (
     APPROVED_INPUT_SNAPSHOT_RECORD_TYPE,
     ParserV2PostgresRepository,
+)
+from db.repositories.legal_intelligence_repository import (
+    PostgresLegalTenantOverlayRepository,
 )
 
 
@@ -154,7 +158,7 @@ def _insert_live_legal_gate_case(
     version_verification_status: str = "schema_verified",
     version_has_verified_at: bool = True,
     fetch_status: str = "succeeded",
-) -> None:
+) -> dict[str, Any]:
     """Insert one complete legal lineage plus a deferred gate snapshot."""
 
     now = "2026-07-18T00:00:00+00:00"
@@ -164,6 +168,12 @@ def _insert_live_legal_gate_case(
     version_id = f"legal-live-version-{suffix}"
     provision_id = f"legal-live-provision-{suffix}"
     snapshot_id = f"legal-live-snapshot-{suffix}"
+    legal_review_id = f"legal-live-review-{suffix}"
+    required_claim_set_id = f"legal-live-required-claims-{suffix}"
+    snapshot_version = int(suffix[:7], 16) + 1
+    snapshot_hash = _stable_hash(f"snapshot:{suffix}")
+    claim_hash = _stable_hash(f"claim:{suffix}")
+    claim_set_hash = _stable_hash(f"claim-1:{claim_hash}")
 
     cursor.execute(
         "SELECT set_config('realytics.tenant_id', %s, true)",
@@ -268,6 +278,7 @@ def _insert_live_legal_gate_case(
     )
 
     coverage = {
+        "legalReviewId": legal_review_id,
         "coverageComplete": True,
         "expectedCitationCount": declared_count,
         "sealedCitationCount": declared_count,
@@ -277,23 +288,70 @@ def _insert_live_legal_gate_case(
     }
     cursor.execute(
         """
+        INSERT INTO legal_required_claim_sets(
+            legal_required_claim_set_id, tenant_id, project_id,
+            claim_set_key, claim_set_version, review_scope, status,
+            claim_set_sha256, created_by, created_at,
+            approved_by, approved_at, metadata_json
+        ) VALUES (
+            %s, %s, %s, %s, 1, 'approval_gate', 'approved',
+            %s, 'live-policy-maker', %s,
+            'live-policy-checker', %s, '{}'::jsonb
+        )
+        """,
+        (
+            required_claim_set_id,
+            TENANT_A,
+            PROJECT_A,
+            f"live-required-claims-{suffix}",
+            claim_set_hash,
+            now,
+            now,
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO legal_required_claims(
+            legal_required_claim_id, tenant_id, project_id,
+            legal_required_claim_set_id, claim_key,
+            claim_text_sha256, ordinal, metadata_json
+        ) VALUES (
+            %s, %s, %s, %s, 'claim-1', %s, 1, '{}'::jsonb
+        )
+        """,
+        (
+            f"legal-live-required-claim-{suffix}",
+            TENANT_A,
+            PROJECT_A,
+            required_claim_set_id,
+            claim_hash,
+        ),
+    )
+    cursor.execute(
+        """
         INSERT INTO legal_evidence_snapshots(
             legal_evidence_snapshot_id, tenant_id, project_id,
             snapshot_version, as_of_date, freshness_policy_version,
             snapshot_sha256, citation_verification_status,
             has_open_conflicts, is_stale, gate_eligible,
+            legal_required_claim_set_id, required_claim_set_sha256,
+            legal_review_id,
             created_by, created_at, metadata_json
         ) VALUES (
             %s, %s, %s, %s, DATE '2026-07-18', 'live-policy-v1',
-            %s, 'verified', FALSE, FALSE, TRUE, 'live-test', %s, %s::jsonb
+            %s, 'verified', FALSE, FALSE, TRUE,
+            %s, %s, %s, 'live-test', %s, %s::jsonb
         )
         """,
         (
             snapshot_id,
             TENANT_A,
             PROJECT_A,
-            int(suffix[:7], 16) + 1,
-            _stable_hash(f"snapshot:{suffix}"),
+            snapshot_version,
+            snapshot_hash,
+            required_claim_set_id,
+            claim_set_hash,
+            legal_review_id,
             now,
             json.dumps(coverage),
         ),
@@ -320,11 +378,82 @@ def _insert_live_legal_gate_case(
             version_id,
             provision_id if item_has_provision else None,
             source_fetch_id,
-            _stable_hash(f"claim:{suffix}"),
+            claim_hash,
             _stable_hash(f"excerpt:{suffix}"),
             now,
         ),
     )
+    projection_id = f"legal-live-review-projection-{suffix}"
+    cursor.execute(
+        """
+        INSERT INTO project_legal_review_versions(
+            review_version_id, tenant_id, project_id,
+            review_id, review_version, status, review_level,
+            evidence_status, evidence_locator_count,
+            verified_evidence_count, verified_reference_count,
+            verified_citation_count, required_claim_count,
+            verified_claim_count, claim_coverage_complete,
+            open_conflict_count, evidence_stale,
+            citation_verification_status,
+            legal_evidence_snapshot_id, snapshot_version,
+            snapshot_sha256, snapshot_gate_eligible,
+            required_claim_set_id, required_claim_set_sha256,
+            parser_status, analysis_only, report_eligible,
+            human_review_status, record_locator_json,
+            evidence_json, parser_json, display_json,
+            created_by, created_at
+        ) VALUES (
+            %s, %s, %s, %s, 1, 'caution', 'preliminary',
+            'verified', 1, 1, 1, 1, 1, 1, TRUE,
+            0, FALSE, 'verified',
+            %s, %s, %s, TRUE, %s, %s,
+            'not_applicable', TRUE, FALSE, 'pending',
+            %s::jsonb, %s::jsonb, %s::jsonb, '{}'::jsonb,
+            'live-legal-pod-runner', %s
+        )
+        RETURNING projection_sha256
+        """,
+        (
+            projection_id,
+            TENANT_A,
+            PROJECT_A,
+            legal_review_id,
+            snapshot_id,
+            snapshot_version,
+            snapshot_hash,
+            required_claim_set_id,
+            claim_set_hash,
+            json.dumps(
+                {
+                    "sourceType": "legal_review_record",
+                    "reviewId": legal_review_id,
+                }
+            ),
+            json.dumps(
+                {
+                    "status": "verified",
+                    "evidenceLocators": [
+                        {
+                            "sourceType": "api_row",
+                            "resourceId": resource_id,
+                            "resourceVersionId": version_id,
+                        }
+                    ],
+                }
+            ),
+            json.dumps({"status": "not_applicable"}),
+            now,
+        ),
+    )
+    projection_hash = str(cursor.fetchone()[0])
+    return {
+        "legalReviewId": legal_review_id,
+        "snapshotId": snapshot_id,
+        "snapshotVersion": snapshot_version,
+        "snapshotSha256": snapshot_hash,
+        "legalReviewProjectionId": projection_id,
+        "legalReviewProjectionSha256": projection_hash,
+    }
 
 
 def _seed_tenants_projects_and_profiles(conn: Any) -> None:
@@ -637,6 +766,130 @@ def test_live_gate_snapshot_reconciles_counts_and_corpus_lineage(
     finally:
         conn.rollback()
         conn.close()
+
+
+def test_live_normalized_approval_readiness_rechecks_snapshot_and_decision(
+    live_database: _LiveDatabase,
+) -> None:
+    decision_clock = datetime.now(timezone.utc)
+    delegation_valid_from = decision_clock - timedelta(days=1)
+    delegation_valid_until = decision_clock + timedelta(days=1)
+    delegation_created_at = decision_clock - timedelta(days=2)
+    conn = live_database.connect_admin()
+    try:
+        suffix = uuid4().hex
+        with conn.cursor() as cursor:
+            case = _insert_live_legal_gate_case(
+                cursor,
+                suffix=suffix,
+                declared_count=1,
+            )
+            delegation_id = f"legal-live-delegation-{suffix}:v1"
+            cursor.execute(
+                """
+                INSERT INTO legal_approval_delegations (
+                    legal_approval_delegation_id,
+                    tenant_id, project_id, delegation_key,
+                    delegation_version, grantor_id, grantor_role,
+                    grantee_id, grantee_role, scope,
+                    valid_from, valid_until, status, reason,
+                    supersedes_delegation_id, created_at, metadata_json
+                ) VALUES (
+                    %s, %s, %s, %s, 1,
+                    'live-legal-approver',
+                    'legal_counsel_approver',
+                    'live-external-counsel',
+                    'external_counsel',
+                    'approval_gate',
+                    %s,
+                    %s,
+                    'active',
+                    'Live external counsel delegation.',
+                    NULL,
+                    %s,
+                    '{}'::jsonb
+                )
+                """,
+                (
+                    delegation_id,
+                    TENANT_A,
+                    PROJECT_A,
+                    f"legal-live-delegation-{suffix}",
+                    delegation_valid_from,
+                    delegation_valid_until,
+                    delegation_created_at,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    repository = PostgresLegalTenantOverlayRepository(
+        tenant_id=TENANT_A,
+        project_id=PROJECT_A,
+        connection_factory=live_database.connect_admin,
+        schema=live_database.schema_name,
+    )
+    repository.append_review_decision(
+        {
+            "decisionId": f"legal-live-decision-{suffix}",
+            "decisionType": "approve",
+            "decisionScope": "approval_gate",
+            "reason": "Live normalized readiness contract test.",
+            "reviewerId": "live-external-counsel",
+            "reviewerRole": "external_counsel",
+            "legalApprovalDelegationId": delegation_id,
+            "decidedAt": decision_clock.isoformat(),
+            "legalEvidenceSnapshotId": case["snapshotId"],
+            "legalReviewProjectionId": case[
+                "legalReviewProjectionId"
+            ],
+            "legalReviewProjectionVersion": 1,
+            "legalReviewProjectionSha256": (
+                f"sha256:{case['legalReviewProjectionSha256']}"
+            ),
+            "metadata": {
+                "legalReviewId": case["legalReviewId"],
+                "evidenceSnapshotVersion": case["snapshotVersion"],
+                "evidenceSnapshotSha256": (
+                    f"sha256:{case['snapshotSha256']}"
+                ),
+                "legalReviewProjectionId": case[
+                    "legalReviewProjectionId"
+                ],
+                "legalReviewProjectionVersion": 1,
+                "legalReviewProjectionSha256": (
+                    f"sha256:{case['legalReviewProjectionSha256']}"
+                ),
+            },
+        }
+    )
+
+    ready = repository.evaluate_approval_readiness(
+        legal_review_id=case["legalReviewId"],
+        evidence_snapshot_id=case["snapshotId"],
+        expected_snapshot_version=case["snapshotVersion"],
+        expected_snapshot_sha256=f"sha256:{case['snapshotSha256']}",
+    )
+    changed_identity = repository.evaluate_approval_readiness(
+        legal_review_id=case["legalReviewId"],
+        evidence_snapshot_id=case["snapshotId"],
+        expected_snapshot_version=case["snapshotVersion"],
+        expected_snapshot_sha256="sha256:" + ("f" * 64),
+    )
+
+    assert ready["pass"] is True
+    assert ready["source"] == "normalized_postgres"
+    assert ready["lineageValid"] is True
+    assert ready["legalReviewProjectionId"] == (
+        case["legalReviewProjectionId"]
+    )
+    assert ready["legalReviewProjectionSha256"] == (
+        f"sha256:{case['legalReviewProjectionSha256']}"
+    )
+    assert ready["humanReviewStatus"] == "counsel_approved"
+    assert changed_identity["pass"] is False
+    assert changed_identity["reason"] == "snapshot_identity_mismatch"
 
 
 def test_live_successful_source_fetch_requires_immutable_object_version(

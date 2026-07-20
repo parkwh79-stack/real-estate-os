@@ -37,6 +37,9 @@ from legal_intelligence.effective_time import (
     EffectiveVersionWindow,
     validate_effective_time_lineage,
 )
+from legal_intelligence.corpus_coverage import (
+    OfficialCorpusCoverageIdentity,
+)
 
 
 class LegalCorpusRepositoryError(RuntimeError):
@@ -100,6 +103,7 @@ class LegalSyncRunRecord:
     lease_ttl_seconds: int
     requested_at: datetime
     metadata: Mapping[str, Any]
+    coverage_contract_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -371,16 +375,18 @@ _INSERT_RUN_SQL = """
 INSERT INTO legal_sync_runs(
     sync_run_id, provider_id, sync_kind, requested_scope,
     requested_scope_hash, checkpoint_before, page_hash, page_record_count,
-    idempotency_key, input_hash, requested_by, requested_at, metadata_json
+    idempotency_key, input_hash, requested_by, requested_at,
+    coverage_contract_id, metadata_json
 ) VALUES (
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
 )
 ON CONFLICT DO NOTHING
 RETURNING sync_run_id
 """
 _SELECT_RUN_SQL = """
 SELECT provider_id, input_hash, idempotency_key, requested_scope,
-       requested_scope_hash, checkpoint_before, page_hash, page_record_count
+       requested_scope_hash, checkpoint_before, page_hash, page_record_count,
+       coverage_contract_id
 FROM legal_sync_runs
 WHERE sync_run_id = %s
 """
@@ -712,6 +718,7 @@ class PostgresLegalCorpusSyncRepository:
                         run.input_hash,
                         run.requested_by,
                         run.requested_at,
+                        run.coverage_contract_id,
                         _json(run.metadata),
                     ),
                 )
@@ -733,6 +740,12 @@ class PostgresLegalCorpusSyncRepository:
                         )
                         or str(existing[6]) != run.page_hash
                         or int(existing[7]) != run.page_record_count
+                        or (
+                            str(existing[8])
+                            if existing[8] is not None
+                            else None
+                        )
+                        != run.coverage_contract_id
                     ):
                         raise LegalCorpusImmutableConflict(
                             "sync run identity is bound to different input"
@@ -1490,6 +1503,9 @@ class PostgresLegalCorpusSyncRepository:
                 _json(
                     {
                         "sourceFetchId": publication.fetch.source_fetch_id,
+                        "coverageIdentity": publication.fetch.metadata.get(
+                            "coverageIdentity"
+                        ),
                         "legalResourceVersionIds": [
                             item.version.legal_resource_version_id
                             for item in publication.records
@@ -3027,6 +3043,7 @@ def _same_run_envelope(
         )
         and hmac.compare_digest(left.page_hash, right.page_hash)
         and left.page_record_count == right.page_record_count
+        and left.coverage_contract_id == right.coverage_contract_id
     )
 
 
@@ -3316,9 +3333,65 @@ def _publication_page_hash(
 
 
 def _validate_sync_run_envelope(run: LegalSyncRunRecord) -> None:
-    expected_scope_hash = _scope_hash(
-        run.provider.provider_id, run.requested_scope
-    )
+    raw_identity = run.metadata.get("coverageIdentity")
+    if run.coverage_contract_id is None:
+        if raw_identity is not None:
+            raise LegalCorpusRepositoryError(
+                "coverage identity requires a coverage contract binding"
+            )
+        expected_scope_hash = _scope_hash(
+            run.provider.provider_id, run.requested_scope
+        )
+    else:
+        if not isinstance(raw_identity, Mapping):
+            raise LegalCorpusRepositoryError(
+                "coverage contract binding requires typed coverage identity"
+            )
+        try:
+            identity = OfficialCorpusCoverageIdentity(
+                provider_key=str(raw_identity.get("providerKey") or ""),
+                provider_revision=int(
+                    raw_identity.get("providerRevision") or 0
+                ),
+                registry_version=str(
+                    raw_identity.get("registryVersion") or ""
+                ),
+                resource_kind=str(
+                    raw_identity.get("resourceKind") or ""
+                ),
+                target=str(raw_identity.get("target") or ""),
+                query_sha256=str(
+                    raw_identity.get("querySha256") or ""
+                ),
+                source_adapter_version=str(
+                    raw_identity.get("sourceAdapterVersion") or ""
+                ),
+                boundary_contract_version=str(
+                    raw_identity.get("boundaryContractVersion") or ""
+                ),
+                coverage_contract_version=str(
+                    raw_identity.get("coverageContractVersion") or ""
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            raise LegalCorpusRepositoryError(
+                "coverage identity is malformed"
+            ) from exc
+        identity.assert_provider(
+            provider_key=run.provider.provider_key,
+            provider_revision=run.provider.provider_revision,
+            provider_id=run.provider.provider_id,
+        )
+        if not hmac.compare_digest(
+            identity.coverage_contract_id,
+            run.coverage_contract_id,
+        ):
+            raise LegalCorpusRepositoryError(
+                "coverage contract id differs from typed identity"
+            )
+        expected_scope_hash = identity.scope_hash(
+            requested_scope=run.requested_scope
+        )
     if not hmac.compare_digest(
         run.requested_scope_hash, expected_scope_hash
     ):

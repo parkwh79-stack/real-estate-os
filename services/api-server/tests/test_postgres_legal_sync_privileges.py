@@ -15,8 +15,15 @@ from db.postgres_legal_sync_privileges import (
 def test_legal_sync_privilege_manifest_is_append_only():
     assert LEGAL_SYNC_TABLE_PRIVILEGES
     assert set(LEGAL_SYNC_TABLE_PRIVILEGES.values()) == {
-        ("SELECT", "INSERT")
+        ("SELECT",),
+        ("SELECT", "INSERT"),
     }
+    for table in (
+        "legal_corpus_required_target_contracts",
+        "legal_corpus_coverage_registries",
+        "legal_corpus_coverage_contracts",
+    ):
+        assert LEGAL_SYNC_TABLE_PRIVILEGES[table] == ("SELECT",)
     for privileges in LEGAL_SYNC_TABLE_PRIVILEGES.values():
         assert not set(privileges).intersection(
             FORBIDDEN_LEGAL_SYNC_PRIVILEGES
@@ -46,10 +53,8 @@ def test_legal_sync_role_sql_has_no_secret_or_elevated_role():
             f"REVOKE ALL PRIVILEGES ON TABLE {qualified}"
             in sql
         )
-        assert (
-            f"GRANT SELECT, INSERT ON TABLE {qualified}"
-            in sql
-        )
+        grant = ", ".join(LEGAL_SYNC_TABLE_PRIVILEGES[table])
+        assert f"GRANT {grant} ON TABLE {qualified}" in sql
     assert "GRANT UPDATE" not in sql
     assert "GRANT DELETE" not in sql
 

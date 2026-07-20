@@ -36,9 +36,16 @@ from legal_intelligence.models import (
 
 ConnectionFactory = Callable[[], Any]
 
+
+class LegalReviewDecisionConflict(ValueError):
+    """The approval-gate predecessor changed after the caller read it."""
+
+
 _SCHEMA_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DEFAULT_SCHEMA = "realytics"
 _DEFAULT_FRESHNESS_DAYS = 7
+_APPROVAL_FRESHNESS_POLICY_VERSION = "legal-freshness-v1"
+_APPROVAL_FRESHNESS_WINDOW = timedelta(days=7)
 
 _CORE_TO_DATABASE_KINDS: Mapping[LegalResourceKind, tuple[str, ...]] = {
     LegalResourceKind.STATUTE: ("statute", "decree", "ministerial_rule"),
@@ -76,6 +83,7 @@ _DATABASE_TO_CORE_KIND: Mapping[str, LegalResourceKind] = {
 _AUTHORITY_ALIASES: Mapping[str, SourceAuthority] = {
     "law_go_kr": SourceAuthority.LAW_GO_KR,
     "moleg": SourceAuthority.LAW_GO_KR,
+    "court": SourceAuthority.COURT,
     "supreme_court": SourceAuthority.SUPREME_COURT,
     "constitutional_court": SourceAuthority.CONSTITUTIONAL_COURT,
     "central_government": SourceAuthority.CENTRAL_GOVERNMENT,
@@ -409,8 +417,9 @@ SELECT *
 """
 
 _COVERAGE_SQL = """
-WITH required_provider AS (
-    SELECT provider.provider_id
+WITH active_provider AS (
+    SELECT provider.provider_id, provider.provider_key,
+           provider.provider_revision
       FROM legal_source_providers AS provider
      WHERE provider.provider_status = 'active'
        AND provider.authority_tier IN (
@@ -426,45 +435,172 @@ WITH required_provider AS (
                    provider.provider_revision
        )
 ),
-latest_complete AS (
-    SELECT DISTINCT ON (completion.provider_id)
+leaf_registry AS (
+    SELECT provider.provider_id,
+           registry.coverage_registry_id,
+           registry.provider_key,
+           registry.coverage_contract_version,
+           registry.expected_contract_count,
+           registry.expected_contracts_sha256
+      FROM active_provider AS provider
+      JOIN legal_corpus_coverage_registries AS registry
+        ON registry.provider_key = provider.provider_key
+       AND registry.provider_revision = provider.provider_revision
+     WHERE NOT EXISTS (
+            SELECT 1
+              FROM legal_corpus_coverage_registries AS successor
+             WHERE successor.supersedes_coverage_registry_id =
+                   registry.coverage_registry_id
+       )
+),
+valid_registry AS (
+    SELECT registry.provider_id,
+           registry.coverage_registry_id,
+           registry.expected_contract_count
+      FROM leaf_registry AS registry
+      JOIN legal_corpus_coverage_contracts AS contract
+        ON contract.coverage_registry_id =
+           registry.coverage_registry_id
+      JOIN legal_corpus_required_target_contracts AS required_target
+        ON required_target.provider_key = registry.provider_key
+       AND required_target.coverage_contract_version =
+           registry.coverage_contract_version
+       AND required_target.resource_kind = contract.resource_kind
+       AND required_target.provider_target = contract.provider_target
+       AND required_target.required
+     GROUP BY
+        registry.provider_id,
+        registry.coverage_registry_id,
+        registry.expected_contract_count,
+        registry.expected_contracts_sha256,
+        registry.provider_key,
+        registry.coverage_contract_version
+    HAVING COUNT(*) = registry.expected_contract_count
+       AND COUNT(*) = (
+            SELECT COUNT(*)
+              FROM legal_corpus_required_target_contracts AS required
+             WHERE required.provider_key = registry.provider_key
+               AND required.coverage_contract_version =
+                   registry.coverage_contract_version
+               AND required.required
+       )
+       AND encode(
+            extensions.digest(
+                convert_to(
+                    string_agg(
+                        contract.coverage_contract_id,
+                        E'\\n'
+                        ORDER BY contract.coverage_contract_id
+                    ),
+                    'UTF8'
+                ),
+                'sha256'
+            ),
+            'hex'
+       ) = registry.expected_contracts_sha256
+),
+latest_contract_completion AS (
+    SELECT DISTINCT ON (
         completion.provider_id,
+        completion.coverage_contract_id
+    )
+        completion.provider_id,
+        contract.coverage_registry_id,
+        completion.coverage_contract_id,
         terminal_checkpoint.occurred_at AS completed_at
       FROM legal_corpus_scope_completion_attestations AS completion
+      JOIN legal_corpus_coverage_contracts AS contract
+        ON contract.coverage_contract_id =
+           completion.coverage_contract_id
+      JOIN valid_registry AS registry
+        ON registry.provider_id = completion.provider_id
+       AND registry.coverage_registry_id =
+           contract.coverage_registry_id
       JOIN legal_sync_checkpoint_events AS terminal_checkpoint
         ON terminal_checkpoint.provider_id = completion.provider_id
        AND terminal_checkpoint.requested_scope_hash =
            completion.requested_scope_hash
        AND terminal_checkpoint.checkpoint_sequence =
            completion.last_checkpoint_sequence
-     WHERE completion.verification_status = 'verified'
+     WHERE completion.coverage_contract_id IS NOT NULL
+       AND completion.verification_status = 'verified'
        AND completion.page_count > 0
        AND completion.record_count > 0
        AND completion.resource_count > 0
        AND completion.manifest_sha256 ~ '^[0-9a-f]{64}$'
        AND jsonb_array_length(completion.page_hashes_json) =
            completion.page_count
-       AND lower(completion.requested_scope) IN (
-            'all',
-            'full',
-            'full_corpus'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM legal_corpus_scope_completion_attestations AS successor
+             WHERE successor.baseline_completion_attestation_id =
+                   completion.completion_attestation_id
+       )
+       AND (
+            completion.coverage_mode = 'initial'
+            OR (
+                completion.coverage_mode = 'incremental'
+                AND EXISTS (
+                    SELECT 1
+                      FROM legal_corpus_scope_completion_attestations
+                           AS baseline
+                     WHERE baseline.completion_attestation_id =
+                           completion.baseline_completion_attestation_id
+                       AND baseline.provider_id = completion.provider_id
+                       AND baseline.requested_scope_hash =
+                           completion.requested_scope_hash
+                       AND baseline.coverage_contract_id =
+                           completion.coverage_contract_id
+                       AND baseline.coverage_mode IN (
+                            'initial',
+                            'incremental'
+                       )
+                       AND baseline.verification_status = 'verified'
+                       AND baseline.last_checkpoint_sequence + 1 =
+                           completion.first_checkpoint_sequence
+                )
+            )
        )
      ORDER BY
         completion.provider_id,
+        completion.coverage_contract_id,
         completion.last_checkpoint_sequence DESC,
         terminal_checkpoint.occurred_at DESC,
         completion.completion_attestation_id DESC
+),
+eligible_registry AS (
+    SELECT registry.provider_id,
+           registry.coverage_registry_id,
+           MIN(completion.completed_at) AS completed_at
+      FROM valid_registry AS registry
+      JOIN legal_corpus_coverage_contracts AS contract
+        ON contract.coverage_registry_id =
+           registry.coverage_registry_id
+      LEFT JOIN latest_contract_completion AS completion
+        ON completion.provider_id = registry.provider_id
+       AND completion.coverage_registry_id =
+           registry.coverage_registry_id
+       AND completion.coverage_contract_id =
+           contract.coverage_contract_id
+     GROUP BY
+        registry.provider_id,
+        registry.coverage_registry_id,
+        registry.expected_contract_count
+    HAVING COUNT(contract.coverage_contract_id) =
+           registry.expected_contract_count
+       AND COUNT(completion.coverage_contract_id) =
+           registry.expected_contract_count
 )
-SELECT
-    CASE
-        WHEN COUNT(required_provider.provider_id) = 0 THEN NULL
-        WHEN COUNT(latest_complete.provider_id)
-             <> COUNT(required_provider.provider_id) THEN NULL
-        ELSE MIN(latest_complete.completed_at)
-    END
-  FROM required_provider
-  LEFT JOIN latest_complete
-    ON latest_complete.provider_id = required_provider.provider_id
+SELECT CASE
+    WHEN (SELECT COUNT(*) FROM active_provider) = 0 THEN NULL
+    WHEN (SELECT COUNT(*) FROM leaf_registry)
+         <> (SELECT COUNT(*) FROM active_provider) THEN NULL
+    WHEN (SELECT COUNT(*) FROM valid_registry)
+         <> (SELECT COUNT(*) FROM active_provider) THEN NULL
+    WHEN (SELECT COUNT(*) FROM eligible_registry)
+         <> (SELECT COUNT(*) FROM active_provider) THEN NULL
+    ELSE (SELECT MIN(completed_at) FROM eligible_registry)
+END
 """
 
 _RESOURCE_SQL = """
@@ -612,13 +748,70 @@ INSERT INTO legal_review_decisions (
     decision_reason,
     reviewer_id,
     reviewer_role,
+    legal_approval_delegation_id,
+    legal_review_id,
+    legal_review_version_id,
+    legal_review_version,
+    legal_review_projection_sha256,
+    expected_predecessor_legal_review_decision_id,
+    predecessor_expectation_supplied,
     decided_at,
     metadata_json
 ) VALUES (
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    TRUE, %s, %s::jsonb
 )
 ON CONFLICT (legal_review_decision_id) DO NOTHING
-RETURNING legal_review_decision_id
+RETURNING
+    legal_review_decision_id,
+    decision_version,
+    supersedes_legal_review_decision_id,
+    recorded_at
+"""
+
+_LATEST_LEGAL_REVIEW_PROJECTION_FOR_DECISION_SQL = """
+SELECT
+    projection.review_version_id,
+    projection.review_version,
+    projection.projection_hash_contract,
+    projection.projection_sha256,
+    CASE
+        WHEN projection.projection_hash_contract = 'pg-jsonb-row-v1'
+        THEN encode(
+            extensions.digest(
+                convert_to(
+                    (
+                        to_jsonb(projection)
+                        - 'projection_sha256'
+                        - 'projection_hash_contract'
+                    )::TEXT,
+                    'UTF8'
+                ),
+                'sha256'
+            ),
+            'hex'
+        )
+        ELSE NULL
+    END,
+    projection.legal_evidence_snapshot_id,
+    projection.created_at,
+    snapshot.created_at,
+    statement_timestamp()
+  FROM project_legal_review_versions AS projection
+  LEFT JOIN legal_evidence_snapshots AS snapshot
+    ON snapshot.legal_evidence_snapshot_id =
+           projection.legal_evidence_snapshot_id
+   AND snapshot.tenant_id = projection.tenant_id
+   AND snapshot.project_id = projection.project_id
+ WHERE projection.tenant_id = %s
+   AND projection.project_id = %s
+   AND projection.review_id = %s
+ ORDER BY
+    projection.review_version DESC,
+    projection.created_at DESC,
+    projection.review_version_id DESC
+ LIMIT 1
+ FOR SHARE
 """
 
 _LATEST_EVIDENCE_SNAPSHOT_SQL = """
@@ -812,11 +1005,92 @@ SELECT
     ) AS has_open_issue
 """
 
+_APPROVED_REQUIRED_CLAIM_SET_SQL = """
+SELECT
+    claim_set.claim_set_version,
+    claim_set.claim_set_sha256,
+    ARRAY_AGG(
+        claim.claim_text_sha256
+        ORDER BY claim.ordinal, claim.claim_key
+    ) AS required_claim_hashes,
+    encode(
+        extensions.digest(
+            convert_to(
+                string_agg(
+                    claim.claim_key || ':' || claim.claim_text_sha256,
+                    E'\n'
+                    ORDER BY claim.ordinal, claim.claim_key
+                ),
+                'UTF8'
+            ),
+            'sha256'
+        ),
+        'hex'
+    ) AS computed_claim_set_sha256
+  FROM legal_required_claim_sets AS claim_set
+  JOIN legal_required_claims AS claim
+    ON claim.legal_required_claim_set_id =
+           claim_set.legal_required_claim_set_id
+   AND claim.tenant_id = claim_set.tenant_id
+   AND claim.project_id = claim_set.project_id
+ WHERE claim_set.legal_required_claim_set_id = %s
+   AND claim_set.tenant_id = %s
+   AND claim_set.project_id = %s
+   AND claim_set.review_scope = 'approval_gate'
+   AND claim_set.status = 'approved'
+   AND claim_set.legal_required_claim_set_id = (
+       SELECT latest.legal_required_claim_set_id
+         FROM legal_required_claim_sets AS latest
+        WHERE latest.tenant_id = claim_set.tenant_id
+          AND latest.project_id = claim_set.project_id
+          AND latest.review_scope = 'approval_gate'
+          AND latest.status = 'approved'
+        ORDER BY latest.approved_at DESC,
+                 latest.claim_set_version DESC,
+                 latest.legal_required_claim_set_id DESC
+        LIMIT 1
+   )
+   AND NOT EXISTS (
+       SELECT 1
+         FROM legal_required_claim_sets AS successor
+        WHERE successor.tenant_id = claim_set.tenant_id
+          AND successor.project_id = claim_set.project_id
+          AND successor.claim_set_key = claim_set.claim_set_key
+          AND successor.claim_set_version > claim_set.claim_set_version
+          AND successor.status IN ('approved', 'superseded')
+   )
+ GROUP BY
+    claim_set.claim_set_version,
+    claim_set.claim_set_sha256
+"""
+
+_LATEST_APPROVED_REQUIRED_CLAIM_SET_ID_SQL = """
+SELECT claim_set.legal_required_claim_set_id
+  FROM legal_required_claim_sets AS claim_set
+ WHERE claim_set.tenant_id = %s
+   AND claim_set.project_id = %s
+   AND claim_set.review_scope = 'approval_gate'
+   AND claim_set.status = 'approved'
+   AND NOT EXISTS (
+       SELECT 1
+         FROM legal_required_claim_sets AS successor
+        WHERE successor.tenant_id = claim_set.tenant_id
+          AND successor.project_id = claim_set.project_id
+          AND successor.claim_set_key = claim_set.claim_set_key
+          AND successor.claim_set_version > claim_set.claim_set_version
+          AND successor.status IN ('approved', 'superseded')
+   )
+ ORDER BY claim_set.claim_set_version DESC,
+          claim_set.approved_at DESC,
+          claim_set.legal_required_claim_set_id DESC
+ LIMIT 1
+"""
+
 _GATE_ELIGIBLE_SNAPSHOT_SQL = """
 SELECT
     snapshot.snapshot_version,
     snapshot.snapshot_sha256,
-    snapshot.metadata_json
+    snapshot.legal_review_id
   FROM legal_evidence_snapshots AS snapshot
  WHERE snapshot.legal_evidence_snapshot_id = %s
    AND snapshot.tenant_id = %s
@@ -825,6 +1099,62 @@ SELECT
    AND snapshot.citation_verification_status = 'verified'
    AND NOT snapshot.has_open_conflicts
    AND NOT snapshot.is_stale
+   AND snapshot.legal_required_claim_set_id IS NOT NULL
+   AND EXISTS (
+       SELECT 1
+         FROM legal_required_claim_sets AS claim_set
+        WHERE claim_set.legal_required_claim_set_id =
+                  snapshot.legal_required_claim_set_id
+          AND claim_set.tenant_id = snapshot.tenant_id
+          AND claim_set.project_id = snapshot.project_id
+          AND claim_set.review_scope = 'approval_gate'
+          AND claim_set.status = 'approved'
+          AND claim_set.legal_required_claim_set_id = (
+              SELECT latest.legal_required_claim_set_id
+                FROM legal_required_claim_sets AS latest
+               WHERE latest.tenant_id = claim_set.tenant_id
+                 AND latest.project_id = claim_set.project_id
+                 AND latest.review_scope = 'approval_gate'
+                 AND latest.status = 'approved'
+               ORDER BY latest.approved_at DESC,
+                        latest.claim_set_version DESC,
+                        latest.legal_required_claim_set_id DESC
+               LIMIT 1
+          )
+          AND claim_set.claim_set_sha256 =
+                  snapshot.required_claim_set_sha256
+          AND claim_set.approved_by <> claim_set.created_by
+          AND claim_set.approved_at IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+                FROM legal_required_claim_sets AS successor
+               WHERE successor.tenant_id = claim_set.tenant_id
+                 AND successor.project_id = claim_set.project_id
+                 AND successor.claim_set_key = claim_set.claim_set_key
+                 AND successor.claim_set_version >
+                         claim_set.claim_set_version
+                 AND successor.status IN ('approved', 'superseded')
+          )
+          AND NOT EXISTS (
+              SELECT 1
+                FROM legal_required_claims AS required_claim
+               WHERE required_claim.legal_required_claim_set_id =
+                         claim_set.legal_required_claim_set_id
+                 AND NOT EXISTS (
+                     SELECT 1
+                       FROM legal_evidence_snapshot_items AS covered_item
+                      WHERE covered_item.legal_evidence_snapshot_id =
+                                snapshot.legal_evidence_snapshot_id
+                        AND covered_item.tenant_id = snapshot.tenant_id
+                        AND covered_item.project_id = snapshot.project_id
+                        AND covered_item.claim_text_sha256 =
+                                required_claim.claim_text_sha256
+                        AND covered_item.citation_verification_status =
+                                'verified'
+                        AND covered_item.verified_at IS NOT NULL
+                 )
+          )
+   )
    AND EXISTS (
        SELECT 1
          FROM legal_evidence_snapshot_items AS item
@@ -836,6 +1166,921 @@ SELECT
           AND item.verified_at IS NOT NULL
    )
  FOR SHARE OF snapshot
+"""
+
+_APPROVAL_READINESS_SQL = """
+WITH selected_snapshot AS (
+    SELECT snapshot.*
+      FROM legal_evidence_snapshots AS snapshot
+     WHERE snapshot.legal_evidence_snapshot_id = %s
+       AND snapshot.tenant_id = %s
+       AND snapshot.project_id = %s
+),
+latest_decision AS (
+    SELECT decision.*
+      FROM legal_review_decisions AS decision
+     WHERE decision.tenant_id = %s
+       AND decision.project_id = %s
+       AND decision.decision_scope = 'approval_gate'
+       AND decision.legal_review_id = %s
+       AND decision.decision_type IN (
+           'approve',
+           'reject',
+           'request_changes',
+           'waive_with_conditions'
+       )
+       AND decision.decision_version IS NOT NULL
+       AND decision.recorded_at IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1
+             FROM legal_review_decisions AS successor
+            WHERE successor.supersedes_legal_review_decision_id =
+                      decision.legal_review_decision_id
+       )
+     ORDER BY decision.decision_version DESC,
+              decision.recorded_at DESC,
+              decision.legal_review_decision_id DESC
+     LIMIT 1
+),
+latest_review_projection AS (
+    SELECT projection.*
+      FROM selected_snapshot AS snapshot
+      LEFT JOIN LATERAL (
+          SELECT candidate.*
+            FROM project_legal_review_versions AS candidate
+           WHERE candidate.tenant_id = snapshot.tenant_id
+             AND candidate.project_id = snapshot.project_id
+             AND candidate.review_id = snapshot.legal_review_id
+             AND NOT EXISTS (
+                 SELECT 1
+                   FROM project_legal_review_versions AS successor
+                  WHERE successor.tenant_id = candidate.tenant_id
+                    AND successor.project_id = candidate.project_id
+                    AND successor.review_id = candidate.review_id
+                    AND (
+                        successor.supersedes_review_version_id =
+                            candidate.review_version_id
+                        OR successor.review_version >
+                            candidate.review_version
+                    )
+             )
+           ORDER BY candidate.review_version DESC,
+                    candidate.created_at DESC,
+                    candidate.review_version_id DESC
+           LIMIT 1
+      ) AS projection ON TRUE
+),
+evidence_rollup AS (
+    SELECT
+        COUNT(item.legal_evidence_item_id)::BIGINT AS item_count,
+        COUNT(
+            DISTINCT (
+                item.legal_resource_id,
+                item.legal_resource_version_id,
+                item.legal_provision_id
+            )
+        )::BIGINT AS citation_count,
+        COUNT(DISTINCT item.claim_text_sha256)::BIGINT AS claim_count,
+        COUNT(*) FILTER (
+            WHERE
+                item.citation_verification_status <> 'verified'
+                OR item.verified_at IS NULL
+                OR item.verified_at > statement_timestamp()
+                OR snapshot.freshness_policy_version <>
+                       'legal-freshness-v1'
+                OR item.verified_at + INTERVAL '7 days' <
+                       statement_timestamp()
+                OR version.legal_resource_version_id IS NULL
+                OR version.verification_status NOT IN (
+                    'source_verified',
+                    'schema_verified'
+                )
+                OR version.verified_at IS NULL
+                OR version.verified_at > statement_timestamp()
+                OR version.source_fetch_id IS DISTINCT FROM item.source_fetch_id
+                OR resource.legal_resource_id IS NULL
+                OR resource.provider_id IS DISTINCT FROM version.provider_id
+                OR source_fetch.source_fetch_id IS NULL
+                OR source_fetch.fetch_status NOT IN (
+                    'succeeded',
+                    'not_modified'
+                )
+                OR source_fetch.fetched_at > statement_timestamp()
+                OR provider.provider_id IS NULL
+                OR provider.provider_status <> 'active'
+                OR lineage.legal_resource_version_lineage_id IS NULL
+                OR lineage.validated_at > statement_timestamp()
+                OR provision.legal_provision_id IS NULL
+                OR btrim(item.exact_locator) = ''
+                OR provision.source_locator IS DISTINCT FROM item.exact_locator
+                OR provision.provision_sha256 IS DISTINCT FROM encode(
+                    extensions.digest(
+                        convert_to(provision.body_text, 'UTF8'),
+                        'sha256'
+                    ),
+                    'hex'
+                )
+                OR (
+                    version.effective_from IS NOT NULL
+                    AND version.effective_from > snapshot.as_of_date
+                )
+                OR (
+                    version.effective_to IS NOT NULL
+                    AND version.effective_to < snapshot.as_of_date
+                )
+                OR (
+                    version.valid_time_start IS NOT NULL
+                    AND version.valid_time_start > snapshot.as_of_date
+                )
+                OR (
+                    version.valid_time_end IS NOT NULL
+                    AND version.valid_time_end < snapshot.as_of_date
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM legal_resource_versions AS replacement
+                      JOIN legal_source_fetches AS replacement_fetch
+                        ON replacement_fetch.source_fetch_id =
+                               replacement.source_fetch_id
+                       AND replacement_fetch.provider_id =
+                               replacement.provider_id
+                      JOIN legal_source_providers AS replacement_provider
+                        ON replacement_provider.provider_id =
+                               replacement.provider_id
+                     WHERE replacement.legal_resource_id =
+                               item.legal_resource_id
+                       AND replacement.version_sequence >
+                               version.version_sequence
+                       AND replacement.verification_status IN (
+                           'source_verified',
+                           'schema_verified'
+                       )
+                       AND replacement.verified_at IS NOT NULL
+                       AND replacement.verified_at <= statement_timestamp()
+                       AND replacement_fetch.fetch_status IN (
+                           'succeeded',
+                           'not_modified'
+                       )
+                       AND replacement_provider.provider_status = 'active'
+                       AND (
+                           replacement.supersedes_version_id =
+                               version.legal_resource_version_id
+                           OR (
+                               (
+                                   replacement.effective_from IS NULL
+                                   OR replacement.effective_from <=
+                                      snapshot.as_of_date
+                               )
+                               AND (
+                                   replacement.effective_to IS NULL
+                                   OR replacement.effective_to >=
+                                      snapshot.as_of_date
+                               )
+                               AND (
+                                   replacement.valid_time_start IS NULL
+                                   OR replacement.valid_time_start <=
+                                      snapshot.as_of_date
+                               )
+                               AND (
+                                   replacement.valid_time_end IS NULL
+                                   OR replacement.valid_time_end >=
+                                      snapshot.as_of_date
+                               )
+                           )
+                       )
+                )
+        )::BIGINT AS invalid_lineage_count
+      FROM selected_snapshot AS snapshot
+      LEFT JOIN legal_evidence_snapshot_items AS item
+        ON item.legal_evidence_snapshot_id =
+               snapshot.legal_evidence_snapshot_id
+       AND item.tenant_id = snapshot.tenant_id
+       AND item.project_id = snapshot.project_id
+      LEFT JOIN legal_resource_versions AS version
+        ON version.legal_resource_version_id =
+               item.legal_resource_version_id
+       AND version.legal_resource_id = item.legal_resource_id
+       AND version.source_fetch_id = item.source_fetch_id
+      LEFT JOIN legal_resources AS resource
+        ON resource.legal_resource_id = item.legal_resource_id
+       AND resource.provider_id = version.provider_id
+      LEFT JOIN legal_source_fetches AS source_fetch
+        ON source_fetch.source_fetch_id = item.source_fetch_id
+       AND source_fetch.provider_id = version.provider_id
+      LEFT JOIN legal_source_providers AS provider
+        ON provider.provider_id = version.provider_id
+      LEFT JOIN legal_resource_version_lineages AS lineage
+        ON lineage.legal_resource_version_id =
+               item.legal_resource_version_id
+       AND lineage.legal_resource_id = item.legal_resource_id
+      LEFT JOIN legal_provisions AS provision
+        ON provision.legal_provision_id = item.legal_provision_id
+       AND provision.legal_resource_version_id =
+               item.legal_resource_version_id
+       AND provision.legal_resource_id = item.legal_resource_id
+),
+required_claim_rollup AS (
+    SELECT
+        claim_set.legal_required_claim_set_id,
+        snapshot.required_claim_set_sha256 AS snapshot_policy_sha256,
+        claim_set.claim_set_version,
+        claim_set.claim_set_sha256,
+        encode(
+            extensions.digest(
+                convert_to(
+                    string_agg(
+                        required_claim.claim_key || ':' ||
+                            required_claim.claim_text_sha256,
+                        E'\n'
+                        ORDER BY
+                            required_claim.ordinal,
+                            required_claim.claim_key
+                    ),
+                    'UTF8'
+                ),
+                'sha256'
+            ),
+            'hex'
+        ) AS computed_claim_set_sha256,
+        COUNT(
+            DISTINCT required_claim.legal_required_claim_id
+        )::BIGINT AS required_claim_count,
+        COUNT(
+            DISTINCT required_claim.legal_required_claim_id
+        ) FILTER (
+            WHERE covered_item.legal_evidence_item_id IS NOT NULL
+              AND covered_item.citation_verification_status = 'verified'
+              AND covered_item.verified_at IS NOT NULL
+        )::BIGINT AS covered_claim_count,
+        (
+            claim_set.status = 'approved'
+            AND claim_set.review_scope = 'approval_gate'
+            AND claim_set.legal_required_claim_set_id = (
+                SELECT latest.legal_required_claim_set_id
+                  FROM legal_required_claim_sets AS latest
+                 WHERE latest.tenant_id = claim_set.tenant_id
+                   AND latest.project_id = claim_set.project_id
+                   AND latest.review_scope = 'approval_gate'
+                   AND latest.status = 'approved'
+                 ORDER BY latest.approved_at DESC,
+                          latest.claim_set_version DESC,
+                          latest.legal_required_claim_set_id DESC
+                 LIMIT 1
+            )
+            AND claim_set.approved_by IS NOT NULL
+            AND claim_set.approved_by <> claim_set.created_by
+            AND claim_set.approved_at IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM legal_required_claim_sets AS successor
+                 WHERE successor.tenant_id = claim_set.tenant_id
+                   AND successor.project_id = claim_set.project_id
+                   AND successor.claim_set_key = claim_set.claim_set_key
+                   AND successor.claim_set_version >
+                           claim_set.claim_set_version
+                   AND successor.status IN ('approved', 'superseded')
+            )
+        ) AS policy_active
+      FROM selected_snapshot AS snapshot
+      LEFT JOIN legal_required_claim_sets AS claim_set
+        ON claim_set.legal_required_claim_set_id =
+               snapshot.legal_required_claim_set_id
+       AND claim_set.tenant_id = snapshot.tenant_id
+       AND claim_set.project_id = snapshot.project_id
+      LEFT JOIN legal_required_claims AS required_claim
+        ON required_claim.legal_required_claim_set_id =
+               claim_set.legal_required_claim_set_id
+       AND required_claim.tenant_id = claim_set.tenant_id
+       AND required_claim.project_id = claim_set.project_id
+      LEFT JOIN legal_evidence_snapshot_items AS covered_item
+        ON covered_item.legal_evidence_snapshot_id =
+               snapshot.legal_evidence_snapshot_id
+       AND covered_item.tenant_id = snapshot.tenant_id
+       AND covered_item.project_id = snapshot.project_id
+       AND covered_item.claim_text_sha256 =
+               required_claim.claim_text_sha256
+     GROUP BY
+        claim_set.legal_required_claim_set_id,
+        claim_set.claim_set_version,
+        claim_set.claim_set_sha256,
+        claim_set.status,
+        claim_set.review_scope,
+        claim_set.approved_by,
+        claim_set.created_by,
+        claim_set.approved_at,
+        claim_set.tenant_id,
+        claim_set.project_id,
+        claim_set.claim_set_key,
+        snapshot.required_claim_set_sha256
+),
+latest_matter_leaves AS (
+    SELECT matter.*
+      FROM selected_snapshot AS snapshot
+      JOIN project_legal_matters AS matter
+        ON matter.tenant_id = snapshot.tenant_id
+       AND matter.project_id = snapshot.project_id
+     WHERE NOT EXISTS (
+         SELECT 1
+           FROM project_legal_matters AS successor
+          WHERE successor.tenant_id = matter.tenant_id
+            AND successor.project_id = matter.project_id
+            AND successor.supersedes_matter_id =
+                    matter.project_legal_matter_id
+     )
+),
+matter_waiver_rollup AS (
+    SELECT
+        COUNT(matter.project_legal_matter_id) FILTER (
+            WHERE matter.status = 'blocked'
+               OR (
+                   matter.status IN ('open', 'under_review')
+                   AND matter.severity IN ('high', 'critical')
+               )
+        )::BIGINT AS active_blocking_matter_count,
+        COUNT(matter.project_legal_matter_id) FILTER (
+            WHERE matter.status = 'waived'
+        )::BIGINT AS waived_matter_count,
+        COUNT(matter.project_legal_matter_id) FILTER (
+            WHERE matter.status = 'waived'
+              AND (
+                  waiver.legal_waiver_id IS NULL
+                  OR waiver.status <> 'approved'
+                  OR waiver.cure_status NOT IN (
+                      'not_started',
+                      'in_progress',
+                      'evidence_submitted'
+                  )
+                  OR waiver.valid_from IS NULL
+                  OR waiver.valid_from > statement_timestamp()
+                  OR waiver.valid_until <= statement_timestamp()
+                  OR waiver.legal_evidence_snapshot_id IS DISTINCT FROM
+                         snapshot.legal_evidence_snapshot_id
+                  OR (
+                      waiver.cure_evidence_snapshot_id IS NOT NULL
+                      AND waiver.cure_evidence_snapshot_id IS DISTINCT FROM
+                              snapshot.legal_evidence_snapshot_id
+                  )
+                  OR jsonb_typeof(waiver.conditions_json) <> 'array'
+                  OR jsonb_array_length(waiver.conditions_json) = 0
+                  OR jsonb_typeof(
+                         waiver.cure_condition_outcomes_json
+                     ) <> 'array'
+                  OR jsonb_array_length(waiver.conditions_json) <> (
+                      SELECT COUNT(
+                                 DISTINCT condition_entry ->> 'code'
+                             )
+                        FROM jsonb_array_elements(
+                                 waiver.conditions_json
+                             ) AS condition_entry
+                  )
+                  OR jsonb_array_length(
+                         waiver.cure_condition_outcomes_json
+                     ) <> (
+                      SELECT COUNT(DISTINCT outcome_entry ->> 'code')
+                        FROM jsonb_array_elements(
+                                 waiver.cure_condition_outcomes_json
+                             ) AS outcome_entry
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM jsonb_array_elements(
+                                 waiver.cure_condition_outcomes_json
+                             ) AS outcome_entry
+                       WHERE jsonb_typeof(outcome_entry) <> 'object'
+                          OR NULLIF(
+                                 btrim(outcome_entry ->> 'code'),
+                                 ''
+                             ) IS NULL
+                          OR outcome_entry ->> 'status' NOT IN (
+                              'in_progress',
+                              'satisfied',
+                              'failed'
+                          )
+                          OR NOT EXISTS (
+                              SELECT 1
+                                FROM jsonb_array_elements(
+                                         waiver.conditions_json
+                                     ) AS condition_entry
+                               WHERE condition_entry ->> 'code' =
+                                         outcome_entry ->> 'code'
+                          )
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM jsonb_array_elements(
+                                 waiver.cure_condition_outcomes_json
+                             ) AS failed_outcome
+                       WHERE failed_outcome ->> 'status' = 'failed'
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM jsonb_array_elements(
+                                 waiver.cure_condition_outcomes_json
+                             ) AS satisfied_outcome
+                       WHERE satisfied_outcome ->> 'status' = 'satisfied'
+                         AND (
+                             waiver.cure_evidence_snapshot_id
+                                 IS DISTINCT FROM
+                                     snapshot.legal_evidence_snapshot_id
+                             OR jsonb_typeof(
+                                    satisfied_outcome ->
+                                        'evidenceItemIds'
+                                ) <> 'array'
+                             OR jsonb_array_length(
+                                    satisfied_outcome ->
+                                        'evidenceItemIds'
+                                ) = 0
+                             OR jsonb_array_length(
+                                    satisfied_outcome ->
+                                        'evidenceItemIds'
+                                ) <> (
+                                 SELECT COUNT(
+                                            DISTINCT evidence_item_id
+                                        )
+                                   FROM jsonb_array_elements_text(
+                                            CASE
+                                                WHEN jsonb_typeof(
+                                                    satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ) = 'array'
+                                                THEN satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ELSE '[]'::JSONB
+                                            END
+                                        ) AS evidence_item(evidence_item_id)
+                             )
+                             OR EXISTS (
+                                 SELECT 1
+                                   FROM jsonb_array_elements_text(
+                                            CASE
+                                                WHEN jsonb_typeof(
+                                                    satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ) = 'array'
+                                                THEN satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ELSE '[]'::JSONB
+                                            END
+                                        ) AS evidence_item(evidence_item_id)
+                                  WHERE NULLIF(
+                                            btrim(evidence_item_id),
+                                            ''
+                                        ) IS NULL
+                                     OR NOT EXISTS (
+                                         SELECT 1
+                                           FROM
+                                               legal_evidence_snapshot_items
+                                                   AS cure_item
+                                          WHERE
+                                              cure_item.legal_evidence_item_id =
+                                                  evidence_item_id
+                                            AND cure_item.tenant_id =
+                                                  waiver.tenant_id
+                                            AND cure_item.project_id =
+                                                  waiver.project_id
+                                            AND
+                                              cure_item
+                                                  .legal_evidence_snapshot_id =
+                                              waiver
+                                                  .cure_evidence_snapshot_id
+                                            AND cure_item
+                                                  .citation_verification_status =
+                                                    'verified'
+                                            AND cure_item.verified_at
+                                                  IS NOT NULL
+                                            AND cure_item.verified_at <=
+                                                  statement_timestamp()
+                                     )
+                             )
+                         )
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM jsonb_array_elements(
+                                 waiver.conditions_json
+                             ) AS condition_entry
+                       WHERE jsonb_typeof(condition_entry) <> 'object'
+                          OR NULLIF(
+                                 btrim(condition_entry ->> 'code'),
+                                 ''
+                             ) IS NULL
+                          OR NOT (
+                              EXISTS (
+                                  SELECT 1
+                                    FROM jsonb_array_elements(
+                                             waiver.cure_condition_outcomes_json
+                                         ) AS outcome_entry
+                                   WHERE outcome_entry ->> 'code' =
+                                             condition_entry ->> 'code'
+                                     AND outcome_entry ->> 'status' =
+                                             'satisfied'
+                              )
+                              OR (
+                                  NULLIF(
+                                      btrim(condition_entry ->> 'dueAt'),
+                                      ''
+                                  ) IS NULL
+                                  AND waiver.valid_until >
+                                          statement_timestamp()
+                              )
+                              OR (
+                                  NULLIF(
+                                      btrim(condition_entry ->> 'dueAt'),
+                                      ''
+                                  ) IS NOT NULL
+                                  AND legal_try_timestamptz(
+                                          condition_entry ->> 'dueAt'
+                                      ) IS NOT NULL
+                                  AND legal_try_timestamptz(
+                                          condition_entry ->> 'dueAt'
+                                      ) > statement_timestamp()
+                                  AND legal_try_timestamptz(
+                                          condition_entry ->> 'dueAt'
+                                      ) <= waiver.valid_until
+                              )
+                          )
+                  )
+              )
+        )::BIGINT AS invalid_waiver_count
+      FROM selected_snapshot AS snapshot
+      LEFT JOIN latest_matter_leaves AS matter ON TRUE
+      LEFT JOIN LATERAL (
+          SELECT candidate.*
+            FROM legal_waivers AS candidate
+           WHERE candidate.tenant_id = matter.tenant_id
+             AND candidate.project_id = matter.project_id
+             AND candidate.project_legal_matter_id =
+                     matter.project_legal_matter_id
+             AND NOT EXISTS (
+                 SELECT 1
+                   FROM legal_waivers AS successor
+                  WHERE successor.tenant_id = candidate.tenant_id
+                    AND successor.project_id = candidate.project_id
+                    AND successor.supersedes_waiver_id =
+                            candidate.legal_waiver_id
+             )
+           ORDER BY candidate.waiver_version DESC,
+                    candidate.recorded_at DESC,
+                    candidate.legal_waiver_id DESC
+           LIMIT 1
+      ) AS waiver ON matter.status = 'waived'
+),
+terminal_cure_rollup AS (
+    SELECT
+        COUNT(waiver.legal_waiver_id) FILTER (
+            WHERE waiver.status = 'cured'
+              AND waiver.cure_status = 'verified'
+              AND (
+                  waiver.cure_evidence_snapshot_id IS DISTINCT FROM
+                         snapshot.legal_evidence_snapshot_id
+                  OR jsonb_typeof(waiver.conditions_json) <> 'array'
+                  OR jsonb_array_length(waiver.conditions_json) = 0
+                  OR jsonb_typeof(
+                         waiver.cure_condition_outcomes_json
+                     ) <> 'array'
+                  OR jsonb_array_length(waiver.conditions_json) <> (
+                      SELECT COUNT(
+                                 DISTINCT condition_entry ->> 'code'
+                             )
+                        FROM jsonb_array_elements(
+                                 waiver.conditions_json
+                             ) AS condition_entry
+                  )
+                  OR jsonb_array_length(waiver.conditions_json) <>
+                         jsonb_array_length(
+                             waiver.cure_condition_outcomes_json
+                         )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM jsonb_array_elements(
+                                 waiver.conditions_json
+                             ) AS condition_entry
+                       WHERE jsonb_typeof(condition_entry) <> 'object'
+                          OR NULLIF(
+                                 btrim(condition_entry ->> 'code'),
+                                 ''
+                             ) IS NULL
+                          OR NOT EXISTS (
+                              SELECT 1
+                                FROM jsonb_array_elements(
+                                         waiver.cure_condition_outcomes_json
+                                     ) AS outcome_entry
+                               WHERE jsonb_typeof(outcome_entry) = 'object'
+                                 AND outcome_entry ->> 'code' =
+                                         condition_entry ->> 'code'
+                                 AND outcome_entry ->> 'status' =
+                                         'satisfied'
+                          )
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM jsonb_array_elements(
+                                 waiver.cure_condition_outcomes_json
+                             ) AS outcome_entry
+                       WHERE jsonb_typeof(outcome_entry) <> 'object'
+                          OR NULLIF(
+                                 btrim(outcome_entry ->> 'code'),
+                                 ''
+                             ) IS NULL
+                          OR outcome_entry ->> 'status' <> 'satisfied'
+                          OR NOT EXISTS (
+                              SELECT 1
+                                FROM jsonb_array_elements(
+                                         waiver.conditions_json
+                                     ) AS condition_entry
+                               WHERE condition_entry ->> 'code' =
+                                         outcome_entry ->> 'code'
+                          )
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM jsonb_array_elements(
+                                 waiver.cure_condition_outcomes_json
+                             ) AS satisfied_outcome
+                       WHERE satisfied_outcome ->> 'status' = 'satisfied'
+                         AND (
+                             jsonb_typeof(
+                                 satisfied_outcome -> 'evidenceItemIds'
+                             ) <> 'array'
+                             OR jsonb_array_length(
+                                    satisfied_outcome ->
+                                        'evidenceItemIds'
+                                ) = 0
+                             OR jsonb_array_length(
+                                    satisfied_outcome ->
+                                        'evidenceItemIds'
+                                ) <> (
+                                 SELECT COUNT(
+                                            DISTINCT evidence_item_id
+                                        )
+                                   FROM jsonb_array_elements_text(
+                                            CASE
+                                                WHEN jsonb_typeof(
+                                                    satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ) = 'array'
+                                                THEN satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ELSE '[]'::JSONB
+                                            END
+                                        ) AS evidence_item(evidence_item_id)
+                             )
+                             OR EXISTS (
+                                 SELECT 1
+                                   FROM jsonb_array_elements_text(
+                                            CASE
+                                                WHEN jsonb_typeof(
+                                                    satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ) = 'array'
+                                                THEN satisfied_outcome ->
+                                                        'evidenceItemIds'
+                                                ELSE '[]'::JSONB
+                                            END
+                                        ) AS evidence_item(evidence_item_id)
+                                  WHERE NULLIF(
+                                            btrim(evidence_item_id),
+                                            ''
+                                        ) IS NULL
+                                     OR NOT EXISTS (
+                                         SELECT 1
+                                           FROM
+                                               legal_evidence_snapshot_items
+                                                   AS cure_item
+                                          WHERE
+                                              cure_item.legal_evidence_item_id =
+                                                  evidence_item_id
+                                            AND cure_item.tenant_id =
+                                                  waiver.tenant_id
+                                            AND cure_item.project_id =
+                                                  waiver.project_id
+                                            AND
+                                              cure_item
+                                                  .legal_evidence_snapshot_id =
+                                              waiver
+                                                  .cure_evidence_snapshot_id
+                                            AND cure_item
+                                                  .citation_verification_status =
+                                                    'verified'
+                                            AND cure_item.verified_at
+                                                  IS NOT NULL
+                                            AND cure_item.verified_at <=
+                                                  statement_timestamp()
+                                     )
+                             )
+                         )
+                  )
+                  OR NOT EXISTS (
+                      SELECT 1
+                        FROM project_legal_matters AS resolved_successor
+                       WHERE resolved_successor.tenant_id =
+                                 waiver.tenant_id
+                         AND resolved_successor.project_id =
+                                 waiver.project_id
+                         AND resolved_successor.supersedes_matter_id =
+                                 waiver.project_legal_matter_id
+                         AND resolved_successor.status = 'resolved'
+                         AND resolved_successor.created_at >=
+                                 waiver.recorded_at
+                  )
+              )
+        )::BIGINT AS invalid_terminal_cure_count
+      FROM selected_snapshot AS snapshot
+      LEFT JOIN legal_waivers AS waiver
+        ON waiver.tenant_id = snapshot.tenant_id
+       AND waiver.project_id = snapshot.project_id
+       AND NOT EXISTS (
+           SELECT 1
+             FROM legal_waivers AS successor
+            WHERE successor.tenant_id = waiver.tenant_id
+              AND successor.project_id = waiver.project_id
+              AND successor.supersedes_waiver_id =
+                      waiver.legal_waiver_id
+       )
+),
+governance_event_rollup AS (
+    SELECT
+        (
+            SELECT MAX(matter.created_at)
+              FROM project_legal_matters AS matter
+             WHERE matter.tenant_id = snapshot.tenant_id
+               AND matter.project_id = snapshot.project_id
+        ) AS latest_matter_event_at,
+        (
+            SELECT MAX(waiver.recorded_at)
+              FROM legal_waivers AS waiver
+             WHERE waiver.tenant_id = snapshot.tenant_id
+               AND waiver.project_id = snapshot.project_id
+        ) AS latest_waiver_event_at
+      FROM selected_snapshot AS snapshot
+)
+SELECT
+    snapshot.legal_evidence_snapshot_id,
+    snapshot.snapshot_version,
+    snapshot.snapshot_sha256,
+    snapshot.as_of_date,
+    snapshot.citation_verification_status,
+    snapshot.has_open_conflicts,
+    snapshot.is_stale,
+    snapshot.gate_eligible,
+    snapshot.metadata_json,
+    snapshot.legal_review_id,
+    snapshot.created_by,
+    snapshot.created_at,
+    EXISTS (
+        SELECT 1
+          FROM legal_evidence_snapshots AS successor
+         WHERE successor.tenant_id = snapshot.tenant_id
+           AND successor.project_id = snapshot.project_id
+           AND (
+               successor.supersedes_snapshot_id =
+                   snapshot.legal_evidence_snapshot_id
+               OR successor.snapshot_version > snapshot.snapshot_version
+           )
+    ) AS snapshot_superseded,
+    COALESCE(rollup.item_count, 0),
+    COALESCE(rollup.citation_count, 0),
+    COALESCE(rollup.claim_count, 0),
+    COALESCE(rollup.invalid_lineage_count, 0),
+    policy.legal_required_claim_set_id,
+    policy.snapshot_policy_sha256,
+    policy.claim_set_version,
+    policy.claim_set_sha256,
+    policy.computed_claim_set_sha256,
+    COALESCE(policy.required_claim_count, 0),
+    COALESCE(policy.covered_claim_count, 0),
+    COALESCE(policy.policy_active, FALSE),
+    projection.review_version_id,
+    projection.review_id,
+    projection.review_version,
+    projection.legal_evidence_snapshot_id,
+    projection.snapshot_version,
+    projection.snapshot_sha256,
+    projection.snapshot_gate_eligible,
+    projection.required_claim_set_id,
+    projection.required_claim_set_sha256,
+    projection.projection_hash_contract,
+    projection.projection_sha256,
+    CASE
+        WHEN projection.projection_hash_contract = 'pg-jsonb-row-v1'
+        THEN encode(
+            extensions.digest(
+                convert_to(
+                    (
+                        to_jsonb(projection)
+                        - 'projection_sha256'
+                        - 'projection_hash_contract'
+                    )::TEXT,
+                    'UTF8'
+                ),
+                'sha256'
+            ),
+            'hex'
+        )
+        ELSE NULL
+    END AS computed_projection_sha256,
+    projection.analysis_only,
+    projection.report_eligible,
+    EXISTS (
+        SELECT 1
+          FROM project_legal_review_versions AS successor
+         WHERE successor.tenant_id = projection.tenant_id
+           AND successor.project_id = projection.project_id
+           AND successor.review_id = projection.review_id
+           AND (
+               successor.supersedes_review_version_id =
+                   projection.review_version_id
+               OR successor.review_version > projection.review_version
+           )
+    ) AS projection_superseded,
+    projection.created_at,
+    decision.legal_review_decision_id,
+    decision.decision_version,
+    decision.supersedes_legal_review_decision_id,
+    decision.expected_predecessor_legal_review_decision_id,
+    decision.legal_evidence_snapshot_id,
+    decision.decision_type,
+    decision.legal_review_version_id,
+    decision.legal_review_version,
+    decision.legal_review_projection_sha256,
+    decision.reviewer_id,
+    decision.reviewer_role,
+    decision.legal_approval_delegation_id,
+    CASE
+        WHEN decision.legal_review_decision_id IS NULL THEN FALSE
+        WHEN decision.legal_approval_delegation_id IS NULL
+            THEN decision.reviewer_role <> 'external_counsel'
+        ELSE EXISTS (
+            SELECT 1
+              FROM legal_approval_delegations AS delegation
+             WHERE delegation.legal_approval_delegation_id =
+                       decision.legal_approval_delegation_id
+               AND delegation.tenant_id = decision.tenant_id
+               AND delegation.project_id = decision.project_id
+               AND delegation.grantee_id = decision.reviewer_id
+               AND delegation.grantee_role = decision.reviewer_role
+               AND delegation.scope = decision.decision_scope
+               AND delegation.status = 'active'
+               AND delegation.created_at <= decision.decided_at
+               AND delegation.valid_from <= decision.decided_at
+               AND delegation.valid_until >= decision.decided_at
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM legal_approval_delegations AS successor
+                     WHERE successor.tenant_id = delegation.tenant_id
+                       AND successor.project_id = delegation.project_id
+                       AND successor.delegation_key =
+                           delegation.delegation_key
+                       AND successor.delegation_version >
+                           delegation.delegation_version
+                       AND successor.created_at <= decision.decided_at
+               )
+        )
+    END AS delegation_valid_at_decision,
+    decision.decided_at,
+    decision.recorded_at,
+    statement_timestamp(),
+    decision.metadata_json,
+    COALESCE(
+        matter_waiver.active_blocking_matter_count,
+        0
+    ),
+    COALESCE(matter_waiver.waived_matter_count, 0),
+    COALESCE(matter_waiver.invalid_waiver_count, 0)
+        + COALESCE(terminal_cure.invalid_terminal_cure_count, 0),
+    governance.latest_matter_event_at,
+    governance.latest_waiver_event_at,
+    CASE
+        WHEN decision.decided_at IS NULL THEN TRUE
+        WHEN governance.latest_matter_event_at > decision.decided_at
+            THEN TRUE
+        WHEN governance.latest_waiver_event_at > decision.decided_at
+            THEN TRUE
+        ELSE FALSE
+    END AS governance_changed_after_decision
+  FROM selected_snapshot AS snapshot
+  CROSS JOIN evidence_rollup AS rollup
+  CROSS JOIN required_claim_rollup AS policy
+  CROSS JOIN latest_review_projection AS projection
+  CROSS JOIN matter_waiver_rollup AS matter_waiver
+  CROSS JOIN terminal_cure_rollup AS terminal_cure
+  CROSS JOIN governance_event_rollup AS governance
+  LEFT JOIN latest_decision AS decision ON TRUE
+"""
+
+_LATEST_APPROVAL_IDENTITY_SQL = """
+SELECT
+    snapshot.legal_evidence_snapshot_id,
+    snapshot.snapshot_version,
+    snapshot.snapshot_sha256,
+    snapshot.legal_review_id
+  FROM legal_evidence_snapshots AS snapshot
+ WHERE snapshot.tenant_id = %s
+   AND snapshot.project_id = %s
+ ORDER BY snapshot.snapshot_version DESC,
+          snapshot.created_at DESC,
+          snapshot.legal_evidence_snapshot_id DESC
+ LIMIT 1
 """
 
 _INSERT_EVIDENCE_SNAPSHOT_SQL = """
@@ -853,12 +2098,16 @@ INSERT INTO legal_evidence_snapshots (
     is_stale,
     gate_eligible,
     supersedes_snapshot_id,
+    legal_required_claim_set_id,
+    required_claim_set_sha256,
+    legal_review_id,
     created_by,
     created_at,
     metadata_json
 ) VALUES (
     %s, %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+    %s, %s, %s, %s, %s, %s, %s, %s,
+    %s, %s, %s::jsonb
 )
 RETURNING legal_evidence_snapshot_id
 """
@@ -1132,6 +2381,638 @@ class PostgresLegalTenantOverlayRepository:
         self._freshness = timedelta(days=max(0, configured_days))
         self._now = now
 
+    def evaluate_approval_readiness(
+        self,
+        *,
+        legal_review_id: str,
+        evidence_snapshot_id: str,
+        expected_snapshot_version: int,
+        expected_snapshot_sha256: str,
+    ) -> dict[str, Any]:
+        """Re-evaluate legal approval evidence from normalized PostgreSQL.
+
+        This read deliberately does not trust the legacy Legal Pod projection.
+        Every invocation rechecks project/tenant scope, immutable snapshot
+        identity, actual item/claim counts, exact corpus lineage, effective-time
+        validity, supersession, and the latest append-only human decision.
+        """
+
+        review_id = _required(legal_review_id, "legal_review_id")
+        snapshot_id = _required(evidence_snapshot_id, "evidence_snapshot_id")
+        try:
+            snapshot_version = int(expected_snapshot_version)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "expected_snapshot_version must be a positive integer"
+            ) from exc
+        if snapshot_version < 1:
+            raise ValueError(
+                "expected_snapshot_version must be a positive integer"
+            )
+        snapshot_sha256 = _required_sha256(
+            expected_snapshot_sha256,
+            "expected_snapshot_sha256",
+        )
+
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                _set_search_path(cursor, self._schema)
+                cursor.execute(
+                    "SELECT set_config('realytics.tenant_id', %s, true)",
+                    (self.tenant_id,),
+                )
+                cursor.execute(
+                    _APPROVAL_READINESS_SQL,
+                    (
+                        snapshot_id,
+                        self.tenant_id,
+                        self.project_id,
+                        self.tenant_id,
+                        self.project_id,
+                        review_id,
+                    ),
+                )
+                row = cursor.fetchone()
+
+        if row is None:
+            return _missing_approval_readiness(
+                snapshot_id=snapshot_id,
+                reason="snapshot_scope_or_identity_mismatch",
+            )
+
+        (
+            stored_snapshot_id,
+            stored_version,
+            stored_hash,
+            as_of_date,
+            citation_status,
+            has_open_conflicts,
+            is_stale,
+            gate_eligible,
+            raw_snapshot_metadata,
+            stored_legal_review_id,
+            snapshot_created_by,
+            snapshot_created_at,
+            snapshot_superseded,
+            item_count,
+            citation_count,
+            claim_count,
+            invalid_lineage_count,
+            required_claim_set_id,
+            snapshot_policy_sha256,
+            required_claim_set_version,
+            required_claim_set_sha256,
+            computed_claim_set_sha256,
+            required_claim_count,
+            covered_claim_count,
+            required_claim_policy_active,
+            projection_version_id,
+            projection_review_id,
+            projection_review_version,
+            projection_snapshot_id,
+            projection_snapshot_version,
+            projection_snapshot_sha256,
+            projection_snapshot_gate_eligible,
+            projection_required_claim_set_id,
+            projection_required_claim_set_sha256,
+            projection_hash_contract,
+            projection_sha256,
+            computed_projection_sha256,
+            projection_analysis_only,
+            projection_report_eligible,
+            projection_superseded,
+            projection_created_at,
+            decision_id,
+            decision_chain_version,
+            supersedes_decision_id,
+            expected_predecessor_decision_id,
+            decision_snapshot_id,
+            decision_type,
+            decision_projection_id,
+            decision_projection_version,
+            decision_projection_sha256,
+            reviewer_id,
+            reviewer_role,
+            legal_approval_delegation_id,
+            delegation_valid_at_decision,
+            decided_at,
+            decision_recorded_at,
+            readiness_evaluated_at,
+            raw_decision_metadata,
+            active_blocking_matter_count,
+            waived_matter_count,
+            invalid_waiver_count,
+            latest_matter_event_at,
+            latest_waiver_event_at,
+            governance_changed_after_decision,
+        ) = row
+        snapshot_metadata = _mapping(raw_snapshot_metadata)
+        decision_metadata = _mapping(raw_decision_metadata)
+        normalized_stored_hash = str(stored_hash or "").strip().casefold()
+        identity_matches = (
+            str(stored_snapshot_id) == snapshot_id
+            and int(stored_version) == snapshot_version
+            and normalized_stored_hash == snapshot_sha256
+            and str(stored_legal_review_id or "") == review_id
+        )
+        coverage_complete = (
+            int(item_count or 0) > 0
+            and int(citation_count or 0) > 0
+        )
+        normalized_snapshot_policy_hash = str(
+            snapshot_policy_sha256 or ""
+        ).strip().casefold()
+        normalized_policy_hash = str(
+            required_claim_set_sha256 or ""
+        ).strip().casefold()
+        normalized_computed_policy_hash = str(
+            computed_claim_set_sha256 or ""
+        ).strip().casefold()
+        required_claim_policy_valid = (
+            bool(required_claim_set_id)
+            and bool(required_claim_policy_active)
+            and int(required_claim_set_version or 0) > 0
+            and bool(normalized_policy_hash)
+            and normalized_snapshot_policy_hash
+            == normalized_policy_hash
+            == normalized_computed_policy_hash
+            and int(required_claim_count or 0) > 0
+        )
+        claim_coverage_complete = (
+            required_claim_policy_valid
+            and int(covered_claim_count or 0)
+            == int(required_claim_count or 0)
+        )
+        normalized_projection_snapshot_hash = str(
+            projection_snapshot_sha256 or ""
+        ).strip().casefold()
+        normalized_projection_policy_hash = str(
+            projection_required_claim_set_sha256 or ""
+        ).strip().casefold()
+        normalized_projection_hash = str(
+            projection_sha256 or ""
+        ).strip().casefold()
+        normalized_computed_projection_hash = str(
+            computed_projection_sha256 or ""
+        ).strip().casefold()
+        projection_exists = bool(projection_version_id)
+        projection_hash_valid = (
+            str(projection_hash_contract or "") == "pg-jsonb-row-v1"
+            and bool(
+                re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    normalized_projection_hash,
+                )
+            )
+            and normalized_projection_hash
+            == normalized_computed_projection_hash
+        )
+        try:
+            projection_version_matches = (
+                int(projection_snapshot_version) == snapshot_version
+            )
+        except (TypeError, ValueError):
+            projection_version_matches = False
+        projection_identity_matches = (
+            projection_exists
+            and str(projection_review_id or "") == review_id
+            and int(projection_review_version or 0) > 0
+            and str(projection_snapshot_id or "") == snapshot_id
+            and projection_version_matches
+            and normalized_projection_snapshot_hash == snapshot_sha256
+            and bool(projection_snapshot_gate_eligible)
+            == bool(gate_eligible)
+            and str(projection_required_claim_set_id or "")
+            == str(required_claim_set_id or "")
+            and normalized_projection_policy_hash
+            == normalized_policy_hash
+            and not bool(projection_superseded)
+        )
+        normalized_decision_projection_hash = str(
+            decision_projection_sha256 or ""
+        ).strip().casefold()
+        try:
+            decision_projection_version_matches = (
+                int(decision_projection_version)
+                == int(projection_review_version)
+            )
+        except (TypeError, ValueError):
+            decision_projection_version_matches = False
+        decision_projection_binding_valid = (
+            bool(decision_id)
+            and projection_exists
+            and str(decision_projection_id or "")
+            == str(projection_version_id or "")
+            and decision_projection_version_matches
+            and normalized_decision_projection_hash
+            == normalized_projection_hash
+        )
+        try:
+            normalized_decision_chain_version = int(
+                decision_chain_version
+            )
+        except (TypeError, ValueError):
+            normalized_decision_chain_version = 0
+        decision_chain_valid = (
+            bool(decision_id)
+            and normalized_decision_chain_version > 0
+            and (
+                (
+                    normalized_decision_chain_version == 1
+                    and supersedes_decision_id is None
+                )
+                or (
+                    normalized_decision_chain_version > 1
+                    and bool(supersedes_decision_id)
+                )
+            )
+            and (
+                expected_predecessor_decision_id is None
+                or str(expected_predecessor_decision_id)
+                == str(supersedes_decision_id or "")
+            )
+        )
+        try:
+            normalized_decided_at = _datetime(decided_at)
+            normalized_decision_recorded_at = _datetime(
+                decision_recorded_at
+            )
+            normalized_readiness_evaluated_at = _datetime(
+                readiness_evaluated_at
+            )
+            decision_time_valid = (
+                decision_chain_valid
+                and projection_created_at is not None
+                and snapshot_created_at is not None
+                and normalized_decided_at
+                == normalized_decision_recorded_at
+                and normalized_decided_at >= _datetime(projection_created_at)
+                and normalized_decided_at >= _datetime(snapshot_created_at)
+                and normalized_decided_at <= normalized_readiness_evaluated_at
+            )
+        except (TypeError, ValueError):
+            decision_time_valid = False
+        lineage_valid = (
+            int(item_count or 0) > 0
+            and int(invalid_lineage_count or 0) == 0
+        )
+        decision_hash = _optional_text(
+            decision_metadata.get("evidenceSnapshotSha256")
+        )
+        if decision_hash:
+            try:
+                decision_hash = _required_sha256(
+                    decision_hash,
+                    "decision.evidenceSnapshotSha256",
+                )
+            except ValueError:
+                decision_hash = None
+        decision_version = decision_metadata.get("evidenceSnapshotVersion")
+        try:
+            decision_version_matches = int(decision_version) == snapshot_version
+        except (TypeError, ValueError):
+            decision_version_matches = False
+        latest_decision_is_approve = (
+            bool(decision_id)
+            and str(decision_snapshot_id or "") == snapshot_id
+            and str(decision_type or "") == "approve"
+        )
+        latest_decision_approves = (
+            latest_decision_is_approve
+            and decision_projection_binding_valid
+            and decision_time_valid
+            and str(reviewer_id or "").strip()
+            != str(snapshot_created_by or "").strip()
+            and str(reviewer_role or "").strip().lower() in {
+                "legal_counsel_approver",
+                "external_counsel",
+            }
+            and bool(delegation_valid_at_decision)
+            and decision_version_matches
+            and decision_hash == snapshot_sha256
+        )
+        matter_waiver_state_valid = (
+            int(active_blocking_matter_count or 0) == 0
+            and int(invalid_waiver_count or 0) == 0
+        )
+        matter_waiver_governance_valid = (
+            matter_waiver_state_valid
+            and not bool(governance_changed_after_decision)
+        )
+        passed = (
+            identity_matches
+            and projection_exists
+            and projection_hash_valid
+            and projection_identity_matches
+            and str(citation_status) == "verified"
+            and not bool(has_open_conflicts)
+            and not bool(is_stale)
+            and bool(gate_eligible)
+            and not bool(snapshot_superseded)
+            and coverage_complete
+            and required_claim_policy_valid
+            and claim_coverage_complete
+            and lineage_valid
+            and latest_decision_approves
+            and matter_waiver_governance_valid
+        )
+        reason = _approval_readiness_reason(
+            identity_matches=identity_matches,
+            projection_exists=projection_exists,
+            projection_hash_valid=projection_hash_valid,
+            projection_identity_matches=projection_identity_matches,
+            citation_status=str(citation_status or ""),
+            has_open_conflicts=bool(has_open_conflicts),
+            is_stale=bool(is_stale),
+            gate_eligible=bool(gate_eligible),
+            snapshot_superseded=bool(snapshot_superseded),
+            coverage_complete=coverage_complete,
+            required_claim_policy_valid=required_claim_policy_valid,
+            claim_coverage_complete=claim_coverage_complete,
+            lineage_valid=lineage_valid,
+            latest_decision_is_approve=latest_decision_is_approve,
+            decision_projection_binding_valid=(
+                decision_projection_binding_valid
+            ),
+            decision_time_valid=decision_time_valid,
+            latest_decision_approves=latest_decision_approves,
+            active_blocking_matter_count=int(
+                active_blocking_matter_count or 0
+            ),
+            invalid_waiver_count=int(invalid_waiver_count or 0),
+            governance_changed_after_decision=bool(
+                governance_changed_after_decision
+            ),
+        )
+        normalized_reviewer_role = str(reviewer_role or "").strip().lower()
+        human_review_status = (
+            "counsel_approved"
+            if latest_decision_approves
+            and normalized_reviewer_role == "external_counsel"
+            else ("approved" if latest_decision_approves else "pending")
+        )
+        return {
+            "schemaVersion": "realytics-normalized-legal-readiness-v1",
+            "source": "normalized_postgres",
+            "readable": True,
+            "pass": passed,
+            "reason": reason,
+            "legalReviewProjectionId": (
+                str(projection_version_id)
+                if projection_version_id is not None
+                else None
+            ),
+            "legalReviewProjectionReviewId": (
+                str(projection_review_id)
+                if projection_review_id is not None
+                else None
+            ),
+            "legalReviewProjectionVersion": (
+                int(projection_review_version)
+                if projection_review_version is not None
+                else None
+            ),
+            "legalReviewProjectionSha256": (
+                f"sha256:{normalized_projection_hash}"
+                if projection_hash_valid
+                else None
+            ),
+            "legalReviewProjectionHashContract": (
+                str(projection_hash_contract)
+                if projection_hash_contract is not None
+                else None
+            ),
+            "legalReviewProjectionHashRecomputed": (
+                projection_hash_valid
+            ),
+            "legalReviewProjectionValid": (
+                projection_hash_valid
+                and projection_identity_matches
+            ),
+            "legalReviewProjectionSuperseded": bool(
+                projection_superseded
+            ),
+            "legalReviewProjectionAnalysisOnly": bool(
+                projection_analysis_only
+            ),
+            "legalReviewProjectionReportEligible": bool(
+                projection_report_eligible
+            ),
+            "evidenceStatus": (
+                "verified" if str(citation_status) == "verified" else
+                str(citation_status or "missing")
+            ),
+            "verifiedReferenceCount": int(item_count or 0),
+            "verifiedCitationCount": int(citation_count or 0),
+            "requiredClaimCount": int(required_claim_count or 0),
+            "verifiedClaimCount": int(covered_claim_count or 0),
+            "claimCoverageComplete": claim_coverage_complete,
+            "requiredClaimPolicyValid": required_claim_policy_valid,
+            "requiredClaimSetId": (
+                str(required_claim_set_id)
+                if required_claim_set_id is not None
+                else None
+            ),
+            "requiredClaimSetVersion": (
+                int(required_claim_set_version)
+                if required_claim_set_version is not None
+                else None
+            ),
+            "requiredClaimSetSha256": (
+                f"sha256:{normalized_policy_hash}"
+                if normalized_policy_hash
+                else None
+            ),
+            "evidenceSnapshotId": str(stored_snapshot_id),
+            "snapshotVersion": int(stored_version),
+            "snapshotSha256": f"sha256:{normalized_stored_hash}",
+            "snapshotGateEligible": bool(gate_eligible),
+            "snapshotSuperseded": bool(snapshot_superseded),
+            "stale": bool(is_stale),
+            "openConflictCount": int(bool(has_open_conflicts)),
+            "lineageValid": lineage_valid,
+            "invalidLineageCount": int(invalid_lineage_count or 0),
+            "coverageComplete": coverage_complete,
+            "asOfDate": (
+                as_of_date.isoformat()
+                if hasattr(as_of_date, "isoformat")
+                else str(as_of_date)
+            ),
+            "latestDecisionId": (
+                str(decision_id) if decision_id is not None else None
+            ),
+            "latestDecisionVersion": (
+                normalized_decision_chain_version
+                if normalized_decision_chain_version > 0
+                else None
+            ),
+            "latestDecisionSupersedesId": (
+                str(supersedes_decision_id)
+                if supersedes_decision_id is not None
+                else None
+            ),
+            "latestDecisionExpectedPredecessorId": (
+                str(expected_predecessor_decision_id)
+                if expected_predecessor_decision_id is not None
+                else None
+            ),
+            "latestDecisionChainValid": decision_chain_valid,
+            "latestDecisionType": (
+                str(decision_type) if decision_type is not None else None
+            ),
+            "latestDecisionLegalReviewProjectionId": (
+                str(decision_projection_id)
+                if decision_projection_id is not None
+                else None
+            ),
+            "latestDecisionLegalReviewProjectionVersion": (
+                int(decision_projection_version)
+                if decision_projection_version is not None
+                else None
+            ),
+            "latestDecisionLegalReviewProjectionSha256": (
+                f"sha256:{normalized_decision_projection_hash}"
+                if re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    normalized_decision_projection_hash,
+                )
+                else None
+            ),
+            "latestDecisionProjectionBindingValid": (
+                decision_projection_binding_valid
+            ),
+            "latestDecisionTimeValid": decision_time_valid,
+            "latestDecisionAt": (
+                decided_at.isoformat()
+                if hasattr(decided_at, "isoformat")
+                else (str(decided_at) if decided_at is not None else None)
+            ),
+            "latestDecisionRecordedAt": (
+                decision_recorded_at.isoformat()
+                if hasattr(decision_recorded_at, "isoformat")
+                else (
+                    str(decision_recorded_at)
+                    if decision_recorded_at is not None
+                    else None
+                )
+            ),
+            "latestDecisionDelegationId": (
+                str(legal_approval_delegation_id)
+                if legal_approval_delegation_id is not None
+                else None
+            ),
+            "latestDecisionDelegationValid": bool(
+                delegation_valid_at_decision
+            ),
+            "activeBlockingMatterCount": int(
+                active_blocking_matter_count or 0
+            ),
+            "waivedMatterCount": int(waived_matter_count or 0),
+            "invalidWaiverCount": int(invalid_waiver_count or 0),
+            "matterWaiverStateValid": matter_waiver_state_valid,
+            "matterWaiverGovernanceValid": (
+                matter_waiver_governance_valid
+            ),
+            "governanceChangedAfterDecision": bool(
+                governance_changed_after_decision
+            ),
+            "latestMatterGovernanceAt": (
+                latest_matter_event_at.isoformat()
+                if hasattr(latest_matter_event_at, "isoformat")
+                else (
+                    str(latest_matter_event_at)
+                    if latest_matter_event_at is not None
+                    else None
+                )
+            ),
+            "latestWaiverGovernanceAt": (
+                latest_waiver_event_at.isoformat()
+                if hasattr(latest_waiver_event_at, "isoformat")
+                else (
+                    str(latest_waiver_event_at)
+                    if latest_waiver_event_at is not None
+                    else None
+                )
+            ),
+            "humanReviewStatus": human_review_status,
+        }
+
+    def evaluate_latest_approval_readiness(self) -> dict[str, Any]:
+        """Select and recheck the newest project snapshot from PostgreSQL.
+
+        No legacy Legal Pod projection participates in identity selection.
+        The second authoritative read intentionally fails if a concurrent
+        successor is appended between selection and evaluation because the
+        selected snapshot will then be reported as superseded.
+        """
+
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                _set_search_path(cursor, self._schema)
+                cursor.execute(
+                    "SELECT set_config('realytics.tenant_id', %s, true)",
+                    (self.tenant_id,),
+                )
+                cursor.execute(
+                    _LATEST_APPROVAL_IDENTITY_SQL,
+                    (self.tenant_id, self.project_id),
+                )
+                identity = cursor.fetchone()
+        if identity is None:
+            return _missing_approval_readiness(
+                snapshot_id=None,
+                reason="normalized_snapshot_missing",
+            )
+        snapshot_id, snapshot_version, snapshot_sha256, legal_review_id = (
+            identity
+        )
+        try:
+            return self.evaluate_approval_readiness(
+                legal_review_id=_required(
+                    legal_review_id,
+                    "snapshot.metadata.legalReviewId",
+                ),
+                evidence_snapshot_id=_required(
+                    snapshot_id,
+                    "legal_evidence_snapshot_id",
+                ),
+                expected_snapshot_version=int(snapshot_version),
+                expected_snapshot_sha256=_required_sha256(
+                    snapshot_sha256,
+                    "snapshot_sha256",
+                ),
+            )
+        except (TypeError, ValueError):
+            return _missing_approval_readiness(
+                snapshot_id=(
+                    str(snapshot_id)
+                    if snapshot_id is not None
+                    else None
+                ),
+                reason="normalized_snapshot_contract_invalid",
+            )
+
+    def latest_approved_required_claim_set_id(self) -> str | None:
+        """Return the current project approval policy under tenant RLS."""
+
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                _set_search_path(cursor, self._schema)
+                cursor.execute(
+                    "SELECT set_config('realytics.tenant_id', %s, true)",
+                    (self.tenant_id,),
+                )
+                cursor.execute(
+                    _LATEST_APPROVED_REQUIRED_CLAIM_SET_ID_SQL,
+                    (self.tenant_id, self.project_id),
+                )
+                row = cursor.fetchone()
+        return (
+            str(row[0])
+            if row is not None and str(row[0] or "").strip()
+            else None
+        )
+
     def append_verified_evidence_snapshot(
         self,
         snapshot: Mapping[str, Any],
@@ -1158,6 +3039,14 @@ class PostgresLegalTenantOverlayRepository:
             or snapshot.get("freshness_policy_version"),
             "freshnessPolicyVersion",
         )
+        if (
+            freshness_policy_version
+            != _APPROVAL_FRESHNESS_POLICY_VERSION
+        ):
+            raise ValueError(
+                "freshnessPolicyVersion is not an approved fail-closed "
+                "snapshot policy"
+            )
         raw_items = snapshot.get("references")
         if not isinstance(raw_items, Sequence) or isinstance(
             raw_items,
@@ -1188,18 +3077,44 @@ class PostgresLegalTenantOverlayRepository:
             or snapshot.get("expected_citation_count"),
             "expectedCitationCount",
         )
-        expected_claim_count = _positive_int(
-            snapshot.get("expectedClaimCount")
-            or snapshot.get("expected_claim_count"),
-            "expectedClaimCount",
+        required_claim_set_id = _required(
+            snapshot.get("requiredClaimSetId")
+            or snapshot.get("required_claim_set_id"),
+            "requiredClaimSetId",
         )
-        verified_claim_count = _non_negative_int(
-            snapshot.get("verifiedClaimCount")
-            if snapshot.get("verifiedClaimCount") is not None
-            else snapshot.get("verified_claim_count"),
-            "verifiedClaimCount",
+        reported_expected_claim_count = (
+            _positive_int(
+                snapshot.get("expectedClaimCount")
+                or snapshot.get("expected_claim_count"),
+                "expectedClaimCount",
+            )
+            if (
+                snapshot.get("expectedClaimCount") is not None
+                or snapshot.get("expected_claim_count") is not None
+            )
+            else None
+        )
+        reported_verified_claim_count = (
+            _non_negative_int(
+                snapshot.get("verifiedClaimCount")
+                if snapshot.get("verifiedClaimCount") is not None
+                else snapshot.get("verified_claim_count"),
+                "verifiedClaimCount",
+            )
+            if (
+                snapshot.get("verifiedClaimCount") is not None
+                or snapshot.get("verified_claim_count") is not None
+            )
+            else None
         )
         top_level_metadata = _mapping(snapshot.get("metadata"))
+        legal_review_id = _required(
+            snapshot.get("legalReviewId")
+            or snapshot.get("legal_review_id")
+            or top_level_metadata.get("legalReviewId"),
+            "legalReviewId",
+        )
+        top_level_metadata["legalReviewId"] = legal_review_id
         timestamp = created_at or self._now()
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
@@ -1220,6 +3135,61 @@ class PostgresLegalTenantOverlayRepository:
                         "legal-evidence-snapshot",
                     ),
                 )
+                cursor.execute(
+                    _APPROVED_REQUIRED_CLAIM_SET_SQL,
+                    (
+                        required_claim_set_id,
+                        self.tenant_id,
+                        self.project_id,
+                    ),
+                )
+                claim_set = cursor.fetchone()
+                if claim_set is None:
+                    raise ValueError(
+                        "requiredClaimSetId must reference the latest approved "
+                        "same-scope approval-gate claim policy"
+                    )
+                (
+                    required_claim_set_version,
+                    required_claim_set_sha256,
+                    raw_required_claim_hashes,
+                    computed_claim_set_sha256,
+                ) = claim_set
+                normalized_claim_set_sha256 = _required_sha256(
+                    required_claim_set_sha256,
+                    "required claim set SHA-256",
+                )
+                if (
+                    normalized_claim_set_sha256
+                    != _required_sha256(
+                        computed_claim_set_sha256,
+                        "computed required claim set SHA-256",
+                    )
+                ):
+                    raise ValueError(
+                        "approved required claim set content hash mismatch"
+                    )
+                required_claim_hashes = {
+                    _required_sha256(
+                        item,
+                        "required claim text SHA-256",
+                    )
+                    for item in (raw_required_claim_hashes or [])
+                }
+                if not required_claim_hashes:
+                    raise ValueError(
+                        "approved required claim set must contain claims"
+                    )
+                expected_claim_count = len(required_claim_hashes)
+                if (
+                    reported_expected_claim_count is not None
+                    and reported_expected_claim_count
+                    != expected_claim_count
+                ):
+                    raise ValueError(
+                        "expectedClaimCount does not match the approved "
+                        "required claim set"
+                    )
                 cursor.execute(
                     _LATEST_EVIDENCE_SNAPSHOT_SQL,
                     (self.tenant_id, self.project_id),
@@ -1248,7 +3218,9 @@ class PostgresLegalTenantOverlayRepository:
                     for item in normalized_items
                 )
                 database_stale = any(
-                    _datetime(item["verifiedAt"]) + self._freshness < timestamp
+                    _datetime(item["verifiedAt"])
+                    + _APPROVAL_FRESHNESS_WINDOW
+                    < timestamp
                     for item in normalized_items
                 )
                 sealed_citations = {
@@ -1260,6 +3232,24 @@ class PostgresLegalTenantOverlayRepository:
                     for item in normalized_items
                 }
                 sealed_citation_count = len(sealed_citations)
+                sealed_claim_hashes = {
+                    item["claimTextSha256"]
+                    for item in normalized_items
+                }
+                verified_claim_count = len(
+                    required_claim_hashes.intersection(
+                        sealed_claim_hashes
+                    )
+                )
+                if (
+                    reported_verified_claim_count is not None
+                    and reported_verified_claim_count
+                    != verified_claim_count
+                ):
+                    raise ValueError(
+                        "verifiedClaimCount does not match normalized "
+                        "evidence membership"
+                    )
                 coverage_complete = (
                     sealed_citation_count == expected_citation_count
                 )
@@ -1281,6 +3271,13 @@ class PostgresLegalTenantOverlayRepository:
                     "expectedClaimCount": expected_claim_count,
                     "verifiedClaimCount": verified_claim_count,
                     "claimCoverageComplete": claim_coverage_complete,
+                    "requiredClaimSetId": required_claim_set_id,
+                    "requiredClaimSetVersion": int(
+                        required_claim_set_version
+                    ),
+                    "requiredClaimSetSha256": (
+                        normalized_claim_set_sha256
+                    ),
                     "databaseOpenIssueDetected": database_open_issues,
                     "databaseFreshnessDerived": True,
                 }
@@ -1345,6 +3342,9 @@ class PostgresLegalTenantOverlayRepository:
                         is_stale,
                         gate_eligible,
                         latest_snapshot_id,
+                        required_claim_set_id,
+                        normalized_claim_set_sha256,
+                        legal_review_id,
                         actor,
                         timestamp,
                         _canonical_json(top_level_metadata),
@@ -1409,6 +3409,12 @@ class PostgresLegalTenantOverlayRepository:
             "expectedClaimCount": expected_claim_count,
             "verifiedClaimCount": verified_claim_count,
             "claimCoverageComplete": claim_coverage_complete,
+            "requiredClaimSetId": required_claim_set_id,
+            "requiredClaimSetVersion": int(required_claim_set_version),
+            "requiredClaimSetSha256": (
+                f"sha256:{normalized_claim_set_sha256}"
+            ),
+            "legalReviewId": legal_review_id,
             "hasOpenConflicts": has_open_conflicts,
             "stale": is_stale,
             "gateEligible": gate_eligible,
@@ -1612,6 +3618,89 @@ class PostgresLegalTenantOverlayRepository:
             decision_metadata.get("legalReviewId"),
             "metadata.legalReviewId",
         )
+        reviewer_role = _required(
+            decision.get("reviewerRole"),
+            "reviewerRole",
+        ).casefold()
+        delegation_id = _optional_text(
+            decision.get("legalApprovalDelegationId")
+        )
+        expected_predecessor_id = _optional_text(
+            decision.get("expectedLatestDecisionId")
+            or decision_metadata.get("expectedLatestDecisionId")
+        )
+        final_decision = decision_type in {
+            "approve",
+            "reject",
+            "waive_with_conditions",
+        }
+        decided_at = _required_datetime(
+            decision.get("decidedAt"),
+            "decidedAt",
+        )
+        evidence_snapshot_id = (
+            _required(
+                decision.get("legalEvidenceSnapshotId"),
+                "legalEvidenceSnapshotId",
+            )
+            if final_decision
+            else _optional_text(decision.get("legalEvidenceSnapshotId"))
+        )
+        if final_decision and reviewer_role not in {
+            "legal_counsel_approver",
+            "external_counsel",
+        }:
+            raise ValueError(
+                "final legal decisions require a dedicated counsel "
+                "approver role"
+            )
+        if (
+            final_decision
+            and reviewer_role == "external_counsel"
+            and not delegation_id
+        ):
+            raise ValueError(
+                "external counsel final decisions require an explicit "
+                "legalApprovalDelegationId"
+            )
+        raw_projection_id = (
+            decision.get("legalReviewProjectionId")
+            or decision_metadata.get("legalReviewProjectionId")
+        )
+        raw_projection_version = (
+            decision.get("legalReviewProjectionVersion")
+            if decision.get("legalReviewProjectionVersion") is not None
+            else decision_metadata.get("legalReviewProjectionVersion")
+        )
+        raw_projection_hash = (
+            decision.get("legalReviewProjectionSha256")
+            or decision_metadata.get("legalReviewProjectionSha256")
+        )
+        projection_binding_supplied = any(
+            value not in (None, "")
+            for value in (
+                raw_projection_id,
+                raw_projection_version,
+                raw_projection_hash,
+            )
+        )
+        if final_decision or projection_binding_supplied:
+            legal_review_version_id = _required(
+                raw_projection_id,
+                "legalReviewProjectionId",
+            )
+            legal_review_version = _positive_int(
+                raw_projection_version,
+                "legalReviewProjectionVersion",
+            )
+            legal_review_projection_sha256 = _required_sha256(
+                raw_projection_hash,
+                "legalReviewProjectionSha256",
+            )
+        else:
+            legal_review_version_id = None
+            legal_review_version = None
+            legal_review_projection_sha256 = None
         with self._connection_factory() as connection:
             with connection.cursor() as cursor:
                 _set_search_path(cursor, self._schema)
@@ -1619,11 +3708,94 @@ class PostgresLegalTenantOverlayRepository:
                     "SELECT set_config('realytics.tenant_id', %s, true)",
                     (self.tenant_id,),
                 )
-                if decision_type == "approve":
-                    evidence_snapshot_id = _required(
-                        decision.get("legalEvidenceSnapshotId"),
-                        "legalEvidenceSnapshotId",
+                if legal_review_version_id is not None:
+                    cursor.execute(
+                        _LATEST_LEGAL_REVIEW_PROJECTION_FOR_DECISION_SQL,
+                        (
+                            self.tenant_id,
+                            self.project_id,
+                            legal_review_id,
+                        ),
                     )
+                    projection_row = cursor.fetchone()
+                    if projection_row is None:
+                        raise ValueError(
+                            "final legal decision requires the latest "
+                            "normalized legal review projection"
+                        )
+                    (
+                        stored_projection_id,
+                        stored_projection_version,
+                        stored_projection_hash_contract,
+                        stored_projection_sha256,
+                        computed_projection_sha256,
+                        projection_snapshot_id,
+                        projection_created_at,
+                        projection_snapshot_created_at,
+                        database_statement_time,
+                    ) = projection_row
+                    if (
+                        str(stored_projection_id or "")
+                        != legal_review_version_id
+                        or int(stored_projection_version or 0)
+                        != legal_review_version
+                        or str(stored_projection_hash_contract or "")
+                        != "pg-jsonb-row-v1"
+                        or str(
+                            stored_projection_sha256 or ""
+                        ).strip().casefold()
+                        != legal_review_projection_sha256
+                        or str(
+                            computed_projection_sha256 or ""
+                        ).strip().casefold()
+                        != legal_review_projection_sha256
+                    ):
+                        raise ValueError(
+                            "legal review projection changed before the "
+                            "decision was recorded"
+                        )
+                    if (
+                        final_decision
+                        and str(projection_snapshot_id or "")
+                        != str(evidence_snapshot_id or "")
+                    ):
+                        raise ValueError(
+                            "legal review projection does not match the "
+                            "decision evidence snapshot"
+                        )
+                    if (
+                        projection_created_at is None
+                        or _datetime(projection_created_at) > decided_at
+                    ):
+                        raise ValueError(
+                            "legal review projection must exist before the "
+                            "decision timestamp"
+                        )
+                    if (
+                        final_decision
+                        and (
+                            projection_snapshot_created_at is None
+                            or _datetime(projection_snapshot_created_at)
+                            > decided_at
+                        )
+                    ):
+                        raise ValueError(
+                            "legal evidence snapshot must exist before the "
+                            "decision timestamp"
+                        )
+                    if final_decision:
+                        database_now = _datetime(database_statement_time)
+                        tolerance = timedelta(minutes=5)
+                        if not (
+                            database_now - tolerance
+                            <= decided_at
+                            <= database_now + tolerance
+                        ):
+                            raise ValueError(
+                                "decidedAt must be within five minutes of "
+                                "database statement time"
+                            )
+                if decision_type == "approve":
                     cursor.execute(
                         _GATE_ELIGIBLE_SNAPSHOT_SQL,
                         (
@@ -1638,12 +3810,11 @@ class PostgresLegalTenantOverlayRepository:
                             "approve requires a same-scope gate-eligible "
                             "verified legal evidence snapshot"
                         )
-                    snapshot_version, snapshot_sha256, snapshot_metadata = (
+                    snapshot_version, snapshot_sha256, snapshot_review_id = (
                         snapshot_row
                     )
-                    stored_metadata = _mapping(snapshot_metadata)
                     if (
-                        str(stored_metadata.get("legalReviewId") or "")
+                        str(snapshot_review_id or "")
                         != legal_review_id
                     ):
                         raise ValueError(
@@ -1670,29 +3841,49 @@ class PostgresLegalTenantOverlayRepository:
                         raise ValueError(
                             "evidence snapshot hash changed before approval"
                         )
-                cursor.execute(
-                    _INSERT_REVIEW_DECISION_SQL,
-                    (
-                        decision_id,
-                        self.tenant_id,
-                        self.project_id,
-                        decision.get("legalFindingId"),
-                        decision.get("legalEvidenceSnapshotId"),
-                        decision_type,
-                        _required(decision.get("decisionScope"), "decisionScope"),
-                        _required(decision.get("reason"), "reason"),
-                        _required(decision.get("reviewerId"), "reviewerId"),
-                        _required(decision.get("reviewerRole"), "reviewerRole"),
-                        _required(decision.get("decidedAt"), "decidedAt"),
-                        json.dumps(
-                            decision_metadata,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            default=str,
+                try:
+                    cursor.execute(
+                        _INSERT_REVIEW_DECISION_SQL,
+                        (
+                            decision_id,
+                            self.tenant_id,
+                            self.project_id,
+                            decision.get("legalFindingId"),
+                            evidence_snapshot_id,
+                            decision_type,
+                            _required(
+                                decision.get("decisionScope"),
+                                "decisionScope",
+                            ),
+                            _required(decision.get("reason"), "reason"),
+                            _required(
+                                decision.get("reviewerId"),
+                                "reviewerId",
+                            ),
+                            reviewer_role,
+                            delegation_id,
+                            legal_review_id,
+                            legal_review_version_id,
+                            legal_review_version,
+                            legal_review_projection_sha256,
+                            expected_predecessor_id,
+                            decided_at,
+                            json.dumps(
+                                decision_metadata,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            ),
                         ),
-                    ),
-                )
+                    )
+                except Exception as exc:
+                    if getattr(exc, "sqlstate", None) == "40001":
+                        raise LegalReviewDecisionConflict(
+                            "legal review decision predecessor changed; "
+                            "reload approval readiness before deciding"
+                        ) from exc
+                    raise
                 inserted = cursor.fetchone()
                 if inserted is None:
                     raise ValueError(
@@ -1841,8 +4032,10 @@ def _row_to_hit(row: Sequence[Any], query: LegalSearchQuery) -> SearchHit:
         official_version_id=str(row[7]),
         locator=locator,
         as_of=query.as_of,
+        observed_at=_datetime(row[12]),
         fetched_at=_datetime(row[13]),
         verified_at=_datetime(row[14]),
+        verified_effective_date=_date(row[10]),
         effective_from=_date(row[10]),
         effective_to=_date(row[11]),
         article=provision_display_path or provision_identifier,
@@ -2123,6 +4316,153 @@ def _non_negative_int(value: Any, name: str) -> int:
     return parsed
 
 
+def _non_negative_integer(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _missing_approval_readiness(
+    *,
+    snapshot_id: str | None,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "schemaVersion": "realytics-normalized-legal-readiness-v1",
+        "source": "normalized_postgres",
+        "readable": True,
+        "pass": False,
+        "reason": reason,
+        "legalReviewProjectionId": None,
+        "legalReviewProjectionReviewId": None,
+        "legalReviewProjectionVersion": None,
+        "legalReviewProjectionSha256": None,
+        "legalReviewProjectionValid": False,
+        "legalReviewProjectionSuperseded": False,
+        "legalReviewProjectionAnalysisOnly": True,
+        "legalReviewProjectionReportEligible": False,
+        "evidenceStatus": "missing",
+        "verifiedReferenceCount": 0,
+        "verifiedCitationCount": 0,
+        "requiredClaimCount": 0,
+        "verifiedClaimCount": 0,
+        "claimCoverageComplete": False,
+        "requiredClaimPolicyValid": False,
+        "requiredClaimSetId": None,
+        "requiredClaimSetVersion": None,
+        "requiredClaimSetSha256": None,
+        "evidenceSnapshotId": snapshot_id,
+        "snapshotVersion": None,
+        "snapshotSha256": None,
+        "snapshotGateEligible": False,
+        "snapshotSuperseded": False,
+        "stale": True,
+        "openConflictCount": 0,
+        "lineageValid": False,
+        "invalidLineageCount": 0,
+        "coverageComplete": False,
+        "latestDecisionId": None,
+        "latestDecisionType": None,
+        "latestDecisionLegalReviewProjectionId": None,
+        "latestDecisionLegalReviewProjectionVersion": None,
+        "latestDecisionLegalReviewProjectionSha256": None,
+        "latestDecisionProjectionBindingValid": False,
+        "latestDecisionTimeValid": False,
+        "latestDecisionAt": None,
+        "activeBlockingMatterCount": 0,
+        "waivedMatterCount": 0,
+        "invalidWaiverCount": 0,
+        "matterWaiverStateValid": False,
+        "matterWaiverGovernanceValid": False,
+        "governanceChangedAfterDecision": True,
+        "latestMatterGovernanceAt": None,
+        "latestWaiverGovernanceAt": None,
+        "humanReviewStatus": "pending",
+    }
+
+
+def _approval_readiness_reason(
+    *,
+    identity_matches: bool,
+    projection_exists: bool,
+    projection_hash_valid: bool,
+    projection_identity_matches: bool,
+    citation_status: str,
+    has_open_conflicts: bool,
+    is_stale: bool,
+    gate_eligible: bool,
+    snapshot_superseded: bool,
+    coverage_complete: bool,
+    required_claim_policy_valid: bool,
+    claim_coverage_complete: bool,
+    lineage_valid: bool,
+    latest_decision_is_approve: bool,
+    decision_projection_binding_valid: bool,
+    decision_time_valid: bool,
+    latest_decision_approves: bool,
+    active_blocking_matter_count: int,
+    invalid_waiver_count: int,
+    governance_changed_after_decision: bool,
+) -> str:
+    checks = (
+        (identity_matches, "snapshot_identity_mismatch"),
+        (
+            projection_exists,
+            "normalized_legal_review_projection_missing",
+        ),
+        (
+            projection_hash_valid,
+            "normalized_legal_review_projection_hash_invalid",
+        ),
+        (
+            projection_identity_matches,
+            "normalized_legal_review_projection_snapshot_mismatch",
+        ),
+        (citation_status == "verified", "citation_status_not_verified"),
+        (not has_open_conflicts, "snapshot_has_open_conflicts"),
+        (not is_stale, "snapshot_is_stale"),
+        (gate_eligible, "snapshot_not_gate_eligible"),
+        (not snapshot_superseded, "snapshot_superseded"),
+        (coverage_complete, "citation_coverage_incomplete"),
+        (
+            required_claim_policy_valid,
+            "required_claim_policy_invalid",
+        ),
+        (claim_coverage_complete, "required_claim_coverage_incomplete"),
+        (lineage_valid, "corpus_lineage_invalid"),
+        (
+            active_blocking_matter_count == 0,
+            "active_blocking_legal_matter",
+        ),
+        (
+            invalid_waiver_count == 0,
+            "invalid_or_expired_legal_waiver",
+        ),
+        (
+            latest_decision_is_approve,
+            "latest_review_decision_not_approved",
+        ),
+        (
+            decision_projection_binding_valid,
+            "latest_review_decision_projection_mismatch",
+        ),
+        (
+            decision_time_valid,
+            "latest_review_decision_time_invalid",
+        ),
+        (
+            not governance_changed_after_decision,
+            "legal_governance_changed_after_decision",
+        ),
+        (latest_decision_approves, "latest_review_decision_not_approved"),
+    )
+    for passed, reason in checks:
+        if not passed:
+            return reason
+    return "ready"
+
+
 def _normalized_evidence_text(value: Any) -> str:
     """Normalize Unicode and spacing without changing the quoted words."""
 
@@ -2249,6 +4589,7 @@ def _assert_expected_snapshot_lineage(
 
 
 __all__ = [
+    "LegalReviewDecisionConflict",
     "PostgresLegalTenantOverlayRepository",
     "PostgresVerifiedLegalSnapshotProvider",
 ]

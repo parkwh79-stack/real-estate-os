@@ -1,6 +1,7 @@
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,18 +31,44 @@ _load_local_env()
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import agent_platform, audit, auth, glossary, kakao, google, legal_intelligence, valuemap, projects, project_assumptions, ops, market
+from routers import agent_platform, audit, auth, glossary, kakao, google, legal_citator, legal_corpus_operations, legal_governance, legal_intelligence, legal_provider_operations, valuemap, projects, project_assumptions, ops, market
 from core.authz import enforce_project_tenant_scope
 from core.idp import principal_from_request
-from core.runtime_profile import cors_origins, validate_security_configuration
-from storage import get_user_session, record_user_activity_log
+from core.runtime_profile import (
+    cors_origins,
+    raw_identity_headers_enabled,
+    server_issued_sessions_enabled,
+    validate_security_configuration,
+)
+from db.postgres_runtime_pool import (
+    close_runtime_pools,
+    open_runtime_pools,
+)
+from storage import get_user_session, record_user_activity_log, storage_backend
 
 validate_security_configuration()
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Own bounded PostgreSQL pools for exactly one API process lifespan."""
+
+    registry = open_runtime_pools()
+    application.state.postgres_runtime_pools = registry
+    try:
+        yield
+    finally:
+        try:
+            close_runtime_pools()
+        finally:
+            application.state.postgres_runtime_pools = None
+
 
 app = FastAPI(
     title="REALYTICS x PLATFORM9 API",
     description="Backend API server for Real Estate OS alpha workflows",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -63,8 +90,24 @@ async def user_activity_middleware(request: Request, call_next):
     response = None
     try:
         project_match = PROJECT_PATH_RE.match(request.url.path)
+        if project_match and project_match.group("project_id") in {
+            "recent-work",
+            "intake",
+            "monitoring",
+        }:
+            project_match = None
         if project_match:
-            project = projects.PROJECTS_DB.get(project_match.group("project_id"))
+            project_id = project_match.group("project_id")
+            project = None
+            if storage_backend() == "postgres":
+                # PostgreSQL is the request-time authority.  The legacy map is
+                # hydrated only as a compatibility read model for downstream
+                # use-cases that still accept the historical repository shape.
+                project = projects.project_repository(request).get(project_id)
+                if project is not None:
+                    projects.PROJECTS_DB[project_id] = project
+            else:
+                project = projects.PROJECTS_DB.get(project_id)
             if isinstance(project, dict):
                 try:
                     enforce_project_tenant_scope(request, project)
@@ -76,6 +119,10 @@ async def user_activity_middleware(request: Request, call_next):
                         response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
                         return response
                     raise
+            elif storage_backend() == "postgres":
+                from fastapi.responses import JSONResponse
+                response = JSONResponse(status_code=404, content={"detail": "Project not found"})
+                return response
         response = await call_next(request)
         return response
     finally:
@@ -84,22 +131,28 @@ async def user_activity_middleware(request: Request, call_next):
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             project_match = PROJECT_PATH_RE.match(path)
             run_match = RUN_PATH_RE.search(path)
-            user_id = (
-                request.headers.get("x-realytics-user-id")
-                or request.headers.get("x-user-id")
-                or request.headers.get("x-codex-user-id")
-                or request.query_params.get("user_id")
-            )
-            session_id = request.headers.get("x-realytics-session-id")
-            if not user_id and session_id:
-                session = get_user_session(session_id)
-                user_id = session.get("userId") if session else None
-            if not user_id and request.headers.get("authorization"):
+            user_id = None
+            if request.headers.get("authorization"):
                 try:
                     principal = principal_from_request(request)
                     user_id = principal.user_id if principal else None
                 except Exception:
                     user_id = None
+            session_id = request.headers.get("x-realytics-session-id")
+            if (
+                not user_id
+                and session_id
+                and server_issued_sessions_enabled()
+            ):
+                session = get_user_session(session_id)
+                user_id = session.get("userId") if session else None
+            if not user_id and raw_identity_headers_enabled():
+                user_id = (
+                    request.headers.get("x-realytics-user-id")
+                    or request.headers.get("x-user-id")
+                    or request.headers.get("x-codex-user-id")
+                    or request.query_params.get("user_id")
+                )
             user_id = user_id or "anonymous"
             try:
                 record_user_activity_log(
@@ -135,6 +188,10 @@ app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(glossary.router)
 app.include_router(legal_intelligence.router)
+app.include_router(legal_citator.router)
+app.include_router(legal_corpus_operations.router)
+app.include_router(legal_governance.router)
+app.include_router(legal_provider_operations.router)
 app.include_router(kakao.router)
 app.include_router(google.router)
 app.include_router(ops.router)

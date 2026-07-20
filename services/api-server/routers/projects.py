@@ -17,6 +17,7 @@ from core.authz import (
     authorize_request,
     enforce_project_tenant_scope,
     identity_context_from_request,
+    is_explicit_human_principal,
 )
 from core.calculations import (
     calculate_cashflow_max_minus,
@@ -40,14 +41,27 @@ from agents.restructuring_agent import RestructuringAgent
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
 from db.repositories.orchestration_repository import OrchestrationRepository
 from db.repositories.project_repository import ProjectRepository
+from db.repositories.postgres_project_repository import (
+    PostgresProjectRepository,
+    ProjectVersionConflict,
+)
 from db.repositories.project_snapshot_repository import ProjectSnapshotRepository
 from db.repositories.report_repository import ReportRepository
 from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
 from db.repositories.legal_intelligence_repository import (
+    LegalReviewDecisionConflict,
     PostgresLegalTenantOverlayRepository,
 )
+from db.repositories.legal_review_projection_repository import (
+    PostgresLegalReviewProjectionRepository,
+)
+from db.legal_review_database import (
+    connect_legal_review_database,
+    legal_review_database_configured,
+)
 from db.postgres import postgres_configured
+from storage import storage_backend
 from storage import (
     get_evidence_graph_record,
     get_chief_pod_artifact_record,
@@ -130,6 +144,10 @@ from use_cases.legal_review import review_legal_and_permits_use_case
 from use_cases.legal_pod import run_legal_pod_use_case
 from use_cases.legal_review_decisions import decide_legal_review_use_case
 from use_cases.legal_intelligence import seal_legal_review_evidence_snapshot
+from use_cases.legal_review_projection import (
+    mark_projection_persistence_failure,
+    persist_legal_pod_projections,
+)
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.orchestration_approval import approve_orchestration_run_by_id_use_case, review_orchestration_handoff_by_id_use_case, review_risk_register_row_by_id_use_case
 from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestration_use_case, run_workflow_use_case
@@ -251,7 +269,19 @@ def persist_snapshot(project_id: str, record: Dict[str, Any]) -> None:
     if not upsert_project_snapshot_record(project_id, record):
         persist_state()
 
-def project_repository() -> ProjectRepository:
+def project_repository(request: Request | None = None):
+    """Return the configured project authority.
+
+    PostgreSQL is authoritative whenever the normalized Postgres backend is
+    selected.  The in-memory repository remains a deliberate local/test lane;
+    it is never used as a fallback after an authenticated production request.
+    """
+    if request is not None and storage_backend() in {"postgres", "postgresql"}:
+        context = identity_context_from_request(request)
+        tenant_id = str((context.get("user") or {}).get("tenantId") or "").strip()
+        if not tenant_id:
+            raise HTTPException(status_code=401, detail={"error": "tenant_required"})
+        return PostgresProjectRepository(tenant_id=tenant_id)
     return ProjectRepository(
         PROJECTS_DB,
         REPORTS_DB,
@@ -381,6 +411,10 @@ _SERVER_MANAGED_PROJECT_AUTHORITY_FIELDS = frozenset(
         "regulatory_constraint_snapshot",
         "legalPermitReview",
         "legal_permit_review",
+        "legalReview",
+        "legal_review",
+        "permitReview",
+        "permit_review",
     }
 )
 
@@ -1494,7 +1528,7 @@ load_fixtures()
 
 @router.get("/")
 def get_projects(request: Request):
-    projects = list_projects_use_case(project_repository())
+    projects = list_projects_use_case(project_repository(request))
     return [project for project in projects if project_visible_to_identity(project, request)]
 
 
@@ -1502,7 +1536,7 @@ def get_projects(request: Request):
 def get_recent_work(request: Request, limit: int = Query(5, ge=1, le=20)):
     """Return the signed-in user's resumable deal-room work, not demo cards."""
     authorize_request(request, "project:read")
-    visible = [p for p in list_projects_use_case(project_repository()) if project_visible_to_identity(p, request)]
+    visible = [p for p in list_projects_use_case(project_repository(request)) if project_visible_to_identity(p, request)]
     items: list[Dict[str, Any]] = []
     for project in visible:
         project_id = str((project.get("project") or {}).get("id") or project.get("id") or "")
@@ -1538,7 +1572,7 @@ def check_intake_continuation(request: Request, input_data: Dict[str, Any] | Non
     authorize_request(request, "project:read")
     files = input_data.get("files") if isinstance(input_data, dict) else []
     files = files if isinstance(files, list) else []
-    visible = [p for p in list_projects_use_case(project_repository()) if project_visible_to_identity(p, request)]
+    visible = [p for p in list_projects_use_case(project_repository(request)) if project_visible_to_identity(p, request)]
     matches: list[Dict[str, Any]] = []
     for project in visible:
         project_id = str((project.get("project") or {}).get("id") or project.get("id") or "")
@@ -1558,26 +1592,42 @@ def check_intake_continuation(request: Request, input_data: Dict[str, Any] | Non
 @router.post("/")
 def create_project(project_data: Dict[str, Any], request: Request):
     reject_server_managed_project_authority_fields(project_data)
-    return create_project_use_case(project_repository(), stamp_project_identity(project_data, request))
+    try:
+        repository = project_repository(request)
+        if isinstance(repository, PostgresProjectRepository):
+            context = identity_context_from_request(request)
+            return repository.create(
+                project_data,
+                created_by=str((context.get("user") or {}).get("userId") or "") or None,
+            )
+        return create_project_use_case(repository, stamp_project_identity(project_data, request))
+    except ProjectVersionConflict as exc:
+        raise HTTPException(status_code=409, detail={"error": "project_version_conflict", "projectId": exc.project_id}) from exc
 
 @router.get("/{project_id}")
-def get_project(project_id: str):
-    project = get_project_use_case(project_repository(), project_id)
+def get_project(project_id: str, request: Request):
+    project = get_project_use_case(project_repository(request), project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 @router.put("/{project_id}")
-def update_project(project_id: str, project_data: Dict[str, Any]):
+def update_project(project_id: str, project_data: Dict[str, Any], request: Request):
     reject_server_managed_project_authority_fields(project_data)
-    project = update_project_use_case(project_repository(), project_id, project_data)
+    try:
+        project = update_project_use_case(project_repository(request), project_id, project_data)
+    except ProjectVersionConflict as exc:
+        raise HTTPException(status_code=409, detail={"error": "project_version_conflict", "projectId": exc.project_id, "actualStateVersion": exc.actual_state_version}) from exc
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 @router.delete("/{project_id}")
-def delete_project(project_id: str):
-    deleted = delete_project_use_case(project_repository(), project_id)
+def delete_project(project_id: str, request: Request):
+    try:
+        deleted = delete_project_use_case(project_repository(request), project_id)
+    except ProjectVersionConflict as exc:
+        raise HTTPException(status_code=409, detail={"error": "project_version_conflict", "projectId": exc.project_id, "actualStateVersion": exc.actual_state_version}) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     delete_project_upload_archive_use_case(upload_archive_repository(), project_id)
@@ -3418,6 +3468,60 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
                 "reason": "verified_snapshot_store_unavailable",
                 "errorType": type(exc).__name__,
             }
+    projection_persistence: Dict[str, Any] = {
+        "persisted": False,
+        "reason": (
+            "postgres_not_configured"
+            if not postgres_configured()
+            else "trusted_tenant_or_actor_missing"
+        ),
+    }
+    if postgres_configured() and tenant_id and actor_id:
+        try:
+            projection_repository = (
+                PostgresLegalReviewProjectionRepository(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                )
+            )
+            projection_persistence = persist_legal_pod_projections(
+                result,
+                repository=projection_repository,
+                actor_id=actor_id,
+            )
+            result["normalizedProjectionPersistence"] = (
+                projection_persistence
+            )
+            result["legalReview"]["normalizedProjectionPersisted"] = True
+            result["permitReview"]["normalizedProjectionPersisted"] = True
+        except (TypeError, ValueError) as exc:
+            result = mark_projection_persistence_failure(
+                result,
+                reason="normalized_projection_contract_rejected",
+                error_type=type(exc).__name__,
+            )
+            projection_persistence = result[
+                "normalizedProjectionPersistence"
+            ]
+        except Exception as exc:
+            result = mark_projection_persistence_failure(
+                result,
+                reason="normalized_projection_store_unavailable",
+                error_type=type(exc).__name__,
+            )
+            projection_persistence = result[
+                "normalizedProjectionPersistence"
+            ]
+    elif postgres_configured():
+        result = mark_projection_persistence_failure(
+            result,
+            reason="trusted_tenant_or_actor_missing",
+        )
+        projection_persistence = result[
+            "normalizedProjectionPersistence"
+        ]
+    else:
+        result["normalizedProjectionPersistence"] = projection_persistence
     result["evidenceSnapshotPersistence"] = snapshot_persistence
     project_data["legalPermitReview"] = result["legalReview"]
     project_data["legalReview"] = result["legalReview"]
@@ -3451,6 +3555,16 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
                     else None
                 ),
             },
+            "normalizedProjection": {
+                "persisted": projection_persistence.get("persisted"),
+                "reason": projection_persistence.get("reason"),
+                "legalReviewVersionId": projection_persistence.get(
+                    "legalReviewVersionId"
+                ),
+                "permitReviewVersionId": projection_persistence.get(
+                    "permitReviewVersionId"
+                ),
+            },
             "authorization": authorization.get("authorization"),
         },
     )
@@ -3469,8 +3583,56 @@ def list_project_legal_reviews(project_id: str, request: Request, limit: int = Q
             detail={"error": "authentication_required", "scope": "legal_review"},
         )
     enforce_project_tenant_scope(request, project)
+    if postgres_configured():
+        user = authorization.get("user") or {}
+        metadata = (
+            project.get("_meta")
+            if isinstance(project.get("_meta"), dict)
+            else {}
+        )
+        tenant_id = str(
+            user.get("tenantId")
+            or tenant_id_from_request(request)
+            or metadata.get("tenantId")
+            or metadata.get("tenant_id")
+            or ""
+        ).strip()
+        if not tenant_id:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "normalized_legal_store_scope_missing",
+                    "message": (
+                        "Tenant scope is required for normalized legal "
+                        "review reads."
+                    ),
+                },
+            )
+        try:
+            repository = PostgresLegalReviewProjectionRepository(
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+            items = repository.list_legal_reviews(limit)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "normalized_legal_store_unavailable",
+                    "errorType": type(exc).__name__,
+                },
+            ) from exc
+        return {
+            "projectId": project_id,
+            "items": items,
+            "source": "normalized_postgres",
+        }
     from storage import list_legal_review_records
-    return {"projectId": project_id, "items": list_legal_review_records(project_id, limit)}
+    return {
+        "projectId": project_id,
+        "items": list_legal_review_records(project_id, limit),
+        "source": "legacy_non_authoritative",
+    }
 
 
 @router.post("/{project_id}/legal-reviews/{review_id}/decision")
@@ -3497,13 +3659,24 @@ def decide_project_legal_review(
                 ),
             },
         )
+    if not is_explicit_human_principal(authorization):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "human_legal_reviewer_required",
+                "message": (
+                    "Legal review decisions require an explicitly classified "
+                    "human principal; service identities cannot approve."
+                ),
+            },
+        )
     enforce_project_tenant_scope(request, project)
     user = authorization.get("user") or {}
     reviewer_id = str(user.get("userId") or "").strip()
     app_role = str(authorization.get("role") or user.get("role") or "").lower()
     legal_role_by_app_role = {
-        "admin": "tenant_admin",
         "legal_reviewer": "legal_reviewer",
+        "legal_counsel_approver": "legal_counsel_approver",
         "external_counsel": "external_counsel",
         "compliance_officer": "compliance_officer",
     }
@@ -3518,13 +3691,32 @@ def decide_project_legal_review(
         )
     metadata = project.get("_meta") if isinstance(project.get("_meta"), dict) else {}
     tenant_id = str(user.get("tenantId") or metadata.get("tenantId") or "").strip()
-    decision_writer = None
-    if postgres_configured() and tenant_id:
-        normalized_repository = PostgresLegalTenantOverlayRepository(
-            tenant_id=tenant_id,
-            project_id=project_id,
+    if (
+        not postgres_configured()
+        or not legal_review_database_configured()
+        or not tenant_id
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "normalized_legal_store_required",
+                "message": (
+                    "Legal review decisions require tenant-bound normalized "
+                    "PostgreSQL and the dedicated legal-review DSN; runtime "
+                    "and legacy projections are never approval authorities."
+                ),
+            },
         )
-        decision_writer = normalized_repository.append_review_decision
+    normalized_repository = PostgresLegalTenantOverlayRepository(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        connection_factory=connect_legal_review_database,
+    )
+    projection_repository = PostgresLegalReviewProjectionRepository(
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    decision_writer = normalized_repository.append_review_decision
     try:
         result = decide_legal_review_use_case(
             project_id,
@@ -3532,10 +3724,27 @@ def decide_project_legal_review(
             payload,
             reviewer_id=reviewer_id,
             reviewer_role=reviewer_role,
+            review_loader=(
+                lambda requested_project_id, requested_limit: (
+                    projection_repository.list_legal_reviews(
+                        requested_limit
+                    )
+                    if requested_project_id == project_id
+                    else []
+                )
+            ),
             decision_writer=decision_writer,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LegalReviewDecisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "legal_review_decision_predecessor_changed",
+                "message": str(exc),
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     record_sensitive_project_event(
@@ -3568,8 +3777,56 @@ def list_project_permit_reviews(project_id: str, request: Request, limit: int = 
             detail={"error": "authentication_required", "scope": "permit_review"},
         )
     enforce_project_tenant_scope(request, project)
+    if postgres_configured():
+        user = authorization.get("user") or {}
+        metadata = (
+            project.get("_meta")
+            if isinstance(project.get("_meta"), dict)
+            else {}
+        )
+        tenant_id = str(
+            user.get("tenantId")
+            or tenant_id_from_request(request)
+            or metadata.get("tenantId")
+            or metadata.get("tenant_id")
+            or ""
+        ).strip()
+        if not tenant_id:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "normalized_legal_store_scope_missing",
+                    "message": (
+                        "Tenant scope is required for normalized permit "
+                        "review reads."
+                    ),
+                },
+            )
+        try:
+            repository = PostgresLegalReviewProjectionRepository(
+                tenant_id=tenant_id,
+                project_id=project_id,
+            )
+            items = repository.list_permit_reviews(limit)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "normalized_legal_store_unavailable",
+                    "errorType": type(exc).__name__,
+                },
+            ) from exc
+        return {
+            "projectId": project_id,
+            "items": items,
+            "source": "normalized_postgres",
+        }
     from storage import list_permit_review_records
-    return {"projectId": project_id, "items": list_permit_review_records(project_id, limit)}
+    return {
+        "projectId": project_id,
+        "items": list_permit_review_records(project_id, limit),
+        "source": "legacy_non_authoritative",
+    }
 
 
 @router.get("/{project_id}/legal-pod/law-changes")

@@ -32,6 +32,10 @@ SERVER_MANAGED_PROJECT_FIELDS = (
     "regulatoryConstraintSnapshot",
     "regulatory_constraint_snapshot",
     "legalPermitReview",
+    "legalReview",
+    "legal_review",
+    "permitReview",
+    "permit_review",
     "legal_permit_review",
 )
 

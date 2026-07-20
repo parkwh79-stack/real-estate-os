@@ -112,6 +112,7 @@ class InMemoryVerifiedSnapshotProvider:
                 as_of=query.as_of,
                 fetched_at=snapshot.fetched_at,
                 verified_at=snapshot.verified_at,
+                verified_effective_date=snapshot.effective_from,
                 effective_from=snapshot.effective_from,
                 effective_to=snapshot.effective_to,
             )

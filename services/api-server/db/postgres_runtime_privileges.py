@@ -71,6 +71,9 @@ PARSER_V2_MANAGED_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
 # role.  Keeping the synchronization ledger visible lets the API disclose
 # coverage/freshness without inheriting ingestion authority.
 LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "legal_corpus_required_target_contracts": ("SELECT",),
+    "legal_corpus_coverage_registries": ("SELECT",),
+    "legal_corpus_coverage_contracts": ("SELECT",),
     "legal_source_providers": ("SELECT",),
     "legal_sync_runs": ("SELECT",),
     "legal_sync_run_events": ("SELECT",),
@@ -84,9 +87,13 @@ LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "legal_resource_version_lineages": ("SELECT",),
     "legal_provisions": ("SELECT",),
     "legal_citations": ("SELECT",),
+    "legal_citation_review_events": (),
     "legal_relation_assertions": ("SELECT",),
+    "legal_relation_review_events": (),
     "legal_term_definitions": ("SELECT",),
     "legal_term_provision_links": ("SELECT",),
+    "legal_term_source_links": ("SELECT",),
+    "legal_term_relations": ("SELECT",),
     "legal_semantic_artifacts": ("SELECT",),
 }
 
@@ -100,7 +107,23 @@ LEGAL_INTELLIGENCE_TENANT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "legal_findings": ("SELECT", "INSERT"),
     "legal_evidence_snapshots": ("SELECT", "INSERT"),
     "legal_evidence_snapshot_items": ("SELECT", "INSERT"),
-    "legal_review_decisions": ("SELECT", "INSERT"),
+    "legal_review_decisions": ("SELECT",),
+    "legal_approval_delegations": ("SELECT",),
+    "legal_required_claim_sets": ("SELECT",),
+    "legal_required_claims": ("SELECT",),
+    "project_legal_matters": ("SELECT",),
+    "legal_waivers": ("SELECT",),
+    "counsel_opinions": ("SELECT",),
+    "legal_analysis_versions": ("SELECT",),
+    "project_legal_annotations": ("SELECT",),
+    "tenant_legal_term_aliases": ("SELECT",),
+    "tenant_legal_term_alias_review_events": ("SELECT",),
+    "project_legal_review_versions": ("SELECT", "INSERT"),
+    "project_permit_review_versions": ("SELECT", "INSERT"),
+    "project_legal_citation_review_versions": ("SELECT",),
+    "project_legal_citation_review_events": ("SELECT",),
+    "project_legal_relation_review_versions": ("SELECT",),
+    "project_legal_relation_review_events": ("SELECT",),
 }
 
 # The canonical glossary remains owned by its governed curation workflow.  The
@@ -109,6 +132,30 @@ LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES: Mapping[
     str, tuple[str, ...]
 ] = {
     "glossary_terms": ("SELECT",),
+}
+
+# Narrow, side-effect-free helpers used by authoritative normalized reads.
+# Migration 0009 revokes PUBLIC execution, so the serving role receives only
+# the exact parser needed to fail closed on malformed waiver deadlines.
+LEGAL_INTELLIGENCE_RUNTIME_FUNCTIONS = (
+    "legal_try_timestamptz(TEXT)",
+)
+LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS = (
+    "digest(bytea, text)",
+)
+
+# Provider operational writes and replay reads/appends use the dedicated
+# REALYTICS_LEGAL_OPERATIONS_DATABASE_URL principal.  Keeping these relations
+# in the serving-runtime manifest with an empty allowlist makes any accidental
+# fallback grant auditable and ensures provisioning revokes historical access.
+LEGAL_PROVIDER_OPERATIONS_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "legal_provider_quarantine": (),
+    "legal_provider_dead_letters": (),
+    "legal_provider_metrics": (),
+    "legal_provider_replay_objects": (),
+    "legal_provider_replay_approval_events": (),
+    "legal_provider_replay_requests": (),
+    "legal_provider_replay_events": (),
 }
 
 FORBIDDEN_APPEND_ONLY_PRIVILEGES = (
@@ -178,6 +225,7 @@ def required_table_privileges() -> dict[str, tuple[str, ...]]:
         **LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
         **LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
         **LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
+        **LEGAL_PROVIDER_OPERATIONS_PRIVILEGES,
     }
 
 
@@ -200,6 +248,18 @@ def forbidden_table_privileges() -> dict[str, tuple[str, ...]]:
         **{
             table: FORBIDDEN_READ_ONLY_PRIVILEGES
             for table in LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES
+        },
+        **{
+            table: (
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "TRUNCATE",
+                "REFERENCES",
+                "TRIGGER",
+            )
+            for table in LEGAL_PROVIDER_OPERATIONS_PRIVILEGES
         },
         **dict(FORBIDDEN_MANAGED_SUPPORT_PRIVILEGES),
     }
@@ -306,6 +366,7 @@ def provision_parser_v2_runtime_role(
                 *LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
                 *LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
                 *LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
+                *LEGAL_PROVIDER_OPERATIONS_PRIVILEGES,
             )
         )
     )
@@ -476,6 +537,7 @@ def render_parser_v2_runtime_role_sql(
         **LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
         **LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
         **LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
+        **LEGAL_PROVIDER_OPERATIONS_PRIVILEGES,
     }
     for table, privileges in exact_privileges.items():
         relation = f"{schema_identifier}.{_quoted_identifier(table)}"
@@ -494,6 +556,17 @@ def render_parser_v2_runtime_role_sql(
     for table, privileges in PARSER_V2_SUPPORT_PRIVILEGES.items():
         relation = f"{schema_identifier}.{_quoted_identifier(table)}"
         statements.append(_render_grant(relation, role_identifier, privileges))
+
+    for signature in LEGAL_INTELLIGENCE_RUNTIME_FUNCTIONS:
+        statements.append(
+            "GRANT EXECUTE ON FUNCTION "
+            f"{schema_identifier}.{signature} TO {role_identifier}"
+        )
+    for signature in LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS:
+        statements.append(
+            "GRANT EXECUTE ON FUNCTION "
+            f"{postgis_schema_identifier}.{signature} TO {role_identifier}"
+        )
 
     return tuple(statements)
 
@@ -559,7 +632,10 @@ __all__ = [
     "FORBIDDEN_READ_ONLY_PRIVILEGES",
     "LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES",
     "LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES",
+    "LEGAL_INTELLIGENCE_RUNTIME_FUNCTIONS",
+    "LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS",
     "LEGAL_INTELLIGENCE_TENANT_PRIVILEGES",
+    "LEGAL_PROVIDER_OPERATIONS_PRIVILEGES",
     "PARSER_V2_MANAGED_SUPPORT_PRIVILEGES",
     "PARSER_V2_SUPPORT_PRIVILEGES",
     "PARSER_V2_TABLE_PRIVILEGES",

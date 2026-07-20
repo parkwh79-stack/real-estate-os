@@ -13,20 +13,14 @@ import { useRouter } from "next/navigation";
 import {
   apiBase,
   authHeaders,
+  cacheResolvedIdentity,
   clearStoredAuthSession,
-  getStoredAuthSession,
-  persistSupabaseSession,
-  refreshSupabaseStoredSession,
+  purgeLegacyBrowserAuthStorage,
   resolveCurrentIdentity,
-  setStoredAuthSession,
   signOutSupabaseSession,
   type RealyticsSession,
   type RealyticsUser,
 } from "../../lib/auth-client";
-import {
-  getSupabaseBrowserClient,
-  supabaseConfigured,
-} from "../../lib/supabase-client";
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
@@ -35,18 +29,17 @@ export interface AuthContextValue {
   user: RealyticsUser | null;
   session: RealyticsSession | null;
   permissions: string[];
-  /** Re-run the session check (e.g. after creating a session in settings). */
+  /** Re-run the cookie-backed session check. */
   refresh: () => void;
-  /** Clear the stored session; the provider reacts via the change event. */
+  /** Revoke the current provider session and clear in-memory identity. */
   logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 /**
- * Single source of truth for client-side authentication. Reads the stored
- * session once, validates it against the server, and re-checks whenever the
- * stored session changes (login/logout dispatch `realytics-auth-session-changed`).
+ * Single source of truth for client-side authentication. The BFF reads the
+ * cookie-backed session, validates it, and returns only non-secret identity.
  * Components consume `useAuth()` instead of re-implementing the check.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -54,138 +47,65 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<RealyticsUser | null>(null);
   const [session, setSession] = useState<RealyticsSession | null>(null);
   const [permissions, setPermissions] = useState<string[]>([]);
+  const [authSource, setAuthSource] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
   const logout = useCallback(async () => {
     try {
-      const stored = getStoredAuthSession();
-      if (stored?.session?.sessionId) {
-        await fetch(`${apiBase}/auth/ai-credentials/current`, {
+      await fetch(`${apiBase}/auth/ai-credentials/current`, {
+        method: "DELETE",
+        headers: authHeaders("web"),
+      }).catch(() => undefined);
+      if (authSource !== "bearer_token") {
+        await fetch(`${apiBase}/auth/session/current`, {
           method: "DELETE",
           headers: authHeaders("web"),
-        });
-        if (stored.authProvider === "supabase") {
-          await signOutSupabaseSession();
-        } else {
-          await fetch(`${apiBase}/auth/session/current`, {
-            method: "DELETE",
-            headers: authHeaders("web"),
-          });
-        }
+        }).catch(() => undefined);
       }
+      await signOutSupabaseSession();
     } finally {
-      // Always clear local state, even when the API is unavailable. The server
-      // session expires independently and hardened deployments revoke at IdP.
       clearStoredAuthSession();
+      setAuthSource(null);
     }
-  }, []);
+  }, [authSource]);
 
   useEffect(() => {
-    const stored = getStoredAuthSession();
-    if (!stored?.session?.sessionId) {
-      setStatus("unauthenticated");
-      setUser(null);
-      setSession(null);
-      setPermissions([]);
-      return;
-    }
-
-    // Optimistically surface the stored identity while the server validates it,
-    // so authenticated reviewers don't see an empty flash on every navigation.
-    setUser(stored.user);
-    setSession(stored.session);
-    setPermissions(stored.permissions ?? []);
-
+    purgeLegacyBrowserAuthStorage();
     let cancelled = false;
-    const validate = async () => {
-      const activeStored = stored.authProvider === "supabase"
-        ? await refreshSupabaseStoredSession(stored)
-        : stored;
-      if (!activeStored) {
-        throw new Error("Supabase session expired.");
-      }
-      const identity = await resolveCurrentIdentity(
-        activeStored.authProvider === "supabase"
-          ? undefined
-          : activeStored.session.sessionId,
-        activeStored.accessToken,
-      );
-      return { activeStored, identity };
-    };
-    validate()
-      .then(({ activeStored, identity }) => {
+    resolveCurrentIdentity()
+      .then((identity) => {
         if (cancelled) return;
         if (!identity.authenticated) {
-          clearStoredAuthSession();
+          clearStoredAuthSession({ notify: false });
           setStatus("unauthenticated");
           setUser(null);
           setSession(null);
           setPermissions([]);
+          setAuthSource(null);
           return;
         }
+        const activeStored = cacheResolvedIdentity(identity);
         setUser(identity.user);
-        setSession(identity.session ?? activeStored.session);
-        setPermissions(identity.permissions ?? activeStored.permissions ?? []);
-        setStoredAuthSession(
-          {
-            ...activeStored,
-            user: identity.user,
-            session: identity.session ?? activeStored.session,
-            permissions: identity.permissions ?? activeStored.permissions ?? [],
-          },
-          { notify: false },
-        );
+        setSession(activeStored.session);
+        setPermissions(activeStored.permissions);
+        setAuthSource(identity.authSource ?? null);
         setStatus("authenticated");
       })
       .catch(() => {
         if (cancelled) return;
-        // Validation failed (expired/invalid/unreachable): treat as logged out so
-        // protected routes consistently fall back to the login page.
-        clearStoredAuthSession();
+        clearStoredAuthSession({ notify: false });
         setStatus("unauthenticated");
         setUser(null);
         setSession(null);
         setPermissions([]);
+        setAuthSource(null);
       });
 
     return () => {
       cancelled = true;
     };
   }, [nonce]);
-
-  useEffect(() => {
-    if (!supabaseConfigured()) return;
-    const client = getSupabaseBrowserClient();
-    const { data } = client.auth.onAuthStateChange((_event, supabaseSession) => {
-      const stored = getStoredAuthSession();
-      if (!stored && supabaseSession) {
-        void persistSupabaseSession(supabaseSession).catch(() => {
-          // A valid Supabase session may still lack REALYTICS tenant/RBAC
-          // authorization. Keep the app logged out when the API rejects it.
-        });
-        return;
-      }
-      if (stored?.authProvider !== "supabase") return;
-      if (!supabaseSession) {
-        clearStoredAuthSession();
-        return;
-      }
-      if (stored.accessToken === supabaseSession.access_token) return;
-      setStoredAuthSession({
-        ...stored,
-        accessToken: supabaseSession.access_token,
-        accessTokenExpiresAt: supabaseSession.expires_at,
-        session: {
-          ...stored.session,
-          expiresAt: supabaseSession.expires_at
-            ? new Date(supabaseSession.expires_at * 1000).toISOString()
-            : stored.session.expiresAt,
-        },
-      });
-    });
-    return () => data.subscription.unsubscribe();
-  }, []);
 
   useEffect(() => {
     const onChange = () => refresh();

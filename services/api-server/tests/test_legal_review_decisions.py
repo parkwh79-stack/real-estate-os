@@ -7,6 +7,9 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 import routers.projects as project_router
+from db.repositories.legal_intelligence_repository import (
+    LegalReviewDecisionConflict,
+)
 from use_cases.legal_review_decisions import (
     decide_legal_review_use_case,
     legal_evidence_readiness,
@@ -18,6 +21,9 @@ def _review(**overrides):
         "schemaVersion": "realytics-legal-review-v2",
         "projectId": "p1",
         "reviewId": "legal-review-1",
+        "reviewVersionId": "legal-review-version-1",
+        "reviewVersion": 1,
+        "projectionSha256": "sha256:" + ("d" * 64),
         "status": "caution",
         "humanReviewStatus": "pending",
         "reviewHistory": [
@@ -37,7 +43,10 @@ def _review(**overrides):
             "stale": False,
             "openConflicts": [],
             "evidenceSnapshotId": "legal-evidence-snapshot-1",
+            "snapshotVersion": 1,
+            "snapshotSha256": "sha256:" + ("a" * 64),
             "snapshotGateEligible": True,
+            "snapshotCreatedBy": "snapshot-maker",
         },
     }
     value.update(overrides)
@@ -49,7 +58,7 @@ def _run(
     payload,
     *,
     reviewer_id="trusted-user",
-    reviewer_role="legal_reviewer",
+    reviewer_role="legal_counsel_approver",
 ):
     writes = []
     decisions = []
@@ -94,10 +103,18 @@ def test_approve_appends_decision_and_uses_only_trusted_reviewer_identity():
     decision = result["decision"]
     assert decision["decisionStatus"] == "approved"
     assert decision["reviewedBy"] == "principal-123"
+    assert (
+        decision["legalReviewProjectionId"]
+        == "legal-review-version-1"
+    )
+    assert decision["legalReviewProjectionVersion"] == 1
+    assert decision["legalReviewProjectionSha256"] == (
+        "sha256:" + ("d" * 64)
+    )
     assert decision["evidenceAssessment"]["eligibleForApproval"] is True
     assert decisions == [decision]
     assert len(writes) == 1
-    assert writes[0]["humanReviewStatus"] == "approved"
+    assert writes[0]["humanReviewStatus"] == "counsel_approved"
     assert writes[0]["reviewHistory"][-1] == decision
     assert writes[0]["reviewHistory"][0]["decisionId"] == "legal-review-decision:old"
     assert original["humanReviewStatus"] == "pending"
@@ -137,10 +154,51 @@ def test_approve_appends_decision_and_uses_only_trusted_reviewer_identity():
 )
 def test_approve_fails_closed_when_evidence_is_not_approval_grade(intelligence):
     with pytest.raises(ValueError, match="gate-eligible sealed evidence snapshot"):
-        _run(
-            _review(legalIntelligence=intelligence),
+        decide_legal_review_use_case(
+            "p1",
+            "legal-review-1",
             {"decisionStatus": "approved"},
+            reviewer_id="trusted-user",
+            reviewer_role="legal_counsel_approver",
+            review_loader=lambda *_args: [
+                _review(legalIntelligence=intelligence)
+            ],
+            review_writer=lambda _project_id, value: value,
+            decision_writer=None,
+            audit_recorder=None,
         )
+
+
+def test_normalized_writer_not_legacy_projection_is_approval_authority():
+    forged_legacy = _review(
+        legalIntelligence={
+            "evidenceStatus": "candidate",
+            "verifiedReferenceCount": 0,
+            "verifiedCitationCount": 0,
+            "requiredClaimCount": 0,
+            "verifiedClaimCount": 0,
+            "claimCoverageComplete": False,
+            "stale": True,
+            "openConflictCount": 99,
+            "evidenceSnapshotId": "normalized-snapshot-1",
+        }
+    )
+    normalized = []
+
+    result = decide_legal_review_use_case(
+        "p1",
+        "legal-review-1",
+        {"decisionStatus": "approved"},
+        reviewer_id="trusted-user",
+        reviewer_role="legal_counsel_approver",
+        review_loader=lambda *_args: [forged_legacy],
+        review_writer=lambda _project_id, value: value,
+        decision_writer=lambda decision: normalized.append(decision),
+        audit_recorder=None,
+    )
+
+    assert result["normalizedDecisionPersistence"]["persisted"] is True
+    assert normalized[0]["legalEvidenceSnapshotId"] == "normalized-snapshot-1"
 
 
 def test_waiver_requires_reason_but_does_not_misrepresent_itself_as_approval():
@@ -151,6 +209,7 @@ def test_waiver_requires_reason_but_does_not_misrepresent_itself_as_approval():
             "stale": True,
             "openConflictCount": 2,
             "evidenceSnapshotId": "legal-evidence-snapshot-weak",
+            "snapshotCreatedBy": "snapshot-maker",
         }
     )
     with pytest.raises(ValueError, match="waiverReason"):
@@ -160,6 +219,13 @@ def test_waiver_requires_reason_but_does_not_misrepresent_itself_as_approval():
         weak_review,
         {
             "decisionStatus": "waived",
+            "waiverValidUntil": "2026-08-31T00:00:00+00:00",
+            "waiverConditions": [
+                {
+                    "code": "CURE-1",
+                    "description": "Attach verified legal evidence.",
+                }
+            ],
             "waiverReason": "외부 법률의견서 제출을 조건으로 위원회가 예외 승인",
         },
     )
@@ -198,6 +264,12 @@ def test_decision_validation_and_lookup_are_fail_closed():
             {"decisionStatus": "rejected", "reviewerRole": "tenant_admin"},
             reviewer_role="untrusted_role",
         )
+    with pytest.raises(ValueError, match="trusted authorization context"):
+        _run(
+            _review(),
+            {"decisionStatus": "needs_revision"},
+            reviewer_role="tenant_admin",
+        )
 
     with pytest.raises(LookupError, match="Legal review not found"):
         decide_legal_review_use_case(
@@ -205,6 +277,7 @@ def test_decision_validation_and_lookup_are_fail_closed():
             "missing",
             {"decisionStatus": "rejected"},
             reviewer_id="principal",
+            reviewer_role="legal_counsel_approver",
             review_loader=lambda _project_id, _limit: [],
             review_writer=lambda _project_id, value: value,
             audit_recorder=None,
@@ -223,12 +296,13 @@ def test_missing_snapshot_blocks_approval_before_any_legacy_or_normalized_write(
     )
     writes = []
     decisions = []
-    with pytest.raises(ValueError, match="sealed evidence snapshot"):
+    with pytest.raises(ValueError, match="normalized evidence snapshot"):
         decide_legal_review_use_case(
             "p1",
             "legal-review-1",
             {"decisionStatus": "approved"},
             reviewer_id="trusted-user",
+            reviewer_role="legal_counsel_approver",
             review_loader=lambda *_args: [review],
             review_writer=lambda _project_id, value: writes.append(value),
             decision_writer=lambda value: decisions.append(value),
@@ -238,6 +312,14 @@ def test_missing_snapshot_blocks_approval_before_any_legacy_or_normalized_write(
     assert decisions == []
 
 
+def test_final_decision_fails_closed_without_normalized_projection_binding():
+    review = _review()
+    review.pop("reviewVersionId")
+
+    with pytest.raises(ValueError, match="normalized legal review projection"):
+        _run(review, {"decisionStatus": "approved"})
+
+
 def test_normalized_decision_shape_uses_migration_enums_and_trusted_role():
     result, _, decisions, _ = _run(
         _review(),
@@ -245,6 +327,7 @@ def test_normalized_decision_shape_uses_migration_enums_and_trusted_role():
             "decisionStatus": "approved",
             "decisionScope": "counsel_opinion",
             "reviewerRole": "tenant_admin",
+            "expectedLatestDecisionId": "decision-previous",
         },
         reviewer_id="counsel-user",
     )
@@ -254,20 +337,62 @@ def test_normalized_decision_shape_uses_migration_enums_and_trusted_role():
     assert decision["decisionScope"] == "approval_gate"
     assert decision["reviewerId"] == "counsel-user"
     # Payload role is ignored; only the trusted kwarg may set it.
-    assert decision["reviewerRole"] == "legal_reviewer"
+    assert decision["reviewerRole"] == "legal_counsel_approver"
     assert decision["legalEvidenceSnapshotId"] == "legal-evidence-snapshot-1"
+    assert decision["expectedLatestDecisionId"] == "decision-previous"
+    assert (
+        decision["metadata"]["expectedLatestDecisionId"]
+        == "decision-previous"
+    )
     assert result["normalizedDecisionPersistence"]["persisted"] is True
 
 
 def test_external_counsel_approval_projects_counsel_approved_status():
     result, writes, _, _ = _run(
         _review(),
-        {"decisionStatus": "approved"},
+        {
+            "decisionStatus": "approved",
+            "legalApprovalDelegationId": "legal-delegation-1",
+        },
         reviewer_id="external-counsel-77",
         reviewer_role="external_counsel",
     )
     assert result["decision"]["reviewerRole"] == "external_counsel"
+    assert (
+        result["decision"]["legalApprovalDelegationId"]
+        == "legal-delegation-1"
+    )
     assert writes[0]["humanReviewStatus"] == "counsel_approved"
+
+
+def test_final_decision_requires_dedicated_counsel_and_maker_checker():
+    with pytest.raises(ValueError, match="dedicated counsel approver"):
+        _run(
+            _review(),
+            {"decisionStatus": "approved"},
+            reviewer_role="legal_reviewer",
+        )
+
+    with pytest.raises(ValueError, match="maker-checker"):
+        decide_legal_review_use_case(
+            "p1",
+            "legal-review-1",
+            {"decisionStatus": "approved"},
+            reviewer_id="snapshot-maker",
+            reviewer_role="legal_counsel_approver",
+            review_loader=lambda *_args: [_review()],
+            review_writer=lambda _project_id, value: value,
+            decision_writer=None,
+            audit_recorder=None,
+        )
+
+    with pytest.raises(ValueError, match="legalApprovalDelegationId"):
+        _run(
+            _review(),
+            {"decisionStatus": "approved"},
+            reviewer_id="external-counsel-1",
+            reviewer_role="external_counsel",
+        )
 
 
 def test_legal_evidence_readiness_treats_missing_staleness_as_stale():
@@ -320,11 +445,12 @@ def test_router_binds_decision_to_authenticated_principal(monkeypatch):
         "authorize_request",
         lambda request, permission: {
             "authenticated": True,
-            "role": "legal_reviewer",
+            "role": "legal_counsel_approver",
             "user": {
                 "userId": "trusted-reviewer",
                 "tenantId": "tenant-1",
-                "role": "legal_reviewer",
+                "role": "legal_counsel_approver",
+                "metadata": {"principalType": "human"},
             },
             "authorization": {"allowed": True, "permission": permission},
         },
@@ -334,7 +460,22 @@ def test_router_binds_decision_to_authenticated_principal(monkeypatch):
         "enforce_project_tenant_scope",
         lambda request, project: {},
     )
-    monkeypatch.setattr(project_router, "postgres_configured", lambda: False)
+    monkeypatch.setattr(project_router, "postgres_configured", lambda: True)
+    monkeypatch.setattr(
+        project_router,
+        "legal_review_database_configured",
+        lambda: True,
+    )
+    decision_writer = lambda value: value
+    monkeypatch.setattr(
+        project_router,
+        "PostgresLegalTenantOverlayRepository",
+        lambda **_kwargs: type(
+            "_NormalizedRepository",
+            (),
+            {"append_review_decision": staticmethod(decision_writer)},
+        )(),
+    )
     monkeypatch.setattr(
         project_router,
         "decide_legal_review_use_case",
@@ -375,8 +516,119 @@ def test_router_binds_decision_to_authenticated_principal(monkeypatch):
 
     assert response["decision"]["decisionId"] == "decision-route"
     assert captured["reviewer_id"] == "trusted-reviewer"
-    assert captured["reviewer_role"] == "legal_reviewer"
-    assert captured["decision_writer"] is None
+    assert captured["reviewer_role"] == "legal_counsel_approver"
+    assert captured["decision_writer"] is decision_writer
+
+
+def test_router_maps_stale_legal_decision_predecessor_to_conflict(monkeypatch):
+    monkeypatch.setitem(
+        project_router.PROJECTS_DB,
+        "p-route-conflict",
+        {
+            "project": {"id": "p-route-conflict"},
+            "_meta": {"tenantId": "tenant-1"},
+        },
+    )
+    monkeypatch.setattr(
+        project_router,
+        "authorize_request",
+        lambda _request, _permission: {
+            "authenticated": True,
+            "role": "legal_counsel_approver",
+            "user": {
+                "userId": "trusted-reviewer",
+                "tenantId": "tenant-1",
+                "role": "legal_counsel_approver",
+                "metadata": {"principalType": "human"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        project_router,
+        "enforce_project_tenant_scope",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(project_router, "postgres_configured", lambda: True)
+    monkeypatch.setattr(
+        project_router,
+        "legal_review_database_configured",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        project_router,
+        "PostgresLegalTenantOverlayRepository",
+        lambda **_kwargs: type(
+            "_Repository",
+            (),
+            {"append_review_decision": staticmethod(lambda _value: None)},
+        )(),
+    )
+    monkeypatch.setattr(
+        project_router,
+        "decide_legal_review_use_case",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            LegalReviewDecisionConflict("reload approval readiness")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        project_router.decide_project_legal_review(
+            "p-route-conflict",
+            "review-route",
+            _request(),
+            {
+                "decisionStatus": "approved",
+                "expectedLatestDecisionId": "stale-decision",
+            },
+        )
+
+    assert error.value.status_code == 409
+    assert (
+        error.value.detail["error"]
+        == "legal_review_decision_predecessor_changed"
+    )
+
+
+def test_router_requires_normalized_postgres_for_human_decisions(monkeypatch):
+    monkeypatch.setitem(
+        project_router.PROJECTS_DB,
+        "p-route-no-postgres",
+        {
+            "project": {"id": "p-route-no-postgres"},
+            "_meta": {"tenantId": "tenant-1"},
+        },
+    )
+    monkeypatch.setattr(
+        project_router,
+        "authorize_request",
+        lambda _request, _permission: {
+            "authenticated": True,
+            "role": "legal_counsel_approver",
+            "user": {
+                "userId": "counsel-1",
+                "tenantId": "tenant-1",
+                "role": "legal_counsel_approver",
+                "metadata": {"principalType": "human"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        project_router,
+        "enforce_project_tenant_scope",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(project_router, "postgres_configured", lambda: False)
+
+    with pytest.raises(HTTPException) as error:
+        project_router.decide_project_legal_review(
+            "p-route-no-postgres",
+            "review-1",
+            _request(),
+            {"decisionStatus": "approved"},
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail["error"] == "normalized_legal_store_required"
 
 
 def test_router_rejects_permissive_anonymous_human_decision(monkeypatch):
@@ -435,6 +687,7 @@ def test_router_does_not_promote_a_generic_financial_reviewer_to_legal_reviewer(
                 "userId": "financial-reviewer",
                 "tenantId": "tenant-1",
                 "role": "reviewer",
+                "metadata": {"principalType": "human"},
             },
             "authorization": {
                 "allowed": True,

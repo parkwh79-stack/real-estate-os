@@ -96,6 +96,12 @@ def _legal_migration(tmp_path):
     return migration
 
 
+def _governance_migration(tmp_path):
+    migration = tmp_path / postgres.LEGAL_GOVERNANCE_MIGRATION
+    migration.write_text("SELECT 2;", encoding="utf-8")
+    return migration
+
+
 def test_runtime_readiness_includes_all_legal_tenant_tables(
     monkeypatch,
     tmp_path,
@@ -110,6 +116,63 @@ def test_runtime_readiness_includes_all_legal_tenant_tables(
     postgres.assert_parser_v2_runtime_ready()
 
     assert connection.closed is True
+
+
+def test_runtime_readiness_includes_governance_tenant_tables(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    legal_migration = _legal_migration(tmp_path)
+    governance_migration = _governance_migration(tmp_path)
+    monkeypatch.setattr(postgres, "MIGRATIONS_DIR", tmp_path)
+    connection = _LegalReadinessConnection(
+        {
+            legal_migration.name: postgres._migration_checksum(
+                legal_migration
+            ),
+            governance_migration.name: postgres._migration_checksum(
+                governance_migration
+            ),
+        },
+        missing=("legal_waivers",),
+    )
+    monkeypatch.setattr(postgres, "connect", lambda: connection)
+
+    with pytest.raises(
+        postgres.ParserV2RuntimeReadinessError,
+        match="legal_waivers",
+    ):
+        postgres.assert_parser_v2_runtime_ready()
+
+
+def test_runtime_readiness_requires_forced_rls_on_provider_replay_tables(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    assert set(postgres.LEGAL_PROVIDER_REPLAY_RLS_TABLES).issubset(
+        postgres.LEGAL_GOVERNANCE_RLS_TABLES
+    )
+    legal_migration = _legal_migration(tmp_path)
+    governance_migration = _governance_migration(tmp_path)
+    monkeypatch.setattr(postgres, "MIGRATIONS_DIR", tmp_path)
+    connection = _LegalReadinessConnection(
+        {
+            legal_migration.name: postgres._migration_checksum(
+                legal_migration
+            ),
+            governance_migration.name: postgres._migration_checksum(
+                governance_migration
+            ),
+        },
+        not_forced=("legal_provider_replay_events",),
+    )
+    monkeypatch.setattr(postgres, "connect", lambda: connection)
+
+    with pytest.raises(
+        postgres.ParserV2RuntimeReadinessError,
+        match="legal_provider_replay_events",
+    ):
+        postgres.assert_parser_v2_runtime_ready()
 
 
 @pytest.mark.parametrize(

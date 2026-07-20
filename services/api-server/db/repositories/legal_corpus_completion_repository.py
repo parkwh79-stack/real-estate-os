@@ -22,18 +22,23 @@ from use_cases.legal_corpus_sync import _deterministic_id, _stable_hash
 
 
 _SELECT_CHECKPOINTS_SQL = """
-SELECT checkpoint_sequence, requested_scope, sync_run_id,
-       checkpoint_before, checkpoint_after, page_hash,
-       page_record_count, occurred_at, metadata_json
-FROM legal_sync_checkpoint_events
-WHERE provider_id = %s
-  AND requested_scope_hash = %s
-  AND checkpoint_sequence BETWEEN %s AND %s
-ORDER BY checkpoint_sequence
+SELECT checkpoint.checkpoint_sequence, checkpoint.requested_scope,
+       checkpoint.sync_run_id, checkpoint.checkpoint_before,
+       checkpoint.checkpoint_after, checkpoint.page_hash,
+       checkpoint.page_record_count, checkpoint.occurred_at,
+       checkpoint.metadata_json, run.coverage_contract_id
+FROM legal_sync_checkpoint_events AS checkpoint
+JOIN legal_sync_runs AS run
+  ON run.sync_run_id = checkpoint.sync_run_id
+ AND run.provider_id = checkpoint.provider_id
+WHERE checkpoint.provider_id = %s
+  AND checkpoint.requested_scope_hash = %s
+  AND checkpoint.checkpoint_sequence BETWEEN %s AND %s
+ORDER BY checkpoint.checkpoint_sequence
 """
 
 _SELECT_FETCHES_SQL = """
-SELECT source_fetch_id, provider_id, sync_run_id
+SELECT source_fetch_id, provider_id, sync_run_id, metadata_json
 FROM legal_source_fetches
 WHERE source_fetch_id = ANY(%s)
 ORDER BY source_fetch_id
@@ -53,10 +58,12 @@ INSERT INTO legal_corpus_scope_completion_attestations(
     last_checkpoint_sequence, terminal_checkpoint, page_count,
     record_count, resource_count, page_hashes_json, manifest_sha256,
     started_at, completed_at, attested_by, verification_status,
-    metadata_json
+    coverage_contract_id, coverage_mode,
+    baseline_completion_attestation_id, metadata_json
 ) VALUES (
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
-    %s, %s, %s, 'verified', %s::jsonb
+    %s, %s, %s, 'verified', %s, %s, %s,
+    %s::jsonb
 )
 ON CONFLICT DO NOTHING
 RETURNING completion_attestation_id
@@ -67,9 +74,24 @@ SELECT provider_id, requested_scope, requested_scope_hash,
        first_checkpoint_sequence, last_checkpoint_sequence,
        terminal_checkpoint, page_count, record_count, resource_count,
        page_hashes_json, manifest_sha256, started_at, completed_at,
-       attested_by, verification_status
+       attested_by, verification_status, coverage_contract_id,
+       coverage_mode, baseline_completion_attestation_id
 FROM legal_corpus_scope_completion_attestations
 WHERE completion_attestation_id = %s
+"""
+
+_SELECT_BASELINE_ATTESTATION_SQL = """
+SELECT baseline.provider_id, baseline.requested_scope_hash,
+       baseline.coverage_contract_id, baseline.coverage_mode,
+       baseline.last_checkpoint_sequence, baseline.verification_status
+FROM legal_corpus_scope_completion_attestations AS baseline
+WHERE baseline.completion_attestation_id = %s
+  AND NOT EXISTS (
+        SELECT 1
+        FROM legal_corpus_scope_completion_attestations AS successor
+        WHERE successor.baseline_completion_attestation_id =
+              baseline.completion_attestation_id
+  )
 """
 
 
@@ -102,6 +124,8 @@ class CompletionCheckpointEvidence:
     page_record_count: int
     occurred_at: datetime
     records: tuple[CompletionRecordEvidence, ...]
+    coverage_identity_sha256: str
+    coverage_contract_id: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "records", tuple(self.records))
@@ -109,6 +133,16 @@ class CompletionCheckpointEvidence:
             raise ValueError("page_hash must be a lowercase SHA-256")
         if self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
+        if not re.fullmatch(
+            r"[0-9a-f]{64}", self.coverage_identity_sha256
+        ):
+            raise ValueError(
+                "coverage_identity_sha256 must be a lowercase SHA-256"
+            )
+        if not self.coverage_contract_id.startswith(
+            "legal-corpus-coverage-contract:"
+        ):
+            raise ValueError("coverage_contract_id is invalid")
 
 
 @dataclass(frozen=True)
@@ -116,6 +150,7 @@ class CompletionFetchEvidence:
     source_fetch_id: str
     provider_id: str
     sync_run_id: str
+    coverage_identity_sha256: str
 
 
 def verify_scope_completion_evidence(
@@ -127,11 +162,13 @@ def verify_scope_completion_evidence(
     """Rebuild the exact ordered manifest before making coverage visible."""
 
     ordered = tuple(checkpoints)
-    expected_scope_hash = _stable_hash(
-        {
-            "providerId": attestation.provider_id,
-            "requestedScope": attestation.requested_scope,
-        }
+    attestation.coverage_identity.assert_provider(
+        provider_key=attestation.coverage_identity.provider_key,
+        provider_revision=attestation.coverage_identity.provider_revision,
+        provider_id=attestation.provider_id,
+    )
+    expected_scope_hash = attestation.coverage_identity.scope_hash(
+        requested_scope=attestation.requested_scope
     )
     if not hmac.compare_digest(
         expected_scope_hash, attestation.requested_scope_hash
@@ -167,6 +204,22 @@ def verify_scope_completion_evidence(
     ):
         raise LegalCorpusCoordinationError(
             "checkpoint requested_scope differs from the attestation"
+        )
+    if any(
+        item.coverage_identity_sha256
+        != attestation.coverage_identity.coverage_identity_sha256
+        for item in ordered
+    ):
+        raise LegalCorpusCoordinationError(
+            "checkpoint coverage identity differs from the attestation"
+        )
+    if any(
+        item.coverage_contract_id
+        != attestation.coverage_identity.coverage_contract_id
+        for item in ordered
+    ):
+        raise LegalCorpusCoordinationError(
+            "checkpoint sync run belongs to another coverage contract"
         )
     for previous, current in zip(ordered, ordered[1:]):
         if current.checkpoint_before != previous.checkpoint_after:
@@ -205,6 +258,8 @@ def verify_scope_completion_evidence(
             fetch is None
             or fetch.provider_id != attestation.provider_id
             or fetch.sync_run_id != checkpoint.sync_run_id
+            or fetch.coverage_identity_sha256
+            != attestation.coverage_identity.coverage_identity_sha256
         ):
             raise LegalCorpusCoordinationError(
                 "checkpoint source fetch is absent or belongs to another run"
@@ -225,6 +280,11 @@ def verify_scope_completion_evidence(
         "providerId": attestation.provider_id,
         "requestedScope": attestation.requested_scope,
         "requestedScopeHash": attestation.requested_scope_hash,
+        "coverageIdentity": dict(attestation.coverage_identity.as_dict()),
+        "coverageMode": attestation.coverage_mode,
+        "baselineCompletionAttestationId": (
+            attestation.baseline_completion_attestation_id
+        ),
         "terminalCheckpoint": attestation.terminal_checkpoint,
         "pages": [
             {
@@ -260,6 +320,13 @@ def verify_scope_completion_evidence(
         {
             "providerId": attestation.provider_id,
             "requestedScopeHash": attestation.requested_scope_hash,
+            "coverageIdentitySha256": (
+                attestation.coverage_identity.coverage_identity_sha256
+            ),
+            "coverageMode": attestation.coverage_mode,
+            "baselineCompletionAttestationId": (
+                attestation.baseline_completion_attestation_id
+            ),
             "terminalCheckpoint": attestation.terminal_checkpoint,
             "manifestSha256": attestation.manifest_sha256,
         },
@@ -302,6 +369,7 @@ class PostgresLegalCorpusCompletionRepository:
                         f"{attestation.requested_scope_hash}",
                     ),
                 )
+                self._verify_baseline(cursor, attestation)
                 checkpoints = self._load_checkpoints(
                     cursor, attestation
                 )
@@ -329,10 +397,13 @@ class PostgresLegalCorpusCompletionRepository:
                         attestation.started_at,
                         attestation.completed_at,
                         attestation.attested_by,
+                        attestation.coverage_identity.coverage_contract_id,
+                        attestation.coverage_mode,
+                        attestation.baseline_completion_attestation_id,
                         _json(
                             {
                                 "verificationPolicy": (
-                                    "ordered-checkpoint-manifest/v1"
+                                    "ordered-checkpoint-manifest/v2"
                                 ),
                                 "replayed": False,
                             }
@@ -342,6 +413,45 @@ class PostgresLegalCorpusCompletionRepository:
                 if cursor.fetchone() is None:
                     self._assert_exact_replay(cursor, attestation)
         return attestation
+
+    @staticmethod
+    def _verify_baseline(
+        cursor: Any,
+        attestation: LegalCorpusScopeCompletionAttestation,
+    ) -> None:
+        if attestation.coverage_mode == "initial":
+            if (
+                attestation.baseline_completion_attestation_id is not None
+                or attestation.first_checkpoint_sequence != 1
+            ):
+                raise LegalCorpusCoordinationError(
+                    "initial completion must start at sequence one without "
+                    "a baseline"
+                )
+            return
+        baseline_id = attestation.baseline_completion_attestation_id
+        if not baseline_id:
+            raise LegalCorpusCoordinationError(
+                "incremental completion requires the verified current "
+                "completion leaf as its baseline"
+            )
+        cursor.execute(_SELECT_BASELINE_ATTESTATION_SQL, (baseline_id,))
+        row = cursor.fetchone()
+        if (
+            row is None
+            or str(row[0]) != attestation.provider_id
+            or str(row[1]) != attestation.requested_scope_hash
+            or str(row[2])
+            != attestation.coverage_identity.coverage_contract_id
+            or str(row[3]) not in {"initial", "incremental"}
+            or int(row[4]) + 1
+            != attestation.first_checkpoint_sequence
+            or str(row[5]) != "verified"
+        ):
+            raise LegalCorpusCoordinationError(
+                "incremental baseline is not the verified current leaf for "
+                "this coverage contract and checkpoint chain"
+            )
 
     @staticmethod
     def _load_checkpoints(
@@ -359,9 +469,17 @@ class PostgresLegalCorpusCompletionRepository:
         )
         rows = tuple(cursor.fetchall())
         version_ids: list[str] = []
-        parsed: list[tuple[Any, str, tuple[str, ...]]] = []
+        parsed: list[tuple[Any, str, tuple[str, ...], str]] = []
         for row in rows:
             metadata = _json_object(row[8], "checkpoint metadata")
+            raw_coverage_identity = metadata.get("coverageIdentity")
+            if not isinstance(raw_coverage_identity, dict):
+                raise LegalCorpusCoordinationError(
+                    "checkpoint has no typed coverage identity"
+                )
+            coverage_identity_sha256 = str(
+                raw_coverage_identity.get("coverageIdentitySha256") or ""
+            ).strip()
             source_fetch_id = str(
                 metadata.get("sourceFetchId") or ""
             ).strip()
@@ -388,7 +506,14 @@ class PostgresLegalCorpusCompletionRepository:
                     "checkpoint version manifest length is inconsistent"
                 )
             version_ids.extend(page_version_ids)
-            parsed.append((row, source_fetch_id, page_version_ids))
+            parsed.append(
+                (
+                    row,
+                    source_fetch_id,
+                    page_version_ids,
+                    coverage_identity_sha256,
+                )
+            )
 
         if len(set(version_ids)) != len(version_ids):
             raise LegalCorpusCoordinationError(
@@ -398,7 +523,12 @@ class PostgresLegalCorpusCompletionRepository:
             cursor, version_ids
         )
         checkpoints: list[CompletionCheckpointEvidence] = []
-        for row, source_fetch_id, page_version_ids in parsed:
+        for (
+            row,
+            source_fetch_id,
+            page_version_ids,
+            coverage_identity_sha256,
+        ) in parsed:
             records = tuple(
                 version_map[version_id] for version_id in page_version_ids
             )
@@ -416,6 +546,8 @@ class PostgresLegalCorpusCompletionRepository:
                     occurred_at=row[7],
                     source_fetch_id=source_fetch_id,
                     records=records,
+                    coverage_identity_sha256=coverage_identity_sha256,
+                    coverage_contract_id=str(row[9] or ""),
                 )
             )
         return tuple(checkpoints)
@@ -452,14 +584,25 @@ class PostgresLegalCorpusCompletionRepository:
         if not fetch_ids:
             return {}
         cursor.execute(_SELECT_FETCHES_SQL, (fetch_ids,))
-        result = {
-            str(row[0]): CompletionFetchEvidence(
+        result = {}
+        for row in cursor.fetchall():
+            metadata = _json_object(row[3], "source fetch metadata")
+            raw_coverage_identity = metadata.get("coverageIdentity")
+            if not isinstance(raw_coverage_identity, dict):
+                raise LegalCorpusCoordinationError(
+                    "source fetch has no typed coverage identity"
+                )
+            result[str(row[0])] = CompletionFetchEvidence(
                 source_fetch_id=str(row[0]),
                 provider_id=str(row[1]),
                 sync_run_id=str(row[2]),
+                coverage_identity_sha256=str(
+                    raw_coverage_identity.get(
+                        "coverageIdentitySha256"
+                    )
+                    or ""
+                ).strip(),
             )
-            for row in cursor.fetchall()
-        }
         if set(result) != set(fetch_ids):
             raise LegalCorpusCoordinationError(
                 "checkpoint references absent source fetches"
@@ -486,10 +629,13 @@ class PostgresLegalCorpusCompletionRepository:
             attestation.page_count,
             attestation.record_count,
             attestation.resource_count,
+            attestation.coverage_identity.coverage_contract_id,
+            attestation.coverage_mode,
+            attestation.baseline_completion_attestation_id,
         )
         if (
             row is None
-            or tuple(row[:9]) != expected
+            or tuple(row[:9]) != expected[:9]
             or tuple(_json_array(row[9], "page hashes"))
             != attestation.page_hashes
             or not hmac.compare_digest(
@@ -499,6 +645,14 @@ class PostgresLegalCorpusCompletionRepository:
             or row[12] != attestation.completed_at
             or str(row[13]) != attestation.attested_by
             or str(row[14]) != "verified"
+            or tuple(
+                str(value) if value is not None else None
+                for value in row[15:18]
+            )
+            != tuple(
+                str(value) if value is not None else None
+                for value in expected[9:12]
+            )
         ):
             raise LegalCorpusCoordinationError(
                 "completion attestation id is bound to different evidence"

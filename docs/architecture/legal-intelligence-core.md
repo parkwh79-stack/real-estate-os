@@ -56,7 +56,8 @@ knowledge system:
 - there is no verified local corpus with immutable fetch history;
 - source authority, transport, content type, and verification state are not
   first-class independent fields;
-- project legal records do not yet follow the normalized tenant/RLS model;
+- legacy `legal_reviews`/`permit_reviews` projections and singleton state do
+  not themselves provide a normalized tenant/RLS authority boundary;
 - an MCP outage can unnecessarily remove legal research capability;
 - exact legal locators and source hashes are not consistently required before a
   finding can affect an approval gate.
@@ -124,32 +125,37 @@ These dimensions MUST remain independent.
 
 ### 6.1 `sourceAuthority`
 
-Initial canonical values:
+Runtime serialized values:
 
-- `LAW_GO_KR`
-- `SUPREME_COURT`
-- `CONSTITUTIONAL_COURT`
-- `CENTRAL_GOVERNMENT`
-- `LOCAL_GOVERNMENT`
-- `PUBLIC_AGENCY`
-- `TENANT_DOCUMENT`
-- `COUNSEL_OPINION`
-- `UNKNOWN`
+- `law_go_kr`
+- `court`
+- `supreme_court`
+- `constitutional_court`
+- `central_government`
+- `local_government`
+- `public_agency`
+- `national_tax_service`
+- `tenant_document`
+- `human_counsel`
+- `caller_supplied`
+- `unknown`
 
 `sourceAuthority` identifies origin/ownership, not the HTTP client or MCP tool.
-A resource distributed through Law.go.kr MAY retain the more specific authority
-when the official metadata supports it.
+A resource distributed through Law.go.kr MUST use the more specific issuing
+authority when the resource family or official metadata supports it.
+`law_go_kr` is not a blanket authority for precedent, Constitutional Court
+decision, central-government material, or local ordinance.
 
 ### 6.2 `transport`
 
-Initial canonical values:
+Runtime serialized values:
 
-- `LOCAL_VERIFIED_SNAPSHOT`
-- `OFFICIAL_DIRECT_API`
-- `SELF_HOSTED_MCP`
-- `REMOTE_MCP`
-- `TENANT_UPLOAD`
-- `INTERNAL_WORKER`
+- `local_verified_snapshot`
+- `law_go_kr_direct_api`
+- `self_hosted_mcp`
+- `remote_mcp`
+- `tenant_object_storage`
+- `caller_context`
 
 The same official source can be observed through different transports.
 Transport precedence MUST NOT be interpreted as legal-authority precedence.
@@ -170,21 +176,21 @@ stored in separate records/fields and rendered with different badges.
 
 ### 6.4 Verification states
 
-Initial canonical values:
+Transport/source trust is serialized separately as:
 
-- `UNVERIFIED`
-- `SCHEMA_VALID`
-- `SOURCE_ATTESTED`
-- `CITATION_VERIFIED`
-- `HUMAN_REVIEWED`
-- `COUNSEL_APPROVED`
-- `REJECTED`
-- `SUPERSEDED`
+- `untrusted_candidate`
+- `source_attested`
+- `verified_snapshot`
+- `human_reviewed`
+
+Citation, review and lifecycle tables additionally use domain states such as
+`unknown`, `verified`, `rejected`, and `superseded`. Counsel approval remains a
+separate human decision, not another name for a source trust level.
 
 Verification is monotonic only within an immutable record. A later correction
 creates a superseding record; it does not silently rewrite the audit history.
 
-`CITATION_VERIFIED` means that the cited resource/version/provision exists and
+`citation_verified` means that the cited resource/version/provision exists and
 matches the stored locator. It does **not** mean that the legal interpretation
 or project conclusion is correct.
 
@@ -343,8 +349,9 @@ table.
 
 ### 10.1 Global official corpus
 
-Only the source-sync role may write these records. Application runtime roles
-have read-only access to published, source-attested versions.
+Only the source-sync role may write published Corpus records. Application
+runtime roles have read-only access to published, source-attested versions.
+The legacy global review ledgers have no project-review write grant.
 
 | Table | Purpose |
 |---|---|
@@ -358,6 +365,8 @@ have read-only access to published, source-attested versions.
 | `legal_relation_assertions` | Versioned, evidence-backed relation candidates |
 | `legal_sync_runs` | Run status, counts, adapter/rules version, checksum |
 | `legal_sync_checkpoints` | Resumable provider/resource checkpoints |
+| `legal_citation_review_events` | Legacy/institutional review ledger retained for compatibility; project review does not write it |
+| `legal_relation_review_events` | Legacy/institutional relation-review ledger retained for compatibility; project review does not write it |
 
 Raw source payloads SHOULD be stored as immutable objects. The database stores
 the object key/version, SHA-256, byte size, content type, source endpoint
@@ -377,13 +386,36 @@ composite foreign key to `(project_id, tenant_id)`.
 | `legal_findings` | Preliminary deterministic/AI/human findings |
 | `legal_evidence_snapshots` | Sealed evidence set used by a finding or gate |
 | `legal_review_decisions` | Append-only approve/waive/needs-revision/reject decisions |
+| `legal_approval_delegations` | Versioned, time-bounded approval delegation with explicit scope |
 | `legal_waivers` | Time-bounded authorized exception with reason and evidence |
 | `counsel_opinions` | Tenant document metadata and approval, never globalized |
+| `legal_analysis_versions` | AI/deterministic analysis version, input/content hashes, and independent review state |
 | `project_legal_annotations` | Project-specific notes and classifications |
+| `tenant_legal_term_aliases` | Tenant-scoped legal alias candidates and approved/rejected versions |
+| `tenant_legal_term_alias_review_events` | Append-only tenant alias review history |
+| `project_legal_citation_review_versions` / `project_legal_citation_review_events` | Tenant/project-scoped, branch-free citation review versions and exact review events |
+| `project_legal_relation_review_versions` / `project_legal_relation_review_events` | Tenant/project-scoped, branch-free interpretive-relation review versions and exact review events |
 
 Sensitive tenant document bodies use the project document/object-storage
 controls. The legal corpus may store a tenant-document reference and hash, but
 must not copy it into the public corpus.
+
+Provider operations are stored separately from both the global corpus and
+tenant overlay. `legal_provider_quarantine`, `legal_provider_dead_letters`,
+and `legal_provider_metrics` are global, privacy-safe operational metadata:
+they contain no tenant payload, query text, response body, credential, or
+credential-bearing URL. Replay authority is tenant-native.
+`legal_provider_replay_objects`, `legal_provider_replay_approval_events`,
+`legal_provider_replay_requests`, and `legal_provider_replay_events` use forced
+RLS. A trusted provider/object worker must append a catalog receipt containing
+the exact dead-letter, provider, object locator, object-store version ID,
+SHA-256, Object Lock mode, retention deadline, and receipt hash before the
+dead-letter is replayable. The public approval API accepts only that catalog
+ID. PostgreSQL revalidates the copied binding on approval, request, and
+`requested -> running` transition, including a deferred commit-time check.
+Event visibility is inherited from the parent request, so changing
+`realytics.tenant_id` cannot reveal another tenant's object receipt, approval,
+request, or lifecycle events.
 
 ### 10.3 Bitemporal and version fields
 
@@ -428,6 +460,16 @@ Each assertion contains:
 The default subsequent-treatment status is `UNKNOWN`. Machine-inferred
 treatment may prioritize research but cannot independently clear an approval
 gate.
+
+`machine_inferred + verified + human_review_pending` is invalid. A citation or
+interpretive relation becomes verified only through an append-only review that
+records the reviewer, review time, exact excerpt and excerpt hash. Re-review
+creates a superseding tenant/project review version and its exact review event.
+It never creates a project-specific successor in the institution-wide
+`legal_citations` or `legal_relation_assertions` Corpus tables. The overlay
+enforces project evidence scope, maker-checker separation, server-time and
+source-time causality, exact delegation scope, and branch-free version/event
+chains under forced RLS.
 
 ## 11. Glossary integration
 
@@ -536,15 +578,16 @@ overlays are read.
   "resourceId": "stable-resource-id",
   "resourceVersionId": "immutable-version-id",
   "provisionId": "optional-provision-id",
-  "resourceType": "STATUTE",
-  "sourceAuthority": "LAW_GO_KR",
-  "transport": "LOCAL_VERIFIED_SNAPSHOT",
-  "contentClass": "OFFICIAL_TEXT",
-  "verificationStatus": "CITATION_VERIFIED",
-  "freshnessStatus": "CURRENT",
+  "resourceType": "statute",
+  "sourceAuthority": "central_government",
+  "transport": "local_verified_snapshot",
+  "contentClass": "official_text",
+  "verificationStatus": "citation_verified",
+  "freshnessStatus": "fresh",
   "officialIdentifiers": {},
   "citation": "건축법 제11조",
-  "asOfDate": "2026-07-18",
+  "requestedAsOfDate": "2026-07-18",
+  "verifiedEffectiveDate": "2026-01-01",
   "validFrom": "2026-01-01",
   "validTo": null,
   "observedAt": "2026-07-18T01:00:00Z",
@@ -555,6 +598,14 @@ overlays are read.
   "normalizedContentSha256": "sha256"
 }
 ```
+
+`sourceAuthority` identifies the issuing body, not the delivery system.
+Law.go.kr is normally `transport=law_go_kr_direct_api`; precedent,
+constitutional-decision, central-government and local-ordinance results map to
+their underlying court or government authority. Direct list search records
+`requestedAsOfDate` and `observedAt`, but leaves `verifiedEffectiveDate` and
+`verifiedAt` empty until a detail/history-backed verification path proves
+historical applicability.
 
 ### 13.3 Untrusted legacy context
 
@@ -588,6 +639,13 @@ Every material Legal Pod claim MUST be backed by a sealed evidence snapshot.
 An evidence snapshot contains exact resource version/provision links, source
 hashes, freshness state, validation results, and snapshot hash.
 
+`recordLocator` and `evidenceLocator` are different contracts.
+`recordLocator` locates the internal Legal Pod/review record. Only
+`evidenceLocator`, which identifies the external source version, provision,
+page/table/row/cell or equivalent exact basis, is eligible for a legal evidence
+gate. A legal review cannot satisfy its own evidence requirement by pointing
+back to itself.
+
 The following are not sufficient evidence:
 
 - `mcp.connected=true`;
@@ -600,6 +658,11 @@ The following are not sufficient evidence:
 
 A legal approval gate may pass only when:
 
+- normalized PostgreSQL confirms the tenant/project/review/snapshot scope;
+- the presented snapshot ID, version and SHA-256 match the stored snapshot;
+- the snapshot has not been superseded and remains effective/fresh;
+- every evidence item resolves to the same corpus provider, fetch, resource
+  version and provision lineage stored in PostgreSQL;
 - required claim categories are complete;
 - every blocking claim has exact verified evidence;
 - requested `asOfDate` is covered;
@@ -609,6 +672,19 @@ A legal approval gate may pass only when:
 - required counsel/human review is approved;
 - all waivers are authorized, scoped, time-bounded, and auditable.
 
+The gate always re-reads those facts and the latest decision directly from the
+normalized PostgreSQL tables. A missing/unreadable normalized store fails
+closed; no environment mode and no legacy JSON boolean/count can clear the
+gate. Legacy projections remain display and migration inputs only.
+
+Approval Gate final approve/reject/conditional-waive decisions require
+`legal_counsel_approver` or an explicitly delegated `external_counsel`.
+The snapshot creator cannot make the final decision. External counsel must
+reference a same-tenant/project, active, unexpired, unsuperseded delegation
+whose grantee, role and scope match the decision. `tenant_admin` may manage
+tenant workflow or propose review/waiver work but cannot be the final legal
+approver.
+
 Fallback assumptions remain `analysisOnly=true` and
 `reportEligible=false`. A citation verification pass cannot promote an AI
 conclusion to counsel approval.
@@ -617,24 +693,60 @@ conclusion to counsel approval.
 
 ### 15.1 Roles
 
-Minimum production roles:
+Application user roles:
 
-- `legal_sync`: write immutable fetch/sync records and publish verified global
-  versions;
-- `legal_runtime`: read published global corpus, read/write authorized tenant
-  overlays;
-- `legal_reviewer`: append review decisions within authorized projects;
-- `legal_counsel_approver`: append counsel approval/rejection;
-- `legal_admin`: manage provider/freshness/ranking policies with audit;
+- `legal_reviewer`: append preliminary review decisions within authorized
+  projects;
+- `legal_counsel_approver`: append final counsel approval/rejection;
+- `external_counsel`: exercise only an explicit, valid delegation;
+- `compliance_officer`: operate the provider DLQ/replay workflow;
+- `tenant_admin`: tenant administration and proposals, not final legal
+  approval;
+- `admin`: provider/freshness/ranking policy and controlled operations.
+
+Minimum PostgreSQL principals:
+
+- `realytics_runtime`: serve verified corpus reads and append authorized
+  tenant overlays;
+- `realytics_legal_sync`: append official fetch/sync/corpus records;
+- `realytics_legal_review`: read global Corpus facts and required evidence
+  lineage, and append only tenant-native legal-governance and Citator review
+  versions/events; it has no global Corpus write privilege;
+- `realytics_legal_operations`: read and append global
+  quarantine/DLQ/metric metadata, and read/append tenant-RLS replay
+  approval/request/event streams;
 - migration owner: schema changes only, never used by application runtime.
 
-No application runtime role may own tables or bypass tenant RLS.
+Human Citator review requires
+`REALYTICS_LEGAL_REVIEW_DATABASE_URL`; provider DLQ review/replay requires
+`REALYTICS_LEGAL_OPERATIONS_DATABASE_URL`. Neither may fall back to the serving
+runtime or legal-sync DSN. Role names are configured independently through
+`REALYTICS_LEGAL_REVIEW_DATABASE_ROLE` and
+`REALYTICS_LEGAL_OPERATIONS_DATABASE_ROLE`.
+
+No application database role may own tables, inherit an elevated role, create
+schema objects, or bypass tenant RLS. Review and operations roles have no
+`UPDATE` or `DELETE`; all decisions and replay transitions are appended.
+
+The HTTP boundary additionally requires an authenticated principal explicitly
+typed as a human and derives reviewer identity/role from that principal rather
+than accepting those fields from the request. This is not yet cryptographic
+database-level actor binding. A compromised
+`REALYTICS_LEGAL_REVIEW_DATABASE_URL` credential could still attempt direct SQL
+using a permitted reviewer ID/role string. Before production, legal-review
+writes MUST be brokered through an authenticated service or bound to signed,
+transaction-local actor claims that PostgreSQL triggers verify against managed
+role membership. Credential issuance, membership, connection identity, and
+revocation evidence remain a P1 security hardening item.
 
 ### 15.2 RLS
 
 - Every tenant overlay table has RLS enabled and forced.
 - Policies use the authenticated tenant session context and fail closed when it
   is missing.
+- Global provider quarantine/DLQ/metric metadata intentionally has no tenant
+  identity. Replay approval/request rows are tenant/project native, and replay
+  event policies resolve tenant identity through their parent request.
 - Project rows use composite `(project_id, tenant_id)` foreign keys.
 - Tenant A cannot observe Tenant B query text, annotations, documents,
   evidence, decisions, or identifiers through joins, errors, counts, search
@@ -655,6 +767,10 @@ No application runtime role may own tables or bypass tenant RLS.
 | AI overwrites official source | Separate content class/table and immutable official version |
 | Stale legal data clears a gate | Freshness-aware fail-closed gate |
 | Duplicate/replayed source payload | Idempotency and payload hash uniqueness |
+| Reviewer approves own snapshot | Python check plus deferred PostgreSQL maker-checker trigger |
+| External counsel self-asserts authority | Explicit scoped, time-bounded delegation revalidated at decision time |
+| Internal review record masquerades as evidence | Separate `recordLocator`/`evidenceLocator`; gate consumes evidence locator only |
+| DLQ exposes raw query or credential URL | Privacy-safe metadata, restricted object locator, exact hash, dedicated operations role |
 
 Official APIs that require credentials in a query parameter MUST have the full
 request URL redacted from application logs, exception messages, traces, and
@@ -688,9 +804,18 @@ Every query/sync/review event records:
 - execution and approval status;
 - created/occurred/observed/verified timestamps.
 
+The provider boundary implements provider-specific token buckets, bounded
+retry with jitter, `Retry-After` handling, circuit breaking, and explicit
+partial-success status. Schema drift is quarantined and retry exhaustion is
+dead-lettered. PostgreSQL sinks persist only privacy-safe hashes/codes/metrics.
+The restricted replay API records `requested → running → completed|failed`
+events against an approved immutable object reference; deploying an actual
+object reader/executor, scheduler and alert exporter remains an operational
+task.
+
 ## 17. Implementation phases
 
-### 17.0 구현 현황 — 2026-07-18
+### 17.0 구현 현황 — 2026-07-20
 
 이 표는 “코드가 존재함”과 “운영 환경에서 검증됨”을 구분한다. 아래의
 운영 미완료 항목이 남아 있으므로 이 ADR의 전체 상태는 여전히
@@ -699,20 +824,28 @@ Every query/sync/review event records:
 | 영역 | 현재 판정 | 구현·검증 근거 |
 |---|---|---|
 | 권위/전송/검증 계약 | 코드 완료 | source authority, transport, trust, freshness, data classification을 독립 모델로 분리했다. Direct API 목록과 MCP·caller 결과는 candidate이며 로컬 검증 스냅샷·human-reviewed 근거만 authoritative evidence가 된다. |
+| 저수준 `lawContext` 경계 | 코드 완료 | 일반 mapping은 `connected=true`, `source=korean-law-mcp`, `verified=true`를 보내도 항상 untrusted candidate다. in-process factory가 만든 immutable `ServerIssuedLawContext`만 verified reference를 전달할 수 있고 `mcp.connected`는 transport 상태로만 남는다. |
+| Direct API 시점·권위 의미 | 코드 완료 / live provider 미검증 | `requestedAsOfDate`, `observedAt`, `verifiedEffectiveDate`, `verifiedAt`을 분리했다. Law.go.kr를 transport/aggregator로 취급하고 판례·헌재결정·중앙정부·자치법규의 실제 발행기관 계열을 authority로 매핑한다. 목록 응답은 historical applicability를 주장하지 않는다. |
 | 기밀정보 egress | 코드 완료 | `PROJECT_CONFIDENTIAL`·`LEGALLY_PRIVILEGED` 질의는 공식 외부 API와 remote MCP 호출을 0회로 차단하고 진단을 남긴다. 프로젝트 주소·PNU는 법령 일반질의에 포함하지 않는다. 전역 법령검색만 `PUBLIC`으로 명시한다. |
 | 공식 corpus 저장 계약 | 코드 완료 / live 미검증 | 2xx 응답, 원문 SHA, 공식 authority/identifier, parser schema, transport별 verification basis와 verifier를 확인한 뒤에만 게시한다. provider/scope checkpoint CAS, append-only fenced lease, 다중 record/page 원자 commit, replay, terminal page coordinator를 구현했다. 완료 시 checkpoint 연속성·페이지 hash·fetch/run·version manifest를 Python과 PostgreSQL deferred trigger가 재검증한 `legal_corpus_scope_completion_attestations`만 생성한다. |
+| Law.go.kr boundary/page source | 기반 코드 완료 / 실제 initial·history 미완료 | 법령·조문·판례·법령해석·행정규칙·자치법규·헌재결정·법령용어의 list/detail/history 외부 응답 계약과 list/detail page source, pagination/checkpoint, partial-page fail-closed를 구현했다. 저장소 fixture는 계약 형태 검증용이며 실제 공식 응답 bytes를 보존한 승인 fixture, resource별 history HTTP acquisition/semantic normalizer, operating OC와 scheduler/backfill은 남아 있다. |
 | 원본 object storage | 코드 완료 / live 미검증 | 전용 S3/MinIO adapter가 versioning과 Object Lock을 먼저 확인하고, content-addressed key·`If-None-Match`·SHA-256 checksum·version ID·보존기한을 검증한다. inventory cursor, delete-marker 거부, orphan 보존 및 append-only reconciliation worker를 구현했으며 삭제 API는 의도적으로 없다. 실제 bucket/IAM과 복구 훈련은 남아 있다. |
-| PostgreSQL schema/RLS | 정적 구현 완료 / live 미검증 | global corpus와 tenant overlay, forced RLS, runtime privilege/readiness, append-only 및 승인용 deferred constraint trigger를 구현했다. 실제 PostgreSQL/PostGIS에 migration을 적용한 cross-tenant·pooling·다중 worker 시험은 남아 있다. |
+| PostgreSQL schema/RLS | 정적 구현·wrapper 동기화 완료 / live 미검증 | `0008` global corpus, `0009` Citator·maker-checker·tenant-native governance·provider operations, `0010` 8-target official-corpus coverage registry/contract/completion chain을 분리했다. tenant overlay forced RLS, append-only trigger와 runtime/readiness 권한 계약이 있고 Supabase wrapper/checksum도 `render_supabase_migrations.py --check`를 통과한다. 실제 `db push --dry-run`, PostgreSQL/PostGIS 적용, cross-tenant·pooling·다중 worker 시험은 남아 있다. |
 | resource identity·유효시점 계보 | 코드 완료 / live 미검증 | 공식 resource identity를 provider revision과 분리하고 provider별 식별자는 crosswalk로 보존한다. predecessor, overlap, undocumented gap, same-window source correction을 fail-closed 검증하고 open-ended predecessor의 파생 종료일을 append-only lineage로 남긴다. runtime 검색·상세·증거 조회는 실제 version provider revision과 최신 source correction을 사용한다. |
 | 로컬 검색 | 코드 완료 / live corpus 미적재 | exact identifier/name/approved alias → PostgreSQL FTS/`pg_trgm` 순위를 적용하고 exact provision 본문·hash·locator를 함께 반환한다. 모든 최신 active 공식 provider에 대해 DB가 검증한 full-corpus completion attestation이 있어야 coverage가 complete다. freshness는 attestation 작성 시간이 아니라 terminal checkpoint 게시 시각으로 계산한다. |
-| 동기화 권한 경계 | 코드 완료 / live 미검증 | `REALYTICS_LEGAL_SYNC_DATABASE_URL`이 없으면 runtime/migration DSN으로 폴백하지 않는다. `realytics_legal_sync`는 허용 테이블의 `SELECT, INSERT`만 가지며 `UPDATE`, `DELETE`, DDL, schema `CREATE`, superuser, inheritance, `BYPASSRLS`를 금지한다. |
+| 동기화 권한 경계 | 코드 완료 / live 미검증 | `REALYTICS_LEGAL_SYNC_DATABASE_URL`이 없으면 runtime/migration DSN으로 폴백하지 않는다. `realytics_legal_sync`는 coverage registration 3개 테이블에는 `SELECT`만, corpus publish ledger에는 `SELECT, INSERT`만 가지며 `UPDATE`, `DELETE`, DDL, schema `CREATE`, superuser, inheritance, `BYPASSRLS`를 금지한다. Registry+8개 contract 등록은 table owner인 migration role 전용 CLI에서만 원자적으로 수행한다. |
 | Citation snapshot | 코드 완료 | exact provision ID, fetch/version lineage, normalized hash, verified time, locator, 공식 조문 본문과 excerpt의 일치, DB에서 파생한 freshness/open issue, citation coverage와 required-claim coverage를 원자적으로 봉인한다. 일부 근거만 봉인해 수를 부풀리는 snapshot은 gate-eligible이 될 수 없다. |
-| 승인 결정 무결성 | 코드 완료 | 별도 `legal:review` 권한과 법무 역할을 사용한다. `approve`는 같은 tenant/project/review의 gate-eligible snapshot ID/version/hash를 Python repository와 PostgreSQL deferred trigger가 재검증한 뒤 append-only decision으로 저장한다. 일반 reviewer와 spoofed principal은 차단된다. |
+| Approval Readiness 정규화 결합 | 코드 완료 / live 미검증 | Gate는 항상 tenant/project/review/snapshot ID·version·hash, supersession/effective time, claim/citation coverage, 실제 corpus fetch/version/provision lineage, 최신 decision과 delegation을 normalized PostgreSQL에서 매번 재조회한다. DB 또는 계약 누락은 fail-closed이며 legacy JSON projection은 승인 권위가 아니다. |
+| maker-checker·delegation | 코드 완료 / live 미검증 | snapshot과 required-claim-set의 maker/checker를 분리하고, Approval Gate·waiver 승인과 terminal cure·counsel opinion 승인·report-eligible analysis 검토·Citator 최종 검토를 `legal_counsel_approver` 또는 해당 scope의 유효한 delegation을 가진 `external_counsel`로 제한한다. delegation은 tenant/project/grantee/role/scope/기간/version/결정시각을 묶고 Python과 PostgreSQL trigger가 재검증한다. 실제 DB의 동시 revoke/decision 경합과 actor credential binding은 남아 있다. |
+| Citator 검토 무결성 | DB·repository·API·Web 코드 완료 / live 미검증 | global citation/relation 후보는 read-only이고 사람 판단은 forced-RLS tenant/project overlay의 단일 successor version/event로 기록한다. machine inferred의 자동 verified 금지, 해석적 relation의 human review, maker-checker, exact excerpt/hash, server-derived actor/role, external-counsel delegation을 구현했다. Web은 queue, citation/relation 검토, delegation 선택과 브라우저 excerpt SHA-256 계산을 제공한다. 전용 `REALYTICS_LEGAL_REVIEW_DATABASE_URL` 없이는 API가 fail-closed한다. |
+| tenant-native 법률 overlay | 코드 완료 / live 미검증 | project matter, waiver lifecycle/cure, counsel opinion, AI/deterministic analysis version, annotation, tenant alias, delegation을 typed append-only table/API와 workspace read model로 분리했다. opinion/analysis는 유일한 v1 root, immediate same-scope predecessor, version+1, 단일 successor 및 sealed content/input lineage를 DB에서도 강제한다. Citator·tenant alias review action은 Web에 연결됐지만 나머지 governance 작성/승인 화면은 API-first다. legacy `legal_reviews`/`permit_reviews`는 호환 projection으로 남아 있으며 backfill·dual-read parity는 live release 작업이다. |
+| locator 분리 | 코드 완료 | Legal Pod 내부 저장 위치는 `recordLocator`, 외부 원문 근거는 `evidenceLocator`로 분리했다. Gate는 법률 레코드의 self locator를 evidence로 인정하지 않는다. |
+| Provider resilience·DLQ/replay | 코드 완료 / worker 배포 미완료 | provider별 token bucket, bounded jitter retry, `Retry-After`, circuit breaker, partial status, privacy-safe PostgreSQL quarantine/DLQ/metrics와 admin/compliance 전용 replay request/event API를 구현했다. trusted worker의 version/hash/retention object receipt가 없으면 non-replayable이고, 승인 API는 catalog ID만 받으며 replay 시작 전에 DB가 exact binding을 재검증한다. 전용 operations DSN 없이는 fail-closed한다. 실제 executor/object reader·IAM 검증, scheduler, metric exporter/alert와 장애훈련은 남아 있다. |
 | Legal Pod·Permit Gate | 코드 완료 | caller `lawContext`는 candidate로만 취급한다. 법률 상태, exact verified citation, 전체 쟁점 coverage, non-stale/non-conflict snapshot, 법무 human approval을 독립 gate로 검사한다. Permit gate는 승인된 parser output과 정확한 원문 locator가 없거나 parser가 unavailable이면 fail-closed다. |
-| Web review surface | 코드 완료 | 공식 원문/AI 요약/human opinion을 구분하고 source·transport·freshness badge를 표시한다. Chief Deal Room에서 인용 수, 필수 쟁점 coverage, snapshot, 최신성, conflict, human decision을 확인하고 승인·수정요청·거절·조건부 waive를 수행한다. |
-| 자동 회귀 | 구현 및 로컬 통과 | authority/egress/provider/schema drift/corpus sync/lease/checkpoint/completion/identity/effective-time/raw reconciliation/migration/RLS/search/snapshot/decision/Legal Pod/Approval Gate 계약을 자동 검증한다. 2026-07-18 최종 수치는 아래 검증 기록을 따른다. |
-| Golden corpus·법무 기준 | 미완료 | 실제 법령·판례·해석·인허가/PF 질문 corpus, locator/version 정확도, 적절한 abstention, counsel-approved precision/recall 기준이 필요하다. |
-| 운영·재해복구 | 미완료 | 실제 provider 자격증명, secret manager, initial/backfill sync, DLQ·모니터링·알람, backup/restore, schema-drift replay, outage/rollback 훈련이 필요하다. |
+| Web review surface | 핵심 trust/검토 action 코드 완료 / live 미검증 | 검색 결과를 공식 검색 후보·검증 corpus snapshot·사람 검토 완료로 각각 집계하고 MCP 연결을 “승인 근거 아님”으로 표시한다. Chief Deal Room은 normalized PostgreSQL readiness가 읽히고 완전한 경우에만 법무 승인 action을 활성화하며 legacy Legal Pod boolean을 사용하지 않는다. governance workspace는 tenant-native metadata와 Citator queue/action, tenant alias 검토를 제공한다. waiver·opinion·analysis·delegation의 전체 작성 UX는 API-first 후속 범위다. |
+| 자동 회귀 | 변경 범위 녹색 / live·전역 장시간 스위트 미완료 | 2026-07-20 기준 법률·Law.go.kr·법률 전용 role 회귀 632 passed, 연관 API/권한/Supabase 회귀 119 passed·15 live-PostgreSQL skipped, Web trust/Citator/governance Playwright 36 passed, TypeScript·ESLint 통과다. 전체 1,846-test 단일 프로세스 실행은 10분 로컬 상한에서 완료되지 않았으므로 전역 완료 증거로 주장하지 않는다. |
+| Golden corpus·법무 기준 | 평가기 코드 완료 / 실제 corpus 미완료 | versioned manifest/JSONL, label SHA-256, maker-checker 승인, exact lineage locator, claim precision/recall, abstention precision/recall/accuracy, locator accuracy와 fail-closed CLI를 구현했다. 실제 법령·판례·해석·인허가/PF corpus와 counsel-approved threshold/labels/predictions는 외부 운영 산출물로 남아 있다. |
+| 운영·재해복구 | 부분 코드 완료 / live 미완료 | quarantine/DLQ/replay 계약은 구현됐지만 실제 provider 자격증명, secret manager, initial/backfill scheduler, metric exporter·알람, backup/restore, schema-drift replay, outage/rollback 훈련이 필요하다. |
 
 이번 구현의 fail-closed 원칙은 다음과 같다.
 
@@ -729,25 +862,46 @@ Every query/sync/review event records:
 
 구조적 코드 잔여와 운영 검증을 구분해 관리한다.
 
-1. Law.go.kr의 각 resource family별 실제 initial/backfill page source는
-   운영 OC, 공식 응답 fixture, 이용조건, 호출량 기준으로 release해야 한다.
-   범용 search-list candidate를 곧바로 검증 corpus로 승격해서는 안 된다.
-2. DLQ·provider별 rate limit·metrics/alert exporter와 scheduler 배포는 실제
-   worker 플랫폼에 연결해야 한다. checkpoint/lease/reconciliation 저장
-   계약과 운영 runbook은 준비되어 있다.
-3. 실제 PostgreSQL/PostGIS/Supabase에 migration과 세 역할을 적용하고,
-   cross-tenant RLS, session pooling, stale checkpoint 경합, lease fencing,
-   다중 worker crash/retry를 검증해야 한다.
+1. Law.go.kr 각 resource family의 typed list/detail/history boundary는
+   구현됐지만, 실제 공식 응답 bytes를 보존한 승인 fixture, history
+   acquisition/semantic normalizer, 운영 OC·이용조건·호출량 기준을 적용한
+   initial/backfill scheduler가 필요하다. 범용 search-list candidate를
+   검증 corpus로 곧바로 승격해서는 안 된다.
+2. provider별 rate limit·Retry-After·partial 상태와 영속
+   quarantine/DLQ/replay/metrics 계약은 구현됐다. 이를 실제 worker의
+   object reader/executor, scheduler, metric exporter/alert, 장애 대응
+   runbook에 연결하고 replay 훈련을 수행해야 한다.
+3. 실제 PostgreSQL/PostGIS/Supabase에 `0008`, `0009`, `0010`, migration/runtime/
+   legal-sync/legal-review/legal-operations principal을 적용하고
+   cross-tenant RLS, session pooling, maker-checker, delegation,
+   stale checkpoint 경합, lease fencing, 다중 worker crash/retry를
+   검증해야 한다.
 4. 실제 S3/MinIO bucket에서 versioning, Object Lock, IAM, inventory,
    backup/restore와 orphan 보존 훈련을 수행해야 한다.
-5. 실제 법령·판례·해석·인허가/PF golden corpus와 법무 승인 threshold를
-   확정해야 한다. semantic/OpenSearch 확대는 이 측정 이후 별도 ADR로 한다.
+5. 평가기만으로는 release gate가 닫히지 않는다. 실제
+   법령·판례·해석·인허가/PF golden corpus의 고정된 label bytes와
+   counsel-approved threshold, 독립 maker-checker 승인, 실제 prediction
+   결과를 확정해야 한다. semantic/OpenSearch 확대는 이 측정 이후 별도
+   ADR로 한다.
+6. waiver/opinion/analysis/Citator를 포함한 external-counsel delegation과
+   append-only lifecycle은 코드에서 강제한다. 남은 일은 실제
+   PostgreSQL에서 revoke/decision 동시성, server time, RLS 및 전용
+   legal-review role의 허용·거부 경로를 재현하는 것이다.
+7. waiver cure transition, Citator queue/review, tenant legal alias review와
+   normalized readiness 기반 Chief Deal Room action은 구현됐다.
+   matter·waiver·opinion·analysis·delegation의 전체 작성 UX와 legacy
+   backfill/dual-read parity는 별도 제품·전환 작업으로 남는다.
+8. API의 explicit-human 검사와 server-derived actor/role만으로는
+   legal-review DB credential 탈취 시 direct SQL actor 위조를 완전히
+   차단하지 못한다. transaction-local signed actor context 또는 동등한
+   brokered-write 방식으로 DB trigger와 실제 IdP/role membership을
+   결합하고 credential 발급·회수·감사를 검증해야 한다.
 
 운영 절차와 증거 양식은
 [`docs/engineering/legal-corpus-operations.md`](../engineering/legal-corpus-operations.md)
 를 따른다.
 
-#### 17.0.2 로컬 검증 기록 — 2026-07-18
+#### 17.0.2 이전 기준선 검증 기록 — 2026-07-18
 
 검증은 테스트 간 공유 SQLite 경합을 피하기 위해 파일군별 고유
 `REALYTICS_SQLITE_FILE`과 `--basetemp`를 사용해 순차 또는 격리 실행했다.
@@ -764,10 +918,14 @@ Every query/sync/review event records:
 | Web production build | 통과 | Next.js optimized production build 및 25개 static page 생성 |
 | Supabase migration wrapper | current | 저장소 가상환경 Python으로 `render_supabase_migrations.py --check` 실행 |
 
-이 기록은 로컬 코드·계약 회귀의 증거다. 실제 Supabase/PostgreSQL에
-`0008_legal_intelligence_core.sql`을 적용한 결과, runtime role/RLS,
-connection pooling, 다중 worker, 공식 provider 자격증명, S3/MinIO
-Object Lock, backup/restore 및 장애 복구 훈련의 증거를 대신하지 않는다.
+이 기록은 `0009` 이전 로컬 코드·계약 회귀의 기준선이다. 2026-07-20
+변경은 별도 집중 테스트와 전체 API/Web 회귀를 다시 통과해야 하며, 위
+수치를 현재 변경의 최종 통과 수치로 인용해서는 안 된다. 또한 실제
+Supabase/PostgreSQL에 `0008_legal_intelligence_core.sql`과
+`0009_legal_governance_and_tenant_overlay.sql`을 적용한 결과,
+runtime/sync/review/operations role, RLS, connection pooling, 다중
+worker, 공식 provider 자격증명, S3/MinIO Object Lock, backup/restore 및
+장애 복구 훈련의 증거를 대신하지 않는다.
 
 ### Phase 0 — Authority and security contract
 
@@ -799,6 +957,27 @@ Exit gate:
 - Implement exact identifier/name/article/case-number retrieval.
 - Extend the existing glossary instead of duplicating it.
 - Provision least-privilege PostgreSQL roles and forced RLS.
+
+Controlled adapter status (2026-07-20):
+
+- Direct list search records the requested as-of date and observation time but
+  does not claim that a list row verifies historical applicability.
+- Law.go.kr is modeled as transport/aggregator; the issuing authority is mapped
+  by resource family (court, Constitutional Court, central government, or local
+  government).
+- Target-specific list/detail/history boundary contracts cover statutes,
+  provisions, precedents, interpretations, administrative rules, local
+  ordinances, Constitutional Court decisions, and legal terms. Contract-shape
+  fixtures reject unknown envelopes, mismatched identity/page/display and
+  malformed history rows.
+- `LawGoKrOfficialCorpusPageSource` supplies list/detail pagination,
+  scope-bound checkpoints, versioned target descriptors, and partial-page
+  diagnostics. The completion coordinator refuses to attest a partial page.
+- This is not the Phase 1 exit gate. Actual official response bytes under an
+  approved fixture manifest, byte-preserving acquisition, resource-specific
+  history acquisition/semantic normalizers, provider terms, operating
+  credentials, scheduled initial/backfill jobs, and live PostgreSQL
+  verification remain required.
 
 Exit gate:
 
@@ -870,6 +1049,14 @@ Exit gate:
 - glossary candidate/approval behavior;
 - staged search precedence;
 - citation exact-locator verification;
+- caller mapping versus server-issued `lawContext` trust;
+- requested date versus verified effective date and issuing authority;
+- normalized Approval Readiness snapshot/decision/lineage re-query;
+- maker-checker, scoped delegation and final-role enforcement;
+- Citator excerpt/hash/supersession/review-event integrity;
+- provider retry classification, `Retry-After`, jitter, rate limit, partial
+  state, quarantine, DLQ and replay state machine;
+- golden-corpus manifest/label/prediction integrity and threshold failure;
 - stale/freshness policy;
 - secret redaction.
 
@@ -884,6 +1071,9 @@ Exit gate:
 - caller-supplied fake context rejection;
 - Legal Pod evidence snapshot and PF handoff;
 - Approval Readiness fail-closed behavior;
+- legacy projection tamper with normalized PostgreSQL unchanged;
+- tenant-native matter/waiver/opinion/analysis/annotation/alias workflows;
+- dedicated legal-review and legal-operations DSN non-fallback behavior;
 - immutable object hash and database lineage.
 
 ### 18.3 Live PostgreSQL tests
@@ -894,6 +1084,15 @@ Exit gate:
 - cross-tenant joins, counts, search, and error paths reveal nothing;
 - missing tenant context fails closed;
 - migration owner and runtime roles are distinct;
+- legal-sync, legal-review and legal-operations principals have only their
+  allowlisted append/read privileges and cannot inherit elevated roles;
+- final legal decision rejects self-approval, expired/superseded delegation and
+  cross-project delegation;
+- Citator verification is append-only and rejects machine-finalized
+  interpretive relations;
+- DLQ replay requires a worker-registered immutable object catalog receipt;
+  callers cannot submit locator/hash claims, and the executor must attest the
+  exact catalog ID, object version, and SHA-256 before completion;
 - RLS remains effective under application connection pooling.
 
 ### 18.4 Retrieval golden corpus
@@ -998,8 +1197,18 @@ Before production, the runbook MUST cover:
 
 - Existing `legal_reviews` and `permit_reviews` remain readable during
   transition.
-- New Legal Pod runs dual-write normalized references/evidence links behind a
-  feature flag, then switch reads after parity tests.
+- Migration `0009_legal_governance_and_tenant_overlay.sql` adds tenant-native
+  matters, waivers, counsel opinions, analysis versions, annotations, tenant
+  aliases, delegation, Citator review events and provider operation ledgers
+  without changing the immutable checksum of `0008`.
+- Migration `0010_legal_corpus_coverage_contracts.sql` adds a deployment-owned
+  eight-target registry, exact query/adapter/boundary identities, and an
+  append-only initial/incremental completion chain without rewriting legacy
+  nullable completion rows.
+- Approval Readiness always reads authority from normalized
+  snapshot/corpus/decision records and fails closed when they are unavailable.
+- Legacy legal/permit projections remain until backfill and dual-read parity
+  prove that every supported workflow has a typed tenant-native equivalent.
 - Existing `mcp` fields remain a compatibility projection only. They are not
   authoritative storage.
 - Existing `realytics-law-context-v1` requests remain accepted as candidates
@@ -1010,6 +1219,8 @@ Before production, the runbook MUST cover:
   source attestation without re-verification.
 - Approval Readiness switches only after dual-run results and blocker
   differences are reviewed.
+- The Supabase wrapper/ledger includes `0009`; `db push --dry-run` and live
+  application are still required before treating the schema as deployed.
 
 ## 21. Consequences
 
@@ -1077,12 +1288,35 @@ are true:
 - Official source text cannot be overwritten by AI or reviewer content.
 - Global source corpus and tenant overlays satisfy live least-privilege/RLS
   tests.
+- `0008`/`0009`/`0010` are applied to the actual
+  PostgreSQL/PostGIS/Supabase target, and the reviewed eight-target coverage
+  manifest is the current registered leaf,
+  including pooler tenant context, concurrent worker fencing, concurrent
+  delegation revocation/decision, and dedicated-principal deny tests.
+- The legal-review write path binds the authenticated human identity to a
+  PostgreSQL-verifiable actor context; possession of the shared review
+  credential alone cannot select another reviewer ID/role.
 - Exact legal identifiers always outrank fuzzy and semantic candidates.
 - Open citation conflicts and unsupported precedent-treatment assertions block
   authoritative presentation.
+- Machine-inferred citations/relations cannot become verified without a
+  separate human review event, exact excerpt/hash and reviewer timestamp.
+- Snapshot creators cannot make their own final decision, and delegated
+  external counsel decisions reproduce the exact valid delegation.
+- Human Citator review and provider DLQ replay use separately audited
+  least-privilege DSNs with no runtime/sync fallback.
 - Official adapter contract, sync replay, outage, schema-drift, secret
   redaction, and recovery tests pass.
+- Real provider credentials and approved byte-preserving list/detail/history
+  fixtures drive successful initial and incremental backfill; generic search
+  rows or synthetic fixtures do not satisfy this condition.
+- The S3/MinIO reader verifies exact object version/hash under separate IAM,
+  versioning and Object Lock, and backup/restore plus replay drills reproduce
+  the same immutable bytes.
 - Approval Readiness evaluates evidence completeness, freshness, and required
   human approval rather than MCP connectivity.
 - Operational monitoring, alerting, backup/restore, and incident runbooks have
   been exercised in a live-like environment.
+- A real counsel-approved golden corpus passes the versioned claim precision,
+  claim recall, abstention and locator thresholds; synthetic unit fixtures do
+  not satisfy this release condition.

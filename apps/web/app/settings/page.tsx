@@ -12,6 +12,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { apiBase, authHeaders, createLocalPilotSession } from "../../lib/auth-client";
+import { localPilotAuthEnabled } from "../../lib/auth-policy";
 import { useAuth } from "../../components/auth/auth-context";
 
 const roleOptions = [
@@ -58,6 +59,7 @@ interface AiProfileResponse {
 
 export default function SettingsPage() {
   const { user, session, permissions, logout } = useAuth();
+  const hasLocalPilot = localPilotAuthEnabled();
   const [tenantId, setTenantId] = useState("pilot-tenant");
   const [tenantName, setTenantName] = useState("REALYTICS Pilot Workspace");
   const [userId, setUserId] = useState("credit_officer");
@@ -208,41 +210,50 @@ export default function SettingsPage() {
 
       <section className="grid gap-4 xl:grid-cols-[1fr_0.85fr]">
         <Panel title="로그인 세션" icon={<UserRound className="h-5 w-5 text-indigo-600" />}>
-          <div className="grid gap-3 md:grid-cols-2">
-            <TextInput label="Tenant ID" value={tenantId} onChange={setTenantId} />
-            <TextInput label="Tenant Name" value={tenantName} onChange={setTenantName} />
-            <TextInput label="User ID" value={userId} onChange={setUserId} />
-            <TextInput label="Email" value={email} onChange={setEmail} />
-            <TextInput label="Display Name" value={displayName} onChange={setDisplayName} />
-            <label className="block">
-              <span className="text-xs font-semibold text-slate-500">역할</span>
-              <select
-                value={role}
-                onChange={(event) => setRole(event.target.value)}
-                className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
-              >
-                {roleOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-slate-500">
-                {roleOptions.find((item) => item.value === role)?.description}
-              </p>
-            </label>
-          </div>
+          {hasLocalPilot ? (
+            <div className="grid gap-3 md:grid-cols-2">
+              <TextInput label="Tenant ID" value={tenantId} onChange={setTenantId} />
+              <TextInput label="Tenant Name" value={tenantName} onChange={setTenantName} />
+              <TextInput label="User ID" value={userId} onChange={setUserId} />
+              <TextInput label="Email" value={email} onChange={setEmail} />
+              <TextInput label="Display Name" value={displayName} onChange={setDisplayName} />
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">역할</span>
+                <select
+                  value={role}
+                  onChange={(event) => setRole(event.target.value)}
+                  className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                >
+                  {roleOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-slate-500">
+                  {roleOptions.find((item) => item.value === role)?.description}
+                </p>
+              </label>
+            </div>
+          ) : (
+            <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
+              운영 환경에서는 Supabase/OIDC로 검증된 계정만 사용할 수 있습니다.
+              로컬 파일럿 사용자·세션 생성 기능은 표시되지 않습니다.
+            </p>
+          )}
 
           <div className="mt-5 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => void login()}
-              disabled={loading}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-bold text-white disabled:opacity-50 dark:bg-white dark:text-slate-950"
-            >
-              <ShieldCheck className="h-4 w-4" />
-              {loading ? "처리 중..." : "파일럿 로그인"}
-            </button>
+            {hasLocalPilot ? (
+              <button
+                type="button"
+                onClick={() => void login()}
+                disabled={loading}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-bold text-white disabled:opacity-50 dark:bg-white dark:text-slate-950"
+              >
+                <ShieldCheck className="h-4 w-4" />
+                {loading ? "처리 중..." : "파일럿 로그인"}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => void logout()}
@@ -260,7 +271,7 @@ export default function SettingsPage() {
               <InfoRow label="사용자" value={`${user.displayName ?? user.userId} (${user.userId})`} />
               <InfoRow label="Tenant" value={user.tenantId ?? session.tenantId ?? "-"} />
               <InfoRow label="역할" value={user.role ?? "-"} />
-              <InfoRow label="Session ID" value={session.sessionId} mono />
+              <InfoRow label="인증 공급자" value={session.provider ?? "verified-cookie"} />
               <div>
                 <p className="text-xs font-semibold uppercase text-slate-500">권한</p>
                 <div className="mt-2 flex flex-wrap gap-2">

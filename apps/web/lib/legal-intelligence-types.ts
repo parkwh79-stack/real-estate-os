@@ -17,6 +17,7 @@ export type LegalContentClass =
 
 export type LegalSourceAuthority =
   | "law_go_kr"
+  | "court"
   | "supreme_court"
   | "constitutional_court"
   | "central_government"
@@ -55,6 +56,12 @@ export type LegalVerificationStatus =
 
 export type LegalFreshnessStatus = "fresh" | "current" | "stale" | "unknown";
 
+export type LegalTrustTier =
+  | "official_search_candidate"
+  | "verified_corpus_snapshot"
+  | "human_reviewed"
+  | "other_candidate";
+
 export interface LegalResourceSummary {
   resourceId: string;
   resourceVersionId?: string;
@@ -69,6 +76,8 @@ export interface LegalResourceSummary {
   freshnessStatus: LegalFreshnessStatus;
   stale: boolean;
   asOfDate?: string;
+  requestedAsOfDate?: string;
+  verifiedEffectiveDate?: string;
   effectiveFrom?: string;
   effectiveTo?: string;
   sourceUrl?: string;
@@ -76,6 +85,10 @@ export interface LegalResourceSummary {
   officialText?: string;
   aiSummary?: string;
   humanOpinion?: string;
+  observedAt?: string;
+  fetchedAt?: string;
+  verifiedAt?: string;
+  normalizedContentSha256?: string;
 }
 
 export interface LegalSearchResponse {
@@ -83,8 +96,13 @@ export interface LegalSearchResponse {
   asOfDate?: string;
   resourceType?: LegalResourceType;
   results: LegalResourceSummary[];
+  /** Compatibility total: verified corpus snapshots plus human-reviewed rows. */
   authoritativeCount: number;
+  /** All rows that are not verified corpus snapshots or human-reviewed rows. */
   candidateCount: number;
+  officialCandidateCount: number;
+  verifiedSnapshotCount: number;
+  humanReviewedCount: number;
   satisfiedByLocalSnapshot: boolean;
   externalEgressAcknowledged?: boolean;
   externalEgressPolicy?: string;
@@ -93,11 +111,7 @@ export interface LegalSearchResponse {
 export interface LegalResourceDetail extends LegalResourceSummary {
   officialIdentifiers?: Record<string, string>;
   article?: string;
-  observedAt?: string;
-  fetchedAt?: string;
-  verifiedAt?: string;
   sourcePayloadSha256?: string;
-  normalizedContentSha256?: string;
 }
 
 export interface LegalSearchParams {

@@ -251,7 +251,10 @@ def test_stale_local_uses_direct_official_before_self_hosted_bridge():
     assert result.provider_trace[2].status == ProviderStatus.FAILED
     assert result.authoritative_hits == ()
     direct_candidate = result.candidate_hits[0]
-    assert direct_candidate.attestation.source_authority == SourceAuthority.LAW_GO_KR
+    assert (
+        direct_candidate.attestation.source_authority
+        == SourceAuthority.CENTRAL_GOVERNMENT
+    )
     assert direct_candidate.attestation.source_transport == SourceTransport.LAW_GO_KR_DIRECT_API
     assert direct_candidate.attestation.trust_level == TrustLevel.SOURCE_ATTESTED
 
@@ -535,9 +538,234 @@ def test_citation_attestation_binds_content_hash_and_as_of_date():
     )
 
     assert attestation.as_of == date(2026, 7, 18)
+    assert attestation.requested_as_of_date == date(2026, 7, 18)
+    assert attestation.observed_at == NOW
+    assert attestation.verified_effective_date is None
+    assert attestation.is_applicability_verified is False
+    assert attestation.model_dump()["as_of"] == date(2026, 7, 18)
     assert attestation.verifies(content) is True
     assert attestation.verifies({**content, "본문": "변조"}) is False
     assert attestation.is_authoritative_evidence is False
+
+
+def test_source_attested_search_candidate_cannot_claim_verified_applicability():
+    with pytest.raises(
+        ValueError,
+        match="cannot assert verified historical applicability",
+    ):
+        build_attestation(
+            content={"id": "candidate"},
+            source_authority=SourceAuthority.CENTRAL_GOVERNMENT,
+            source_transport=SourceTransport.LAW_GO_KR_DIRECT_API,
+            trust_level=TrustLevel.SOURCE_ATTESTED,
+            resource_kind=LegalResourceKind.STATUTE,
+            official_resource_id="law-1",
+            official_version_id="law-1-v1",
+            locator="law-go-kr-candidate:law:law-1",
+            requested_as_of_date=date(2026, 7, 18),
+            fetched_at=NOW,
+            verified_at=NOW,
+            verified_effective_date=date(2026, 1, 1),
+            effective_from=date(2026, 1, 1),
+        )
+
+
+def _verified_attestation(**overrides):
+    options = {
+        "content": {"id": "verified-version"},
+        "source_authority": SourceAuthority.CENTRAL_GOVERNMENT,
+        "source_transport": SourceTransport.LOCAL_VERIFIED_SNAPSHOT,
+        "trust_level": TrustLevel.VERIFIED_SNAPSHOT,
+        "resource_kind": LegalResourceKind.STATUTE,
+        "official_resource_id": "law-1",
+        "official_version_id": "law-1-v1",
+        "locator": "legal-corpus:law-1:v1",
+        "requested_as_of_date": date(2026, 7, 18),
+        "observed_at": NOW - timedelta(minutes=2),
+        "fetched_at": NOW - timedelta(minutes=1),
+        "verified_at": NOW,
+        "verified_effective_date": date(2026, 1, 1),
+        "effective_from": date(2026, 1, 1),
+        "effective_to": date(2026, 12, 31),
+    }
+    options.update(overrides)
+    return build_attestation(**options)
+
+
+def test_verified_attestation_requires_version_and_effective_window_membership():
+    attestation = _verified_attestation()
+    assert attestation.is_applicability_verified is True
+
+    with pytest.raises(ValueError, match="official_version_id"):
+        _verified_attestation(official_version_id=None)
+    with pytest.raises(ValueError, match="verified_effective_date"):
+        _verified_attestation(verified_effective_date=None)
+    with pytest.raises(ValueError, match="outside the verified validity window"):
+        _verified_attestation(
+            requested_as_of_date=date(2027, 1, 1),
+        )
+    with pytest.raises(ValueError, match="must match effective_from"):
+        _verified_attestation(
+            verified_effective_date=date(2026, 2, 1),
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {
+            "observed_at": datetime.now(timezone.utc)
+            + timedelta(minutes=10),
+        },
+        {
+            "fetched_at": datetime.now(timezone.utc)
+            + timedelta(minutes=10),
+        },
+        {
+            "verified_at": datetime.now(timezone.utc)
+            + timedelta(minutes=10),
+        },
+        {
+            "fetched_at": NOW,
+            "verified_at": NOW - timedelta(seconds=1),
+        },
+    ),
+)
+def test_verified_attestation_rejects_future_or_noncausal_times(overrides):
+    with pytest.raises(ValueError):
+        _verified_attestation(**overrides)
+
+
+@pytest.mark.parametrize(
+    ("transport", "trust_level"),
+    (
+        (SourceTransport.SELF_HOSTED_MCP, TrustLevel.SOURCE_ATTESTED),
+        (SourceTransport.REMOTE_MCP, TrustLevel.VERIFIED_SNAPSHOT),
+        (SourceTransport.CALLER_CONTEXT, TrustLevel.HUMAN_REVIEWED),
+        (
+            SourceTransport.LAW_GO_KR_DIRECT_API,
+            TrustLevel.VERIFIED_SNAPSHOT,
+        ),
+        (
+            SourceTransport.LOCAL_VERIFIED_SNAPSHOT,
+            TrustLevel.SOURCE_ATTESTED,
+        ),
+    ),
+)
+def test_citation_attestation_rejects_invalid_trust_transport_matrix(
+    transport,
+    trust_level,
+):
+    with pytest.raises(ValueError):
+        build_attestation(
+            content={"id": "candidate"},
+            source_authority=SourceAuthority.SUPREME_COURT,
+            source_transport=transport,
+            trust_level=trust_level,
+            resource_kind=LegalResourceKind.PRECEDENT,
+            official_resource_id="precedent-1",
+            locator="candidate:precedent-1",
+            as_of=date(2026, 7, 18),
+            fetched_at=NOW,
+            verified_at=(
+                NOW
+                if trust_level
+                in {TrustLevel.VERIFIED_SNAPSHOT, TrustLevel.HUMAN_REVIEWED}
+                else None
+            ),
+        )
+
+
+def test_direct_provider_deduplicates_shared_law_target_and_does_not_verify_requested_date():
+    seen_targets = []
+
+    def fake_get(url: str, timeout: float):
+        seen_targets.extend(parse_qs(urlsplit(url).query)["target"])
+        return {
+            "LawSearch": {
+                "law": [
+                    {
+                        "id": "law-1",
+                        "title": "Housing Act",
+                        "effectiveDate": "20260101",
+                    }
+                ]
+            }
+        }
+
+    provider = LawGoKrDirectProvider(
+        oc="test@example.com",
+        http_get_json=fake_get,
+        retry_policy=RetryPolicy(
+            max_attempts=1,
+            initial_backoff_seconds=0,
+        ),
+        now=lambda: NOW,
+    )
+
+    query = _public_query(
+            "Housing Act",
+            resource_kinds=(
+                LegalResourceKind.STATUTE,
+                LegalResourceKind.PROVISION,
+            ),
+        )
+    result = provider.search(query)
+
+    assert seen_targets == ["law"]
+    attestation = result.hits[0].attestation
+    assert (
+        attestation.source_authority
+        == SourceAuthority.CENTRAL_GOVERNMENT
+    )
+    assert attestation.requested_as_of_date == query.as_of
+    assert attestation.verified_effective_date is None
+    assert attestation.verified_at is None
+
+
+@pytest.mark.parametrize(
+    ("court_name", "expected_authority"),
+    (
+        ("대법원", SourceAuthority.SUPREME_COURT),
+        ("서울고등법원", SourceAuthority.COURT),
+    ),
+)
+def test_precedent_authority_comes_from_issuing_court_not_transport(
+    court_name,
+    expected_authority,
+):
+    provider = LawGoKrDirectProvider(
+        oc="test@example.com",
+        http_get_json=lambda *_args: {
+            "PrecSearch": {
+                "prec": [
+                    {
+                        "id": "precedent-1",
+                        "title": "Housing precedent",
+                        "courtName": court_name,
+                    }
+                ]
+            }
+        },
+        retry_policy=RetryPolicy(
+            max_attempts=1,
+            initial_backoff_seconds=0,
+        ),
+        now=lambda: NOW,
+    )
+
+    result = provider.search(
+        _public_query(
+            "Housing precedent",
+            resource_kinds=(LegalResourceKind.PRECEDENT,),
+        )
+    )
+
+    assert result.hits[0].attestation.source_authority == expected_authority
+    assert (
+        result.hits[0].attestation.source_transport
+        == SourceTransport.LAW_GO_KR_DIRECT_API
+    )
 
 
 def test_direct_provider_redacts_oc_and_tokens_from_failures_and_urls():
@@ -655,10 +883,42 @@ def test_direct_provider_replaces_untrusted_result_locator(
     result = provider.search(_public_query("Housing Act"))
     locator = result.hits[0].attestation.locator
 
-    assert locator.startswith("https://www.law.go.kr/")
+    assert locator == "law-go-kr-candidate:law:law-safe-locator-1"
     assert "evil.example" not in locator
     assert "secret" not in locator
     assert result.hits[0].content["url"] == locator
+
+
+def test_direct_provider_does_not_fabricate_statute_url_for_precedent():
+    provider = LawGoKrDirectProvider(
+        oc="test@example.com",
+        http_get_json=lambda *_args: {
+            "PrecSearch": {
+                "prec": [
+                    {
+                        "id": "precedent-without-link",
+                        "title": "Housing precedent",
+                        "courtName": "서울고등법원",
+                    }
+                ]
+            }
+        },
+        retry_policy=RetryPolicy(
+            max_attempts=1,
+            initial_backoff_seconds=0,
+        ),
+    )
+
+    result = provider.search(
+        _public_query(
+            "Housing precedent",
+            resource_kinds=(LegalResourceKind.PRECEDENT,),
+        )
+    )
+
+    locator = result.hits[0].attestation.locator
+    assert locator == "law-go-kr-candidate:prec:precedent-without-link"
+    assert not locator.startswith(("http://", "https://"))
 
 
 def test_remote_mcp_requires_tls_and_all_mcp_urls_reject_credentials():

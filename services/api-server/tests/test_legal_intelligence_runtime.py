@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+
+import pytest
 
 from agents.korean_law_context import build_korean_law_mcp_query_plan
 from db import postgres
@@ -28,6 +30,7 @@ from legal_intelligence.search import InMemoryVerifiedSnapshotProvider
 from use_cases.legal_intelligence import (
     LegalIntelligenceService,
     UnavailableLegalProvider,
+    build_legal_intelligence_service,
     resolve_project_legal_context,
     search_legal_resources,
     seal_legal_review_evidence_snapshot,
@@ -36,6 +39,19 @@ from use_cases.legal_intelligence import (
 
 
 NOW = datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc)
+
+
+def test_runtime_rejects_invalid_provider_response_limit_configuration():
+    with pytest.raises(
+        ValueError,
+        match="REALYTICS_LEGAL_PROVIDER_MAX_RESPONSE_BYTES",
+    ):
+        build_legal_intelligence_service(
+            environ={
+                "LAW_OC": "test@example.com",
+                "REALYTICS_LEGAL_PROVIDER_MAX_RESPONSE_BYTES": "0",
+            }
+        )
 
 
 def test_local_coverage_tracks_current_provider_but_corpus_reads_pin_fetch_revision():
@@ -81,6 +97,40 @@ def test_local_coverage_tracks_current_provider_but_corpus_reads_pin_fetch_revis
         in coverage_sql
     )
     assert "scopeCompletenessAttested" not in coverage_sql
+
+
+def test_local_coverage_requires_all_eight_registered_contract_lanes():
+    coverage_sql = legal_intelligence_repository._COVERAGE_SQL
+
+    assert "legal_corpus_required_target_contracts" in coverage_sql
+    assert "legal_corpus_coverage_registries" in coverage_sql
+    assert "legal_corpus_coverage_contracts" in coverage_sql
+    assert "successor.supersedes_coverage_registry_id" in coverage_sql
+    assert "registry.expected_contracts_sha256" in coverage_sql
+    assert "string_agg(" in coverage_sql
+    assert "COUNT(*) = registry.expected_contract_count" in coverage_sql
+    assert "required.required" in coverage_sql
+    assert (
+        "COUNT(completion.coverage_contract_id) ="
+        in coverage_sql
+    )
+    assert "completion.coverage_contract_id IS NOT NULL" in coverage_sql
+    assert (
+        "completion.baseline_completion_attestation_id"
+        in coverage_sql
+    )
+    assert (
+        "baseline.coverage_mode IN ("
+        in coverage_sql
+    )
+    assert (
+        "baseline.last_checkpoint_sequence + 1 ="
+        in coverage_sql
+    )
+    assert (
+        "successor.baseline_completion_attestation_id ="
+        in coverage_sql
+    )
 
 
 def test_cross_revision_alias_and_effective_closure_are_queryable() -> None:
@@ -168,7 +218,6 @@ def _official_hit() -> SearchHit:
             locator="https://www.law.go.kr/법령/건축법",
             as_of=date(2026, 7, 18),
             fetched_at=NOW,
-            effective_from=date(2026, 1, 1),
         ),
     )
 
@@ -264,6 +313,11 @@ def test_search_serialization_matches_web_contract():
     assert item["sourceAuthority"] == "law_go_kr"
     assert item["transport"] == "law_go_kr_direct_api"
     assert item["verificationStatus"] == "source_attested"
+    assert item["requestedAsOfDate"] == "2026-07-18"
+    assert item["verifiedEffectiveDate"] is None
+    assert item["observedAt"] == NOW.isoformat()
+    assert item["fetchedAt"] == NOW.isoformat()
+    assert item["verifiedAt"] is None
     assert item["sourceUrl"].startswith("https://www.law.go.kr/")
     assert item["normalizedContentSha256"].startswith("sha256:")
 
@@ -313,6 +367,9 @@ class SnapshotRecorder:
     def __init__(self):
         self.calls = []
 
+    def latest_approved_required_claim_set_id(self):
+        return "required-claims-1"
+
     def append_verified_evidence_snapshot(self, snapshot, *, created_by):
         self.calls.append((snapshot, created_by))
         verified_citation_count = len(
@@ -332,6 +389,7 @@ class SnapshotRecorder:
         )
         return {
             "legalEvidenceSnapshotId": "snapshot-1",
+            "createdBy": created_by,
             "snapshotSha256": "sha256:" + ("d" * 64),
             "snapshotVersion": 1,
             "gateEligible": coverage_complete,
@@ -344,6 +402,9 @@ class SnapshotRecorder:
                 snapshot["verifiedClaimCount"]
                 == snapshot["expectedClaimCount"]
             ),
+            "requiredClaimSetId": snapshot["requiredClaimSetId"],
+            "requiredClaimSetVersion": 2,
+            "requiredClaimSetSha256": "sha256:" + ("e" * 64),
             "stale": False,
             "hasOpenConflicts": False,
         }
@@ -510,7 +571,7 @@ def test_postgres_provider_projects_verified_bitemporal_row():
         "Building Act",
         date(2026, 1, 1),
         None,
-        NOW,
+        NOW - timedelta(minutes=2),
         NOW,
         NOW,
         "schema_verified",
@@ -553,6 +614,9 @@ def test_postgres_provider_projects_verified_bitemporal_row():
     )
 
     assert result.status == ProviderStatus.SUCCESS
+    assert result.hits[0].attestation.observed_at == (
+        NOW - timedelta(minutes=2)
+    )
     assert result.coverage == CoverageStatus.COMPLETE
     assert result.freshness == FreshnessStatus.FRESH
     assert result.hits[0].is_authoritative_evidence

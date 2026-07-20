@@ -39,10 +39,14 @@ class _SnapshotCursor:
         values = tuple(params or ())
         self.connection.statements.append((normalized, values))
         self.one = None
-        if "FROM legal_resource_versions AS competing" in normalized:
-            self.one = (self.connection.open_issue,)
+        if "FROM project_legal_review_versions AS projection" in normalized:
+            self.one = self.connection.projection
         elif "snapshot.gate_eligible" in normalized:
             self.one = self.connection.gate_snapshot
+        elif "FROM legal_required_claim_sets AS claim_set" in normalized:
+            self.one = self.connection.claim_set
+        elif "FROM legal_resource_versions AS competing" in normalized:
+            self.one = (self.connection.open_issue,)
         elif "FROM legal_evidence_snapshots" in normalized:
             self.one = self.connection.latest
         elif "FROM legal_resource_versions AS version" in normalized:
@@ -56,7 +60,7 @@ class _SnapshotCursor:
             self.one = (values[0],)
         elif normalized.startswith("INSERT INTO legal_review_decisions"):
             self.connection.decision_inserts.append(values)
-            self.one = (values[0],)
+            self.one = (values[0], 1, values[15], NOW)
 
     def fetchone(self):
         return self.one
@@ -70,11 +74,25 @@ class _SnapshotConnection:
         lineages=None,
         open_issue=False,
         gate_snapshot=None,
+        claim_set=None,
+        projection=None,
     ):
         self.latest = latest
         self.lineages = dict(lineages or {})
         self.open_issue = open_issue
         self.gate_snapshot = gate_snapshot
+        self.projection = projection or (
+            "legal-review-version-1",
+            1,
+            "pg-jsonb-row-v1",
+            "f" * 64,
+            "f" * 64,
+            "snapshot-1",
+            NOW - timedelta(minutes=5),
+            NOW - timedelta(minutes=10),
+            NOW,
+        )
+        self.claim_set = claim_set or _claim_set()
         self.statements = []
         self.snapshot_inserts = []
         self.item_inserts = []
@@ -138,6 +156,25 @@ def _reference(**overrides):
     return value
 
 
+def _claim_set(claim_hashes=None):
+    hashes = list(
+        claim_hashes
+        or [
+            hashlib.sha256(
+                str(_reference()["claimText"]).encode("utf-8")
+            ).hexdigest()
+        ]
+    )
+    entries = [
+        f"claim-{index}:{claim_hash}"
+        for index, claim_hash in enumerate(hashes, start=1)
+    ]
+    claim_set_hash = hashlib.sha256(
+        "\n".join(entries).encode("utf-8")
+    ).hexdigest()
+    return (2, claim_set_hash, hashes, claim_set_hash)
+
+
 def _snapshot(references=None, **overrides):
     value = {
         "asOfDate": "2026-07-18",
@@ -147,8 +184,12 @@ def _snapshot(references=None, **overrides):
         "expectedCitationCount": 1,
         "expectedClaimCount": 1,
         "verifiedClaimCount": 1,
+        "requiredClaimSetId": "required-claims-1",
         "references": references or [_reference()],
-        "metadata": {"purpose": "approval_gate"},
+        "metadata": {
+            "purpose": "approval_gate",
+            "legalReviewId": "review-1",
+        },
     }
     value.update(overrides)
     return value
@@ -201,6 +242,11 @@ def test_append_snapshot_and_exact_items_are_atomic_rls_scoped_and_gate_eligible
         True,
         None,
     )
+    assert snapshot_insert[13:15] == (
+        "required-claims-1",
+        result["requiredClaimSetSha256"].removeprefix("sha256:"),
+    )
+    assert snapshot_insert[15] == "review-1"
     assert item_insert[1:4] == (
         "tenant-1",
         "project-1",
@@ -231,6 +277,23 @@ def test_append_snapshot_and_exact_items_are_atomic_rls_scoped_and_gate_eligible
     )
     assert tenant_context_index < advisory_lock_index < snapshot_insert_index
     assert connection.exit_exception is None
+
+
+def test_snapshot_rejects_an_unapproved_freshness_policy_before_database_write():
+    connection = _SnapshotConnection(lineages=_default_lineages())
+
+    with pytest.raises(
+        ValueError,
+        match="freshnessPolicyVersion is not an approved",
+    ):
+        _repository(connection).append_verified_evidence_snapshot(
+            _snapshot(freshnessPolicyVersion="caller-controlled-never-expires"),
+            created_by="legal-reviewer-1",
+            created_at=NOW,
+        )
+
+    assert connection.statements == []
+    assert connection.snapshot_inserts == []
 
 
 def test_snapshot_hash_and_ids_are_deterministic_for_same_state_and_content():
@@ -494,7 +557,13 @@ def test_partial_citation_coverage_can_be_sealed_but_never_gate_eligible():
 
 
 def test_uncovered_required_claim_can_never_be_gate_eligible():
-    connection = _SnapshotConnection(lineages=_default_lineages())
+    covered_hash = hashlib.sha256(
+        str(_reference()["claimText"]).encode("utf-8")
+    ).hexdigest()
+    connection = _SnapshotConnection(
+        lineages=_default_lineages(),
+        claim_set=_claim_set([covered_hash, "b" * 64]),
+    )
 
     result = _repository(connection).append_verified_evidence_snapshot(
         _snapshot(expectedClaimCount=2, verifiedClaimCount=1),
@@ -509,6 +578,39 @@ def test_uncovered_required_claim_can_never_be_gate_eligible():
     assert result["gateEligible"] is False
 
 
+def test_caller_cannot_understate_the_approved_required_claim_policy():
+    covered_hash = hashlib.sha256(
+        str(_reference()["claimText"]).encode("utf-8")
+    ).hexdigest()
+    connection = _SnapshotConnection(
+        lineages=_default_lineages(),
+        claim_set=_claim_set([covered_hash, "b" * 64]),
+    )
+
+    with pytest.raises(ValueError, match="expectedClaimCount"):
+        _repository(connection).append_verified_evidence_snapshot(
+            _snapshot(expectedClaimCount=1, verifiedClaimCount=1),
+            created_by="reviewer",
+            created_at=NOW,
+        )
+
+    assert connection.snapshot_inserts == []
+
+
+def test_snapshot_rejects_unapproved_or_hash_mismatched_claim_policy():
+    connection = _SnapshotConnection(
+        lineages=_default_lineages(),
+        claim_set=(2, "a" * 64, ["b" * 64], "c" * 64),
+    )
+
+    with pytest.raises(ValueError, match="content hash mismatch"):
+        _repository(connection).append_verified_evidence_snapshot(
+            _snapshot(),
+            created_by="reviewer",
+            created_at=NOW,
+        )
+
+
 def _approve_decision(**overrides):
     decision = {
         "decisionId": "decision-1",
@@ -517,12 +619,19 @@ def _approve_decision(**overrides):
         "reason": "Verified by counsel.",
         "reviewerId": "counsel-1",
         "reviewerRole": "external_counsel",
+        "legalApprovalDelegationId": "delegation-1",
         "decidedAt": NOW.isoformat(),
         "legalEvidenceSnapshotId": "snapshot-1",
+        "legalReviewProjectionId": "legal-review-version-1",
+        "legalReviewProjectionVersion": 1,
+        "legalReviewProjectionSha256": "sha256:" + ("f" * 64),
         "metadata": {
             "legalReviewId": "review-1",
             "evidenceSnapshotVersion": 1,
             "evidenceSnapshotSha256": "sha256:" + ("d" * 64),
+            "legalReviewProjectionId": "legal-review-version-1",
+            "legalReviewProjectionVersion": 1,
+            "legalReviewProjectionSha256": "sha256:" + ("f" * 64),
         },
     }
     decision.update(overrides)
@@ -534,7 +643,7 @@ def test_approve_decision_rechecks_snapshot_hash_version_and_review_lineage():
         gate_snapshot=(
             1,
             "d" * 64,
-            {"legalReviewId": "review-1"},
+            "review-1",
         )
     )
 
@@ -551,17 +660,17 @@ def test_approve_decision_rechecks_snapshot_hash_version_and_review_lineage():
     [
         (None, _approve_decision(), "gate-eligible"),
         (
-            (1, "d" * 64, {"legalReviewId": "different-review"}),
+            (1, "d" * 64, "different-review"),
             _approve_decision(),
             "review lineage",
         ),
         (
-            (2, "d" * 64, {"legalReviewId": "review-1"}),
+            (2, "d" * 64, "review-1"),
             _approve_decision(),
             "version changed",
         ),
         (
-            (1, "e" * 64, {"legalReviewId": "review-1"}),
+            (1, "e" * 64, "review-1"),
             _approve_decision(),
             "hash changed",
         ),
@@ -578,3 +687,117 @@ def test_approve_decision_fails_closed_on_snapshot_mismatch(
         _repository(connection).append_review_decision(decision)
 
     assert connection.decision_inserts == []
+
+
+@pytest.mark.parametrize(
+    ("projection", "decision", "expected"),
+    [
+        (
+            None,
+            _approve_decision(),
+            "latest normalized legal review projection",
+        ),
+        (
+            (
+                "legal-review-version-2",
+                2,
+                "pg-jsonb-row-v1",
+                "e" * 64,
+                "e" * 64,
+                "snapshot-1",
+                NOW - timedelta(minutes=1),
+                NOW - timedelta(minutes=10),
+                NOW,
+            ),
+            _approve_decision(),
+            "projection changed",
+        ),
+        (
+            (
+                "legal-review-version-1",
+                1,
+                "pg-jsonb-row-v1",
+                "f" * 64,
+                "f" * 64,
+                "different-snapshot",
+                NOW - timedelta(minutes=1),
+                NOW - timedelta(minutes=10),
+                NOW,
+            ),
+            _approve_decision(),
+            "does not match the decision evidence snapshot",
+        ),
+        (
+            (
+                "legal-review-version-1",
+                1,
+                "pg-jsonb-row-v1",
+                "f" * 64,
+                "f" * 64,
+                "snapshot-1",
+                NOW + timedelta(minutes=1),
+                NOW - timedelta(minutes=10),
+                NOW,
+            ),
+            _approve_decision(),
+            "must exist before the decision timestamp",
+        ),
+        (
+            (
+                "legal-review-version-1",
+                1,
+                "pg-jsonb-row-v1",
+                "f" * 64,
+                "f" * 64,
+                "snapshot-1",
+                NOW - timedelta(minutes=1),
+                NOW + timedelta(minutes=1),
+                NOW,
+            ),
+            _approve_decision(),
+            "snapshot must exist before",
+        ),
+        (
+            (
+                "legal-review-version-1",
+                1,
+                "pg-jsonb-row-v1",
+                "f" * 64,
+                "f" * 64,
+                "snapshot-1",
+                NOW - timedelta(minutes=1),
+                NOW - timedelta(minutes=10),
+                NOW + timedelta(minutes=6),
+            ),
+            _approve_decision(),
+            "within five minutes",
+        ),
+    ],
+)
+def test_final_decision_fails_closed_when_projection_binding_is_stale(
+    projection,
+    decision,
+    expected,
+):
+    connection = _SnapshotConnection(
+        gate_snapshot=(1, "d" * 64, "review-1"),
+        projection=projection,
+    )
+    if projection is None:
+        connection.projection = None
+
+    with pytest.raises(ValueError, match=expected):
+        _repository(connection).append_review_decision(decision)
+
+    assert connection.decision_inserts == []
+
+
+@pytest.mark.parametrize("decision_type", ["reject", "waive_with_conditions"])
+def test_every_final_approval_gate_decision_requires_a_snapshot(decision_type):
+    decision = _approve_decision(
+        decisionType=decision_type,
+        legalEvidenceSnapshotId=None,
+    )
+
+    with pytest.raises(ValueError, match="legalEvidenceSnapshotId"):
+        _repository(_SnapshotConnection()).append_review_decision(decision)

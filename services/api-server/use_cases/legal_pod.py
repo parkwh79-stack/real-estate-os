@@ -37,7 +37,15 @@ def _now() -> str:
 
 def _locator(value: Dict[str, Any], *, fallback: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Normalize document/page, Excel-cell, API-row and artifact locators."""
-    raw = value.get("sourceLocator") or value.get("source_locator") or value.get("locator") or fallback or {}
+    raw = (
+        value.get("evidenceLocator")
+        or value.get("evidence_locator")
+        or value.get("sourceLocator")
+        or value.get("source_locator")
+        or value.get("locator")
+        or fallback
+        or {}
+    )
     if not isinstance(raw, dict):
         return {}
     return {
@@ -261,7 +269,7 @@ def _check_risk(check: Dict[str, Any], locators: list[Dict[str, Any]], review_id
     severity = str(check.get("severity") or "caution")
     issue_code = f"LEGAL_{key}"
     findings = check.get("findings") if isinstance(check.get("findings"), list) else []
-    return {
+    record = {
         "recordType": "risk_issue",
         "recordId": f"risk_issue:{issue_code}",
         "key": issue_code,
@@ -273,11 +281,19 @@ def _check_risk(check: Dict[str, Any], locators: list[Dict[str, Any]], review_id
         "blocking": severity == "blocking",
         "description": " / ".join(str(item) for item in findings) or str(check.get("title") or issue_code),
         "mitigation": "법무 증빙과 인허가·계약 조건을 확인한 후 승인 또는 조건부 승인 처리",
-        "sourceType": "legal_review",
-        "sourceLocator": locators[0] if locators else {"sourceType": "legal_review", "reviewId": review_id},
+        "sourceType": "legal_evidence" if locators else "legal_review_record",
+        "recordLocator": {
+            "sourceType": "legal_review_record",
+            "reviewId": review_id,
+        },
         "evidenceIds": check.get("evidenceIds") or [],
         "legalReviewId": review_id,
     }
+    if locators:
+        record["evidenceLocator"] = locators[0]
+        # Compatibility projection only. Approval uses evidenceLocator.
+        record["sourceLocator"] = locators[0]
+    return record
 
 
 _LEGAL_CHECK_CONTEXT_TOKENS = {
@@ -676,6 +692,7 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             **check,
             "checkCode": f"LEGAL_{str(check.get('key') or 'REVIEW').upper()}",
             "responsibleAgent": "LegalReviewAgent",
+            "evidenceLocators": check_locators[:10],
             "sourceLocators": check_locators[:10],
             "evidenceIds": [
                 item.get("evidenceId")
@@ -703,11 +720,10 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             "description": f"{len(parcel_blockers)}개 필지의 등기·제한물권 증빙 또는 소유자 일치 확인이 필요합니다.",
             "mitigation": "필지별 등기부 증빙과 제한물권 말소 조건을 첨부하고 법무 검토를 완료합니다.",
             "sourceType": "land_evidence",
-            "sourceLocator": (
-                parcel_locators[0]
-                if parcel_locators
-                else {"sourceType": "legal_review", "reviewId": review_id}
-            ),
+            "recordLocator": {
+                "sourceType": "legal_review_record",
+                "reviewId": review_id,
+            },
             "evidenceIds": [
                 item.get("evidenceId")
                 for item in locators
@@ -715,6 +731,9 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             ],
             "legalReviewId": review_id,
         })
+        if parcel_locators:
+            risk_issues[-1]["evidenceLocator"] = parcel_locators[0]
+            risk_issues[-1]["sourceLocator"] = parcel_locators[0]
         risk_issues[-1]["description"] = f"{len(parcel_pending)}필지의 등기·제한물권 증빙이 아직 첨부되지 않았습니다."
         risk_issues[-1]["mitigation"] = "등기부 발급본과 제한물권 확인자료를 첨부한 뒤 법무 Pod를 재실행합니다."
 
@@ -769,9 +788,13 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             **review.get("mcp", {}),
             "connected": law_context.get("connected", False),
             "status": "connected" if law_context.get("connected") else "not_connected",
+            "verifiedEvidenceAvailable": law_context.get(
+                "verifiedEvidenceAvailable",
+                False,
+            ),
             "failureReason": (
                 None
-                if law_context.get("connected")
+                if law_context.get("verifiedEvidenceAvailable")
                 else "No current, hash-bound official legal evidence was verified."
             ),
             "citationVerification": law_context.get("citationVerification"),
@@ -841,7 +864,7 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             "valueType": "source",
             "lawReference": reference,
             "sourceType": reference.get("sourceAuthority") or "official_legal_source",
-            "sourceLocator": {
+            "evidenceLocator": {
                 "sourceType": "api_row",
                 "sourceUrl": reference.get("url"),
                 "apiRowId": reference.get("lawId") or reference_id,
@@ -862,6 +885,9 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             "legalReviewId": review_id,
             "createdAt": _now(),
         }
+        # Read-only compatibility alias for consumers predating the explicit
+        # recordLocator/evidenceLocator contract.
+        law_record["sourceLocator"] = law_record["evidenceLocator"]
         upsert_deal_state_record(str(project_id), law_record)
     reference_by_key = {
         str(
@@ -875,7 +901,7 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
     for change_type in ("added", "removed", "changed"):
         for index, change in enumerate(law_change_report.get(change_type) or []):
             change_reference = reference_by_key.get(str(change.get("lawKey") or ""))
-            upsert_deal_state_record(str(project_id), {
+            change_record = {
                 "recordType": "legal_law_change",
                 "recordId": f"legal_law_change:{project_id}:{review_id}:{change_type}:{index}",
                 "key": change.get("lawKey"),
@@ -885,7 +911,7 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
                     (change_reference or {}).get("sourceAuthority")
                     or "legal_change_analysis"
                 ),
-                "sourceLocator": {
+                "evidenceLocator": {
                     key: value
                     for key, value in {
                         "sourceType": "api_row",
@@ -903,7 +929,11 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
                 "legalReviewId": review_id,
                 "status": "needs_review",
                 "createdAt": _now(),
-            })
+            }
+            change_record["sourceLocator"] = change_record[
+                "evidenceLocator"
+            ]
+            upsert_deal_state_record(str(project_id), change_record)
     for risk in risk_issues:
         upsert_deal_state_record(str(project_id), risk)
     handoff = {
@@ -916,6 +946,7 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
         "payloadSchema": "LegalReadinessPatchV1",
         "payload": {"legalReviewId": review_id, "status": status, "blockingRiskCodes": [item["code"] for item in risk_issues if item.get("blocking")]},
         "evidenceIds": [item.get("evidenceId") for item in locators if item.get("evidenceId")],
+        "evidenceLocators": locators,
         "sourceLocators": locators,
         "requiresHumanReview": True,
         "reviewStatus": "pending",
@@ -923,16 +954,19 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
         "reportEligible": False,
         "createdAt": _now(),
     }
-    upsert_deal_state_record(str(project_id), {
+    handoff_record = {
         "recordType": "handoff", "recordId": handoff["handoffId"], "key": handoff["handoffId"],
         "sourceType": "legal_pod",
-        "sourceLocator": (
-            locators[0]
-            if locators
-            else {"sourceType": "legal_review", "reviewId": review_id}
-        ),
+        "recordLocator": {
+            "sourceType": "legal_review_record",
+            "reviewId": review_id,
+        },
         **handoff,
-    })
+    }
+    if locators:
+        handoff_record["evidenceLocator"] = locators[0]
+        handoff_record["sourceLocator"] = locators[0]
+    upsert_deal_state_record(str(project_id), handoff_record)
     legal_record["pfHandoff"] = handoff
     legal_record["nextActions"] = review.get("requiredFollowUps", [])
     upsert_legal_review_record(str(project_id), legal_record)
