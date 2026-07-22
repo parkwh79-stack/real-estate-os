@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import HTTPException, Request
@@ -297,6 +298,117 @@ def authorize_request(request: Request, permission: str) -> Dict[str, Any]:
     )
 
 
+def require_step_up_authentication(
+    context: Dict[str, Any],
+    *,
+    action: str,
+) -> Dict[str, Any]:
+    """Require a recent, verified human MFA proof for a high-risk action.
+
+    The assurance is derived only from the already verified bearer claims.
+    Client timestamps, UI state, membership role, and OAuth provider profile do
+    not satisfy this gate.
+    """
+
+    if not is_explicit_human_principal(context):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "step_up_required",
+                "action": action,
+                "reason": "verified_human_principal_required",
+            },
+        )
+    assurance = context.get("identityAssurance")
+    if not isinstance(assurance, dict) or assurance.get("mfaVerified") is not True:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "step_up_required",
+                "action": action,
+                "reason": "aal2_required",
+            },
+        )
+    authenticated_at = assurance.get("authenticatedAt")
+    if not isinstance(authenticated_at, str):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "step_up_required",
+                "action": action,
+                "reason": "authentication_time_missing",
+            },
+        )
+    try:
+        parsed = datetime.fromisoformat(authenticated_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("authentication time must be timezone-aware")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "step_up_required",
+                "action": action,
+                "reason": "authentication_time_invalid",
+            },
+        ) from exc
+    configured_window = str(
+        os.environ.get("REALYTICS_STEP_UP_MAX_AGE_SECONDS") or ""
+    ).strip()
+    if not configured_window:
+        if security_default(local="configured", hardened="missing") == "missing":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "step_up_policy_not_configured",
+                    "action": action,
+                },
+            )
+        max_age_seconds = 900
+    else:
+        try:
+            max_age_seconds = int(configured_window)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "step_up_policy_invalid", "action": action},
+            ) from exc
+        if max_age_seconds <= 0:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "step_up_policy_invalid", "action": action},
+            )
+    age_seconds = (datetime.now(timezone.utc) - parsed).total_seconds()
+    if age_seconds < -60 or age_seconds > max_age_seconds:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "step_up_required",
+                "action": action,
+                "reason": "authentication_too_old",
+                "maxAgeSeconds": max_age_seconds,
+            },
+        )
+    return context
+
+
+def high_risk_step_up_required() -> bool:
+    raw = str(os.environ.get("REALYTICS_REQUIRE_HIGH_RISK_STEP_UP") or "").strip()
+    if raw:
+        return raw.casefold() in {"1", "true", "yes", "on"}
+    return security_default(local="false", hardened="true") == "true"
+
+
+def enforce_high_risk_step_up(
+    context: Dict[str, Any],
+    *,
+    action: str,
+) -> Dict[str, Any]:
+    if high_risk_step_up_required():
+        return require_step_up_authentication(context, action=action)
+    return context
+
+
 def enforce_project_tenant_scope(request: Request, project: Dict[str, Any]) -> Dict[str, Any]:
     """Fail closed on every project-scoped request in strict tenant mode."""
     context = identity_context_from_request(request)
@@ -507,11 +619,19 @@ def _identity_assurance(claims: Dict[str, Any]) -> Dict[str, Any]:
         amr = []
     acr = str(claims.get("acr") or "") or None
     aal = str(claims.get("aal") or "").casefold() or None
+    raw_auth_time = claims.get("auth_time")
+    authenticated_at = None
+    if isinstance(raw_auth_time, (int, float)) and raw_auth_time > 0:
+        authenticated_at = datetime.fromtimestamp(
+            raw_auth_time,
+            tz=timezone.utc,
+        ).isoformat()
     mfa_markers = {"mfa", "otp", "hwk", "swk", "fido", "webauthn"}
     return {
         "amr": amr,
         "acr": acr,
         "aal": aal,
+        "authenticatedAt": authenticated_at,
         "mfaVerified": aal == "aal2"
         or bool(mfa_markers.intersection(item.casefold() for item in amr)),
         "source": "verified_bearer_claims",

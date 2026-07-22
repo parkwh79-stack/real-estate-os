@@ -1,6 +1,19 @@
-# Social Login Setup — Kakao & Google (실제 계정 연동)
+# Social Login Setup — Kakao & Google (Legacy Direct OAuth Reference)
 
-Updated: 2026-06-29
+Updated: 2026-07-22
+
+> **LEGACY / 운영 설정에 사용 금지**
+>
+> 아래 FastAPI 직접 OAuth, `localStorage` 세션, `pilot_mock` 흐름은 이전
+> 호환 경로입니다. 현재 운영 경로는 Supabase Auth의 Google/Kakao provider,
+> Next.js `/api/auth/supabase/oauth`, `/auth/callback`, HttpOnly cookie/BFF,
+> FastAPI JWKS 검증, PostgreSQL membership 권위입니다. 신규 설정과 테스트는
+> `docs/product/identity-tenant-access-contract.md`와
+> `docs/architecture/architecture-boundary.md`를 따릅니다. 운영 환경에서는
+> `REALYTICS_ENABLE_LOCAL_AUTH`, `REALYTICS_ENABLE_OAUTH_MOCKS`,
+> `REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS`를 모두 비활성화해야 합니다.
+
+## Historical reference only
 
 로그인 페이지의 "실제 카카오 계정으로 연동하기" / "실제 구글 계정으로 연동하기" 버튼이
 **실제 계정으로 동작**하려면 각 개발자 콘솔에서 OAuth 앱을 등록하고 Client ID/Secret을

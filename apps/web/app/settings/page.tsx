@@ -1,17 +1,36 @@
 "use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
   KeyRound,
+  Link2,
   LogOut,
   RotateCcw,
   Save,
   ShieldCheck,
+  ShieldPlus,
   Sparkles,
+  Trash2,
   UserRound,
 } from "lucide-react";
-import { apiBase, authHeaders, createLocalPilotSession } from "../../lib/auth-client";
+import {
+  apiBase,
+  authHeaders,
+  createLocalPilotSession,
+  enrollSupabaseTotp,
+  loadSupabaseAuthReadiness,
+  loadSupabaseSecurityProfile,
+  signOutSupabaseSession,
+  startSupabaseIdentityLink,
+  unenrollSupabaseMfa,
+  unlinkSupabaseIdentity,
+  verifySupabaseTotp,
+  type SupabaseAuthReadiness,
+  type SupabaseSecurityProfile,
+  type TotpEnrollment,
+} from "../../lib/auth-client";
 import { localPilotAuthEnabled } from "../../lib/auth-policy";
 import { useAuth } from "../../components/auth/auth-context";
 
@@ -71,7 +90,12 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [allowSystemFallback, setAllowSystemFallback] = useState(true);
   const [aiProfile, setAiProfile] = useState<AiProfileResponse | null>(null);
+  const [authReadiness, setAuthReadiness] = useState<SupabaseAuthReadiness | null>(null);
+  const [securityProfile, setSecurityProfile] = useState<SupabaseSecurityProfile | null>(null);
+  const [totpEnrollment, setTotpEnrollment] = useState<TotpEnrollment | null>(null);
+  const [totpCode, setTotpCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const [securityLoading, setSecurityLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -126,10 +150,104 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const loadAuthSecurity = useCallback(async () => {
+    setSecurityLoading(true);
+    try {
+      const readiness = await loadSupabaseAuthReadiness();
+      setAuthReadiness(readiness);
+      if (user) {
+        setSecurityProfile(await loadSupabaseSecurityProfile());
+      } else {
+        setSecurityProfile(null);
+      }
+    } catch (err) {
+      setSecurityProfile(null);
+      setError(err instanceof Error ? err.message : "인증 보안 상태 조회에 실패했습니다.");
+    } finally {
+      setSecurityLoading(false);
+    }
+  }, [user]);
+
   useEffect(() => {
     if (!user) return;
     void loadAiProfile();
   }, [user, loadAiProfile]);
+
+  useEffect(() => {
+    void loadAuthSecurity();
+  }, [loadAuthSecurity]);
+
+  const beginTotpEnrollment = async () => {
+    setSecurityLoading(true);
+    clearMessages();
+    try {
+      setTotpEnrollment(await enrollSupabaseTotp());
+      setTotpCode("");
+      setNotice("인증 앱에 QR 코드를 등록한 뒤 일회용 코드를 확인해 주세요.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "MFA 등록을 시작하지 못했습니다.");
+    } finally {
+      setSecurityLoading(false);
+    }
+  };
+
+  const confirmTotpEnrollment = async () => {
+    if (!totpEnrollment) return;
+    setSecurityLoading(true);
+    clearMessages();
+    try {
+      await verifySupabaseTotp(totpEnrollment.factorId, totpCode);
+      setTotpEnrollment(null);
+      setTotpCode("");
+      await loadAuthSecurity();
+      setNotice("MFA가 검증되었고 현재 세션이 AAL2로 승격되었습니다.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "MFA 코드 검증에 실패했습니다.");
+    } finally {
+      setSecurityLoading(false);
+    }
+  };
+
+  const removeMfaFactor = async (factorId: string) => {
+    setSecurityLoading(true);
+    clearMessages();
+    try {
+      await unenrollSupabaseMfa(factorId);
+      await loadAuthSecurity();
+      setNotice("MFA 요소를 해제했습니다.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "MFA 요소를 해제하지 못했습니다.");
+    } finally {
+      setSecurityLoading(false);
+    }
+  };
+
+  const removeIdentity = async (identityId: string) => {
+    setSecurityLoading(true);
+    clearMessages();
+    try {
+      await unlinkSupabaseIdentity(identityId);
+      await loadAuthSecurity();
+      setNotice("로그인 공급자 연결을 해제했습니다.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "로그인 공급자 연결을 해제하지 못했습니다.");
+    } finally {
+      setSecurityLoading(false);
+    }
+  };
+
+  const revokeOtherSessions = async () => {
+    setSecurityLoading(true);
+    clearMessages();
+    try {
+      await signOutSupabaseSession("others");
+      setNotice("현재 브라우저를 제외한 다른 Supabase 세션을 폐기했습니다.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "다른 세션 폐기에 실패했습니다.");
+    } finally {
+      setSecurityLoading(false);
+    }
+  };
 
   const saveAiProfile = async () => {
     setLoading(true);
@@ -294,6 +412,126 @@ export default function SettingsPage() {
         </Panel>
       </section>
 
+      <section className="grid gap-4 xl:grid-cols-[0.85fr_1.15fr]">
+        <Panel title="운영 인증 Readiness" icon={<ShieldCheck className="h-5 w-5 text-emerald-600" />}>
+          <div className="space-y-3">
+            <InfoRow label="Supabase 설정" value={authReadiness?.configured ? "설정됨" : "미설정"} />
+            <InfoRow label="Google provider" value={authReadiness?.providers.google ? "활성" : "미확인/비활성"} />
+            <InfoRow label="Kakao provider" value={authReadiness?.providers.kakao ? "활성" : "미확인/비활성"} />
+            <InfoRow label="FastAPI JWKS + Membership" value={authReadiness?.backend.ready ? "준비됨" : "점검 필요"} />
+            <InfoRow label="종합 상태" value={authReadiness?.operational ? "구성 확인" : "운영 검증 미완료"} />
+            {authReadiness?.limitations.length ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+                {authReadiness.limitations.join(" · ")}
+              </div>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void loadAuthSecurity()}
+              disabled={securityLoading}
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200"
+            >
+              <RotateCcw className="h-4 w-4" />
+              운영 상태 다시 확인
+            </button>
+          </div>
+        </Panel>
+
+        <Panel title="계정 연결·MFA·세션" icon={<ShieldPlus className="h-5 w-5 text-blue-600" />}>
+          {!user ? (
+            <p className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500 dark:border-slate-700">
+              Supabase 계정으로 로그인하면 연결된 공급자와 MFA 상태를 관리할 수 있습니다.
+            </p>
+          ) : (
+            <div className="space-y-5">
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">로그인 공급자</h3>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => startSupabaseIdentityLink("google")} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold dark:border-slate-700">
+                      <Link2 className="mr-1 inline h-3.5 w-3.5" />Google 연결
+                    </button>
+                    <button type="button" onClick={() => startSupabaseIdentityLink("kakao")} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold dark:border-slate-700">
+                      <Link2 className="mr-1 inline h-3.5 w-3.5" />Kakao 연결
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-2 space-y-2">
+                  {(securityProfile?.identities ?? []).map((identity) => (
+                    <div key={identity.identityId} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
+                      <div>
+                        <p className="text-sm font-bold text-slate-900 dark:text-white">{providerLabel(identity.provider)}</p>
+                        <p className="text-xs text-slate-500">{identity.email ?? "공급자 이메일 비공개"}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void removeIdentity(identity.identityId)}
+                        disabled={securityLoading || (securityProfile?.identities.length ?? 0) < 2}
+                        className="rounded-md p-2 text-rose-600 disabled:cursor-not-allowed disabled:opacity-30"
+                        aria-label={`${providerLabel(identity.provider)} 연결 해제`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">다중요소 인증</h3>
+                    <p className="text-xs text-slate-500">현재 세션: {securityProfile?.assurance.currentLevel ?? "미확인"}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void beginTotpEnrollment()}
+                    disabled={securityLoading || Boolean(totpEnrollment)}
+                    className="rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+                  >
+                    TOTP 등록
+                  </button>
+                </div>
+                <div className="mt-2 space-y-2">
+                  {(securityProfile?.factors ?? []).map((factor) => (
+                    <div key={factor.factorId} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
+                      <div>
+                        <p className="text-sm font-bold text-slate-900 dark:text-white">{factor.friendlyName ?? factor.factorType}</p>
+                        <p className="text-xs text-slate-500">{factor.status}</p>
+                      </div>
+                      <button type="button" onClick={() => void removeMfaFactor(factor.factorId)} disabled={securityLoading} className="rounded-md p-2 text-rose-600 disabled:opacity-30" aria-label="MFA 요소 해제">
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {totpEnrollment ? (
+                <div className="grid gap-4 rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-900 dark:bg-blue-950/20 sm:grid-cols-[160px_1fr]">
+                  <Image src={totpEnrollment.qrCode} alt="REALYTICS MFA QR 코드" width={160} height={160} unoptimized className="rounded bg-white" />
+                  <div>
+                    <p className="text-sm font-bold text-slate-900 dark:text-white">인증 앱 등록</p>
+                    <p className="mt-1 break-all font-mono text-xs text-slate-600 dark:text-slate-300">{totpEnrollment.secret}</p>
+                    <input value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 8))} inputMode="numeric" placeholder="일회용 코드" className="mt-3 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950" />
+                    <button type="button" onClick={() => void confirmTotpEnrollment()} disabled={securityLoading || totpCode.length < 6} className="mt-2 rounded-md bg-slate-950 px-3 py-2 text-xs font-bold text-white disabled:opacity-50 dark:bg-white dark:text-slate-950">
+                      코드 확인 및 활성화
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="border-t border-slate-200 pt-4 dark:border-slate-800">
+                <button type="button" onClick={() => void revokeOtherSessions()} disabled={securityLoading} className="inline-flex h-10 items-center gap-2 rounded-lg border border-rose-200 px-4 text-sm font-bold text-rose-700 disabled:opacity-50 dark:border-rose-900 dark:text-rose-300">
+                  <LogOut className="h-4 w-4" />
+                  다른 기기의 세션 폐기
+                </button>
+              </div>
+            </div>
+          )}
+        </Panel>
+      </section>
+
       <section className="grid gap-4 xl:grid-cols-[1fr_0.85fr]">
         <Panel title="사용자 LLM API 설정" icon={<KeyRound className="h-5 w-5 text-blue-600" />}>
           <div className="grid gap-3 md:grid-cols-2">
@@ -399,6 +637,13 @@ function sourceLabel(value?: string) {
   if (value === "user_ai_profile_without_key_system_fallback") return "개인 프로필 + 시스템 fallback";
   if (value === "system_free_fallback") return "시스템 무료 fallback";
   return value ?? "-";
+}
+
+function providerLabel(value: string) {
+  if (value === "google") return "Google";
+  if (value === "kakao") return "Kakao";
+  if (value === "email") return "Email";
+  return value;
 }
 
 function Panel({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {

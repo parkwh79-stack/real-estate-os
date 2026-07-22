@@ -9,12 +9,14 @@ def archive_source_document_use_case(
     content: bytes,
     original_file_name: str | None,
     content_type: str | None,
+    tenant_id: str | None = None,
 ) -> Dict[str, Any]:
     return upload_archive_repository.archive_upload(
         project_id,
         content,
         original_file_name,
         content_type,
+        tenant_id=tenant_id,
     )
 
 

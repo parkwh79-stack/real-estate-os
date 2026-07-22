@@ -4,15 +4,53 @@
 
 :root {
   color-scheme: light;
-  --background: #f8fafc;
-  --foreground: #020617;
+  --re-bg-canvas: #f6f8fb;
+  --re-bg-surface: #ffffff;
+  --re-bg-subtle: #f1f5f9;
+  --re-border-default: #d8e0ea;
+  --re-border-strong: #aab7c7;
+  --re-text-primary: #0b172a;
+  --re-text-secondary: #475569;
+  --re-text-muted: #718096;
+  --re-brand-900: #08213f;
+  --re-brand-700: #123f73;
+  --re-action-600: #1d5fd1;
+  --re-info-600: #2563eb;
+  --re-success-600: #15803d;
+  --re-warning-600: #b45309;
+  --re-danger-600: #b42318;
+  --re-neutral-600: #526071;
+  --re-focus-ring: #60a5fa;
+  --re-radius-control: 8px;
+  --re-radius-panel: 12px;
+  --re-shadow-panel: 0 1px 2px rgb(8 33 63 / 0.06);
+  --background: var(--re-bg-canvas);
+  --foreground: var(--re-text-primary);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --background: #020617;
-    --foreground: #f8fafc;
+    --re-bg-canvas: #07111f;
+    --re-bg-surface: #0b172a;
+    --re-bg-subtle: #122238;
+    --re-border-default: #2c4058;
+    --re-border-strong: #50657c;
+    --re-text-primary: #f3f7fb;
+    --re-text-secondary: #c3ceda;
+    --re-text-muted: #91a2b5;
+    --re-brand-900: #07111f;
+    --re-brand-700: #2c67a7;
+    --re-action-600: #4a8df1;
+    --re-info-600: #60a5fa;
+    --re-success-600: #4ade80;
+    --re-warning-600: #fbbf24;
+    --re-danger-600: #fb7185;
+    --re-neutral-600: #a1afbf;
+    --re-focus-ring: #93c5fd;
+    --re-shadow-panel: none;
+    --background: var(--re-bg-canvas);
+    --foreground: var(--re-text-primary);
   }
 }
 
@@ -29,6 +67,23 @@ body {
   margin: 0;
   background: var(--background);
   color: var(--foreground);
+  font-family: "Pretendard Variable", "Noto Sans KR", Inter, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-rendering: optimizeLegibility;
+}
+
+:focus-visible {
+  outline: 2px solid var(--re-focus-ring);
+  outline-offset: 2px;
+}
+
+.re-financial-number {
+  font-variant-numeric: tabular-nums lining-nums;
+  letter-spacing: -0.01em;
+}
+
+.re-sr-status::before {
+  content: attr(data-status-label) ": ";
 }
 
 button,

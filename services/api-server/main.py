@@ -29,6 +29,7 @@ def _load_local_env() -> None:
 _load_local_env()
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import agent_platform, audit, auth, glossary, kakao, google, legal_citator, legal_corpus_operations, legal_governance, legal_intelligence, legal_provider_operations, valuemap, projects, project_assumptions, ops, market
@@ -44,6 +45,7 @@ from db.postgres_runtime_pool import (
     close_runtime_pools,
     open_runtime_pools,
 )
+from db.repositories.upload_archive_repository import UploadRejectedError
 from storage import get_user_session, record_user_activity_log, storage_backend
 
 validate_security_configuration()
@@ -70,6 +72,33 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(UploadRejectedError)
+async def upload_rejected_handler(
+    _request: Request,
+    exc: UploadRejectedError,
+):
+    status_code = {
+        "malware_detected": 422,
+        "malware_scan_failed": 503,
+        "malware_scan_required": 503,
+        "quarantine_hash_mismatch": 409,
+        "active_archive_hash_mismatch": 409,
+    }.get(exc.code, 422)
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "detail": {
+                "error": exc.code,
+                "archiveId": exc.archive_id,
+                "malwareScanStatus": exc.scan_status,
+                "storageLifecycleStatus": "quarantine",
+                "activeArchiveCreated": False,
+            }
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 app.add_middleware(
     CORSMiddleware,

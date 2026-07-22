@@ -42,6 +42,62 @@ export interface ResolvedIdentity {
   limitations?: string[];
 }
 
+export interface SupabaseAuthReadiness {
+  schemaVersion: string;
+  checkedAt: string;
+  configured: boolean;
+  settingsReachable: boolean;
+  providers: { google: boolean; kakao: boolean };
+  canonicalOriginReady: boolean;
+  backend: {
+    reachable: boolean;
+    configured: boolean;
+    mode: string | null;
+    provider: string | null;
+    issuerConfigured: boolean;
+    jwksUrlConfigured: boolean;
+    membershipAuthority: string | null;
+    ready: boolean;
+  };
+  operational: boolean;
+  limitations: string[];
+}
+
+export interface SupabaseSecurityProfile {
+  schemaVersion: string;
+  userId: string;
+  identities: Array<{
+    identityId: string;
+    provider: string;
+    email: string | null;
+    createdAt: string | null;
+    lastSignInAt: string | null;
+  }>;
+  factors: Array<{
+    factorId: string;
+    factorType: string;
+    status: string;
+    friendlyName: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  assurance: {
+    currentLevel: "aal1" | "aal2" | null;
+    nextLevel: "aal1" | "aal2" | null;
+    currentAuthenticationMethods: unknown[];
+  };
+}
+
+export interface TotpEnrollment {
+  schemaVersion: string;
+  factorId: string;
+  factorType: "totp";
+  friendlyName: string | null;
+  qrCode: string;
+  secret: string;
+  uri: string;
+}
+
 const LEGACY_STORAGE_KEY = "realytics.auth.session.v1";
 const TRANSIENT_AI_SECRET_PREFIX = "realytics.ai.session.";
 let inMemoryIdentity: StoredAuthSession | null = null;
@@ -154,12 +210,90 @@ export async function signUpWithSupabasePassword(input: {
   };
 }
 
-export async function signOutSupabaseSession() {
+export async function signOutSupabaseSession(
+  scope: "local" | "global" | "others" = "local",
+) {
   if (!supabaseConfigured()) return;
   await fetch("/api/auth/supabase/signout", {
     method: "POST",
-    headers: authHeaders(),
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ scope }),
   }).then(assertOk);
+}
+
+export async function loadSupabaseAuthReadiness(): Promise<SupabaseAuthReadiness> {
+  const response = await fetch("/api/auth/supabase/readiness", { cache: "no-store" })
+    .then(assertOk);
+  return await response.json() as SupabaseAuthReadiness;
+}
+
+export async function loadSupabaseSecurityProfile(): Promise<SupabaseSecurityProfile> {
+  const response = await fetch("/api/auth/supabase/security", { cache: "no-store" })
+    .then(assertOk);
+  return await response.json() as SupabaseSecurityProfile;
+}
+
+export function startSupabaseIdentityLink(
+  provider: "google" | "kakao",
+  nextPath = "/settings",
+) {
+  if (typeof window === "undefined") {
+    throw new Error("Identity linking must start in the browser.");
+  }
+  const safeNext = nextPath.startsWith("/") && !nextPath.startsWith("//")
+    ? nextPath
+    : "/settings";
+  const start = new URL(
+    "/api/auth/supabase/identity/link",
+    window.location.origin,
+  );
+  start.searchParams.set("provider", provider);
+  start.searchParams.set("next", safeNext);
+  window.location.assign(start.toString());
+}
+
+async function postSupabaseSecurityAction<T>(body: Record<string, unknown>): Promise<T> {
+  const response = await fetch("/api/auth/supabase/security", {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(assertOk);
+  return await response.json() as T;
+}
+
+export async function enrollSupabaseTotp(
+  friendlyName = "REALYTICS Authenticator",
+): Promise<TotpEnrollment> {
+  return await postSupabaseSecurityAction<TotpEnrollment>({
+    action: "mfa_enroll_totp",
+    friendlyName,
+  });
+}
+
+export async function verifySupabaseTotp(factorId: string, code: string) {
+  return await postSupabaseSecurityAction<{ verified: boolean; assuranceLevel: "aal2" }>({
+    action: "mfa_verify_totp",
+    factorId,
+    code,
+  });
+}
+
+export async function unenrollSupabaseMfa(factorId: string) {
+  return await postSupabaseSecurityAction<{ unenrolled: boolean; factorId: string }>({
+    action: "mfa_unenroll",
+    factorId,
+  });
+}
+
+export async function unlinkSupabaseIdentity(identityId: string) {
+  return await postSupabaseSecurityAction<{
+    unlinked: boolean;
+    identityId: string;
+    provider: string;
+  }>({
+    action: "identity_unlink",
+    identityId,
+  });
 }
 
 export async function signInWithSupabaseOAuth(

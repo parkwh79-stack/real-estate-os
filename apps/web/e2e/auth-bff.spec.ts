@@ -130,3 +130,86 @@ test("configured OAuth start stores PKCE state in hardened cookies", async ({
     expect(cookie.toLowerCase()).toContain("samesite=lax");
   }
 });
+
+test("auth readiness is secret-safe and reports both production providers", async ({
+  request,
+}) => {
+  const response = await request.get("/api/auth/supabase/readiness");
+  expect(response.status()).toBe(200);
+  const body = await response.json();
+  expect(body.schemaVersion).toBe("realytics-supabase-auth-readiness-v1");
+  expect(body.providers).toEqual({
+    google: expect.any(Boolean),
+    kakao: expect.any(Boolean),
+  });
+  expect(body.backend).toEqual(expect.objectContaining({
+    ready: expect.any(Boolean),
+  }));
+  expect(
+    body.backend.membershipAuthority === null
+      || typeof body.backend.membershipAuthority === "string",
+  ).toBe(true);
+  const rendered = JSON.stringify(body).toLowerCase();
+  expect(rendered).not.toContain("publishable_key");
+  expect(rendered).not.toContain("service_role");
+  expect(rendered).not.toContain("refresh_token");
+});
+
+test("security mutations and session revocation reject cross-site requests", async ({
+  request,
+}) => {
+  const security = await request.post("/api/auth/supabase/security", {
+    headers: { Origin: "https://attacker.invalid" },
+    data: { action: "mfa_enroll_totp" },
+  });
+  expect(security.status()).toBe(403);
+  await expect(security.json()).resolves.toMatchObject({
+    error: "cross_site_request_rejected",
+  });
+
+  const signout = await request.post("/api/auth/supabase/signout", {
+    headers: { Origin: "https://attacker.invalid" },
+    data: { scope: "global" },
+  });
+  expect(signout.status()).toBe(403);
+  await expect(signout.json()).resolves.toMatchObject({
+    error: "cross_site_request_rejected",
+  });
+});
+
+test("identity linking rejects providers outside the approved allow-list", async ({
+  request,
+}) => {
+  const response = await request.get(
+    "/api/auth/supabase/identity/link?provider=github",
+    { maxRedirects: 0 },
+  );
+  expect(response.status()).toBe(400);
+  await expect(response.json()).resolves.toMatchObject({
+    error: "unsupported_identity_provider",
+  });
+});
+
+test("invitation intent is isolated in an HttpOnly cookie before OAuth", async ({
+  request,
+}) => {
+  const token = "t".repeat(48);
+  const response = await request.get(
+    `/api/auth/supabase/invitation/start?token=${token}`,
+    { maxRedirects: 0 },
+  );
+  expect(response.status()).toBeGreaterThanOrEqual(300);
+  expect(response.status()).toBeLessThan(400);
+  expect(response.headers().location).toContain("/login?invitation=pending");
+  expect(response.headers().location).not.toContain(token);
+  expect(response.headers()["referrer-policy"]).toBe("no-referrer");
+  const setCookies = response
+    .headersArray()
+    .filter((header) => header.name.toLowerCase() === "set-cookie")
+    .map((header) => header.value);
+  expect(setCookies.some((cookie) => (
+    cookie.includes("realytics-invitation=")
+      && cookie.includes("HttpOnly")
+      && cookie.toLowerCase().includes("samesite=lax")
+  ))).toBe(true);
+});

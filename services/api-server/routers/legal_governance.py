@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 from core.authz import (
     authorize_request,
+    enforce_high_risk_step_up,
     enforce_project_tenant_scope,
     is_explicit_human_principal,
 )
@@ -62,6 +63,7 @@ def grant_legal_approval_delegation(
         project_id,
         request,
         permission="legal:review",
+        step_up_action="legal_approval_delegation_grant",
     )
     return _created(
         "legalApprovalDelegationId",
@@ -87,6 +89,7 @@ def revoke_legal_approval_delegation(
         project_id,
         request,
         permission="legal:review",
+        step_up_action="legal_approval_delegation_revoke",
     )
     return _created(
         "legalApprovalDelegationId",
@@ -172,6 +175,7 @@ def approve_legal_required_claim_set(
         project_id,
         request,
         permission="legal:review",
+        step_up_action="legal_required_claim_set_approve",
     )
     return _created(
         "legalRequiredClaimSetId",
@@ -214,6 +218,7 @@ def approve_legal_waiver(
         project_id,
         request,
         permission="legal:review",
+        step_up_action="legal_waiver_approve",
     )
     return _created(
         "legalWaiverId",
@@ -240,6 +245,7 @@ def advance_legal_waiver_cure(
         project_id,
         request,
         permission="legal:review",
+        step_up_action="legal_waiver_cure",
     )
     return _created(
         "legalWaiverId",
@@ -287,6 +293,7 @@ def approve_counsel_opinion(
         project_id,
         request,
         permission="legal:review",
+        step_up_action="counsel_opinion_approve",
     )
     return _created(
         "counselOpinionId",
@@ -430,6 +437,7 @@ def _repository(
     request: Request,
     *,
     permission: str,
+    step_up_action: str | None = None,
 ) -> tuple[PostgresLegalGovernanceRepository, str, str]:
     project = get_project_record(project_id)
     if project is None:
@@ -439,6 +447,11 @@ def _repository(
         raise HTTPException(
             status_code=401,
             detail={"error": "authentication_required"},
+        )
+    if step_up_action:
+        enforce_high_risk_step_up(
+            authorization,
+            action=step_up_action,
         )
     enforce_project_tenant_scope(request, project)
     user = authorization.get("user") or {}

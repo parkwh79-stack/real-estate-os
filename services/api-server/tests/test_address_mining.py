@@ -10,11 +10,27 @@ class _RemoteObjectStorage:
     def __init__(self):
         self.objects = {}
 
-    def put(self, key, content, *, content_type=None):
+    def put(
+        self,
+        key,
+        content,
+        *,
+        content_type=None,
+        metadata=None,
+        retention_until=None,
+        retention_mode=None,
+    ):
         from db.object_storage import sha256_bytes
 
         self.objects[key] = bytes(content)
-        return {"key": key, "size": len(content), "sha256": sha256_bytes(content)}
+        return {
+            "key": key,
+            "size": len(content),
+            "sha256": sha256_bytes(content),
+            "metadata": metadata or {},
+            "retentionUntil": retention_until.isoformat() if retention_until else None,
+            "retentionMode": retention_mode,
+        }
 
     def get(self, key):
         return self.objects[key]
@@ -24,6 +40,9 @@ class _RemoteObjectStorage:
 
     def delete_prefix(self, prefix):
         return False
+
+    def delete(self, key):
+        return self.objects.pop(key, None) is not None
 
     def local_path(self, key):
         return None

@@ -7,13 +7,23 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 
-from core.authz import identity_context_from_request, permissions_for_role
-from core.idp import idp_status
+from core.authz import (
+    authorize_request,
+    identity_context_from_request,
+    permissions_for_role,
+    require_step_up_authentication,
+)
+from core.idp import idp_status, principal_from_request
 from core.runtime_profile import (
     legacy_oauth_sessions_enabled,
     local_auth_bootstrap_enabled,
 )
 from core.secret_vault import ingest_user_credential, revoke_credential, revoke_session_credentials
+from db.repositories.identity_invitation_repository import (
+    IdentityInvitationRepositoryUnavailable,
+    InvitationLifecycleError,
+    PostgresIdentityInvitationRepository,
+)
 from integrations.kakao import (
     build_kakao_identity_records,
     exchange_kakao_authorization_code,
@@ -33,10 +43,31 @@ from storage import (
     upsert_tenant,
     upsert_user,
 )
+from schemas.identity_access import (
+    AcceptTenantInvitationInput,
+    IssueTenantInvitationInput,
+    RevokeTenantInvitationInput,
+    TenantInvitationView,
+)
 from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+STEP_UP_INVITATION_ROLES = frozenset(
+    {
+        "admin",
+        "legal_counsel_approver",
+        "external_counsel",
+        "compliance_officer",
+    }
+)
+
+
+def identity_invitation_repository() -> PostgresIdentityInvitationRepository:
+    """Composition point kept injectable for invitation contract tests."""
+
+    return PostgresIdentityInvitationRepository()
 
 
 def _require_local_auth_bootstrap() -> None:
@@ -149,6 +180,164 @@ def get_identity_context(request: Request):
         "limitations": [
             "Header/session based identity is an MVP control. Bearer-token identity is available when REALYTICS_IDP_MODE is configured.",
         ],
+    }
+
+
+@router.post("/invitations", status_code=201)
+def issue_tenant_invitation(
+    request: Request,
+    payload: IssueTenantInvitationInput,
+):
+    context = authorize_request(request, "user:manage")
+    user = context.get("user") or {}
+    metadata = user.get("metadata") or {}
+    tenant_id = str(user.get("tenantId") or "").strip()
+    inviter_issuer = str(metadata.get("issuer") or "").strip()
+    inviter_subject = str(metadata.get("subject") or "").strip()
+    if not tenant_id or not inviter_issuer or not inviter_subject:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "identity_authority_context_incomplete"},
+        )
+    if (
+        payload.role.value in STEP_UP_INVITATION_ROLES
+        or (not payload.invitedEmail and not payload.invitedIssuer)
+    ):
+        require_step_up_authentication(
+            context,
+            action="tenant_invitation_issue_sensitive",
+        )
+    try:
+        issued = identity_invitation_repository().issue(
+            tenant_id=tenant_id,
+            payload=payload,
+            inviter_issuer=inviter_issuer,
+            inviter_subject=inviter_subject,
+        )
+    except IdentityInvitationRepositoryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "identity_invitation_authority_unavailable"},
+        ) from exc
+    return {
+        "schemaVersion": "realytics-tenant-invitation-issue-v1",
+        "invitation": TenantInvitationView.model_validate(
+            issued.invitation
+        ).model_dump(mode="json"),
+        "token": issued.token,
+        "tokenPolicy": "shown_once_never_persisted_in_plaintext",
+    }
+
+
+@router.get("/invitations")
+def list_tenant_invitations(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    context = authorize_request(request, "user:manage")
+    tenant_id = str((context.get("user") or {}).get("tenantId") or "").strip()
+    if not tenant_id:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "identity_authority_context_incomplete"},
+        )
+    try:
+        invitations = identity_invitation_repository().list_for_tenant(
+            tenant_id=tenant_id,
+            limit=limit,
+        )
+    except IdentityInvitationRepositoryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "identity_invitation_authority_unavailable"},
+        ) from exc
+    return {
+        "schemaVersion": "realytics-tenant-invitation-list-v1",
+        "invitations": [
+            TenantInvitationView.model_validate(item).model_dump(mode="json")
+            for item in invitations
+        ],
+    }
+
+
+@router.post("/invitations/{invitation_id}/revoke")
+def revoke_tenant_invitation(
+    invitation_id: str,
+    request: Request,
+    payload: RevokeTenantInvitationInput,
+):
+    context = authorize_request(request, "user:manage")
+    user = context.get("user") or {}
+    metadata = user.get("metadata") or {}
+    tenant_id = str(user.get("tenantId") or "").strip()
+    try:
+        result = identity_invitation_repository().revoke(
+            tenant_id=tenant_id,
+            invitation_id=invitation_id,
+            actor_issuer=str(metadata.get("issuer") or ""),
+            actor_subject=str(metadata.get("subject") or ""),
+            reason=payload.reason,
+        )
+    except InvitationLifecycleError as exc:
+        raise HTTPException(status_code=409, detail={"error": exc.code}) from exc
+    except IdentityInvitationRepositoryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "identity_invitation_authority_unavailable"},
+        ) from exc
+    return {
+        "schemaVersion": "realytics-tenant-invitation-revoke-v1",
+        "invitation": result,
+    }
+
+
+@router.post("/invitations/accept")
+def accept_tenant_invitation(
+    request: Request,
+    payload: AcceptTenantInvitationInput,
+):
+    # This is intentionally the one onboarding endpoint that verifies the
+    # signed provider principal before a PostgreSQL membership exists.
+    principal = principal_from_request(request)
+    if principal is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "authentication_required"},
+        )
+    if principal.principal_type != "human":
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "verified_human_principal_required"},
+        )
+    try:
+        accepted = identity_invitation_repository().accept(
+            token=payload.token,
+            principal_issuer=principal.issuer,
+            principal_subject=principal.subject,
+            principal_email=principal.email,
+            principal_display_name=principal.display_name,
+        )
+    except InvitationLifecycleError as exc:
+        status_code = {
+            "invitation_expired": 410,
+            "invitation_identity_mismatch": 403,
+            "invitation_email_mismatch": 403,
+            "principal_inactive": 403,
+            "invitation_not_pending": 409,
+            "tenant_membership_already_exists": 409,
+        }.get(exc.code, 400)
+        raise HTTPException(
+            status_code=status_code,
+            detail={"error": exc.code},
+        ) from exc
+    except IdentityInvitationRepositoryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "identity_invitation_authority_unavailable"},
+        ) from exc
+    return {
+        "schemaVersion": "realytics-tenant-invitation-accept-v1",
+        "invitation": accepted,
     }
 
 

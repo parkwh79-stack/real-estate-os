@@ -1,7 +1,13 @@
 # Server Storage and User Audit Log Plan
 
-Updated: 2026-06-11
+Updated: 2026-07-22
 Project: REALYTICS x PLATFORM9
+
+> This document is the detailed storage/audit inventory and migration history.
+> The normative runtime boundary is
+> `docs/architecture/architecture-boundary.md`; data classification,
+> quarantine, retention, deletion, backup/restore, incident, and support policy
+> are governed by `docs/product/privacy-retention-support-policy.md`.
 
 ## Goal
 

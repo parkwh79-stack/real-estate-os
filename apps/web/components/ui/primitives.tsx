@@ -1,6 +1,15 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { FinancialMetric } from "@repo/ui/financial-metric";
+
+export {
+  ApprovalStatusBadge,
+  DataQualityBadge,
+  EvidenceStatusBadge,
+  ExecutionStatusBadge,
+  ReportEligibilityBadge,
+} from "@repo/ui/status-axis";
 
 export type Tone = "good" | "warn" | "bad" | "info" | "neutral";
 
@@ -14,13 +23,7 @@ const TONE_PILL: Record<Tone, string> = {
 
 /** Compact KPI/metric card used across orchestration, report, and mobile views. */
 export function MetricCard({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
-  return (
-    <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
-      <p className="text-[11px] font-semibold text-slate-500">{label}</p>
-      <p className="mt-1 text-sm font-black text-slate-950 dark:text-white">{value}</p>
-      {hint ? <p className="mt-0.5 text-[11px] text-slate-400">{hint}</p> : null}
-    </div>
-  );
+  return <FinancialMetric label={label} value={value} basis={hint} />;
 }
 
 /** Tone-based status pill. */

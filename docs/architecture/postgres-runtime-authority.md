@@ -1,5 +1,12 @@
 # PostgreSQL runtime authority
 
+Updated: 2026-07-22
+
+This is the database-specific companion to
+`docs/architecture/architecture-boundary.md`. That document owns the complete
+Web/Auth/API/worker/object-storage boundary; this document owns the implemented
+PostgreSQL tenant, RLS, role, and pool details.
+
 The production request path resolves `issuer + subject` against
 `tenant_memberships`. Token claims and the legacy JSON identity projection are
 not authorization sources. A request with more than one active membership must
@@ -28,8 +35,11 @@ opened. The live inventory contains 83 RLS-protected business relations and
 four identity bootstrap relations (`tenants`, `tenant_memberships`, `users`,
 and `sessions`).
 
-The hosted Supabase project has replayed migrations through `0015`; live
+The hosted Supabase project has replayed migrations through `0015`; migration
+`0016_identity_invitation_lifecycle.sql` is generated for Supabase but is not
+yet applied. Live
 cross-tenant and two-session `SKIP LOCKED` worker claims passed. The remaining
 deployment gate is provisioning separate API, identity, and PF-worker login
-principals with rotated secrets, applying their least-privilege grants, and
-running the Python pool checkout from the deployed network.
+principals with rotated secrets, applying their least-privilege grants
+(including the invitation/principal/membership write boundary), and running
+the Python pool checkout from the deployed network.

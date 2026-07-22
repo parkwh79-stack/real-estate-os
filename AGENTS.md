@@ -46,9 +46,14 @@ evolve; **the invariants do not.**
 ```
 apps/web (Next.js)  →  routers/  →  use_cases/  →  agents · core(calculators) · db/repositories  →  schemas/
 ```
-- **Persistence:** SQLite/JSON today (`storage.py`); PostgreSQL/PostGIS scaffold
-  in `db/postgres.py` (gated). Object storage abstraction in `db/object_storage.py`
-  (local default, S3 gated). Durable async jobs + recovery in `use_cases/async_jobs.py`.
+- **Persistence:** Normalized PostgreSQL/PostGIS is the production authority;
+  SQLite/JSON (`storage.py`) remains a local compatibility lane only. The
+  private runtime boundary and RLS/pool rules are defined in
+  `docs/architecture/architecture-boundary.md` and
+  `docs/architecture/postgres-runtime-authority.md`. Object storage uses
+  `db/object_storage.py` (local development, S3/MinIO production). Durable
+  asynchronous work uses the PostgreSQL outbox/external-worker path; legacy
+  in-process jobs remain compatibility-only where not yet promoted.
 - **Canonical schemas:** FeasibilityStudyV2, CashFlowRunRequest, MarketabilityAnalysisV2,
   ScenarioSetV1, AgentHandoffEnvelopeV1, Phase11ReportV1, CreditPolicyProfile, etc.
 - **RAG (grounding only):** `agents/retrieval.py` + `use_cases/similar_case_rag.py`

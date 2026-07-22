@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from core.authz import _identity_assurance
+from core.authz import _identity_assurance, require_step_up_authentication
 from core.idp import _principal_from_claims
 
 
@@ -96,3 +96,50 @@ def test_supabase_aal2_and_object_amr_are_recognized_as_mfa():
     assert assurance["aal"] == "aal2"
     assert assurance["amr"] == ["password", "totp"]
     assert assurance["mfaVerified"] is True
+
+
+def test_verified_aal2_auth_time_satisfies_recent_step_up(monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("REALYTICS_STEP_UP_MAX_AGE_SECONDS", "900")
+    assurance = _identity_assurance(
+        {
+            "aal": "aal2",
+            "amr": [{"method": "totp"}],
+            "auth_time": int(datetime.now(timezone.utc).timestamp()),
+        }
+    )
+    context = {
+        "authenticated": True,
+        "user": {"metadata": {"principalType": "human"}},
+        "identityAssurance": assurance,
+    }
+
+    assert require_step_up_authentication(
+        context,
+        action="tenant_invitation_issue_sensitive",
+    ) is context
+
+
+def test_step_up_rejects_aal1_even_for_admin_role(monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("REALYTICS_STEP_UP_MAX_AGE_SECONDS", "900")
+    context = {
+        "authenticated": True,
+        "role": "admin",
+        "user": {"metadata": {"principalType": "human"}},
+        "identityAssurance": _identity_assurance(
+            {
+                "aal": "aal1",
+                "amr": ["oauth"],
+                "auth_time": int(datetime.now(timezone.utc).timestamp()),
+            }
+        ),
+    }
+
+    with pytest.raises(HTTPException) as error:
+        require_step_up_authentication(context, action="final_approval")
+
+    assert error.value.detail["error"] == "step_up_required"
+    assert error.value.detail["reason"] == "aal2_required"

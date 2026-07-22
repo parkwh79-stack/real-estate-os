@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import string
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-from db.object_storage import LocalObjectStorage, ObjectStorage, get_object_storage, sha256_bytes
+from db.malware_scanner import MalwareScanner, get_malware_scanner
+from db.object_storage import (
+    LocalObjectStorage,
+    ObjectStorage,
+    S3ObjectStorage,
+    get_object_storage,
+    sha256_bytes,
+)
+
+
+class UploadRejectedError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        *,
+        scan_status: str | None = None,
+        archive_id: str | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        self.scan_status = scan_status
+        self.archive_id = archive_id
 
 
 class UploadArchiveRepository:
@@ -16,10 +39,12 @@ class UploadArchiveRepository:
         api_server_root: Path | None = None,
         archive_root: Path | None = None,
         object_storage: ObjectStorage | None = None,
+        malware_scanner: MalwareScanner | None = None,
     ):
         self.api_server_root = (api_server_root or Path(__file__).resolve().parents[2]).resolve()
         self.archive_root = (archive_root or self.api_server_root / "data" / "runtime" / "uploads").resolve()
         self.object_storage = object_storage or get_object_storage(self.archive_root)
+        self.malware_scanner = malware_scanner or get_malware_scanner()
 
     def archive_upload(
         self,
@@ -27,11 +52,98 @@ class UploadArchiveRepository:
         content: bytes,
         original_file_name: str | None,
         content_type: str | None,
+        tenant_id: str | None = None,
     ) -> Dict[str, Any]:
         archive_id = self.hash_content(content)
         suffix = self.safe_suffix(original_file_name)
-        object_key = self.object_key(project_id, archive_id, suffix)
-        stored = self.object_storage.put(object_key, content, content_type=content_type)
+        tenant_scope = self.tenant_scope(tenant_id)
+        quarantine_key = self.object_key(
+            project_id,
+            archive_id,
+            suffix,
+            tenant_id=tenant_scope,
+            stage="quarantine",
+        )
+        object_key = self.object_key(
+            project_id,
+            archive_id,
+            suffix,
+            tenant_id=tenant_scope,
+            stage="active",
+        )
+        base_metadata = {
+            "sha256": archive_id,
+            "tenant-id": tenant_scope,
+            "project-id": self.project_component(project_id),
+        }
+        quarantined = self.object_storage.put(
+            quarantine_key,
+            content,
+            content_type=content_type,
+            metadata={**base_metadata, "lifecycle-status": "quarantine"},
+        )
+        if quarantined.get("sha256") != archive_id:
+            raise UploadRejectedError(
+                "quarantine_hash_mismatch",
+                archive_id=archive_id,
+            )
+        try:
+            scan = self.malware_scanner.scan(
+                content,
+                filename=original_file_name,
+                content_type=content_type,
+            )
+        except Exception as exc:
+            raise UploadRejectedError(
+                "malware_scan_failed",
+                scan_status="error",
+                archive_id=archive_id,
+            ) from exc
+        if scan.status == "infected":
+            raise UploadRejectedError(
+                "malware_detected",
+                scan_status="infected",
+                archive_id=archive_id,
+            )
+        if scan.status not in {"clean", "skipped"}:
+            raise UploadRejectedError(
+                "malware_scan_failed",
+                scan_status=scan.status,
+                archive_id=archive_id,
+            )
+        if scan.status == "skipped" and self.hardened_storage_required():
+            raise UploadRejectedError(
+                "malware_scan_required",
+                scan_status="skipped",
+                archive_id=archive_id,
+            )
+        retention_until = None
+        retention_mode = None
+        if isinstance(self.object_storage, S3ObjectStorage):
+            if self.object_storage.retention_days:
+                retention_until = datetime.now(timezone.utc) + timedelta(
+                    days=self.object_storage.retention_days
+                )
+            retention_mode = self.object_storage.retention_mode
+        stored = self.object_storage.put(
+            object_key,
+            content,
+            content_type=content_type,
+            metadata={
+                **base_metadata,
+                "lifecycle-status": "active",
+                "malware-scan-status": scan.status,
+                "malware-scan-engine": scan.engine,
+            },
+            retention_until=retention_until,
+            retention_mode=retention_mode,
+        )
+        if stored.get("sha256") != archive_id:
+            raise UploadRejectedError(
+                "active_archive_hash_mismatch",
+                archive_id=archive_id,
+            )
+        quarantine_deleted = self.object_storage.delete(quarantine_key)
         local_path = self.object_storage.local_path(object_key)
         archive_path = self.relative_archive_path(local_path) if local_path else object_key
 
@@ -41,11 +153,24 @@ class UploadArchiveRepository:
             "archivePath": archive_path,
             "archiveBackend": self.object_storage.backend,
             "archiveObjectKey": object_key,
+            "archiveTenantId": tenant_scope,
             "archiveHashAlgorithm": "sha256",
             "archiveIntegrityStatus": "verified" if stored.get("sha256") == archive_id else "hash_mismatch",
             "fileSizeBytes": stored.get("size", len(content)),
             "downloadUrl": f"/projects/{project_id}/source-documents/{archive_id}/download",
             "contentType": content_type,
+            "storageLifecycleStatus": "active",
+            "quarantineObjectKey": quarantine_key,
+            "quarantineCleanupStatus": (
+                "deleted" if quarantine_deleted else "not_found_or_retained"
+            ),
+            "malwareScanStatus": scan.status,
+            "malwareScanEngine": scan.engine,
+            "malwareScannedAt": scan.scanned_at.isoformat(),
+            "malwareSignature": scan.signature,
+            "reportEligible": scan.status == "clean",
+            "retentionMode": stored.get("retentionMode"),
+            "retentionUntil": stored.get("retentionUntil"),
         }
 
     def resolve_download_metadata(
@@ -57,19 +182,45 @@ class UploadArchiveRepository:
         if not self.is_valid_archive_id(archive_id):
             return None
 
-        object_key = document.get("archiveObjectKey") or self.object_key(
-            project_id,
-            archive_id,
-            self.safe_suffix(document.get("originalFileName")),
-        )
+        archive_tenant = document.get("archiveTenantId")
+        object_key = document.get("archiveObjectKey")
+        if not object_key:
+            object_key = (
+                self.object_key(
+                    project_id,
+                    archive_id,
+                    self.safe_suffix(document.get("originalFileName")),
+                    tenant_id=str(archive_tenant) if archive_tenant else None,
+                    stage="active",
+                )
+                if archive_tenant
+                else self.legacy_object_key(
+                    project_id,
+                    archive_id,
+                    self.safe_suffix(document.get("originalFileName")),
+                )
+            )
         object_key = str(object_key)
-        project_prefix = self.project_prefix(project_id) + "/"
+        project_prefix = (
+            self.project_prefix(
+                project_id,
+                tenant_id=str(archive_tenant),
+                stage="active",
+            )
+            if archive_tenant
+            else self.legacy_project_prefix(project_id)
+        ) + "/"
         if not object_key.startswith(project_prefix):
             return None
         scoped_name = object_key[len(project_prefix) :]
         if "/" in scoped_name or "\\" in scoped_name or not scoped_name.startswith(archive_id):
             return None
         if not self.object_storage.exists(object_key):
+            return None
+        if self.hardened_storage_required() and (
+            document.get("storageLifecycleStatus") != "active"
+            or document.get("malwareScanStatus") != "clean"
+        ):
             return None
         content = self.object_storage.get(object_key)
         integrity_status = "verified" if sha256_bytes(content) == archive_id else "hash_mismatch"
@@ -83,6 +234,7 @@ class UploadArchiveRepository:
             "content": None if archive_path else content,
             "archiveBackend": self.object_storage.backend,
             "archiveObjectKey": object_key,
+            "archiveTenantId": archive_tenant,
             "archiveId": archive_id,
             "archiveHashAlgorithm": "sha256",
             "archiveIntegrityStatus": integrity_status,
@@ -92,13 +244,26 @@ class UploadArchiveRepository:
             "downloadUrl": f"/projects/{project_id}/source-documents/{archive_id}/download",
         }
 
-    def delete_project_archive(self, project_id: str) -> bool:
-        return self.object_storage.delete_prefix(self.project_prefix(project_id))
+    def delete_project_archive(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> bool:
+        return self.object_storage.delete_prefix(
+            self.project_prefix(project_id, tenant_id=tenant_id)
+        )
 
-    def project_archive_dir(self, project_id: str) -> Path:
+    def project_archive_dir(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> Path:
         if not isinstance(self.object_storage, LocalObjectStorage):
             raise RuntimeError("Remote object storage does not expose a local archive directory")
-        archive_dir = (self.archive_root / str(project_id)).resolve()
+        archive_dir = (
+            self.archive_root
+            / self.project_prefix(project_id, tenant_id=tenant_id)
+        ).resolve()
         if self.archive_root != archive_dir and self.archive_root not in archive_dir.parents:
             raise ValueError("Invalid project archive path")
         return archive_dir
@@ -110,15 +275,75 @@ class UploadArchiveRepository:
         return str(resolved_path.relative_to(self.api_server_root)).replace("\\", "/")
 
     @classmethod
-    def project_prefix(cls, project_id: str) -> str:
+    def project_component(cls, project_id: str) -> str:
         value = str(project_id or "").strip()
         if not value or value in {".", ".."} or "/" in value or "\\" in value:
             raise ValueError("Invalid project id for object storage")
         return value
 
     @classmethod
-    def object_key(cls, project_id: str, archive_id: str, suffix: str) -> str:
-        return f"{cls.project_prefix(project_id)}/{archive_id}{suffix}"
+    def tenant_scope(cls, tenant_id: str | None) -> str:
+        value = str(tenant_id or "").strip()
+        if not value:
+            if cls.hardened_storage_required():
+                raise ValueError("tenant_id is required for hardened object storage")
+            return "local-development"
+        if value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("Invalid tenant id for object storage")
+        return value
+
+    @classmethod
+    def project_prefix(
+        cls,
+        project_id: str,
+        *,
+        tenant_id: str | None = None,
+        stage: str | None = None,
+    ) -> str:
+        tenant = cls.tenant_scope(tenant_id)
+        project = cls.project_component(project_id)
+        prefix = f"tenants/{tenant}/projects/{project}"
+        if stage:
+            if stage not in {"quarantine", "active"}:
+                raise ValueError("Invalid object lifecycle stage")
+            prefix = f"{prefix}/{stage}"
+        return prefix
+
+    @classmethod
+    def object_key(
+        cls,
+        project_id: str,
+        archive_id: str,
+        suffix: str,
+        *,
+        tenant_id: str | None = None,
+        stage: str = "active",
+    ) -> str:
+        return (
+            f"{cls.project_prefix(project_id, tenant_id=tenant_id, stage=stage)}"
+            f"/{archive_id}{suffix}"
+        )
+
+    @classmethod
+    def legacy_project_prefix(cls, project_id: str) -> str:
+        return cls.project_component(project_id)
+
+    @classmethod
+    def legacy_object_key(
+        cls,
+        project_id: str,
+        archive_id: str,
+        suffix: str,
+    ) -> str:
+        return f"{cls.legacy_project_prefix(project_id)}/{archive_id}{suffix}"
+
+    @staticmethod
+    def hardened_storage_required() -> bool:
+        return str(
+            os.environ.get("REALYTICS_ENVIRONMENT") or "development"
+        ).strip().casefold() in {"production", "prod", "staging"} or str(
+            os.environ.get("REALYTICS_REQUIRE_TENANT_SCOPED_OBJECTS") or ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def safe_suffix(filename: str | None) -> str:

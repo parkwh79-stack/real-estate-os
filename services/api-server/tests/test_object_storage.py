@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from db.object_storage import (
@@ -57,6 +59,57 @@ def test_factory_fails_closed_when_s3_misconfigured(tmp_path, monkeypatch):
     monkeypatch.delenv("REALYTICS_S3_BUCKET", raising=False)
     with pytest.raises(RuntimeError, match="REALYTICS_S3_BUCKET"):
         get_object_storage(default_base_dir=tmp_path)
+
+
+def test_hardened_s3_requires_encryption_and_object_lock(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ENVIRONMENT", "production")
+    monkeypatch.setenv("REALYTICS_OBJECT_STORAGE", "s3")
+    monkeypatch.setenv("REALYTICS_S3_BUCKET", "realytics-docs")
+    for key in (
+        "REALYTICS_S3_SERVER_SIDE_ENCRYPTION",
+        "REALYTICS_OBJECT_RETENTION_DAYS",
+        "REALYTICS_OBJECT_LOCK_MODE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(RuntimeError, match="Object Lock"):
+        get_object_storage()
+
+
+def test_s3_active_put_applies_encryption_metadata_and_retention():
+    class _Client:
+        def __init__(self):
+            self.kwargs = None
+
+        def put_object(self, **kwargs):
+            self.kwargs = kwargs
+
+    store = S3ObjectStorage(
+        "realytics-docs",
+        server_side_encryption="aws:kms",
+        kms_key_id="kms-key",
+        retention_days=365,
+        retention_mode="COMPLIANCE",
+    )
+    client = _Client()
+    store._client = client
+    retain_until = datetime(2027, 7, 22, tzinfo=timezone.utc)
+
+    metadata = store.put(
+        "tenants/t1/projects/p1/active/doc.pdf",
+        b"document",
+        content_type="application/pdf",
+        metadata={"malware-scan-status": "clean"},
+        retention_until=retain_until,
+        retention_mode="COMPLIANCE",
+    )
+
+    assert client.kwargs["ServerSideEncryption"] == "aws:kms"
+    assert client.kwargs["SSEKMSKeyId"] == "kms-key"
+    assert client.kwargs["ObjectLockMode"] == "COMPLIANCE"
+    assert client.kwargs["ObjectLockRetainUntilDate"] == retain_until
+    assert client.kwargs["Metadata"]["malware-scan-status"] == "clean"
+    assert metadata["retentionMode"] == "COMPLIANCE"
 
 
 def test_s3_backend_errors_clearly_without_boto3(monkeypatch):

@@ -1,36 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  acceptRealyticsInvitation,
+  canonicalWebOrigin,
+  clearInvitationIntentCookie,
   preventAuthenticatedResponseCaching,
+  REALYTICS_INVITATION_COOKIE,
   realyticsAcceptsBearer,
+  safeInternalNextPath,
 } from "../../../lib/backend-session";
 import { createSupabaseServerClient } from "../../../lib/supabase/server";
 
-function safeNextPath(value: string | null): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/start";
-  return value === "/" || value === "/dashboard" ? "/start" : value;
-}
-
-function redirectOrigin(request: NextRequest): string | null {
-  const configuredOrigin = process.env.REALYTICS_WEB_ORIGIN;
-  if (configuredOrigin) {
-    try {
-      const parsed = new URL(configuredOrigin);
-      if (process.env.NODE_ENV === "production" && parsed.protocol !== "https:") {
-        return null;
-      }
-      return parsed.origin;
-    } catch {
-      return null;
-    }
-  }
-  if (process.env.NODE_ENV === "production") return null;
-  return request.nextUrl.origin;
-}
-
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
-  const nextPath = safeNextPath(request.nextUrl.searchParams.get("next"));
-  const origin = redirectOrigin(request);
+  const nextPath = safeInternalNextPath(request.nextUrl.searchParams.get("next"));
+  const origin = canonicalWebOrigin(request);
+  const invitationToken = request.cookies.get(
+    REALYTICS_INVITATION_COOKIE,
+  )?.value;
   if (!origin) {
     return NextResponse.json(
       { error: "canonical_web_origin_not_configured" },
@@ -54,11 +40,37 @@ export async function GET(request: NextRequest) {
     }
     const { data: sessionData } = await supabase.auth.getSession();
     const accessToken = sessionData.session?.access_token;
-    if (!accessToken || !(await realyticsAcceptsBearer(accessToken))) {
-      await supabase.auth.signOut({ scope: "local" });
-      return NextResponse.redirect(`${origin}/login?error=identity_not_provisioned`);
+    let provisioned = Boolean(
+      accessToken && await realyticsAcceptsBearer(accessToken),
+    );
+    let invitationAccepted = false;
+    if (!provisioned && accessToken && invitationToken) {
+      invitationAccepted = await acceptRealyticsInvitation(
+        accessToken,
+        invitationToken,
+      );
+      provisioned = invitationAccepted
+        && await realyticsAcceptsBearer(accessToken);
     }
-    const response = NextResponse.redirect(`${origin}${nextPath}`);
+    if (!accessToken || !provisioned) {
+      await supabase.auth.signOut({ scope: "local" });
+      const response = NextResponse.redirect(
+        `${origin}/login?error=${
+          invitationToken
+            ? "invitation_accept_failed"
+            : "identity_not_provisioned"
+        }`,
+      );
+      clearInvitationIntentCookie(response);
+      preventAuthenticatedResponseCaching(response);
+      return response;
+    }
+    const destination = new URL(`${origin}${nextPath}`);
+    if (invitationAccepted) {
+      destination.searchParams.set("invitation", "accepted");
+    }
+    const response = NextResponse.redirect(destination);
+    clearInvitationIntentCookie(response);
     preventAuthenticatedResponseCaching(response);
     return response;
   } catch {

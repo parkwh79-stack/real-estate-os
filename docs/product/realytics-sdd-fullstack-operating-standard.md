@@ -142,6 +142,11 @@ DB raw/evidence state
 
 Current UI should evolve toward a REALYTICS design system rather than ad hoc page styling.
 
+The normative visual, financial-data, state-axis, component, accessibility,
+and migration rules are defined in `docs/product/realytics-design-system.md`.
+This section is the SDD entry point; the design-system document is the detailed
+implementation contract.
+
 Priority components:
 
 | Component | Use |

@@ -15,6 +15,7 @@ from agents.risk_report_workbook_importer import import_risk_report_workbook
 
 from core.authz import (
     authorize_request,
+    enforce_high_risk_step_up,
     enforce_project_tenant_scope,
     identity_context_from_request,
     is_explicit_human_principal,
@@ -301,6 +302,25 @@ def source_document_repository() -> SourceDocumentRepository:
 
 def upload_archive_repository() -> UploadArchiveRepository:
     return UploadArchiveRepository()
+
+
+def _project_tenant_id(project_id: str) -> str | None:
+    project = PROJECTS_DB.get(str(project_id))
+    if not isinstance(project, dict):
+        return None
+    metadata = (
+        project.get("_meta")
+        if isinstance(project.get("_meta"), dict)
+        else {}
+    )
+    value = (
+        project.get("tenantId")
+        or project.get("tenant_id")
+        or metadata.get("tenantId")
+        or metadata.get("tenant_id")
+    )
+    normalized = str(value or "").strip()
+    return normalized or None
 
 def parser_v2_record_store() -> ParserV2RecordStore:
     factory = PARSER_V2_RUNTIME_DEPENDENCIES.get("record_store_factory")
@@ -1172,6 +1192,7 @@ async def parse_uploaded_business_plan(
         content,
         file.filename,
         file.content_type,
+        tenant_id=_project_tenant_id(project_id),
     )
     upload_meta = {
         "originalFileName": file.filename,
@@ -1240,6 +1261,7 @@ async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[
         content,
         file.filename,
         file.content_type,
+        tenant_id=_project_tenant_id(project_id),
     )
     upload_meta = {
         "originalFileName": file.filename,
@@ -1292,6 +1314,7 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
         content,
         file.filename,
         file.content_type,
+        tenant_id=_project_tenant_id(project_id),
     )
     upload_meta = {
         "originalFileName": file.filename,
@@ -1356,6 +1379,7 @@ async def validate_uploaded_risk_report_workbook(project_id: str, file: UploadFi
         content,
         file.filename,
         file.content_type,
+        tenant_id=_project_tenant_id(project_id),
     )
     upload_meta = {
         "originalFileName": file.filename,
@@ -1420,6 +1444,7 @@ async def learn_uploaded_feasibility_workbook(
         content,
         file.filename,
         file.content_type,
+        tenant_id=_project_tenant_id(project_id),
     )
     upload_meta = {
         "originalFileName": file.filename,
@@ -1723,7 +1748,13 @@ async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, 
         name, content_type=ctype, size=len(content), sheet_names=sheet_names, json_keys=json_keys
     )
     try:
-        archive = upload_archive_repository().archive_upload(project_id, content, name, ctype)
+        archive = upload_archive_repository().archive_upload(
+            project_id,
+            content,
+            name,
+            ctype,
+            tenant_id=_project_tenant_id(project_id),
+        )
         save_source_document_metadata_use_case(
             source_document_repository(),
             project_id,
@@ -1991,7 +2022,12 @@ async def extract_project_feasibility_workbook(
         tmp.write(content)
         tmp_path = tmp.name
     archive_meta = archive_source_document_use_case(
-        upload_archive_repository(), project_id, content, file.filename, file.content_type
+        upload_archive_repository(),
+        project_id,
+        content,
+        file.filename,
+        file.content_type,
+        tenant_id=_project_tenant_id(project_id),
     )
     upload_meta = {
         "originalFileName": file.filename,
@@ -5751,12 +5787,40 @@ def upsert_project_snapshot_outcome(
     }
 
 @router.post("/{project_id}/orchestrations/{run_id}/approve")
-def approve_project_orchestration(project_id: str, run_id: str, input_data: Dict[str, Any] | None = None):
+def approve_project_orchestration(
+    project_id: str,
+    run_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
     if project_id not in PROJECTS_DB:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    authorization = authorize_request(request, "project:review")
+    enforce_high_risk_step_up(
+        authorization,
+        action="pf_orchestration_final_approve",
+    )
+
     try:
-        return approve_orchestration_run_by_id_use_case(orchestration_repository(), project_id, run_id, input_data, now_iso())
+        result = approve_orchestration_run_by_id_use_case(
+            orchestration_repository(),
+            project_id,
+            run_id,
+            input_data,
+            now_iso(),
+        )
+        record_sensitive_project_event(
+            request,
+            event_type="pf_orchestration_final_approved",
+            project_id=project_id,
+            run_id=run_id,
+            metadata={
+                "authorization": authorization.get("authorization"),
+                "identityAssurance": authorization.get("identityAssurance"),
+            },
+        )
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
