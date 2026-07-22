@@ -37,6 +37,7 @@ The following focused checks passed in the developer workspace:
 Python identity/storage/auth boundary tests: 57 passed in 20.98s
 Python project/orchestration/legal approval tests: 124 passed in 866.21s
 Post-fix invitation RLS/repository/router recheck: 10 passed in 19.38s
+Identity role/grant and invitation regression: 35 passed in 19.88s
 Playwright Auth BFF desktop/mobile: 18 passed
 Web/package type check: passed
 Web/package lint: passed
@@ -61,6 +62,7 @@ No secret values were returned or logged.
 | Tenant isolation | strict |
 | Membership authority after local hardening | PostgreSQL |
 | Canonical local Web origin | configured |
+| Supabase migration ledger | local/remote 0001-0016 match |
 | Role-scoped PostgreSQL runtime DSNs in local secret environment | missing |
 | Real Google/Kakao callback/refresh/logout smoke | blocked |
 
@@ -71,7 +73,8 @@ and identity DSNs; the application deliberately does not fall back to claims.
 
 ## Not deployed or not yet complete
 
-- Supabase migration `0016` and dedicated identity-role grants.
+- Migration `0017` identity-role grants, LOGIN credential activation, and the
+  dedicated Identity DSN. Migration `0016` is live.
 - Real Google/Kakao accounts, callback allow-list, refresh, global revocation,
   provider collision/recovery and TOTP step-up rehearsal.
 - Invitation email transport and administrative recovery UI.
