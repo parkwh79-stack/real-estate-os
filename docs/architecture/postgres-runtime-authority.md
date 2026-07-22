@@ -35,12 +35,13 @@ opened. The live inventory contains 83 RLS-protected business relations and
 four identity bootstrap relations (`tenants`, `tenant_memberships`, `users`,
 and `sessions`).
 
-The hosted Supabase project has replayed migrations through `0016`; the local
+The hosted Supabase project has replayed migrations through `0017`; the local
 and remote ledgers match, a post-apply dry-run is empty, and the `realytics`
-schema lint reports no errors. Migration `0017` and `supabase/roles.sql` now
-prepare a credential-free `realytics_identity` role with exact identity table
-grants and self-auditing forbidden-privilege checks. Live cross-tenant and
-two-session `SKIP LOCKED` worker claims passed. The remaining deployment gate
-is applying `0017`, activating separate API, identity, and PF-worker LOGIN
-principals through the approved secret manager, and running the Python pool
-checkout from the deployed network.
+schema lint reports no errors. Migration `0017` and `supabase/roles.sql`
+created a credential-free `realytics_identity` role with exact identity table
+grants; its required and forbidden privilege postflight passed in the same
+transaction. Live cross-tenant and two-session `SKIP LOCKED` worker claims
+passed. The remaining deployment gate is activating separate API, identity,
+and PF-worker LOGIN principals through the approved secret manager, injecting
+their role-scoped DSNs, and running the Python pool checkout from the deployed
+network.

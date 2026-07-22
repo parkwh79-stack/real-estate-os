@@ -62,7 +62,8 @@ No secret values were returned or logged.
 | Tenant isolation | strict |
 | Membership authority after local hardening | PostgreSQL |
 | Canonical local Web origin | configured |
-| Supabase migration ledger | local/remote 0001-0016 match |
+| Supabase migration ledger | local/remote 0001-0017 match; pending none |
+| Identity role grants | live; self-audit passed; role remains NOLOGIN |
 | Role-scoped PostgreSQL runtime DSNs in local secret environment | missing |
 | Real Google/Kakao callback/refresh/logout smoke | blocked |
 
@@ -73,8 +74,8 @@ and identity DSNs; the application deliberately does not fall back to claims.
 
 ## Not deployed or not yet complete
 
-- Migration `0017` identity-role grants, LOGIN credential activation, and the
-  dedicated Identity DSN. Migration `0016` is live.
+- Secret-manager LOGIN credential activation and the dedicated Identity DSN.
+  Migrations `0016` and `0017` are live; `realytics_identity` remains NOLOGIN.
 - Real Google/Kakao accounts, callback allow-list, refresh, global revocation,
   provider collision/recovery and TOTP step-up rehearsal.
 - Invitation email transport and administrative recovery UI.

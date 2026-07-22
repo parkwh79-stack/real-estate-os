@@ -11,10 +11,11 @@ session revocation, and a short-lived HttpOnly invitation intent. Migration
 hash-only invitation issue/revoke/accept with replay, expiry, binding, role and
 membership checks. Hardened high-risk actions require recent AAL2. Migration
 `0016` is live and both migration ledgers match. The credential-free
-`realytics_identity` role and its exact grant audit are prepared in
-`supabase/roles.sql` and migration `0017`, but `0017`, LOGIN activation, and
-the Identity DSN are not deployed. The live Supabase settings check currently
-reports both Google and Kakao disabled; this is not yet an operational sign-off.
+`realytics_identity` role and its exact grant audit are live through migration
+`0017`, with matching ledgers and no pending migration. The role remains
+NOLOGIN until an approved secret-manager workflow activates its credential and
+injects the Identity DSN. The live Supabase settings check currently reports
+both Google and Kakao disabled; this is not yet an operational sign-off.
 
 ## 1. Purpose
 
