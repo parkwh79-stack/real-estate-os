@@ -1,6 +1,6 @@
 # PostgreSQL runtime authority
 
-Updated: 2026-07-22
+Updated: 2026-07-27
 
 This is the database-specific companion to
 `docs/architecture/architecture-boundary.md`. That document owns the complete
@@ -35,13 +35,71 @@ opened. The live inventory contains 83 RLS-protected business relations and
 four identity bootstrap relations (`tenants`, `tenant_memberships`, `users`,
 and `sessions`).
 
-The hosted Supabase project has replayed migrations through `0017`; the local
-and remote ledgers match, a post-apply dry-run is empty, and the `realytics`
-schema lint reports no errors. Migration `0017` and `supabase/roles.sql`
-created a credential-free `realytics_identity` role with exact identity table
-grants; its required and forbidden privilege postflight passed in the same
-transaction. Live cross-tenant and two-session `SKIP LOCKED` worker claims
-passed. The remaining deployment gate is activating separate API, identity,
-and PF-worker LOGIN principals through the approved secret manager, injecting
-their role-scoped DSNs, and running the Python pool checkout from the deployed
-network.
+The hosted Supabase project has replayed migrations through
+`20260727002700_report_publication_lineage_lookup_fix.sql`; both the Supabase
+deployment ledger and the REALYTICS checksum ledger contain the normalized
+report migrations. The post-apply advisor reports no blocking schema/RLS
+error; Supabase Auth still warns that leaked-password protection is disabled.
+Migration `0017` and `supabase/roles.sql` created a credential-free
+`realytics_identity` role with exact identity table grants; its required and
+forbidden privilege postflight passed in the same transaction. A controlled
+Google-auth rehearsal temporarily enabled LOGIN with a short-lived credential,
+but this is not the durable secret-manager deployment. Live
+cross-tenant and two-session `SKIP LOCKED` worker claims passed. The remaining
+deployment gate is activating separate API, identity, and PF-worker LOGIN
+principals through the approved secret manager, injecting their role-scoped
+DSNs, and running the Python pool checkout from the deployed network.
+
+## Normalized PF report publication
+
+Production report drafts are inserted into tenant-scoped
+`realytics.reports`. The JSON/SQLite `ReportRepository` remains an explicit
+local compatibility lane; PostgreSQL deployments do not silently fall back to
+it. A report is final only when an immutable row exists in
+`realytics.report_publications`. A legacy `payload_json.status = 'published'`
+value has no independent authority.
+
+Migration `20260727002612_normalized_report_publication.sql` binds every
+publication to the same tenant and project as its report, approved
+orchestration run, and project Snapshot through composite foreign keys. It
+enables and forces tenant RLS, rejects update/delete operations, and gives the
+runtime role only `SELECT, INSERT` on publications. Browser-facing Supabase
+roles receive no schema or table privileges.
+
+The first hosted smoke exposed a PostgreSQL-specific defect in the original
+trigger: dynamic PL/pgSQL `EXECUTE ... INTO` does not update `FOUND`, so valid
+lineage was rejected as missing. The already-applied migration was not edited.
+Follow-up migration
+`20260727002700_report_publication_lineage_lookup_fix.sql` replaces the lookup
+checks with explicit `GET DIAGNOSTICS ... ROW_COUNT` assertions. The corrected
+function is active in Supabase and its source checksum is recorded in the
+REALYTICS ledger.
+
+The repository locks the report row for the short publish transaction and
+uses the tenant/project/report primary key with `ON CONFLICT DO NOTHING` as the
+serialization point. The request's draft content hash is its optimistic
+concurrency token. Exact retries share the first authoritative publication;
+different content, run/project lineage, Snapshot hash, or decision package
+fails with a conflict. Reads and export creation recompute the report content
+hash and compare it with the immutable publication seal, so later mutation of
+the compatibility payload cannot be presented as a published report.
+
+The HTTP publication workflow still owns the human policy gates: approved PF
+run, freshly passing Approval Readiness, exact immutable Snapshot lineage,
+recent AAL2, and a reviewer distinct from the PF requester. The database
+repository owns tenant isolation, lineage constraints, content integrity,
+idempotency, and concurrent serialization; neither layer substitutes for the
+other.
+
+The source and generated Supabase migrations are synchronized and both report
+migrations are live. Two concurrent hosted inserts converged on one immutable
+publication row; maker-as-publisher and post-publication report mutation were
+rejected by the database. FORCE RLS, the exact tenant policy, runtime
+`SELECT/INSERT` grants, forbidden `UPDATE/DELETE`, and zero `anon`/
+`authenticated` access were inspected live. A behavioral RLS pass as the
+`realytics_runtime` principal still requires the dedicated direct runtime DSN:
+the Supabase management SQL connection is a `BYPASSRLS` administration role
+and is intentionally not permitted to assume the runtime role. Run the
+opt-in disposable-schema test in
+`services/api-server/tests/test_parser_v2_postgres_live.py` with an isolated
+`REALYTICS_TEST_DATABASE_URL` before declaring that final role-level Gate done.

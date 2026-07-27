@@ -1,6 +1,6 @@
 # Identity, Tenant, and Access Contract
 
-Updated: 2026-07-22
+Updated: 2026-07-27
 Status: Approved policy contract; controlled implementation present, deployed provider rehearsal blocked
 Production identity provider: Supabase Auth with Google and Kakao
 
@@ -16,6 +16,34 @@ membership checks. Hardened high-risk actions require recent AAL2. Migration
 NOLOGIN until an approved secret-manager workflow activates its credential and
 injects the Identity DSN. The live Supabase settings check currently reports
 both Google and Kakao disabled; this is not yet an operational sign-off.
+
+Follow-up implementation (2026-07-24): tenant administrators with
+`user:manage` can issue, list, and revoke email-bound invitations in Settings.
+The plaintext token remains in browser memory only for its one-time handoff and
+is neither returned by list APIs nor written to browser storage. The
+environment-gated `auth-live.spec.ts` harness consumes an ignored,
+interactively authenticated Playwright storage state to verify a real provider,
+PostgreSQL membership, linked identity, TOTP/AAL2, and optional other-session
+revocation without committing provider credentials or session material.
+
+Operational Gate follow-up (2026-07-27): final PF approval and final report
+publication both require a signed `aal2` session in hardened mode. FastAPI uses
+the verified strong-factor AMR timestamp for freshness and does not promote an
+`aal1` token merely because it contains an OTP-like method label. The live
+harness now supports two independent storage states, proves the recorded maker
+cannot self-approve, and lets the distinct AAL2 checker approve and publish a
+dedicated rehearsal artifact. Hosted inspection still reports Google/Kakao
+disabled and zero Auth identities/MFA factors/sessions and zero normalized
+principals/active memberships, so this is an implemented but blocked Gate.
+
+TOTP session follow-up (2026-07-27): a later OAuth login that returns to AAL1
+can now step up with an already verified TOTP factor in Settings. The BFF
+validates the factor/code shape, resolves the exact factor from Supabase's
+verified TOTP list before challenge, calls `challengeAndVerify`, and then
+requires the refreshed session to report `aal2`. An unverified, wrong-type, or
+unknown factor fails before challenge. The existing-factor path never returns a
+factor secret and clears the submitted one-time code after every outcome. New
+factor enrollment and its QR/secret handoff remain a separate, explicit flow.
 
 ## 1. Purpose
 
@@ -184,6 +212,7 @@ step-up proof is required for operations designated high risk, including:
 
 - final legal approval or rejection;
 - final PF approval where policy requires;
+- final PF report publication;
 - approval of waiver or terminal cure;
 - assignment of `admin` or approval roles;
 - delegation to external counsel;
@@ -191,9 +220,18 @@ step-up proof is required for operations designated high risk, including:
 - billing owner, payment method, or contract changes when billing is enabled;
 - secret rotation or security-policy changes.
 
-The server must validate the assurance level and freshness. A UI badge or a
-client-provided timestamp is not proof. Exact freshness windows are a security
-policy setting and must be approved before external production.
+The server must validate the signed `aal=aal2` claim and freshness. When a
+strong-factor AMR event timestamp is present, it is the step-up time; token
+refresh timestamps do not extend the window. A UI badge, a method label without
+`aal2`, or a client-provided timestamp is not proof. Exact freshness windows
+are a security policy setting and must be approved before external production.
+
+For a user who already has a verified TOTP factor, each later AAL1 session must
+select one of that user's verified TOTP factors, complete a new challenge, and
+receive an AAL2 session before a high-risk operation. Factor IDs are selectors,
+not proof. Existing-factor reauthentication must not return the enrollment
+secret, persist the one-time code, or treat a successful HTTP response as AAL2
+without checking the resulting assurance level.
 
 ## 10. Maker-checker and delegation
 

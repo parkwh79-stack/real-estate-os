@@ -1,6 +1,6 @@
 # REALYTICS Design System
 
-Updated: 2026-07-22
+Updated: 2026-07-27
 Status: Approved design contract v1; token/state-axis foundation implemented, screen migration incomplete
 Primary users: Korean real-estate development, PF, credit, legal, and investment professionals
 
@@ -10,6 +10,42 @@ Card, FinancialMetric, and five independent state-axis badges. The former
 create-turbo alert/link behavior is removed. Existing routes that still use a
 generic status pill or raw slate/emerald/amber/rose classes remain migration
 work and must not be treated as design-system compliant yet.
+
+Follow-up (2026-07-24): the Settings surface now obtains its panel, control,
+border, typography, and shadow treatment from `re-*` semantic tokens. The new
+tenant invitation workflow preserves explicit lifecycle text alongside color
+and keeps security warnings in the primary page flow rather than a transient
+modal.
+
+Decision-workspace migration (2026-07-24): project pages now use one
+`ProjectContextHeader` with six business navigation groups instead of stacked
+route tabs and memory cards. Shared status contracts cover execution, review,
+approval, evidence, data quality, report eligibility, and value nature without
+collapsing them into one color. `FinancialMetric` preserves raw/display units,
+scenario, calculation Run, source Snapshot, calculation version, approval, and
+report eligibility. The Dashboard is an API-backed work inbox; the document
+review route is a three-pane Parser V2 workspace; and the feasibility route is
+a Cash Flow/PF decision surface with a fail-visible Approval Gate. These are
+the first controlled migrations, not evidence that every legacy route now
+conforms to this standard.
+
+Document-review follow-up (2026-07-27): the first evidence-first vertical slice
+now consumes one typed, versioned server read model. It separates candidate
+review from active snapshot approval, exposes `validationOutcome` plus
+concurrent `issueCodes[]`, provides a durable review Queue and Parser snapshot
+Changes view, and supports Fact-to-source and source-to-Fact navigation. The
+shared state system now also has a dedicated `ApprovalReadinessStatusBadge`;
+readiness is never encoded as an approval decision. Extraction confidence is
+labelled as extraction confidence and cannot stand in for review, evidence, or
+approval.
+
+Financial-lineage follow-up (2026-07-27): Feasibility metrics no longer borrow
+missing values from a mutable workspace projection, and an unrelated latest PF
+approval is not attached to a CalculationRun. Until exact run/Snapshot
+ID/Snapshot hash binding exists, the calculation remains visibly unbound and
+analysis-only. PF Structure, Risk, Credit, and Covenant values are rendered
+from one exact Chief artifact; a standalone Covenant recalculation is labelled
+as analysis-only rather than silently replacing that package.
 
 ## 1. Design objective
 
@@ -185,6 +221,7 @@ A report-grade metric exposes, directly or through a standard detail affordance:
 | Component | Required content |
 |---|---|
 | `ExecutionStatusBadge` | planned/pending/running/completed/blocked/failed plus time |
+| `ApprovalReadinessStatusBadge` | not started/evaluating/not ready/ready/needs review/hold; never a human decision |
 | `ApprovalStatusBadge` | reviewer decision and decision time/owner where allowed |
 | `EvidenceStatusBadge` | source tier and locator availability |
 | `DataQualityBadge` | missing/partial/conflicting/reconciled/failed |

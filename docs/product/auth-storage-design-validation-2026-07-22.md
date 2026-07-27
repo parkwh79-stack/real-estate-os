@@ -38,7 +38,9 @@ Python identity/storage/auth boundary tests: 57 passed in 20.98s
 Python project/orchestration/legal approval tests: 124 passed in 866.21s
 Post-fix invitation RLS/repository/router recheck: 10 passed in 19.38s
 Identity role/grant and invitation regression: 35 passed in 19.88s
-Playwright Auth BFF desktop/mobile: 18 passed
+Follow-up API identity/invitation regression: 32 passed in 42.84s
+Playwright Auth BFF + invitation UI desktop/mobile: 20 passed
+Live Auth harness without storage state: 2 explicitly skipped, exit 0
 Web/package type check: passed
 Web/package lint: passed
 Supabase migration wrapper parity check: passed
@@ -78,7 +80,8 @@ and identity DSNs; the application deliberately does not fall back to claims.
   Migrations `0016` and `0017` are live; `realytics_identity` remains NOLOGIN.
 - Real Google/Kakao accounts, callback allow-list, refresh, global revocation,
   provider collision/recovery and TOTP step-up rehearsal.
-- Invitation email transport and administrative recovery UI.
+- Invitation email transport and administrative recovery workflow. The
+  issue/list/revoke administrator UI is implemented.
 - Live S3/MinIO bucket, IAM prefix denial, versioning, Object Lock, ClamAV,
   backup/restore, legal hold, rejected-object ledger, signed download and
   deletion receipt drills.
