@@ -107,8 +107,8 @@ export default function CashFlowDetailPage() {
           <section className="grid gap-4 md:grid-cols-4">
             <KpiCard
               label="최대 자금부족 (Max Minus)"
-              value={formatEok(Math.abs(cf.maxMinusEok))}
-              sub={`M${cf.maxMinusMonth} 시점`}
+              value={cf.maxMinusEok === null ? "미확인" : formatEok(Math.abs(cf.maxMinusEok))}
+              sub={cf.maxMinusMonth === null ? "발생월 미확인" : `M${cf.maxMinusMonth} 시점`}
               icon={<TrendingDown className="h-5 w-5 text-rose-600" />}
             />
             <KpiCard
@@ -157,14 +157,14 @@ export default function CashFlowDetailPage() {
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {cf.monthly.map((m) => (
-                    <tr key={m.period} className={m.period === `M${cf.maxMinusMonth}` ? "bg-rose-50/60 dark:bg-rose-950/20" : ""}>
+                    <tr key={m.period} className={cf.maxMinusMonth !== null && m.period === `M${cf.maxMinusMonth}` ? "bg-rose-50/60 dark:bg-rose-950/20" : ""}>
                       <td className="sticky left-0 z-10 bg-inherit p-3 text-left font-bold text-slate-900 dark:text-white">{m.period}</td>
                       <td className="p-3 text-slate-700 dark:text-slate-300">{cell(m.cashInEok)}</td>
                       <td className="p-3 text-slate-700 dark:text-slate-300">{cell(m.cashOutEok)}</td>
-                      <td className={`p-3 ${m.netCashFlowEok < 0 ? "text-rose-600 dark:text-rose-300" : "text-slate-700 dark:text-slate-300"}`}>
+                      <td className={`p-3 ${m.netCashFlowEok !== null && m.netCashFlowEok < 0 ? "text-rose-600 dark:text-rose-300" : "text-slate-700 dark:text-slate-300"}`}>
                         {cell(m.netCashFlowEok)}
                       </td>
-                      <td className={`p-3 font-black ${m.cumulativeEok < 0 ? "text-rose-600 dark:text-rose-300" : "text-slate-950 dark:text-white"}`}>
+                      <td className={`p-3 font-black ${m.cumulativeEok !== null && m.cumulativeEok < 0 ? "text-rose-600 dark:text-rose-300" : "text-slate-950 dark:text-white"}`}>
                         {cell(m.cumulativeEok)}
                       </td>
                     </tr>
@@ -179,7 +179,8 @@ export default function CashFlowDetailPage() {
   );
 }
 
-function cell(value: number): string {
+function cell(value: number | null): string {
+  if (value === null) return "미확인";
   if (Math.abs(value) < 0.05) return "-";
   return value.toLocaleString("ko-KR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }

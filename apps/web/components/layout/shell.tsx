@@ -5,8 +5,7 @@ import { Suspense } from "react";
 import { usePathname } from "next/navigation";
 import { RequireAuth } from "../auth/auth-context";
 import { Header } from "./header";
-import { ProjectMemoryStrip } from "./project-memory-strip";
-import { ProjectWorkspaceNav } from "./project-workspace-nav";
+import { ProjectContextHeader } from "./project-context-header";
 import { Sidebar } from "./sidebar";
 
 interface ShellProps {
@@ -34,10 +33,9 @@ export function Shell({ children }: ShellProps) {
         <Sidebar />
         <div className="min-h-screen lg:pl-64">
           <Header />
-          {currentProjectId ? <ProjectWorkspaceNav projectId={currentProjectId} /> : null}
           {currentProjectId ? (
             <Suspense fallback={null}>
-              <ProjectMemoryStrip projectId={currentProjectId} />
+              <ProjectContextHeader projectId={currentProjectId} />
             </Suspense>
           ) : null}
           <main className="mx-auto w-full max-w-[1600px] px-4 py-5 sm:px-6 lg:px-8">

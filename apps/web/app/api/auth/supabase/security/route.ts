@@ -3,6 +3,11 @@ import {
   preventAuthenticatedResponseCaching,
   requestIsSameOrigin,
 } from "../../../../../lib/backend-session";
+import { evaluateHighRiskAuthOperationalGate } from "../../../../../lib/supabase/auth-operational-gate";
+import {
+  findVerifiedTotpFactor,
+  parseTotpChallengeInput,
+} from "../../../../../lib/supabase/mfa-security";
 import { createSupabaseServerClient } from "../../../../../lib/supabase/server";
 
 type SecurityAction = {
@@ -12,6 +17,8 @@ type SecurityAction = {
   friendlyName?: unknown;
   identityId?: unknown;
 };
+
+const HIGH_RISK_IDENTITY_PROVIDERS = new Set(["google", "kakao"]);
 
 function json(body: unknown, status = 200) {
   const response = NextResponse.json(body, { status });
@@ -31,7 +38,12 @@ async function authenticatedClient() {
   return supabase;
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const requestedProvider = request.nextUrl.searchParams.get("provider")?.trim()
+    .toLowerCase() ?? "";
+  if (requestedProvider && !HIGH_RISK_IDENTITY_PROVIDERS.has(requestedProvider)) {
+    return json({ error: "unsupported_identity_provider" }, 400);
+  }
   try {
     const supabase = await authenticatedClient();
     if (!supabase) return json({ error: "login_required" }, 401);
@@ -47,34 +59,50 @@ export async function GET() {
     if (identityResult.error || factorResult.error || aalResult.error) {
       return json({ error: "security_profile_unavailable" }, 503);
     }
+    const identities = (identityResult.data?.identities ?? []).map((identity) => ({
+      identityId: identity.identity_id,
+      provider: identity.provider,
+      email: typeof identity.identity_data?.email === "string"
+        ? identity.identity_data.email
+        : null,
+      createdAt: identity.created_at ?? null,
+      lastSignInAt: identity.last_sign_in_at ?? null,
+    }));
+    // `totp` and `phone` contain verified factors only. Keep `all` here so an
+    // interrupted enrollment remains visible and can be explicitly removed
+    // before the user starts over.
+    const allFactors = factorResult.data?.all ?? [
+      ...(factorResult.data?.totp ?? []),
+      ...(factorResult.data?.phone ?? []),
+    ];
+    const factors = allFactors.map((factor) => ({
+      factorId: factor.id,
+      factorType: factor.factor_type,
+      status: factor.status,
+      friendlyName: factor.friendly_name ?? null,
+      createdAt: factor.created_at,
+      updatedAt: factor.updated_at,
+    }));
+    const operationalGate = evaluateHighRiskAuthOperationalGate({
+      userId: userResult.data.user.id,
+      requestedProvider,
+      identities,
+      factors,
+      currentLevel: aalResult.data.currentLevel,
+    });
     return json({
       schemaVersion: "realytics-auth-security-profile-v1",
       userId: userResult.data.user.id,
-      identities: (identityResult.data?.identities ?? []).map((identity) => ({
-        identityId: identity.identity_id,
-        provider: identity.provider,
-        email: typeof identity.identity_data?.email === "string"
-          ? identity.identity_data.email
-          : null,
-        createdAt: identity.created_at ?? null,
-        lastSignInAt: identity.last_sign_in_at ?? null,
-      })),
-      factors: [
-        ...(factorResult.data?.totp ?? []),
-        ...(factorResult.data?.phone ?? []),
-      ].map((factor) => ({
-        factorId: factor.id,
-        factorType: factor.factor_type,
-        status: factor.status,
-        friendlyName: factor.friendly_name ?? null,
-        createdAt: factor.created_at,
-        updatedAt: factor.updated_at,
-      })),
+      requestedProvider: requestedProvider || null,
+      identities,
+      factors,
       assurance: {
         currentLevel: aalResult.data.currentLevel,
         nextLevel: aalResult.data.nextLevel,
         currentAuthenticationMethods: aalResult.data.currentAuthenticationMethods,
       },
+      operationalForHighRiskActions: operationalGate.operational,
+      limitations: operationalGate.limitations,
     });
   } catch {
     return json({ error: "supabase_auth_not_configured" }, 503);
@@ -106,21 +134,59 @@ export async function POST(request: NextRequest) {
         factorId: data.id,
         factorType: data.type,
         friendlyName: data.friendly_name ?? null,
-        qrCode: data.totp.qr_code,
+        // Supabase may return an SVG data URI with a trailing newline. Next.js
+        // rejects data-image sources that end in whitespace, so normalize the
+        // transport value before it reaches any renderer.
+        qrCode: data.totp.qr_code.trimEnd(),
         secret: data.totp.secret,
         uri: data.totp.uri,
       });
     }
 
     if (action === "mfa_verify_totp") {
-      const factorId = safeIdentifier(payload?.factorId);
-      const code = typeof payload?.code === "string" ? payload.code.trim() : "";
-      if (!factorId || !/^\d{6,8}$/.test(code)) {
+      const challenge = parseTotpChallengeInput({
+        factorId: payload?.factorId,
+        code: payload?.code,
+      });
+      if (!challenge) {
         return json({ error: "invalid_mfa_verification_input" }, 400);
       }
-      const { error } = await supabase.auth.mfa.challengeAndVerify({ factorId, code });
+      const { error } = await supabase.auth.mfa.challengeAndVerify(challenge);
       if (error) return json({ error: "mfa_verification_failed" }, 400);
       return json({ verified: true, assuranceLevel: "aal2" });
+    }
+
+    if (action === "mfa_reauthenticate_totp") {
+      const challenge = parseTotpChallengeInput({
+        factorId: payload?.factorId,
+        code: payload?.code,
+      });
+      if (!challenge) {
+        return json({ error: "invalid_mfa_reauthentication_input" }, 400);
+      }
+      const factorsResult = await supabase.auth.mfa.listFactors();
+      if (factorsResult.error) {
+        return json({ error: "verified_totp_factor_unavailable" }, 503);
+      }
+      const verifiedFactor = findVerifiedTotpFactor(
+        factorsResult.data?.totp ?? [],
+        challenge.factorId,
+      );
+      if (!verifiedFactor) {
+        return json({ error: "verified_totp_factor_required" }, 409);
+      }
+      const { error } = await supabase.auth.mfa.challengeAndVerify(challenge);
+      if (error) return json({ error: "mfa_reauthentication_failed" }, 400);
+
+      const assuranceResult = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+      if (assuranceResult.error || assuranceResult.data.currentLevel !== "aal2") {
+        return json({ error: "mfa_reauthentication_incomplete" }, 503);
+      }
+      return json({
+        schemaVersion: "realytics-mfa-reauthentication-v1",
+        verified: true,
+        assuranceLevel: "aal2",
+      });
     }
 
     if (action === "mfa_unenroll") {

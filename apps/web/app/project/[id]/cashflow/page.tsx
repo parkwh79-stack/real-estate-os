@@ -16,9 +16,20 @@ const FEAS_METHOD_LABEL: Record<string, string> = {
   no_source: "근거 없음",
 };
 
-function formatEok(value?: number, digits = 1): string {
-  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+function formatEok(value?: number | null, digits = 1): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "미확인";
   return `${value.toLocaleString("ko-KR", { minimumFractionDigits: digits, maximumFractionDigits: digits })}억원`;
+}
+
+function formatCashflowCell(value: number | null): string {
+  if (value === null) return "미확인";
+  return value.toLocaleString("ko-KR", { maximumFractionDigits: 1 });
+}
+
+function wonSummaryToEok(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed / 1e8 : null;
 }
 
 function formatValue(value: unknown): string {
@@ -150,11 +161,11 @@ export default function ProjectCashflowPage() {
       {loading ? <EmptyState title="CalculationRun을 조회하는 중입니다." body="프로젝트 원장에서 최신 계산 결과와 근거를 읽고 있습니다." loading /> : !cashflow ? <EmptyState title="저장된 Cash Flow 계산 결과가 없습니다." body="파싱된 사업수지가 있으면 ‘AI 사업수지 구성’으로 total_revenue·total_cost를 채운 뒤 Cash Flow를 계산합니다. 없으면 사업수지 Excel/사업계획서를 먼저 업로드하세요." action={<div className="flex gap-2"><button type="button" onClick={() => void buildFeasibilityInput()} disabled={buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-4 text-sm font-black text-indigo-700 disabled:opacity-40"><Calculator className="h-4 w-4" />AI 사업수지 구성</button><button type="button" onClick={() => void runPod()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white"><PlayCircle className="h-4 w-4" />Pod 실행</button></div>} /> : (
         <>
           <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            <KpiCard label="Max Minus" value={formatEok(Math.abs(cashflow.maxMinusEok))} sub={`M${cashflow.maxMinusMonth || "-"} 발생`} icon={<TrendingDown className="h-5 w-5 text-rose-600" />} tone="text-rose-700" />
-            <KpiCard label="총수입" value={formatEok(Number(summary.totalRevenue ?? 0) / 1e8)} sub="분양·매각·기타 수입" icon={<Calculator className="h-5 w-5 text-emerald-600" />} />
-            <KpiCard label="총사업비" value={formatEok(Number(summary.totalProjectCost ?? 0) / 1e8)} sub="토지비·공사비·금융비" icon={<Calculator className="h-5 w-5 text-sky-600" />} />
-            <KpiCard label="PF 한도" value={formatEok(Number(summary.pfLimit ?? 0) / 1e8)} sub={`총 인출 ${formatEok(Number(summary.totalPfDraw ?? 0) / 1e8)}`} icon={<Wallet className="h-5 w-5 text-indigo-600" />} />
-            <KpiCard label="계산 상태" value={String(summary.status ?? "완료")} sub={`CalculationRun ${runId.slice(0, 18)}`} icon={<ShieldCheck className="h-5 w-5 text-slate-600" />} />
+            <KpiCard label="Max Minus" value={cashflow.maxMinusEok === null ? "미확인" : formatEok(Math.abs(cashflow.maxMinusEok))} sub={cashflow.maxMinusMonth === null ? "발생월 미확인" : `M${cashflow.maxMinusMonth} 발생`} icon={<TrendingDown className="h-5 w-5 text-rose-600" />} tone="text-rose-700" />
+            <KpiCard label="총수입" value={formatEok(wonSummaryToEok(summary.totalRevenue))} sub="분양·매각·기타 수입" icon={<Calculator className="h-5 w-5 text-emerald-600" />} />
+            <KpiCard label="총사업비" value={formatEok(wonSummaryToEok(summary.totalProjectCost))} sub="토지비·공사비·금융비" icon={<Calculator className="h-5 w-5 text-sky-600" />} />
+            <KpiCard label="PF 한도" value={formatEok(wonSummaryToEok(summary.pfLimit))} sub={`총 인출 ${formatEok(wonSummaryToEok(summary.totalPfDraw))}`} icon={<Wallet className="h-5 w-5 text-indigo-600" />} />
+            <KpiCard label="계산 상태" value={summary.status ? String(summary.status) : "미확인"} sub={`CalculationRun ${runId.slice(0, 18)}`} icon={<ShieldCheck className="h-5 w-5 text-slate-600" />} />
           </section>
 
           <ScenarioRegistryPanel runs={scenarioRuns} />
@@ -162,7 +173,7 @@ export default function ProjectCashflowPage() {
           <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">월별 Cash Flow</h2><p className="mt-1 text-xs font-semibold text-slate-500">저장된 CalculationRun의 실데이터입니다. 단위: 억원</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">원장 기준</span></div>
-              <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">Cash-In</th><th className="p-3">Cash-Out</th><th className="p-3">Net CF</th><th className="p-3">누적 CF</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.period} className={row.period === `M${cashflow.maxMinusMonth}` ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{row.cashInEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className="p-3">{row.cashOutEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className={`p-3 font-bold ${row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{row.netCashFlowEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td><td className={`p-3 font-black ${row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{row.cumulativeEok.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}</td></tr>)}</tbody></table></div>
+              <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">Cash-In</th><th className="p-3">Cash-Out</th><th className="p-3">Net CF</th><th className="p-3">누적 CF</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.period} className={cashflow.maxMinusMonth !== null && row.period === `M${cashflow.maxMinusMonth}` ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{formatCashflowCell(row.cashInEok)}</td><td className="p-3">{formatCashflowCell(row.cashOutEok)}</td><td className={`p-3 font-bold ${row.netCashFlowEok !== null && row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.netCashFlowEok)}</td><td className={`p-3 font-black ${row.cumulativeEok !== null && row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.cumulativeEok)}</td></tr>)}</tbody></table></div>
             </div>
             <aside className="space-y-4"><InfoPanel title="계산 근거"><Fact label="CalculationRun" value={runId} /><Fact label="Engine" value="cash_flow_engine" /><Fact label="Input snapshot" value={inputScheduleEvidence} /><Fact label="완료 시각" value={cashflow.completedAt || "-"} /><Fact label="Source locator" value={JSON.stringify(cashflow.sourceMetadata ?? {})} /></InfoPanel><InfoPanel title="Cash Flow 위험"><RiskList flags={cashflow.riskFlags ?? []} /></InfoPanel></aside>
           </section>

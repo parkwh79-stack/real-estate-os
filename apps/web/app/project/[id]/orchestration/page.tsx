@@ -946,7 +946,6 @@ export default function ProjectOrchestrationPage() {
   const [updatingOverrideId, setUpdatingOverrideId] = useState<string | null>(null);
   const [savingLandEvidence, setSavingLandEvidence] = useState(false);
   const [savingRestructuringCure, setSavingRestructuringCure] = useState(false);
-  const [approvedBy, setApprovedBy] = useState("credit_officer");
   const [approvalComment, setApprovalComment] = useState("");
   const [evidenceReviewer, setEvidenceReviewer] = useState("market_analyst");
   const [handoffReviewer, setHandoffReviewer] = useState("credit_officer");
@@ -1143,9 +1142,8 @@ export default function ProjectOrchestrationPage() {
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${selectedRun.run_id}/approve`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders(approvedBy.trim() || "credit_officer") },
+        headers: { "Content-Type": "application/json", ...authHeaders("web") },
         body: JSON.stringify({
-          approved_by: approvedBy.trim() || "credit_officer",
           comment: approvalComment.trim(),
         }),
       });
@@ -1531,7 +1529,7 @@ export default function ProjectOrchestrationPage() {
   ), [selectedRun]);
   const canApprove = (
     (selectedRun?.status === "completed" || selectedRun?.status === "completed_with_warnings")
-    && selectedRun?.artifacts.approvalReadinessGate?.pass !== false
+    && selectedRun?.artifacts.approvalReadinessGate?.pass === true
     && unresolvedHandoffCount === 0
     && unresolvedRiskCount === 0
   );
@@ -1670,10 +1668,8 @@ export default function ProjectOrchestrationPage() {
                     unresolvedHandoffCount={unresolvedHandoffCount}
                     unresolvedRiskCount={unresolvedRiskCount}
                     status={selectedRun.status}
-                    approvedBy={approvedBy}
                     approvalComment={approvalComment}
                     approving={approving}
-                    onApprovedByChange={setApprovedBy}
                     onApprovalCommentChange={setApprovalComment}
                     onApprove={() => void approveRun()}
                   />
@@ -3861,10 +3857,8 @@ function ApprovalPanel({
   unresolvedHandoffCount,
   unresolvedRiskCount,
   status,
-  approvedBy,
   approvalComment,
   approving,
-  onApprovedByChange,
   onApprovalCommentChange,
   onApprove,
 }: {
@@ -3874,10 +3868,8 @@ function ApprovalPanel({
   unresolvedHandoffCount: number;
   unresolvedRiskCount: number;
   status: string;
-  approvedBy: string;
   approvalComment: string;
   approving: boolean;
-  onApprovedByChange: (value: string) => void;
   onApprovalCommentChange: (value: string) => void;
   onApprove: () => void;
 }) {
@@ -3914,15 +3906,7 @@ function ApprovalPanel({
             : `Current status is \`${status}\`. Only completed runs can be approved.`}
         </p>
       ) : (
-        <div className="mt-4 grid gap-3 lg:grid-cols-[220px_1fr_auto]">
-          <label className="block">
-            <span className="text-xs font-semibold text-slate-500">Approver</span>
-            <input
-              value={approvedBy}
-              onChange={(event) => onApprovedByChange(event.target.value)}
-              className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-900 outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
-            />
-          </label>
+        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto]">
           <label className="block">
             <span className="text-xs font-semibold text-slate-500">Comment</span>
             <input
@@ -3941,6 +3925,9 @@ function ApprovalPanel({
             {approving ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserCheck className="h-4 w-4" />}
             Approve
           </button>
+          <p className="lg:col-span-2 text-xs font-semibold text-slate-500">
+            승인자는 입력값이 아니라 현재 로그인 세션과 PostgreSQL membership으로 결정됩니다. 작성자와 동일한 사용자는 승인할 수 없습니다.
+          </p>
         </div>
       )}
     </section>

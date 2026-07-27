@@ -10,7 +10,8 @@
     "start": "next start",
     "lint": "eslint --max-warnings 0",
     "check-types": "next typegen && tsc --noEmit",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:auth-live": "playwright test e2e/auth-live.spec.ts --project=chromium"
   },
   "dependencies": {
     "@repo/ui": "*",

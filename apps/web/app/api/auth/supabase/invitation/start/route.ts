@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  canonicalAuthRequestUrl,
   canonicalWebOrigin,
   preventAuthenticatedResponseCaching,
   setInvitationIntentCookie,
@@ -14,6 +15,13 @@ export async function GET(request: NextRequest) {
       { error: "canonical_web_origin_not_configured" },
       { status: 503 },
     );
+  }
+  const canonicalRequest = canonicalAuthRequestUrl(request, origin);
+  if (canonicalRequest) {
+    const response = NextResponse.redirect(canonicalRequest);
+    preventAuthenticatedResponseCaching(response);
+    response.headers.set("Referrer-Policy", "no-referrer");
+    return response;
   }
   const token = request.nextUrl.searchParams.get("token") || "";
   if (!TOKEN_PATTERN.test(token)) {

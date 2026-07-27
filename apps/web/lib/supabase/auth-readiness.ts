@@ -68,6 +68,14 @@ export async function inspectSupabaseAuthReadiness() {
     google: providerEnabled(settings, "google"),
     kakao: providerEnabled(settings, "kakao"),
   };
+  const providerUsable = {
+    google: providers.google,
+    // Hosted GoTrue currently asks Kakao for account_email by default. Keep
+    // this provider fail-closed until a Biz App consent item has completed an
+    // actual round trip; an enabled Supabase toggle alone is insufficient.
+    kakao: providers.kakao
+      && process.env.REALYTICS_KAKAO_OAUTH_SCOPE_VERIFIED === "true",
+  };
   const backendReady = Boolean(
     (backend?.configured ?? backend?.enabled)
       && ["oidc", "jwks", "rs256"].includes(String(backend.mode || "").toLowerCase())
@@ -85,6 +93,19 @@ export async function inspectSupabaseAuthReadiness() {
         }
       })(),
   );
+  const sharedBoundaryReady = Boolean(
+    configured
+      && settings
+      && canonicalOriginReady
+      && backendReady,
+  );
+  const providerReady = {
+    google: sharedBoundaryReady && providerUsable.google,
+    kakao: sharedBoundaryReady && providerUsable.kakao,
+  };
+  // Overall readiness intentionally remains stricter than a provider-specific
+  // live smoke: the product-level gate requires every supported provider.
+  const configurationReady = providerReady.google && providerReady.kakao;
 
   return {
     schemaVersion: "realytics-supabase-auth-readiness-v1",
@@ -92,7 +113,10 @@ export async function inspectSupabaseAuthReadiness() {
     configured,
     settingsReachable: settings !== null,
     providers,
+    providerUsable,
+    providerReady,
     canonicalOriginReady,
+    configurationReady,
     backend: {
       reachable: backend !== null,
       configured: Boolean(backend?.configured ?? backend?.enabled),
@@ -103,22 +127,24 @@ export async function inspectSupabaseAuthReadiness() {
       membershipAuthority: backend?.membershipAuthority ?? null,
       ready: backendReady,
     },
-    operational: Boolean(
-      configured
-        && settings
-        && providers.google
-        && providers.kakao
-        && canonicalOriginReady
-        && backendReady,
-    ),
+    // Provider/JWKS configuration is necessary but does not prove that two
+    // admitted users, verified factors, fresh AAL2 sessions, and maker-checker
+    // separation exist. The authenticated security profile and destructive
+    // live rehearsal own that evidence, so this public diagnostic stays
+    // fail-closed instead of claiming operational readiness from settings.
+    operational: false,
     limitations: [
       ...(!configured ? ["supabase_web_configuration_missing"] : []),
       ...(configured && !settings ? ["supabase_auth_settings_unreachable"] : []),
       ...(!providers.google ? ["google_provider_not_enabled"] : []),
       ...(!providers.kakao ? ["kakao_provider_not_enabled"] : []),
+      ...(providers.kakao && !providerUsable.kakao
+        ? ["kakao_account_email_scope_not_verified"]
+        : []),
       ...(!canonicalOriginReady ? ["canonical_https_web_origin_not_configured"] : []),
       ...(!backendReady ? ["fastapi_oidc_membership_boundary_not_ready"] : []),
-      "real_user_callback_refresh_logout_smoke_required",
+      ...(!configurationReady ? [] : ["real_user_aal2_maker_checker_smoke_required"]),
+      ...(!configurationReady ? ["configuration_gate_incomplete"] : []),
     ],
   };
 }

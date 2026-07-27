@@ -3,7 +3,20 @@ import { apiBase, authHeaders } from "./auth-client";
 export interface WorkspaceProjectMemory {
   projectId?: string;
   projectName?: string;
+  project?: {
+    stage?: string;
+    projectStage?: string;
+    status?: string;
+    asOfDate?: string;
+    asOf?: string;
+    freshness?: string;
+    updatedAt?: string;
+    [key: string]: unknown;
+  };
   status?: string;
+  stage?: string;
+  asOfDate?: string;
+  freshness?: string;
   sourceDocumentCount?: number;
   landEvidenceCount?: number;
   assumptionOverrideCount?: number;
@@ -35,10 +48,24 @@ export interface WorkspacePageContext {
     requiredPageDataFields?: string[];
   };
   projectMemory?: WorkspaceProjectMemory;
-  dealStateGraph?: Record<string, unknown>;
+  dealStateGraph?: {
+    updatedAt?: string;
+    summary?: {
+      evidenceCount?: number;
+      missingInputCount?: number;
+    };
+    graph?: {
+      conflicts?: Array<{ status?: string; [key: string]: unknown }>;
+    };
+    [key: string]: unknown;
+  };
   evidenceVault?: unknown[];
   assumptionBook?: unknown[];
-  missingInputRegister?: unknown[];
+  missingInputRegister?: Array<{
+    status?: string;
+    severity?: string;
+    [key: string]: unknown;
+  }>;
   taskGraph?: Record<string, unknown>;
   agentPods?: unknown[];
   podRuns?: unknown[];

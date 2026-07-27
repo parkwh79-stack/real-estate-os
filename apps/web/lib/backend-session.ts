@@ -2,6 +2,10 @@ import "server-only";
 
 import type { CookieOptions } from "@supabase/ssr";
 import type { NextRequest, NextResponse } from "next/server";
+import {
+  classifyRealyticsBearerIdentity,
+  type RealyticsBearerIdentityResult,
+} from "./backend-identity-result";
 
 export const BACKEND_ORIGIN =
   process.env.REALYTICS_API_ORIGIN || "http://127.0.0.1:8000";
@@ -18,15 +22,15 @@ export const REALYTICS_INVITATION_COOKIE =
 
 export function localPilotServerEnabled(): boolean {
   return (
-    process.env.NODE_ENV !== "production"
-    && process.env.REALYTICS_ENABLE_LOCAL_AUTH === "true"
+    process.env.NODE_ENV !== "production" &&
+    process.env.REALYTICS_ENABLE_LOCAL_AUTH === "true"
   );
 }
 
 export function legacyOauthSessionExchangeEnabled(): boolean {
   return (
-    localPilotServerEnabled()
-    && process.env.REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS === "true"
+    localPilotServerEnabled() &&
+    process.env.REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS === "true"
   );
 }
 
@@ -47,7 +51,8 @@ export function safeInternalNextPath(
   value: string | null,
   fallback = "/start",
 ): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return fallback;
+  if (!value || !value.startsWith("/") || value.startsWith("//"))
+    return fallback;
   return value === "/" || value === "/dashboard" ? fallback : value;
 }
 
@@ -56,7 +61,10 @@ export function canonicalWebOrigin(request: NextRequest): string | null {
   if (configured) {
     try {
       const parsed = new URL(configured);
-      if (process.env.NODE_ENV === "production" && parsed.protocol !== "https:") {
+      if (
+        process.env.NODE_ENV === "production" &&
+        parsed.protocol !== "https:"
+      ) {
         return null;
       }
       return parsed.origin;
@@ -66,6 +74,25 @@ export function canonicalWebOrigin(request: NextRequest): string | null {
   }
   if (process.env.NODE_ENV === "production") return null;
   return request.nextUrl.origin;
+}
+
+export function canonicalAuthRequestUrl(
+  request: NextRequest,
+  canonicalOrigin: string,
+): URL | null {
+  const canonicalHost = new URL(canonicalOrigin).host.toLowerCase();
+  const requestHost = request.headers.get("host")?.toLowerCase();
+  if (requestHost === canonicalHost) return null;
+
+  // PKCE verifier and invitation cookies are host-only. Canonicalize the
+  // request before either cookie is issued so localhost/127.0.0.1 (or an
+  // alternate production host) can never split the OAuth start and callback.
+  // Next.js can normalize request.nextUrl to the configured dev host, so the
+  // actual HTTP Host header is the comparison boundary here. The redirect
+  // target remains the independently configured canonical origin.
+  const destination = new URL(request.nextUrl.pathname, canonicalOrigin);
+  destination.search = request.nextUrl.search;
+  return destination;
 }
 
 export function setRealyticsSessionCookie(
@@ -137,19 +164,21 @@ export function hardenedSupabaseCookieOptions(
   };
 }
 
-export async function realyticsAcceptsBearer(accessToken: string): Promise<boolean> {
+export async function realyticsAcceptsBearer(
+  accessToken: string,
+): Promise<RealyticsBearerIdentityResult> {
   try {
     const response = await fetch(`${BACKEND_ORIGIN}/auth/me`, {
       cache: "no-store",
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
+      signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) return false;
-    const identity = await response.json() as { authenticated?: boolean };
-    return identity.authenticated === true;
+    const identity = (await response.json().catch(() => null)) as unknown;
+    return classifyRealyticsBearerIdentity(response.status, identity);
   } catch {
-    return false;
+    return { status: "backend_unavailable" };
   }
 }
 

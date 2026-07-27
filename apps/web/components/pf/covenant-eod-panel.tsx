@@ -39,6 +39,20 @@ type CovenantEodResult = {
   covenantSheet?: { schemaVersion?: string; projectName?: string | null; markdown?: string };
 };
 
+function artifactCovenantResult(value: unknown): CovenantEodResult | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<CovenantEodResult>;
+  if (
+    typeof candidate.schemaVersion !== "string" ||
+    !Array.isArray(candidate.covenants) ||
+    !Array.isArray(candidate.eodConditions) ||
+    !Array.isArray(candidate.dataQualityNotes)
+  ) {
+    return null;
+  }
+  return candidate as CovenantEodResult;
+}
+
 function formatThreshold(value: Covenant["thresholdValue"], unit?: string | null): string {
   if (value === null || value === undefined) return "—";
   if (Array.isArray(value)) return value.join(" → ");
@@ -61,12 +75,36 @@ const SEVERITY_CLS: Record<string, string> = {
   medium: "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200",
 };
 
-export function CovenantEodPanel({ projectId }: { projectId: string }) {
-  const [result, setResult] = useState<CovenantEodResult | null>(null);
-  const [loading, setLoading] = useState(true);
+export function CovenantEodPanel({
+  projectId,
+  artifactResult,
+  sourceArtifactKey,
+}: {
+  projectId: string;
+  artifactResult?: unknown;
+  sourceArtifactKey?: string;
+}) {
+  const [result, setResult] = useState<CovenantEodResult | null>(() =>
+    artifactCovenantResult(artifactResult),
+  );
+  const [resultSource, setResultSource] = useState<"artifact" | "analysis" | "none">(
+    artifactCovenantResult(artifactResult) ? "artifact" : "none",
+  );
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
+    const parsed = artifactCovenantResult(artifactResult);
+    setResult(parsed);
+    setResultSource(parsed ? "artifact" : "none");
+    setError(
+      artifactResult !== null && artifactResult !== undefined && !parsed
+        ? "선택한 PF artifact의 Covenant/EOD 결과 계약이 올바르지 않습니다."
+        : null,
+    );
+  }, [artifactResult]);
+
+  const loadAnalysisOnly = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -76,17 +114,16 @@ export function CovenantEodPanel({ projectId }: { projectId: string }) {
         body: JSON.stringify({}),
       });
       if (!res.ok) throw new Error(`Covenant/EOD 산출 실패 (${res.status})`);
-      setResult((await res.json()) as CovenantEodResult);
+      const parsed = artifactCovenantResult(await res.json());
+      if (!parsed) throw new Error("Covenant/EOD 응답 계약이 올바르지 않습니다.");
+      setResult(parsed);
+      setResultSource("analysis");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Covenant/EOD를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
   }, [projectId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   function downloadSheet() {
     const md = result?.covenantSheet?.markdown;
@@ -108,6 +145,15 @@ export function CovenantEodPanel({ projectId }: { projectId: string }) {
           <h2 className="text-lg font-black text-slate-950 dark:text-white">Covenant / EOD (기한이익상실)</h2>
         </div>
         <div className="flex items-center gap-3">
+          {resultSource === "artifact" ? (
+            <span className="max-w-56 truncate text-[11px] font-bold text-slate-500" title={sourceArtifactKey}>
+              PF artifact · {sourceArtifactKey ?? "key 미확인"}
+            </span>
+          ) : resultSource === "analysis" ? (
+            <span className="text-[11px] font-black text-amber-700 dark:text-amber-300">
+              분석용 재산출 · 승인 근거 아님
+            </span>
+          ) : null}
           {result?.summary ? (
             <span className="text-xs font-semibold text-slate-500">
               커버넌트 {result.summary.activeCovenantCount ?? 0}/{result.summary.covenantCount ?? 0} · EOD {result.summary.eodConditionCount ?? 0}
@@ -124,15 +170,28 @@ export function CovenantEodPanel({ projectId }: { projectId: string }) {
               Covenant Sheet
             </button>
           ) : null}
+          {!artifactCovenantResult(artifactResult) ? (
+            <button
+              type="button"
+              onClick={() => void loadAnalysisOnly()}
+              disabled={loading}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 text-xs font-bold text-amber-800 disabled:opacity-50 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+            >
+              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              분석용 재산출
+            </button>
+          ) : null}
         </div>
       </div>
       <p className="mb-4 text-xs text-slate-500">
-        결정론 사업성·PF 계산값에서 도출한 커버넌트 임계값과 EOD 조건입니다. 수치는 새로 만들지 않으며, 근거가 없으면 &ldquo;근거 필요&rdquo;로 표시합니다.
+        기본 화면은 선택한 하나의 PF-Credit artifact에 함께 저장된 Covenant/EOD만
+        표시합니다. 독립 재산출 결과는 분석 전용이며 기존 artifact나 승인 상태를 갱신하지
+        않습니다.
       </p>
 
       {loading ? (
         <div className="flex min-h-[120px] items-center justify-center text-sm font-bold text-slate-500">
-          <Loader2 className="mr-2 h-5 w-5 animate-spin" />커버넌트/EOD 산출 중입니다.
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" />분석용 Covenant/EOD 산출 중입니다.
         </div>
       ) : error ? (
         <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{error}</div>
@@ -206,7 +265,12 @@ export function CovenantEodPanel({ projectId }: { projectId: string }) {
             </div>
           ) : null}
         </div>
-      ) : null}
+      ) : (
+        <div className="rounded-lg border border-dashed border-slate-300 p-5 text-sm leading-6 text-slate-600 dark:border-slate-700 dark:text-slate-300">
+          선택한 PF artifact에 Covenant/EOD 결과가 없습니다. 위의 분석용 재산출은 검토를
+          돕기 위한 별도 실행이며 승인 패키지로 간주되지 않습니다.
+        </div>
+      )}
     </section>
   );
 }

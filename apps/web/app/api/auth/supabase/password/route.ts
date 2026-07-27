@@ -15,17 +15,26 @@ type PasswordPayload = {
 
 export async function POST(request: NextRequest) {
   if (!requestIsSameOrigin(request)) {
-    return NextResponse.json({ error: "cross_site_request_rejected" }, { status: 403 });
+    return NextResponse.json(
+      { error: "cross_site_request_rejected" },
+      { status: 403 },
+    );
   }
 
-  const payload = await request.json().catch(() => null) as PasswordPayload | null;
+  const payload = (await request
+    .json()
+    .catch(() => null)) as PasswordPayload | null;
   const mode = payload?.mode === "signup" ? "signup" : "login";
   const email = typeof payload?.email === "string" ? payload.email.trim() : "";
-  const password = typeof payload?.password === "string" ? payload.password : "";
+  const password =
+    typeof payload?.password === "string" ? payload.password : "";
   const displayName =
     typeof payload?.displayName === "string" ? payload.displayName.trim() : "";
   if (!email || password.length < 6) {
-    return NextResponse.json({ error: "invalid_credentials_input" }, { status: 400 });
+    return NextResponse.json(
+      { error: "invalid_credentials_input" },
+      { status: 400 },
+    );
   }
 
   try {
@@ -47,10 +56,14 @@ export async function POST(request: NextRequest) {
         const { data: claimsData, error: claimsError } =
           await supabase.auth.getClaims();
         const accessToken = data.session.access_token;
+        const identityResult =
+          claimsError || !claimsData?.claims
+            ? null
+            : await realyticsAcceptsBearer(accessToken);
         if (
-          claimsError
-          || !claimsData?.claims
-          || !(await realyticsAcceptsBearer(accessToken))
+          claimsError ||
+          !claimsData?.claims ||
+          identityResult?.status !== "accepted"
         ) {
           await supabase.auth.signOut({ scope: "local" });
           return NextResponse.json(
@@ -67,25 +80,40 @@ export async function POST(request: NextRequest) {
       return response;
     }
 
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
     if (error) {
       return NextResponse.json({ error: "invalid_login" }, { status: 401 });
     }
     const { data, error: claimsError } = await supabase.auth.getClaims();
     if (claimsError || !data?.claims) {
       await supabase.auth.signOut({ scope: "local" });
-      return NextResponse.json({ error: "verified_claims_unavailable" }, { status: 401 });
+      return NextResponse.json(
+        { error: "verified_claims_unavailable" },
+        { status: 401 },
+      );
     }
     const { data: sessionData } = await supabase.auth.getSession();
     const accessToken = sessionData.session?.access_token;
-    if (!accessToken || !(await realyticsAcceptsBearer(accessToken))) {
+    const identityResult = accessToken
+      ? await realyticsAcceptsBearer(accessToken)
+      : null;
+    if (!accessToken || identityResult?.status !== "accepted") {
       await supabase.auth.signOut({ scope: "local" });
-      return NextResponse.json({ error: "realytics_identity_not_provisioned" }, { status: 403 });
+      return NextResponse.json(
+        { error: "realytics_identity_not_provisioned" },
+        { status: 403 },
+      );
     }
     const response = NextResponse.json({ authenticated: true });
     preventAuthenticatedResponseCaching(response);
     return response;
   } catch {
-    return NextResponse.json({ error: "supabase_auth_not_configured" }, { status: 503 });
+    return NextResponse.json(
+      { error: "supabase_auth_not_configured" },
+      { status: 503 },
+    );
   }
 }

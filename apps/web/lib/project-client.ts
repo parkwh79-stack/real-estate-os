@@ -21,6 +21,7 @@ export interface RecentWorkItem {
   openReviewCount: number;
   riskCount: number;
   approvalStatus: string;
+  approvalReadinessStatus?: string;
   nextAction: string;
   sourceHashes?: string[];
 }
@@ -85,10 +86,10 @@ export async function fetchProjectDetail<T = Record<string, unknown>>(projectId:
 /** Real monthly cash flow extracted from a completed PF-review (orchestration) run. */
 export interface CashflowMonth {
   period: string;
-  cashInEok: number;
-  cashOutEok: number;
-  netCashFlowEok: number;
-  cumulativeEok: number;
+  cashInEok: number | null;
+  cashOutEok: number | null;
+  netCashFlowEok: number | null;
+  cumulativeEok: number | null;
 }
 
 export interface CashflowResult {
@@ -98,8 +99,8 @@ export interface CashflowResult {
   artifactKey?: string;
   artifactType?: string;
   monthly: CashflowMonth[];
-  maxMinusEok: number;
-  maxMinusMonth: number;
+  maxMinusEok: number | null;
+  maxMinusMonth: number | null;
   summary: Record<string, number>;
   reportFragments?: Record<string, string>;
   riskFlags?: Array<Record<string, unknown>>;
@@ -161,6 +162,18 @@ export async function fetchLatestCalculationRuns(
 
 const WON = 1e8;
 
+function finiteNumberOrNull(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function wonToEokOrNull(value: unknown): number | null {
+  const won = finiteNumberOrNull(value);
+  return won === null ? null : won / WON;
+}
+
 function cashflowFromResult(
   cf: Record<string, unknown> | null | undefined,
   source: CashflowResult["source"],
@@ -180,14 +193,20 @@ function cashflowFromResult(
       const cashOut = (r.cashOut ?? {}) as Record<string, unknown>;
       return {
         period: String(r.period ?? `M${r.monthIndex ?? r.month ?? ""}`),
-        cashInEok: Number(cashIn.totalCashIn ?? r.cash_in ?? 0) / WON,
-        cashOutEok: Number(cashOut.totalCashOut ?? r.cash_out ?? 0) / WON,
-        netCashFlowEok: Number(r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? r.net_cashflow ?? 0) / WON,
-        cumulativeEok: Number(r.cumulativeCashFlowBeforePfDraw ?? r.cumulativeCashFlow ?? r.cumulative_cashflow ?? 0) / WON,
+        cashInEok: wonToEokOrNull(cashIn.totalCashIn ?? r.cash_in),
+        cashOutEok: wonToEokOrNull(cashOut.totalCashOut ?? r.cash_out),
+        netCashFlowEok: wonToEokOrNull(
+          r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? r.net_cashflow,
+        ),
+        cumulativeEok: wonToEokOrNull(
+          r.cumulativeCashFlowBeforePfDraw ??
+            r.cumulativeCashFlow ??
+            r.cumulative_cashflow,
+        ),
       };
     }),
-    maxMinusEok: Number(summary.maxMinus ?? 0) / WON,
-    maxMinusMonth: Number(summary.maxMinusMonth ?? 0),
+    maxMinusEok: wonToEokOrNull(summary.maxMinus),
+    maxMinusMonth: finiteNumberOrNull(summary.maxMinusMonth),
     summary,
     reportFragments: (cf?.reportFragments ?? {}) as Record<string, string>,
     riskFlags: Array.isArray(cf?.riskFlags) ? (cf?.riskFlags as Array<Record<string, unknown>>) : [],

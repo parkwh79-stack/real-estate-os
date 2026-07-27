@@ -48,7 +48,10 @@ export interface SupabaseAuthReadiness {
   configured: boolean;
   settingsReachable: boolean;
   providers: { google: boolean; kakao: boolean };
+  providerUsable: { google: boolean; kakao: boolean };
+  providerReady: { google: boolean; kakao: boolean };
   canonicalOriginReady: boolean;
+  configurationReady: boolean;
   backend: {
     reachable: boolean;
     configured: boolean;
@@ -66,6 +69,7 @@ export interface SupabaseAuthReadiness {
 export interface SupabaseSecurityProfile {
   schemaVersion: string;
   userId: string;
+  requestedProvider: "google" | "kakao" | null;
   identities: Array<{
     identityId: string;
     provider: string;
@@ -86,6 +90,8 @@ export interface SupabaseSecurityProfile {
     nextLevel: "aal1" | "aal2" | null;
     currentAuthenticationMethods: unknown[];
   };
+  operationalForHighRiskActions: boolean;
+  limitations: string[];
 }
 
 export interface TotpEnrollment {
@@ -96,6 +102,41 @@ export interface TotpEnrollment {
   qrCode: string;
   secret: string;
   uri: string;
+}
+
+export type TenantInvitationRole =
+  | "admin"
+  | "reviewer"
+  | "analyst"
+  | "viewer"
+  | "legal_reviewer"
+  | "legal_counsel_approver"
+  | "external_counsel"
+  | "compliance_officer";
+
+export interface TenantInvitation {
+  invitationId: string;
+  tenantId: string;
+  role: TenantInvitationRole;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  invitedEmail: string | null;
+  invitedIssuer: string | null;
+  invitedSubject: string | null;
+  issuedByIssuer: string;
+  issuedBySubject: string;
+  issuedAt: string;
+  expiresAt: string;
+  acceptedByIssuer: string | null;
+  acceptedBySubject: string | null;
+  acceptedAt: string | null;
+  revokedAt: string | null;
+  revocationReason: string | null;
+}
+
+export interface IssuedTenantInvitation {
+  invitation: TenantInvitation;
+  token: string;
+  tokenPolicy: "shown_once_never_persisted_in_plaintext";
 }
 
 const LEGACY_STORAGE_KEY = "realytics.auth.session.v1";
@@ -278,6 +319,18 @@ export async function verifySupabaseTotp(factorId: string, code: string) {
   });
 }
 
+export async function reauthenticateSupabaseTotp(factorId: string, code: string) {
+  return await postSupabaseSecurityAction<{
+    schemaVersion: "realytics-mfa-reauthentication-v1";
+    verified: true;
+    assuranceLevel: "aal2";
+  }>({
+    action: "mfa_reauthenticate_totp",
+    factorId,
+    code,
+  });
+}
+
 export async function unenrollSupabaseMfa(factorId: string) {
   return await postSupabaseSecurityAction<{ unenrolled: boolean; factorId: string }>({
     action: "mfa_unenroll",
@@ -294,6 +347,53 @@ export async function unlinkSupabaseIdentity(identityId: string) {
     action: "identity_unlink",
     identityId,
   });
+}
+
+export async function loadTenantInvitations(
+  limit = 100,
+): Promise<TenantInvitation[]> {
+  const response = await fetch(
+    `${apiBase}/auth/invitations?limit=${encodeURIComponent(String(limit))}`,
+    { cache: "no-store", headers: authHeaders() },
+  ).then(assertOk);
+  const body = await response.json() as {
+    invitations?: TenantInvitation[];
+  };
+  return body.invitations ?? [];
+}
+
+export async function issueTenantInvitation(input: {
+  role: TenantInvitationRole;
+  invitedEmail?: string;
+  expiresInHours?: number;
+}): Promise<IssuedTenantInvitation> {
+  const response = await fetch(`${apiBase}/auth/invitations`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      role: input.role,
+      invitedEmail: input.invitedEmail?.trim() || undefined,
+      expiresInHours: input.expiresInHours ?? 72,
+    }),
+  }).then(assertOk);
+  return await response.json() as IssuedTenantInvitation;
+}
+
+export async function revokeTenantInvitation(
+  invitationId: string,
+  reason: string,
+) {
+  const response = await fetch(
+    `${apiBase}/auth/invitations/${encodeURIComponent(invitationId)}/revoke`,
+    {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: reason.trim() }),
+    },
+  ).then(assertOk);
+  return await response.json() as {
+    invitation: { invitationId: string; status: "revoked" };
+  };
 }
 
 export async function signInWithSupabaseOAuth(
@@ -449,9 +549,17 @@ async function assertOk(res: Response) {
       detail?: unknown;
       error?: unknown;
     };
+    const nestedError = (
+      body.detail
+      && typeof body.detail === "object"
+      && "error" in body.detail
+      && typeof body.detail.error === "string"
+    ) ? body.detail.error : null;
     const detail =
       typeof body.detail === "string"
         ? body.detail
+        : nestedError
+          ? nestedError
         : typeof body.error === "string"
           ? body.error
           : `Request failed with ${res.status}`;

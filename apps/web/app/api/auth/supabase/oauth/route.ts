@@ -1,6 +1,7 @@
 import type { Provider } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 import {
+  canonicalAuthRequestUrl,
   canonicalWebOrigin,
   preventAuthenticatedResponseCaching,
   safeInternalNextPath,
@@ -21,6 +22,12 @@ export async function GET(request: NextRequest) {
       { error: "canonical_web_origin_not_configured" },
       { status: 503 },
     );
+  }
+  const canonicalRequest = canonicalAuthRequestUrl(request, origin);
+  if (canonicalRequest) {
+    const response = NextResponse.redirect(canonicalRequest);
+    preventAuthenticatedResponseCaching(response);
+    return response;
   }
   const callback = new URL("/auth/callback", origin);
   callback.searchParams.set("next", nextPath);
