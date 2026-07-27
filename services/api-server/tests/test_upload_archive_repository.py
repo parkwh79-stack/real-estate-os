@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
 from db.malware_scanner import MalwareScanResult
 from db.repositories.upload_archive_repository import UploadRejectedError
@@ -260,13 +261,18 @@ def test_remote_download_uses_utf8_content_disposition_and_audit(tmp_path, monke
         "originalFileName": "사업계획서.pdf",
         "contentType": "application/pdf",
     }
-    source_repository = InMemorySourceDocumentRepository(document, project_id="p-korean")
     audit_events = []
     app = FastAPI()
     app.include_router(
         build_project_source_documents_router(
-            project_lookup=lambda project_id: {"id": project_id} if project_id == "p-korean" else None,
-            source_document_repository_factory=lambda: source_repository,
+            project_lookup=lambda project_id, _request: (
+                {"id": project_id, "source_documents": [document]}
+                if project_id == "p-korean"
+                else None
+            ),
+            source_document_repository_factory=lambda project_id, project: (
+                SourceDocumentRepository({project_id: project}, lambda: None)
+            ),
             upload_archive_repository_factory=lambda: archive_repository,
             audit_recorder=lambda *args, **kwargs: audit_events.append(kwargs),
         )

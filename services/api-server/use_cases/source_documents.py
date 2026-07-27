@@ -60,5 +60,21 @@ def get_source_document_download_use_case(
     }
 
 
+def get_source_document_view_metadata_use_case(
+    source_document_repository,
+    upload_archive_repository,
+    project_id: str,
+    archive_id: str,
+) -> Dict[str, Any] | None:
+    """Resolve a version-bound range source without loading the object body."""
+
+    if not upload_archive_repository.is_valid_archive_id(archive_id):
+        return None
+    document = source_document_repository.find_by_archive_id(project_id, archive_id)
+    if not document:
+        return None
+    return upload_archive_repository.resolve_view_metadata(project_id, document)
+
+
 def delete_project_upload_archive_use_case(upload_archive_repository, project_id: str) -> bool:
     return upload_archive_repository.delete_project_archive(project_id)

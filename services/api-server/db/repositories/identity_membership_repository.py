@@ -33,6 +33,7 @@ class IdentityPrincipalRecord:
 @dataclass(frozen=True)
 class TenantMembershipRecord:
     tenant_id: str
+    tenant_status: str | None
     role: str
     status: str
     membership_version: int
@@ -101,6 +102,7 @@ class PostgresIdentityMembershipRepository:
                 p.display_name,
                 p.legacy_user_id,
                 m.tenant_id,
+                t.status AS tenant_status,
                 m.role,
                 m.status,
                 m.membership_version
@@ -108,6 +110,8 @@ class PostgresIdentityMembershipRepository:
             LEFT JOIN "{self._schema}".tenant_memberships AS m
               ON m.issuer = p.issuer
              AND m.subject = p.subject
+            LEFT JOIN "{self._schema}".tenants AS t
+              ON t.tenant_id = m.tenant_id
             WHERE p.issuer = %s
               AND p.subject = %s
             ORDER BY m.tenant_id
@@ -145,9 +149,12 @@ class PostgresIdentityMembershipRepository:
         memberships = tuple(
             TenantMembershipRecord(
                 tenant_id=str(row[7]),
-                role=str(row[8]),
-                status=str(row[9]),
-                membership_version=int(row[10]),
+                tenant_status=(
+                    str(row[8]) if row[8] is not None else None
+                ),
+                role=str(row[9]),
+                status=str(row[10]),
+                membership_version=int(row[11]),
             )
             for row in rows
             if row[7] is not None

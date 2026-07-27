@@ -4,9 +4,15 @@ from typing import Any, Dict, List, Optional
 
 from agents.report_agent import ReportAgent
 from agents.report_export_agent import ReportExportAgent
+from db.repositories.orchestration_repository import OrchestrationRepository
+from db.repositories.project_snapshot_repository import (
+    ProjectSnapshotRepository,
+    verify_project_snapshot_hash,
+)
 from db.repositories.report_repository import ReportRepository
 from storage import list_deal_state_records, list_pod_ai_review_records
 from use_cases.common import deep_merge
+from use_cases.orchestration_approval import refresh_approval_readiness_gate
 
 REPORT_TEMPLATE_TO_REPORT_SECTION = {
     "cover": "cover",
@@ -229,6 +235,115 @@ def export_saved_report_use_case(
         raise LookupError("Report not found")
     rendered = export_report_use_case(report_record, input_data)
     return report_repository.add_export(report_record, rendered)
+
+
+def publish_saved_report_use_case(
+    report_repository: ReportRepository,
+    orchestration_repository: OrchestrationRepository,
+    project_snapshot_repository: ProjectSnapshotRepository,
+    project_id: str,
+    report_id: str,
+    *,
+    published_by: str,
+    published_at: str,
+) -> Dict[str, Any]:
+    """Publish only a report bound to an approved, currently eligible PF run."""
+    report_record = report_repository.get(project_id, report_id)
+    if not report_record:
+        raise LookupError("Report not found")
+
+    run_id = str(report_record.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError(
+            "Only an orchestration-bound report can be finally published; manual reports remain drafts"
+        )
+    run = orchestration_repository.get(project_id, run_id)
+    if not run:
+        raise ValueError("The report's source orchestration run is unavailable")
+    if str(run.get("approvalStatus") or "").lower() != "approved":
+        raise ValueError("The source PF review run must be approved before report publication")
+
+    maker_id = str(
+        run.get("user_id")
+        or run.get("requestedBy")
+        or run.get("requested_by")
+        or (run.get("options") or {}).get("requestedBy")
+        or (run.get("options") or {}).get("requested_by")
+        or ""
+    ).strip()
+    if (
+        maker_id
+        and maker_id.casefold() not in {"system", "anonymous", "unknown"}
+        and maker_id.casefold() == str(published_by).strip().casefold()
+    ):
+        raise ValueError(
+            "Maker-checker violation: the PF review requester cannot finally publish the same report"
+        )
+
+    gate = refresh_approval_readiness_gate(run)
+    if gate.get("pass") is not True:
+        blocker_codes = [
+            str(item.get("code"))
+            for item in (gate.get("blockers") or [])
+            if isinstance(item, dict) and item.get("code")
+        ]
+        suffix = f" Blocking gates: {', '.join(blocker_codes[:12])}." if blocker_codes else ""
+        raise ValueError(
+            "Approval Readiness Gate must still pass at report publication time."
+            + suffix
+        )
+
+    snapshot_meta = (run.get("artifacts") or {}).get("projectSnapshot") or {}
+    snapshot_id = str(snapshot_meta.get("snapshotId") or f"snapshot-{run_id}")
+    snapshot = project_snapshot_repository.get(project_id, snapshot_id)
+    if not snapshot:
+        raise ValueError("The immutable project review snapshot is unavailable")
+    if str(snapshot.get("runId") or "") != run_id:
+        raise ValueError("Project snapshot lineage does not match the report run")
+    if str(snapshot.get("projectId") or "") != project_id:
+        raise ValueError("Project snapshot lineage does not match the report project")
+
+    snapshot_hash = str(snapshot.get("snapshotHash") or "")
+    run_snapshot_hash = str(snapshot_meta.get("snapshotHash") or "")
+    if not snapshot_hash or not run_snapshot_hash:
+        raise ValueError(
+            "The project review snapshot is not hash-sealed; final publication is blocked"
+        )
+    if not verify_project_snapshot_hash(snapshot):
+        raise ValueError(
+            "The project review snapshot hash seal is invalid; final publication is blocked"
+        )
+    if snapshot_hash != run_snapshot_hash:
+        raise ValueError(
+            "Project snapshot hash lineage does not match the approved report run"
+        )
+
+    approval = run.get("approval") or {}
+    decision_package = {
+        "schemaVersion": "realytics-decision-package-manifest-v1",
+        "projectId": project_id,
+        "projectSnapshotId": snapshot_id,
+        "projectSnapshotSchemaVersion": snapshot.get("schemaVersion"),
+        "projectSnapshotHash": snapshot_hash,
+        "orchestrationRunId": run_id,
+        "workflow": run.get("workflow"),
+        "approvalStatus": run.get("approvalStatus"),
+        "approvedBy": approval.get("approved_by") or approval.get("approvedBy"),
+        "approvedAt": approval.get("approved_at") or approval.get("approvedAt"),
+        "approvalReadiness": {
+            "schemaVersion": gate.get("schemaVersion"),
+            "status": gate.get("status"),
+            "gateType": gate.get("gateType"),
+            "blockingIssueCount": (gate.get("summary") or {}).get("blockingIssueCount"),
+            "warningCount": (gate.get("summary") or {}).get("warningCount"),
+        },
+    }
+    return report_repository.publish(
+        report_record,
+        published_by=published_by,
+        published_at=published_at,
+        decision_package=decision_package,
+    )
 
 
 def _select_report_template(

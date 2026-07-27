@@ -1,11 +1,16 @@
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agents.report_agent import ReportAgent
+from db.repositories.project_snapshot_repository import project_snapshot_content_hash
+from db.repositories.report_repository import ReportRepository
 from main import app
 from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
+from use_cases import report_generation
+from use_cases.report_generation import publish_saved_report_use_case
 
 
 def load_example():
@@ -176,6 +181,144 @@ def test_report_export_rejects_unsupported_format():
         json={"format": "xlsx"},
     )
     assert res.status_code == 400
+
+
+def test_manual_report_remains_draft_and_cannot_be_finally_published():
+    client = TestClient(app)
+    project_id = client.get("/projects/").json()[0]["project"]["id"]
+    report = client.post(
+        f"/projects/{project_id}/reports/generate",
+        json={"template": PHASE_11_TEMPLATE},
+    ).json()
+
+    detail = client.get(
+        f"/projects/{project_id}/reports/{report['report_id']}"
+    ).json()
+    assert detail["status"] == "draft"
+    assert detail["metadata"]["report_eligible"] is False
+    assert detail["metadata"]["usage_restriction"] == (
+        "analysis_only_not_final_approval"
+    )
+
+    publication = client.post(
+        f"/projects/{project_id}/reports/{report['report_id']}/publish"
+    )
+    assert publication.status_code == 409
+    assert "orchestration-bound" in publication.json()["detail"]
+
+
+def test_orchestration_bound_report_publication_is_hashed_and_idempotent(monkeypatch):
+    store = {}
+    repository = ReportRepository(store, lambda: None)
+    structured = ReportAgent().generate_structured_report(load_example())
+    markdown = ReportAgent().generate_report(load_example())
+    record = repository.create(
+        "project-1",
+        structured,
+        markdown,
+        run_id="run-1",
+    )
+    run = {
+        "run_id": "run-1",
+        "project_id": "project-1",
+        "workflow": "pf-review",
+        "approvalStatus": "approved",
+        "approval": {
+            "approved_by": "checker-1",
+            "approved_at": "2026-07-24T00:00:00Z",
+        },
+        "artifacts": {
+            "projectSnapshot": {"snapshotId": "snapshot-run-1"},
+        },
+    }
+    snapshot = {
+        "schemaVersion": "realytics-project-snapshot-v1",
+        "snapshotId": "snapshot-run-1",
+        "projectId": "project-1",
+        "runId": "run-1",
+    }
+    snapshot["snapshotHash"] = project_snapshot_content_hash(snapshot)
+    run["artifacts"]["projectSnapshot"]["snapshotHash"] = snapshot["snapshotHash"]
+
+    class Orchestrations:
+        def get(self, project_id, run_id):
+            assert (project_id, run_id) == ("project-1", "run-1")
+            return run
+
+    class Snapshots:
+        def get(self, project_id, snapshot_id):
+            assert (project_id, snapshot_id) == (
+                "project-1",
+                "snapshot-run-1",
+            )
+            return snapshot
+
+    monkeypatch.setattr(
+        report_generation,
+        "refresh_approval_readiness_gate",
+        lambda _run: {
+            "schemaVersion": "realytics-approval-readiness-gate-v1",
+            "gateType": "approval_readiness",
+            "status": "ready_for_approval",
+            "pass": True,
+            "summary": {"blockingIssueCount": 0, "warningCount": 1},
+        },
+    )
+
+    published = publish_saved_report_use_case(
+        repository,
+        Orchestrations(),
+        Snapshots(),
+        "project-1",
+        record["report_id"],
+        published_by="publisher-1",
+        published_at="2026-07-24T01:00:00Z",
+    )
+    assert published["status"] == "published"
+    assert published["metadata"]["report_eligible"] is True
+    assert published["metadata"]["content_sha256"].startswith("sha256:")
+    assert published["publication"]["decisionPackage"]["projectSnapshotId"] == (
+        "snapshot-run-1"
+    )
+    assert published["publication"]["decisionPackage"]["projectSnapshotHash"] == (
+        snapshot["snapshotHash"]
+    )
+
+    repeated = publish_saved_report_use_case(
+        repository,
+        Orchestrations(),
+        Snapshots(),
+        "project-1",
+        record["report_id"],
+        published_by="publisher-1",
+        published_at="2026-07-24T01:00:00Z",
+    )
+    assert repeated is published
+
+    snapshot["schemaVersion"] = "tampered"
+    with pytest.raises(ValueError, match="hash seal is invalid"):
+        publish_saved_report_use_case(
+            repository,
+            Orchestrations(),
+            Snapshots(),
+            "project-1",
+            record["report_id"],
+            published_by="publisher-1",
+            published_at="2026-07-24T01:00:00Z",
+        )
+
+    snapshot["schemaVersion"] = "realytics-project-snapshot-v1"
+    run["artifacts"]["projectSnapshot"]["snapshotHash"] = "sha256:" + ("0" * 64)
+    with pytest.raises(ValueError, match="hash lineage does not match"):
+        publish_saved_report_use_case(
+            repository,
+            Orchestrations(),
+            Snapshots(),
+            "project-1",
+            record["report_id"],
+            published_by="publisher-1",
+            published_at="2026-07-24T01:00:00Z",
+        )
 
 
 def test_report_land_acquisition_tolerates_parsed_ledger_parcels():

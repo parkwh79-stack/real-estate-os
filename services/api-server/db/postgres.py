@@ -80,8 +80,15 @@ LEGAL_PROVIDER_REPLAY_RLS_TABLES = (
     "legal_provider_replay_requests",
     "legal_provider_replay_events",
 )
+REPORT_PUBLICATION_RLS_TABLES = (
+    "reports",
+    "report_publications",
+)
 LEGAL_INTELLIGENCE_MIGRATION = "0008_legal_intelligence_core.sql"
 LEGAL_GOVERNANCE_MIGRATION = "0009_legal_governance_and_tenant_overlay.sql"
+REPORT_PUBLICATION_MIGRATION = (
+    "20260727002612_normalized_report_publication.sql"
+)
 
 
 class MigrationChecksumMismatch(RuntimeError):
@@ -516,6 +523,8 @@ def assert_parser_v2_runtime_ready() -> None:
                 required_rls_tables.extend(LEGAL_INTELLIGENCE_RLS_TABLES)
             if LEGAL_GOVERNANCE_MIGRATION in expected:
                 required_rls_tables.extend(LEGAL_GOVERNANCE_RLS_TABLES)
+            if REPORT_PUBLICATION_MIGRATION in expected:
+                required_rls_tables.extend(REPORT_PUBLICATION_RLS_TABLES)
 
             cur.execute(
                 """

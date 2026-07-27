@@ -37,6 +37,16 @@ class ObjectStorage(Protocol):
         retention_mode: Optional[str] = None,
     ) -> Dict[str, Any]: ...
     def get(self, key: str) -> bytes: ...
+    def head(self, key: str) -> Dict[str, Any]: ...
+    def get_range(
+        self,
+        key: str,
+        start: int,
+        end: int,
+        *,
+        version_id: Optional[str] = None,
+        if_match: Optional[str] = None,
+    ) -> bytes: ...
     def exists(self, key: str) -> bool: ...
     def delete_prefix(self, prefix: str) -> bool: ...
     def delete(self, key: str) -> bool: ...
@@ -84,6 +94,49 @@ class LocalObjectStorage:
 
     def get(self, key: str) -> bytes:
         return self._resolve(key).read_bytes()
+
+    @staticmethod
+    def _etag(path: Path) -> str:
+        stat = path.stat()
+        return f'"local-{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+
+    def head(self, key: str) -> Dict[str, Any]:
+        path = self._resolve(key)
+        stat = path.stat()
+        return {
+            "backend": self.backend,
+            "key": key,
+            "size": stat.st_size,
+            "contentType": None,
+            "metadata": {},
+            "etag": self._etag(path),
+            "versionId": None,
+        }
+
+    def get_range(
+        self,
+        key: str,
+        start: int,
+        end: int,
+        *,
+        version_id: Optional[str] = None,
+        if_match: Optional[str] = None,
+    ) -> bytes:
+        del version_id
+        path = self._resolve(key)
+        if start < 0 or end < start:
+            raise ValueError("Invalid object byte range")
+        if if_match and self._etag(path) != if_match:
+            raise RuntimeError("Object changed after metadata resolution")
+        size = path.stat().st_size
+        if start >= size or end >= size:
+            raise ValueError("Object byte range exceeds content length")
+        with path.open("rb") as source:
+            source.seek(start)
+            content = source.read(end - start + 1)
+        if len(content) != end - start + 1:
+            raise RuntimeError("Object byte range response is incomplete")
+        return content
 
     def exists(self, key: str) -> bool:
         return self._resolve(key).exists()
@@ -203,6 +256,58 @@ class S3ObjectStorage:
     def get(self, key: str) -> bytes:
         obj = self.client().get_object(Bucket=self.bucket, Key=self._full_key(key))
         return obj["Body"].read()
+
+    def head(self, key: str) -> Dict[str, Any]:
+        response = self.client().head_object(
+            Bucket=self.bucket,
+            Key=self._full_key(key),
+        )
+        return {
+            "backend": self.backend,
+            "key": key,
+            "bucket": self.bucket,
+            "size": int(response.get("ContentLength") or 0),
+            "contentType": response.get("ContentType"),
+            "metadata": {
+                str(name).lower(): str(value)
+                for name, value in dict(response.get("Metadata") or {}).items()
+            },
+            "etag": response.get("ETag"),
+            "versionId": response.get("VersionId"),
+            "objectLockMode": response.get("ObjectLockMode"),
+            "objectLockRetainUntil": response.get("ObjectLockRetainUntilDate"),
+            "serverSideEncryption": response.get("ServerSideEncryption"),
+            "sseKmsKeyId": response.get("SSEKMSKeyId"),
+        }
+
+    def get_range(
+        self,
+        key: str,
+        start: int,
+        end: int,
+        *,
+        version_id: Optional[str] = None,
+        if_match: Optional[str] = None,
+    ) -> bytes:
+        if start < 0 or end < start:
+            raise ValueError("Invalid object byte range")
+        kwargs: Dict[str, Any] = {
+            "Bucket": self.bucket,
+            "Key": self._full_key(key),
+            "Range": f"bytes={start}-{end}",
+        }
+        if version_id:
+            kwargs["VersionId"] = version_id
+        if if_match:
+            kwargs["IfMatch"] = if_match
+        response = self.client().get_object(**kwargs)
+        content_range = str(response.get("ContentRange") or "")
+        if not content_range.startswith(f"bytes {start}-{end}/"):
+            raise RuntimeError("Object byte range response is not bound to the requested interval")
+        content = response["Body"].read()
+        if len(content) != end - start + 1:
+            raise RuntimeError("Object byte range response is incomplete")
+        return content
 
     def exists(self, key: str) -> bool:
         try:

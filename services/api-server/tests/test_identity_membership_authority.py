@@ -87,12 +87,14 @@ def _directory(
 def _membership(
     tenant_id: str,
     *,
+    tenant_status: str | None = "active",
     role: str = "viewer",
     status: str = "active",
     version: int = 1,
 ) -> TenantMembershipRecord:
     return TenantMembershipRecord(
         tenant_id=tenant_id,
+        tenant_status=tenant_status,
         role=role,
         status=status,
         membership_version=version,
@@ -196,6 +198,7 @@ def test_postgres_authority_ignores_malicious_app_metadata_and_uses_db_role(
     assert context["membershipAuthority"] == {
         "source": "normalized_postgres",
         "principalStatus": "active",
+        "tenantStatus": "active",
         "membershipStatus": "active",
         "membershipVersion": 7,
     }
@@ -296,6 +299,54 @@ def test_requested_tenant_must_match_an_active_db_membership(monkeypatch):
         )
     assert inactive.value.status_code == 403
     assert inactive.value.detail["error"] == "tenant_membership_inactive"
+
+
+def test_requested_tenant_must_be_active_even_when_membership_is_active(
+    monkeypatch,
+):
+    _install_authority(
+        monkeypatch,
+        _directory(
+            _membership(
+                "tenant-suspended",
+                tenant_status="suspended",
+                role="admin",
+            ),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        authz.identity_context_from_request(
+            _request(tenant_header="tenant-suspended")
+        )
+
+    assert error.value.status_code == 403
+    assert error.value.detail == {
+        "error": "tenant_inactive",
+        "requestedTenantId": "tenant-suspended",
+        "tenantStatus": "suspended",
+    }
+
+
+def test_implicit_selection_fails_closed_when_tenant_status_is_missing(
+    monkeypatch,
+):
+    _install_authority(
+        monkeypatch,
+        _directory(
+            _membership("tenant-legacy", tenant_status=None, role="admin"),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        authz.identity_context_from_request(_request())
+
+    assert error.value.status_code == 403
+    assert error.value.detail == {
+        "error": "tenant_inactive",
+        "requestedTenantId": "tenant-legacy",
+        "tenantStatus": "unknown",
+    }
 
 
 def test_disabled_db_principal_is_rejected_before_membership_role(monkeypatch):
@@ -420,6 +471,7 @@ def test_postgres_repository_uses_parameterized_read_only_query():
                 "Directory Principal",
                 "legacy-user",
                 "tenant-a",
+                "active",
                 "legal_reviewer",
                 "active",
                 11,
@@ -445,6 +497,7 @@ def test_postgres_repository_uses_parameterized_read_only_query():
     assert sql.lstrip().upper().startswith("SELECT")
     assert '"realytics".principals' in sql
     assert '"realytics".tenant_memberships' in sql
+    assert '"realytics".tenants' in sql
     assert "INSERT" not in sql.upper()
     assert "UPDATE" not in sql.upper()
     assert "CREATE" not in sql.upper()

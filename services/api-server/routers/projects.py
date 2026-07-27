@@ -36,18 +36,28 @@ from agents.stress_test_agent import StressTestAgent
 from schemas.credit_enhancement import CreditEnhancementRequest
 from agents.credit_enhancement_agent import CreditEnhancementAgent
 from schemas.cash_sweep import CashSweepRequest
+from schemas.document_review_workspace import DocumentReviewWorkspaceViewModel
 from agents.cash_sweep_agent import CashSweepAgent
 from integrations.kakao import build_kakao_intake_plan_message, build_kakao_workflow_result_message
 from agents.restructuring_agent import RestructuringAgent
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
-from db.repositories.orchestration_repository import OrchestrationRepository
+from db.repositories.orchestration_repository import (
+    OrchestrationRepository,
+    PostgresOrchestrationRepository,
+)
 from db.repositories.project_repository import ProjectRepository
 from db.repositories.postgres_project_repository import (
     PostgresProjectRepository,
     ProjectVersionConflict,
 )
-from db.repositories.project_snapshot_repository import ProjectSnapshotRepository
-from db.repositories.report_repository import ReportRepository
+from db.repositories.project_snapshot_repository import (
+    PostgresProjectSnapshotRepository,
+    ProjectSnapshotRepository,
+)
+from db.repositories.report_repository import (
+    PostgresReportRepository,
+    ReportRepository,
+)
 from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
 from db.repositories.legal_intelligence_repository import (
@@ -155,7 +165,14 @@ from use_cases.pf_review import run_and_save_pf_review_use_case, plan_orchestrat
 from routers.project_jobs import build_project_jobs_router
 from routers.project_parser_v2 import build_project_parser_v2_router
 from routers.project_source_documents import build_project_source_documents_router
-from use_cases.parser_v2_records import ParserV2RecordStore
+from use_cases.document_review_workspace import (
+    build_document_review_workspace_read_model,
+)
+from use_cases.glossary import list_glossary_candidates_use_case
+from use_cases.parser_v2_records import (
+    ParserV2RecordStore,
+    approved_input_snapshot_wire_payload,
+)
 from use_cases.parser_v2_runtime import build_parser_v2_runtime_dependencies
 from use_cases.term_annotation import annotate_terms_use_case
 from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
@@ -191,7 +208,11 @@ from use_cases.project_management import (
     list_projects_use_case,
     update_project_use_case,
 )
-from use_cases.report_generation import export_saved_report_use_case, generate_and_save_pf_report_use_case
+from use_cases.report_generation import (
+    export_saved_report_use_case,
+    generate_and_save_pf_report_use_case,
+    publish_saved_report_use_case,
+)
 from use_cases.source_locator_completeness import run_source_locator_completeness_audit_use_case
 from use_cases.report_templates import (
     get_report_template_use_case,
@@ -270,19 +291,40 @@ def persist_snapshot(project_id: str, record: Dict[str, Any]) -> None:
     if not upsert_project_snapshot_record(project_id, record):
         persist_state()
 
-def project_repository(request: Request | None = None):
+def project_repository(
+    request: Request | None = None,
+    *,
+    tenant_id: str | None = None,
+):
     """Return the configured project authority.
 
     PostgreSQL is authoritative whenever the normalized Postgres backend is
     selected.  The in-memory repository remains a deliberate local/test lane;
     it is never used as a fallback after an authenticated production request.
     """
-    if request is not None and storage_backend() in {"postgres", "postgresql"}:
-        context = identity_context_from_request(request)
-        tenant_id = str((context.get("user") or {}).get("tenantId") or "").strip()
-        if not tenant_id:
-            raise HTTPException(status_code=401, detail={"error": "tenant_required"})
-        return PostgresProjectRepository(tenant_id=tenant_id)
+    if storage_backend() in {"postgres", "postgresql"}:
+        resolved_tenant_id = str(tenant_id or "").strip()
+        if request is not None:
+            context = identity_context_from_request(request)
+            request_tenant_id = str(
+                (context.get("user") or {}).get("tenantId") or ""
+            ).strip()
+            if resolved_tenant_id and request_tenant_id != resolved_tenant_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "tenant_scope_mismatch"},
+                )
+            resolved_tenant_id = request_tenant_id
+        if not resolved_tenant_id:
+            if request is not None:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "tenant_required"},
+                )
+            raise RuntimeError(
+                "A verified tenant is required for normalized project persistence"
+            )
+        return PostgresProjectRepository(tenant_id=resolved_tenant_id)
     return ProjectRepository(
         PROJECTS_DB,
         REPORTS_DB,
@@ -294,11 +336,53 @@ def project_repository(request: Request | None = None):
         persist_project=persist_project,
     )
 
-def report_repository() -> ReportRepository:
+def report_repository(
+    request: Request | None = None,
+    *,
+    tenant_id: str | None = None,
+):
+    """Return PostgreSQL authority or the explicit local compatibility lane."""
+    if storage_backend() in {"postgres", "postgresql"}:
+        resolved_tenant_id = str(tenant_id or "").strip()
+        if request is not None:
+            context = identity_context_from_request(request)
+            request_tenant_id = str(
+                (context.get("user") or {}).get("tenantId") or ""
+            ).strip()
+            if resolved_tenant_id and request_tenant_id != resolved_tenant_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "tenant_scope_mismatch"},
+                )
+            resolved_tenant_id = request_tenant_id
+        if not resolved_tenant_id:
+            if request is not None:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "tenant_required"},
+                )
+            raise RuntimeError(
+                "A verified tenant is required for normalized report persistence"
+            )
+        return PostgresReportRepository(tenant_id=resolved_tenant_id)
     return ReportRepository(REPORTS_DB, persist_state, persist_report=persist_report)
 
 def source_document_repository() -> SourceDocumentRepository:
     return SourceDocumentRepository(PROJECTS_DB, persist_state, persist_project=persist_project)
+
+
+def project_source_document_read_repository(
+    project_id: str,
+    project: Dict[str, Any],
+) -> SourceDocumentRepository:
+    """Create a read boundary over one already-authorized project record.
+
+    In PostgreSQL mode the record came from the request tenant's normalized
+    repository.  Keeping this one-record store prevents a later source lookup
+    from silently falling back to the legacy process-global projection.
+    """
+
+    return SourceDocumentRepository({str(project_id): project}, lambda: None)
 
 def upload_archive_repository() -> UploadArchiveRepository:
     return UploadArchiveRepository()
@@ -322,6 +406,42 @@ def _project_tenant_id(project_id: str) -> str | None:
     normalized = str(value or "").strip()
     return normalized or None
 
+
+def _tenant_scoped_snapshot_corpus(
+    project_id: str,
+    snapshots: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    """Exclude snapshots whose project lineage cannot be tied to this tenant."""
+    expected_tenant_id = _project_tenant_id(project_id)
+    scoped: list[Dict[str, Any]] = []
+    for snapshot in snapshots:
+        candidate_project_id = str(snapshot.get("projectId") or "").strip()
+        canonical_project = (
+            snapshot.get("canonicalProject")
+            if isinstance(snapshot.get("canonicalProject"), dict)
+            else {}
+        )
+        metadata = (
+            canonical_project.get("_meta")
+            if isinstance(canonical_project.get("_meta"), dict)
+            else {}
+        )
+        candidate_tenant_id = str(
+            snapshot.get("tenantId")
+            or snapshot.get("tenant_id")
+            or metadata.get("tenantId")
+            or metadata.get("tenant_id")
+            or _project_tenant_id(candidate_project_id)
+            or ""
+        ).strip()
+        if expected_tenant_id:
+            if candidate_tenant_id == expected_tenant_id:
+                scoped.append(snapshot)
+        elif candidate_project_id == str(project_id):
+            # Legacy tenantless data may only compare within the current project.
+            scoped.append(snapshot)
+    return scoped
+
 def parser_v2_record_store() -> ParserV2RecordStore:
     factory = PARSER_V2_RUNTIME_DEPENDENCIES.get("record_store_factory")
     return factory() if callable(factory) else ParserV2RecordStore()
@@ -329,15 +449,83 @@ def parser_v2_record_store() -> ParserV2RecordStore:
 def market_evidence_repository() -> MarketEvidenceRepository:
     return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state)
 
-def project_snapshot_repository() -> ProjectSnapshotRepository:
+def project_snapshot_repository(
+    request: Request | None = None,
+    *,
+    tenant_id: str | None = None,
+    local_compatibility: bool = False,
+):
+    if (
+        storage_backend() in {"postgres", "postgresql"}
+        and not local_compatibility
+    ):
+        resolved_tenant_id = str(tenant_id or "").strip()
+        if request is not None:
+            context = identity_context_from_request(request)
+            request_tenant_id = str(
+                (context.get("user") or {}).get("tenantId") or ""
+            ).strip()
+            if resolved_tenant_id and request_tenant_id != resolved_tenant_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "tenant_scope_mismatch"},
+                )
+            resolved_tenant_id = request_tenant_id
+        if not resolved_tenant_id:
+            if request is not None:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "tenant_required"},
+                )
+            raise RuntimeError(
+                "A verified tenant is required for normalized Snapshot persistence"
+            )
+        return PostgresProjectSnapshotRepository(
+            tenant_id=resolved_tenant_id
+        )
     return ProjectSnapshotRepository(PROJECT_SNAPSHOTS_DB, persist_state, persist_snapshot=persist_snapshot)
 
-def orchestration_repository() -> OrchestrationRepository:
+def orchestration_repository(
+    request: Request | None = None,
+    *,
+    tenant_id: str | None = None,
+) -> OrchestrationRepository:
+    if storage_backend() in {"postgres", "postgresql"}:
+        resolved_tenant_id = str(tenant_id or "").strip()
+        if request is not None:
+            context = identity_context_from_request(request)
+            request_tenant_id = str(
+                (context.get("user") or {}).get("tenantId") or ""
+            ).strip()
+            if resolved_tenant_id and request_tenant_id != resolved_tenant_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "tenant_scope_mismatch"},
+                )
+            resolved_tenant_id = request_tenant_id
+        if not resolved_tenant_id:
+            if request is not None:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "tenant_required"},
+                )
+            raise RuntimeError(
+                "A verified tenant is required for normalized orchestration persistence"
+            )
+        return PostgresOrchestrationRepository(
+            tenant_id=resolved_tenant_id,
+            report_repository=PostgresReportRepository(
+                tenant_id=resolved_tenant_id
+            ),
+            project_snapshot_repository=PostgresProjectSnapshotRepository(
+                tenant_id=resolved_tenant_id
+            ),
+        )
     return OrchestrationRepository(
         ORCHESTRATIONS_DB,
-        report_repository(),
+        report_repository(request, tenant_id=tenant_id),
         market_evidence_repository(),
-        project_snapshot_repository(),
+        project_snapshot_repository(local_compatibility=True),
         persist_state,
         persist_run=persist_orchestration_run,
     )
@@ -355,6 +543,13 @@ def tenant_id_from_request(request: Request) -> str | None:
     user = context.get("user") or {}
     session = context.get("session") or {}
     return user.get("tenantId") or session.get("tenantId")
+
+
+def authoritative_project(project_id: str, request: Request) -> Dict[str, Any]:
+    project = project_repository(request).get(str(project_id))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
 
 def ai_context_from_request(
     request: Request,
@@ -1553,6 +1748,7 @@ load_fixtures()
 
 @router.get("/")
 def get_projects(request: Request):
+    authorize_request(request, "project:read")
     projects = list_projects_use_case(project_repository(request))
     return [project for project in projects if project_visible_to_identity(project, request)]
 
@@ -1568,10 +1764,21 @@ def get_recent_work(request: Request, limit: int = Query(5, ge=1, le=20)):
         if not project_id:
             continue
         documents = list_source_documents_use_case(source_document_repository(), project_id)
-        runs = orchestration_repository().list_metadata(project_id)
+        runs = orchestration_repository(request).list_metadata(project_id)
         latest_run = max(runs, key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), default={})
         state = project.get("chief_orchestration_state") or {}
-        gate = state.get("approvalReadinessGate") or state.get("approval_readiness_gate") or {}
+        gate = (
+            state.get("approvalReadinessGate")
+            or state.get("approval_readiness_gate")
+            or {}
+        )
+        raw_approval_status = str(latest_run.get("approvalStatus") or "").strip().lower()
+        approval_status = (
+            raw_approval_status
+            if raw_approval_status
+            in {"not_requested", "pending", "approved", "rejected", "superseded"}
+            else "not_requested"
+        )
         risk_count = len(project.get("risk_register", {}).get("risks", []) if isinstance(project.get("risk_register"), dict) else [])
         items.append({
             "projectId": project_id,
@@ -1579,16 +1786,17 @@ def get_recent_work(request: Request, limit: int = Query(5, ge=1, le=20)):
             "track": project.get("workflowTrack") or project.get("workflow_track"),
             "lastWorkedAt": latest_run.get("completed_at") or latest_run.get("started_at") or project.get("updatedAt") or project.get("updated_at"),
             "latestRunId": latest_run.get("run_id"),
-            "latestRunStatus": latest_run.get("status"),
+            "latestRunStatus": latest_run.get("executionStatus") or latest_run.get("status"),
             "sourceDocumentCount": len(documents),
             "openReviewCount": len(project.get("pending_reviews", []) if isinstance(project.get("pending_reviews"), list) else []),
             "riskCount": risk_count,
-            "approvalStatus": gate.get("status") or "not_started",
+            "approvalStatus": approval_status,
+            "approvalReadinessStatus": gate.get("status") or "not_started",
             "nextAction": _resume_action(project, documents, latest_run, gate),
             "sourceHashes": sorted({str(item.get("sha256") or item.get("originalFileHash")) for item in documents if item.get("sha256") or item.get("originalFileHash")}),
         })
     items.sort(key=lambda item: str(item.get("lastWorkedAt") or ""), reverse=True)
-    return {"schemaVersion": "realytics-recent-work-v1", "count": min(limit, len(items)), "items": items[:limit]}
+    return {"schemaVersion": "realytics-recent-work-v2", "count": min(limit, len(items)), "items": items[:limit]}
 
 
 @router.post("/intake/continuation-check")
@@ -1616,6 +1824,7 @@ def check_intake_continuation(request: Request, input_data: Dict[str, Any] | Non
 
 @router.post("/")
 def create_project(project_data: Dict[str, Any], request: Request):
+    authorize_request(request, "project:write")
     reject_server_managed_project_authority_fields(project_data)
     try:
         repository = project_repository(request)
@@ -1631,14 +1840,21 @@ def create_project(project_data: Dict[str, Any], request: Request):
 
 @router.get("/{project_id}")
 def get_project(project_id: str, request: Request):
+    authorize_request(request, "project:read")
     project = get_project_use_case(project_repository(request), project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    enforce_project_tenant_scope(request, project)
     return project
 
 @router.put("/{project_id}")
 def update_project(project_id: str, project_data: Dict[str, Any], request: Request):
+    authorize_request(request, "project:write")
     reject_server_managed_project_authority_fields(project_data)
+    current = get_project_use_case(project_repository(request), project_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Project not found")
+    enforce_project_tenant_scope(request, current)
     try:
         project = update_project_use_case(project_repository(request), project_id, project_data)
     except ProjectVersionConflict as exc:
@@ -1649,6 +1865,11 @@ def update_project(project_id: str, project_data: Dict[str, Any], request: Reque
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str, request: Request):
+    authorize_request(request, "project:write")
+    current = get_project_use_case(project_repository(request), project_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Project not found")
+    enforce_project_tenant_scope(request, current)
     try:
         deleted = delete_project_use_case(project_repository(request), project_id)
     except ProjectVersionConflict as exc:
@@ -1877,7 +2098,7 @@ def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = N
     if run is True and track in {"development", "pf"}:
         source_data = _hydrated_project_source(project_id, {})
         run_result = run_and_save_pf_review_use_case(
-            orchestration_repository(), project_id, source_data, {}
+            orchestration_repository(request), project_id, source_data, {}
         )
         analysis_run = {
             "run_id": run_result.get("run_id"),
@@ -2335,7 +2556,7 @@ async def upload_business_plan_and_run_pf_review(
     project_data = attach_approved_assumption_overrides(project_id, project_data)
     project_data = attach_active_restructuring_cures(project_id, project_data)
     run = run_and_save_pf_review_use_case(
-        orchestration_repository(),
+        orchestration_repository(request),
         project_id,
         project_data,
         {
@@ -3885,18 +4106,36 @@ def list_project_legal_law_changes(project_id: str, request: Request, limit: int
     return {"projectId": project_id, "items": records[:limit]}
 
 @router.post("/{project_id}/reports/generate")
-def generate_report(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    result = generate_and_save_pf_report_use_case(report_repository(), project_id, PROJECTS_DB[project_id], input_data)
+def generate_report(project_id: str, request: Request, input_data: Dict[str, Any]):
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "report:export")
+    enforce_project_tenant_scope(request, project)
+    result = generate_and_save_pf_report_use_case(
+        report_repository(request),
+        project_id,
+        project,
+        input_data,
+    )
     structured_report = result["generated"]["structuredReport"]
     md_report = result["generated"]["reportMarkdown"]
     report_record = result["reportRecord"]
+    record_sensitive_project_event(
+        request,
+        event_type="pf_report_draft_generated",
+        project_id=project_id,
+        metadata={
+            "reportId": report_record.get("report_id"),
+            "version": report_record.get("version"),
+            "status": report_record.get("status"),
+            "reportEligible": (report_record.get("metadata") or {}).get("report_eligible"),
+            "authorization": authorization.get("authorization"),
+        },
+    )
     return {
         "project_id": project_id,
         "report_id": report_record["report_id"],
         "version": report_record["version"],
+        "status": report_record["status"],
         "template": structured_report["template"],
         "report": structured_report,
         "report_markdown": md_report,
@@ -3905,16 +4144,18 @@ def generate_report(project_id: str, input_data: Dict[str, Any]):
     }
 
 @router.get("/{project_id}/reports")
-def get_reports(project_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return report_repository().list_metadata(project_id)
+def get_reports(project_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    return report_repository(request).list_metadata(project_id)
 
 @router.get("/{project_id}/reports/{report_id}")
-def get_report(project_id: str, report_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    repo = report_repository()
+def get_report(project_id: str, report_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    repo = report_repository(request)
     record = repo.get(project_id, report_id)
     if not record:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -3926,20 +4167,23 @@ def get_report(project_id: str, report_id: str):
     }
 
 @router.get("/{project_id}/report-templates")
-def list_report_templates(project_id: str):
+def list_report_templates(project_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     try:
-        return list_report_templates_use_case(project_repository(), project_id)
+        return list_report_templates_use_case(project_repository(request), project_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @router.post("/{project_id}/report-templates")
 def upsert_report_template(project_id: str, request: Request, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authz = authorize_request(request, "report:export")
+    enforce_project_tenant_scope(request, project)
     try:
         result = upsert_report_template_use_case(
-            project_repository(),
+            project_repository(request),
             project_id,
             input_data,
             edited_by=input_data.get("editedBy") or input_data.get("edited_by") or user_id_from_request(request),
@@ -3960,17 +4204,31 @@ def upsert_report_template(project_id: str, request: Request, input_data: Dict[s
     return result
 
 @router.get("/{project_id}/report-templates/{template_id}")
-def get_report_template(project_id: str, template_id: str):
+def get_report_template(project_id: str, template_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     try:
-        return get_report_template_use_case(project_repository(), project_id, template_id)
+        return get_report_template_use_case(
+            project_repository(request),
+            project_id,
+            template_id,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @router.post("/{project_id}/reports/{report_id}/exports")
 def create_report_export(project_id: str, report_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    project = authoritative_project(project_id, request)
     authz = authorize_request(request, "report:export")
+    enforce_project_tenant_scope(request, project)
     try:
-        export_record = export_saved_report_use_case(report_repository(), project_id, report_id, input_data)
+        export_record = export_saved_report_use_case(
+            report_repository(request),
+            project_id,
+            report_id,
+            input_data,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -3988,13 +4246,56 @@ def create_report_export(project_id: str, report_id: str, request: Request, inpu
             "authorization": authz.get("authorization"),
         },
     )
-    return report_repository().export_metadata(export_record)
+    return report_repository(request).export_metadata(export_record)
+
+
+@router.post("/{project_id}/reports/{report_id}/publish")
+def publish_report(project_id: str, report_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "project:review")
+    enforce_project_tenant_scope(request, project)
+    enforce_high_risk_step_up(
+        authorization,
+        action="pf_report_final_publish",
+    )
+    actor_id = user_id_from_request(request)
+    try:
+        record = publish_saved_report_use_case(
+            report_repository(request),
+            orchestration_repository(request),
+            project_snapshot_repository(request),
+            project_id,
+            report_id,
+            published_by=actor_id,
+            published_at=now_iso(),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_sensitive_project_event(
+        request,
+        event_type="pf_report_final_published",
+        project_id=project_id,
+        run_id=record.get("run_id"),
+        metadata={
+            "reportId": report_id,
+            "contentSha256": (record.get("metadata") or {}).get("content_sha256"),
+            "projectSnapshotId": (
+                (record.get("publication") or {}).get("decisionPackage") or {}
+            ).get("projectSnapshotId"),
+            "authorization": authorization.get("authorization"),
+            "identityAssurance": authorization.get("identityAssurance"),
+        },
+    )
+    return report_repository(request).metadata(record)
 
 @router.get("/{project_id}/reports/{report_id}/exports")
-def list_report_exports(project_id: str, report_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    repo = report_repository()
+def list_report_exports(project_id: str, report_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    repo = report_repository(request)
     record = repo.get(project_id, report_id)
     if not record:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -4002,10 +4303,10 @@ def list_report_exports(project_id: str, report_id: str):
 
 @router.get("/{project_id}/reports/{report_id}/exports/{export_id}/download")
 def download_report_export(project_id: str, report_id: str, export_id: str, request: Request):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authz = authorize_request(request, "report:export")
-    repo = report_repository()
+    enforce_project_tenant_scope(request, project)
+    repo = report_repository(request)
     record = repo.get(project_id, report_id)
     if not record:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -4036,8 +4337,15 @@ def download_report_export(project_id: str, report_id: str, export_id: str, requ
         },
     )
 
-def _hydrated_project_source(project_id: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
-    source_data = deep_merge(PROJECTS_DB[project_id], (input_data or {}).get("project_data", {}))
+def _hydrated_project_source(
+    project_id: str,
+    input_data: Dict[str, Any],
+    authoritative_source: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    base = authoritative_source or PROJECTS_DB.get(project_id)
+    if base is None:
+        raise LookupError("Project not found")
+    source_data = deep_merge(base, (input_data or {}).get("project_data", {}))
     source_data = attach_persisted_land_evidence(project_id, source_data)
     source_data = attach_persisted_parsed_facts(project_id, source_data)
     source_data = attach_approved_assumption_overrides(project_id, source_data)
@@ -4314,7 +4622,7 @@ def apply_unsold_ltv_cure_and_rerun(project_id: str, request: Request, input_dat
     project_data = dict(project_data)
     project_data["adoptedRestructuringCures"] = [saved_cure]
     rerun = run_and_save_pf_review_use_case(
-        orchestration_repository(),
+        orchestration_repository(request),
         project_id,
         project_data,
         {"trigger": "unsold_ltv_cure", "cureId": saved_cure.get("cureId")},
@@ -4549,6 +4857,171 @@ def _workspace_page_data(
         "taskGraph": plan.get("taskGraph") or {},
         "chiefArtifacts": chief_artifacts,
     }
+
+
+@router.get(
+    "/{project_id}/workspace/document-review",
+    response_model=DocumentReviewWorkspaceViewModel,
+)
+def get_project_document_review_workspace(
+    project_id: str,
+    request: Request,
+):
+    """Return one tenant-scoped, versioned Parser V2 review read model.
+
+    Candidate, review, canonical-selection, and approved-snapshot records are
+    assembled on the server after one project authorization boundary.  The
+    payload remains read-only and candidate-first; it cannot promote a value or
+    stand in for an ApprovedInputSnapshot.
+    """
+
+    authz = authorize_request(request, "evidence:read")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    user = authz.get("user") if isinstance(authz.get("user"), dict) else {}
+    metadata = project.get("_meta") if isinstance(project.get("_meta"), dict) else {}
+    tenant_id = str(
+        user.get("tenantId")
+        or metadata.get("tenantId")
+        or metadata.get("tenant_id")
+        or ""
+    ).strip()
+    if not tenant_id:
+        if (
+            str(authz.get("rbacMode") or "").lower() == "strict"
+            or storage_backend() in {"postgres", "postgresql"}
+        ):
+            raise HTTPException(status_code=401, detail={"error": "tenant_required"})
+        tenant_id = "default"
+
+    store = parser_v2_record_store()
+    try:
+        runs = store.list_parsing_runs(tenant_id, project_id)
+        document_versions = store.list_document_versions(tenant_id, project_id)
+        candidates = store.list_candidates(tenant_id, project_id)
+        conflicts = store.list_source_conflicts(tenant_id, project_id)
+        reviews = store.list_review_decisions(tenant_id, project_id)
+        selections = store.list_canonical_selections(tenant_id, project_id)
+        snapshots = [
+            approved_input_snapshot_wire_payload(item)
+            for item in store.list_approved_input_snapshots(tenant_id, project_id)
+        ]
+        seals = store.list_candidate_set_seals(tenant_id, project_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "document_review_authority_unavailable",
+                "message": str(exc),
+            },
+        ) from exc
+
+    documents_by_id = {
+        str(item.get("documentVersionId") or ""): item
+        for item in document_versions
+        if str(item.get("documentVersionId") or "")
+    }
+    packages: list[Dict[str, Any]] = []
+    for run in runs:
+        run_id = str(run.get("parsingRunId") or "")
+        document_version_id = str(run.get("documentVersionId") or "")
+        document_version = documents_by_id.get(document_version_id)
+        if not run_id or document_version is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "parser_run_lineage_incomplete",
+                    "parsingRunId": run_id or None,
+                    "documentVersionId": document_version_id or None,
+                },
+            )
+        run_candidates = [
+            item for item in candidates if item.get("parsingRunId") == run_id
+        ]
+        candidate_ids = {
+            str(item.get("candidateId") or "") for item in run_candidates
+        }
+        run_conflicts = [
+            item
+            for item in conflicts
+            if run_id in (item.get("sourceParsingRunIds") or [])
+            or item.get("parsingRunId") == run_id
+            or candidate_ids.intersection(
+                str(value) for value in (item.get("candidateIds") or [])
+            )
+        ]
+        run_reviews = [
+            item for item in reviews if str(item.get("candidateId") or "") in candidate_ids
+        ]
+        run_selections = [
+            item
+            for item in selections
+            if str(item.get("candidateId") or "") in candidate_ids
+        ]
+        selection_ids = {
+            str(item.get("selectionId") or "") for item in run_selections
+        }
+        run_snapshots = [
+            item
+            for item in snapshots
+            if selection_ids.intersection(
+                str(value) for value in (item.get("selectionIds") or [])
+            )
+        ]
+        run_seal = next(
+            (
+                item
+                for item in seals
+                if item.get("parsingRunId") == run_id
+            ),
+            None,
+        )
+        packages.append(
+            {
+                "schemaVersion": "realytics-parser-v2-run-package-v2",
+                "candidateOnly": True,
+                "authoritative": False,
+                "projectProjectionMutated": False,
+                "projectId": project_id,
+                "parsingRun": run,
+                "documentVersion": document_version,
+                "candidates": run_candidates,
+                "conflicts": run_conflicts,
+                "candidateSetSeal": run_seal,
+                "reviewDecisions": run_reviews,
+                "canonicalSelections": run_selections,
+                "approvedInputSnapshots": run_snapshots,
+            }
+        )
+
+    source_documents = list_source_documents_use_case(
+        project_source_document_read_repository(project_id, project),
+        project_id,
+    )
+    glossary = list_glossary_candidates_use_case(
+        project_id=project_id,
+        limit=500,
+    )
+    result = build_document_review_workspace_read_model(
+        project_id=project_id,
+        source_documents=source_documents,
+        run_packages=packages,
+        glossary_candidates=glossary.get("candidates") or [],
+    )
+    record_sensitive_project_event(
+        request,
+        event_type="document_review_workspace_loaded",
+        project_id=project_id,
+        metadata={
+            "snapshotId": result.get("snapshotId"),
+            "snapshotHash": result.get("snapshotHash"),
+            "viewModelVersion": result.get("viewModelVersion"),
+            "sourceDocumentCount": len(source_documents),
+            "parsingRunCount": len(runs),
+            "reviewQueueCount": len(result.get("reviewQueue") or []),
+        },
+    )
+    return result
 
 
 @router.get("/{project_id}/workspace/context")
@@ -5329,7 +5802,7 @@ def _snapshot_history_by_project() -> Dict[str, list[Dict[str, Any]]]:
     metrics persisted per run — mapped onto the covenant metric keys.
     """
     history: Dict[str, list[Dict[str, Any]]] = {}
-    for snapshot in project_snapshot_repository().list_all():
+    for snapshot in project_snapshot_repository(local_compatibility=True).list_all():
         project_id = snapshot.get("projectId")
         seed = snapshot.get("caseComparisonSeed") or {}
         metrics = {}
@@ -5428,8 +5901,12 @@ def run_orchestration_workflow(
         raise HTTPException(status_code=422, detail="Missing 'workflow' selection")
     source_data = _hydrated_project_source(project_id, input_data)
     if workflow == "full_pf_review":
+        options = dict(input_data.get("options") or {})
+        options["user_id"] = user_id_from_request(request)
+        options["requested_by"] = user_id_from_request(request)
+        options["tenant_id"] = tenant_id_from_request(request)
         run = run_and_save_pf_review_use_case(
-            orchestration_repository(), project_id, source_data, input_data.get("options", {}),
+            orchestration_repository(request), project_id, source_data, options,
         )
     else:
         run = run_workflow_use_case(project_id, source_data, workflow, input_data.get("options", {}))
@@ -5456,8 +5933,7 @@ def start_pf_review_orchestration(
     request: Request,
     input_data: Dict[str, Any] | None = None,
 ):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorization = authorize_request(request, "project:analyze")
     if not authorization.get("authenticated"):
         raise HTTPException(
@@ -5467,31 +5943,39 @@ def start_pf_review_orchestration(
                 "scope": "pf_review_orchestration",
             },
         )
-    enforce_project_tenant_scope(request, PROJECTS_DB[project_id])
+    enforce_project_tenant_scope(request, project)
 
     input_data = input_data or {}
-    source_data = _hydrated_project_source(project_id, input_data)
+    source_data = _hydrated_project_source(
+        project_id,
+        input_data,
+        project,
+    )
+    options = dict(input_data.get("options") or {})
+    options["user_id"] = user_id_from_request(request)
+    options["requested_by"] = user_id_from_request(request)
+    options["tenant_id"] = tenant_id_from_request(request)
     return run_and_save_pf_review_use_case(
-        orchestration_repository(),
+        orchestration_repository(request),
         project_id,
         source_data,
-        input_data.get("options", {}),
+        options,
     )
 
 
 @router.get("/{project_id}/orchestrations")
-def list_project_orchestrations(project_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    return orchestration_repository().list_metadata(project_id)
+def list_project_orchestrations(project_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    return orchestration_repository(request).list_metadata(project_id)
 
 @router.get("/{project_id}/orchestrations/{run_id}")
-def get_project_orchestration(project_id: str, run_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    run = orchestration_repository().get(project_id, run_id)
+def get_project_orchestration(project_id: str, run_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    run = orchestration_repository(request).get(project_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Orchestration run not found")
     return run
@@ -5500,11 +5984,11 @@ def get_project_orchestration(project_id: str, run_id: str):
 @router.get("/{project_id}/orchestrations/{run_id}/credit-documents")
 def get_project_orchestration_credit_documents(project_id: str, run_id: str, request: Request):
     """Return the Term Sheet and IC Memo generated during a PF review run."""
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
 
-    run = orchestration_repository().get(project_id, run_id)
+    run = orchestration_repository(request).get(project_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Orchestration run not found")
     artifacts = run.get("artifacts", {})
@@ -5540,9 +6024,9 @@ def export_project_credit_document(
     For a term sheet, `stage` (bridge / main_pf) selects the financing-stage
     variant; defaults to the auto-detected stage stored on the run.
     """
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authz = authorize_request(request, "report:export")
+    enforce_project_tenant_scope(request, project)
 
     artifact_key = CREDIT_DOCUMENT_ARTIFACT_KEYS.get(document)
     if not artifact_key:
@@ -5553,7 +6037,7 @@ def export_project_credit_document(
     if export_format == "md":
         export_format = "markdown"
 
-    run = orchestration_repository().get(project_id, run_id)
+    run = orchestration_repository(request).get(project_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Orchestration run not found")
     artifacts = run.get("artifacts", {}) or {}
@@ -5605,9 +6089,9 @@ def export_project_credit_document(
 
 @router.get("/{project_id}/risk-registers")
 def list_project_risk_registers(project_id: str, request: Request):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     return {
         "schemaVersion": "realytics-risk-register-list-v1",
         "projectId": project_id,
@@ -5626,12 +6110,12 @@ def list_project_risk_registers(project_id: str, request: Request):
 
 @router.get("/{project_id}/orchestrations/{run_id}/risk-register")
 def get_project_orchestration_risk_register(project_id: str, run_id: str, request: Request):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     record = get_risk_register_record(project_id, run_id)
     if not record:
-        run = orchestration_repository().get(project_id, run_id)
+        run = orchestration_repository(request).get(project_id, run_id)
         record = (run or {}).get("artifacts", {}).get("riskRegister")
     if not record:
         raise HTTPException(status_code=404, detail="Risk register not found")
@@ -5639,9 +6123,9 @@ def get_project_orchestration_risk_register(project_id: str, run_id: str, reques
 
 @router.get("/{project_id}/evidence-graphs")
 def list_project_evidence_graphs(project_id: str, request: Request):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     return {
         "schemaVersion": "realytics-evidence-graph-list-v1",
         "projectId": project_id,
@@ -5661,23 +6145,27 @@ def list_project_evidence_graphs(project_id: str, request: Request):
 
 @router.get("/{project_id}/orchestrations/{run_id}/evidence-graph")
 def get_project_orchestration_evidence_graph(project_id: str, run_id: str, request: Request):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     record = get_evidence_graph_record(project_id, run_id)
     if not record:
-        run = orchestration_repository().get(project_id, run_id)
+        run = orchestration_repository(request).get(project_id, run_id)
         record = (run or {}).get("artifacts", {}).get("evidenceGraph")
     if not record:
         raise HTTPException(status_code=404, detail="Evidence graph not found")
     return record
 
 @router.get("/{project_id}/snapshots")
-def list_project_snapshots(project_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+def list_project_snapshots(project_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
 
-    return list_project_snapshots_use_case(project_snapshot_repository(), project_id)
+    return list_project_snapshots_use_case(
+        project_snapshot_repository(request),
+        project_id,
+    )
 
 
 @router.get("/{project_id}/similar-cases/rag")
@@ -5689,32 +6177,50 @@ def similar_cases_rag(
     k: int = 5,
 ):
     """Retrieve relevant prior reviewed cases (institutional-memory RAG) with citations."""
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     from use_cases.similar_case_rag import retrieve_similar_cases_rag
 
-    corpus = project_snapshot_repository().list_all()
+    corpus = _tenant_scoped_snapshot_corpus(
+        project_id,
+        project_snapshot_repository(request).list_all(),
+    )
     return retrieve_similar_cases_rag(corpus, query=q, query_snapshot_id=snapshotId, k=max(1, min(k, 20)))
 
 @router.post("/{project_id}/snapshots/similar")
-def search_project_similar_snapshots(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+def search_project_similar_snapshots(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    snapshot_repo = project_snapshot_repository(request)
 
     try:
         return search_similar_project_snapshots_use_case(
-            project_snapshot_repository(),
+            snapshot_repo,
             project_id,
             input_data,
+            candidate_snapshots=_tenant_scoped_snapshot_corpus(
+                project_id,
+                snapshot_repo.list_all(),
+            ),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @router.post("/{project_id}/snapshots/diff")
-def diff_project_snapshots(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+def diff_project_snapshots(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any] | None = None,
+):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     input_data = input_data or {}
     base_snapshot_id = input_data.get("baseSnapshotId") or input_data.get("base_snapshot_id")
     compare_snapshot_id = input_data.get("compareSnapshotId") or input_data.get("compare_snapshot_id")
@@ -5723,7 +6229,7 @@ def diff_project_snapshots(project_id: str, input_data: Dict[str, Any] | None = 
 
     try:
         return diff_project_snapshots_use_case(
-            project_snapshot_repository(),
+            project_snapshot_repository(request),
             project_id,
             str(base_snapshot_id),
             str(compare_snapshot_id),
@@ -5732,12 +6238,17 @@ def diff_project_snapshots(project_id: str, input_data: Dict[str, Any] | None = 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @router.get("/{project_id}/snapshots/{snapshot_id}")
-def get_project_snapshot(project_id: str, snapshot_id: str):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+def get_project_snapshot(project_id: str, snapshot_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
 
     try:
-        return get_project_snapshot_use_case(project_snapshot_repository(), project_id, snapshot_id)
+        return get_project_snapshot_use_case(
+            project_snapshot_repository(request),
+            project_id,
+            snapshot_id,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -5748,12 +6259,12 @@ def upsert_project_snapshot_outcome(
     request: Request,
     input_data: Dict[str, Any],
 ):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authz = authorize_request(request, "project:write")
+    enforce_project_tenant_scope(request, project)
     try:
         snapshot = upsert_project_snapshot_outcome_use_case(
-            project_snapshot_repository(),
+            project_snapshot_repository(request),
             project_id,
             snapshot_id,
             input_data or {},
@@ -5793,22 +6304,27 @@ def approve_project_orchestration(
     request: Request,
     input_data: Dict[str, Any] | None = None,
 ):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
 
     authorization = authorize_request(request, "project:review")
+    enforce_project_tenant_scope(request, project)
     enforce_high_risk_step_up(
         authorization,
         action="pf_orchestration_final_approve",
     )
+    actor_id = user_id_from_request(request)
+    approval_input = dict(input_data or {})
+    approval_input["approved_by"] = actor_id
+    approval_input.pop("approvedBy", None)
 
     try:
         result = approve_orchestration_run_by_id_use_case(
-            orchestration_repository(),
+            orchestration_repository(request),
             project_id,
             run_id,
-            input_data,
+            approval_input,
             now_iso(),
+            approver_id=actor_id,
         )
         record_sensitive_project_event(
             request,
@@ -5830,13 +6346,17 @@ def approve_project_orchestration(
 # Job lifecycle routes are isolated from this domain router while reusing its
 # canonical project hydration and orchestration repositories.
 jobs_router = build_project_jobs_router(
-    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+    project_lookup=lambda project_id, tenant_id: project_repository(
+        tenant_id=tenant_id
+    ).get(str(project_id)),
     source_builder=_hydrated_project_source,
-    orchestration_repository_factory=orchestration_repository,
+    orchestration_repository_factory=(
+        lambda tenant_id: orchestration_repository(tenant_id=tenant_id)
+    ),
 )
 source_documents_router = build_project_source_documents_router(
-    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
-    source_document_repository_factory=source_document_repository,
+    project_lookup=authoritative_project,
+    source_document_repository_factory=project_source_document_read_repository,
     upload_archive_repository_factory=upload_archive_repository,
     audit_recorder=record_sensitive_project_event,
 )
@@ -5856,14 +6376,16 @@ def review_project_orchestration_handoff(
     project_id: str,
     run_id: str,
     handoff_id: str,
+    request: Request,
     input_data: Dict[str, Any] | None = None,
 ):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:review")
+    enforce_project_tenant_scope(request, project)
 
     try:
         return review_orchestration_handoff_by_id_use_case(
-            orchestration_repository(),
+            orchestration_repository(request),
             project_id,
             run_id,
             handoff_id,
@@ -5883,13 +6405,13 @@ def review_project_orchestration_risk_register_row(
     request: Request,
     input_data: Dict[str, Any] | None = None,
 ):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authz = authorize_request(request, "risk:review")
+    enforce_project_tenant_scope(request, project)
 
     try:
         reviewed = review_risk_register_row_by_id_use_case(
-            orchestration_repository(),
+            orchestration_repository(request),
             project_id,
             run_id,
             risk_id,

@@ -122,6 +122,7 @@ def test_hardened_profile_preserves_verified_oidc_bearer_identity(monkeypatch):
                 memberships=(
                     TenantMembershipRecord(
                         tenant_id="verified-tenant",
+                        tenant_status="active",
                         role="reviewer",
                         status="active",
                         membership_version=2,

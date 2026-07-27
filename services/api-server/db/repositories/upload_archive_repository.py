@@ -178,10 +178,151 @@ class UploadArchiveRepository:
         project_id: str,
         document: Dict[str, Any],
     ) -> Dict[str, Any] | None:
+        binding = self._resolve_object_binding(project_id, document)
+        if binding is None:
+            return None
+        archive_id, archive_tenant, object_key = binding
+        if self.hardened_storage_required() and not archive_tenant:
+            return None
+        if not self.object_storage.exists(object_key):
+            return None
+        if self.hardened_storage_required() and (
+            document.get("storageLifecycleStatus") != "active"
+            or document.get("malwareScanStatus") != "clean"
+        ):
+            return None
+        content = self.object_storage.get(object_key)
+        integrity_status = "verified" if sha256_bytes(content) == archive_id else "hash_mismatch"
+        if integrity_status != "verified":
+            return None
+
+        archive_path = self.object_storage.local_path(object_key)
+
+        return {
+            "path": archive_path,
+            "content": None if archive_path else content,
+            "archiveBackend": self.object_storage.backend,
+            "archiveObjectKey": object_key,
+            "archiveTenantId": archive_tenant,
+            "archiveId": archive_id,
+            "archiveHashAlgorithm": "sha256",
+            "archiveIntegrityStatus": integrity_status,
+            "fileSizeBytes": len(content),
+            "mediaType": document.get("contentType") or "application/octet-stream",
+            "filename": document.get("originalFileName") or f"{archive_id}{self.safe_suffix(document.get('originalFileName'))}",
+            "downloadUrl": f"/projects/{project_id}/source-documents/{archive_id}/download",
+        }
+
+    def resolve_view_metadata(
+        self,
+        project_id: str,
+        document: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        """Resolve an immutable object binding without downloading its body."""
+
+        binding = self._resolve_object_binding(project_id, document)
+        if binding is None:
+            return None
+        archive_id, archive_tenant, object_key = binding
+        if self.hardened_storage_required() and not archive_tenant:
+            return None
+        if self.hardened_storage_required() and self.object_storage.backend != "s3":
+            return None
+        if self.hardened_storage_required() and (
+            document.get("storageLifecycleStatus") != "active"
+            or document.get("malwareScanStatus") != "clean"
+        ):
+            return None
+        try:
+            head = self.object_storage.head(object_key)
+        except Exception:
+            return None
+        try:
+            size = int(head.get("size") or 0)
+        except (TypeError, ValueError):
+            return None
+        if size < 0:
+            return None
+        expected_size = document.get("fileSizeBytes")
+        if expected_size is not None:
+            try:
+                if int(expected_size) != size:
+                    return None
+            except (TypeError, ValueError):
+                return None
+        metadata = {
+            str(name).lower(): str(value)
+            for name, value in dict(head.get("metadata") or {}).items()
+        }
+        if self.object_storage.backend == "s3":
+            if metadata.get("sha256", "").lower() != str(archive_id).lower():
+                return None
+            if archive_tenant and metadata.get("tenant-id") != str(archive_tenant):
+                return None
+            if metadata.get("project-id") != self.project_component(project_id):
+                return None
+            if metadata.get("lifecycle-status") != "active":
+                return None
+            if self.hardened_storage_required() and metadata.get("malware-scan-status") != "clean":
+                return None
+            if self.hardened_storage_required() and (
+                not head.get("etag")
+                or not head.get("versionId")
+                or not head.get("objectLockMode")
+                or not head.get("objectLockRetainUntil")
+                or not head.get("serverSideEncryption")
+            ):
+                return None
+        elif document.get("archiveIntegrityStatus") not in {None, "verified"}:
+            return None
+
+        return {
+            "document": document,
+            "archiveBackend": self.object_storage.backend,
+            "archiveObjectKey": object_key,
+            "archiveTenantId": archive_tenant,
+            "archiveId": archive_id,
+            "archiveHashAlgorithm": "sha256",
+            "archiveIntegrityStatus": "verified_metadata_binding",
+            "archiveIntegrityBasis": (
+                "s3_head_sha256_metadata_version_bound"
+                if self.object_storage.backend == "s3"
+                else "local_content_addressed_path_size_bound"
+            ),
+            "archiveETag": head.get("etag"),
+            "archiveVersionId": head.get("versionId"),
+            "fileSizeBytes": size,
+            "mediaType": document.get("contentType") or head.get("contentType") or "application/octet-stream",
+            "filename": document.get("originalFileName") or f"{archive_id}{self.safe_suffix(document.get('originalFileName'))}",
+            "viewUrl": f"/projects/{project_id}/source-documents/{archive_id}/content",
+        }
+
+    def read_view_range(
+        self,
+        view_metadata: Dict[str, Any],
+        start: int,
+        end: int,
+    ) -> bytes:
+        size = int(view_metadata.get("fileSizeBytes") or 0)
+        if size <= 0 or start < 0 or end < start or end >= size:
+            raise ValueError("Invalid source-document byte range")
+        return self.object_storage.get_range(
+            str(view_metadata["archiveObjectKey"]),
+            start,
+            end,
+            version_id=(str(view_metadata["archiveVersionId"]) if view_metadata.get("archiveVersionId") else None),
+            if_match=(str(view_metadata["archiveETag"]) if view_metadata.get("archiveETag") else None),
+        )
+
+    def _resolve_object_binding(
+        self,
+        project_id: str,
+        document: Dict[str, Any],
+    ) -> tuple[str, Any, str] | None:
         archive_id = document.get("archiveId") or document.get("originalFileHash")
         if not self.is_valid_archive_id(archive_id):
             return None
-
+        archive_id = str(archive_id)
         archive_tenant = document.get("archiveTenantId")
         object_key = document.get("archiveObjectKey")
         if not object_key:
@@ -213,36 +354,10 @@ class UploadArchiveRepository:
         if not object_key.startswith(project_prefix):
             return None
         scoped_name = object_key[len(project_prefix) :]
-        if "/" in scoped_name or "\\" in scoped_name or not scoped_name.startswith(archive_id):
+        expected_name = f"{archive_id}{self.safe_suffix(document.get('originalFileName'))}"
+        if "/" in scoped_name or "\\" in scoped_name or scoped_name != expected_name:
             return None
-        if not self.object_storage.exists(object_key):
-            return None
-        if self.hardened_storage_required() and (
-            document.get("storageLifecycleStatus") != "active"
-            or document.get("malwareScanStatus") != "clean"
-        ):
-            return None
-        content = self.object_storage.get(object_key)
-        integrity_status = "verified" if sha256_bytes(content) == archive_id else "hash_mismatch"
-        if integrity_status != "verified":
-            return None
-
-        archive_path = self.object_storage.local_path(object_key)
-
-        return {
-            "path": archive_path,
-            "content": None if archive_path else content,
-            "archiveBackend": self.object_storage.backend,
-            "archiveObjectKey": object_key,
-            "archiveTenantId": archive_tenant,
-            "archiveId": archive_id,
-            "archiveHashAlgorithm": "sha256",
-            "archiveIntegrityStatus": integrity_status,
-            "fileSizeBytes": len(content),
-            "mediaType": document.get("contentType") or "application/octet-stream",
-            "filename": document.get("originalFileName") or f"{archive_id}{self.safe_suffix(document.get('originalFileName'))}",
-            "downloadUrl": f"/projects/{project_id}/source-documents/{archive_id}/download",
-        }
+        return archive_id, archive_tenant, object_key
 
     def delete_project_archive(
         self,

@@ -227,8 +227,12 @@ def test_recent_work_returns_resume_action_and_continuation_match():
 
     recent = client.get("/projects/recent-work")
     assert recent.status_code == 200
-    item = next(row for row in recent.json()["items"] if row["projectId"] == project_id)
+    body = recent.json()
+    assert body["schemaVersion"] == "realytics-recent-work-v2"
+    item = next(row for row in body["items"] if row["projectId"] == project_id)
     assert item["nextAction"] == "resume_open_reviews"
+    assert item["approvalReadinessStatus"] == "not_ready_for_approval"
+    assert item["approvalStatus"] != item["approvalReadinessStatus"]
     assert "sha-repeatable-001" in item["sourceHashes"]
 
     check = client.post("/projects/intake/continuation-check", json={"files": [{"name": "repeatable-plan.pdf", "sha256": "sha-repeatable-001"}]})
@@ -263,6 +267,42 @@ def test_workspace_context_persists_shared_deal_state_and_page_data():
     assert set(body["pageDataContract"]["requiredPageDataFields"]).issubset(body["pageData"].keys())
     assert body["dealStateGraph"]["schemaVersion"] == "realytics-shared-deal-state-graph-record-v1"
     assert PROJECTS_DB[project_id]["chief_orchestration_state"]["sharedDealStateGraph"]["projectId"] == project_id
+
+
+def test_document_review_workspace_is_one_versioned_server_read_model():
+    client = TestClient(app)
+    project_id = first_project_id(client)
+    project_data = PROJECTS_DB[project_id]
+    project_data["source_documents"] = [
+        {
+            "documentType": "business_plan",
+            "originalFileName": "business.pdf",
+            "archiveId": "a" * 64,
+            "originalFileHash": "a" * 64,
+            "sha256": "a" * 64,
+            "uploadedAt": "2026-07-27T01:00:00+00:00",
+        }
+    ]
+    upsert_project_record(project_id, project_data)
+
+    response = client.get(f"/projects/{project_id}/workspace/document-review")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schemaVersion"] == "realytics-document-review-workspace-v1"
+    assert body["viewModelVersion"] == "document-review-workspace-2026-07-27"
+    assert body["projectId"] == project_id
+    assert body["snapshotId"].startswith(f"document-review:{project_id}:")
+    assert len(body["snapshotHash"]) == 64
+    assert body["sourceDocuments"][0]["originalFileName"] == "business.pdf"
+    assert body["reviewQueue"] == []
+    assert body["snapshotDiffs"] == []
+    assert body["authority"] == {
+        "candidateOnly": True,
+        "authoritativeProjectionMutated": False,
+        "approvalAuthority": "approved_input_snapshot_only",
+        "assembly": "server_versioned_read_model",
+    }
 
 
 def test_workspace_context_page_data_contracts_for_core_pages():

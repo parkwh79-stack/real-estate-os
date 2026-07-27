@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +36,7 @@ from db.repositories.parser_v2_repository import (
 from db.repositories.legal_intelligence_repository import (
     PostgresLegalTenantOverlayRepository,
 )
+from db.repositories.report_repository import PostgresReportRepository
 
 
 _POSTGRES_CONNECT = postgres.connect
@@ -647,6 +650,10 @@ def test_live_migrations_apply_once_and_are_idempotent(
 
     conn = live_database.connect_admin()
     try:
+        required_rls_tables = [
+            *postgres.PARSER_V2_RLS_TABLES,
+            *postgres.REPORT_PUBLICATION_RLS_TABLES,
+        ]
         with conn.cursor() as cursor:
             cursor.execute(
                 """
@@ -656,10 +663,10 @@ def test_live_migrations_apply_once_and_are_idempotent(
                 WHERE n.nspname = %s AND c.relname = ANY(%s)
                 ORDER BY c.relname
                 """,
-                (live_database.schema_name, list(postgres.PARSER_V2_RLS_TABLES)),
+                (live_database.schema_name, required_rls_tables),
             )
             rows = cursor.fetchall()
-        assert [row[0] for row in rows] == sorted(postgres.PARSER_V2_RLS_TABLES)
+        assert [row[0] for row in rows] == sorted(required_rls_tables)
         assert all(bool(row[1]) and bool(row[2]) for row in rows)
     finally:
         conn.close()
@@ -1432,3 +1439,195 @@ def test_live_snapshot_membership_and_outbox_share_rollback_boundary(
     finally:
         verification.rollback()
         verification.close()
+
+
+def test_live_concurrent_report_publication_is_single_and_idempotent(
+    live_database: _LiveDatabase,
+) -> None:
+    """Exercise the real unique key, row lock, RLS, and runtime grants.
+
+    The module fixture owns a disposable schema and drops it after the suite,
+    so the immutable publication row never leaks into a developer database.
+    """
+
+    suffix = uuid4().hex
+    run_id = f"report-live-run-{suffix}"
+    snapshot_id = f"report-live-snapshot-{suffix}"
+    snapshot_hash = "sha256:" + ("a" * 64)
+    now = "2026-07-27T00:00:00+00:00"
+
+    admin = live_database.connect_admin()
+    try:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('realytics.tenant_id', %s, true)",
+                (TENANT_A,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO orchestrations (
+                    tenant_id, project_id, run_id, status, started_at,
+                    completed_at, payload_json
+                ) VALUES (
+                    %s, %s, %s, 'completed', %s, %s, %s::jsonb
+                )
+                """,
+                (
+                    TENANT_A,
+                    PROJECT_A,
+                    run_id,
+                    now,
+                    now,
+                    json.dumps(
+                        {
+                            "project_id": PROJECT_A,
+                            "run_id": run_id,
+                            "approvalStatus": "approved",
+                            "user_id": "live-maker",
+                            "approval": {
+                                "approved_by": "live-approval-checker",
+                                "approved_at": now,
+                            },
+                        }
+                    ),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO project_snapshots (
+                    tenant_id, project_id, snapshot_id, run_id, created_at,
+                    payload_json
+                ) VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    TENANT_A,
+                    PROJECT_A,
+                    snapshot_id,
+                    run_id,
+                    now,
+                    json.dumps(
+                        {
+                            "projectId": PROJECT_A,
+                            "runId": run_id,
+                            "snapshotId": snapshot_id,
+                            "snapshotHash": snapshot_hash,
+                        }
+                    ),
+                ),
+            )
+        admin.commit()
+    finally:
+        admin.close()
+
+    @contextmanager
+    def transaction(tenant_id: str):
+        connection = live_database.connect_runtime()
+        try:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT set_config('realytics.tenant_id', %s, true)",
+                    (tenant_id,),
+                )
+                yield connection
+        finally:
+            connection.close()
+
+    repository = PostgresReportRepository(
+        tenant_id=TENANT_A,
+        transaction_factory=transaction,
+    )
+    report = repository.create(
+        PROJECT_A,
+        {
+            "template": "phase-11-pf-review",
+            "title": "Live publication",
+            "qualityChecks": {
+                "actualSectionCount": 1,
+                "expectedSectionCount": 1,
+                "isComplete": True,
+            },
+            "sections": {"cover": "verified"},
+        },
+        "# live report",
+        run_id=run_id,
+    )
+    read_token = repository.get(PROJECT_A, report["report_id"])
+    assert read_token is not None
+    decision_package = {
+        "schemaVersion": "realytics-decision-package-manifest-v1",
+        "projectId": PROJECT_A,
+        "projectSnapshotId": snapshot_id,
+        "projectSnapshotHash": snapshot_hash,
+        "orchestrationRunId": run_id,
+        "approvalStatus": "approved",
+        "approvedBy": "live-approval-checker",
+    }
+
+    def publish(actor: str):
+        return repository.publish(
+            copy.deepcopy(read_token),
+            published_by=actor,
+            published_at="2026-07-27T01:00:00+00:00",
+            decision_package=decision_package,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(publish, ("live-checker-a", "live-checker-b"))
+        )
+
+    assert {result["status"] for result in results} == {"published"}
+    assert len(
+        {
+            result["publication"]["idempotencyKey"]
+            for result in results
+        }
+    ) == 1
+    assert len(
+        {
+            result["publication"]["publishedBy"]
+            for result in results
+        }
+    ) == 1
+
+    verification = live_database.connect_admin()
+    try:
+        with verification.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('realytics.tenant_id', %s, true)",
+                (TENANT_A,),
+            )
+            cursor.execute(
+                """
+                SELECT count(*), min(content_sha256), min(idempotency_key)
+                FROM report_publications
+                WHERE tenant_id = %s
+                  AND project_id = %s
+                  AND report_id = %s
+                """,
+                (TENANT_A, PROJECT_A, report["report_id"]),
+            )
+            count, content_sha256, idempotency_key = cursor.fetchone()
+        assert count == 1
+        assert str(content_sha256).startswith("sha256:")
+        assert str(idempotency_key).startswith("sha256:")
+    finally:
+        verification.rollback()
+        verification.close()
+
+    with pytest.raises(Exception, match="published report is immutable"):
+        with transaction(TENANT_A) as connection:
+            connection.execute(
+                """
+                UPDATE reports
+                SET payload_json = jsonb_set(
+                    payload_json,
+                    '{report_markdown}',
+                    '"tampered"'::jsonb
+                )
+                WHERE tenant_id = %s
+                  AND project_id = %s
+                  AND report_id = %s
+                """,
+                (TENANT_A, PROJECT_A, report["report_id"]),
+            )

@@ -510,6 +510,7 @@ def _resolve_postgres_membership(
         membership
         for membership in directory.memberships
         if membership.status.strip().casefold() == "active"
+        and _tenant_status(membership.tenant_status) == "active"
     ]
     if requested_tenant:
         selected = memberships_by_tenant.get(requested_tenant)
@@ -531,9 +532,34 @@ def _resolve_postgres_membership(
                     "membershipStatus": membership_status,
                 },
             )
+        tenant_status = _tenant_status(selected.tenant_status)
+        if tenant_status != "active":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "tenant_inactive",
+                    "requestedTenantId": requested_tenant,
+                    "tenantStatus": tenant_status,
+                },
+            )
     elif len(active_memberships) == 1:
         selected = active_memberships[0]
     elif not active_memberships:
+        membership_active = [
+            membership
+            for membership in directory.memberships
+            if membership.status.strip().casefold() == "active"
+        ]
+        if len(membership_active) == 1:
+            selected = membership_active[0]
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "tenant_inactive",
+                    "requestedTenantId": selected.tenant_id,
+                    "tenantStatus": _tenant_status(selected.tenant_status),
+                },
+            )
         raise HTTPException(
             status_code=403,
             detail={"error": "no_active_tenant_membership"},
@@ -577,9 +603,15 @@ def _resolve_postgres_membership(
     return resolved, {
         "source": "normalized_postgres",
         "principalStatus": principal_status,
+        "tenantStatus": _tenant_status(selected.tenant_status),
         "membershipStatus": selected.status.strip().casefold(),
         "membershipVersion": selected.membership_version,
     }
+
+
+def _tenant_status(status: str | None) -> str:
+    normalized = str(status or "").strip().casefold()
+    return normalized or "unknown"
 
 
 def _requested_tenant_selector(request: Request) -> str | None:
@@ -604,35 +636,70 @@ def _requested_tenant_selector(request: Request) -> str | None:
 
 def _identity_assurance(claims: Dict[str, Any]) -> Dict[str, Any]:
     raw_amr = claims.get("amr")
+    amr_events: list[tuple[str, float | None]] = []
     if isinstance(raw_amr, str):
         amr = [raw_amr]
+        amr_events.append((raw_amr, None))
     elif isinstance(raw_amr, list):
         amr = []
         for item in raw_amr:
             if isinstance(item, dict):
                 method = item.get("method") or item.get("amr")
                 if method:
-                    amr.append(str(method))
+                    normalized_method = str(method)
+                    amr.append(normalized_method)
+                    raw_timestamp = item.get("timestamp")
+                    timestamp = (
+                        float(raw_timestamp)
+                        if isinstance(raw_timestamp, (int, float))
+                        and not isinstance(raw_timestamp, bool)
+                        and raw_timestamp > 0
+                        else None
+                    )
+                    amr_events.append((normalized_method, timestamp))
             elif item:
-                amr.append(str(item))
+                normalized_method = str(item)
+                amr.append(normalized_method)
+                amr_events.append((normalized_method, None))
     else:
         amr = []
     acr = str(claims.get("acr") or "") or None
     aal = str(claims.get("aal") or "").casefold() or None
+    # Supabase records each authentication method with its own Unix timestamp.
+    # For a high-risk action, use the actual strong-factor event when it is
+    # present. Falling back to the generic ``auth_time`` remains conservative:
+    # it can make a valid session look older, but can never extend MFA recency
+    # merely because an access token was refreshed.
+    strong_methods = {"mfa", "totp", "phone", "hwk", "swk", "fido", "webauthn"}
+    strong_timestamps = [
+        timestamp
+        for method, timestamp in amr_events
+        if method.casefold() in strong_methods and timestamp is not None
+    ]
     raw_auth_time = claims.get("auth_time")
+    authentication_timestamp: float | None = (
+        max(strong_timestamps) if strong_timestamps else None
+    )
+    if (
+        authentication_timestamp is None
+        and isinstance(raw_auth_time, (int, float))
+        and not isinstance(raw_auth_time, bool)
+        and raw_auth_time > 0
+    ):
+        authentication_timestamp = float(raw_auth_time)
     authenticated_at = None
-    if isinstance(raw_auth_time, (int, float)) and raw_auth_time > 0:
+    if authentication_timestamp is not None:
         authenticated_at = datetime.fromtimestamp(
-            raw_auth_time,
+            authentication_timestamp,
             tz=timezone.utc,
         ).isoformat()
-    mfa_markers = {"mfa", "otp", "hwk", "swk", "fido", "webauthn"}
     return {
         "amr": amr,
         "acr": acr,
         "aal": aal,
         "authenticatedAt": authenticated_at,
-        "mfaVerified": aal == "aal2"
-        or bool(mfa_markers.intersection(item.casefold() for item in amr)),
+        # A method label alone is not assurance. Only the signed Supabase AAL
+        # claim can authorize the final approval/publication gate.
+        "mfaVerified": aal == "aal2",
         "source": "verified_bearer_claims",
     }

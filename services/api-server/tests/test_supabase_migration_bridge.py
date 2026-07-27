@@ -23,6 +23,10 @@ EXPECTED_MIGRATIONS = (
     "0013_core_tenant_rls.sql",
     "0014_core_tenant_rls_permissive_base.sql",
     "0015_supabase_security_and_rls_policy_cleanup.sql",
+    "0016_identity_invitation_lifecycle.sql",
+    "0017_identity_runtime_privileges.sql",
+    "20260727002612_normalized_report_publication.sql",
+    "20260727002700_report_publication_lineage_lookup_fix.sql",
 )
 
 

@@ -96,6 +96,36 @@ def test_supabase_aal2_and_object_amr_are_recognized_as_mfa():
     assert assurance["aal"] == "aal2"
     assert assurance["amr"] == ["password", "totp"]
     assert assurance["mfaVerified"] is True
+    assert assurance["authenticatedAt"] == "1970-01-01T00:00:02+00:00"
+
+
+def test_signed_aal1_cannot_be_promoted_by_an_otp_amr_label():
+    assurance = _identity_assurance(
+        {
+            "aal": "aal1",
+            "amr": [{"method": "otp", "timestamp": 2}],
+        }
+    )
+
+    assert assurance["aal"] == "aal1"
+    assert assurance["amr"] == ["otp"]
+    assert assurance["mfaVerified"] is False
+    assert assurance["authenticatedAt"] is None
+
+
+def test_aal2_uses_strong_factor_timestamp_not_token_refresh_timestamp():
+    assurance = _identity_assurance(
+        {
+            "aal": "aal2",
+            "amr": [
+                {"method": "totp", "timestamp": 100},
+                {"method": "token_refresh", "timestamp": 900},
+            ],
+        }
+    )
+
+    assert assurance["mfaVerified"] is True
+    assert assurance["authenticatedAt"] == "1970-01-01T00:01:40+00:00"
 
 
 def test_verified_aal2_auth_time_satisfies_recent_step_up(monkeypatch):

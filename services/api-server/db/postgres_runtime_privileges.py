@@ -66,6 +66,20 @@ PARSER_V2_MANAGED_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "runtime_outbox_events": ("SELECT", "INSERT", "UPDATE"),
 }
 
+# Final report issuance is authoritative in normalized PostgreSQL. Draft
+# payloads may be updated while exports are added, but the publication seal is
+# append-only and can only be read or inserted by the serving role.
+REPORT_PUBLICATION_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "assumption_proposals": ("SELECT", "INSERT", "UPDATE"),
+    "evidence_graphs": ("SELECT", "INSERT", "UPDATE"),
+    "market_evidence": ("SELECT", "INSERT", "UPDATE"),
+    "orchestrations": ("SELECT", "INSERT", "UPDATE"),
+    "project_snapshots": ("SELECT", "INSERT", "UPDATE"),
+    "reports": ("SELECT", "INSERT", "UPDATE"),
+    "report_publications": ("SELECT", "INSERT"),
+    "risk_registers": ("SELECT", "INSERT", "UPDATE"),
+}
+
 # The API consumes the verified public/legal corpus but never mutates it.
 # Synchronization and corpus ingestion run under a separately governed worker
 # role.  Keeping the synchronization ledger visible lets the API disclose
@@ -180,6 +194,18 @@ FORBIDDEN_MANAGED_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     ),
     "runtime_outbox_events": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
 }
+REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES: Mapping[
+    str, tuple[str, ...]
+] = {
+    "assumption_proposals": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    "evidence_graphs": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    "market_evidence": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    "orchestrations": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    "project_snapshots": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    "reports": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    "report_publications": FORBIDDEN_APPEND_ONLY_PRIVILEGES,
+    "risk_registers": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+}
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")
 
@@ -222,6 +248,7 @@ def required_table_privileges() -> dict[str, tuple[str, ...]]:
         **PARSER_V2_TABLE_PRIVILEGES,
         **PARSER_V2_SUPPORT_PRIVILEGES,
         **PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
+        **REPORT_PUBLICATION_PRIVILEGES,
         **LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
         **LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
         **LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
@@ -262,6 +289,7 @@ def forbidden_table_privileges() -> dict[str, tuple[str, ...]]:
             for table in LEGAL_PROVIDER_OPERATIONS_PRIVILEGES
         },
         **dict(FORBIDDEN_MANAGED_SUPPORT_PRIVILEGES),
+        **REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES,
     }
 
 
@@ -363,6 +391,7 @@ def provision_parser_v2_runtime_role(
                 *PARSER_V2_TABLE_PRIVILEGES,
                 *PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
                 *PARSER_V2_SUPPORT_PRIVILEGES,
+                *REPORT_PUBLICATION_PRIVILEGES,
                 *LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
                 *LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
                 *LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
@@ -534,6 +563,7 @@ def render_parser_v2_runtime_role_sql(
     exact_privileges = {
         **PARSER_V2_TABLE_PRIVILEGES,
         **PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
+        **REPORT_PUBLICATION_PRIVILEGES,
         **LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
         **LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
         **LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
@@ -639,6 +669,8 @@ __all__ = [
     "PARSER_V2_MANAGED_SUPPORT_PRIVILEGES",
     "PARSER_V2_SUPPORT_PRIVILEGES",
     "PARSER_V2_TABLE_PRIVILEGES",
+    "REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES",
+    "REPORT_PUBLICATION_PRIVILEGES",
     "POSTGIS_SCHEMA_ENV",
     "REVOKE_PUBLIC_DATABASE_TEMPORARY_ENV",
     "RUNTIME_ROLE_ENV",

@@ -66,7 +66,8 @@ class OrchestrationAgent:
             "workflow": PF_REVIEW_WORKFLOW,
             "status": "running",
             "executionStatus": "running",
-            "approvalStatus": "not_evaluated",
+            "approvalStatus": "not_requested",
+            "approvalReadinessStatus": "not_started",
             "reportStatus": "not_started",
             "started_at": now,
             "completed_at": None,
@@ -763,7 +764,18 @@ class OrchestrationAgent:
 
             approval_readiness = self._approval_readiness_gate(run)
             run["artifacts"]["approvalReadinessGate"] = approval_readiness
-            run["approvalStatus"] = "ready_for_review" if approval_readiness.get("status") in {"ready", "pass"} else "not_ready"
+            readiness_pass = approval_readiness.get("status") in {
+                "ready",
+                "pass",
+                "ready_for_approval",
+            }
+            run["approvalReadinessStatus"] = (
+                "ready_for_approval" if readiness_pass else "not_ready_for_approval"
+            )
+            # Readiness is not approval.  Keep approvalStatus in its canonical
+            # lifecycle and let the separate, authenticated maker-checker
+            # action move it to approved/rejected.
+            run["approvalStatus"] = "pending" if readiness_pass else "not_requested"
             self._complete_step(run, "approval_readiness_gate", approval_readiness, artifact_key="approvalReadinessGate")
 
             # Credit documents synthesise every prior artifact (incl. the approval

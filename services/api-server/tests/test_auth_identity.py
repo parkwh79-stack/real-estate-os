@@ -117,7 +117,7 @@ def test_strict_tenant_isolation_blocks_cross_tenant_project_access(monkeypatch)
                 "userId": user_id,
                 "tenantId": tenant_id,
                 "displayName": user_id,
-                "role": "reviewer",
+                "role": "admin" if user_id == "tenant-owner" else "reviewer",
             },
         )
     owner_session = client.post(
@@ -150,6 +150,194 @@ def test_strict_tenant_isolation_blocks_cross_tenant_project_access(monkeypatch)
     assert blocked.json()["detail"]["error"] == "tenant_scope_mismatch"
 
 
+def test_strict_tenant_isolation_blocks_cross_tenant_decision_artifact_routes(monkeypatch):
+    client = TestClient(app)
+    for user_id, tenant_id in (
+        ("decision-artifact-owner", "decision-artifact-tenant-one"),
+        ("decision-artifact-outsider", "decision-artifact-tenant-two"),
+    ):
+        client.post("/auth/tenants", json={"tenantId": tenant_id, "name": tenant_id})
+        client.post(
+            "/auth/users",
+            json={
+                "userId": user_id,
+                "tenantId": tenant_id,
+                "displayName": user_id,
+                "role": "admin",
+            },
+        )
+
+    owner_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "decision-artifact-owner",
+            "tenantId": "decision-artifact-tenant-one",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    outsider_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "decision-artifact-outsider",
+            "tenantId": "decision-artifact-tenant-two",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    project = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": owner_session},
+        json={"project": {"name": "Decision Artifact Boundary", "type": "residential"}},
+    ).json()
+    project_id = project["project"]["id"]
+    outsider_headers = {"x-realytics-session-id": outsider_session}
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+
+    responses = [
+        client.get(f"/projects/{project_id}/orchestrations", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/credit-documents",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/credit-documents/term-sheet/export",
+            headers=outsider_headers,
+        ),
+        client.get(f"/projects/{project_id}/risk-registers", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/risk-register",
+            headers=outsider_headers,
+        ),
+        client.get(f"/projects/{project_id}/evidence-graphs", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/evidence-graph",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/orchestrations/missing-run/approve",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/orchestrations/missing-run/handoffs/missing-handoff/review",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/orchestrations/missing-run/risk-register/missing-risk/review",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.get(f"/projects/{project_id}/source-documents", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/download",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/content",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/pdf/pages/1.png",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/workbook/cells",
+            headers=outsider_headers,
+            params={"sheet_name": "Sheet1", "cell_reference": "A1"},
+        ),
+        client.post(
+            f"/projects/{project_id}/reports/generate",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.get(f"/projects/{project_id}/reports", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/reports/missing-report",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/reports/missing-report/exports",
+            headers=outsider_headers,
+            json={"format": "markdown"},
+        ),
+        client.get(
+            f"/projects/{project_id}/reports/missing-report/exports",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/reports/missing-report/exports/missing-export/download",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/reports/missing-report/publish",
+            headers=outsider_headers,
+        ),
+        client.get(f"/projects/{project_id}/report-templates", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/report-templates/missing-template",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/report-templates",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.get(f"/projects/{project_id}/snapshots", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/snapshots/missing-snapshot",
+            headers=outsider_headers,
+        ),
+        client.get(f"/projects/{project_id}/similar-cases/rag", headers=outsider_headers),
+        client.post(
+            f"/projects/{project_id}/snapshots/similar",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/snapshots/diff",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/snapshots/missing-snapshot/outcome",
+            headers=outsider_headers,
+            json={},
+        ),
+    ]
+
+    for response in responses:
+        assert response.status_code == 403
+        assert response.json()["detail"]["error"] == "tenant_scope_mismatch"
+
+
+def test_similar_case_snapshot_corpus_excludes_other_tenants_and_unknown_lineage():
+    project_a = "snapshot-corpus-project-a"
+    project_a_peer = "snapshot-corpus-project-a-peer"
+    project_b = "snapshot-corpus-project-b"
+    projects.PROJECTS_DB[project_a] = {"_meta": {"tenantId": "snapshot-tenant-a"}}
+    projects.PROJECTS_DB[project_a_peer] = {"_meta": {"tenantId": "snapshot-tenant-a"}}
+    projects.PROJECTS_DB[project_b] = {"_meta": {"tenantId": "snapshot-tenant-b"}}
+    snapshots = [
+        {"snapshotId": "same-project", "projectId": project_a},
+        {"snapshotId": "same-tenant", "projectId": project_a_peer},
+        {"snapshotId": "other-tenant", "projectId": project_b},
+        {"snapshotId": "unknown-lineage", "projectId": "missing-project"},
+    ]
+
+    try:
+        scoped = projects._tenant_scoped_snapshot_corpus(project_a, snapshots)
+    finally:
+        projects.PROJECTS_DB.pop(project_a, None)
+        projects.PROJECTS_DB.pop(project_a_peer, None)
+        projects.PROJECTS_DB.pop(project_b, None)
+
+    assert {item["snapshotId"] for item in scoped} == {"same-project", "same-tenant"}
+
+
 def test_auth_me_returns_anonymous_context_when_user_missing():
     client = TestClient(app)
 
@@ -160,11 +348,52 @@ def test_auth_me_returns_anonymous_context_when_user_missing():
     assert me.json()["user"]["role"] == "anonymous"
 
 
-def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
+def test_strict_rbac_blocks_anonymous_project_listing(monkeypatch):
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
     client = TestClient(app)
-    project_id = client.get("/projects/").json()[0]["project"]["id"]
-    report = client.post(f"/projects/{project_id}/reports/generate", json={})
+
+    response = client.get("/projects/")
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["requiredPermission"] == "project:read"
+
+
+def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+    client = TestClient(app)
+
+    admin_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "admin-user",
+            "tenantId": "tenant-auth",
+            "role": "admin",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    created = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": admin_session},
+        json={"project": {"name": "Strict report export", "type": "mixed_use"}},
+    )
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+
+    reviewer_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "reviewer-user",
+            "tenantId": "tenant-auth",
+            "role": "reviewer",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    report = client.post(
+        f"/projects/{project_id}/reports/generate",
+        headers={"x-realytics-session-id": reviewer_session},
+        json={},
+    )
     assert report.status_code == 200
     report_id = report.json()["report_id"]
 
@@ -185,15 +414,6 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
     assert blocked.status_code == 403
     assert blocked.json()["detail"]["requiredPermission"] == "report:export"
 
-    reviewer_session = client.post(
-        "/auth/session",
-        json={
-            "userId": "reviewer-user",
-            "tenantId": "tenant-auth",
-            "role": "reviewer",
-            "provider": "local-test",
-        },
-    ).json()["session"]["sessionId"]
     allowed = client.post(
         f"/projects/{project_id}/reports/{report_id}/exports",
         headers={"x-realytics-session-id": reviewer_session},
@@ -205,8 +425,18 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
 def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
     client = TestClient(app)
+    admin_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "analysis-admin-user",
+            "tenantId": "tenant-auth",
+            "role": "admin",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
     created = client.post(
         "/projects/",
+        headers={"x-realytics-session-id": admin_session},
         json={
             "project": {"name": "Reviewer Analysis Contract", "type": "mixed_use"},
             "land": {

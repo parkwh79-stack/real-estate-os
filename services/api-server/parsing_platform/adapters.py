@@ -802,6 +802,17 @@ def _inspect_zip_container(content: bytes) -> tuple[list[InspectionFinding], dic
     return findings, metadata
 
 
+def inspect_office_container_safety(content: bytes) -> tuple[bool, list[InspectionFinding], dict[str, Any]]:
+    """Expose the parser's bounded Office-container gate to read-only viewers.
+
+    Preview code must enforce the same ZIP entry, expansion, encryption, and
+    unsafe-path rules as ingestion before an OpenXML library expands entries.
+    """
+
+    findings, metadata = _inspect_zip_container(content)
+    return not any(item.blocking for item in findings), findings, metadata
+
+
 def _magic_mismatch(document: ArchivedDocument) -> InspectionFinding | None:
     extension = document.extension
     content = document.content

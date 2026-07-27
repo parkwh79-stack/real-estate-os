@@ -242,8 +242,10 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     run = res.json()
     assert run["workflow"] == PF_REVIEW_WORKFLOW
     assert run["status"] == "completed"
-    assert run["user_id"] == "pytest"
-    assert run["ai_connection"]["user_id"] == "pytest"
+    # The authenticated principal is authoritative. A caller-supplied
+    # requested_by value must not be able to spoof the orchestration actor.
+    assert run["user_id"] == "pytest-orchestrator"
+    assert run["ai_connection"]["user_id"] == "pytest-orchestrator"
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
     assert len(run["handoffs"]) >= 8
     assert set(run["agentProgress"]) == {key for key, _ in PF_REVIEW_STEPS}
@@ -955,6 +957,12 @@ def test_pilot_input_package_template_runs_orchestration():
         "reject_recommended",
     }
     assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
+    assert run["approvalStatus"] in {"not_requested", "pending"}
+    assert run["approvalReadinessStatus"] in {
+        "ready_for_approval",
+        "not_ready_for_approval",
+    }
+    assert run["approvalStatus"] != run["approvalReadinessStatus"]
     assert run["errors"] == []
 
 
@@ -1003,6 +1011,10 @@ def test_restructuring_cure_is_attached_to_next_pf_review_run():
 def test_pf_review_orchestration_can_be_retrieved_and_approved():
     client = TestClient(app)
     project_id = project_with_discount_triggers(client)
+    approver_headers = orchestration_auth_headers(
+        user_id="pytest-independent-approver",
+        role="reviewer",
+    )
     run = client.post(
         f"/projects/{project_id}/orchestrations/pf-review",
         headers=orchestration_auth_headers(),
@@ -1027,6 +1039,7 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
 
     blocked_approval = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",
+        headers=approver_headers,
         json={"approved_by": "credit_officer", "comment": "Should be blocked"},
     )
     assert blocked_approval.status_code == 409
@@ -1077,20 +1090,28 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
         for risk in persisted_after_review["risks"]
     )
 
-    approved = client.post(
+    final_approval = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",
+        headers=approver_headers,
         json={"approved_by": "credit_officer", "comment": "Reviewed for workflow QA"},
+    )
+    assert final_approval.status_code == 409
+    assert "Approval Readiness Gate must pass" in final_approval.json()["detail"]
+
+    # Completing every human review does not make synthetic or weakly sourced
+    # evidence authoritative. Final approval must remain fail-closed until the
+    # independently evaluated readiness gate passes.
+    persisted = client.get(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}"
     ).json()
-    assert approved["status"] == "completed"
-    assert approved["executionStatus"] == "completed"
-    assert approved["approvalStatus"] == "approved"
-    assert approved["approval"]["approved_by"] == "credit_officer"
+    assert persisted["executionStatus"] == "completed"
+    assert persisted["approvalStatus"] != "approved"
 
     summaries = client.get(f"/projects/{project_id}/orchestrations").json()
     assert any(
         item["run_id"] == run["run_id"]
         and item["executionStatus"] == "completed"
-        and item["approvalStatus"] == "approved"
+        and item["approvalStatus"] != "approved"
         for item in summaries
     )
 
