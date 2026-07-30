@@ -1,6 +1,6 @@
 # Deployment Plan
 
-Updated: 2026-07-18
+Updated: 2026-07-30
 
 Status: **Controlled implementation; not production-ready**
 
@@ -27,6 +27,108 @@ Core deployment components are:
 
 Object storage, production IAM, antivirus/CDR, live backup/restore, and a complete
 multi-worker incident rehearsal remain deployment blockers.
+
+### 1.1 Current Web Preview and external API contract
+
+The Next.js Web/BFF has an active Vercel Preview deployment connected to the
+current Git branch. Preview URLs are deployment outputs and are not committed
+as application authority. Documentation and environment templates use only the
+following placeholders:
+
+```text
+https://<branch>-<web-project>-<vercel-team>.vercel.app
+https://<approved-production-web-domain>
+```
+
+The Web deployment must set the server-only variable below to the public HTTPS
+origin of the matching FastAPI environment:
+
+```text
+REALYTICS_API_ORIGIN=https://<external-fastapi-origin>
+```
+
+It must never point to `localhost`, a container-private hostname, or a database
+endpoint. Browser business requests remain same-origin calls to the Next.js
+BFF. Only the BFF forwards a verified bearer token to FastAPI. FastAPI sets
+`REALYTICS_CORS_ORIGINS` to the exact approved Web origins; wildcard credentialed
+CORS is forbidden. Supabase Auth redirect allowlists are configured separately
+and do not replace this API boundary.
+
+### 1.2 Provider-neutral container process contract
+
+One immutable Python 3.12 image may be reused, but each process has a distinct
+command and secret set:
+
+| Process | Command | Network | Database authority |
+|---|---|---|---|
+| Migration task | `python scripts/migrate_postgres.py` | No public listener | deployment-only direct DSN; exits after immutable migration checks |
+| API service | `uvicorn main:app --host 0.0.0.0 --port "$PORT"` | public HTTPS only through a load balancer | dedicated `api,identity` pools |
+| PF review worker | `python scripts/run_pf_review_worker.py` | no public listener | intended dedicated `pf_worker` pool and tenant-bound jobs |
+| Agent outbox worker | `python scripts/run_agent_platform_worker.py` | no public listener | dedicated worker claim/update authority |
+| Legal corpus worker | `python scripts/run_legal_corpus_worker.py` | egress only | dedicated legal-sync role and immutable raw-object store |
+| Coding Pod worker | `python scripts/run_coding_pod_worker.py` | egress to isolated executor only | operational job authority; no executor credentials in payloads |
+
+`/health/live` proves only that the API process answers. `/health/ready` performs
+secret-safe API and identity pool checkouts and reports the configured data,
+membership, and object authority. S3 and ClamAV are deliberately labelled as
+configuration-only checks in that response; live IAM, bucket, scanner, backup,
+and restore drills remain separate release evidence. Container health checks
+use liveness; the external load balancer should use readiness.
+
+The image runs as a non-root user and accepts platform-provided `PORT`. The
+service build context excludes `.env`, credentials, private keys, runtime state,
+test artifacts, and local databases. Runtime secrets are injected by the
+platform and never copied into an image layer.
+
+### 1.3 Safest next staging target: AWS ECS Fargate
+
+Keep Vercel for Web/BFF and deploy the backend first as an isolated **staging**
+ECS Fargate workload. This is the lowest-boundary-mismatch option because the
+approved hardened profile already requires S3, KMS-backed encryption, AWS
+Secrets Manager, private worker processes, and ClamAV. Use one task definition
+revision per immutable image digest and separate ECS services/tasks for the API,
+PF worker, Agent worker, legal worker, and scanner. Only the API attaches to an
+HTTPS Application Load Balancer; workers stay private. Prefer task IAM roles
+over static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` environment variables.
+
+Controlled staging sequence:
+
+1. Push a commit-SHA image after supply-chain and secret-layer inspection.
+2. Run the migration task once with only `REALYTICS_MIGRATION_DATABASE_URL`.
+3. Run API/identity role preflights from the deployed VPC/network.
+4. Start one API task, wait for `/health/ready`, and point the Vercel Preview
+   `REALYTICS_API_ORIGIN` at the staging HTTPS origin.
+5. Run login, membership, cross-tenant denial, project create/read, and upload
+   quarantine smoke tests.
+6. Start workers only after their dedicated claim/write paths pass the same
+   least-privilege and multi-worker tests.
+7. Scale API tasks only after the aggregate PostgreSQL connection budget is
+   updated and observed.
+
+No cloud service creation or secret provisioning is performed by this plan.
+
+### 1.4 Current external-deployment blockers
+
+- Dedicated LOGIN credentials for `realytics_runtime`, `realytics_identity`,
+  and the PF worker are not present in the repository and must be issued and
+  rotated through the approved secret workflow.
+- The PF entrypoint now builds its orchestration repository only after a job is
+  claimed and binds it to the persisted `tenantId`. However, the legacy
+  `JobStore`/operational storage claim and update functions still open
+  `REALYTICS_DATABASE_URL` directly rather than using the `pf_worker` pool with
+  transaction-local tenant context. Therefore PF and Agent workers are **not
+  approved for hardened staging yet**; an administrator or migration DSN must
+  never be supplied as a workaround.
+- The current PF worker role/grant postflight is not equivalent to the existing
+  API and identity login-role preflights. Add the exact worker privilege
+  manifest and deployed checkout test before enabling the worker service.
+- A real versioned/Object-Lock S3 bucket, KMS/IAM policy, private ClamAV service,
+  backup/restore evidence, and scanner failure drill remain required.
+- `/health/ready` does not claim live S3 or ClamAV connectivity. The deployment
+  pipeline must run explicit smoke commands before promotion.
+- The repository has no checked-in ECS IaC/task-definition manifest yet. ECS
+  resource creation must follow an approved infrastructure change rather than
+  an ad hoc console-only production setup.
 
 ## 2. Immutable PostgreSQL migrations
 

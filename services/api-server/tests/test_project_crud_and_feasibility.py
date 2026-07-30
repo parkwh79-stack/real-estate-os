@@ -12,6 +12,7 @@ from storage import (
     upsert_deal_state_record,
     upsert_evidence_graph_record,
     upsert_risk_register_record,
+    upsert_user,
 )
 
 
@@ -409,12 +410,20 @@ def test_deal_state_record_review_api_updates_risk_issue(tmp_path, monkeypatch):
         for record in list_deal_state_records(project_id, record_type="risk_issue")
         if record["key"] == "SENIOR_SHORTFALL"
     )
+    upsert_user(
+        {
+            "userId": "credit_officer",
+            "tenantId": "deal-state-review-tenant",
+            "role": "reviewer",
+            "status": "active",
+        }
+    )
 
     res = client.patch(
         f"/projects/{project_id}/deal-state-records/{risk['recordId']}/review",
         json={
             "reviewStatus": "resolved",
-            "reviewedBy": "credit_officer",
+            "reviewedBy": "spoofed-credit-officer",
             "comment": "Resolved by senior reduction cure.",
         },
         headers={"X-REALYTICS-USER-ID": "credit_officer"},

@@ -41,6 +41,7 @@ from core.runtime_profile import (
     server_issued_sessions_enabled,
     validate_security_configuration,
 )
+from core.runtime_health import liveness_payload, readiness_payload
 from db.postgres_runtime_pool import (
     close_runtime_pools,
     open_runtime_pools,
@@ -169,7 +170,7 @@ async def user_activity_middleware(request: Request, call_next):
         return response
     finally:
         path = request.url.path
-        if path not in {"/health"}:
+        if path not in {"/health", "/health/live", "/health/ready"}:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             project_id = _activity_project_id(path)
             run_match = RUN_PATH_RE.search(path)
@@ -340,4 +341,21 @@ curl "http://127.0.0.1:8000/projects/{{PROJECT_ID}}/similar-cases/rag?q=대구+�
 
 @app.get("/health")
 def health_check():
+    """Backward-compatible process liveness probe."""
+
     return {"status": "ok"}
+
+
+@app.get("/health/live")
+def process_liveness():
+    return liveness_payload()
+
+
+@app.get("/health/ready")
+def deployment_readiness(request: Request):
+    status_code, payload = readiness_payload(request.app)
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
+        headers={"Cache-Control": "no-store"},
+    )

@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from use_cases.async_jobs import (
     JobStore,
+    PFReviewJobWorker,
     TERMINAL_STATUSES,
     cancel_pf_review_job,
     process_next_pf_review_job,
@@ -149,6 +150,66 @@ def test_external_worker_mode_queues_then_claims(monkeypatch):
     assert completed is not None
     assert completed["status"] == "completed"
     assert completed["agentRunId"]
+
+
+def test_pf_worker_builds_repository_after_claim_from_persisted_tenant(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ASYNC_JOB_MODE", "external_worker")
+    store = JobStore()
+    project_id = f"tenant-worker-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+    queued = submit_pf_review_job(
+        _RepoStub(),
+        project_id,
+        project,
+        {"tenantId": "tenant-a"},
+        background=True,
+        store=store,
+    )
+    observed = {}
+
+    def repository_factory(job):
+        observed["tenantId"] = job["tenantId"]
+        observed["jobId"] = job["jobId"]
+        return _RepoStub()
+
+    completed = PFReviewJobWorker(
+        repository_factory,
+        worker_id="worker:tenant-a",
+        store=store,
+    ).run_once()
+
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert observed == {"tenantId": "tenant-a", "jobId": queued["jobId"]}
+
+
+def test_pf_worker_repository_factory_failure_is_secret_safe_and_terminal(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ASYNC_JOB_MODE", "external_worker")
+    store = JobStore()
+    project_id = f"tenant-worker-failure-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+    submit_pf_review_job(
+        _RepoStub(),
+        project_id,
+        project,
+        {"tenantId": "tenant-a"},
+        background=True,
+        store=store,
+    )
+
+    def failing_factory(_job):
+        raise RuntimeError("postgresql://user:secret@database.invalid/postgres")
+
+    failed = PFReviewJobWorker(
+        failing_factory,
+        worker_id="worker:tenant-a",
+        store=store,
+    ).run_once()
+
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["error"] == "repository_configuration_failed:RuntimeError"
+    assert "secret" not in failed["error"]
 
 
 def test_cancel_queued_job_is_terminal():

@@ -50,6 +50,19 @@ deployment gate is activating separate API, identity, and PF-worker LOGIN
 principals through the approved secret manager, injecting their role-scoped
 DSNs, and running the Python pool checkout from the deployed network.
 
+The API and identity repositories use those bounded pools today. The PF worker
+entrypoint now waits until a durable job is claimed and constructs its
+orchestration repository from that job's persisted `tenantId`; repository
+configuration failures become secret-safe terminal job failures. This closes
+the earlier tenantless repository construction defect. It does **not** complete
+the worker database cutover: legacy asynchronous-job and Agent operational
+storage functions still use the direct `db.postgres.connect()` compatibility
+path and do not consistently establish the `pf_worker` pool's transaction-local
+tenant context. Hardened PF/Agent worker deployment remains blocked until those
+claim/update paths and an exact PF-worker role postflight are migrated and live
+tested. Supplying an owner or migration DSN to make the compatibility path work
+is forbidden.
+
 The API pool now runs a read-only fail-closed preflight during hardened
 staging/production startup. `REALYTICS_API_DATABASE_URL` must authenticate
 directly as `REALYTICS_API_DATABASE_ROLE`; an administrator or migration DSN

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import core.secret_vault as secret_vault
 from main import app
 from routers import projects
+from storage import upsert_deal_state_record, upsert_orchestration_run
 
 
 def test_auth_identity_session_and_me_context():
@@ -60,6 +61,153 @@ def test_auth_identity_session_and_me_context():
     logs = client.get("/audit/user-activity", params={"user_id": "auth-user", "limit": 20}).json()["logs"]
     assert any(record["eventType"] == "login" for record in logs)
     assert any(record.get("path") == "/projects/" for record in logs)
+
+
+def test_review_mutations_ignore_client_supplied_actor_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "REALYTICS_SQLITE_FILE",
+        str(tmp_path / "verified-review-actor.sqlite3"),
+    )
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    tenant_id = "verified-review-tenant"
+    client.post("/auth/tenants", json={"tenantId": tenant_id, "name": tenant_id})
+    for user_id, role in (
+        ("verified-review-admin", "admin"),
+        ("verified-reviewer", "reviewer"),
+    ):
+        client.post(
+            "/auth/users",
+            json={
+                "userId": user_id,
+                "tenantId": tenant_id,
+                "displayName": user_id,
+                "role": role,
+            },
+        )
+    admin_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "verified-review-admin",
+            "tenantId": tenant_id,
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    reviewer_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "verified-reviewer",
+            "tenantId": tenant_id,
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    reviewer_headers = {"x-realytics-session-id": reviewer_session}
+    created = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": admin_session},
+        json={"project": {"name": "Verified Review Actor", "type": "mixed_use"}},
+    ).json()
+    project_id = created["project"]["id"]
+
+    deal_state = upsert_deal_state_record(
+        project_id,
+        {
+            "recordId": "verified-review-deal-state",
+            "recordType": "risk_issue",
+            "key": "VERIFIED_REVIEW_RISK",
+            "reviewStatus": "open",
+        },
+    )
+    projects.MARKET_EVIDENCE_DB.setdefault(project_id, {})[
+        "verified-review-market-evidence"
+    ] = {
+        "recordKey": "verified-review-market-evidence",
+        "projectId": project_id,
+        "reviewStatus": "pending_review",
+    }
+    run_id = "verified-review-run"
+    run_record = {
+        "run_id": run_id,
+        "project_id": project_id,
+        "status": "completed",
+        "executionStatus": "completed",
+        "approvalStatus": "not_ready",
+        "handoffs": [
+            {
+                "handoffId": "verified-review-handoff",
+                "reviewStatus": "pending",
+                "requiresHumanReview": True,
+            }
+        ],
+        "agentProgress": {},
+        "artifacts": {
+            "riskRegister": {
+                "risks": [
+                    {
+                        "riskId": "verified-review-risk",
+                        "reviewStatus": "open",
+                        "requiresHumanReview": True,
+                    }
+                ]
+            }
+        },
+    }
+    upsert_orchestration_run(
+        project_id,
+        run_id,
+        run_record,
+    )
+    projects.ORCHESTRATIONS_DB.setdefault(project_id, {})[run_id] = run_record
+
+    deal_state_response = client.patch(
+        f"/projects/{project_id}/deal-state-records/{deal_state['recordId']}/review",
+        headers=reviewer_headers,
+        json={"reviewStatus": "approved", "reviewedBy": "spoofed-reviewer"},
+    )
+    anonymous_market_response = client.post(
+        f"/projects/{project_id}/market-evidence/review",
+        json={
+            "record_key": "verified-review-market-evidence",
+            "review_status": "approved",
+        },
+    )
+    market_response = client.post(
+        f"/projects/{project_id}/market-evidence/review",
+        headers=reviewer_headers,
+        json={
+            "record_key": "verified-review-market-evidence",
+            "review_status": "approved",
+            "reviewed_by": "spoofed-reviewer",
+        },
+    )
+    handoff_response = client.post(
+        f"/projects/{project_id}/orchestrations/{run_id}/handoffs/verified-review-handoff/review",
+        headers=reviewer_headers,
+        json={"review_status": "approved", "reviewed_by": "spoofed-reviewer"},
+    )
+    risk_response = client.post(
+        f"/projects/{project_id}/orchestrations/{run_id}/risk-register/verified-review-risk/review",
+        headers=reviewer_headers,
+        json={"review_status": "approved", "reviewed_by": "spoofed-reviewer"},
+    )
+
+    assert deal_state_response.status_code == 200
+    assert anonymous_market_response.status_code == 401
+    assert market_response.status_code == 200
+    assert handoff_response.status_code == 200
+    assert risk_response.status_code == 200
+    assert deal_state_response.json()["record"]["reviewedBy"] == "verified-reviewer"
+    assert market_response.json()["reviewedBy"] == "verified-reviewer"
+    reviewed_handoff = handoff_response.json()["handoffs"][0]
+    assert reviewed_handoff["reviewedBy"] == "verified-reviewer"
+    reviewed_risk = risk_response.json()["artifacts"]["riskRegister"]["risks"][0]
+    assert reviewed_risk["reviewedBy"] == "verified-reviewer"
+
+    projects.MARKET_EVIDENCE_DB.pop(project_id, None)
+    client.delete(
+        f"/projects/{project_id}",
+        headers={"x-realytics-session-id": admin_session},
+    )
 
 
 def test_project_list_scopes_to_authenticated_session_owner():
@@ -212,6 +360,45 @@ def test_strict_tenant_isolation_blocks_cross_tenant_decision_artifact_routes(mo
         client.get(
             f"/projects/{project_id}/orchestrations/missing-run/risk-register",
             headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/calculation-runs",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/cashflow-export-package",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/cashflow-export-completions",
+            headers=outsider_headers,
+            json={
+                "anchorCalculationRunId": "anchor-outside-tenant",
+                "calculationRunIds": {
+                    "cash_flow_engine": "anchor-outside-tenant",
+                    "waterfall": "waterfall-outside-tenant",
+                    "tranche_recovery": "recovery-outside-tenant",
+                    "unsold_ltv": "ltv-outside-tenant",
+                    "discount_stress": "stress-outside-tenant",
+                },
+                "artifactSha256": "a" * 64,
+                "fileName": "outside-tenant.xlsx",
+                "sizeBytes": 1024,
+            },
+        ),
+        client.get(
+            f"/projects/{project_id}/market-evidence",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/market-evidence/review",
+            headers=outsider_headers,
+            json={"record_key": "missing", "review_status": "approved"},
+        ),
+        client.patch(
+            f"/projects/{project_id}/deal-state-records/missing-record/review",
+            headers=outsider_headers,
+            json={"reviewStatus": "approved"},
         ),
         client.get(f"/projects/{project_id}/evidence-graphs", headers=outsider_headers),
         client.get(
@@ -416,12 +603,68 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
     assert blocked.status_code == 403
     assert blocked.json()["detail"]["requiredPermission"] == "report:export"
 
+    blocked_cashflow = client.get(
+        f"/projects/{project_id}/cashflow-export-package",
+        headers={"x-realytics-session-id": viewer_session},
+    )
+    assert blocked_cashflow.status_code == 403
+    assert blocked_cashflow.json()["detail"]["requiredPermission"] == "report:export"
+
+    blocked_cashflow_completion = client.post(
+        f"/projects/{project_id}/cashflow-export-completions",
+        headers={"x-realytics-session-id": viewer_session},
+        json={
+            "anchorCalculationRunId": "blocked-anchor",
+            "calculationRunIds": {
+                "cash_flow_engine": "blocked-anchor",
+                "waterfall": "blocked-waterfall",
+                "tranche_recovery": "blocked-recovery",
+                "unsold_ltv": "blocked-ltv",
+                "discount_stress": "blocked-stress",
+            },
+            "artifactSha256": "b" * 64,
+            "fileName": "blocked.xlsx",
+            "sizeBytes": 1024,
+        },
+    )
+    assert blocked_cashflow_completion.status_code == 403
+    assert (
+        blocked_cashflow_completion.json()["detail"]["requiredPermission"]
+        == "report:export"
+    )
+
     allowed = client.post(
         f"/projects/{project_id}/reports/{report_id}/exports",
         headers={"x-realytics-session-id": reviewer_session},
         json={"format": "markdown"},
     )
     assert allowed.status_code == 200
+
+    allowed_cashflow = client.get(
+        f"/projects/{project_id}/cashflow-export-package",
+        headers={"x-realytics-session-id": reviewer_session},
+    )
+    assert allowed_cashflow.status_code == 409
+    assert (
+        allowed_cashflow.json()["detail"]["error"]
+        == "cashflow_export_lineage_incomplete"
+    )
+
+    export_events = client.get(
+        "/audit/user-activity",
+        headers={"x-realytics-session-id": reviewer_session},
+        params={
+            "user_id": "reviewer-user",
+            "project_id": project_id,
+            "event_type": "report_export_created",
+        },
+    )
+    assert export_events.status_code == 200
+    assert not any(
+        (event.get("metadata") or {}).get("exportType")
+        == "cashflow_calculation_package"
+        for event in export_events.json()["logs"]
+    )
 
 
 def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):

@@ -223,16 +223,34 @@ def submit_pf_review_job(
 
 
 def process_next_pf_review_job(
-    orchestration_repository: Any,
+    orchestration_repository: Any | None,
     *,
     worker_id: str,
     store: Optional[JobStore] = None,
+    repository_factory: Callable[[Dict[str, Any]], Any] | None = None,
 ) -> Dict[str, Any] | None:
     store = store or _STORE
     job = store.claim(worker_id=worker_id)
     if job is None:
         return None
-    return _execute_job(job, orchestration_repository, store, already_claimed=True)
+    try:
+        repository = (
+            repository_factory(job)
+            if repository_factory is not None
+            else orchestration_repository
+        )
+        if repository is None:
+            raise RuntimeError("PF review worker repository is not configured")
+    except Exception as exc:
+        return store.update(
+            job["jobId"],
+            status="failed",
+            completedAt=_now(),
+            leaseOwner=None,
+            leaseExpiresAt=None,
+            error=f"repository_configuration_failed:{exc.__class__.__name__}",
+        )
+    return _execute_job(job, repository, store, already_claimed=True)
 
 
 def cancel_pf_review_job(job_id: str, *, reason: str, store: Optional[JobStore] = None) -> Dict[str, Any] | None:
@@ -295,14 +313,23 @@ def recover_interrupted_jobs(
 
 
 class PFReviewJobWorker:
-    def __init__(self, repository_factory: Callable[[], Any], *, worker_id: str | None = None) -> None:
+    def __init__(
+        self,
+        repository_factory: Callable[[Dict[str, Any]], Any],
+        *,
+        worker_id: str | None = None,
+        store: Optional[JobStore] = None,
+    ) -> None:
         self.repository_factory = repository_factory
         self.worker_id = worker_id or f"pf-review-worker:{uuid4()}"
+        self.store = store
 
     def run_once(self) -> Dict[str, Any] | None:
         return process_next_pf_review_job(
-            self.repository_factory(),
+            None,
             worker_id=self.worker_id,
+            store=self.store,
+            repository_factory=self.repository_factory,
         )
 
     def run_forever(self, *, poll_seconds: float = 1.0) -> None:

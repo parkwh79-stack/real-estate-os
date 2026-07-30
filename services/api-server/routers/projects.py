@@ -38,11 +38,20 @@ from agents.stress_test_agent import StressTestAgent
 from schemas.credit_enhancement import CreditEnhancementRequest
 from agents.credit_enhancement_agent import CreditEnhancementAgent
 from schemas.cash_sweep import CashSweepRequest
+from schemas.cashflow_export import (
+    CASHFLOW_EXPORT_ENGINE_KEYS,
+    CashflowExportCompletionRequest,
+)
 from schemas.document_review_workspace import DocumentReviewWorkspaceViewModel
 from agents.cash_sweep_agent import CashSweepAgent
 from integrations.kakao import build_kakao_intake_plan_message, build_kakao_workflow_result_message
 from agents.restructuring_agent import RestructuringAgent
 from db.repositories.market_evidence_repository import MarketEvidenceRepository
+from db.repositories.calculation_run_repository import (
+    CalculationRunRepositoryError,
+    PostgresCalculationRunRepository,
+    select_local_export_runs,
+)
 from db.repositories.orchestration_repository import (
     OrchestrationRepository,
     PostgresOrchestrationRepository,
@@ -556,6 +565,18 @@ def user_id_from_request(request: Request) -> str:
     context = identity_context_from_request(request)
     user = context.get("user") or {}
     return user.get("userId") or "anonymous"
+
+
+def verified_actor_id(authorization: Dict[str, Any]) -> str:
+    """Return only a server-verified identity for an audit mutation."""
+
+    actor_id = str(((authorization.get("user") or {}).get("userId") or "")).strip()
+    if authorization.get("authenticated") is not True or not actor_id:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "authentication_required", "scope": "review_actor"},
+        )
+    return actor_id
 
 def tenant_id_from_request(request: Request) -> str | None:
     context = identity_context_from_request(request)
@@ -2752,9 +2773,9 @@ def list_project_calculation_runs(
     engine_key: str | None = None,
     limit: int = Query(100, ge=1, le=500),
 ):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
     records = list_calculation_run_records(project_id, engine_key=engine_key, limit=limit)
     return {
         "schemaVersion": "realytics-calculation-run-list-v2",
@@ -2762,6 +2783,187 @@ def list_project_calculation_runs(
         "engineKey": engine_key,
         "count": len(records),
         "records": records,
+    }
+
+
+def _cashflow_export_selection(
+    project_id: str,
+    request: Request,
+    *,
+    anchor_calculation_run_id: str | None = None,
+) -> Dict[str, Any]:
+    dependent_engine_keys = CASHFLOW_EXPORT_ENGINE_KEYS[1:]
+    try:
+        if storage_backend() in {"postgres", "postgresql"}:
+            tenant_id = str(tenant_id_from_request(request) or "").strip()
+            if not tenant_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "tenant_required"},
+                )
+            return PostgresCalculationRunRepository(
+                tenant_id=tenant_id
+            ).select_export_runs(
+                project_id,
+                dependent_engine_keys=dependent_engine_keys,
+                anchor_calculation_run_id=anchor_calculation_run_id,
+            )
+        return select_local_export_runs(
+            list_calculation_run_records(project_id, limit=500),
+            dependent_engine_keys=dependent_engine_keys,
+            anchor_calculation_run_id=anchor_calculation_run_id,
+        )
+    except HTTPException:
+        raise
+    except CalculationRunRepositoryError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "calculation_run_authority_unavailable"},
+        ) from exc
+
+
+def _require_complete_cashflow_export_lineage(
+    selection: Dict[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    anchor = selection.get("anchor")
+    missing = list(selection.get("missingEngineKeys") or [])
+    ineligible = list(selection.get("ineligibleEngineKeys") or [])
+    if not isinstance(anchor, dict):
+        missing = list(CASHFLOW_EXPORT_ENGINE_KEYS)
+    if (
+        not isinstance(anchor, dict)
+        or selection.get("reportEligible") is not True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "cashflow_export_lineage_incomplete",
+                "reason": (
+                    "anchor_missing"
+                    if not isinstance(anchor, dict)
+                    else "dependent_run_lineage_incomplete"
+                ),
+                "reportEligible": False,
+                "anchorCalculationRunId": (
+                    anchor.get("calculationRunId")
+                    if isinstance(anchor, dict)
+                    else None
+                ),
+                "missingEngineKeys": missing,
+                "ineligibleEngineKeys": ineligible,
+            },
+        )
+    runs = selection.get("runs")
+    if not isinstance(runs, dict) or any(
+        not isinstance(runs.get(engine_key), dict)
+        for engine_key in CASHFLOW_EXPORT_ENGINE_KEYS
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "calculation_run_authority_unavailable"},
+        )
+    return anchor, runs
+
+
+@router.get("/{project_id}/cashflow-export-package")
+def get_project_cashflow_export_package(project_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "report:export")
+    enforce_project_tenant_scope(request, project)
+    actor_id = verified_actor_id(authorization)
+    selection = _cashflow_export_selection(project_id, request)
+    anchor, runs_by_engine = _require_complete_cashflow_export_lineage(selection)
+    record_sensitive_project_event(
+        request,
+        event_type="cashflow_export_package_read",
+        project_id=project_id,
+        metadata={
+            "exportType": "cashflow_calculation_package",
+            "requestedBy": actor_id,
+            "anchorCalculationRunId": anchor.get("calculationRunId"),
+            "engineKeys": list(CASHFLOW_EXPORT_ENGINE_KEYS),
+            "calculationRunIds": {
+                engine_key: record.get("calculationRunId")
+                for engine_key, record in runs_by_engine.items()
+            },
+            "authorization": authorization.get("authorization"),
+        },
+    )
+    return {
+        "schemaVersion": "realytics-cashflow-export-package-v1",
+        "projectId": project_id,
+        "generatedAt": now_iso(),
+        "generatedBy": actor_id,
+        "anchorCalculationRunId": anchor.get("calculationRunId"),
+        "reportEligible": True,
+        "engineKeys": list(CASHFLOW_EXPORT_ENGINE_KEYS),
+        "missingEngineKeys": [],
+        "ineligibleEngineKeys": [],
+        "runs": runs_by_engine,
+    }
+
+
+@router.post("/{project_id}/cashflow-export-completions", status_code=201)
+def complete_project_cashflow_export(
+    project_id: str,
+    request: Request,
+    completion: CashflowExportCompletionRequest,
+):
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "report:export")
+    enforce_project_tenant_scope(request, project)
+    actor_id = verified_actor_id(authorization)
+    selection = _cashflow_export_selection(
+        project_id,
+        request,
+        anchor_calculation_run_id=completion.anchor_calculation_run_id,
+    )
+    anchor, runs_by_engine = _require_complete_cashflow_export_lineage(selection)
+    expected_ids = {
+        engine_key: str(record.get("calculationRunId") or "")
+        for engine_key, record in runs_by_engine.items()
+    }
+    if expected_ids != completion.calculation_run_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "cashflow_export_completion_lineage_mismatch",
+                "anchorCalculationRunId": anchor.get("calculationRunId"),
+            },
+        )
+    completion_id = str(uuid4())
+    completed_at = now_iso()
+    record_sensitive_project_event(
+        request,
+        event_type="cashflow_export_completed",
+        project_id=project_id,
+        metadata={
+            "completionId": completion_id,
+            "exportType": "cashflow_xlsx",
+            "completedBy": actor_id,
+            "completedAt": completed_at,
+            "anchorCalculationRunId": anchor.get("calculationRunId"),
+            "calculationRunIds": expected_ids,
+            "artifactSha256": completion.artifact_sha256,
+            "fileName": completion.file_name,
+            "sizeBytes": completion.size_bytes,
+            "mediaType": completion.media_type,
+            "artifactVerification": "client_generated_metadata_attested",
+            "authorization": authorization.get("authorization"),
+        },
+    )
+    return {
+        "schemaVersion": "realytics-cashflow-export-completion-v1",
+        "completionId": completion_id,
+        "projectId": project_id,
+        "completedAt": completed_at,
+        "completedBy": actor_id,
+        "anchorCalculationRunId": anchor.get("calculationRunId"),
+        "calculationRunIds": expected_ids,
+        "artifactSha256": completion.artifact_sha256,
+        "fileName": completion.file_name,
+        "sizeBytes": completion.size_bytes,
+        "mediaType": completion.media_type,
     }
 
 
@@ -2904,9 +3106,10 @@ def review_project_deal_state_record(
     payload: Dict[str, Any],
     request: Request,
 ):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:review")
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "project:review")
+    enforce_project_tenant_scope(request, project)
+    reviewer = verified_actor_id(authorization)
     review_status = str(payload.get("reviewStatus") or payload.get("review_status") or "").strip()
     if review_status not in {"approved", "waived", "needs_revision", "resolved"}:
         raise HTTPException(status_code=400, detail="reviewStatus must be approved, waived, needs_revision, or resolved")
@@ -2915,7 +3118,6 @@ def review_project_deal_state_record(
     if not record:
         raise HTTPException(status_code=404, detail="Deal State record not found")
 
-    reviewer = str(payload.get("reviewedBy") or payload.get("reviewed_by") or identity_context_from_request(request).get("userId") or "reviewer")
     now = datetime.now(timezone.utc).isoformat()
     audit_entry = {
         "reviewStatus": review_status,
@@ -3752,18 +3954,36 @@ def upsert_project_restructuring_cure(project_id: str, request: Request, input_d
     }
 
 @router.get("/{project_id}/market-evidence")
-def list_project_market_evidence(project_id: str, run_id: str | None = None):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+def list_project_market_evidence(
+    project_id: str,
+    request: Request,
+    run_id: str | None = None,
+):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "evidence:read")
+    enforce_project_tenant_scope(request, project)
     return list_market_evidence_use_case(market_evidence_repository(), project_id, run_id)
 
 @router.post("/{project_id}/market-evidence/review")
-def review_project_market_evidence(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
-        raise HTTPException(status_code=404, detail="Project not found")
+def review_project_market_evidence(
+    project_id: str,
+    request: Request,
+    input_data: Dict[str, Any],
+):
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "project:review")
+    enforce_project_tenant_scope(request, project)
+    review_input = dict(input_data or {})
+    review_input["reviewed_by"] = verified_actor_id(authorization)
+    review_input.pop("reviewedBy", None)
 
     try:
-        return review_market_evidence_use_case(market_evidence_repository(), input_data, now_iso(), project_id)
+        return review_market_evidence_use_case(
+            market_evidence_repository(),
+            review_input,
+            now_iso(),
+            project_id,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -6590,8 +6810,11 @@ def review_project_orchestration_handoff(
     input_data: Dict[str, Any] | None = None,
 ):
     project = authoritative_project(project_id, request)
-    authorize_request(request, "project:review")
+    authorization = authorize_request(request, "project:review")
     enforce_project_tenant_scope(request, project)
+    review_input = dict(input_data or {})
+    review_input["reviewed_by"] = verified_actor_id(authorization)
+    review_input.pop("reviewedBy", None)
 
     try:
         return review_orchestration_handoff_by_id_use_case(
@@ -6599,7 +6822,7 @@ def review_project_orchestration_handoff(
             project_id,
             run_id,
             handoff_id,
-            input_data,
+            review_input,
             now_iso(),
         )
     except LookupError as exc:
@@ -6618,6 +6841,9 @@ def review_project_orchestration_risk_register_row(
     project = authoritative_project(project_id, request)
     authz = authorize_request(request, "risk:review")
     enforce_project_tenant_scope(request, project)
+    review_input = dict(input_data or {})
+    review_input["reviewed_by"] = verified_actor_id(authz)
+    review_input.pop("reviewedBy", None)
 
     try:
         reviewed = review_risk_register_row_by_id_use_case(
@@ -6625,7 +6851,7 @@ def review_project_orchestration_risk_register_row(
             project_id,
             run_id,
             risk_id,
-            input_data,
+            review_input,
             now_iso(),
         )
         record_sensitive_project_event(
@@ -6635,7 +6861,7 @@ def review_project_orchestration_risk_register_row(
             run_id=run_id,
             metadata={
                 "riskId": risk_id,
-                "reviewStatus": (input_data or {}).get("review_status") or (input_data or {}).get("reviewStatus"),
+                "reviewStatus": review_input.get("review_status") or review_input.get("reviewStatus"),
                 "authorization": authz.get("authorization"),
             },
         )

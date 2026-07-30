@@ -1011,6 +1011,10 @@ def test_restructuring_cure_is_attached_to_next_pf_review_run():
 def test_pf_review_orchestration_can_be_retrieved_and_approved():
     client = TestClient(app)
     project_id = project_with_discount_triggers(client)
+    reviewer_headers = orchestration_auth_headers(
+        user_id="pytest-workflow-reviewer",
+        role="reviewer",
+    )
     approver_headers = orchestration_auth_headers(
         user_id="pytest-independent-approver",
         role="reviewer",
@@ -1027,9 +1031,10 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
     handoff_id = fetched["handoffs"][0]["handoffId"]
     needs_revision = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff_id}/review",
+        headers=reviewer_headers,
         json={
             "review_status": "needs_revision",
-            "reviewed_by": "credit_officer",
+            "reviewed_by": "spoofed-credit-officer",
             "comment": "Handoff needs workflow QA follow-up",
         },
     ).json()
@@ -1047,25 +1052,27 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
 
     reviewed = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff_id}/review",
+        headers=reviewer_headers,
         json={
             "review_status": "approved",
-            "reviewed_by": "credit_officer",
+            "reviewed_by": "spoofed-credit-officer",
             "comment": "Handoff accepted for workflow QA",
         },
     ).json()
     reviewed_handoff = next(item for item in reviewed["handoffs"] if item["handoffId"] == handoff_id)
     assert reviewed_handoff["reviewStatus"] == "approved"
     assert reviewed_handoff["status"] == "accepted"
-    assert reviewed_handoff["reviewedBy"] == "credit_officer"
+    assert reviewed_handoff["reviewedBy"] == "pytest-workflow-reviewer"
     assert reviewed_handoff["reviewHistory"][-1]["reviewComment"] == "Handoff accepted for workflow QA"
 
     for handoff in reviewed["handoffs"]:
         if handoff["reviewStatus"] in {"pending", "rejected", "needs_revision"}:
             reviewed = client.post(
                 f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff['handoffId']}/review",
+                headers=reviewer_headers,
                 json={
                     "review_status": "approved",
-                    "reviewed_by": "credit_officer",
+                    "reviewed_by": "spoofed-credit-officer",
                     "comment": "Remaining handoff accepted for workflow QA",
                 },
             ).json()
@@ -1074,13 +1081,20 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
         if risk.get("requiresHumanReview"):
             reviewed = client.post(
                 f"/projects/{project_id}/orchestrations/{run['run_id']}/risk-register/{risk['riskId']}/review",
+                headers=reviewer_headers,
                 json={
                     "review_status": "waived",
-                    "reviewed_by": "credit_officer",
+                    "reviewed_by": "spoofed-credit-officer",
                     "comment": "Risk accepted for workflow QA.",
                     "waiver_reason": "Test run waiver.",
                 },
             ).json()
+            reviewed_risk = next(
+                item
+                for item in reviewed["artifacts"]["riskRegister"]["risks"]
+                if item["riskId"] == risk["riskId"]
+            )
+            assert reviewed_risk["reviewedBy"] == "pytest-workflow-reviewer"
 
     persisted_after_review = client.get(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/risk-register"
@@ -1252,7 +1266,15 @@ def test_pf_review_persists_market_evidence_records():
         headers=orchestration_auth_headers(),
         json={},
     ).json()
-    records = client.get(f"/projects/{project_id}/market-evidence", params={"run_id": run["run_id"]}).json()
+    reviewer_headers = orchestration_auth_headers(
+        user_id="pytest-market-reviewer",
+        role="reviewer",
+    )
+    records = client.get(
+        f"/projects/{project_id}/market-evidence",
+        headers=reviewer_headers,
+        params={"run_id": run["run_id"]},
+    ).json()
 
     assert run["artifacts"]["marketEvidenceReview"]["evidenceSummary"]["evidenceRecordCount"] == 2
     assert len(records) == 2
@@ -1260,18 +1282,29 @@ def test_pf_review_persists_market_evidence_records():
     assert all(record["runId"] == run["run_id"] for record in records)
     assert all(record["sourceDocument"]["originalFileHash"] == "hash-market-study" for record in records)
 
-    reviewed = client.post(
+    unauthenticated = client.post(
         f"/projects/{project_id}/market-evidence/review",
         json={
             "record_key": records[0]["recordKey"],
             "review_status": "approved",
-            "reviewed_by": "market_analyst",
+        },
+    )
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["detail"]["scope"] == "review_actor"
+
+    reviewed = client.post(
+        f"/projects/{project_id}/market-evidence/review",
+        headers=reviewer_headers,
+        json={
+            "record_key": records[0]["recordKey"],
+            "review_status": "approved",
+            "reviewed_by": "spoofed-market-analyst",
             "comment": "Comparable evidence accepted.",
         },
     ).json()
 
     assert reviewed["reviewStatus"] == "approved"
-    assert reviewed["reviewedBy"] == "market_analyst"
+    assert reviewed["reviewedBy"] == "pytest-market-reviewer"
     assert reviewed["reviewHistory"][-1]["reviewComment"] == "Comparable evidence accepted."
 
 

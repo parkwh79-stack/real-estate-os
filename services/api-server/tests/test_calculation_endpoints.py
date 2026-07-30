@@ -2,10 +2,158 @@ from fastapi.testclient import TestClient
 import pytest
 
 from main import app
+from storage import upsert_calculation_run_record
 
 
 def first_project_id(client: TestClient) -> str:
     return client.get("/projects/").json()[0]["project"]["id"]
+
+
+def test_cashflow_export_package_returns_latest_fixed_engine_runs():
+    client = TestClient(app)
+    client.post(
+        "/auth/tenants",
+        json={"tenantId": "cashflow-export-tenant", "name": "Cashflow Export"},
+    )
+    client.post(
+        "/auth/users",
+        json={
+            "userId": "cashflow-export-admin",
+            "tenantId": "cashflow-export-tenant",
+            "role": "admin",
+        },
+    )
+    session_id = client.post(
+        "/auth/session",
+        json={
+            "userId": "cashflow-export-admin",
+            "tenantId": "cashflow-export-tenant",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    headers = {"x-realytics-session-id": session_id}
+    created = client.post(
+        "/projects/",
+        headers=headers,
+        json={"project": {"name": "Cashflow Export Package", "type": "mixed_use"}},
+    ).json()
+    project_id = created["project"]["id"]
+
+    upsert_calculation_run_record(
+        project_id,
+        {
+            "calculationRunId": "cashflow-export-old",
+            "engineKey": "cash_flow_engine",
+            "createdAt": "2026-01-01T00:00:00+00:00",
+            "resultSnapshot": {"version": "old"},
+        },
+    )
+    upsert_calculation_run_record(
+        project_id,
+        {
+            "calculationRunId": "cashflow-export-current",
+            "engineKey": "cash_flow_engine",
+            "createdAt": "2026-02-01T00:00:00+00:00",
+            "resultSnapshot": {"version": "current"},
+        },
+    )
+    upsert_calculation_run_record(
+        project_id,
+        {
+            "calculationRunId": "waterfall-export-wrong-newer",
+            "engineKey": "waterfall",
+            "createdAt": "2026-03-02T00:00:00+00:00",
+            "inputSnapshot": {"parentCalculationRunId": "cashflow-export-old"},
+            "resultSnapshot": {"rows": []},
+        },
+    )
+    incomplete = client.get(
+        f"/projects/{project_id}/cashflow-export-package",
+        headers=headers,
+    )
+    assert incomplete.status_code == 409
+    assert incomplete.json()["detail"] == {
+        "error": "cashflow_export_lineage_incomplete",
+        "reason": "dependent_run_lineage_incomplete",
+        "reportEligible": False,
+        "anchorCalculationRunId": "cashflow-export-current",
+        "missingEngineKeys": [
+            "tranche_recovery",
+            "unsold_ltv",
+            "discount_stress",
+        ],
+        "ineligibleEngineKeys": ["waterfall"],
+    }
+    for engine_key in (
+        "waterfall",
+        "tranche_recovery",
+        "unsold_ltv",
+        "discount_stress",
+    ):
+        upsert_calculation_run_record(
+            project_id,
+            {
+                "calculationRunId": f"{engine_key}-export-current",
+                "engineKey": engine_key,
+                "createdAt": "2026-03-01T00:00:00+00:00",
+                "inputSnapshot": {
+                    "parentCalculationRunId": "cashflow-export-current"
+                },
+                "resultSnapshot": {"rows": []},
+            },
+        )
+
+    response = client.get(
+        f"/projects/{project_id}/cashflow-export-package",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schemaVersion"] == "realytics-cashflow-export-package-v1"
+    assert body["generatedBy"] == "cashflow-export-admin"
+    assert body["reportEligible"] is True
+    assert body["anchorCalculationRunId"] == "cashflow-export-current"
+    assert body["runs"]["cash_flow_engine"]["calculationRunId"] == "cashflow-export-current"
+    assert body["runs"]["waterfall"]["calculationRunId"] == "waterfall-export-current"
+    assert body["missingEngineKeys"] == []
+    assert body["ineligibleEngineKeys"] == []
+
+    completion = client.post(
+        f"/projects/{project_id}/cashflow-export-completions",
+        headers=headers,
+        json={
+            "anchorCalculationRunId": body["anchorCalculationRunId"],
+            "calculationRunIds": {
+                key: value["calculationRunId"] for key, value in body["runs"].items()
+            },
+            "artifactSha256": "a" * 64,
+            "fileName": "cashflow-export.xlsx",
+            "sizeBytes": 4096,
+            "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+    )
+    assert completion.status_code == 201
+    assert completion.json()["artifactSha256"] == "a" * 64
+    completion_events = client.get(
+        "/audit/user-activity",
+        headers=headers,
+        params={
+            "user_id": "cashflow-export-admin",
+            "project_id": project_id,
+            "event_type": "cashflow_export_completed",
+        },
+    )
+    assert completion_events.status_code == 200
+    matching_events = completion_events.json()["logs"]
+    assert len(matching_events) == 1
+    assert matching_events[0]["metadata"]["artifactSha256"] == "a" * 64
+    assert (
+        matching_events[0]["metadata"]["artifactVerification"]
+        == "client_generated_metadata_attested"
+    )
+
+    client.delete(f"/projects/{project_id}", headers=headers)
 
 
 def test_cashflow_endpoint_returns_monthly_rows_and_max_minus():
