@@ -1,0 +1,46 @@
+# REALYTICS Vercel project deploys the Next.js application only.
+# Keep root workspace manifests and packages/* available for workspace resolution.
+
+# Backend services and local database/runtime state are deployed separately.
+/services/
+/supabase/
+
+# Non-web applications and internal documentation are not part of the web bundle.
+/apps/docs/
+/docs/
+
+# Local dependencies, virtual environments, caches, and build outputs.
+node_modules/
+**/node_modules/
+.venv/
+venv/
+.runtime/
+.turbo/
+.pytest_cache/
+**/.pytest*/
+**/__pycache__/
+**/*.py[cod]
+
+# Local configuration, credentials, and deployment metadata.
+.env
+.env.*
+**/.env
+**/.env.*
+.vercel/
+**/.vercel/
+
+# Web build and test artifacts.
+apps/web/.next/
+apps/web/out/
+apps/web/test-results/
+apps/web/playwright-report/
+apps/web/.auth/
+coverage/
+**/coverage/
+
+# Repository and editor metadata.
+.git/
+.agents/
+.codex/
+.cursor/
+.claude/
