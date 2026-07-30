@@ -115,6 +115,12 @@ MFA state, and optionally other-session revocation.
 ## Preconditions
 
 - The selected provider is enabled in the hosted Supabase project.
+- A production-grade Custom SMTP provider is enabled in Supabase Auth and its
+  sender domain is verified. The built-in provider is not an acceptable pilot
+  prerequisite: its delivery scope and rate limit are intentionally restricted
+  and cannot prove delivery to customer addresses. Store SMTP credentials only
+  in Supabase/Vault or the approved secret manager; never put them in Git,
+  screenshots, test fixtures, or this runbook.
 - Kakao OAuth start fixes the provider query to
   `scope=profile_nickname profile_image`, the resulting Kakao URL contains no
   `account_email`, and hosted Kakao Auth has
@@ -129,6 +135,53 @@ MFA state, and optionally other-session revocation.
   exported session was stepped up recently.
 - `REALYTICS_IDENTITY_DATABASE_URL` points to the dedicated identity role, not
   the migration or API runtime role.
+
+## Email signup, resend, and recovery smoke
+
+Use two dedicated pilot inboxes: one address that has never been registered and
+one pending, unconfirmed signup. Do not use an executive's or production
+operator's primary account.
+
+1. Submit email signup with the current displayed terms and privacy versions.
+   Confirm the BFF receives `termsAccepted=true`, `privacyAccepted=true`, and
+   both exact version identifiers. A missing consent must return
+   `signup_policy_consent_required`;
+   a stale version must return `signup_policy_version_mismatch` before Supabase
+   is contacted.
+2. Confirm the UI enters the privacy-preserving confirmation state. It must not
+   say that the account was created or that delivery definitely succeeded.
+3. Wait for the displayed cooldown, select **확인 메일 다시 보내기**, and
+   confirm one additional signup confirmation message arrives. The callback
+   must return to the canonical Web origin and then `/onboarding` through the
+   existing SSR/PKCE exchange.
+4. Request password recovery once for each pilot inbox. Both browser responses
+   must use the same accepted envelope (`accountState=undisclosed`,
+   `deliveryState=unconfirmed`). A caller must not be able to infer which inbox
+   has an account from status, message, timing target, or response shape.
+5. Open the recovery link once, set a policy-compliant password, and confirm the
+   recovery session is locally signed out. Reusing the link must fail closed.
+
+The public error contract exposes only account-neutral operational states:
+
+- `auth_email_rate_limited`: caller/project request limit; retry after the
+  displayed cooldown. A per-address recovery/resend limit remains hidden behind
+  the accepted envelope because exposing it could enable account enumeration.
+- `auth_email_delivery_not_configured`: email/password signup or Custom SMTP is
+  disabled, or the built-in SMTP does not authorize the recipient. This blocks
+  the pilot Gate.
+- `auth_email_delivery_unavailable`: SMTP/Auth provider timeout or temporary
+  outage. Retry once after the cooldown; repeated failure blocks the Gate.
+- `auth_email_address_invalid`: syntactically/provider-invalid recipient; fix
+  the input without echoing provider details.
+
+For diagnosis, inspect Supabase **Auth logs** and the Vercel/Next.js BFF logs at
+the same timestamp. REALYTICS logs only operation, normalized category,
+provider error code, and HTTP status. They must not contain the email address,
+password, confirmation token, PKCE verifier, access/refresh token, SMTP host
+credential, or raw provider error message. Expected provider signals include
+`over_request_rate_limit`, `over_email_send_rate_limit`,
+`email_address_not_authorized`, `email_provider_disabled`, `request_timeout`,
+and `unexpected_failure`. Record the normalized category and remediation only.
 
 ## Capture a short-lived signed browser state
 

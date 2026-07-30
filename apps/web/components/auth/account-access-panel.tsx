@@ -8,6 +8,7 @@ import {
   REALYTICS_PRIVACY_VERSION,
   REALYTICS_TERMS_VERSION,
   requestSupabasePasswordRecovery,
+  resendSupabaseSignupConfirmation,
   signInWithSupabasePassword,
   signUpWithSupabasePassword,
   updateSupabasePassword,
@@ -26,6 +27,8 @@ export function AccountAccessPanel() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const resendCoolingDown = resendCooldown > 0;
 
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
@@ -38,12 +41,21 @@ export function AccountAccessPanel() {
     if (code) setError(loginErrorMessage(code));
   }, []);
 
+  useEffect(() => {
+    if (!resendCoolingDown) return;
+    const timer = window.setInterval(() => {
+      setResendCooldown((value) => Math.max(0, value - 1));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [resendCoolingDown]);
+
   function changeMode(next: Mode) {
     setMode(next);
     setPassword("");
     setPasswordConfirmation("");
     setError(null);
     setNotice(null);
+    setResendCooldown(0);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -72,21 +84,59 @@ export function AccountAccessPanel() {
         const result = await signInWithSupabasePassword({ email, password });
         window.location.assign(result.next);
       } else if (mode === "signup") {
-        const result = await signUpWithSupabasePassword({ email, password, displayName });
+        const result = await signUpWithSupabasePassword({
+          email,
+          password,
+          displayName,
+          termsAccepted: true,
+          privacyAccepted: true,
+          termsVersion: REALYTICS_TERMS_VERSION,
+          privacyVersion: REALYTICS_PRIVACY_VERSION,
+        });
         if (result.requiresEmailConfirmation) {
           setMode("confirmation");
+          setResendCooldown(60);
         } else {
           window.location.assign(result.next);
         }
       } else if (mode === "recovery") {
         await requestSupabasePasswordRecovery(email);
-        setNotice("가입된 계정이 있으면 비밀번호 재설정 메일이 발송됩니다. 메일의 링크는 한 번만 사용해 주세요.");
+        setNotice("가입된 계정이고 발송이 가능하면 비밀번호 재설정 메일이 전송됩니다. 계정 존재 여부와 실제 발송 여부는 이 화면에서 구분하지 않습니다.");
+        setResendCooldown(60);
       } else if (mode === "reset") {
         await updateSupabasePassword(password);
         changeMode("login");
         setNotice("비밀번호를 변경했습니다. 새 비밀번호로 로그인해 주세요.");
       }
     } catch (caught) {
+      if (
+        caught instanceof AuthClientRequestError
+        && caught.code === "auth_email_rate_limited"
+      ) {
+        setResendCooldown(60);
+      }
+      setError(accountErrorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendConfirmation() {
+    if (busy || resendCooldown > 0) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await resendSupabaseSignupConfirmation(email);
+      setNotice("확인 가능한 가입 요청이라면 메일이 발송됩니다. 스팸함도 확인해 주세요.");
+      setResendCooldown(60);
+    } catch (caught) {
+      if (
+        caught instanceof AuthClientRequestError
+        && caught.code === "auth_email_rate_limited"
+      ) {
+        setResendCooldown(60);
+      }
       setError(accountErrorMessage(caught));
     } finally {
       setBusy(false);
@@ -99,11 +149,22 @@ export function AccountAccessPanel() {
         <CheckCircle2 className="h-6 w-6 text-emerald-600" />
         <h3 className="mt-3 text-lg font-black">이메일을 확인해 주세요</h3>
         <p className="mt-2 text-sm leading-6 text-emerald-800">
-          <strong>{email}</strong>로 확인 링크를 보냈습니다. 확인 후 기관 가입 온보딩으로 이동합니다.
+          <strong>{email}</strong>이 가입 가능한 주소라면 확인 링크가 발송됩니다.
+          링크를 확인하면 기관 가입 온보딩으로 이동합니다.
         </p>
-        <button type="button" onClick={() => changeMode("login")} className="mt-4 text-sm font-bold underline underline-offset-4">
-          로그인으로 돌아가기
-        </button>
+        <p className="mt-2 text-xs leading-5 text-emerald-800">
+          이미 가입한 주소라도 계정 존재 여부 보호를 위해 같은 화면이 표시됩니다. 로그인 또는 비밀번호 찾기를 이용해 주세요.
+        </p>
+        {error ? <p role="alert" className="mt-4 flex gap-2 rounded-xl border border-rose-200 bg-white p-3 text-xs leading-5 text-rose-800"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{error}</p> : null}
+        {notice ? <p role="status" className="mt-4 rounded-xl border border-emerald-200 bg-white p-3 text-xs leading-5 text-emerald-800">{notice}</p> : null}
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button type="button" onClick={() => void resendConfirmation()} disabled={busy || resendCooldown > 0} className="rounded-lg border border-emerald-300 bg-white px-3 py-2 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-60">
+            {busy ? "요청 중" : resendCooldown > 0 ? `다시 보내기 (${resendCooldown}초)` : "확인 메일 다시 보내기"}
+          </button>
+          <button type="button" onClick={() => changeMode("login")} className="px-2 py-2 text-sm font-bold underline underline-offset-4">
+            로그인으로 돌아가기
+          </button>
+        </div>
       </div>
     );
   }
@@ -132,7 +193,7 @@ export function AccountAccessPanel() {
             <Consent checked={termsAccepted} onChange={setTermsAccepted} label={`[필수] 서비스 이용약관 (${REALYTICS_TERMS_VERSION})`} />
             <Consent checked={privacyAccepted} onChange={setPrivacyAccepted} label={`[필수] 개인정보 처리방침 (${REALYTICS_PRIVACY_VERSION})`} />
             <p className="text-[11px] text-slate-500">
-              여기서는 가입 진행 의사를 확인합니다. 최종 동의는 이메일 인증 후 온보딩 프로필에 정책 버전과 시각으로 기록됩니다.
+              현재 정책 버전과 동의 여부는 가입 BFF가 먼저 검증합니다. 최종 동의는 이메일 인증 후 온보딩 프로필에 정책 버전과 시각으로 다시 기록됩니다.
             </p>
           </div>
         ) : null}
@@ -140,8 +201,12 @@ export function AccountAccessPanel() {
         {error ? <p role="alert" className="flex gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs leading-5 text-rose-800"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{error}</p> : null}
         {notice ? <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-5 text-emerald-800">{notice}</p> : null}
 
-        <button type="submit" disabled={busy} className="flex h-12 w-full items-center justify-center rounded-xl bg-[#07172d] text-sm font-bold text-white hover:bg-[#0d2748] disabled:opacity-60">
-          {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : submitLabel(mode)}
+        <button type="submit" disabled={busy || (mode === "recovery" && resendCoolingDown)} className="flex h-12 w-full items-center justify-center rounded-xl bg-[#07172d] text-sm font-bold text-white hover:bg-[#0d2748] disabled:opacity-60">
+          {busy
+            ? <LoaderCircle className="h-4 w-4 animate-spin" />
+            : mode === "recovery" && resendCoolingDown
+              ? `다시 요청 (${resendCooldown}초)`
+              : submitLabel(mode)}
         </button>
       </form>
 

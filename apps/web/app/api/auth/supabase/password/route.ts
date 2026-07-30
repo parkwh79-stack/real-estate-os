@@ -24,6 +24,14 @@ import {
   invitationIntentIsDeferred,
   shouldClearInvitationIntent,
 } from "../../../../../lib/invitation-intent";
+import {
+  REALYTICS_PRIVACY_VERSION,
+  REALYTICS_TERMS_VERSION,
+} from "../../../../../lib/auth-onboarding-policy";
+import {
+  classifyAuthEmailFailure,
+  publicAuthEmailFailureBody,
+} from "../../../../../lib/supabase/auth-email-errors";
 import { createSupabaseServerClient } from "../../../../../lib/supabase/server";
 
 type PasswordPayload = {
@@ -31,6 +39,10 @@ type PasswordPayload = {
   email?: unknown;
   password?: unknown;
   displayName?: unknown;
+  termsAccepted?: unknown;
+  privacyAccepted?: unknown;
+  termsVersion?: unknown;
+  privacyVersion?: unknown;
 };
 
 type AuthResolution = {
@@ -75,6 +87,30 @@ export async function POST(request: NextRequest) {
       400,
     );
   }
+  if (
+    mode === "signup"
+    && (payload.termsAccepted !== true || payload.privacyAccepted !== true)
+  ) {
+    return authJson({ error: "signup_policy_consent_required" }, 400);
+  }
+  if (
+    mode === "signup"
+    && (
+      payload.termsVersion !== REALYTICS_TERMS_VERSION
+      || payload.privacyVersion !== REALYTICS_PRIVACY_VERSION
+    )
+  ) {
+    return authJson(
+      {
+        error: "signup_policy_version_mismatch",
+        policyVersions: {
+          termsVersion: REALYTICS_TERMS_VERSION,
+          privacyVersion: REALYTICS_PRIVACY_VERSION,
+        },
+      },
+      409,
+    );
+  }
 
   try {
     const supabase = await createSupabaseServerClient();
@@ -90,15 +126,19 @@ export async function POST(request: NextRequest) {
         },
       });
       if (error) {
-        return authJson({ error: "authentication_failed" }, 400);
+        const failure = classifyAuthEmailFailure(error, "signup");
+        logAuthEmailFailure("signup", failure);
+        const publicFailure = publicAuthEmailFailureBody(failure);
+        if (publicFailure && failure.publicStatus) {
+          return authJson(publicFailure, failure.publicStatus);
+        }
+        // Supabase intentionally obfuscates existing-account signup results.
+        // Keep the same public envelope when a provider code could reveal that
+        // an address already has an identity.
+        return pendingConfirmationResponse();
       }
       if (!data.session) {
-        return authJson({
-          authenticated: false,
-          requiresEmailConfirmation: true,
-          accessState: "onboarding_required",
-          next: "/onboarding",
-        });
+        return pendingConfirmationResponse();
       }
       return authenticatedResponse(
         request,
@@ -122,6 +162,27 @@ export async function POST(request: NextRequest) {
   } catch {
     return authJson({ error: "authentication_unavailable" }, 503);
   }
+}
+
+function pendingConfirmationResponse() {
+  return authJson({
+    authenticated: false,
+    requiresEmailConfirmation: true,
+    accessState: "onboarding_required",
+    next: "/onboarding",
+  }, 202);
+}
+
+function logAuthEmailFailure(
+  operation: string,
+  failure: ReturnType<typeof classifyAuthEmailFailure>,
+) {
+  console.warn("Supabase Auth email operation was not accepted", {
+    operation,
+    category: failure.category,
+    providerCode: failure.providerCode,
+    providerStatus: failure.providerStatus,
+  });
 }
 
 async function authenticatedResponse(

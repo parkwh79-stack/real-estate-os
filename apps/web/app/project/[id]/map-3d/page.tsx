@@ -4,9 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Box } from "lucide-react";
-import { authHeaders } from "../../../../lib/auth-client";
-
-const apiBase = "http://127.0.0.1:8000";
+import { apiBase, authHeaders } from "../../../../lib/auth-client";
 const VWORLD_KEY = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
 const SEOUL: [number, number] = [126.9779, 37.5663];
 
@@ -20,7 +18,7 @@ export default function Project3DMapPage() {
     void (async () => {
       let c = SEOUL;
       try {
-        const res = await fetch(`${apiBase}/projects/${projectId}/map?resolve_geometry=true`, {
+        const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/map?resolve_geometry=true`, {
           cache: "no-store",
           headers: authHeaders("web"),
         });

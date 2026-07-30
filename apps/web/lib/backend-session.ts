@@ -10,11 +10,23 @@ import {
   classifyInvitationAcceptanceResponse,
   type InvitationAcceptanceResult,
 } from "./invitation-intent";
+import { resolveBackendOrigin } from "./backend-origin-contract";
 export { safeInternalNextPath } from "./safe-navigation";
 export type { InvitationAcceptanceResult } from "./invitation-intent";
 
-export const BACKEND_ORIGIN =
-  process.env.REALYTICS_API_ORIGIN || "http://127.0.0.1:8000";
+export const BACKEND_ORIGIN = resolveBackendOrigin(
+  process.env.REALYTICS_API_ORIGIN,
+  process.env.NODE_ENV,
+) ?? "";
+
+/**
+ * Local development may use the loopback FastAPI default. A deployed Web/BFF
+ * must receive an explicit API origin; otherwise it fails closed instead of
+ * spending every request on an unreachable localhost connection.
+ */
+export function backendAuthorityConfigured(): boolean {
+  return Boolean(BACKEND_ORIGIN);
+}
 
 export const REALYTICS_SESSION_COOKIE =
   process.env.NODE_ENV === "production"
@@ -315,6 +327,9 @@ export async function realyticsAcceptsBearer(
   accessToken: string,
   tenantId?: string | null,
 ): Promise<RealyticsBearerIdentityResult> {
+  if (!backendAuthorityConfigured()) {
+    return { status: "backend_unavailable" };
+  }
   try {
     const selectedTenantId = normalizedTenantSelector(tenantId);
     const response = await fetch(`${BACKEND_ORIGIN}/auth/me`, {
@@ -376,6 +391,15 @@ export async function acceptRealyticsInvitation(
   accessToken: string,
   token: string,
 ): Promise<InvitationAcceptanceResult> {
+  if (!backendAuthorityConfigured()) {
+    return {
+      state: "authority_unavailable",
+      errorCode: "identity_invitation_authority_unavailable",
+      httpStatus: 503,
+      tenantId: null,
+      currentPolicyVersions: null,
+    };
+  }
   try {
     const response = await fetch(`${BACKEND_ORIGIN}/auth/invitations/accept`, {
       method: "POST",

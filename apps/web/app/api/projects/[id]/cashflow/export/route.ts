@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
+import { createHash } from "node:crypto";
+import { fetchAuthenticatedBackend } from "../../../../../../lib/authenticated-backend-fetch";
 
 export const runtime = "nodejs";
 
@@ -27,31 +29,192 @@ function addTitle(sheet: ExcelJS.Worksheet, title: string, subtitle: string) {
   sheet.columns = Array.from({ length: 8 }, (_, index) => ({ width: index === 0 ? 18 : 20 }));
 }
 
-async function latestRun(origin: string, projectId: string, engineKey: string, headers: Headers): Promise<AnyRecord | null> {
-  const response = await fetch(`${origin}/projects/${encodeURIComponent(projectId)}/calculation-runs?engine_key=${encodeURIComponent(engineKey)}&limit=1`, {
-    cache: "no-store",
-    headers,
-  });
-  if (!response.ok) return null;
-  const body = await response.json() as AnyRecord;
-  return Array.isArray(body.records) ? body.records[0] ?? null : null;
-}
-
-function copyAuthHeaders(request: Request): Headers {
-  const headers = new Headers();
-  for (const name of ["authorization", "cookie", "x-user-id", "x-role", "x-tenant-id", "x-runtime-mode"]) {
-    const value = request.headers.get(name);
-    if (value) headers.set(name, value);
+class BackendExportError extends Error {
+  constructor(readonly status: number, readonly code = "backend_unavailable") {
+    super(`Backend calculation authority returned ${status}.`);
   }
-  return headers;
 }
 
-export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
+const CASHFLOW_EXPORT_ENGINE_KEYS = [
+  "cash_flow_engine",
+  "waterfall",
+  "tranche_recovery",
+  "unsold_ltv",
+  "discount_stress",
+] as const;
+
+type CashflowExportPackage = {
+  anchorCalculationRunId: string;
+  runs: Record<(typeof CASHFLOW_EXPORT_ENGINE_KEYS)[number], AnyRecord>;
+  calculationRunIds: Record<(typeof CASHFLOW_EXPORT_ENGINE_KEYS)[number], string>;
+};
+
+async function loadExportPackage(projectId: string): Promise<{
+  anchorCalculationRunId: string;
+  runs: CashflowExportPackage["runs"];
+  calculationRunIds: CashflowExportPackage["calculationRunIds"];
+}> {
+  const response = await fetchAuthenticatedBackend(
+    `/projects/${encodeURIComponent(projectId)}/cashflow-export-package`,
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as {
+      error?: unknown;
+      detail?: { error?: unknown } | unknown;
+    } | null;
+    const detailError = payload?.detail
+      && typeof payload.detail === "object"
+      && "error" in payload.detail
+      ? payload.detail.error
+      : null;
+    const code = [payload?.error, detailError].find(
+      (value): value is string => typeof value === "string",
+    ) ?? "backend_unavailable";
+    throw new BackendExportError(response.status, code);
+  }
+  const body = await response.json().catch(() => null) as {
+    schemaVersion?: unknown;
+    projectId?: unknown;
+    anchorCalculationRunId?: unknown;
+    reportEligible?: unknown;
+    engineKeys?: unknown;
+    runs?: unknown;
+    missingEngineKeys?: unknown;
+    ineligibleEngineKeys?: unknown;
+  } | null;
+  const runs = body?.runs;
+  const engineKeys = body?.engineKeys;
+  if (
+    body?.schemaVersion !== "realytics-cashflow-export-package-v1"
+    || body.projectId !== projectId
+    || body.reportEligible !== true
+    || typeof body.anchorCalculationRunId !== "string"
+    || !body.anchorCalculationRunId
+    || !Array.isArray(engineKeys)
+    || engineKeys.length !== CASHFLOW_EXPORT_ENGINE_KEYS.length
+    || !CASHFLOW_EXPORT_ENGINE_KEYS.every(
+      (engineKey, index) => engineKeys[index] === engineKey,
+    )
+    || !runs
+    || typeof runs !== "object"
+    || Array.isArray(runs)
+    || !Array.isArray(body.missingEngineKeys)
+    || body.missingEngineKeys.length !== 0
+    || !Array.isArray(body.ineligibleEngineKeys)
+    || body.ineligibleEngineKeys.length !== 0
+    || !CASHFLOW_EXPORT_ENGINE_KEYS.every((engineKey) => {
+      const record = (runs as Record<string, unknown>)[engineKey];
+      return Boolean(
+        record
+        && typeof record === "object"
+        && !Array.isArray(record)
+        && typeof (record as AnyRecord).calculationRunId === "string"
+        && (record as AnyRecord).calculationRunId,
+      );
+    })
+  ) {
+    throw new BackendExportError(502, "invalid_export_package");
+  }
+  const typedRuns = runs as CashflowExportPackage["runs"];
+  if (
+    typedRuns.cash_flow_engine.calculationRunId
+    !== body.anchorCalculationRunId
+  ) {
+    throw new BackendExportError(502, "invalid_export_package_lineage");
+  }
+  const calculationRunIds = Object.fromEntries(
+    CASHFLOW_EXPORT_ENGINE_KEYS.map((engineKey) => [
+      engineKey,
+      String(typedRuns[engineKey].calculationRunId),
+    ]),
+  ) as CashflowExportPackage["calculationRunIds"];
+  return {
+    anchorCalculationRunId: body.anchorCalculationRunId,
+    runs: typedRuns,
+    calculationRunIds,
+  };
+}
+
+async function recordExportCompletion(
+  projectId: string,
+  exportPackage: CashflowExportPackage,
+  artifact: Uint8Array,
+  fileName: string,
+): Promise<void> {
+  const artifactSha256 = createHash("sha256").update(artifact).digest("hex");
+  const response = await fetchAuthenticatedBackend(
+    `/projects/${encodeURIComponent(projectId)}/cashflow-export-completions`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        anchorCalculationRunId: exportPackage.anchorCalculationRunId,
+        calculationRunIds: exportPackage.calculationRunIds,
+        artifactSha256,
+        fileName,
+        sizeBytes: artifact.byteLength,
+        mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      }),
+    },
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as {
+      error?: unknown;
+      detail?: { error?: unknown } | unknown;
+    } | null;
+    const detailError = payload?.detail
+      && typeof payload.detail === "object"
+      && "error" in payload.detail
+      ? payload.detail.error
+      : null;
+    const code = [payload?.error, detailError].find(
+      (value): value is string => typeof value === "string",
+    ) ?? "export_completion_failed";
+    throw new BackendExportError(response.status, code);
+  }
+  const completion = await response.json().catch(() => null) as {
+    schemaVersion?: unknown;
+    artifactSha256?: unknown;
+  } | null;
+  if (
+    completion?.schemaVersion !== "realytics-cashflow-export-completion-v1"
+    || completion.artifactSha256 !== artifactSha256
+  ) {
+    throw new BackendExportError(502, "invalid_export_completion");
+  }
+}
+
+function exportErrorResponse(error: unknown): NextResponse {
+  const status = error instanceof BackendExportError ? error.status : 502;
+  const code = error instanceof BackendExportError
+    ? error.code
+    : "backend_unavailable";
+  return NextResponse.json(
+    {
+      error: status === 401
+        ? "login_required"
+        : status === 403
+          ? "forbidden"
+          : status === 404
+            ? "project_not_found"
+            : code,
+    },
+    {
+      status,
+      headers: { "Cache-Control": "private, no-cache, no-store, must-revalidate" },
+    },
+  );
+}
+
+export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const origin = process.env.REALYTICS_API_ORIGIN || "http://127.0.0.1:8000";
-  const auth = copyAuthHeaders(request);
-  const engines = ["cash_flow_engine", "waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"];
-  const runs = Object.fromEntries(await Promise.all(engines.map(async (engine) => [engine, await latestRun(origin, id, engine, auth)] as const)));
+  let exportPackage: CashflowExportPackage;
+  try {
+    exportPackage = await loadExportPackage(id);
+  } catch (error) {
+    return exportErrorResponse(error);
+  }
+  const { runs } = exportPackage;
   const cash = runs.cash_flow_engine?.resultSnapshot ?? {};
   const input = runs.cash_flow_engine?.inputSnapshot ?? {};
   const workbook = new ExcelJS.Workbook();
@@ -69,6 +232,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     ["Tranche Recovery CalculationRun", runs.tranche_recovery?.calculationRunId ?? "-", "calculation_runs.tranche_recovery"],
     ["Unsold LTV CalculationRun", runs.unsold_ltv?.calculationRunId ?? "-", "calculation_runs.unsold_ltv"],
     ["Discount Stress CalculationRun", runs.discount_stress?.calculationRunId ?? "-", "calculation_runs.discount_stress"],
+    ["Anchor CalculationRun", exportPackage.anchorCalculationRunId, "cashflow-export-package.anchorCalculationRunId"],
     ["Excel 입력 스냅샷", JSON.stringify(input.productMix?.map((item: AnyRecord) => item.collectionSourceLocator).filter(Boolean) ?? []), "cash_flow_engine.inputSnapshot"],
     ["원본 위치", JSON.stringify(runs.cash_flow_engine?.sourceLocator ?? {}), "calculation run sourceLocator"],
   ]);
@@ -118,5 +282,13 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     sheet.views = [{ state: "frozen", ySplit: 3 }];
   }
   const buffer = await workbook.xlsx.writeBuffer();
-  return new NextResponse(buffer, { status: 200, headers: { "Content-Disposition": `attachment; filename="REALYTICS_${id}_CashFlow_Calculation.xlsx"`, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" } });
+  const artifact = new Uint8Array(buffer);
+  const safeProjectId = id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "project";
+  const fileName = `REALYTICS_${safeProjectId}_CashFlow_Calculation.xlsx`;
+  try {
+    await recordExportCompletion(id, exportPackage, artifact, fileName);
+  } catch (error) {
+    return exportErrorResponse(error);
+  }
+  return new NextResponse(artifact, { status: 200, headers: { "Content-Disposition": `attachment; filename="${fileName}"`, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Cache-Control": "private, no-cache, no-store, must-revalidate" } });
 }

@@ -3,9 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 import { Loader2, Search } from "lucide-react";
-import { authHeaders } from "../../lib/auth-client";
-
-const apiBase = "http://127.0.0.1:8000";
+import { apiBase, authHeaders } from "../../lib/auth-client";
 
 type ProjectRow = {
   project?: { id?: string; name?: string };

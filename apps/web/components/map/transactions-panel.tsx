@@ -2,9 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, TrendingUp } from "lucide-react";
-import { authHeaders } from "../../lib/auth-client";
-
-const apiBase = "http://127.0.0.1:8000";
+import { apiBase, authHeaders } from "../../lib/auth-client";
 
 export type TxRecord = {
   address?: string;

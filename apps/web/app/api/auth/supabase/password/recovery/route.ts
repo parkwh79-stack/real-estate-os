@@ -11,6 +11,10 @@ import {
   validNewSupabasePassword,
 } from "../../../../../../lib/backend-session";
 import { createSupabaseServerClient } from "../../../../../../lib/supabase/server";
+import {
+  classifyAuthEmailFailure,
+  publicAuthEmailFailureBody,
+} from "../../../../../../lib/supabase/auth-email-errors";
 import { passwordRecoveryCallbackUrl } from "../recovery-contract";
 
 type RecoveryPayload = {
@@ -57,17 +61,32 @@ async function requestRecoveryEmail(
       redirectTo: callback.toString(),
     });
     if (error) {
-      // Keep the public envelope enumeration-safe while retaining a
-      // secret-free operational signal for SMTP/rate-limit diagnosis.
+      const failure = classifyAuthEmailFailure(error, "password_recovery");
       console.warn("Supabase password recovery request was not accepted", {
-        code: error.code ?? "provider_error",
-        status: error.status ?? null,
+        category: failure.category,
+        providerCode: failure.providerCode,
+        providerStatus: failure.providerStatus,
       });
+      const publicFailure = publicAuthEmailFailureBody(failure);
+      if (publicFailure && failure.publicStatus) {
+        return authJson(publicFailure, failure.publicStatus);
+      }
     }
-    return authJson({ accepted: true }, 202);
+    return acceptedRecoveryResponse();
   } catch {
     return authJson({ error: "password_recovery_unavailable" }, 503);
   }
+}
+
+function acceptedRecoveryResponse() {
+  // A success response means only that the request was accepted for privacy-
+  // preserving processing. It never confirms whether an account exists or an
+  // email was delivered.
+  return authJson({
+    accepted: true,
+    accountState: "undisclosed",
+    deliveryState: "unconfirmed",
+  }, 202);
 }
 
 async function completePasswordRecovery(

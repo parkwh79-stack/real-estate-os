@@ -1,5 +1,105 @@
 import { expect, test } from "@playwright/test";
+import { backendRequestAllowsAnonymous } from "../lib/backend-access-policy";
+import {
+  sanitizedBackendRequestHeaders,
+  sanitizedBackendResponseHeaders,
+  serverIssuedBackendRequestHeaders,
+} from "../lib/backend-request-headers";
 import { safeInternalNextPath } from "../lib/safe-navigation";
+
+test("backend proxy strips every browser-controlled identity alias", () => {
+  const headers = sanitizedBackendRequestHeaders({
+    Authorization: "Bearer attacker-token",
+    Cookie: "attacker=1",
+    "X-User-Id": "attacker",
+    "X-Codex-User-Id": "attacker",
+    "X-Role": "admin",
+    "X-Tenant-Id": "tenant-attacker",
+    "X-Runtime-Mode": "pilot",
+    "X-Request-Id": "browser-chosen-correlation",
+    "X-REALYTICS-User-Id": "attacker",
+    "X-REALYTICS-Future-Identity": "attacker",
+    Forwarded: "for=192.0.2.1;proto=https;host=attacker.invalid",
+    "X-Forwarded-For": "192.0.2.1",
+    "X-Forwarded-Host": "attacker.invalid",
+    "X-Forwarded-Proto": "https",
+    Connection: "keep-alive, X-Browser-Hop",
+    "X-Browser-Hop": "attacker-controlled",
+    "Transfer-Encoding": "chunked",
+    Upgrade: "websocket",
+    Accept: "application/json",
+  });
+
+  expect(Object.fromEntries(headers.entries())).toEqual({
+    accept: "application/json",
+  });
+});
+
+test("backend proxy replaces browser correlation and strips response transport semantics", () => {
+  const requestHeaders = serverIssuedBackendRequestHeaders(
+    {
+      "X-Request-Id": "browser-request-id",
+      "X-Forwarded-For": "192.0.2.1",
+      Accept: "application/json",
+    },
+    "server-request-id",
+  );
+  expect(Object.fromEntries(requestHeaders.entries())).toEqual({
+    accept: "application/json",
+    "x-request-id": "server-request-id",
+  });
+
+  const responseHeaders = sanitizedBackendResponseHeaders({
+    "Content-Type": "application/octet-stream",
+    "Content-Length": "1024",
+    "Content-Encoding": "gzip",
+    Connection: "X-Upstream-Hop",
+    "X-Upstream-Hop": "not-end-to-end",
+    Forwarded: "by=upstream.internal",
+    "Set-Cookie": "upstream-session=must-not-escape",
+  });
+  expect(Object.fromEntries(responseHeaders.entries())).toEqual({
+    "content-type": "application/octet-stream",
+  });
+});
+
+test("backend proxy exposes only exact anonymous utility paths", () => {
+  expect(backendRequestAllowsAnonymous("GET", "/auth/me")).toBe(true);
+  expect(backendRequestAllowsAnonymous("GET", "/auth/stats")).toBe(true);
+  expect(backendRequestAllowsAnonymous("GET", "/health/ready")).toBe(true);
+  expect(backendRequestAllowsAnonymous("POST", "/auth/me")).toBe(false);
+  expect(backendRequestAllowsAnonymous("GET", "/projects/p-1")).toBe(false);
+  expect(backendRequestAllowsAnonymous("POST", "/projects/p-1/market-evidence/review")).toBe(false);
+  expect(backendRequestAllowsAnonymous("POST", "/auth/session", true)).toBe(true);
+});
+
+test("unauthenticated BFF requests cannot reach business routes through spoofed headers", async ({
+  request,
+}) => {
+  const response = await request.get("/api/backend/projects/private-project", {
+    headers: {
+      "X-User-Id": "attacker",
+      "X-Codex-User-Id": "attacker",
+      "X-Role": "admin",
+      "X-Tenant-Id": "tenant-attacker",
+      "X-REALYTICS-User-Id": "attacker",
+    },
+  });
+  expect(response.status()).toBe(401);
+  await expect(response.json()).resolves.toEqual({ error: "login_required" });
+  expect(response.headers()["cache-control"]).toContain("no-store");
+});
+
+test("cash-flow export derives server identity instead of forwarding browser identity", async ({
+  request,
+}) => {
+  const response = await request.get(
+    "/api/projects/private-project/cashflow/export",
+    { headers: { Authorization: "Bearer attacker-token", "X-Role": "admin" } },
+  );
+  expect(response.status()).toBe(401);
+  await expect(response.json()).resolves.toEqual({ error: "login_required" });
+});
 
 test("callback next paths reject slash-backslash and encoded authority escapes", () => {
   expect(safeInternalNextPath("/project/p-1?tab=risk")).toBe(
@@ -14,6 +114,57 @@ import {
   passwordRecoveryCallbackPlan,
   passwordRecoveryCallbackUrl,
 } from "../app/api/auth/supabase/password/recovery-contract";
+import {
+  classifyAuthEmailFailure,
+  publicAuthEmailFailureBody,
+} from "../lib/supabase/auth-email-errors";
+
+test("auth email failures expose operations without exposing account existence", () => {
+  const signupRateLimit = classifyAuthEmailFailure(
+    { code: "over_email_send_rate_limit", status: 429 },
+    "signup",
+  );
+  expect(publicAuthEmailFailureBody(signupRateLimit)).toEqual({
+    error: "auth_email_rate_limited",
+    retryAfterSeconds: 60,
+  });
+
+  const recoveryRateLimit = classifyAuthEmailFailure(
+    { code: "over_email_send_rate_limit", status: 429 },
+    "password_recovery",
+  );
+  expect(recoveryRateLimit.category).toBe("rate_limited");
+  expect(publicAuthEmailFailureBody(recoveryRateLimit)).toBeNull();
+
+  const unknownAccount = classifyAuthEmailFailure(
+    { code: "user_not_found", status: 404 },
+    "signup_confirmation_resend",
+  );
+  expect(unknownAccount.category).toBe("account_sensitive");
+  expect(publicAuthEmailFailureBody(unknownAccount)).toBeNull();
+
+  const missingSmtp = classifyAuthEmailFailure(
+    { code: "email_address_not_authorized", status: 422 },
+    "password_recovery",
+  );
+  expect(publicAuthEmailFailureBody(missingSmtp)).toEqual({
+    error: "auth_email_delivery_not_configured",
+  });
+
+  const smtpOutage = classifyAuthEmailFailure(
+    { code: "unexpected_failure", status: 500 },
+    "signup",
+  );
+  expect(publicAuthEmailFailureBody(smtpOutage)).toEqual({
+    error: "auth_email_delivery_unavailable",
+  });
+  const privateRecoveryOutage = classifyAuthEmailFailure(
+    { code: "unexpected_failure", status: 500 },
+    "password_recovery",
+  );
+  expect(privateRecoveryOutage.category).toBe("delivery_unavailable");
+  expect(publicAuthEmailFailureBody(privateRecoveryOutage)).toBeNull();
+});
 
 test("password recovery callback preserves reset destination and safe access state", () => {
   const callback = passwordRecoveryCallbackUrl("https://realytics.example");
@@ -229,6 +380,68 @@ test("signup and recovery enforce the server password contract", async ({
   expect(missingRecoveryContext.headers()["cache-control"]).toContain(
     "no-store",
   );
+});
+
+test("signup BFF requires current policy consent before contacting Supabase", async ({
+  request,
+}) => {
+  const baseInput = {
+    mode: "signup",
+    email: "person@example.com",
+    password: "A-valid-signup-password-7!",
+    displayName: "Policy Applicant",
+  };
+  const missingConsent = await request.post("/api/auth/supabase/password", {
+    data: baseInput,
+  });
+  expect(missingConsent.status()).toBe(400);
+  await expect(missingConsent.json()).resolves.toEqual({
+    error: "signup_policy_consent_required",
+  });
+
+  const staleVersion = await request.post("/api/auth/supabase/password", {
+    data: {
+      ...baseInput,
+      termsAccepted: true,
+      privacyAccepted: true,
+      termsVersion: "stale-terms",
+      privacyVersion: "stale-privacy",
+    },
+  });
+  expect(staleVersion.status()).toBe(409);
+  await expect(staleVersion.json()).resolves.toMatchObject({
+    error: "signup_policy_version_mismatch",
+    policyVersions: {
+      termsVersion: "realytics-terms-2026-07-30",
+      privacyVersion: "realytics-privacy-2026-07-30",
+    },
+  });
+});
+
+test("confirmation resend BFF rejects cross-site and malformed requests", async ({
+  request,
+}) => {
+  const crossSite = await request.post(
+    "/api/auth/supabase/password/confirmation",
+    {
+      headers: { Origin: "https://attacker.invalid" },
+      data: { email: "person@example.com" },
+    },
+  );
+  expect(crossSite.status()).toBe(403);
+  await expect(crossSite.json()).resolves.toEqual({
+    error: "cross_site_request_rejected",
+  });
+
+  const invalid = await request.post(
+    "/api/auth/supabase/password/confirmation",
+    { data: { email: "not-an-email" } },
+  );
+  expect(invalid.status()).toBe(400);
+  await expect(invalid.json()).resolves.toEqual({
+    error: "invalid_authentication_input",
+  });
+  expect(invalid.headers()["cache-control"]).toContain("no-store");
 });
 
 test("OAuth callback accepts authorization codes only", async ({ request }) => {

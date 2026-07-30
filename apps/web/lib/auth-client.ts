@@ -2,11 +2,17 @@ import { supabaseConfigured } from "./supabase-client";
 import { localPilotAuthEnabled } from "./auth-policy";
 import { parseBackendErrorResponse } from "./backend-error";
 import { safeIdentityLinkRedirectUrl } from "./supabase/identity-security";
+import type { SignupPolicyConsent } from "./auth-onboarding-policy";
+export {
+  REALYTICS_PRIVACY_VERSION,
+  REALYTICS_TERMS_VERSION,
+} from "./auth-onboarding-policy";
 
-// Browser calls stay same-origin. The Next.js BFF verifies cookie-backed auth
-// and adds the bearer/session header only on the server-to-server hop.
-export const apiBase =
-  typeof window === "undefined" ? "http://127.0.0.1:8000" : "/api/backend";
+// Client API calls always stay same-origin. The Next.js BFF verifies
+// cookie-backed auth and adds the bearer/session header only on the
+// server-to-server hop. Keeping this deterministic also prevents modules
+// evaluated during SSR or tests from accidentally bypassing the BFF.
+export const apiBase = "/api/backend";
 
 export interface RealyticsUser {
   userId: string;
@@ -337,9 +343,6 @@ export function isBackendAuthorityUnavailableAuthError(error: unknown): boolean 
     && !isOnboardingRequiredAuthError(error);
 }
 
-export const REALYTICS_TERMS_VERSION = "realytics-terms-2026-07-30";
-export const REALYTICS_PRIVACY_VERSION = "realytics-privacy-2026-07-30";
-
 export class TenantMembershipRoleChangeError extends Error {
   constructor(
     readonly code: string,
@@ -465,7 +468,7 @@ export async function signUpWithSupabasePassword(input: {
   email: string;
   password: string;
   displayName?: string;
-}): Promise<SupabasePasswordAuthResult> {
+} & SignupPolicyConsent): Promise<SupabasePasswordAuthResult> {
   const response = await fetch("/api/auth/supabase/password", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -474,6 +477,10 @@ export async function signUpWithSupabasePassword(input: {
       email: input.email.trim(),
       password: input.password,
       displayName: input.displayName?.trim(),
+      termsAccepted: input.termsAccepted,
+      privacyAccepted: input.privacyAccepted,
+      termsVersion: input.termsVersion,
+      privacyVersion: input.privacyVersion,
     }),
   }).then(assertOk);
   const result = await response.json() as {
@@ -506,6 +513,14 @@ export async function requestSupabasePasswordRecovery(email: string) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "request", email: email.trim() }),
+  }).then(assertOk);
+}
+
+export async function resendSupabaseSignupConfirmation(email: string) {
+  await fetch("/api/auth/supabase/password/confirmation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: email.trim() }),
   }).then(assertOk);
 }
 
@@ -1137,6 +1152,13 @@ function authClientErrorMessage(code: string, status: number): string {
   const messages: Record<string, string> = {
     authentication_failed: "이메일 또는 비밀번호를 확인해 주세요.",
     authentication_unavailable: "인증 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+    auth_email_address_invalid: "메일을 받을 수 있는 올바른 이메일 주소를 입력해 주세요.",
+    auth_email_delivery_not_configured: "현재 인증 메일 발송 설정을 사용할 수 없습니다. 관리자에게 Custom SMTP 설정을 요청해 주세요.",
+    auth_email_delivery_unavailable: "인증 메일 제공자가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
+    auth_email_rate_limited: "인증 메일 요청이 너무 많습니다. 잠시 기다린 뒤 다시 시도해 주세요.",
+    auth_email_request_failed: "인증 메일을 요청하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+    signup_policy_consent_required: "가입하려면 현재 이용약관과 개인정보 처리방침에 모두 동의해야 합니다.",
+    signup_policy_version_mismatch: "가입 정책이 갱신되었습니다. 최신 약관과 개인정보 처리방침을 다시 확인해 주세요.",
     password_policy_not_satisfied: "비밀번호는 12자 이상이어야 합니다.",
     weak_password_input: "비밀번호는 12~128자이며 영문 대문자·소문자·숫자·기호를 각각 한 글자 이상 포함해야 합니다.",
     password_recovery_context_required: "비밀번호 재설정 링크가 만료되었거나 유효하지 않습니다. 새 링크를 요청해 주세요.",

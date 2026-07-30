@@ -1,6 +1,9 @@
 import "server-only";
 
-import { BACKEND_ORIGIN } from "../backend-session";
+import {
+  BACKEND_ORIGIN,
+  backendAuthorityConfigured,
+} from "../backend-session";
 
 type AuthSettings = {
   external?: Record<string, unknown>;
@@ -54,6 +57,7 @@ export async function inspectSupabaseAuthReadiness() {
   const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
   const webOrigin = process.env.REALYTICS_WEB_ORIGIN;
   const configured = Boolean(url && publishableKey);
+  const backendOriginConfigured = backendAuthorityConfigured();
 
   const [settings, backend] = await Promise.all([
     configured
@@ -61,7 +65,9 @@ export async function inspectSupabaseAuthReadiness() {
           headers: { apikey: publishableKey! },
         })
       : Promise.resolve(null),
-    fetchJson<IdpStatus>(`${BACKEND_ORIGIN}/auth/idp/status`),
+    backendOriginConfigured
+      ? fetchJson<IdpStatus>(`${BACKEND_ORIGIN}/auth/idp/status`)
+      : Promise.resolve(null),
   ]);
 
   const providers = {
@@ -143,6 +149,7 @@ export async function inspectSupabaseAuthReadiness() {
         ? ["kakao_email_optional_not_verified"]
         : []),
       ...(!canonicalOriginReady ? ["canonical_https_web_origin_not_configured"] : []),
+      ...(!backendOriginConfigured ? ["fastapi_origin_not_configured"] : []),
       ...(!backendReady ? ["fastapi_oidc_membership_boundary_not_ready"] : []),
       ...(!configurationReady ? [] : ["real_user_aal2_maker_checker_smoke_required"]),
       ...(!configurationReady ? ["configuration_gate_incomplete"] : []),

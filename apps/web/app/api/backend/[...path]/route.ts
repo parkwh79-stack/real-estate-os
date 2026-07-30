@@ -1,7 +1,19 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextRequest, NextResponse } from "next/server";
+import { backendRequestAllowsAnonymous } from "../../../../lib/backend-access-policy";
+import {
+  sanitizedBackendResponseHeaders,
+  serverIssuedBackendRequestHeaders,
+} from "../../../../lib/backend-request-headers";
+import {
+  createBoundedBackendSignal,
+  prepareBackendResponseBody,
+  requiresBoundedSessionRedaction,
+  streamingBackendRequestInit,
+} from "../../../../lib/backend-proxy-contract";
 import {
   BACKEND_ORIGIN,
+  backendAuthorityConfigured,
   clearRealyticsSessionCookie,
   hardenedSupabaseCookieOptions,
   localPilotServerEnabled,
@@ -19,7 +31,35 @@ type PendingCookie = {
   options: CookieOptions;
 };
 
+function applyPendingAuthState(
+  response: NextResponse,
+  pendingCookies: PendingCookie[],
+  pendingAuthHeaders: Headers,
+): NextResponse {
+  pendingAuthHeaders.forEach((value, name) => response.headers.set(name, value));
+  pendingCookies.forEach(({ name, value, options }) => {
+    response.cookies.set(
+      name,
+      value,
+      hardenedSupabaseCookieOptions(options),
+    );
+  });
+  return response;
+}
+
 async function proxy(request: NextRequest) {
+  if (!backendAuthorityConfigured()) {
+    const response = NextResponse.json(
+      {
+        error: "backend_unavailable",
+        reason: "api_origin_not_configured",
+      },
+      { status: 503 },
+    );
+    preventAuthenticatedResponseCaching(response);
+    return response;
+  }
+
   const backendPath = request.nextUrl.pathname.replace(/^\/api\/backend/, "") || "/";
   const targetUrl = new URL(
     `${BACKEND_ORIGIN}${backendPath}${request.nextUrl.search}`,
@@ -31,6 +71,7 @@ async function proxy(request: NextRequest) {
     backendPath === "/auth/access-requests"
     && targetUrl.searchParams.get("reviewScope") === "platform";
   targetUrl.searchParams.delete("reviewScope");
+  const upstreamRequestId = crypto.randomUUID();
 
   const localBootstrapRequest =
     backendPath === "/auth/tenants"
@@ -47,15 +88,10 @@ async function proxy(request: NextRequest) {
   }
 
   const target = targetUrl.toString();
-  const headers = new Headers(request.headers);
-  headers.delete("host");
-  headers.delete("content-length");
-  headers.delete("cookie");
-  headers.delete("authorization");
-  headers.delete("x-realytics-session-id");
-  headers.delete("x-realytics-user-id");
-  headers.delete("x-realytics-tenant-id");
-  headers.delete("x-realytics-bff");
+  const headers = serverIssuedBackendRequestHeaders(
+    request.headers,
+    upstreamRequestId,
+  );
 
   const pendingCookies: PendingCookie[] = [];
   const pendingAuthHeaders = new Headers();
@@ -100,70 +136,63 @@ async function proxy(request: NextRequest) {
   } else if (localSessionId) {
     headers.set("X-REALYTICS-SESSION-ID", localSessionId);
   }
-
-  const init: RequestInit = {
-    method: request.method,
-    headers,
-    redirect: "manual",
-  };
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = await request.arrayBuffer();
+  if (
+    !verifiedSupabaseBearer
+    && !localSessionId
+    && !backendRequestAllowsAnonymous(
+      request.method,
+      backendPath,
+      localBootstrapRequest,
+    )
+  ) {
+    const response = applyPendingAuthState(
+      NextResponse.json(
+        { error: "login_required" },
+        { status: 401 },
+      ),
+      pendingCookies,
+      pendingAuthHeaders,
+    );
+    preventAuthenticatedResponseCaching(response);
+    return response;
   }
+
+  const { signal, timeoutSignal } = createBoundedBackendSignal(request.signal);
+  const init = streamingBackendRequestInit(
+    request.method,
+    headers,
+    request.body,
+    signal,
+  );
 
   try {
     const response = await fetch(target, init);
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.delete("content-encoding");
-    responseHeaders.delete("content-length");
-    responseHeaders.delete("set-cookie");
-    pendingAuthHeaders.forEach((value, name) => responseHeaders.set(name, value));
+    const responseHeaders = sanitizedBackendResponseHeaders(response.headers);
+    responseHeaders.set("X-Request-Id", upstreamRequestId);
 
-    let responseBody = await response.arrayBuffer();
-    let localSession:
-      | { sessionId: string; expiresAt?: string }
-      | null = null;
-    if (
-      response.ok
-      && response.headers.get("content-type")?.includes("application/json")
-      && (
-        backendPath === "/auth/me"
-        || (backendPath === "/auth/session" && request.method === "POST")
-      )
-    ) {
-      const parsed = JSON.parse(new TextDecoder().decode(responseBody)) as {
-        session?: { sessionId?: string; expiresAt?: string };
-      };
-      if (parsed.session?.sessionId) {
-        localSession = {
-          sessionId: parsed.session.sessionId,
-          expiresAt: parsed.session.expiresAt,
-        };
-        delete parsed.session.sessionId;
-      }
-      responseBody = new TextEncoder().encode(JSON.stringify(parsed)).buffer;
-    }
+    const preparedBody = await prepareBackendResponseBody(
+      response,
+      requiresBoundedSessionRedaction(backendPath, request.method),
+    );
 
-    const nextResponse = new NextResponse(responseBody, {
-      status: response.status,
-      headers: responseHeaders,
-    });
-    pendingCookies.forEach(({ name, value, options }) => {
-      nextResponse.cookies.set(
-        name,
-        value,
-        hardenedSupabaseCookieOptions(options),
-      );
-    });
+    const nextResponse = applyPendingAuthState(
+      new NextResponse(preparedBody.body, {
+        status: response.status,
+        headers: responseHeaders,
+      }),
+      pendingCookies,
+      pendingAuthHeaders,
+    );
     if (
-      localSession
+      preparedBody.localSession
       && backendPath === "/auth/session"
       && request.method === "POST"
       && localPilotServerEnabled()
     ) {
       setRealyticsSessionCookie(
         nextResponse,
-        localSession.sessionId,
-        localSession.expiresAt,
+        preparedBody.localSession.sessionId,
+        preparedBody.localSession.expiresAt,
       );
     }
     if (
@@ -175,16 +204,25 @@ async function proxy(request: NextRequest) {
     preventAuthenticatedResponseCaching(nextResponse);
     return nextResponse;
   } catch (error) {
-    const requestId = crypto.randomUUID();
+    const timedOut = timeoutSignal.aborted;
     console.error("REALYTICS backend proxy unavailable", {
-      requestId,
+      requestId: upstreamRequestId,
       backendPath,
       errorName: error instanceof Error ? error.name : "UnknownError",
     });
-    return NextResponse.json(
-      { error: "backend_unavailable", requestId },
-      { status: 502 },
+    const unavailable = applyPendingAuthState(
+      NextResponse.json(
+        {
+          error: timedOut ? "backend_timeout" : "backend_unavailable",
+          requestId: upstreamRequestId,
+        },
+        { status: timedOut ? 504 : 502 },
+      ),
+      pendingCookies,
+      pendingAuthHeaders,
     );
+    preventAuthenticatedResponseCaching(unavailable);
+    return unavailable;
   }
 }
 

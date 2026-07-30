@@ -116,7 +116,7 @@ test("loads one versioned server read model without browser-side run-package ass
     expect(result.packages[0]?.candidates[0]?.evidence?.[0]).toMatchObject({ pageNumber: 7, tableId: "cost", rowIndex: 3 });
     expect(result.warnings).toEqual([]);
     expect(result.snapshotHash).toBe("c".repeat(64));
-    expect(requested).toEqual(["http://127.0.0.1:8000/projects/project%2F1/workspace/document-review"]);
+    expect(requested).toEqual(["/api/backend/projects/project%2F1/workspace/document-review"]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -162,7 +162,7 @@ test("submits only the existing append-only Parser V2 review contract", async ()
       reason: "페이지와 표 좌표의 재확인이 필요합니다.",
       conflictIds: ["conflict-1"],
     });
-    expect(request?.url).toBe("http://127.0.0.1:8000/projects/project%2F1/parsing-v2/candidates/candidate-1/reviews");
+    expect(request?.url).toBe("/api/backend/projects/project%2F1/parsing-v2/candidates/candidate-1/reviews");
     expect(request?.init?.method).toBe("POST");
     expect(JSON.parse(String(request?.init?.body))).toEqual({
       expectedDecisionSequence: 1,
@@ -191,7 +191,7 @@ test("resolves a conflict only through an existing approved review decision refe
       expectedDecisionSequence: 2,
       notes: "승인된 winning candidate 적용",
     });
-    expect(request?.url).toBe("http://127.0.0.1:8000/projects/project%2F1/parsing-v2/conflicts/conflict%2F1/resolve");
+    expect(request?.url).toBe("/api/backend/projects/project%2F1/parsing-v2/conflicts/conflict%2F1/resolve");
     expect(request?.init?.method).toBe("POST");
     expect(JSON.parse(String(request?.init?.body))).toEqual({
       reviewDecisionId: "decision-2",
@@ -206,7 +206,7 @@ test("resolves a conflict only through an existing approved review decision refe
 
 test("builds same-origin authenticated content URLs and reads real PDF geometry headers", async () => {
   expect(sourceDocumentContentUrl("project/1", "archive 1")).toBe(
-    "http://127.0.0.1:8000/projects/project%2F1/source-documents/archive%201/content",
+    "/api/backend/projects/project%2F1/source-documents/archive%201/content",
   );
   const originalFetch = globalThis.fetch;
   let requested = "";
@@ -231,7 +231,7 @@ test("builds same-origin authenticated content URLs and reads real PDF geometry 
       pageNumber: 7,
     });
     expect(requested).toBe(
-      "http://127.0.0.1:8000/projects/project%2F1/source-documents/archive%201/pdf/pages/7.png?scale=1.5",
+      "/api/backend/projects/project%2F1/source-documents/archive%201/pdf/pages/7.png?scale=1.5",
     );
     expect(result).toMatchObject({
       pageNumber: 7,
