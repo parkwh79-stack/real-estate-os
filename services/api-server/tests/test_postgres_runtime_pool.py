@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 
 from db import postgres_runtime_pool as runtime_pool
+from db.repositories.identity_membership_repository import (
+    IdentityMembershipRepositoryUnavailable,
+    PostgresIdentityMembershipRepository,
+)
 
 
 DIRECT_DSN = "postgresql://runtime:secret@db.example.test:5432/realytics"
@@ -21,6 +25,7 @@ class _FakeTransaction:
         self.connection.in_transaction = True
         self.connection.transaction_enters += 1
         self.connection.local_settings = {}
+        self.connection.events.append("begin")
         return self
 
     def __exit__(self, exc_type, _exc, _traceback):
@@ -29,10 +34,31 @@ class _FakeTransaction:
         )
         if exc_type is None:
             self.connection.commits += 1
+            self.connection.events.append("commit")
         else:
             self.connection.rollbacks += 1
+            self.connection.events.append("rollback")
         self.connection.local_settings = {}
         self.connection.in_transaction = False
+        return False
+
+
+class _FakePipeline:
+    def __init__(self, connection: "_FakeConnection") -> None:
+        self.connection = connection
+
+    def __enter__(self):
+        assert self.connection.pipeline_active is False
+        self.connection.pipeline_active = True
+        self.connection.pipeline_enters += 1
+        self.connection.events.append("pipeline_enter")
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        assert self.connection.in_transaction is False
+        self.connection.events.append("pipeline_exit")
+        self.connection.pipeline_exits += 1
+        self.connection.pipeline_active = False
         return False
 
 
@@ -42,34 +68,73 @@ class _FakeConnection:
         self.transaction_enters = 0
         self.commits = 0
         self.rollbacks = 0
+        self.pipeline_active = False
+        self.pipeline_enters = 0
+        self.pipeline_exits = 0
+        self.events: list[str] = []
         self.statements: list[
-            tuple[str, tuple[str, str] | None]
+            tuple[str, tuple[str, ...] | None]
         ] = []
         self.local_settings: dict[str, str] = {}
         self.local_snapshots: list[dict[str, str]] = []
         self.readiness_result = (1,)
+        self.membership_rows: list[tuple[object, ...]] = []
+        self.membership_query_error: Exception | None = None
+        self.cursor_executions: list[tuple[str, tuple[str, ...]]] = []
 
     def transaction(self) -> _FakeTransaction:
         return _FakeTransaction(self)
 
+    def pipeline(self) -> _FakePipeline:
+        return _FakePipeline(self)
+
     def execute(
         self,
         sql: str,
-        params: tuple[str, str] | None = None,
+        params: tuple[str, ...] | None = None,
     ):
         assert self.in_transaction is True
         self.statements.append((sql, params))
         if sql == runtime_pool.READINESS_SQL:
             assert params is None
+            self.events.append("readiness")
             return self
         assert sql == runtime_pool.SET_LOCAL_CONFIG_SQL
         assert params is not None
-        assert len(params) == 2
-        self.local_settings[params[0]] = params[1]
+        assert sql.count("%s") == len(params)
+        assert sql.count("set_config(") == 7
+        assert len(params) == 14
+        self.events.append("settings")
+        for index in range(0, len(params), 2):
+            self.local_settings[params[index]] = params[index + 1]
         return self
 
     def fetchone(self):
         return self.readiness_result
+
+    def cursor(self):
+        return _FakeCursor(self)
+
+
+class _FakeCursor:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self.connection = connection
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        return False
+
+    def execute(self, sql: str, params: tuple[str, ...]) -> None:
+        self.connection.cursor_executions.append((sql, params))
+        self.connection.events.append("business_execute")
+        if self.connection.membership_query_error is not None:
+            raise self.connection.membership_query_error
+
+    def fetchall(self):
+        self.connection.events.append("business_fetch")
+        return self.connection.membership_rows
 
 
 class _FakePool:
@@ -85,6 +150,8 @@ class _FakePool:
         self.open_calls: list[bool] = []
         self.close_calls: list[float] = []
         self.checkout_timeouts: list[float] = []
+        self.active_checkouts = 0
+        self.returned_connections = 0
 
     def open(self, *, wait: bool = False) -> None:
         self.open_calls.append(wait)
@@ -97,7 +164,12 @@ class _FakePool:
     @contextmanager
     def connection(self, *, timeout: float):
         self.checkout_timeouts.append(timeout)
-        yield self.connection_object
+        self.active_checkouts += 1
+        try:
+            yield self.connection_object
+        finally:
+            self.active_checkouts -= 1
+            self.returned_connections += 1
 
 
 def _registry(
@@ -261,6 +333,8 @@ def test_hardened_api_process_requires_explicit_roles_and_dedicated_dsns() -> No
     dedicated_env = {
         "REALYTICS_ENVIRONMENT": "production",
         runtime_pool.RUNTIME_POOL_ROLES_ENV: "identity,api",
+        "REALYTICS_API_DATABASE_ROLE": "realytics_runtime",
+        "REALYTICS_IDENTITY_DATABASE_ROLE": "realytics_identity",
         "REALYTICS_DATABASE_URL": DIRECT_DSN,
         "REALYTICS_API_DATABASE_URL": (
             "postgresql://api:secret@api.example.test:5432/realytics"
@@ -277,6 +351,83 @@ def test_hardened_api_process_requires_explicit_roles_and_dedicated_dsns() -> No
     }
     assert registry.required_connection_budget == 7
     assert set(pools) == set(registry.specs)
+    api_spec = registry.specs[runtime_pool.RuntimePoolName.API]
+    assert api_spec.expected_database_role == "realytics_runtime"
+    assert api_spec.require_role_preflight is True
+    identity_spec = registry.specs[runtime_pool.RuntimePoolName.IDENTITY]
+    assert identity_spec.expected_database_role == "realytics_identity"
+    assert identity_spec.require_role_preflight is True
+
+
+def test_hardened_api_registry_runs_role_preflight_before_ready(
+    monkeypatch,
+) -> None:
+    registry, _pools = _registry(
+        {
+            "REALYTICS_ENVIRONMENT": "production",
+            runtime_pool.RUNTIME_POOL_ROLES_ENV: "api,identity",
+            "REALYTICS_API_DATABASE_URL": DIRECT_DSN,
+            "REALYTICS_API_DATABASE_ROLE": "realytics_runtime",
+            "REALYTICS_IDENTITY_DATABASE_ROLE": "realytics_identity",
+            "REALYTICS_IDENTITY_DATABASE_URL": (
+                "postgresql://identity:secret@id.example.test:5432/realytics"
+            ),
+        }
+    )
+    calls: list[tuple[str, object, str, str, str]] = []
+
+    def api_preflight(
+        connection,
+        *,
+        expected_role,
+        schema_name,
+        postgis_schema_name,
+    ) -> None:
+        calls.append(
+            (
+                "api",
+                connection,
+                expected_role,
+                schema_name,
+                postgis_schema_name,
+            )
+        )
+
+    monkeypatch.setattr(
+        runtime_pool,
+        "assert_api_runtime_connection",
+        api_preflight,
+    )
+
+    def identity_preflight(
+        connection,
+        *,
+        expected_role,
+        schema_name,
+        postgis_schema_name,
+    ) -> None:
+        calls.append(
+            (
+                "identity",
+                connection,
+                expected_role,
+                schema_name,
+                postgis_schema_name,
+            )
+        )
+
+    monkeypatch.setattr(
+        runtime_pool,
+        "assert_identity_runtime_connection",
+        identity_preflight,
+    )
+
+    assert registry.open_all() is True
+    assert len(calls) == 2
+    assert {(call[0], *call[2:]) for call in calls} == {
+        ("api", "realytics_runtime", "realytics", "extensions"),
+        ("identity", "realytics_identity", "realytics", "extensions"),
+    }
 
 
 def test_hardened_pf_worker_must_run_with_only_its_dedicated_pool() -> None:
@@ -495,6 +646,8 @@ def test_api_tenant_transaction_is_explicit_parameterized_and_does_not_bleed() -
         assert connection.in_transaction is True
         assert connection.local_settings == {
             "realytics.tenant_id": "tenant-a",
+            "realytics.principal_issuer": "",
+            "realytics.principal_subject": "",
             "search_path": runtime_pool.SAFE_RUNTIME_SEARCH_PATH,
             "statement_timeout": "12000ms",
             "lock_timeout": "1400ms",
@@ -510,6 +663,7 @@ def test_api_tenant_transaction_is_explicit_parameterized_and_does_not_bleed() -
         for sql, params in connection.statements
         if sql != runtime_pool.READINESS_SQL
     ]
+    assert len(business_statements) == 1
     assert all(
         sql == runtime_pool.SET_LOCAL_CONFIG_SQL
         for sql, _params in business_statements
@@ -533,6 +687,146 @@ def test_api_tenant_transaction_is_explicit_parameterized_and_does_not_bleed() -
         for snapshot in connection.local_snapshots
         if "realytics.tenant_id" in snapshot
     ] == ["tenant-a", "tenant-b"]
+
+
+def test_pipeline_batches_begin_settings_business_read_and_commit(
+    monkeypatch,
+) -> None:
+    registry, pools = _registry(
+        {
+            "REALYTICS_DATABASE_URL": DIRECT_DSN,
+            "REALYTICS_IDENTITY_DB_POOL_MAX": "1",
+        }
+    )
+    registry.open_all()
+    pool = pools[runtime_pool.RuntimePoolName.IDENTITY]
+    connection = pool.connection_object
+    connection.events.clear()
+    monkeypatch.setattr(
+        runtime_pool,
+        "_supports_psycopg_pipeline",
+        lambda checked_connection: checked_connection is connection,
+    )
+
+    with runtime_pool.identity_transaction(registry=registry) as checked_out:
+        with checked_out.cursor() as cursor:
+            cursor.execute(
+                "SELECT tenant_id FROM realytics.memberships WHERE id = %s",
+                ("membership-1",),
+            )
+            assert cursor.fetchall() == []
+
+    assert connection.events == [
+        "pipeline_enter",
+        "begin",
+        "settings",
+        "business_execute",
+        "business_fetch",
+        "commit",
+        "pipeline_exit",
+    ]
+    assert connection.pipeline_enters == 1
+    assert connection.pipeline_exits == 1
+    assert connection.in_transaction is False
+    assert connection.pipeline_active is False
+    assert connection.local_settings == {}
+    assert pool.active_checkouts == 0
+    assert pool.returned_connections == 2  # readiness + business transaction
+
+
+def test_pipeline_rolls_back_and_returns_connection_after_business_error(
+    monkeypatch,
+) -> None:
+    registry, pools = _registry(
+        {
+            "REALYTICS_DATABASE_URL": DIRECT_DSN,
+            "REALYTICS_IDENTITY_DB_POOL_MAX": "1",
+        }
+    )
+    registry.open_all()
+    pool = pools[runtime_pool.RuntimePoolName.IDENTITY]
+    connection = pool.connection_object
+    connection.events.clear()
+    connection.membership_query_error = RuntimeError("injected query failure")
+    monkeypatch.setattr(
+        runtime_pool,
+        "_supports_psycopg_pipeline",
+        lambda checked_connection: checked_connection is connection,
+    )
+
+    with pytest.raises(RuntimeError, match="injected query failure"):
+        with runtime_pool.identity_transaction(
+            registry=registry
+        ) as checked_out:
+            with checked_out.cursor() as cursor:
+                cursor.execute(
+                    "SELECT tenant_id FROM realytics.memberships WHERE id = %s",
+                    ("membership-1",),
+                )
+
+    assert connection.events == [
+        "pipeline_enter",
+        "begin",
+        "settings",
+        "business_execute",
+        "rollback",
+        "pipeline_exit",
+    ]
+    assert connection.pipeline_enters == 1
+    assert connection.pipeline_exits == 1
+    assert connection.commits == 1  # readiness only
+    assert connection.rollbacks == 1
+    assert connection.in_transaction is False
+    assert connection.pipeline_active is False
+    assert connection.local_settings == {}
+    assert pool.active_checkouts == 0
+    assert pool.returned_connections == 2
+
+
+def test_non_psycopg_connection_gracefully_uses_regular_transaction(
+    monkeypatch,
+) -> None:
+    registry, pools = _registry()
+    registry.open_all()
+    pool = pools[runtime_pool.RuntimePoolName.API]
+    connection = pool.connection_object
+    connection.events.clear()
+    monkeypatch.setattr(
+        runtime_pool,
+        "_supports_psycopg_pipeline",
+        lambda _connection: False,
+    )
+
+    with runtime_pool.api_tenant_transaction(
+        "tenant-a",
+        registry=registry,
+    ) as checked_out:
+        with checked_out.cursor() as cursor:
+            cursor.execute(
+                "SELECT project_id FROM realytics.projects WHERE id = %s",
+                ("project-1",),
+            )
+            assert cursor.fetchall() == []
+
+    assert connection.events == [
+        "begin",
+        "settings",
+        "business_execute",
+        "business_fetch",
+        "commit",
+    ]
+    assert connection.pipeline_enters == 0
+    assert connection.pipeline_exits == 0
+    assert pool.active_checkouts == 0
+    assert pool.returned_connections == 2
+
+
+def test_pipeline_capability_rejects_non_psycopg_connection() -> None:
+    # A third-party or test double may expose a method with the same name.  It
+    # must not enter the libpq-specific path without being a psycopg checkout.
+    connection = _FakeConnection()
+
+    assert runtime_pool._supports_psycopg_pipeline(connection) is False
 
 
 def test_tenant_transaction_rejects_blank_before_checkout() -> None:
@@ -580,9 +874,116 @@ def test_identity_transaction_explicitly_clears_tenant_context() -> None:
 
     with runtime_pool.identity_transaction(registry=registry):
         assert connection.local_settings["realytics.tenant_id"] == ""
+        assert connection.local_settings["realytics.principal_issuer"] == ""
+        assert connection.local_settings["realytics.principal_subject"] == ""
 
     assert connection.local_settings == {}
     assert connection.local_snapshots[-1]["realytics.tenant_id"] == ""
+
+
+def test_identity_principal_transaction_sets_verified_pair_without_tenant() -> None:
+    registry, pools = _registry()
+    registry.open_all()
+    connection = pools[
+        runtime_pool.RuntimePoolName.IDENTITY
+    ].connection_object
+
+    with runtime_pool.identity_principal_transaction(
+        " https://issuer.example/ ",
+        " subject-1 ",
+        registry=registry,
+    ):
+        assert connection.local_settings == {
+            "realytics.tenant_id": "",
+            "realytics.principal_issuer": "https://issuer.example",
+            "realytics.principal_subject": "subject-1",
+            "search_path": runtime_pool.SAFE_RUNTIME_SEARCH_PATH,
+            "statement_timeout": "30000ms",
+            "lock_timeout": "5000ms",
+            "idle_in_transaction_session_timeout": "15000ms",
+        }
+
+    assert connection.local_settings == {}
+    assert connection.local_snapshots[-1]["realytics.tenant_id"] == ""
+
+
+def test_successful_membership_lookup_commits_and_returns_identity_connection() -> None:
+    registry, pools = _registry(
+        {
+            "REALYTICS_DATABASE_URL": DIRECT_DSN,
+            "REALYTICS_IDENTITY_DB_POOL_MAX": "1",
+        }
+    )
+    registry.open_all()
+    pool = pools[runtime_pool.RuntimePoolName.IDENTITY]
+    connection = pool.connection_object
+    connection.membership_rows = [
+        (
+            "https://issuer.example",
+            "subject-1",
+            "human",
+            "active",
+            "person@example.com",
+            "Person",
+            None,
+            "tenant-a",
+            "active",
+            "admin",
+            "active",
+            1,
+        )
+    ]
+    repository = PostgresIdentityMembershipRepository(
+        transaction_factory=lambda: runtime_pool.identity_transaction(
+            registry=registry
+        )
+    )
+
+    directory = repository.load_directory(
+        issuer="https://issuer.example/",
+        subject="subject-1",
+    )
+
+    assert directory.principal is not None
+    assert directory.memberships[0].tenant_id == "tenant-a"
+    assert connection.commits == 2  # readiness + membership lookup
+    assert connection.rollbacks == 0
+    assert connection.in_transaction is False
+    assert pool.active_checkouts == 0
+    assert pool.returned_connections == 2
+    assert len(connection.cursor_executions) == 1
+
+
+def test_failed_membership_lookup_rolls_back_and_returns_identity_connection() -> None:
+    registry, pools = _registry(
+        {
+            "REALYTICS_DATABASE_URL": DIRECT_DSN,
+            "REALYTICS_IDENTITY_DB_POOL_MAX": "1",
+        }
+    )
+    registry.open_all()
+    pool = pools[runtime_pool.RuntimePoolName.IDENTITY]
+    connection = pool.connection_object
+    connection.membership_query_error = RuntimeError("injected query failure")
+    repository = PostgresIdentityMembershipRepository(
+        transaction_factory=lambda: runtime_pool.identity_transaction(
+            registry=registry
+        )
+    )
+
+    with pytest.raises(IdentityMembershipRepositoryUnavailable):
+        repository.load_directory(
+            issuer="https://issuer.example",
+            subject="subject-1",
+        )
+
+    assert connection.commits == 1  # readiness only
+    assert connection.rollbacks == 1
+    assert connection.in_transaction is False
+    assert connection.local_settings == {}
+    assert pool.active_checkouts == 0
+    assert pool.returned_connections == 2
+    assert len(connection.cursor_executions) == 1
 
 
 def test_transactions_require_an_open_pool_registry() -> None:

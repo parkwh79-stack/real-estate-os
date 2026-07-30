@@ -1,4 +1,47 @@
 import { expect, test } from "@playwright/test";
+import { safeInternalNextPath } from "../lib/safe-navigation";
+
+test("callback next paths reject slash-backslash and encoded authority escapes", () => {
+  expect(safeInternalNextPath("/project/p-1?tab=risk")).toBe(
+    "/project/p-1?tab=risk",
+  );
+  expect(safeInternalNextPath("/\\\\evil.example")).toBe("/start");
+  expect(safeInternalNextPath("//evil.example")).toBe("/start");
+  expect(safeInternalNextPath("/\u0000evil.example")).toBe("/start");
+});
+import {
+  PASSWORD_RECOVERY_NEXT_PATH,
+  passwordRecoveryCallbackPlan,
+  passwordRecoveryCallbackUrl,
+} from "../app/api/auth/supabase/password/recovery-contract";
+
+test("password recovery callback preserves reset destination and safe access state", () => {
+  const callback = passwordRecoveryCallbackUrl("https://realytics.example");
+  expect(callback.pathname).toBe("/auth/callback");
+  expect(callback.searchParams.get("next")).toBe(
+    PASSWORD_RECOVERY_NEXT_PATH,
+  );
+  expect(callback.searchParams.get("recovery")).toBe("1");
+
+  for (const accessState of [
+    "member",
+    "tenant_selection_required",
+    "onboarding_required",
+    "authority_unavailable",
+  ] as const) {
+    const plan = passwordRecoveryCallbackPlan(
+      "https://realytics.example",
+      PASSWORD_RECOVERY_NEXT_PATH,
+      accessState,
+    );
+    expect(plan.setRecoveryContextCookie).toBe(true);
+    const destination = plan.destination;
+    expect(destination.pathname).toBe("/login");
+    expect(destination.searchParams.get("mode")).toBe("reset");
+    expect(destination.searchParams.get("flow")).toBe("password_recovery");
+    expect(destination.searchParams.get("accessState")).toBe(accessState);
+  }
+});
 
 test("browser auth state contains no persisted REALYTICS token or session id", async ({
   page,
@@ -95,13 +138,114 @@ test("BFF rejects cross-site mutations before contacting FastAPI", async ({ requ
   });
 });
 
+test("password BFF rejects cross-site and malformed authentication input", async ({
+  request,
+}) => {
+  const crossSite = await request.post("/api/auth/supabase/password", {
+    headers: { Origin: "https://attacker.invalid" },
+    data: {
+      mode: "login",
+      email: "person@example.com",
+      password: "not-sent-to-supabase",
+    },
+  });
+  expect(crossSite.status()).toBe(403);
+  await expect(crossSite.json()).resolves.toEqual({
+    error: "cross_site_request_rejected",
+  });
+  expect(crossSite.headers()["cache-control"]).toContain("no-store");
+
+  const invalidMode = await request.post("/api/auth/supabase/password", {
+    data: {
+      mode: "password-reset-via-login",
+      email: "person@example.com",
+      password: "not-sent-to-supabase",
+    },
+  });
+  expect(invalidMode.status()).toBe(400);
+  await expect(invalidMode.json()).resolves.toEqual({
+    error: "invalid_authentication_input",
+  });
+  expect(invalidMode.headers()["cache-control"]).toContain("no-store");
+});
+
+test("tenant selector BFF rejects cross-site and malformed selectors before authority lookup", async ({ request }) => {
+  const crossSite = await request.post("/api/auth/supabase/tenant", {
+    headers: { Origin: "https://attacker.invalid" },
+    data: { tenantId: "tenant-a" },
+  });
+  expect(crossSite.status()).toBe(403);
+  await expect(crossSite.json()).resolves.toEqual({
+    error: "cross_site_request_rejected",
+  });
+
+  const invalid = await request.post("/api/auth/supabase/tenant", {
+    data: { tenantId: "tenant-a\r\nX-Forged: true" },
+  });
+  expect(invalid.status()).toBe(400);
+  await expect(invalid.json()).resolves.toEqual({
+    error: "invalid_tenant_selector",
+  });
+  expect(invalid.headers()["cache-control"]).toContain("no-store");
+});
+
+test("signup and recovery enforce the server password contract", async ({
+  request,
+}) => {
+  const weakSignup = await request.post("/api/auth/supabase/password", {
+    data: {
+      mode: "signup",
+      email: "person@example.com",
+      password: "short",
+    },
+  });
+  expect(weakSignup.status()).toBe(400);
+  await expect(weakSignup.json()).resolves.toEqual({
+    error: "weak_password_input",
+    passwordPolicy: {
+      minLength: 12,
+      maxLength: 128,
+      requiresLowercase: true,
+      requiresUppercase: true,
+      requiresDigit: true,
+      requiresSymbol: true,
+    },
+  });
+  expect(weakSignup.headers()["cache-control"]).toContain("no-store");
+
+  const missingRecoveryContext = await request.post(
+    "/api/auth/supabase/password/recovery",
+    {
+      data: {
+        action: "complete",
+        password: "A-valid-new-password-7",
+      },
+    },
+  );
+  expect(missingRecoveryContext.status()).toBe(401);
+  await expect(missingRecoveryContext.json()).resolves.toEqual({
+    error: "password_recovery_context_required",
+  });
+  expect(missingRecoveryContext.headers()["cache-control"]).toContain(
+    "no-store",
+  );
+});
+
 test("OAuth callback accepts authorization codes only", async ({ request }) => {
-  const response = await request.get("/auth/callback", { maxRedirects: 0 });
+  const response = await request.get(
+    "/auth/callback?next=/project/deal-1&switch=1",
+    { maxRedirects: 0 },
+  );
 
   expect(response.status()).toBeGreaterThanOrEqual(300);
   expect(response.status()).toBeLessThan(400);
-  expect(response.headers().location).toContain("/login?error=missing_oauth_code");
-  expect(response.headers().location).not.toContain("session_id=");
+  const retryLocation = new URL(response.headers().location ?? "");
+  expect(retryLocation.pathname).toBe("/login");
+  expect(retryLocation.searchParams.get("error")).toBe("missing_oauth_code");
+  expect(retryLocation.searchParams.get("next")).toBe("/project/deal-1");
+  expect(retryLocation.searchParams.get("switch")).toBe("1");
+  expect(retryLocation.searchParams.has("session_id")).toBe(false);
+  expect(response.headers()["cache-control"]).toContain("no-store");
 });
 
 test("configured OAuth start stores PKCE state in hardened cookies", async ({
@@ -120,6 +264,7 @@ test("configured OAuth start stores PKCE state in hardened cookies", async ({
   expect(response.status()).toBeGreaterThanOrEqual(300);
   expect(response.status()).toBeLessThan(400);
   expect(location).toContain("/auth/v1/authorize");
+  expect(new URL(location).searchParams.get("prompt")).toBeNull();
   const redirectTo = new URL(location).searchParams.get("redirect_to");
   expect(redirectTo).not.toBeNull();
   expect(new URL(redirectTo!).origin).toBe(new URL(response.url()).origin);
@@ -132,6 +277,62 @@ test("configured OAuth start stores PKCE state in hardened cookies", async ({
     expect(cookie).toContain("HttpOnly");
     expect(cookie.toLowerCase()).toContain("samesite=lax");
   }
+});
+
+test("Kakao OAuth start sends a server-controlled scope override", async ({
+  request,
+}) => {
+  const response = await request.get(
+    "/api/auth/supabase/oauth?provider=kakao&next=/start",
+    { maxRedirects: 0 },
+  );
+  const location = response.headers().location ?? "";
+  test.skip(
+    location.includes("oauth_not_configured"),
+    "Supabase Auth environment is not configured for this test run.",
+  );
+
+  expect(response.status()).toBeGreaterThanOrEqual(300);
+  expect(response.status()).toBeLessThan(400);
+  expect(location).toContain("/auth/v1/authorize");
+  const requestedScope = new URL(location).searchParams.get("scope");
+  expect(requestedScope).toBe("profile_nickname profile_image");
+  expect(new URL(location).searchParams.get("prompt")).toBeNull();
+  expect(new URL(location).searchParams.has("scopes")).toBe(false);
+  expect(requestedScope).not.toContain("account_email");
+});
+
+test("explicit account switching uses provider-specific interactive prompts", async ({
+  request,
+}) => {
+  const google = await request.get(
+    "/api/auth/supabase/oauth?provider=google&next=/start&switch=1&prompt=none",
+    { maxRedirects: 0 },
+  );
+  const googleLocation = google.headers().location ?? "";
+  test.skip(
+    googleLocation.includes("oauth_not_configured"),
+    "Supabase Auth environment is not configured for this test run.",
+  );
+  expect(new URL(googleLocation).searchParams.get("prompt")).toBe("select_account");
+
+  const kakao = await request.get(
+    "/api/auth/supabase/oauth?provider=kakao&next=/start&switch=1&prompt=none&scope=account_email",
+    { maxRedirects: 0 },
+  );
+  const kakaoLocation = kakao.headers().location ?? "";
+  expect(new URL(kakaoLocation).searchParams.get("prompt")).toBe("login");
+  expect(new URL(kakaoLocation).searchParams.get("scope")).toBe(
+    "profile_nickname profile_image",
+  );
+
+  const ignoredSwitch = await request.get(
+    "/api/auth/supabase/oauth?provider=google&next=/start&switch=true&prompt=select_account",
+    { maxRedirects: 0 },
+  );
+  expect(
+    new URL(ignoredSwitch.headers().location ?? "").searchParams.get("prompt"),
+  ).toBeNull();
 });
 
 test("OAuth start canonicalizes an alternate loopback host before issuing PKCE state", async ({
@@ -195,9 +396,12 @@ test("auth readiness is secret-safe and reports both production providers", asyn
   }
   if (body.providers.kakao && !body.providerUsable.kakao) {
     expect(body.limitations).toContain(
-      "kakao_account_email_scope_not_verified",
+      "kakao_email_optional_not_verified",
     );
   }
+  expect(body.limitations).not.toContain(
+    "kakao_account_email_scope_not_verified",
+  );
   expect(body.configurationReady).toEqual(expect.any(Boolean));
   expect(body.configurationReady).toBe(
     body.providerReady.google && body.providerReady.kakao,
@@ -243,13 +447,23 @@ test("security mutations and session revocation reject cross-site requests", asy
   });
 });
 
+test("session revocation rejects unknown scopes without caching the response", async ({
+  request,
+}) => {
+  const response = await request.post("/api/auth/supabase/signout", {
+    data: { scope: "current-and-all-future-sessions" },
+  });
+  expect(response.status()).toBe(400);
+  await expect(response.json()).resolves.toEqual({ error: "invalid_signout_scope" });
+  expect(response.headers()["cache-control"]).toContain("no-store");
+});
+
 test("identity linking rejects providers outside the approved allow-list", async ({
   request,
 }) => {
-  const response = await request.get(
-    "/api/auth/supabase/identity/link?provider=github",
-    { maxRedirects: 0 },
-  );
+  const response = await request.post("/api/auth/supabase/identity/link", {
+    data: { provider: "github", next: "/settings" },
+  });
   expect(response.status()).toBe(400);
   await expect(response.json()).resolves.toMatchObject({
     error: "unsupported_identity_provider",
@@ -284,7 +498,7 @@ test("tenant administrator issues and revokes hash-only invitations", async ({
   page,
 }) => {
   const invitationToken = "live-once-" + "t".repeat(48);
-  let issueRequest: Record<string, unknown> | null = null;
+  const issueRequests: Array<Record<string, unknown>> = [];
   let revokeRequestSeen = false;
 
   await page.route("**/api/backend/auth/**", async (route) => {
@@ -348,7 +562,8 @@ test("tenant administrator issues and revokes hash-only invitations", async ({
       return;
     }
     if (path.endsWith("/auth/invitations") && request.method() === "POST") {
-      issueRequest = request.postDataJSON() as Record<string, unknown>;
+      const issueRequest = request.postDataJSON() as Record<string, unknown>;
+      issueRequests.push(issueRequest);
       await route.fulfill({
         status: 201,
         contentType: "application/json",
@@ -358,9 +573,9 @@ test("tenant administrator issues and revokes hash-only invitations", async ({
             tenantId: "tenant-live",
             role: "analyst",
             status: "pending",
-            invitedEmail: "new.user@example.com",
-            invitedIssuer: null,
-            invitedSubject: null,
+            invitedEmail: issueRequest.invitedEmail ?? null,
+            invitedIssuer: issueRequest.invitedIssuer ?? null,
+            invitedSubject: issueRequest.invitedSubject ?? null,
             issuedByIssuer: "https://issuer.example",
             issuedBySubject: "tenant-admin",
             issuedAt: "2026-07-24T02:00:00Z",
@@ -438,16 +653,40 @@ test("tenant administrator issues and revokes hash-only invitations", async ({
 
   await page.getByLabel("초대 대상 이메일").fill("new.user@example.com");
   await page.getByRole("button", { name: "일회성 초대 발급" }).click();
-  await expect.poll(() => issueRequest).toMatchObject({
+  await expect.poll(() => issueRequests[0]).toMatchObject({
     role: "analyst",
     invitedEmail: "new.user@example.com",
     expiresInHours: 72,
   });
+  expect(issueRequests[0]).not.toHaveProperty("invitedIssuer");
+  expect(issueRequests[0]).not.toHaveProperty("invitedSubject");
   const issuedLink = page.getByLabel("일회성 초대 링크");
   await expect(issuedLink).toHaveValue(new RegExp(invitationToken));
   await expect.poll(async () => page.evaluate((token) => (
     JSON.stringify({ ...localStorage, ...sessionStorage }).includes(token)
   ), invitationToken)).toBe(false);
+
+  await page.getByRole("button", { name: "Supabase 신원 초대" }).click();
+  const issuerInput = page.getByLabel("Supabase Auth issuer");
+  if (!await issuerInput.inputValue()) {
+    await issuerInput.fill("https://project.supabase.co/auth/v1");
+  }
+  const issuer = await issuerInput.inputValue();
+  const subject = "6a7f0a6a-92c8-4cc3-b8ae-17db4983e7d8";
+  await page.getByLabel("Supabase Auth subject (사용자 UUID)").fill("email-is-not-a-subject");
+  await page.getByRole("button", { name: "일회성 초대 발급" }).click();
+  await expect(page.getByText("Supabase Auth subject는 사용자 상세의 정확한 UUID여야 합니다.")).toBeVisible();
+  expect(issueRequests).toHaveLength(1);
+  await page.getByLabel("Supabase Auth subject (사용자 UUID)").fill(subject);
+  await page.getByRole("button", { name: "일회성 초대 발급" }).click();
+  await expect.poll(() => issueRequests.length).toBe(2);
+  expect(issueRequests[1]).toMatchObject({
+    role: "analyst",
+    invitedIssuer: issuer,
+    invitedSubject: subject,
+    expiresInHours: 72,
+  });
+  expect(issueRequests[1]).not.toHaveProperty("invitedEmail");
 
   await page.getByRole("button", { name: "초대 취소" }).click();
   await expect.poll(() => revokeRequestSeen).toBe(true);

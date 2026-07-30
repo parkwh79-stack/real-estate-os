@@ -41,6 +41,7 @@ from schemas.stress_test import StressTestRequest, StressTranche
 from schemas.credit_enhancement import CreditEnhancementRequest, CreditEnhancementInput
 from schemas.cash_sweep import CashSweepRequest, CashSweepTranche
 from core.risk_assessment import build_basic_risk_matrix
+from core.secret_redaction import collect_secret_values, redact_secret_text
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 from agent_platform.domain_agent_runtime import run_domain_agent_callable_with_contract
 from use_cases.assumption_proposals import build_consensus_assumption_proposals
@@ -72,7 +73,7 @@ class OrchestrationAgent:
             "started_at": now,
             "completed_at": None,
             "user_id": ai_connection["user_id"],
-            "ai_connection": ai_connection,
+            "ai_connection": safe_ai_context(ai_connection),
             "options": self._sanitize_options(options),
             "steps": [],
             "agentProgress": self._initial_agent_progress(now),
@@ -786,11 +787,15 @@ class OrchestrationAgent:
             run["reportStatus"] = "quality_pass" if quality["pass"] else "quality_warning"
             run["status"] = run["executionStatus"]
         except Exception as exc:
+            safe_error = redact_secret_text(
+                exc,
+                secrets=collect_secret_values(ai_connection),
+            )
             run["executionStatus"] = "failed"
             run["reportStatus"] = "failed" if run.get("reportStatus") == "not_started" else run.get("reportStatus")
             run["status"] = run["executionStatus"]
-            run["errors"].append({"message": str(exc), "type": exc.__class__.__name__})
-            self._mark_failed_progress(run, str(exc))
+            run["errors"].append({"message": safe_error, "type": exc.__class__.__name__})
+            self._mark_failed_progress(run, safe_error)
 
         run["completed_at"] = self._now()
         return run

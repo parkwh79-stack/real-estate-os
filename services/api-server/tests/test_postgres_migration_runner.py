@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from db import postgres
-from db.postgres_runtime_privileges import required_table_privileges
+from db.postgres_runtime_privileges import (
+    required_sequence_privileges,
+    required_table_privileges,
+)
 
 
 class _MigrationCursor:
@@ -134,7 +137,12 @@ class _ReadinessCursor:
             self.rows = [(self.connection.schema_create,)]
         elif "WHEN relation_oid IS NULL THEN FALSE" in normalized:
             privilege, _schema, table = params
-            expected = privilege in required_table_privileges().get(table, ())
+            manifest = (
+                required_sequence_privileges()
+                if "has_sequence_privilege" in normalized
+                else required_table_privileges()
+            )
+            expected = privilege in manifest.get(table, ())
             if self.connection.missing_privilege == (table, privilege):
                 expected = False
             if self.connection.forbidden_privilege == (table, privilege):
@@ -333,6 +341,10 @@ def test_parser_v2_runtime_readiness_rejects_replication_and_membership(
         (
             {"forbidden_privilege": ("parser_runs", "UPDATE")},
             "forbidden=parser_runs.UPDATE",
+        ),
+        (
+            {"missing_privilege": ("project_id_sequence", "USAGE")},
+            "missing=project_id_sequence.USAGE",
         ),
         (
             {"schema_create": True},

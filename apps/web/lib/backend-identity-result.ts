@@ -27,6 +27,7 @@ const IDENTITY_AUTHORITY_ERRORS = new Set([
   "identity_membership_authority_unavailable",
   "identity_authority_context_incomplete",
   "identity_authority_integrity_error",
+  "oidc_verifier_unavailable",
 ]);
 
 function fastApiErrorCode(payload: unknown): string | null {

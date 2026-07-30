@@ -75,11 +75,23 @@ def tenant_isolation_mode() -> str:
 
 
 def principal_from_request(request: Request) -> IdpPrincipal | None:
+    cached = verified_principal_from_request_state(request)
+    if cached is not None:
+        return cached
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     token = _bearer_token(auth_header)
     if not token:
         return None
-    return principal_from_bearer_token(token)
+    principal = principal_from_bearer_token(token)
+    request.state.realytics_verified_principal = principal
+    return principal
+
+
+def verified_principal_from_request_state(request: Request) -> IdpPrincipal | None:
+    """Return a principal already verified during this request, without I/O."""
+
+    principal = getattr(request.state, "realytics_verified_principal", None)
+    return principal if isinstance(principal, IdpPrincipal) else None
 
 
 def principal_from_bearer_token(token: str) -> IdpPrincipal:

@@ -63,6 +63,11 @@ test.describe("OAuth callback identity boundary classification", () => {
     expect(loginErrorForIdentityResult(result)).toBe(
       "identity_authority_unavailable",
     );
+    expect(
+      classifyRealyticsBearerIdentity(503, {
+        detail: { error: "oidc_verifier_unavailable" },
+      }),
+    ).toEqual({ status: "identity_authority_unavailable" });
   });
 
   test("maps infrastructure and unknown failures to backend unavailable", () => {

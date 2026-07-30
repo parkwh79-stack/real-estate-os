@@ -205,6 +205,74 @@ def test_postgres_authority_ignores_malicious_app_metadata_and_uses_db_role(
     assert "user:manage" not in context["permissions"]
 
 
+def test_request_scoped_identity_context_reads_membership_once_and_is_defensive(
+    monkeypatch,
+):
+    repository = _install_authority(
+        monkeypatch,
+        _directory(_membership("tenant-a", role="analyst", version=9)),
+    )
+    request = _request(tenant_header="tenant-a")
+
+    first = authz.identity_context_from_request(request)
+    first["role"] = "admin"
+    first["permissions"].append("user:manage")
+    first["user"]["metadata"]["membershipAuthority"]["membershipVersion"] = 999
+    first["authorization"] = {"allowed": True}
+
+    second = authz.identity_context_from_request(request)
+
+    assert repository.calls == [(ISSUER, SUBJECT)]
+    assert second["role"] == "analyst"
+    assert "user:manage" not in second["permissions"]
+    assert (
+        second["user"]["metadata"]["membershipAuthority"][
+            "membershipVersion"
+        ]
+        == 9
+    )
+    assert "authorization" not in second
+
+
+def test_request_identity_cache_does_not_cross_tenant_selector_or_request(
+    monkeypatch,
+):
+    repository = _install_authority(
+        monkeypatch,
+        _directory(
+            _membership("tenant-a", role="viewer", version=1),
+            _membership("tenant-b", role="reviewer", version=2),
+        ),
+    )
+
+    tenant_a_request = _request(tenant_header="tenant-a")
+    tenant_b_request = _request(tenant_header="tenant-b")
+    first_a = authz.identity_context_from_request(tenant_a_request)
+    second_a = authz.identity_context_from_request(tenant_a_request)
+    tenant_b = authz.identity_context_from_request(tenant_b_request)
+
+    assert first_a["user"]["tenantId"] == "tenant-a"
+    assert second_a["user"]["tenantId"] == "tenant-a"
+    assert tenant_b["user"]["tenantId"] == "tenant-b"
+    assert tenant_b["role"] == "reviewer"
+    assert repository.calls == [(ISSUER, SUBJECT), (ISSUER, SUBJECT)]
+
+
+def test_authorize_request_annotation_does_not_mutate_cached_base(monkeypatch):
+    repository = _install_authority(
+        monkeypatch,
+        _directory(_membership("tenant-a", role="viewer", version=4)),
+    )
+    request = _request(tenant_header="tenant-a")
+
+    authorized = authz.authorize_request(request, "project:read")
+    cached_base = authz.identity_context_from_request(request)
+
+    assert authorized["authorization"]["allowed"] is True
+    assert "authorization" not in cached_base
+    assert repository.calls == [(ISSUER, SUBJECT)]
+
+
 def test_one_active_membership_is_selected_without_tenant_selector(monkeypatch):
     _install_authority(
         monkeypatch,

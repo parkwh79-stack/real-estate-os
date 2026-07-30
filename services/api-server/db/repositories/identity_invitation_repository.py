@@ -13,12 +13,18 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from db.postgres_runtime_pool import identity_transaction
+from db.postgres_runtime_pool import (
+    identity_principal_transaction,
+    identity_transaction,
+)
 from db.postgres_runtime_privileges import validate_database_identifier
 from schemas.identity_access import IssueTenantInvitationInput
 
 
 TransactionFactory = Callable[[], AbstractContextManager[Any]]
+PrincipalTransactionFactory = Callable[
+    [str, str], AbstractContextManager[Any]
+]
 
 
 class IdentityInvitationRepositoryUnavailable(RuntimeError):
@@ -44,11 +50,22 @@ class PostgresIdentityInvitationRepository:
         self,
         *,
         transaction_factory: TransactionFactory = identity_transaction,
+        accept_transaction_factory: PrincipalTransactionFactory | None = None,
         schema_name: str | None = None,
         now: Callable[[], datetime] | None = None,
         token_factory: Callable[[], str] | None = None,
     ) -> None:
         self._transaction = transaction_factory
+        if accept_transaction_factory is not None:
+            self._accept_transaction = accept_transaction_factory
+        elif transaction_factory is identity_transaction:
+            self._accept_transaction = identity_principal_transaction
+        else:
+            # Preserve explicit test/custom factories while production always
+            # uses the principal-scoped identity checkout above.
+            self._accept_transaction = (
+                lambda _issuer, _subject: transaction_factory()
+            )
         self._schema = validate_database_identifier(
             schema_name
             or os.environ.get("REALYTICS_DATABASE_SCHEMA")
@@ -261,6 +278,8 @@ class PostgresIdentityInvitationRepository:
         principal_subject: str,
         principal_email: str | None,
         principal_display_name: str | None,
+        required_terms_version: str,
+        required_privacy_version: str,
     ) -> dict[str, Any]:
         token_hash = _hash_token(_required(token, "token"))
         principal_issuer = _required(
@@ -268,10 +287,19 @@ class PostgresIdentityInvitationRepository:
         ).rstrip("/")
         principal_subject = _required(principal_subject, "principal_subject")
         principal_email = _optional(principal_email)
+        required_terms_version = _required(
+            required_terms_version, "required_terms_version"
+        )
+        required_privacy_version = _required(
+            required_privacy_version, "required_privacy_version"
+        )
         now = self._now()
         expired = False
         try:
-            with self._transaction() as connection:
+            with self._accept_transaction(
+                principal_issuer,
+                principal_subject,
+            ) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         f"""
@@ -350,11 +378,48 @@ class PostgresIdentityInvitationRepository:
                         )
                         cursor.execute(
                             f"""
+                            SELECT terms_version, privacy_version
+                              FROM "{self._schema}".onboarding_profiles
+                             WHERE issuer = %s AND subject = %s
+                             FOR SHARE
+                            """,
+                            (principal_issuer, principal_subject),
+                        )
+                        profile_row = cursor.fetchone()
+                        if profile_row is None:
+                            raise InvitationLifecycleError(
+                                "onboarding_profile_required"
+                            )
+                        if str(profile_row[0]) != required_terms_version:
+                            raise InvitationLifecycleError(
+                                "terms_version_mismatch"
+                            )
+                        if str(profile_row[1]) != required_privacy_version:
+                            raise InvitationLifecycleError(
+                                "privacy_version_mismatch"
+                            )
+                        membership_lock_key = "\x1f".join(
+                            (
+                                "tenant-membership",
+                                tenant_id,
+                                principal_issuer,
+                                principal_subject,
+                            )
+                        )
+                        cursor.execute(
+                            """
+                            SELECT pg_catalog.pg_advisory_xact_lock(
+                                pg_catalog.hashtextextended(%s, 0)
+                            )
+                            """,
+                            (membership_lock_key,),
+                        )
+                        cursor.execute(
+                            f"""
                             SELECT status
                               FROM "{self._schema}".tenant_memberships
                              WHERE tenant_id = %s AND issuer = %s
                                AND subject = %s
-                             FOR UPDATE
                             """,
                             (tenant_id, principal_issuer, principal_subject),
                         )

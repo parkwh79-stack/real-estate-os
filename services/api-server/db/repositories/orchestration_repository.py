@@ -121,6 +121,31 @@ class OrchestrationRepository:
         metadata.sort(key=lambda r: r.get("started_at") or "", reverse=True)
         return metadata
 
+    def latest_metadata_by_project(
+        self,
+        project_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return one latest run per requested project.
+
+        The compatibility repository is process-local, so iterating here does
+        not add database round trips.  The PostgreSQL implementation below
+        overrides this with one tenant-scoped query.
+        """
+
+        latest: Dict[str, Dict[str, Any]] = {}
+        for project_id in dict.fromkeys(str(value) for value in project_ids):
+            runs = self.list_metadata(project_id)
+            if runs:
+                latest[project_id] = max(
+                    runs,
+                    key=lambda item: str(
+                        item.get("completed_at")
+                        or item.get("started_at")
+                        or ""
+                    ),
+                )
+        return latest
+
     def get(self, project_id: str, run_id: str) -> Dict[str, Any] | None:
         persisted_run = get_orchestration_run_record(project_id, run_id)
         if persisted_run is not None:
@@ -274,6 +299,51 @@ class PostgresOrchestrationRepository:
                 (self.tenant_id, normalized_project_id),
             ).fetchall()
         return [_run_metadata(_run_payload(row[0])) for row in rows]
+
+    def latest_metadata_by_project(
+        self,
+        project_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Fetch the latest run for every authorized project in one query."""
+
+        normalized_project_ids = tuple(
+            dict.fromkeys(
+                normalized
+                for value in project_ids
+                if (normalized := str(value or "").strip())
+            )
+        )
+        if not normalized_project_ids:
+            return {}
+        with self._transaction(self.tenant_id) as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT ON (project_id) project_id, payload_json
+                FROM realytics.orchestrations
+                WHERE tenant_id = %s
+                  AND project_id = ANY(%s::text[])
+                ORDER BY project_id,
+                         COALESCE(completed_at, started_at) DESC NULLS LAST,
+                         run_id DESC
+                """,
+                (self.tenant_id, list(normalized_project_ids)),
+            ).fetchall()
+
+        requested = frozenset(normalized_project_ids)
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            project_id = str(row[0] or "").strip()
+            if project_id not in requested:
+                raise ValueError(
+                    "Orchestration batch read returned a project outside its scope"
+                )
+            metadata = _run_metadata(_run_payload(row[1]))
+            if str(metadata.get("project_id") or "") != project_id:
+                raise ValueError(
+                    "Orchestration payload project lineage does not match its row"
+                )
+            latest[project_id] = metadata
+        return latest
 
     def get(self, project_id: str, run_id: str) -> Dict[str, Any] | None:
         normalized_project_id = _required_text(project_id, "project_id")

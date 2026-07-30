@@ -9,19 +9,24 @@ import {
   LockKeyhole,
   Scale,
 } from "lucide-react";
-import { OAuthLoginPanel } from "../../components/auth/oauth-login-panel";
-import { resolveCurrentIdentity } from "../../lib/auth-client";
+import { AccountAccessPanel } from "../../components/auth/account-access-panel";
+import { useAuth } from "../../components/auth/auth-context";
+import { safeInternalNextPath } from "../../lib/safe-navigation";
 
 export default function LoginPage() {
   const router = useRouter();
+  const { status } = useAuth();
 
   useEffect(() => {
-    void resolveCurrentIdentity()
-      .then((identity) => {
-        if (identity.authenticated) router.replace(resolveNextPath());
-      })
-      .catch(() => undefined);
-  }, [router]);
+    if (status === "authenticated") router.replace(resolveNextPath());
+    if (
+      status === "onboarding"
+      || status === "tenant_selection"
+      || status === "authority_unavailable"
+    ) {
+      router.replace("/onboarding");
+    }
+  }, [router, status]);
 
   return (
     <main className="min-h-screen bg-white text-slate-950">
@@ -132,11 +137,10 @@ export default function LoginPage() {
               </p>
             </div>
 
-            <OAuthLoginPanel />
+            <AccountAccessPanel />
 
             <p className="mt-7 text-sm leading-6 text-slate-600">
-              워크스페이스 초대가 필요하면 소속 기관의 REALYTICS 관리자에게
-              초대 발급을 요청하세요.
+              아직 소속 기관이 없다면 이메일 확인 후 신규 기관 신청을 제출할 수 있습니다.
             </p>
           </div>
         </section>
@@ -166,6 +170,5 @@ function ProductPrinciple({
 function resolveNextPath() {
   if (typeof window === "undefined") return "/start";
   const next = new URLSearchParams(window.location.search).get("next");
-  if (!next || next === "/" || next === "/dashboard") return "/start";
-  return next.startsWith("/") && !next.startsWith("//") ? next : "/start";
+  return safeInternalNextPath(next);
 }

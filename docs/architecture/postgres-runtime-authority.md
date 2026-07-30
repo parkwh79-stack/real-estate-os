@@ -1,6 +1,6 @@
 # PostgreSQL runtime authority
 
-Updated: 2026-07-27
+Updated: 2026-07-30
 
 This is the database-specific companion to
 `docs/architecture/architecture-boundary.md`. That document owns the complete
@@ -49,6 +49,33 @@ cross-tenant and two-session `SKIP LOCKED` worker claims passed. The remaining
 deployment gate is activating separate API, identity, and PF-worker LOGIN
 principals through the approved secret manager, injecting their role-scoped
 DSNs, and running the Python pool checkout from the deployed network.
+
+The API pool now runs a read-only fail-closed preflight during hardened
+staging/production startup. `REALYTICS_API_DATABASE_URL` must authenticate
+directly as `REALYTICS_API_DATABASE_ROLE`; an administrator or migration DSN
+cannot satisfy this check. The expected role must be `LOGIN`, must not be
+superuser/CREATEDB/CREATEROLE/INHERIT/REPLICATION/BYPASSRLS or a member of
+another role, must have `USAGE` but not `CREATE` on `realytics` and
+`extensions`, and must match the exact project table/sequence privilege
+manifest. Diagnostic output contains stable codes and object names, never a
+DSN, password, or raw database exception. Run before deployment:
+
+```powershell
+python services/api-server/scripts/preflight_postgres_api_runtime.py
+```
+
+The identity pool now has an equivalent checkout gate for
+`REALYTICS_IDENTITY_DATABASE_URL` and
+`REALYTICS_IDENTITY_DATABASE_ROLE`. It verifies the actual `current_user` and
+`session_user`, requires LOGIN with NOINHERIT/NOBYPASSRLS and no parent role,
+requires schema USAGE without CREATE, and rejects ownership of the database or
+runtime schema relations/functions. This is deliberately narrower than the API
+privilege audit because pre-membership writes are constrained by exact column
+grants plus principal-scoped FORCE RLS.
+
+The local/hosted role is still `NOLOGIN` until an approved secret-manager
+workflow creates and rotates its credential. Source code and migration grants
+do not constitute a successful live runtime checkout.
 
 ## Normalized PF report publication
 

@@ -13,6 +13,8 @@ from schemas.identity_access import IssueTenantInvitationInput
 
 NOW = datetime(2026, 7, 22, 4, 0, tzinfo=timezone.utc)
 TOKEN = "t" * 48
+TERMS_VERSION = "realytics-terms-2026-07-30"
+PRIVACY_VERSION = "realytics-privacy-2026-07-30"
 
 
 class _Cursor:
@@ -115,6 +117,7 @@ def test_accept_is_atomic_and_role_comes_only_from_locked_invitation() -> None:
         [
             ("tenant-a", "inv-1", "pending", NOW + timedelta(hours=24)),
             _invitation_row(),
+            (TERMS_VERSION, PRIVACY_VERSION),
             None,
             ("active",),
         ]
@@ -126,6 +129,8 @@ def test_accept_is_atomic_and_role_comes_only_from_locked_invitation() -> None:
         principal_subject="new-user",
         principal_email="INVITEE@example.com",
         principal_display_name="Invitee",
+        required_terms_version=TERMS_VERSION,
+        required_privacy_version=PRIVACY_VERSION,
     )
 
     assert accepted == {
@@ -142,7 +147,22 @@ def test_accept_is_atomic_and_role_comes_only_from_locked_invitation() -> None:
     )
     assert membership_insert[3] == "analyst"
     assert membership_insert[4] == "invitation:inv-1"
-    assert any("FOR UPDATE" in sql for sql, _params in cursor.executions)
+    advisory_lock = next(
+        (sql, params)
+        for sql, params in cursor.executions
+        if "pg_advisory_xact_lock" in sql
+    )
+    assert advisory_lock[1] == (
+        "tenant-membership\x1ftenant-a\x1fhttps://issuer.example/auth/v1"
+        "\x1fnew-user",
+    )
+    membership_lookup = next(
+        sql
+        for sql, _params in cursor.executions
+        if 'FROM "realytics".tenant_memberships' in sql
+    )
+    assert "FOR UPDATE" not in membership_lookup
+    assert sum("FOR UPDATE" in sql for sql, _params in cursor.executions) == 2
 
 
 def test_accept_rejects_email_mismatch_before_principal_or_membership_write() -> None:
@@ -160,12 +180,52 @@ def test_accept_rejects_email_mismatch_before_principal_or_membership_write() ->
             principal_subject="new-user",
             principal_email="attacker@example.com",
             principal_display_name="Attacker",
+            required_terms_version=TERMS_VERSION,
+            required_privacy_version=PRIVACY_VERSION,
         )
 
     assert error.value.code == "invitation_email_mismatch"
     sql = "\n".join(item[0] for item in cursor.executions)
     assert ".principals" not in sql
     assert ".tenant_memberships" not in sql
+
+
+@pytest.mark.parametrize(
+    ("profile_row", "expected_code"),
+    [
+        (None, "onboarding_profile_required"),
+        (("stale-terms", PRIVACY_VERSION), "terms_version_mismatch"),
+        ((TERMS_VERSION, "stale-privacy"), "privacy_version_mismatch"),
+    ],
+)
+def test_accept_requires_current_profile_before_authority_write(
+    profile_row,
+    expected_code,
+) -> None:
+    cursor = _Cursor(
+        [
+            ("tenant-a", "inv-1", "pending", NOW + timedelta(hours=24)),
+            _invitation_row(),
+            profile_row,
+        ]
+    )
+
+    with pytest.raises(InvitationLifecycleError) as error:
+        _repository(cursor).accept(
+            token=TOKEN,
+            principal_issuer="https://issuer.example/auth/v1",
+            principal_subject="new-user",
+            principal_email="invitee@example.com",
+            principal_display_name="Invitee",
+            required_terms_version=TERMS_VERSION,
+            required_privacy_version=PRIVACY_VERSION,
+        )
+
+    assert error.value.code == expected_code
+    sql = "\n".join(item[0] for item in cursor.executions)
+    assert 'FROM "realytics".onboarding_profiles' in sql
+    assert 'INSERT INTO "realytics".principals' not in sql
+    assert 'INSERT INTO "realytics".tenant_memberships' not in sql
 
 
 def test_expired_invitation_is_persistently_closed_before_error_is_returned() -> None:
@@ -183,6 +243,8 @@ def test_expired_invitation_is_persistently_closed_before_error_is_returned() ->
             principal_subject="new-user",
             principal_email="invitee@example.com",
             principal_display_name="Invitee",
+            required_terms_version=TERMS_VERSION,
+            required_privacy_version=PRIVACY_VERSION,
         )
 
     assert error.value.code == "invitation_expired"
@@ -203,6 +265,8 @@ def test_replayed_token_is_rejected_before_tenant_membership_lookup() -> None:
             principal_subject="new-user",
             principal_email="invitee@example.com",
             principal_display_name="Invitee",
+            required_terms_version=TERMS_VERSION,
+            required_privacy_version=PRIVACY_VERSION,
         )
 
     assert error.value.code == "invitation_not_pending"

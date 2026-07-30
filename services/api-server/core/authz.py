@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -25,6 +26,7 @@ from db.repositories.identity_membership_repository import (
     IdentityMembershipRepository,
     IdentityMembershipRepositoryUnavailable,
     PostgresIdentityMembershipRepository,
+    load_directory_singleflight,
 )
 from storage import get_user, get_user_session, upsert_user
 
@@ -154,7 +156,31 @@ def is_explicit_human_principal(context: Dict[str, Any]) -> bool:
     )
 
 
+_IDENTITY_CONTEXT_REQUEST_STATE_KEY = "_realytics_identity_context"
+
+
 def identity_context_from_request(request: Request) -> Dict[str, Any]:
+    """Resolve authorization once per HTTP request and return a safe copy.
+
+    Several project helpers share the same Starlette ``Request``.  Re-reading
+    the normalized membership directory in every helper adds remote database
+    round trips without improving revocation semantics inside one request.
+    The state value dies with the request; there is no positive TTL or reuse by
+    a later request.  Defensive copies prevent one caller's authorization
+    annotations or mutations from changing the cached base context.
+    """
+
+    cached = getattr(request.state, _IDENTITY_CONTEXT_REQUEST_STATE_KEY, None)
+    if isinstance(cached, dict):
+        return deepcopy(cached)
+
+    resolved = _identity_context_from_request_uncached(request)
+    cached = deepcopy(resolved)
+    setattr(request.state, _IDENTITY_CONTEXT_REQUEST_STATE_KEY, cached)
+    return deepcopy(cached)
+
+
+def _identity_context_from_request_uncached(request: Request) -> Dict[str, Any]:
     principal = principal_from_request(request)
     if principal:
         if identity_membership_authority() == "postgres":
@@ -392,6 +418,18 @@ def require_step_up_authentication(
     return context
 
 
+def identity_assurance_from_verified_claims(
+    claims: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Project step-up assurance from claims already verified by ``idp``.
+
+    Memberless onboarding review cannot call the normal membership resolver,
+    but it must use the identical signed AAL/AMR interpretation.
+    """
+
+    return _identity_assurance(dict(claims or {}))
+
+
 def high_risk_step_up_required() -> bool:
     raw = str(os.environ.get("REALYTICS_REQUIRE_HIGH_RISK_STEP_UP") or "").strip()
     if raw:
@@ -460,7 +498,8 @@ def _resolve_postgres_membership(
 ) -> tuple[IdpPrincipal, Dict[str, Any]]:
     requested_tenant = _requested_tenant_selector(request)
     try:
-        directory = repository.load_directory(
+        directory = load_directory_singleflight(
+            repository,
             issuer=principal.issuer,
             subject=principal.subject,
         )

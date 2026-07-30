@@ -39,7 +39,7 @@ def test_kakao_authorize_url_reports_missing_config(monkeypatch):
     assert "mock-callback" in body["authorizeUrl"]
 
 
-def test_kakao_authorize_url_uses_oidc_scope(monkeypatch):
+def test_kakao_authorize_url_uses_email_optional_oidc_scope(monkeypatch):
     monkeypatch.setenv("KAKAO_REST_API_KEY", "kakao-rest-key")
     monkeypatch.setenv("KAKAO_REDIRECT_URI", "https://realytics.example/auth/kakao/callback")
     # Isolate from any deployment .env override (e.g. KAKAO_LOGIN_SCOPE=profile_nickname)
@@ -55,6 +55,8 @@ def test_kakao_authorize_url_uses_oidc_scope(monkeypatch):
     assert "https://kauth.kakao.com/oauth/authorize" in body["authorizeUrl"]
     assert "client_id=kakao-rest-key" in body["authorizeUrl"]
     assert "scope=openid" in body["authorizeUrl"]
+    assert "profile_nickname" in body["scope"]
+    assert "account_email" not in body["scope"]
     assert "state=state-1" in body["authorizeUrl"]
     assert "nonce=nonce-1" in body["authorizeUrl"]
 
@@ -187,7 +189,7 @@ def test_kakao_callback_creates_realytics_session_and_redirects(monkeypatch):
             "access_token": "access-token",
             "id_token": id_token,
             "token_type": "bearer",
-            "scope": "openid profile_nickname account_email",
+            "scope": "openid profile_nickname",
         },
     )
     monkeypatch.setattr(

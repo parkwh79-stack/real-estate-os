@@ -18,6 +18,18 @@ from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import parse_qs, quote_plus, urlsplit
 
+from db.postgres_api_runtime_preflight import (
+    API_DATABASE_ROLE_ENV,
+    ApiRuntimePreflightError,
+    assert_api_runtime_connection,
+)
+from db.postgres_identity_runtime_preflight import (
+    DEFAULT_IDENTITY_DATABASE_ROLE,
+    IDENTITY_DATABASE_ROLE_ENV,
+    IdentityRuntimePreflightError,
+    assert_identity_runtime_connection,
+)
+
 
 DEFAULT_CONNECTION_BUDGET = 20
 DEFAULT_REPLICA_COUNT = 1
@@ -36,7 +48,22 @@ TRANSACTION_POOLER_OPT_IN_ENV = (
 )
 RUNTIME_POOL_ROLES_ENV = "REALYTICS_DB_POOL_ROLES"
 HARDENED_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
-SET_LOCAL_CONFIG_SQL = "SELECT set_config(%s, %s, true)"
+# Configure every transaction-local setting in one database round trip.  The
+# runtime can be several network hops away (for example, a Supabase session
+# pooler), so issuing one ``SELECT set_config`` per setting keeps a checked-out
+# connection idle-in-transaction for the cumulative latency of seven queries.
+# The values remain parameters and ``is_local=true`` still scopes every value
+# to the surrounding ``connection.transaction()`` block.
+SET_LOCAL_CONFIG_SQL = """
+SELECT
+    set_config(%s, %s, true),
+    set_config(%s, %s, true),
+    set_config(%s, %s, true),
+    set_config(%s, %s, true),
+    set_config(%s, %s, true),
+    set_config(%s, %s, true),
+    set_config(%s, %s, true)
+""".strip()
 READINESS_SQL = "SELECT 1"
 SAFE_RUNTIME_SEARCH_PATH = "pg_catalog, realytics, extensions"
 
@@ -97,6 +124,10 @@ class RuntimePoolSpec:
     reconnect_timeout_seconds: float
     transaction_timeouts: TransactionTimeouts
     transaction_pooler: bool
+    expected_database_role: str | None = None
+    runtime_schema: str = "realytics"
+    postgis_schema: str = "extensions"
+    require_role_preflight: bool = False
 
 
 PoolFactory = Callable[[RuntimePoolSpec], _RuntimePool]
@@ -358,6 +389,19 @@ def _build_pool_spec(
 ) -> RuntimePoolSpec:
     prefix = _POOL_ENV_PREFIX[name]
     transaction_pooler = validate_runtime_dsn(dsn, environ=environ)
+    hardened = _is_hardened(environ)
+    expected_database_role: str | None = None
+    if name is RuntimePoolName.API:
+        expected_database_role = str(
+            environ.get(API_DATABASE_ROLE_ENV)
+            or environ.get("REALYTICS_RUNTIME_DATABASE_ROLE")
+            or "realytics_runtime"
+        ).strip()
+    elif name is RuntimePoolName.IDENTITY:
+        expected_database_role = str(
+            environ.get(IDENTITY_DATABASE_ROLE_ENV)
+            or DEFAULT_IDENTITY_DATABASE_ROLE
+        ).strip()
     return RuntimePoolSpec(
         name=name,
         dsn=dsn,
@@ -433,6 +477,17 @@ def _build_pool_spec(
             ),
         ),
         transaction_pooler=transaction_pooler,
+        expected_database_role=expected_database_role,
+        runtime_schema=str(
+            environ.get("REALYTICS_DATABASE_SCHEMA") or "realytics"
+        ).strip(),
+        postgis_schema=str(
+            environ.get("REALYTICS_POSTGIS_SCHEMA") or "extensions"
+        ).strip(),
+        require_role_preflight=(
+            hardened
+            and name in {RuntimePoolName.API, RuntimePoolName.IDENTITY}
+        ),
     )
 
 
@@ -555,6 +610,28 @@ class RuntimePoolRegistry:
                                     "PostgreSQL runtime pool readiness query "
                                     f"failed for {name.value!r}"
                                 )
+                            if spec.require_role_preflight:
+                                try:
+                                    preflight = (
+                                        assert_identity_runtime_connection
+                                        if name is RuntimePoolName.IDENTITY
+                                        else assert_api_runtime_connection
+                                    )
+                                    preflight(
+                                        connection,
+                                        expected_role=(
+                                            spec.expected_database_role or ""
+                                        ),
+                                        schema_name=spec.runtime_schema,
+                                        postgis_schema_name=spec.postgis_schema,
+                                    )
+                                except (
+                                    ApiRuntimePreflightError,
+                                    IdentityRuntimePreflightError,
+                                ) as exc:
+                                    raise RuntimeDatabaseConfigurationError(
+                                        str(exc)
+                                    ) from exc
             except Exception:
                 for pool in reversed(tuple(self._pools.values())):
                     try:
@@ -616,6 +693,20 @@ def build_runtime_pool_registry(
                 f"{name.value} runtime pool; REALYTICS_DATABASE_URL is not "
                 "a fallback for role-scoped runtime traffic"
             )
+        if (
+            hardened
+            and name in {RuntimePoolName.API, RuntimePoolName.IDENTITY}
+        ):
+            role_env = (
+                API_DATABASE_ROLE_ENV
+                if name is RuntimePoolName.API
+                else IDENTITY_DATABASE_ROLE_ENV
+            )
+            if not str(env.get(role_env) or "").strip():
+                raise RuntimeDatabaseConfigurationError(
+                    f"{role_env} is required for the hardened {name.value} "
+                    "runtime pool so the login role can be verified"
+                )
         dsn = _dsn_for_pool(
             name,
             environ=env,
@@ -677,10 +768,14 @@ def _set_transaction_locals(
     connection: Any,
     *,
     tenant_id: str,
+    principal_issuer: str = "",
+    principal_subject: str = "",
     timeouts: TransactionTimeouts,
 ) -> None:
     settings = (
         ("realytics.tenant_id", tenant_id),
+        ("realytics.principal_issuer", principal_issuer),
+        ("realytics.principal_subject", principal_subject),
         ("search_path", SAFE_RUNTIME_SEARCH_PATH),
         ("statement_timeout", f"{timeouts.statement_ms}ms"),
         ("lock_timeout", f"{timeouts.lock_ms}ms"),
@@ -689,11 +784,60 @@ def _set_transaction_locals(
             f"{timeouts.idle_in_transaction_ms}ms",
         ),
     )
-    for setting_name, setting_value in settings:
-        connection.execute(
-            SET_LOCAL_CONFIG_SQL,
-            (setting_name, setting_value),
-        )
+    parameters = tuple(
+        value
+        for setting in settings
+        for value in setting
+    )
+    connection.execute(SET_LOCAL_CONFIG_SQL, parameters)
+
+
+def _supports_psycopg_pipeline(connection: Any) -> bool:
+    """Return whether this checkout can safely use psycopg pipeline mode.
+
+    Runtime database dependencies are intentionally lazy imports so local MVP
+    environments can still start without PostgreSQL extras.  Checking both the
+    concrete connection type and the linked libpq capability avoids treating a
+    similarly named method on a fake or third-party DB-API connection as the
+    psycopg wire-protocol pipeline.
+    """
+
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - optional development dependency
+        return False
+
+    connection_type = getattr(psycopg, "Connection", None)
+    capabilities = getattr(psycopg, "capabilities", None)
+    has_pipeline = getattr(capabilities, "has_pipeline", None)
+    pipeline = getattr(connection, "pipeline", None)
+    return bool(
+        connection_type is not None
+        and isinstance(connection, connection_type)
+        and callable(pipeline)
+        and callable(has_pipeline)
+        and has_pipeline()
+    )
+
+
+@contextmanager
+def _pipeline_if_supported(connection: Any) -> Iterator[bool]:
+    """Batch one explicit transaction without changing its security scope.
+
+    ``Connection.transaction()`` remains the owner of BEGIN/COMMIT/ROLLBACK.
+    Pipeline mode only changes when those ordered protocol messages are
+    flushed.  In particular, the tenant/search-path/timeouts are still
+    transaction-local and are sent before any repository statement.  This is
+    safe for transaction pooling because no session-level state is introduced;
+    prepared statements remain disabled separately for port 6543.
+    """
+
+    if not _supports_psycopg_pipeline(connection):
+        yield False
+        return
+
+    with connection.pipeline():
+        yield True
 
 
 @contextmanager
@@ -701,6 +845,8 @@ def _runtime_transaction(
     *,
     pool_name: RuntimePoolName,
     tenant_id: str,
+    principal_issuer: str = "",
+    principal_subject: str = "",
     registry: RuntimePoolRegistry | None,
 ) -> Iterator[Any]:
     selected_registry = registry or get_runtime_pool_registry()
@@ -708,13 +854,21 @@ def _runtime_transaction(
     with pool.connection(
         timeout=spec.acquire_timeout_seconds
     ) as connection:
-        with connection.transaction():
-            _set_transaction_locals(
-                connection,
-                tenant_id=tenant_id,
-                timeouts=spec.transaction_timeouts,
-            )
-            yield connection
+        # Enclose the entire unit of work so BEGIN, local settings, repository
+        # statements, and COMMIT/ROLLBACK can share psycopg's pipeline.  Fetch
+        # calls may establish an earlier flush, but ordering and atomicity are
+        # unchanged and the pool sees an idle connection only after the
+        # pipeline has synchronized on exit.
+        with _pipeline_if_supported(connection):
+            with connection.transaction():
+                _set_transaction_locals(
+                    connection,
+                    tenant_id=tenant_id,
+                    principal_issuer=principal_issuer,
+                    principal_subject=principal_subject,
+                    timeouts=spec.transaction_timeouts,
+                )
+                yield connection
 
 
 def _required_tenant_id(tenant_id: str) -> str:
@@ -736,6 +890,50 @@ def api_tenant_transaction(
     with _runtime_transaction(
         pool_name=RuntimePoolName.API,
         tenant_id=_required_tenant_id(tenant_id),
+        registry=registry,
+    ) as connection:
+        yield connection
+
+
+def _required_principal_key(
+    *,
+    issuer: str,
+    subject: str,
+) -> tuple[str, str]:
+    normalized_issuer = str(issuer or "").strip().rstrip("/")
+    normalized_subject = str(subject or "").strip()
+    if not normalized_issuer or not normalized_subject:
+        raise ValueError(
+            "Non-blank issuer and subject are required for a "
+            "principal-scoped PostgreSQL transaction"
+        )
+    return normalized_issuer, normalized_subject
+
+
+@contextmanager
+def api_principal_transaction(
+    issuer: str,
+    subject: str,
+    *,
+    registry: RuntimePoolRegistry | None = None,
+) -> Iterator[Any]:
+    """Open API work before tenant membership exists.
+
+    Only the verified bearer ``iss + sub`` pair may be supplied by the server.
+    New onboarding tables enforce this transaction-local principal scope with
+    FORCE RLS.  The tenant setting is explicitly blank, so this context cannot
+    read tenant-scoped business relations through their RLS policies.
+    """
+
+    normalized_issuer, normalized_subject = _required_principal_key(
+        issuer=issuer,
+        subject=subject,
+    )
+    with _runtime_transaction(
+        pool_name=RuntimePoolName.API,
+        tenant_id="",
+        principal_issuer=normalized_issuer,
+        principal_subject=normalized_subject,
         registry=registry,
     ) as connection:
         yield connection
@@ -770,6 +968,36 @@ def identity_transaction(
         yield connection
 
 
+@contextmanager
+def identity_principal_transaction(
+    issuer: str,
+    subject: str,
+    *,
+    registry: RuntimePoolRegistry | None = None,
+) -> Iterator[Any]:
+    """Open the identity pool for a verified principal before membership.
+
+    This is the deployable self-service onboarding path: production currently
+    provides a dedicated identity DSN, while the API role can remain NOLOGIN
+    until its secret-manager activation is complete.  FORCE RLS on the
+    onboarding relations binds every row to this exact signed-token ``iss`` +
+    ``sub`` pair and the tenant setting remains blank.
+    """
+
+    normalized_issuer, normalized_subject = _required_principal_key(
+        issuer=issuer,
+        subject=subject,
+    )
+    with _runtime_transaction(
+        pool_name=RuntimePoolName.IDENTITY,
+        tenant_id="",
+        principal_issuer=normalized_issuer,
+        principal_subject=normalized_subject,
+        registry=registry,
+    ) as connection:
+        yield connection
+
+
 __all__ = [
     "DEFAULT_CONNECTION_BUDGET",
     "DEFAULT_REPLICA_COUNT",
@@ -783,10 +1011,12 @@ __all__ = [
     "TRANSACTION_POOLER_OPT_IN_ENV",
     "TransactionTimeouts",
     "api_tenant_transaction",
+    "api_principal_transaction",
     "build_runtime_pool_registry",
     "close_runtime_pools",
     "get_runtime_pool_registry",
     "identity_transaction",
+    "identity_principal_transaction",
     "open_runtime_pools",
     "pf_worker_tenant_transaction",
     "validate_connection_budget",

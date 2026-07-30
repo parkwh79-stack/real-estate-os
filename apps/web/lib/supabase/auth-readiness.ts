@@ -70,11 +70,12 @@ export async function inspectSupabaseAuthReadiness() {
   };
   const providerUsable = {
     google: providers.google,
-    // Hosted GoTrue currently asks Kakao for account_email by default. Keep
-    // this provider fail-closed until a Biz App consent item has completed an
-    // actual round trip; an enabled Supabase toggle alone is insufficient.
+    // The OAuth route uses a server-controlled `scope` query override because
+    // GoTrue appends `options.scopes` to Kakao's account_email default. Keep
+    // Kakao fail-closed until the deployment has also read back Supabase's
+    // hosted email-optional setting.
     kakao: providers.kakao
-      && process.env.REALYTICS_KAKAO_OAUTH_SCOPE_VERIFIED === "true",
+      && process.env.REALYTICS_KAKAO_EMAIL_OPTIONAL_VERIFIED === "true",
   };
   const backendReady = Boolean(
     (backend?.configured ?? backend?.enabled)
@@ -139,7 +140,7 @@ export async function inspectSupabaseAuthReadiness() {
       ...(!providers.google ? ["google_provider_not_enabled"] : []),
       ...(!providers.kakao ? ["kakao_provider_not_enabled"] : []),
       ...(providers.kakao && !providerUsable.kakao
-        ? ["kakao_account_email_scope_not_verified"]
+        ? ["kakao_email_optional_not_verified"]
         : []),
       ...(!canonicalOriginReady ? ["canonical_https_web_origin_not_configured"] : []),
       ...(!backendReady ? ["fastapi_oidc_membership_boundary_not_ready"] : []),

@@ -16,6 +16,7 @@ def build_user_ai_context(
     *,
     user_id: str | None,
     tenant_id: str | None = None,
+    session_id: str | None = None,
     host: str = "api",
     override: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
@@ -47,11 +48,19 @@ def build_user_ai_context(
 
     profile = get_user_ai_profile(str(user_id or ""), include_secret=True) if user_id else None
     if profile and profile.get("status") == "active":
-        api_key = resolve_user_credential(
-            profile.get("credentialRef"),
-            user_id=str(user_id),
-            tenant_id=tenant_id,
-        ) or decrypt_user_ai_api_key(str(user_id))
+        credential_ref = profile.get("credentialRef")
+        if credential_ref:
+            # A session-bound reference must never fall through to a legacy
+            # persisted key when the user/tenant/session boundary does not
+            # match or the reference has expired.
+            api_key = resolve_user_credential(
+                credential_ref,
+                user_id=str(user_id),
+                tenant_id=tenant_id,
+                session_id=session_id,
+            )
+        else:
+            api_key = decrypt_user_ai_api_key(str(user_id))
         if api_key or profile.get("allowSystemFallback"):
             return resolve_ai_context(
                 {

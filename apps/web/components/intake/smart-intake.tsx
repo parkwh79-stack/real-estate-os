@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, FileQuestion, Loader2, PlayCircle, Sparkles, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
+import { backendErrorMessageForResponse } from "../../lib/backend-error";
 
 type Classified = {
   filename: string;
@@ -93,7 +94,11 @@ async function enrichLandLedgerAfterAnalyze(projectId: string, body: Record<stri
       },
     }),
   });
-  if (!enrichRes.ok) throw new Error(`PNU/evidence enrichment HTTP ${enrichRes.status}`);
+  if (!enrichRes.ok) {
+    throw new Error(
+      await backendErrorMessageForResponse(enrichRes, { action: "토지자료 PNU·증빙 보강" }),
+    );
+  }
   return (await enrichRes.json().catch(() => body)) as Record<string, unknown>;
 }
 
@@ -138,7 +143,11 @@ export function SmartIntake({
           headers: authHeaders("web"),
           body: fd,
         });
-        if (!res.ok) throw new Error(`분류 실패 (${res.status})`);
+        if (!res.ok) {
+          throw new Error(
+            await backendErrorMessageForResponse(res, { action: "자료 업로드 및 문서 분류" }),
+          );
+        }
         const data = (await res.json()) as IntakeResult;
         onClassified?.(data.files, data);
         const newRows: Row[] = data.files.map((c, index) => ({
@@ -200,7 +209,11 @@ export function SmartIntake({
             body: JSON.stringify(payload),
           });
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          throw new Error(
+            await backendErrorMessageForResponse(res, { action: `${TYPE_LABEL[row.type] ?? "자료"} 처리` }),
+          );
+        }
         let body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
         if (row.type === "feasibility_workbook" && body.feasibilityStudyV2Draft) {
           const candidateRes = await fetch(`${apiBase}/projects/${projectId}/feasibility-workbook/import-candidate`, {
@@ -212,7 +225,11 @@ export function SmartIntake({
               sourceDocument: body.upload,
             }),
           });
-          if (!candidateRes.ok) throw new Error(`사업수지 원장 반영 실패 (HTTP ${candidateRes.status})`);
+          if (!candidateRes.ok) {
+            throw new Error(
+              await backendErrorMessageForResponse(candidateRes, { action: "사업수지 원장 반영" }),
+            );
+          }
           body = { ...body, candidateImport: await candidateRes.json().catch(() => ({})) };
         }
         if (row.type === "land_ledger") {

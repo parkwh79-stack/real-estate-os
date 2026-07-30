@@ -132,6 +132,52 @@ def test_accept_allows_verified_principal_before_membership_exists(monkeypatch):
     assert response.json()["invitation"]["membershipStatus"] == "active"
     assert repository.accepted["principal_subject"] == "new-subject"
     assert repository.accepted["principal_email"] == "invitee@example.com"
+    assert repository.accepted["required_terms_version"] == (
+        "realytics-terms-2026-07-30"
+    )
+    assert repository.accepted["required_privacy_version"] == (
+        "realytics-privacy-2026-07-30"
+    )
+
+
+def test_accept_fails_closed_when_profile_or_current_consent_is_missing(
+    monkeypatch,
+):
+    class _BlockedRepository(_Repository):
+        def __init__(self, code: str) -> None:
+            super().__init__()
+            self.code = code
+
+        def accept(self, **kwargs):
+            self.accepted = kwargs
+            raise InvitationLifecycleError(self.code)
+
+    monkeypatch.setattr(auth, "principal_from_request", lambda _request: _principal())
+
+    for code in (
+        "onboarding_profile_required",
+        "terms_version_mismatch",
+        "privacy_version_mismatch",
+    ):
+        repository = _BlockedRepository(code)
+        monkeypatch.setattr(
+            auth,
+            "identity_invitation_repository",
+            lambda repository=repository: repository,
+        )
+        response = TestClient(app).post(
+            "/auth/invitations/accept",
+            headers={"authorization": "Bearer verified"},
+            json={"token": "t" * 48},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["error"] == code
+        if code.endswith("version_mismatch"):
+            assert response.json()["detail"]["currentPolicyVersions"] == {
+                "termsVersion": "realytics-terms-2026-07-30",
+                "privacyVersion": "realytics-privacy-2026-07-30",
+            }
 
 
 def test_invitation_replay_has_stable_conflict_error(monkeypatch):

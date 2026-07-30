@@ -10,30 +10,343 @@ export interface ProjectOption {
   status?: string;
 }
 
+export type RecentWorkKind = "project" | "review" | "analysis";
+
 export interface RecentWorkItem {
+  /** Stable row key. Older recent-work-v2 responses omit this field. */
+  itemId?: string;
+  /** Work category. Older recent-work-v2 responses are normalized as project. */
+  kind?: RecentWorkKind;
   projectId: string;
   projectName: string;
+  title?: string;
+  subtitle?: string;
+  summary?: string;
   track?: string;
   lastWorkedAt?: string;
+  updatedAt?: string;
   latestRunId?: string;
   latestRunStatus?: string;
+  executionStatus?: string;
   sourceDocumentCount: number;
   openReviewCount: number;
   riskCount: number;
   approvalStatus: string;
   approvalReadinessStatus?: string;
   nextAction: string;
+  nextActionLabel?: string;
+  href?: string;
   sourceHashes?: string[];
 }
 
-export async function fetchRecentWork(limit = 5): Promise<RecentWorkItem[]> {
-  const res = await fetch(`${apiBase}/projects/recent-work?limit=${limit}`, {
-    cache: "no-store",
-    headers: authHeaders("web"),
+export interface RecentWorkFeed {
+  schemaVersion: string;
+  items: RecentWorkItem[];
+  totalCount: number;
+  /** Non-fatal contract or upstream warnings. Valid rows remain usable. */
+  warnings: string[];
+}
+
+export class RecentWorkRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = "RecentWorkRequestError";
+  }
+}
+
+/**
+ * Fetch the tenant-scoped recent-work projection.
+ *
+ * The normalizer accepts the original flat recent-work-v2 response as well as
+ * the extended project/review/analysis collections. Invalid rows are dropped
+ * with a visible warning instead of turning the whole work inbox into an empty
+ * state.
+ */
+export async function fetchRecentWorkFeed(
+  limit = 8,
+  signal?: AbortSignal,
+): Promise<RecentWorkFeed> {
+  // A live tenant lookup crosses the BFF identity boundary and the normalized
+  // PostgreSQL RLS boundary.  Keep the request bounded, but leave enough room
+  // for a cold Supabase pool/JWKS cache instead of racing a valid 10-second
+  // response into a false timeout state.
+  const timeoutSignal = AbortSignal.timeout(20_000);
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal;
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase}/projects/recent-work?limit=${limit}`, {
+      cache: "no-store",
+      headers: authHeaders("web"),
+      signal: requestSignal,
+    });
+  } catch (error) {
+    if (timeoutSignal.aborted && !signal?.aborted) {
+      throw new RecentWorkRequestError(
+        "최근 작업 조회가 20초 안에 완료되지 않았습니다. 새 분석은 계속 사용할 수 있으며, 잠시 후 새로고침해 주세요.",
+      );
+    }
+    throw error;
+  }
+  if (!res.ok) {
+    const message =
+      res.status === 401
+        ? "로그인 세션이 만료되어 최근 작업을 불러오지 못했습니다."
+        : res.status === 403
+          ? "현재 계정의 Tenant 프로젝트 조회 권한을 확인할 수 없습니다."
+          : `최근 작업을 불러오지 못했습니다. (${res.status})`;
+    throw new RecentWorkRequestError(message, res.status);
+  }
+  const body: unknown = await res.json();
+  return normalizeRecentWorkResponse(body, limit);
+}
+
+export async function fetchRecentWork(
+  limit = 5,
+  signal?: AbortSignal,
+): Promise<RecentWorkItem[]> {
+  return (await fetchRecentWorkFeed(limit, signal)).items;
+}
+
+export function normalizeRecentWorkResponse(
+  body: unknown,
+  limit = 20,
+): RecentWorkFeed {
+  const root = record(body);
+  if (!root) {
+    throw new RecentWorkRequestError("최근 작업 응답 형식이 올바르지 않습니다.");
+  }
+  const data = record(root.data) ?? root;
+  const warnings = stringArray(
+    first(data, "warnings", "warningMessages", "warning_messages", "errors"),
+  );
+  const candidates: Array<{ value: unknown; fallbackKind?: RecentWorkKind }> = [];
+  const flat = first(data, "items", "recentWork", "recent_work");
+  let groupedContractSeen = false;
+  if (Array.isArray(flat)) {
+    flat.forEach((value) => candidates.push({ value }));
+  } else {
+    const collections: Array<[RecentWorkKind, unknown]> = [
+      ["project", first(data, "projects", "projectItems", "project_items")],
+      ["review", first(data, "reviews", "reviewItems", "review_items")],
+      ["analysis", first(data, "analyses", "analysisItems", "analysis_items")],
+    ];
+    collections.forEach(([fallbackKind, values]) => {
+      if (Array.isArray(values)) {
+        groupedContractSeen = true;
+        values.forEach((value) => candidates.push({ value, fallbackKind }));
+      }
+    });
+  }
+
+  if (!Array.isArray(flat) && !groupedContractSeen) {
+    throw new RecentWorkRequestError("최근 작업 응답에 items 또는 유형별 목록이 없습니다.");
+  }
+
+  const normalized: RecentWorkItem[] = [];
+  let dropped = 0;
+  candidates.forEach(({ value, fallbackKind }, index) => {
+    const item = normalizeRecentWorkItem(value, index, fallbackKind);
+    if (item) normalized.push(item);
+    else dropped += 1;
   });
-  if (!res.ok) return [];
-  const body = await res.json();
-  return Array.isArray(body.items) ? (body.items as RecentWorkItem[]) : [];
+  if (dropped > 0) warnings.push(`필수 프로젝트 식별자가 없는 최근 작업 ${dropped}건을 제외했습니다.`);
+  if (boolean(first(data, "partial", "isPartial", "is_partial"))) {
+    warnings.push("서버가 일부 최근 작업만 반환했습니다.");
+  }
+
+  const cappedLimit = Math.max(1, Math.min(50, Number.isFinite(limit) ? Math.trunc(limit) : 20));
+  const items = normalized
+    .sort((left, right) => String(right.updatedAt ?? right.lastWorkedAt ?? "").localeCompare(String(left.updatedAt ?? left.lastWorkedAt ?? "")))
+    .slice(0, cappedLimit);
+  const declaredCount = number(first(data, "totalCount", "total_count", "count"));
+  return {
+    schemaVersion: text(first(data, "schemaVersion", "schema_version")) ?? "realytics-recent-work-v2",
+    items,
+    totalCount: declaredCount ?? normalized.length,
+    warnings: unique(warnings),
+  };
+}
+
+function normalizeRecentWorkItem(
+  value: unknown,
+  index: number,
+  fallbackKind?: RecentWorkKind,
+): RecentWorkItem | null {
+  const source = record(value);
+  if (!source) return null;
+  const project = record(first(source, "project"));
+  const review = record(first(source, "review"));
+  const analysis = record(first(source, "analysis"));
+  const kind = normalizeKind(
+    first(source, "kind", "itemKind", "item_kind", "itemType", "item_type", "workType", "work_type"),
+    fallbackKind ?? (review ? "review" : analysis ? "analysis" : "project"),
+  );
+  const projectId = text(
+    first(source, "projectId", "project_id") ?? first(project ?? {}, "id", "projectId", "project_id"),
+  );
+  if (!projectId) return null;
+
+  const projectName =
+    text(first(source, "projectName", "project_name")) ??
+    text(first(project ?? {}, "name", "projectName", "project_name")) ??
+    `프로젝트 ${projectId}`;
+  const title =
+    text(first(source, "title", "displayTitle", "display_title", "workTitle", "work_title", "reviewTitle", "review_title", "analysisTitle", "analysis_title")) ??
+    text(first(review ?? {}, "title", "name")) ??
+    text(first(analysis ?? {}, "title", "name")) ??
+    projectName;
+  const updatedAt = text(
+    first(
+      source,
+      "updatedAt",
+      "updated_at",
+      "lastWorkedAt",
+      "last_worked_at",
+      "reviewedAt",
+      "reviewed_at",
+      "completedAt",
+      "completed_at",
+      "startedAt",
+      "started_at",
+    ),
+  );
+  const latestRunStatus = text(
+    first(source, "latestRunStatus", "latest_run_status", "executionStatus", "execution_status"),
+  );
+  const approvalStatus =
+    text(first(source, "approvalStatus", "approval_status")) ?? "not_requested";
+  const sourceDocumentCount = integer(
+    first(source, "sourceDocumentCount", "source_document_count", "documentCount", "document_count"),
+  );
+  const openReviewCount = integer(
+    first(source, "openReviewCount", "open_review_count", "pendingReviewCount", "pending_review_count"),
+  );
+  const riskCount = integer(first(source, "riskCount", "risk_count"));
+  const nextAction =
+    text(first(source, "nextAction", "next_action")) ??
+    (kind === "review" ? "resume_open_reviews" : kind === "analysis" ? "inspect_latest_run" : "continue_next_review_step");
+  const explicitHref = text(first(source, "href", "url", "link", "nextHref", "next_href"));
+  const href = safeInternalHref(explicitHref) ?? fallbackRecentWorkHref(kind, projectId, nextAction);
+  const summary =
+    text(first(source, "summary", "description", "detail")) ??
+    buildRecentWorkSummary({ kind, sourceDocumentCount, openReviewCount, riskCount });
+
+  return {
+    itemId:
+      text(first(source, "itemId", "item_id", "id")) ??
+      `${kind}:${projectId}:${updatedAt ?? index}`,
+    kind,
+    projectId,
+    projectName,
+    title,
+    subtitle: text(first(source, "subtitle", "subTitle", "sub_title")),
+    summary,
+    track: text(first(source, "track", "workflowTrack", "workflow_track")),
+    lastWorkedAt: updatedAt,
+    updatedAt,
+    latestRunId: text(first(source, "latestRunId", "latest_run_id", "runId", "run_id")),
+    latestRunStatus,
+    executionStatus: latestRunStatus,
+    sourceDocumentCount,
+    openReviewCount,
+    riskCount,
+    approvalStatus,
+    approvalReadinessStatus: text(first(source, "approvalReadinessStatus", "approval_readiness_status")),
+    nextAction,
+    nextActionLabel: text(first(source, "nextActionLabel", "next_action_label", "actionLabel", "action_label")),
+    href,
+    sourceHashes: stringArray(first(source, "sourceHashes", "source_hashes")),
+  };
+}
+
+function fallbackRecentWorkHref(kind: RecentWorkKind, projectId: string, nextAction: string) {
+  const base = `/project/${encodeURIComponent(projectId)}`;
+  if (kind === "review") return `${base}/documents/review`;
+  if (kind === "analysis") return `${base}/chief-orchestration`;
+  if (nextAction === "upload_source_documents") return `${base}/input-package`;
+  if (["run_initial_analysis", "resume_open_reviews", "inspect_latest_run"].includes(nextAction)) {
+    return `${base}/chief-orchestration`;
+  }
+  return base;
+}
+
+function buildRecentWorkSummary(input: {
+  kind: RecentWorkKind;
+  sourceDocumentCount: number;
+  openReviewCount: number;
+  riskCount: number;
+}) {
+  if (input.kind === "review") return `미해결 검토 ${input.openReviewCount.toLocaleString("ko-KR")}건`;
+  if (input.kind === "analysis") return `문서 ${input.sourceDocumentCount.toLocaleString("ko-KR")}건 · Risk ${input.riskCount.toLocaleString("ko-KR")}건`;
+  return `문서 ${input.sourceDocumentCount.toLocaleString("ko-KR")}건 · 검토 ${input.openReviewCount.toLocaleString("ko-KR")}건 · Risk ${input.riskCount.toLocaleString("ko-KR")}건`;
+}
+
+function safeInternalHref(value: string | undefined) {
+  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return undefined;
+  return value;
+}
+
+function normalizeKind(value: unknown, fallback: RecentWorkKind): RecentWorkKind {
+  const normalized = text(value)?.toLowerCase().replaceAll("-", "_");
+  if (normalized && ["review", "document_review", "approval_review", "심사", "검토"].includes(normalized)) return "review";
+  if (normalized && ["analysis", "analysis_run", "orchestration", "run", "calculation", "calculation_run", "분석", "실행"].includes(normalized)) return "analysis";
+  if (normalized && ["project", "deal", "프로젝트", "딜"].includes(normalized)) return "project";
+  return fallback;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function first(source: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined && source[key] !== null) {
+      return source[key];
+    }
+  }
+  return undefined;
+}
+
+function text(value: unknown) {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const normalized = String(value).trim();
+  return normalized || undefined;
+}
+
+function number(value: unknown) {
+  if (value === null || value === undefined || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function integer(value: unknown) {
+  return Math.max(0, Math.trunc(number(value) ?? 0));
+}
+
+function boolean(value: unknown) {
+  return value === true || String(value ?? "").trim().toLowerCase() === "true";
+}
+
+function stringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (typeof entry === "string" || typeof entry === "number") return String(entry).trim();
+      const item = record(entry);
+      return item ? text(first(item, "message", "detail", "code")) : undefined;
+    })
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function unique(values: string[]) {
+  return [...new Set(values)];
 }
 
 interface RawProjectSummary {

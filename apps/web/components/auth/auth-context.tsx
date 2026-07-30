@@ -9,12 +9,17 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   apiBase,
   authHeaders,
   cacheResolvedIdentity,
   clearStoredAuthSession,
+  clearTransientAiSecrets,
+  isBackendAuthorityUnavailableAuthError,
+  isOnboardingRequiredAuthError,
+  isTenantSelectionRequiredAuthError,
+  loadSupabaseSecurityProfile,
   purgeLegacyBrowserAuthStorage,
   resolveCurrentIdentity,
   signOutSupabaseSession,
@@ -22,7 +27,13 @@ import {
   type RealyticsUser,
 } from "../../lib/auth-client";
 
-export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
+export type AuthStatus =
+  | "loading"
+  | "authenticated"
+  | "onboarding"
+  | "tenant_selection"
+  | "authority_unavailable"
+  | "unauthenticated";
 
 export interface AuthContextValue {
   status: AuthStatus;
@@ -31,7 +42,7 @@ export interface AuthContextValue {
   permissions: string[];
   /** Re-run the cookie-backed session check. */
   refresh: () => void;
-  /** Revoke the current provider session and clear in-memory identity. */
+  /** Revoke the current application session and clear in-memory identity. */
   logout: () => Promise<void>;
 }
 
@@ -43,6 +54,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
  * Components consume `useAuth()` instead of re-implementing the check.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [user, setUser] = useState<RealyticsUser | null>(null);
   const [session, setSession] = useState<RealyticsSession | null>(null);
@@ -52,6 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
   const logout = useCallback(async () => {
+    let sessionRevoked = false;
     try {
       await fetch(`${apiBase}/auth/ai-credentials/current`, {
         method: "DELETE",
@@ -64,14 +77,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }).catch(() => undefined);
       }
       await signOutSupabaseSession();
+      sessionRevoked = true;
     } finally {
-      clearStoredAuthSession();
-      setAuthSource(null);
+      // Secret residue is never retained, including when revocation fails.
+      // Identity state, however, must remain until the authoritative session
+      // boundary confirms logout so callers cannot claim a false switch.
+      clearTransientAiSecrets();
+      if (sessionRevoked) {
+        clearStoredAuthSession({ notify: false });
+        setStatus("unauthenticated");
+        setUser(null);
+        setSession(null);
+        setPermissions([]);
+        setAuthSource(null);
+      }
     }
   }, [authSource]);
 
   useEffect(() => {
     purgeLegacyBrowserAuthStorage();
+    if (pathname?.startsWith("/guest")) {
+      setStatus("unauthenticated");
+      setUser(null);
+      setSession(null);
+      setPermissions([]);
+      setAuthSource(null);
+      return;
+    }
     let cancelled = false;
     resolveCurrentIdentity()
       .then((identity) => {
@@ -92,7 +124,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAuthSource(identity.authSource ?? null);
         setStatus("authenticated");
       })
-      .catch(() => {
+      .catch(async (error) => {
+        if (cancelled) return;
+        const boundaryStatus: AuthStatus | null =
+          isOnboardingRequiredAuthError(error)
+            ? "onboarding"
+            : isTenantSelectionRequiredAuthError(error)
+              ? "tenant_selection"
+              : isBackendAuthorityUnavailableAuthError(error)
+                ? "authority_unavailable"
+                : null;
+        if (boundaryStatus) {
+          try {
+            const profile = await loadSupabaseSecurityProfile();
+            if (cancelled) return;
+            const email = profile.identities.find((identity) => identity.email)?.email ?? undefined;
+            const onboardingUser: RealyticsUser = {
+              userId: profile.userId,
+              email,
+              displayName: email?.split("@")[0],
+              role: "unassigned",
+              status: boundaryStatus,
+              metadata: { principalType: "human" },
+            };
+            clearStoredAuthSession({ notify: false });
+            setUser(onboardingUser);
+            setSession({ userId: profile.userId, provider: "supabase", host: "web-bff" });
+            setPermissions([]);
+            setAuthSource("bearer_token");
+            setStatus(boundaryStatus);
+            return;
+          } catch {
+            // A missing/invalid Supabase cookie is genuinely unauthenticated.
+          }
+        }
         if (cancelled) return;
         clearStoredAuthSession({ notify: false });
         setStatus("unauthenticated");
@@ -105,7 +170,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [nonce]);
+  }, [nonce, pathname]);
 
   useEffect(() => {
     const onChange = () => refresh();
@@ -160,13 +225,50 @@ export function RequireAuth({
 }) {
   const { status } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
-    if (status !== "unauthenticated") return;
-    router.replace("/login?next=/start");
-  }, [status, router]);
+    if (
+      status === "onboarding"
+      || status === "tenant_selection"
+      || status === "authority_unavailable"
+    ) {
+      router.replace("/onboarding");
+    } else if (status === "unauthenticated") {
+      const next = pathname?.startsWith("/") ? pathname : "/start";
+      router.replace(`/login?next=${encodeURIComponent(next)}`);
+    }
+  }, [status, router, pathname]);
 
   if (status !== "authenticated") {
+    return <>{fallback ?? <AuthFallback />}</>;
+  }
+  return <>{children}</>;
+}
+
+/** Gate onboarding by Supabase session only; Tenant membership is optional. */
+export function RequireSupabaseSession({
+  children,
+  fallback,
+}: {
+  children: ReactNode;
+  fallback?: ReactNode;
+}) {
+  const { status } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (status === "unauthenticated") {
+      router.replace("/login?next=/onboarding");
+    }
+  }, [status, router]);
+
+  if (
+    status !== "authenticated"
+    && status !== "onboarding"
+    && status !== "tenant_selection"
+    && status !== "authority_unavailable"
+  ) {
     return <>{fallback ?? <AuthFallback />}</>;
   }
   return <>{children}</>;

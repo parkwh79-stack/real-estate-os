@@ -33,6 +33,9 @@ from db.repositories.parser_v2_repository import (
     APPROVED_INPUT_SNAPSHOT_RECORD_TYPE,
     ParserV2PostgresRepository,
 )
+from db.repositories.postgres_project_repository import (
+    PostgresProjectRepository,
+)
 from db.repositories.legal_intelligence_repository import (
     PostgresLegalTenantOverlayRepository,
 )
@@ -1054,6 +1057,52 @@ def test_live_runtime_readiness_and_exact_privilege_manifest(
     finally:
         conn.rollback()
         conn.close()
+
+
+def test_live_runtime_project_create_update_and_soft_delete(
+    live_database: _LiveDatabase,
+) -> None:
+    @contextmanager
+    def transaction(tenant_id: str):
+        connection = live_database.connect_runtime()
+        try:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT set_config('realytics.tenant_id', %s, true)",
+                    (tenant_id,),
+                )
+                yield connection
+        finally:
+            connection.close()
+
+    repository = PostgresProjectRepository(
+        tenant_id=TENANT_A,
+        transaction_factory=transaction,
+    )
+    created = repository.create(
+        {"project": {"name": "Runtime privilege contract"}},
+        created_by="live-runtime-test",
+    )
+    project_id = created["project"]["id"]
+
+    assert created["_meta"]["tenantId"] == TENANT_A
+    assert created["_meta"]["stateVersion"] == 1
+
+    updated = repository.update(
+        project_id,
+        {"project": {"status": "reviewing"}},
+        expected_state_version=1,
+    )
+    assert updated is not None
+    assert updated["project"]["status"] == "reviewing"
+    assert updated["_meta"]["stateVersion"] == 2
+
+    deleted = repository.delete(
+        project_id,
+        expected_state_version=2,
+    )
+    assert deleted is not None
+    assert repository.get(project_id) is None
 
 
 def test_live_project_advisory_lock_serializes_two_connections(

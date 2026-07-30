@@ -78,14 +78,31 @@ denied. The rehearsal credential is short-lived and is not a production
 secret-store deployment; it must be rotated into the approved secret manager
 before this Gate can be called durable.
 
-Google is therefore provider/session/membership-ready. Kakao remains
-fail-closed because the hosted provider requests `account_email` and the Kakao
-application has not yet proven that consent scope. TOTP enrollment is available
-interactively, and interrupted unverified factors can be removed and restarted,
-but the current smoke still has to receive and verify the user-entered code.
-Final maker-checker proof additionally needs a second distinct invited
-principal in the same tenant, with both users holding fresh signed `aal2`
-sessions.
+Google is provider/session/membership-ready and now has a verified TOTP factor
+with one active AAL2 session. A scoped other-session sign-out preserved the
+current session, but there was no second active session, so cross-device
+invalidation remains unproven. Kakao is also provider/session/membership-ready:
+because GoTrue appends `options.scopes` to its Kakao
+defaults, the Web uses a server-controlled provider query override of
+`scope=profile_nickname profile_image`; the hosted provider is enabled, and
+Management API readback confirms `external_kakao_email_optional=true`. The
+generated Kakao authorization URL must contain no `account_email`. Both the
+scope override and the hosted email-optional setting are required; neither
+alone is sufficient. A Biz App `account_email` scope is not required. The Web
+remains fail-closed unless the deployment records the hosted readback with
+`REALYTICS_KAKAO_EMAIL_OPTIONAL_VERIFIED=true`. A real Kakao PKCE round trip,
+identity-bound invitation acceptance, and normalized reviewer membership have
+passed; email did not grant or link tenant access.
+
+The current email-optional Kakao Auth identity cannot enroll hosted GoTrue TOTP
+because it has no unique verified email/account name. REALYTICS now blocks that
+call with `verified_email_required_for_totp` instead of surfacing a GoTrue 500.
+Final maker-checker proof therefore still needs a second independent human
+checker with a distinct principal, verified email, TOTP, and a fresh signed
+`aal2` session. Before the destructive rehearsal, the API must also restart
+with high-risk AAL2 enforcement, a 900-second freshness limit, PostgreSQL
+storage, and an authoritative API runtime DSN, and the operator must select a
+dedicated completed PF run and Gate-ready draft report.
 
 ## Source evidence viewer Gate
 

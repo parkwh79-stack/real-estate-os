@@ -5,8 +5,10 @@ import {
   clearRealyticsSessionCookie,
   hardenedSupabaseCookieOptions,
   localPilotServerEnabled,
+  normalizedTenantSelector,
   preventAuthenticatedResponseCaching,
   REALYTICS_SESSION_COOKIE,
+  REALYTICS_TENANT_SELECTOR_COOKIE,
   requestIsSameOrigin,
   setRealyticsSessionCookie,
 } from "../../../../lib/backend-session";
@@ -19,6 +21,16 @@ type PendingCookie = {
 
 async function proxy(request: NextRequest) {
   const backendPath = request.nextUrl.pathname.replace(/^\/api\/backend/, "") || "/";
+  const targetUrl = new URL(
+    `${BACKEND_ORIGIN}${backendPath}${request.nextUrl.search}`,
+  );
+  // reviewScope is a BFF-only routing hint. FastAPI remains authoritative for
+  // the platform-operator permission; this flag only prevents a remembered
+  // Tenant selector from narrowing the operator's cross-Tenant review queue.
+  const platformReviewQueue =
+    backendPath === "/auth/access-requests"
+    && targetUrl.searchParams.get("reviewScope") === "platform";
+  targetUrl.searchParams.delete("reviewScope");
 
   const localBootstrapRequest =
     backendPath === "/auth/tenants"
@@ -34,7 +46,7 @@ async function proxy(request: NextRequest) {
     return NextResponse.json({ error: "cross_site_request_rejected" }, { status: 403 });
   }
 
-  const target = `${BACKEND_ORIGIN}${backendPath}${request.nextUrl.search}`;
+  const target = targetUrl.toString();
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
@@ -79,6 +91,12 @@ async function proxy(request: NextRequest) {
     : undefined;
   if (verifiedSupabaseBearer) {
     headers.set("Authorization", `Bearer ${verifiedSupabaseBearer}`);
+    const selectedTenantId = normalizedTenantSelector(
+      request.cookies.get(REALYTICS_TENANT_SELECTOR_COOKIE)?.value,
+    );
+    if (selectedTenantId && !platformReviewQueue) {
+      headers.set("X-REALYTICS-TENANT-ID", selectedTenantId);
+    }
   } else if (localSessionId) {
     headers.set("X-REALYTICS-SESSION-ID", localSessionId);
   }
@@ -157,8 +175,14 @@ async function proxy(request: NextRequest) {
     preventAuthenticatedResponseCaching(nextResponse);
     return nextResponse;
   } catch (error) {
+    const requestId = crypto.randomUUID();
+    console.error("REALYTICS backend proxy unavailable", {
+      requestId,
+      backendPath,
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    });
     return NextResponse.json(
-      { error: "backend_unavailable", detail: error instanceof Error ? error.message : "Backend request failed" },
+      { error: "backend_unavailable", requestId },
       { status: 502 },
     );
   }

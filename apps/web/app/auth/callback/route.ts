@@ -1,15 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   acceptRealyticsInvitation,
+  accessStateForIdentityResult,
   canonicalWebOrigin,
   clearInvitationIntentCookie,
+  clearTenantSelectorCookie,
   preventAuthenticatedResponseCaching,
   REALYTICS_INVITATION_COOKIE,
   realyticsAcceptsBearer,
   safeInternalNextPath,
+  setPasswordRecoveryIntentCookie,
+  setTenantSelectorCookie,
+  type InvitationAcceptanceResult,
 } from "../../../lib/backend-session";
-import { loginErrorForIdentityResult } from "../../../lib/backend-identity-result";
+import {
+  invitationIntentIsDeferred,
+  shouldClearInvitationIntent,
+} from "../../../lib/invitation-intent";
 import { createSupabaseServerClient } from "../../../lib/supabase/server";
+import { passwordRecoveryCallbackPlan } from "../../api/auth/supabase/password/recovery-contract";
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
@@ -17,15 +26,15 @@ export async function GET(request: NextRequest) {
   const nextPath = safeInternalNextPath(
     request.nextUrl.searchParams.get("next"),
   );
+  const switchAccount = request.nextUrl.searchParams.get("switch") === "1";
+  const passwordRecovery =
+    request.nextUrl.searchParams.get("recovery") === "1";
   const origin = canonicalWebOrigin(request);
   const invitationToken = request.cookies.get(
     REALYTICS_INVITATION_COOKIE,
   )?.value;
   if (!origin) {
-    return NextResponse.json(
-      { error: "canonical_web_origin_not_configured" },
-      { status: 503 },
-    );
+    return authJson({ error: "canonical_web_origin_not_configured" }, 503);
   }
   if (providerError) {
     const errorCode =
@@ -34,69 +43,123 @@ export async function GET(request: NextRequest) {
         : providerError === "access_denied"
           ? "oauth_access_denied"
           : "oauth_provider_failed";
-    return NextResponse.redirect(`${origin}/login?error=${errorCode}`);
+    return authRedirect(
+      loginRetryUrl(origin, errorCode, nextPath, switchAccount),
+    );
   }
   if (!code) {
-    return NextResponse.redirect(`${origin}/login?error=missing_oauth_code`);
+    return authRedirect(
+      loginRetryUrl(origin, "missing_oauth_code", nextPath, switchAccount),
+    );
   }
 
   try {
     const supabase = await createSupabaseServerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) {
-      return NextResponse.redirect(
-        `${origin}/login?error=oauth_code_exchange_failed`,
+      return authRedirect(
+        loginRetryUrl(origin, "oauth_code_exchange_failed", nextPath, switchAccount),
       );
     }
     const { data, error: claimsError } = await supabase.auth.getClaims();
     if (claimsError || !data?.claims) {
       await supabase.auth.signOut({ scope: "local" });
-      return NextResponse.redirect(
-        `${origin}/login?error=oauth_claims_invalid`,
+      return authRedirect(
+        loginRetryUrl(origin, "oauth_claims_invalid", nextPath, switchAccount),
       );
     }
     const { data: sessionData } = await supabase.auth.getSession();
     const accessToken = sessionData.session?.access_token;
-    let identityResult = accessToken
-      ? await realyticsAcceptsBearer(accessToken)
-      : ({ status: "backend_unavailable" } as const);
-    let invitationAccepted = false;
-    if (
-      identityResult.status === "not_provisioned" &&
-      accessToken &&
-      invitationToken
-    ) {
-      invitationAccepted = await acceptRealyticsInvitation(
+    let invitation: InvitationAcceptanceResult | null = null;
+    if (accessToken && invitationToken) {
+      invitation = await acceptRealyticsInvitation(
         accessToken,
         invitationToken,
       );
-      if (invitationAccepted) {
-        identityResult = await realyticsAcceptsBearer(accessToken);
-      }
     }
-    if (!accessToken || identityResult.status !== "accepted") {
+    if (!accessToken) {
       await supabase.auth.signOut({ scope: "local" });
-      const errorCode = accessToken
-        ? loginErrorForIdentityResult(identityResult, {
-            invitationPending: Boolean(invitationToken),
-          })
-        : "oauth_session_missing";
-      const response = NextResponse.redirect(
-        `${origin}/login?error=${errorCode ?? "backend_unavailable"}`,
+      const response = authRedirect(
+        loginRetryUrl(
+          origin,
+          "oauth_session_missing",
+          nextPath,
+          switchAccount,
+        ),
       );
       clearInvitationIntentCookie(response);
-      preventAuthenticatedResponseCaching(response);
       return response;
     }
-    const destination = new URL(`${origin}${nextPath}`);
-    if (invitationAccepted) {
-      destination.searchParams.set("invitation", "accepted");
+
+    const invitationState = invitation?.state ?? null;
+    const identityResult = await realyticsAcceptsBearer(
+      accessToken,
+      invitation?.state === "accepted" ? invitation.tenantId : null,
+    );
+
+    const accessState = invitationState === "authority_unavailable"
+      ? "authority_unavailable"
+      : invitationState && invitationIntentIsDeferred(invitationState)
+        ? "onboarding_required"
+        : accessStateForIdentityResult(identityResult);
+    const recoveryPlan = passwordRecovery
+      ? passwordRecoveryCallbackPlan(origin, nextPath, accessState)
+      : null;
+    const destination = recoveryPlan
+      ? recoveryPlan.destination
+      : accessState === "member"
+        ? new URL(nextPath, origin)
+        : new URL("/onboarding", origin);
+    if (!passwordRecovery && accessState !== "member") {
+      destination.searchParams.set("accessState", accessState);
+      destination.searchParams.set("next", nextPath);
     }
-    const response = NextResponse.redirect(destination);
-    clearInvitationIntentCookie(response);
-    preventAuthenticatedResponseCaching(response);
+    if (invitation) {
+      destination.searchParams.set("invitation", invitation.state);
+    }
+    const response = authRedirect(destination);
+    // A selector belongs to the identity that previously proved membership.
+    // Never carry it across a fresh OAuth/session exchange, even when the new
+    // account happens to use the same browser profile.
+    clearTenantSelectorCookie(response);
+    if (invitationState === "accepted" && invitation?.tenantId) {
+      setTenantSelectorCookie(response, invitation.tenantId);
+    }
+    if (invitationState && shouldClearInvitationIntent(invitationState)) {
+      clearInvitationIntentCookie(response);
+    }
+    if (recoveryPlan?.setRecoveryContextCookie) {
+      setPasswordRecoveryIntentCookie(response);
+    }
     return response;
   } catch {
-    return NextResponse.redirect(`${origin}/login?error=oauth_not_configured`);
+    return authRedirect(
+      loginRetryUrl(origin, "oauth_not_configured", nextPath, switchAccount),
+    );
   }
+}
+
+function loginRetryUrl(
+  origin: string,
+  error: string,
+  nextPath: string,
+  switchAccount: boolean,
+) {
+  const destination = new URL("/login", origin);
+  destination.searchParams.set("error", error);
+  destination.searchParams.set("next", nextPath);
+  if (switchAccount) destination.searchParams.set("switch", "1");
+  return destination;
+}
+
+function authRedirect(destination: URL) {
+  const response = NextResponse.redirect(destination);
+  preventAuthenticatedResponseCaching(response);
+  return response;
+}
+
+function authJson(body: Record<string, unknown>, status: number) {
+  const response = NextResponse.json(body, { status });
+  preventAuthenticatedResponseCaching(response);
+  return response;
 }

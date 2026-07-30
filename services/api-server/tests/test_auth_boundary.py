@@ -87,10 +87,11 @@ def test_hardened_profile_preserves_verified_oidc_bearer_identity(monkeypatch):
     monkeypatch.setenv("REALYTICS_ENVIRONMENT", "production")
     monkeypatch.setenv("REALYTICS_IDP_MODE", "oidc")
     monkeypatch.setenv("REALYTICS_IDP_PROVIDER", "supabase")
-    monkeypatch.setattr(
-        oidc,
-        "verify_oidc_token",
-        lambda token: {
+    verification_calls = []
+
+    def _verify_oidc_token(token):
+        verification_calls.append(token)
+        return {
             "iss": "https://project.supabase.co/auth/v1",
             "aud": "authenticated",
             "sub": "b90129f1-1f9f-4ca8-8e69-54d97e665889",
@@ -102,8 +103,9 @@ def test_hardened_profile_preserves_verified_oidc_bearer_identity(monkeypatch):
                 "realytics_role": "admin",
             },
             "user_metadata": {"full_name": "Verified Reviewer"},
-        },
-    )
+        }
+
+    monkeypatch.setattr(oidc, "verify_oidc_token", _verify_oidc_token)
 
     class _MembershipRepository:
         def load_directory(self, *, issuer: str, subject: str):
@@ -149,6 +151,31 @@ def test_hardened_profile_preserves_verified_oidc_bearer_identity(monkeypatch):
     assert body["user"]["tenantId"] == "verified-tenant"
     assert body["user"]["role"] == "reviewer"
     assert body["user"]["metadata"]["principalType"] == "human"
+    assert verification_calls == ["header.payload.signature"]
+
+
+def test_oidc_jwks_outage_returns_typed_503_without_middleware_reverification(
+    monkeypatch,
+):
+    monkeypatch.setenv("REALYTICS_ENVIRONMENT", "production")
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "oidc")
+    verification_calls = []
+
+    def _unavailable(token):
+        verification_calls.append(token)
+        raise oidc.OidcVerifierUnavailable("OIDC JWKS authority is unavailable.")
+
+    monkeypatch.setattr(oidc, "verify_oidc_token", _unavailable)
+    client = TestClient(app)
+
+    response = client.get(
+        "/auth/me",
+        headers={"authorization": "Bearer header.payload.signature"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "oidc_verifier_unavailable"
+    assert verification_calls == ["header.payload.signature"]
 
 
 def test_hardened_social_login_mocks_ignore_opt_in_and_fail_closed(monkeypatch):

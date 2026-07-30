@@ -5,6 +5,7 @@ import base64
 import tempfile
 import os
 import re
+from urllib.parse import quote
 from uuid import uuid4
 from agents.ai_connection import resolve_ai_context
 from agents.feasibility_workbook_importer import import_feasibility_study_from_workbook
@@ -20,6 +21,7 @@ from core.authz import (
     identity_context_from_request,
     is_explicit_human_principal,
 )
+from core.credential_session import credential_session_binding_from_request
 from core.calculations import (
     calculate_cashflow_max_minus,
     build_monthly_cash_flow,
@@ -49,6 +51,10 @@ from db.repositories.project_repository import ProjectRepository
 from db.repositories.postgres_project_repository import (
     PostgresProjectRepository,
     ProjectVersionConflict,
+)
+from db.repositories.recent_activity_repository import (
+    PostgresRecentActivityRepository,
+    RecentActivityRepositoryError,
 )
 from db.repositories.project_snapshot_repository import (
     PostgresProjectSnapshotRepository,
@@ -407,6 +413,19 @@ def _project_tenant_id(project_id: str) -> str | None:
     return normalized or None
 
 
+def recent_project_activity_repository(
+    *,
+    tenant_id: str,
+    user_id: str,
+) -> PostgresRecentActivityRepository:
+    """Composition point for the normalized recent-work activity projection."""
+
+    return PostgresRecentActivityRepository(
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+
+
 def _tenant_scoped_snapshot_corpus(
     project_id: str,
     snapshots: list[Dict[str, Any]],
@@ -579,9 +598,11 @@ def ai_context_from_request(
         override["provider"] = explicit_provider
     user_id = user.get("userId") or explicit_user_id or "anonymous"
     tenant_id = user.get("tenantId") or session.get("tenantId")
+    credential_session = credential_session_binding_from_request(request, context)
     return build_user_ai_context(
         user_id=user_id,
         tenant_id=tenant_id,
+        session_id=(credential_session or {}).get("sessionId"),
         host="api",
         override=override,
     )
@@ -1754,18 +1775,98 @@ def get_projects(request: Request):
 
 
 @router.get("/recent-work")
-def get_recent_work(request: Request, limit: int = Query(5, ge=1, le=20)):
+def get_recent_work(
+    request: Request,
+    response: Response,
+    limit: int = Query(5, ge=1, le=20),
+):
     """Return the signed-in user's resumable deal-room work, not demo cards."""
-    authorize_request(request, "project:read")
-    visible = [p for p in list_projects_use_case(project_repository(request)) if project_visible_to_identity(p, request)]
+    authorization = authorize_request(request, "project:read")
+    response.headers["Cache-Control"] = "private, no-store"
+    repository = project_repository(request)
+    visible = [
+        project
+        for project in list_projects_use_case(repository)
+        if project_visible_to_identity(project, request)
+    ]
+    latest_activity_by_project: dict[str, str] = {}
+    if isinstance(repository, PostgresProjectRepository):
+        verified_user = authorization.get("user") or {}
+        tenant_id = str(verified_user.get("tenantId") or "").strip()
+        user_id = str(verified_user.get("userId") or "").strip()
+        if not tenant_id or not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "verified_recent_work_identity_required"},
+            )
+        visible_project_ids = [
+            str(
+                (project.get("project") or {}).get("id")
+                or project.get("id")
+                or ""
+            ).strip()
+            for project in visible
+        ]
+        try:
+            latest_activity_by_project = recent_project_activity_repository(
+                tenant_id=tenant_id,
+                user_id=user_id,
+            ).latest_successful_project_activity(visible_project_ids)
+        except RecentActivityRepositoryError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "recent_activity_authority_unavailable"},
+            ) from exc
+    run_repository = orchestration_repository(request)
+    visible_project_ids = [
+        str(
+            (
+                project.get("project")
+                if isinstance(project.get("project"), dict)
+                else {}
+            ).get("id")
+            or project.get("id")
+            or ""
+        ).strip()
+        for project in visible
+    ]
+    visible_project_ids = [
+        project_id for project_id in visible_project_ids if project_id
+    ]
+    batch_latest = getattr(run_repository, "latest_metadata_by_project", None)
+    if callable(batch_latest):
+        latest_run_by_project = batch_latest(visible_project_ids)
+    else:  # Compatibility for injected repositories during staged rollout.
+        latest_run_by_project = {}
+        for project_id in visible_project_ids:
+            runs = run_repository.list_metadata(project_id)
+            if runs:
+                latest_run_by_project[project_id] = max(
+                    runs,
+                    key=lambda item: str(
+                        item.get("completed_at")
+                        or item.get("started_at")
+                        or ""
+                    ),
+                )
     items: list[Dict[str, Any]] = []
     for project in visible:
-        project_id = str((project.get("project") or {}).get("id") or project.get("id") or "")
+        project_record = (
+            project.get("project")
+            if isinstance(project.get("project"), dict)
+            else {}
+        )
+        project_id = str(project_record.get("id") or project.get("id") or "")
         if not project_id:
             continue
-        documents = list_source_documents_use_case(source_document_repository(), project_id)
-        runs = orchestration_repository(request).list_metadata(project_id)
-        latest_run = max(runs, key=lambda item: str(item.get("completed_at") or item.get("started_at") or ""), default={})
+        # The project repository has already applied the verified request
+        # tenant.  Read document metadata only from that authorized projection;
+        # the process-global compatibility store is not a PostgreSQL authority.
+        documents = list_source_documents_use_case(
+            project_source_document_read_repository(project_id, project),
+            project_id,
+        )
+        latest_run = latest_run_by_project.get(project_id, {})
         state = project.get("chief_orchestration_state") or {}
         gate = (
             state.get("approvalReadinessGate")
@@ -1780,19 +1881,57 @@ def get_recent_work(request: Request, limit: int = Query(5, ge=1, le=20)):
             else "not_requested"
         )
         risk_count = len(project.get("risk_register", {}).get("risks", []) if isinstance(project.get("risk_register"), dict) else [])
+        open_review_count = len(project.get("pending_reviews", []) if isinstance(project.get("pending_reviews"), list) else [])
+        raw_execution_status = (
+            latest_run.get("executionStatus")
+            or latest_run.get("status")
+            or "not_started"
+        )
+        execution_status = str(raw_execution_status).strip().lower()
+        next_action = _resume_action(project, documents, latest_run, gate)
+        work_kind = _recent_work_kind(latest_run, approval_status)
+        record_updated_at = _recent_work_updated_at(project, latest_run)
+        activity_at = latest_activity_by_project.get(project_id)
+        last_worked_at = activity_at or record_updated_at
+        project_name = _project_display_name(project_id, project)
         items.append({
+            # Additive v3 work-item fields.  The v2 fields below remain intact
+            # for existing dashboards and mobile clients.
+            "kind": work_kind,
+            "id": str(latest_run.get("run_id") or project_id),
             "projectId": project_id,
-            "projectName": _project_display_name(project_id, project),
-            "track": project.get("workflowTrack") or project.get("workflow_track"),
-            "lastWorkedAt": latest_run.get("completed_at") or latest_run.get("started_at") or project.get("updatedAt") or project.get("updated_at"),
-            "latestRunId": latest_run.get("run_id"),
-            "latestRunStatus": latest_run.get("executionStatus") or latest_run.get("status"),
-            "sourceDocumentCount": len(documents),
-            "openReviewCount": len(project.get("pending_reviews", []) if isinstance(project.get("pending_reviews"), list) else []),
-            "riskCount": risk_count,
+            "title": project_name,
+            "status": (
+                approval_status
+                if work_kind == "review"
+                else execution_status
+                if work_kind == "analysis"
+                else str(project_record.get("status") or "draft")
+            ),
+            "executionStatus": execution_status,
             "approvalStatus": approval_status,
+            "updatedAt": last_worked_at,
+            "href": _recent_work_href(project_id, next_action),
+            "summary": _recent_work_summary(
+                work_kind=work_kind,
+                execution_status=execution_status,
+                approval_status=approval_status,
+                document_count=len(documents),
+                open_review_count=open_review_count,
+                risk_count=risk_count,
+            ),
+            "projectName": project_name,
+            "track": project.get("workflowTrack") or project.get("workflow_track"),
+            "lastWorkedAt": last_worked_at,
+            "lastActivityAt": activity_at,
+            "recordUpdatedAt": record_updated_at,
+            "latestRunId": latest_run.get("run_id"),
+            "latestRunStatus": raw_execution_status if latest_run else None,
+            "sourceDocumentCount": len(documents),
+            "openReviewCount": open_review_count,
+            "riskCount": risk_count,
             "approvalReadinessStatus": gate.get("status") or "not_started",
-            "nextAction": _resume_action(project, documents, latest_run, gate),
+            "nextAction": next_action,
             "sourceHashes": sorted({str(item.get("sha256") or item.get("originalFileHash")) for item in documents if item.get("sha256") or item.get("originalFileHash")}),
         })
     items.sort(key=lambda item: str(item.get("lastWorkedAt") or ""), reverse=True)
@@ -1809,7 +1948,10 @@ def check_intake_continuation(request: Request, input_data: Dict[str, Any] | Non
     matches: list[Dict[str, Any]] = []
     for project in visible:
         project_id = str((project.get("project") or {}).get("id") or project.get("id") or "")
-        documents = list_source_documents_use_case(source_document_repository(), project_id)
+        documents = list_source_documents_use_case(
+            project_source_document_read_repository(project_id, project),
+            project_id,
+        )
         fingerprints = {str(item.get("sha256") or item.get("originalFileHash")): item for item in documents if item.get("sha256") or item.get("originalFileHash")}
         matched_files = []
         for file in files:
@@ -4381,6 +4523,74 @@ def _resume_action(
     if str(latest_run.get("status") or "").lower() in {"running", "queued", "failed"}:
         return "inspect_latest_run"
     return "continue_next_review_step"
+
+
+def _recent_work_kind(
+    latest_run: Dict[str, Any],
+    approval_status: str,
+) -> str:
+    """Classify one resumable item without conflating execution and approval."""
+    if not latest_run:
+        return "project"
+    if approval_status in {"pending", "approved", "rejected", "superseded"}:
+        return "review"
+    return "analysis"
+
+
+def _recent_work_updated_at(
+    project: Dict[str, Any],
+    latest_run: Dict[str, Any],
+) -> str | None:
+    metadata = project.get("_meta") if isinstance(project.get("_meta"), dict) else {}
+    value = (
+        latest_run.get("completed_at")
+        or latest_run.get("started_at")
+        or metadata.get("updatedAt")
+        or metadata.get("updated_at")
+        or project.get("updatedAt")
+        or project.get("updated_at")
+        or metadata.get("createdAt")
+        or metadata.get("created_at")
+    )
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _recent_work_href(project_id: str, next_action: str) -> str:
+    encoded_project_id = quote(str(project_id), safe="")
+    base = f"/project/{encoded_project_id}"
+    if next_action == "upload_source_documents":
+        return f"{base}/input-package"
+    if next_action in {
+        "run_initial_analysis",
+        "resume_open_reviews",
+        "inspect_latest_run",
+        "continue_next_review_step",
+    }:
+        return f"{base}/chief-orchestration"
+    return base
+
+
+def _recent_work_summary(
+    *,
+    work_kind: str,
+    execution_status: str,
+    approval_status: str,
+    document_count: int,
+    open_review_count: int,
+    risk_count: int,
+) -> str:
+    """Return only persisted counts and status axes; never synthesize a verdict."""
+    facts = [f"원본 자료 {document_count}건"]
+    if work_kind != "project":
+        facts.append(f"실행 {execution_status}")
+    if approval_status != "not_requested":
+        facts.append(f"승인 {approval_status}")
+    if open_review_count:
+        facts.append(f"미해결 검토 {open_review_count}건")
+    if risk_count:
+        facts.append(f"등록 리스크 {risk_count}건")
+    return " · ".join(facts)
 
 
 def _looks_like_corrupted_korean(value: Any) -> bool:

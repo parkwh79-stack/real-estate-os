@@ -13,13 +13,24 @@ from db.postgres_runtime_privileges import (
     LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS,
     LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
     LEGAL_PROVIDER_OPERATIONS_PRIVILEGES,
+    MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES,
+    MEMBERSHIP_ADMIN_FORBIDDEN_COLUMN_PRIVILEGES,
+    MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
     PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
     PARSER_V2_TABLE_PRIVILEGES,
+    PROJECT_RUNTIME_FORBIDDEN_PRIVILEGES,
+    PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES,
+    PROJECT_RUNTIME_SEQUENCE_PRIVILEGES,
+    PROJECT_RUNTIME_TABLE_PRIVILEGES,
     REVOKE_PUBLIC_DATABASE_TEMPORARY_ENV,
     RuntimePrivilegeProvisioningError,
     audit_runtime_privileges,
+    forbidden_column_privileges,
+    forbidden_sequence_privileges,
     provision_parser_v2_runtime_role,
     render_parser_v2_runtime_role_sql,
+    required_column_privileges,
+    required_sequence_privileges,
     required_table_privileges,
     revoke_public_database_temporary_enabled,
     validate_database_identifier,
@@ -39,6 +50,95 @@ def test_privilege_manifest_covers_every_parser_rls_table_exactly() -> None:
     )
     for table, privileges in PARSER_V2_TABLE_PRIVILEGES.items():
         assert not set(privileges).intersection(FORBIDDEN_APPEND_ONLY_PRIVILEGES), table
+
+
+def test_project_runtime_manifest_supports_crud_without_delete_or_setval() -> None:
+    assert PROJECT_RUNTIME_TABLE_PRIVILEGES == {
+        "projects": ("SELECT", "INSERT", "UPDATE"),
+        "user_activity_logs": ("SELECT", "INSERT"),
+    }
+    assert PROJECT_RUNTIME_FORBIDDEN_PRIVILEGES == {
+        "projects": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+        "user_activity_logs": FORBIDDEN_APPEND_ONLY_PRIVILEGES,
+    }
+    assert PROJECT_RUNTIME_SEQUENCE_PRIVILEGES == {
+        "project_id_sequence": ("USAGE",),
+    }
+    assert PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES == {
+        "project_id_sequence": ("SELECT", "UPDATE"),
+    }
+    assert required_sequence_privileges() == (
+        PROJECT_RUNTIME_SEQUENCE_PRIVILEGES
+    )
+    assert forbidden_sequence_privileges() == (
+        PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES
+    )
+
+
+def test_membership_admin_manifest_is_column_scoped_and_append_only() -> None:
+    assert MEMBERSHIP_ADMIN_TABLE_PRIVILEGES == {
+        "principals": (),
+        "tenant_memberships": (),
+        "tenant_identity_access_events": ("INSERT",),
+        "tenants": (),
+        "onboarding_profiles": (),
+        "onboarding_principal_events": (),
+        "platform_onboarding_operators": (),
+        "tenant_access_requests": (),
+        "tenant_access_request_events": (),
+    }
+    assert MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES["tenant_memberships"] == {
+        "SELECT": (
+            "tenant_id",
+            "issuer",
+            "subject",
+            "role",
+            "status",
+            "membership_version",
+            "updated_at",
+        ),
+        "INSERT": (
+            "tenant_id",
+            "issuer",
+            "subject",
+            "role",
+            "status",
+            "membership_version",
+            "membership_source",
+            "created_at",
+            "updated_at",
+        ),
+        "UPDATE": ("role", "membership_version", "updated_at"),
+    }
+    assert MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES["tenants"]["SELECT"] == (
+        "tenant_id",
+        "name",
+        "status",
+    )
+    assert set(MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES[
+        "tenant_access_requests"
+    ]) == {"SELECT", "UPDATE"}
+    assert "request_id" in MEMBERSHIP_ADMIN_FORBIDDEN_COLUMN_PRIVILEGES[
+        "tenant_access_requests"
+    ]["INSERT"]
+    assert set(MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES[
+        "tenant_access_request_events"
+    ]) == {"INSERT"}
+    assert "membership_source" in (
+        MEMBERSHIP_ADMIN_FORBIDDEN_COLUMN_PRIVILEGES[
+            "tenant_memberships"
+        ]["UPDATE"]
+    )
+    assert required_column_privileges() == {
+        table: dict(grants)
+        for table, grants in MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES.items()
+    }
+    assert forbidden_column_privileges() == {
+        table: dict(grants)
+        for table, grants in (
+            MEMBERSHIP_ADMIN_FORBIDDEN_COLUMN_PRIVILEGES.items()
+        )
+    }
 
 
 def test_privilege_manifest_covers_legal_corpus_and_tenant_overlay_exactly() -> None:
@@ -132,11 +232,24 @@ class _AuditCursor:
         schema_usage: dict[str, bool] | None = None,
         schema_create: dict[str, bool] | None = None,
         database_temporary: bool = False,
+        sequence_grants: set[tuple[str, str]] | None = None,
+        column_grants: set[tuple[str, str, str]] | None = None,
     ):
         self.grants = set(grants)
         self.schema_usage = schema_usage or {}
         self.schema_create = schema_create or {}
         self.database_temporary = database_temporary
+        self.sequence_grants = set(sequence_grants or ())
+        self.column_grants = set(
+            column_grants
+            if column_grants is not None
+            else {
+                (table, column, privilege)
+                for table, grants in required_column_privileges().items()
+                for privilege, columns in grants.items()
+                for column in columns
+            }
+        )
         self.row = None
 
     def execute(self, query, params=None):
@@ -147,6 +260,16 @@ class _AuditCursor:
             self.row = (self.schema_usage.get(str(params[0]), True),)
         elif normalized.endswith("'CREATE')"):
             self.row = (self.schema_create.get(str(params[0]), False),)
+        elif "has_sequence_privilege" in normalized:
+            privilege, _schema, sequence = params
+            self.row = (
+                (sequence, privilege) in self.sequence_grants,
+            )
+        elif "has_column_privilege" in normalized:
+            column, privilege, _schema, table = params
+            self.row = (
+                (table, column, privilege) in self.column_grants,
+            )
         elif "WHEN relation_oid IS NULL THEN FALSE" in normalized:
             privilege, _schema, table = params
             self.row = ((table, privilege) in self.grants,)
@@ -169,6 +292,11 @@ def test_privilege_audit_reports_missing_and_forbidden_effective_grants() -> Non
         grants,
         schema_usage={"realytics": False, "extensions": False},
         schema_create={"realytics": True, "extensions": True},
+        sequence_grants={
+            (sequence, privilege)
+            for sequence, privileges in required_sequence_privileges().items()
+            for privilege in privileges
+        },
     )
 
     missing, forbidden = audit_runtime_privileges(
@@ -188,6 +316,41 @@ def test_privilege_audit_reports_missing_and_forbidden_effective_grants() -> Non
     ]
 
 
+def test_privilege_audit_reports_membership_column_drift() -> None:
+    grants = {
+        (table, privilege)
+        for table, privileges in required_table_privileges().items()
+        for privilege in privileges
+    }
+    column_grants = {
+        (table, column, privilege)
+        for table, column_grants in required_column_privileges().items()
+        for privilege, columns in column_grants.items()
+        for column in columns
+    }
+    column_grants.remove(("tenant_memberships", "role", "UPDATE"))
+    column_grants.add(
+        ("tenant_memberships", "membership_source", "UPDATE")
+    )
+
+    missing, forbidden = audit_runtime_privileges(
+        _AuditCursor(
+            grants,
+            column_grants=column_grants,
+            sequence_grants={
+                (sequence, privilege)
+                for sequence, privileges
+                in required_sequence_privileges().items()
+                for privilege in privileges
+            },
+        ),
+        schema_name="realytics",
+    )
+
+    assert missing == ["tenant_memberships.role.UPDATE"]
+    assert forbidden == ["tenant_memberships.membership_source.UPDATE"]
+
+
 def test_privilege_audit_rejects_legal_corpus_write_and_overlay_update() -> None:
     grants = {
         (table, privilege)
@@ -201,7 +364,15 @@ def test_privilege_audit_rejects_legal_corpus_write_and_overlay_update() -> None
     grants.add(("legal_provider_replay_requests", "SELECT"))
 
     missing, forbidden = audit_runtime_privileges(
-        _AuditCursor(grants),
+        _AuditCursor(
+            grants,
+            sequence_grants={
+                (sequence, privilege)
+                for sequence, privileges
+                in required_sequence_privileges().items()
+                for privilege in privileges
+            },
+        ),
         schema_name="realytics",
     )
 
@@ -223,13 +394,46 @@ def test_privilege_audit_can_require_database_temporary_revocation() -> None:
     }
 
     missing, forbidden = audit_runtime_privileges(
-        _AuditCursor(grants, database_temporary=True),
+        _AuditCursor(
+            grants,
+            database_temporary=True,
+            sequence_grants={
+                (sequence, privilege)
+                for sequence, privileges
+                in required_sequence_privileges().items()
+                for privilege in privileges
+            },
+        ),
         schema_name="realytics",
         require_no_database_temporary=True,
     )
 
     assert missing == []
     assert forbidden == ["database.TEMPORARY"]
+
+
+def test_privilege_audit_reports_missing_or_broad_project_sequence_grants() -> None:
+    grants = {
+        (table, privilege)
+        for table, privileges in required_table_privileges().items()
+        for privilege in privileges
+    }
+    missing, forbidden = audit_runtime_privileges(
+        _AuditCursor(
+            grants,
+            sequence_grants={
+                ("project_id_sequence", "SELECT"),
+                ("project_id_sequence", "UPDATE"),
+            },
+        ),
+        schema_name="realytics",
+    )
+
+    assert missing == ["project_id_sequence.USAGE"]
+    assert forbidden == [
+        "project_id_sequence.SELECT",
+        "project_id_sequence.UPDATE",
+    ]
 
 
 class _ProvisionCursor:
@@ -344,6 +548,48 @@ def test_provisioner_revokes_parser_tables_and_grants_only_manifest() -> None:
         '"realytics"."runtime_outbox_events" '
         'TO "realytics_runtime"'
     ) in sql
+    assert (
+        'GRANT SELECT, INSERT, UPDATE ON TABLE '
+        '"realytics"."projects" TO "realytics_runtime"'
+    ) in sql
+    assert (
+        'REVOKE ALL PRIVILEGES ON TABLE '
+        '"realytics"."projects" FROM "realytics_runtime"'
+    ) in sql
+    assert (
+        'GRANT SELECT, INSERT ON TABLE "realytics"."user_activity_logs" '
+        'TO "realytics_runtime"'
+    ) in sql
+    assert (
+        'GRANT SELECT ("issuer", "subject", "principal_type", "status", '
+        '"email", "display_name") ON TABLE "realytics"."principals" '
+        'TO "realytics_runtime"'
+    ) in sql
+    assert (
+        'GRANT UPDATE ("role", "membership_version", "updated_at") '
+        'ON TABLE "realytics"."tenant_memberships" '
+        'TO "realytics_runtime"'
+    ) in sql
+    assert (
+        'GRANT INSERT ON TABLE "realytics".'
+        '"tenant_identity_access_events" TO "realytics_runtime"'
+    ) in sql
+    assert (
+        'GRANT UPDATE ON TABLE "realytics"."tenant_memberships"'
+        not in sql
+    )
+    assert (
+        'GRANT USAGE ON SEQUENCE '
+        '"realytics"."project_id_sequence" TO "realytics_runtime"'
+    ) in sql
+    assert (
+        'REVOKE ALL PRIVILEGES ON SEQUENCE '
+        '"realytics"."project_id_sequence" FROM "realytics_runtime"'
+    ) in sql
+    assert (
+        'GRANT UPDATE ON SEQUENCE "realytics"."project_id_sequence"'
+        not in sql
+    )
     assert 'GRANT SELECT ON TABLE "realytics"."schema_migrations"' in sql
     assert (
         'GRANT SELECT ON TABLE "realytics"."legal_resource_versions" '

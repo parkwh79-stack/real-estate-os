@@ -15,6 +15,11 @@ def _external_provider(name: str) -> dict[str, object]:
     return config["auth"]["external"][name]
 
 
+def _auth_config() -> dict[str, object]:
+    with SUPABASE_CONFIG.open("rb") as config_file:
+        return tomllib.load(config_file)["auth"]
+
+
 def test_google_oauth_uses_deployment_scoped_credentials() -> None:
     google = _external_provider("google")
 
@@ -29,7 +34,7 @@ def test_google_oauth_uses_deployment_scoped_credentials() -> None:
     assert google["email_optional"] is False
 
 
-def test_kakao_accepts_missing_email_after_provider_scope_succeeds() -> None:
+def test_kakao_accepts_missing_email_without_biz_app_scope() -> None:
     kakao = _external_provider("kakao")
 
     assert kakao["email_optional"] is True
@@ -42,3 +47,17 @@ def test_social_provider_secrets_are_never_literal_config_values() -> None:
         assert provider["enabled"] is True
         assert str(provider["client_id"]).startswith("env(")
         assert str(provider["secret"]).startswith("env(")
+
+
+def test_email_signup_is_primary_and_guest_mode_does_not_create_auth_users() -> None:
+    auth = _auth_config()
+
+    assert auth["enable_signup"] is True
+    assert auth["enable_anonymous_sign_ins"] is False
+    assert auth["enable_manual_linking"] is True
+    assert auth["minimum_password_length"] >= 12
+    assert auth["password_requirements"] == (
+        "lower_upper_letters_digits_symbols"
+    )
+    assert auth["email"]["enable_signup"] is True
+    assert auth["email"]["enable_confirmations"] is True

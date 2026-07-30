@@ -11,6 +11,7 @@ and a reachable JWKS endpoint.
 """
 
 import base64
+import http.client
 import json
 import os
 import threading
@@ -23,6 +24,10 @@ ALLOWED_ASYMMETRIC_ALGORITHMS = frozenset({"RS256", "ES256"})
 _JWK_TYPES_BY_ALGORITHM = {"RS256": "RSA", "ES256": "EC"}
 _JWKS_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _JWKS_CACHE_LOCK = threading.Lock()
+
+
+class OidcVerifierUnavailable(RuntimeError):
+    """The configured JWKS authority could not be read within its time budget."""
 
 
 def oidc_configured() -> bool:
@@ -80,10 +85,46 @@ def fetch_jwks(
         cached = _JWKS_CACHE.get(jwks_url)
         if not force_refresh and cached and cached[0] > now:
             return cached[1]
-    with urllib.request.urlopen(jwks_url, timeout=timeout) as response:  # noqa: S310 (configured URL)
-        payload = json.loads(response.read().decode("utf-8"))
+
+    # Keep retries inside the caller's existing timeout budget. A quick DNS,
+    # proxy, or connection reset may recover immediately, while a persistent
+    # outage still fails closed before the BFF's 10-second request deadline.
+    deadline = now + max(0.1, float(timeout))
+    last_error: Exception | None = None
+    payload: Dict[str, Any] | None = None
+    for attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            with urllib.request.urlopen(  # noqa: S310 (configured URL)
+                jwks_url,
+                timeout=max(0.1, remaining),
+            ) as response:
+                decoded = json.loads(response.read().decode("utf-8"))
+            if not isinstance(decoded, dict) or not isinstance(
+                decoded.get("keys"), list
+            ):
+                raise ValueError("JWKS response must contain a keys array")
+            payload = decoded
+            break
+        except (
+            OSError,
+            http.client.HTTPException,
+            json.JSONDecodeError,
+            UnicodeError,
+            ValueError,
+        ) as exc:
+            last_error = exc
+            if attempt == 1:
+                break
+    if payload is None:
+        raise OidcVerifierUnavailable(
+            "OIDC JWKS authority is unavailable."
+        ) from last_error
+
     with _JWKS_CACHE_LOCK:
-        _JWKS_CACHE[jwks_url] = (now + cache_ttl, payload)
+        _JWKS_CACHE[jwks_url] = (time.monotonic() + cache_ttl, payload)
     return payload
 
 
@@ -98,7 +139,7 @@ def verify_oidc_token(
 
     jwks can be injected (tests / cached); otherwise it is fetched from the
     configured endpoint. Raises ValueError on validation failure, or RuntimeError
-    if PyJWT is unavailable.
+    if the JWKS authority or PyJWT verifier is unavailable.
     """
     header = decode_unverified_header(token)
     alg = header.get("alg")

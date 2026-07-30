@@ -4,12 +4,14 @@ import Link from "next/link";
 import { ArrowDown, UploadCloud } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAuth } from "../../components/auth/auth-context";
+import { ReviewOnlyNotice } from "../../components/auth/review-only-notice";
 import {
   WorkInbox,
   type DashboardDataError,
 } from "../../components/dashboard/work-inbox";
 import { DashboardIntake } from "../../components/intake/dashboard-intake";
 import { apiBase, authHeaders } from "../../lib/auth-client";
+import { hasPermission, PROJECT_WRITE_PERMISSION } from "../../lib/authorization";
 import type { RecentWorkItem } from "../../lib/project-client";
 
 interface RecentWorkResponse {
@@ -41,7 +43,8 @@ async function loadRecentWork(signal: AbortSignal) {
 }
 
 export default function DashboardPage() {
-  const { status, user } = useAuth();
+  const { status, user, permissions } = useAuth();
+  const canWriteProjects = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
   const [items, setItems] = useState<RecentWorkItem[] | null>(null);
   const [totalProjectCount, setTotalProjectCount] = useState<number | null>(null);
   const [errors, setErrors] = useState<DashboardDataError[]>([]);
@@ -117,15 +120,30 @@ export default function DashboardPage() {
             수치가 없는 영역에는 추정값을 채우지 않습니다.
           </p>
         </div>
-        <Link
-          href="#new-deal-intake"
-          className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-re-control bg-re-brand px-4 text-sm font-bold text-white hover:opacity-90"
-        >
-          <UploadCloud className="h-4 w-4" aria-hidden="true" />
-          새 딜 시작
-          <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
-        </Link>
+        {canWriteProjects ? (
+          <Link
+            href="#new-deal-intake"
+            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-re-control bg-re-brand px-4 text-sm font-bold text-white hover:opacity-90"
+          >
+            <UploadCloud className="h-4 w-4" aria-hidden="true" />
+            새 딜 시작
+            <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        ) : (
+          <button
+            type="button"
+            disabled
+            title={`필요 권한: ${PROJECT_WRITE_PERMISSION}`}
+            data-testid="dashboard-new-deal-disabled"
+            className="inline-flex h-10 shrink-0 cursor-not-allowed items-center justify-center gap-2 rounded-re-control border border-re-border bg-re-subtle px-4 text-sm font-bold text-re-muted"
+          >
+            <UploadCloud className="h-4 w-4" aria-hidden="true" />
+            심사 전용 · 새 딜 생성 불가
+          </button>
+        )}
       </header>
+
+      {!canWriteProjects ? <ReviewOnlyNotice role={user?.role} tone="light" /> : null}
 
       <WorkInbox
         items={items}
@@ -145,7 +163,21 @@ export default function DashboardPage() {
             기존 업로드·프로젝트 생성 흐름을 유지합니다. 생성된 프로젝트는 처리 후 위 업무함에 반영됩니다.
           </p>
         </div>
-        <DashboardIntake onProjectCreated={() => setReloadKey((value) => value + 1)} />
+        {canWriteProjects ? (
+          <DashboardIntake onProjectCreated={() => setReloadKey((value) => value + 1)} />
+        ) : (
+          <div
+            data-testid="dashboard-intake-read-only"
+            className="rounded-2xl border border-dashed border-re-border bg-re-subtle px-6 py-10 text-center"
+          >
+            <UploadCloud className="mx-auto h-9 w-9 text-re-muted" aria-hidden="true" />
+            <p className="mt-3 text-sm font-black text-re-text">심사 전용 역할에서는 새 자료를 업로드할 수 없습니다.</p>
+            <p className="mt-1 text-xs leading-5 text-re-secondary">
+              위 업무함에서 배정된 프로젝트를 선택해 심사·검토를 계속하세요. 새 딜 생성에는
+              {" "}<span className="font-mono font-bold">{PROJECT_WRITE_PERMISSION}</span> 권한이 필요합니다.
+            </p>
+          </div>
+        )}
       </section>
     </div>
   );

@@ -33,8 +33,8 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import agent_platform, audit, auth, glossary, kakao, google, legal_citator, legal_corpus_operations, legal_governance, legal_intelligence, legal_provider_operations, valuemap, projects, project_assumptions, ops, market
-from core.authz import enforce_project_tenant_scope
-from core.idp import principal_from_request
+from core.authz import enforce_project_tenant_scope, identity_context_from_request
+from core.idp import verified_principal_from_request_state
 from core.runtime_profile import (
     cors_origins,
     raw_identity_headers_enabled,
@@ -46,6 +46,7 @@ from db.postgres_runtime_pool import (
     open_runtime_pools,
 )
 from db.repositories.upload_archive_repository import UploadRejectedError
+from db.repositories.activity_log_repository import PostgresActivityLogRepository
 from storage import get_user_session, record_user_activity_log, storage_backend
 
 validate_security_configuration()
@@ -110,6 +111,25 @@ app.add_middleware(
 
 PROJECT_PATH_RE = re.compile(r"^/projects/(?P<project_id>[^/]+)")
 RUN_PATH_RE = re.compile(r"/orchestrations/(?P<run_id>[^/]+)")
+NON_PROJECT_ROUTE_SEGMENTS = frozenset({"recent-work", "intake", "monitoring"})
+
+
+def _activity_project_id(path: str) -> str | None:
+    match = PROJECT_PATH_RE.match(path)
+    if not match:
+        return None
+    project_id = str(match.group("project_id") or "").strip()
+    if not project_id or project_id in NON_PROJECT_ROUTE_SEGMENTS:
+        return None
+    return project_id
+
+
+def normalized_activity_repository(
+    *,
+    tenant_id: str,
+    user_id: str,
+) -> PostgresActivityLogRepository:
+    return PostgresActivityLogRepository(tenant_id=tenant_id, user_id=user_id)
 
 
 @app.middleware("http")
@@ -118,15 +138,8 @@ async def user_activity_middleware(request: Request, call_next):
     started = time.perf_counter()
     response = None
     try:
-        project_match = PROJECT_PATH_RE.match(request.url.path)
-        if project_match and project_match.group("project_id") in {
-            "recent-work",
-            "intake",
-            "monitoring",
-        }:
-            project_match = None
-        if project_match:
-            project_id = project_match.group("project_id")
+        project_id = _activity_project_id(request.url.path)
+        if project_id:
             project = None
             if storage_backend() == "postgres":
                 # PostgreSQL is the request-time authority.  The legacy map is
@@ -158,15 +171,12 @@ async def user_activity_middleware(request: Request, call_next):
         path = request.url.path
         if path not in {"/health"}:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            project_match = PROJECT_PATH_RE.match(path)
+            project_id = _activity_project_id(path)
             run_match = RUN_PATH_RE.search(path)
             user_id = None
             if request.headers.get("authorization"):
-                try:
-                    principal = principal_from_request(request)
-                    user_id = principal.user_id if principal else None
-                except Exception:
-                    user_id = None
+                principal = verified_principal_from_request_state(request)
+                user_id = principal.user_id if principal else None
             session_id = request.headers.get("x-realytics-session-id")
             if (
                 not user_id
@@ -183,25 +193,54 @@ async def user_activity_middleware(request: Request, call_next):
                     or request.query_params.get("user_id")
                 )
             user_id = user_id or "anonymous"
+            event = {
+                "eventId": str(uuid4()),
+                "eventType": "api_request",
+                "userId": user_id,
+                "projectId": project_id,
+                "runId": run_match.group("run_id") if run_match else None,
+                "method": request.method,
+                "path": path,
+                "statusCode": response.status_code if response else 500,
+                "durationMs": duration_ms,
+                "clientHost": request.client.host if request.client else None,
+                "userAgent": request.headers.get("user-agent"),
+                "requestId": request_id,
+                "metadata": {
+                    "queryKeys": sorted(request.query_params.keys()),
+                },
+            }
+            # PostgreSQL activity uses the membership-resolved identity, not
+            # the raw OAuth ``sub``.  This keeps the append and recent feed
+            # lookup on the same stable user key.  Compatibility logging has
+            # its own failure boundary so a transient normalized write cannot
+            # suppress the existing operational trace.
+            if storage_backend() in {"postgres", "postgresql"} and project_id:
+                try:
+                    context = identity_context_from_request(request)
+                    verified_user = context.get("user") or {}
+                    tenant_id = str(
+                        verified_user.get("tenantId") or ""
+                    ).strip()
+                    resolved_user_id = str(
+                        verified_user.get("userId") or ""
+                    ).strip()
+                    if not tenant_id or not resolved_user_id:
+                        raise ValueError(
+                            "Verified tenant and user are required for activity append"
+                        )
+                    normalized_activity_repository(
+                        tenant_id=tenant_id,
+                        user_id=resolved_user_id,
+                    ).append_api_request(event)
+                except Exception:
+                    # Activity logging must never break the product workflow.
+                    pass
+
             try:
-                record_user_activity_log(
-                    {
-                        "eventType": "api_request",
-                        "userId": user_id,
-                        "projectId": project_match.group("project_id") if project_match else None,
-                        "runId": run_match.group("run_id") if run_match else None,
-                        "method": request.method,
-                        "path": path,
-                        "statusCode": response.status_code if response else 500,
-                        "durationMs": duration_ms,
-                        "clientHost": request.client.host if request.client else None,
-                        "userAgent": request.headers.get("user-agent"),
-                        "requestId": request_id,
-                        "metadata": {
-                            "queryKeys": sorted(request.query_params.keys()),
-                        },
-                    }
-                )
+                # Retain this projection until audit/export endpoints move to
+                # normalized PostgreSQL.
+                record_user_activity_log(event)
             except Exception:
                 # Activity logging must never break the product workflow.
                 pass

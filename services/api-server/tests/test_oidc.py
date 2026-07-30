@@ -17,6 +17,20 @@ def _token(header, payload):
     return f"{_b64url(header)}.{_b64url(payload)}.sig"
 
 
+class _JwksResponse:
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self._payload
+
+
 def test_decode_unverified_header():
     tok = _token({"alg": "RS256", "kid": "k1"}, {"sub": "u"})
     h = oidc.decode_unverified_header(tok)
@@ -29,6 +43,44 @@ def test_select_jwk_by_kid():
     assert oidc.select_jwk(jwks, "missing") is None
     assert oidc.select_jwk({"keys": [{"kid": "only"}]}, None)["kid"] == "only"
     assert oidc.select_jwk({"keys": []}, "a") is None
+
+
+def test_fetch_jwks_retries_one_transient_network_failure_and_caches(monkeypatch):
+    jwks_url = "https://identity.example/.well-known/retry-jwks.json"
+    calls = []
+
+    def _urlopen(url, *, timeout):
+        calls.append((url, timeout))
+        if len(calls) == 1:
+            raise OSError("transient connection reset")
+        return _JwksResponse({"keys": [{"kid": "recovered", "kty": "RSA"}]})
+
+    monkeypatch.setattr(oidc.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setenv("REALYTICS_OIDC_JWKS_CACHE_SECONDS", "600")
+
+    first = oidc.fetch_jwks(jwks_url)
+    cached = oidc.fetch_jwks(jwks_url)
+
+    assert first == cached
+    assert first["keys"][0]["kid"] == "recovered"
+    assert len(calls) == 2
+    assert all(call[0] == jwks_url for call in calls)
+
+
+def test_fetch_jwks_persistent_network_failure_is_typed_and_bounded(monkeypatch):
+    jwks_url = "https://identity.example/.well-known/unavailable-jwks.json"
+    calls = []
+
+    def _urlopen(url, *, timeout):
+        calls.append((url, timeout))
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr(oidc.urllib.request, "urlopen", _urlopen)
+
+    with pytest.raises(oidc.OidcVerifierUnavailable, match="authority is unavailable"):
+        oidc.fetch_jwks(jwks_url)
+
+    assert len(calls) == 2
 
 
 def test_non_rs256_rejected():

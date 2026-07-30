@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import { Suspense } from "react";
 import { usePathname } from "next/navigation";
-import { RequireAuth } from "../auth/auth-context";
+import { RequireAuth, RequireSupabaseSession } from "../auth/auth-context";
 import { Header } from "./header";
 import { ProjectContextHeader } from "./project-context-header";
 import { Sidebar } from "./sidebar";
@@ -14,13 +14,22 @@ interface ShellProps {
 
 export function Shell({ children }: ShellProps) {
   const pathname = usePathname();
-  const isPublicRoute = Boolean(pathname?.startsWith("/login") || pathname?.startsWith("/auth"));
+  const isPublicRoute = Boolean(
+    pathname?.startsWith("/login")
+      || pathname?.startsWith("/auth")
+      || pathname?.startsWith("/guest"),
+  );
+  const isOnboardingRoute = Boolean(pathname?.startsWith("/onboarding"));
   const isFocusRoute = Boolean(pathname?.startsWith("/start"));
   const projectMatch = pathname?.match(/^\/project\/([^/]+)/);
   const currentProjectId = projectMatch?.[1];
 
   if (isPublicRoute) {
     return <>{children}</>;
+  }
+
+  if (isOnboardingRoute) {
+    return <RequireSupabaseSession>{children}</RequireSupabaseSession>;
   }
 
   if (isFocusRoute) {

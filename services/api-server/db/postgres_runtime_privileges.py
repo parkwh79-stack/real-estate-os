@@ -49,12 +49,388 @@ PARSER_V2_TABLE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "parser_validity_events": ("SELECT", "INSERT"),
 }
 
-# These objects are shared with existing application paths.  Provisioning is
-# additive here so Parser V2 hardening cannot accidentally revoke permissions
-# required by project CRUD or calculation persistence.  The broader application
-# role manifest remains a separate deployment responsibility.
+# Project creation and editing are served by ``PostgresProjectRepository``.
+# DELETE is intentionally absent because the repository implements deletion as
+# a tenant-scoped, optimistic-concurrency UPDATE tombstone.  Keeping this
+# allowlist exact prevents a UI-level ``project:write`` grant from being
+# defeated by a missing database privilege while preserving FORCE RLS as the
+# row authorization boundary.
+PROJECT_RUNTIME_TABLE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "projects": ("SELECT", "INSERT", "UPDATE"),
+    # Recent-work is derived from append-only server-observed request history.
+    # The serving API can read and append, but never rewrite or delete events.
+    "user_activity_logs": ("SELECT", "INSERT"),
+}
+PROJECT_RUNTIME_SEQUENCE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    # ``nextval`` needs USAGE (or the broader UPDATE privilege).  USAGE is the
+    # narrow choice and does not allow callers to reset the sequence with
+    # ``setval``.
+    "project_id_sequence": ("USAGE",),
+}
+
+# Tenant membership administration runs through the tenant-scoped API pool,
+# never the read-only identity pool.  The directory relations intentionally do
+# not receive broad table SELECT/UPDATE grants: only the columns projected by
+# the authorized membership screen and changed by the optimistic-CAS command
+# are visible to the serving role.  Audit history can only be appended.
+MEMBERSHIP_ADMIN_TABLE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "principals": (),
+    "tenant_memberships": (),
+    "tenant_identity_access_events": ("INSERT",),
+    "tenants": (),
+    "onboarding_profiles": (),
+    "onboarding_principal_events": (),
+    "platform_onboarding_operators": (),
+    "tenant_access_requests": (),
+    "tenant_access_request_events": (),
+}
+MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES: Mapping[
+    str, Mapping[str, tuple[str, ...]]
+] = {
+    "principals": {
+        "SELECT": (
+            "issuer",
+            "subject",
+            "principal_type",
+            "status",
+            "email",
+            "display_name",
+        ),
+        "INSERT": (
+            "issuer",
+            "subject",
+            "principal_type",
+            "status",
+            "email",
+            "display_name",
+            "verification_method",
+            "first_verified_at",
+            "last_verified_at",
+            "created_at",
+            "updated_at",
+        ),
+        "UPDATE": ("email", "display_name", "updated_at"),
+    },
+    "tenant_memberships": {
+        "SELECT": (
+            "tenant_id",
+            "issuer",
+            "subject",
+            "role",
+            "status",
+            "membership_version",
+            "updated_at",
+        ),
+        "INSERT": (
+            "tenant_id",
+            "issuer",
+            "subject",
+            "role",
+            "status",
+            "membership_version",
+            "membership_source",
+            "created_at",
+            "updated_at",
+        ),
+        "UPDATE": ("role", "membership_version", "updated_at"),
+    },
+    "tenants": {
+        "SELECT": ("tenant_id", "name", "status"),
+        "INSERT": (
+            "tenant_id",
+            "name",
+            "status",
+            "created_at",
+            "updated_at",
+            "metadata_json",
+        ),
+    },
+    # Self-owned onboarding profiles/events use the separately provisioned
+    # identity role. The API review role receives no column grant here.
+    "onboarding_profiles": {},
+    "onboarding_principal_events": {},
+    "platform_onboarding_operators": {
+        "SELECT": ("issuer", "subject", "status", "operator_version"),
+    },
+    "tenant_access_requests": {
+        "SELECT": (
+            "request_id",
+            "request_type",
+            "requester_issuer",
+            "requester_subject",
+            "requester_email_snapshot",
+            "requester_display_name_snapshot",
+            "profile_version_snapshot",
+            "terms_version_snapshot",
+            "privacy_version_snapshot",
+            "profile_snapshot_hash",
+            "target_tenant_id",
+            "organization_name",
+            "business_registration_number",
+            "requested_role",
+            "request_message",
+            "status",
+            "request_version",
+            "submitted_at",
+            "decision_by_issuer",
+            "decision_by_subject",
+            "decision_at",
+            "decision_reason",
+            "approved_tenant_id",
+            "created_at",
+            "updated_at",
+        ),
+        "UPDATE": (
+            "status",
+            "request_version",
+            "decision_by_issuer",
+            "decision_by_subject",
+            "decision_at",
+            "decision_reason",
+            "approved_tenant_id",
+            "updated_at",
+        ),
+    },
+    "tenant_access_request_events": {
+        "INSERT": (
+            "event_id",
+            "request_id",
+            "event_type",
+            "request_type",
+            "requester_issuer",
+            "requester_subject",
+            "target_tenant_id",
+            "actor_issuer",
+            "actor_subject",
+            "event_payload",
+            "occurred_at",
+        ),
+    },
+}
+MEMBERSHIP_ADMIN_FORBIDDEN_COLUMN_PRIVILEGES: Mapping[
+    str, Mapping[str, tuple[str, ...]]
+] = {
+    "principals": {
+        "SELECT": (
+            "legacy_user_id",
+            "verification_method",
+            "first_verified_at",
+            "last_verified_at",
+            "created_at",
+            "updated_at",
+        ),
+        "UPDATE": (
+            "issuer",
+            "subject",
+            "principal_type",
+            "status",
+            "legacy_user_id",
+            "verification_method",
+            "first_verified_at",
+            "last_verified_at",
+            "created_at",
+        ),
+    },
+    "tenant_memberships": {
+        "SELECT": ("membership_source", "created_at"),
+        "UPDATE": (
+            "tenant_id",
+            "issuer",
+            "subject",
+            "status",
+            "membership_source",
+            "created_at",
+        ),
+    },
+    "tenants": {
+        "SELECT": ("created_at", "updated_at", "metadata_json"),
+        "UPDATE": (
+            "tenant_id",
+            "name",
+            "status",
+            "created_at",
+            "updated_at",
+            "metadata_json",
+        ),
+    },
+    "onboarding_profiles": {
+        operation: (
+            "issuer",
+            "subject",
+            "contact_email",
+            "display_name",
+            "phone",
+            "job_title",
+            "terms_version",
+            "privacy_version",
+            "terms_accepted_at",
+            "privacy_accepted_at",
+            "profile_version",
+            "created_at",
+            "updated_at",
+        )
+        for operation in ("SELECT", "INSERT", "UPDATE")
+    },
+    "onboarding_principal_events": {
+        operation: (
+            "event_id",
+            "issuer",
+            "subject",
+            "event_type",
+            "event_payload",
+            "occurred_at",
+            "created_at",
+        )
+        for operation in ("SELECT", "INSERT", "UPDATE")
+    },
+    "platform_onboarding_operators": {
+        "SELECT": ("created_at", "updated_at"),
+        **{
+            operation: (
+                "issuer",
+                "subject",
+                "status",
+                "operator_version",
+                "created_at",
+                "updated_at",
+            )
+            for operation in ("INSERT", "UPDATE")
+        },
+    },
+    "tenant_access_requests": {
+        "INSERT": (
+            "request_id",
+            "request_type",
+            "requester_issuer",
+            "requester_subject",
+            "requester_email_snapshot",
+            "requester_display_name_snapshot",
+            "profile_version_snapshot",
+            "terms_version_snapshot",
+            "privacy_version_snapshot",
+            "profile_snapshot_hash",
+            "target_tenant_id",
+            "organization_name",
+            "business_registration_number",
+            "requested_role",
+            "request_message",
+            "status",
+            "request_version",
+            "submitted_at",
+            "decision_by_issuer",
+            "decision_by_subject",
+            "decision_at",
+            "decision_reason",
+            "approved_tenant_id",
+            "created_at",
+            "updated_at",
+        ),
+        "UPDATE": (
+            "request_id",
+            "request_type",
+            "requester_issuer",
+            "requester_subject",
+            "requester_email_snapshot",
+            "requester_display_name_snapshot",
+            "profile_version_snapshot",
+            "terms_version_snapshot",
+            "privacy_version_snapshot",
+            "profile_snapshot_hash",
+            "target_tenant_id",
+            "organization_name",
+            "business_registration_number",
+            "requested_role",
+            "request_message",
+            "submitted_at",
+            "created_at",
+        ),
+    },
+    "tenant_access_request_events": {
+        "SELECT": (
+            "event_id",
+            "request_id",
+            "event_type",
+            "request_type",
+            "requester_issuer",
+            "requester_subject",
+            "target_tenant_id",
+            "actor_issuer",
+            "actor_subject",
+            "event_payload",
+            "occurred_at",
+            "created_at",
+        ),
+        "UPDATE": (
+            "event_id",
+            "request_id",
+            "event_type",
+            "request_type",
+            "requester_issuer",
+            "requester_subject",
+            "target_tenant_id",
+            "actor_issuer",
+            "actor_subject",
+            "event_payload",
+            "occurred_at",
+            "created_at",
+        ),
+        "INSERT": ("created_at",),
+    },
+}
+MEMBERSHIP_ADMIN_FORBIDDEN_TABLE_PRIVILEGES: Mapping[
+    str, tuple[str, ...]
+] = {
+    "principals": (
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+    ),
+    "tenant_memberships": (
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+    ),
+    "tenant_identity_access_events": (
+        "SELECT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+    ),
+    **{
+        table: (
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+        )
+        for table in (
+            "tenants",
+            "onboarding_profiles",
+            "onboarding_principal_events",
+            "platform_onboarding_operators",
+            "tenant_access_requests",
+            "tenant_access_request_events",
+        )
+    },
+}
+
+# Calculation persistence is shared with existing application paths.
+# Provisioning remains additive here until its complete write contract is
+# promoted into this manifest.
 PARSER_V2_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
-    "projects": ("SELECT",),
     "calculation_runs": ("SELECT",),
 }
 
@@ -206,6 +582,17 @@ REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES: Mapping[
     "report_publications": FORBIDDEN_APPEND_ONLY_PRIVILEGES,
     "risk_registers": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
 }
+PROJECT_RUNTIME_FORBIDDEN_PRIVILEGES: Mapping[
+    str, tuple[str, ...]
+] = {
+    "projects": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    "user_activity_logs": FORBIDDEN_APPEND_ONLY_PRIVILEGES,
+}
+PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES: Mapping[
+    str, tuple[str, ...]
+] = {
+    "project_id_sequence": ("SELECT", "UPDATE"),
+}
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")
 
@@ -246,8 +633,10 @@ def required_table_privileges() -> dict[str, tuple[str, ...]]:
 
     return {
         **PARSER_V2_TABLE_PRIVILEGES,
+        **PROJECT_RUNTIME_TABLE_PRIVILEGES,
         **PARSER_V2_SUPPORT_PRIVILEGES,
         **PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
+        **MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
         **REPORT_PUBLICATION_PRIVILEGES,
         **LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
         **LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
@@ -289,7 +678,43 @@ def forbidden_table_privileges() -> dict[str, tuple[str, ...]]:
             for table in LEGAL_PROVIDER_OPERATIONS_PRIVILEGES
         },
         **dict(FORBIDDEN_MANAGED_SUPPORT_PRIVILEGES),
+        **MEMBERSHIP_ADMIN_FORBIDDEN_TABLE_PRIVILEGES,
         **REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES,
+        **PROJECT_RUNTIME_FORBIDDEN_PRIVILEGES,
+    }
+
+
+def required_sequence_privileges() -> dict[str, tuple[str, ...]]:
+    """Return sequence privileges required by normalized runtime domains."""
+
+    return dict(PROJECT_RUNTIME_SEQUENCE_PRIVILEGES)
+
+
+def forbidden_sequence_privileges() -> dict[str, tuple[str, ...]]:
+    """Return sequence privileges broader than the runtime contract."""
+
+    return dict(PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES)
+
+
+def required_column_privileges(
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Return exact column grants for membership administration."""
+
+    return {
+        table: dict(privileges)
+        for table, privileges in MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES.items()
+    }
+
+
+def forbidden_column_privileges(
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Return identity columns that the serving runtime must not access."""
+
+    return {
+        table: dict(privileges)
+        for table, privileges in (
+            MEMBERSHIP_ADMIN_FORBIDDEN_COLUMN_PRIVILEGES.items()
+        )
     }
 
 
@@ -357,6 +782,50 @@ def audit_runtime_privileges(
             ):
                 forbidden.append(f"{table}.{privilege}")
 
+    for table, grants in required_column_privileges().items():
+        for privilege, columns in grants.items():
+            for column in columns:
+                if not _has_column_privilege(
+                    cursor,
+                    schema=schema,
+                    table=table,
+                    column=column,
+                    privilege=privilege,
+                ):
+                    missing.append(f"{table}.{column}.{privilege}")
+
+    for table, grants in forbidden_column_privileges().items():
+        for privilege, columns in grants.items():
+            for column in columns:
+                if _has_column_privilege(
+                    cursor,
+                    schema=schema,
+                    table=table,
+                    column=column,
+                    privilege=privilege,
+                ):
+                    forbidden.append(f"{table}.{column}.{privilege}")
+
+    for sequence, privileges in required_sequence_privileges().items():
+        for privilege in privileges:
+            if not _has_sequence_privilege(
+                cursor,
+                schema=schema,
+                sequence=sequence,
+                privilege=privilege,
+            ):
+                missing.append(f"{sequence}.{privilege}")
+
+    for sequence, privileges in forbidden_sequence_privileges().items():
+        for privilege in privileges:
+            if _has_sequence_privilege(
+                cursor,
+                schema=schema,
+                sequence=sequence,
+                privilege=privilege,
+            ):
+                forbidden.append(f"{sequence}.{privilege}")
+
     return sorted(missing), sorted(forbidden)
 
 
@@ -372,11 +841,11 @@ def provision_parser_v2_runtime_role(
     """Apply the normalized runtime role manifest inside the transaction.
 
     The caller owns commit/rollback.  Parser tables, managed support tables,
-    Legal Intelligence corpus/overlay tables, and its glossary dependency are
-    reset to their exact allowlists.  Shared project/calculation tables receive
-    additive SELECT only, preserving the rest of the application's independently
-    managed grants.  The public function name is kept for deployment
-    compatibility.
+    project CRUD objects, Legal Intelligence corpus/overlay tables, and its
+    glossary dependency are reset to their exact allowlists.  Calculation
+    support remains additive SELECT until its complete write contract is
+    promoted into this manifest.  The public function name is kept for
+    deployment compatibility.
     """
 
     role = validate_database_identifier(role_name, label="runtime role")
@@ -390,6 +859,8 @@ def provision_parser_v2_runtime_role(
             (
                 *PARSER_V2_TABLE_PRIVILEGES,
                 *PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
+                *PROJECT_RUNTIME_TABLE_PRIVILEGES,
+                *MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
                 *PARSER_V2_SUPPORT_PRIVILEGES,
                 *REPORT_PUBLICATION_PRIVILEGES,
                 *LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
@@ -563,6 +1034,8 @@ def render_parser_v2_runtime_role_sql(
     exact_privileges = {
         **PARSER_V2_TABLE_PRIVILEGES,
         **PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
+        **PROJECT_RUNTIME_TABLE_PRIVILEGES,
+        **MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
         **REPORT_PUBLICATION_PRIVILEGES,
         **LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
         **LEGAL_INTELLIGENCE_TENANT_PRIVILEGES,
@@ -583,9 +1056,40 @@ def render_parser_v2_runtime_role_sql(
                 _render_grant(relation, role_identifier, privileges)
             )
 
+    for table, grants in MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES.items():
+        relation = f"{schema_identifier}.{_quoted_identifier(table)}"
+        for privilege, columns in grants.items():
+            statements.append(
+                _render_column_grant(
+                    relation,
+                    role_identifier,
+                    privilege=privilege,
+                    columns=columns,
+                )
+            )
+
     for table, privileges in PARSER_V2_SUPPORT_PRIVILEGES.items():
         relation = f"{schema_identifier}.{_quoted_identifier(table)}"
         statements.append(_render_grant(relation, role_identifier, privileges))
+
+    statements.append(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA "
+        f"{schema_identifier} REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC"
+    )
+    for sequence, privileges in PROJECT_RUNTIME_SEQUENCE_PRIVILEGES.items():
+        relation = f"{schema_identifier}.{_quoted_identifier(sequence)}"
+        statements.extend(
+            (
+                f"REVOKE ALL PRIVILEGES ON SEQUENCE {relation} FROM PUBLIC",
+                "REVOKE ALL PRIVILEGES ON SEQUENCE "
+                f"{relation} FROM {role_identifier}",
+                _render_sequence_grant(
+                    relation,
+                    role_identifier,
+                    privileges,
+                ),
+            )
+        )
 
     for signature in LEGAL_INTELLIGENCE_RUNTIME_FUNCTIONS:
         statements.append(
@@ -617,6 +1121,46 @@ def _render_grant(
 ) -> str:
     privilege_sql = ", ".join(privileges)
     return f"GRANT {privilege_sql} ON TABLE {relation} TO {role_identifier}"
+
+
+def _render_sequence_grant(
+    relation: str,
+    role_identifier: str,
+    privileges: Sequence[str],
+) -> str:
+    privilege_sql = ", ".join(privileges)
+    return (
+        f"GRANT {privilege_sql} ON SEQUENCE {relation} "
+        f"TO {role_identifier}"
+    )
+
+
+def _render_column_grant(
+    relation: str,
+    role_identifier: str,
+    *,
+    privilege: str,
+    columns: Sequence[str],
+) -> str:
+    privilege_name = str(privilege or "").strip().upper()
+    if privilege_name not in {"SELECT", "INSERT", "UPDATE", "REFERENCES"}:
+        raise RuntimePrivilegeProvisioningError(
+            f"unsupported column privilege: {privilege_name}"
+        )
+    if not columns:
+        raise RuntimePrivilegeProvisioningError(
+            "column privilege grant requires at least one column"
+        )
+    column_sql = ", ".join(
+        _quoted_identifier(
+            validate_database_identifier(column, label="database column")
+        )
+        for column in columns
+    )
+    return (
+        f"GRANT {privilege_name} ({column_sql}) ON TABLE {relation} "
+        f"TO {role_identifier}"
+    )
 
 
 def _quoted_identifier(value: str) -> str:
@@ -655,6 +1199,59 @@ def _has_table_privilege(
     return bool(row and row[0])
 
 
+def _has_column_privilege(
+    cursor: Any,
+    *,
+    schema: str,
+    table: str,
+    column: str,
+    privilege: str,
+) -> bool:
+    cursor.execute(
+        """
+        SELECT CASE
+            WHEN relation_oid IS NULL THEN FALSE
+            ELSE has_column_privilege(
+                current_user, relation_oid, %s, %s
+            )
+        END
+        FROM (
+            SELECT to_regclass(
+                format('%%I.%%I', %s::text, %s::text)
+            ) AS relation_oid
+        ) AS runtime_relation
+        """,
+        (column, privilege, schema, table),
+    )
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def _has_sequence_privilege(
+    cursor: Any,
+    *,
+    schema: str,
+    sequence: str,
+    privilege: str,
+) -> bool:
+    cursor.execute(
+        """
+        SELECT CASE
+            WHEN relation_oid IS NULL THEN FALSE
+            ELSE has_sequence_privilege(current_user, relation_oid, %s)
+        END
+        FROM (
+            SELECT to_regclass(
+                format('%%I.%%I', %s::text, %s::text)
+            ) AS relation_oid
+        ) AS runtime_relation
+        """,
+        (privilege, schema, sequence),
+    )
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
 __all__ = [
     "DEFAULT_POSTGIS_SCHEMA",
     "DEFAULT_RUNTIME_SCHEMA",
@@ -666,9 +1263,17 @@ __all__ = [
     "LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS",
     "LEGAL_INTELLIGENCE_TENANT_PRIVILEGES",
     "LEGAL_PROVIDER_OPERATIONS_PRIVILEGES",
+    "MEMBERSHIP_ADMIN_COLUMN_PRIVILEGES",
+    "MEMBERSHIP_ADMIN_FORBIDDEN_COLUMN_PRIVILEGES",
+    "MEMBERSHIP_ADMIN_FORBIDDEN_TABLE_PRIVILEGES",
+    "MEMBERSHIP_ADMIN_TABLE_PRIVILEGES",
     "PARSER_V2_MANAGED_SUPPORT_PRIVILEGES",
     "PARSER_V2_SUPPORT_PRIVILEGES",
     "PARSER_V2_TABLE_PRIVILEGES",
+    "PROJECT_RUNTIME_FORBIDDEN_PRIVILEGES",
+    "PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES",
+    "PROJECT_RUNTIME_SEQUENCE_PRIVILEGES",
+    "PROJECT_RUNTIME_TABLE_PRIVILEGES",
     "REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES",
     "REPORT_PUBLICATION_PRIVILEGES",
     "POSTGIS_SCHEMA_ENV",
@@ -679,9 +1284,13 @@ __all__ = [
     "assert_current_schema",
     "audit_runtime_privileges",
     "forbidden_table_privileges",
+    "forbidden_column_privileges",
+    "forbidden_sequence_privileges",
     "provision_parser_v2_runtime_role",
     "render_parser_v2_runtime_role_sql",
     "required_table_privileges",
+    "required_column_privileges",
+    "required_sequence_privileges",
     "revoke_public_database_temporary_enabled",
     "validate_database_identifier",
 ]

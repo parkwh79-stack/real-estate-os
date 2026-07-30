@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Provision the least-privilege Parser V2 PostgreSQL runtime role."""
+"""Provision the least-privilege REALYTICS PostgreSQL runtime role."""
 
 import os
 import sys
@@ -65,7 +65,7 @@ def main() -> int:
         connection.close()
 
     print(
-        "Parser V2 PostgreSQL runtime privileges are current for "
+        "REALYTICS PostgreSQL runtime privileges are current for "
         f"role={role_name!r}, schema={schema_name!r}, "
         f"postgis_schema={postgis_schema_name!r}."
     )

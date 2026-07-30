@@ -3,9 +3,11 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
+import core.secret_vault as secret_vault
 from main import app
 from routers import projects
 
@@ -666,6 +668,178 @@ def test_byok_uses_dedicated_credential_ingest_and_is_revoked_on_logout(monkeypa
 
     me_after_logout = client.get("/auth/me", headers=headers)
     assert me_after_logout.json()["authenticated"] is False
+
+
+def test_supabase_bearer_byok_uses_signed_session_id_and_rejects_other_session(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "bearer-byok.sqlite3"))
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
+    monkeypatch.setenv("REALYTICS_AI_CREDENTIAL_TTL_SECONDS", "3600")
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "bearer-byok-secret")
+    monkeypatch.setenv("REALYTICS_IDP_PROVIDER", "supabase")
+    monkeypatch.setenv("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY", "claims")
+    client = TestClient(app)
+    base_claims = {
+        "iss": "https://pilot.supabase.co/auth/v1",
+        "sub": "supabase-byok-user",
+        "realytics_tenant_id": "supabase-byok-tenant",
+        "realytics_role": "reviewer",
+        "exp": int(time.time()) + 3600,
+    }
+    token_a = _make_hs256_token(
+        {**base_claims, "session_id": "supabase-provider-session-a"},
+        "bearer-byok-secret",
+    )
+    token_b = _make_hs256_token(
+        {**base_claims, "session_id": "supabase-provider-session-b"},
+        "bearer-byok-secret",
+    )
+    headers_a = {"authorization": f"Bearer {token_a}"}
+    headers_b = {"authorization": f"Bearer {token_b}"}
+
+    ingested = client.post(
+        "/auth/ai-credentials",
+        headers=headers_a,
+        json={
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "apiKey": "supabase-session-secret-value",
+        },
+    )
+    assert ingested.status_code == 200
+    assert "supabase-session-secret-value" not in json.dumps(ingested.json())
+    assert "supabase-provider-session-a" not in json.dumps(ingested.json())
+    assert (
+        client.get("/auth/ai-profile", headers=headers_a).json()["effectiveAi"][
+            "selectionSource"
+        ]
+        == "user_ai_profile"
+    )
+    assert (
+        client.get("/auth/ai-profile", headers=headers_b).json()["effectiveAi"][
+            "selectionSource"
+        ]
+        == "user_ai_profile_without_key_system_fallback"
+    )
+    monkeypatch.setitem(
+        projects.PROJECTS_DB,
+        "supabase-byok-project",
+        {"id": "supabase-byok-project", "name": "Supabase BYOK Project"},
+    )
+    owner_project_ai = client.post(
+        "/projects/supabase-byok-project/ai/connection/resolve",
+        headers=headers_a,
+        json={},
+    )
+    other_project_ai = client.post(
+        "/projects/supabase-byok-project/ai/connection/resolve",
+        headers=headers_b,
+        json={},
+    )
+    assert owner_project_ai.status_code == 200
+    assert (
+        owner_project_ai.json()["ai_connection"]["selectionSource"]
+        == "user_ai_profile"
+    )
+    assert other_project_ai.status_code == 200
+    assert (
+        other_project_ai.json()["ai_connection"]["selectionSource"]
+        == "user_ai_profile_without_key_system_fallback"
+    )
+
+    wrong_session_revoke = client.delete(
+        "/auth/ai-credentials/current",
+        headers=headers_b,
+    )
+    assert wrong_session_revoke.status_code == 409
+    assert wrong_session_revoke.json()["detail"]["error"] == "credential_session_mismatch"
+    assert (
+        client.get("/auth/ai-profile", headers=headers_a).json()["effectiveAi"][
+            "selectionSource"
+        ]
+        == "user_ai_profile"
+    )
+
+    owner_revoke = client.delete("/auth/ai-credentials/current", headers=headers_a)
+    assert owner_revoke.status_code == 200
+    assert owner_revoke.json()["credentialRevoked"] is True
+
+
+def test_bearer_byok_fails_closed_without_signed_session_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "bearer-without-session.sqlite3"))
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "bearer-no-session-secret")
+    monkeypatch.setenv("REALYTICS_IDP_PROVIDER", "supabase")
+    monkeypatch.setenv("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY", "claims")
+    token = _make_hs256_token(
+        {
+            "iss": "https://pilot.supabase.co/auth/v1",
+            "sub": "supabase-no-session-user",
+            "realytics_tenant_id": "supabase-no-session-tenant",
+            "realytics_role": "reviewer",
+            "exp": int(time.time()) + 3600,
+        },
+        "bearer-no-session-secret",
+    )
+
+    response = TestClient(app).post(
+        "/auth/ai-credentials",
+        headers={"authorization": f"Bearer {token}"},
+        json={"provider": "gemini", "apiKey": "must-not-be-stored"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "credential_session_binding_required"
+
+
+def test_expired_byok_reference_is_cleared_from_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "expired-byok.sqlite3"))
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
+    monkeypatch.setenv("REALYTICS_AI_CREDENTIAL_TTL_SECONDS", "60")
+    now = datetime(2026, 7, 28, 2, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(secret_vault, "_utc_now", lambda: now)
+    client = TestClient(app)
+    client.post("/auth/tenants", json={"tenantId": "expired-tenant", "name": "Expired Tenant"})
+    client.post(
+        "/auth/users",
+        json={
+            "userId": "expired-user",
+            "tenantId": "expired-tenant",
+            "role": "reviewer",
+        },
+    )
+    session_id = client.post(
+        "/auth/session",
+        json={"userId": "expired-user", "tenantId": "expired-tenant"},
+    ).json()["session"]["sessionId"]
+    headers = {"x-realytics-session-id": session_id}
+    assert client.post(
+        "/auth/ai-credentials",
+        headers=headers,
+        json={"provider": "gemini", "apiKey": "short-lived-secret"},
+    ).status_code == 200
+
+    monkeypatch.setattr(
+        secret_vault,
+        "_utc_now",
+        lambda: now + timedelta(seconds=61),
+    )
+    profile = client.get("/auth/ai-profile", headers=headers)
+
+    assert profile.status_code == 200
+    assert profile.json()["profile"]["apiKeyConfigured"] is False
+    assert profile.json()["profile"]["credentialRefConfigured"] is False
+    assert (
+        profile.json()["effectiveAi"]["selectionSource"]
+        == "user_ai_profile_without_key_system_fallback"
+    )
 
 
 def _make_hs256_token(claims: dict, secret: str) -> str:

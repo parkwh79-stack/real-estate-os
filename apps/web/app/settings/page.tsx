@@ -22,6 +22,7 @@ import {
 import {
   apiBase,
   authHeaders,
+  configuredSupabaseAuthIssuer,
   createLocalPilotSession,
   enrollSupabaseTotp,
   issueTenantInvitation,
@@ -43,6 +44,8 @@ import {
 } from "../../lib/auth-client";
 import { localPilotAuthEnabled } from "../../lib/auth-policy";
 import { useAuth } from "../../components/auth/auth-context";
+import { TenantMembershipManagement } from "../../components/auth/tenant-membership-management";
+import { OnboardingAccessRequestManagement } from "../../components/auth/onboarding-access-request-management";
 
 const roleOptions = [
   { value: "reviewer", label: "심사역", description: "리스크 검토, 기준값 승인, 보고서 export 권한" },
@@ -74,6 +77,8 @@ const invitationRoleOptions: Array<{
   { value: "legal_counsel_approver", label: "법무 승인자" },
   { value: "admin", label: "테넌트 관리자" },
 ];
+
+type InvitationBindingMode = "email" | "identity";
 
 interface AiProfileResponse {
   profile?: {
@@ -111,7 +116,8 @@ export default function SettingsPage() {
   const [role, setRole] = useState("reviewer");
   const [provider, setProvider] = useState("gemini");
   const [model, setModel] = useState("gemini-2.5-flash");
-  const [apiKey, setApiKey] = useState("");
+  const apiKeyInputRef = useRef<HTMLInputElement>(null);
+  const [apiKeyLength, setApiKeyLength] = useState(0);
   const [allowSystemFallback, setAllowSystemFallback] = useState(true);
   const [aiProfile, setAiProfile] = useState<AiProfileResponse | null>(null);
   const [authReadiness, setAuthReadiness] = useState<SupabaseAuthReadiness | null>(null);
@@ -121,13 +127,18 @@ export default function SettingsPage() {
   const [reauthenticationFactorId, setReauthenticationFactorId] = useState("");
   const reauthenticationCodeRef = useRef<HTMLInputElement>(null);
   const [invitations, setInvitations] = useState<TenantInvitation[]>([]);
+  const [invitationBindingMode, setInvitationBindingMode] = useState<InvitationBindingMode>("email");
   const [invitationEmail, setInvitationEmail] = useState("");
+  const [invitationIssuer, setInvitationIssuer] = useState(
+    () => configuredSupabaseAuthIssuer() ?? "",
+  );
+  const [invitationSubject, setInvitationSubject] = useState("");
   const [invitationRole, setInvitationRole] = useState<TenantInvitationRole>("analyst");
   const [invitationExpiresInHours, setInvitationExpiresInHours] = useState(72);
   const [issuedInvitationUrl, setIssuedInvitationUrl] = useState<string | null>(null);
   const [invitationLoading, setInvitationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [securityLoading, setSecurityLoading] = useState(false);
+  const [securityLoading, setSecurityLoading] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -159,11 +170,24 @@ export default function SettingsPage() {
   const kakaoLinkAvailable = Boolean(
     authReadiness?.providerReady?.kakao && !kakaoIdentityLinked,
   );
+  const totpEnrollmentEligible = Boolean(
+    securityProfile?.totpEnrollment?.eligible,
+  );
+  const recentAal2Eligible = Boolean(
+    securityProfile?.assurance.recentAal2?.eligible,
+  );
 
   const clearMessages = () => {
     setNotice(null);
     setError(null);
   };
+
+  const clearApiKeyInput = useCallback(() => {
+    if (apiKeyInputRef.current) {
+      apiKeyInputRef.current.value = "";
+    }
+    setApiKeyLength(0);
+  }, []);
 
   const login = async () => {
     setLoading(true);
@@ -186,6 +210,7 @@ export default function SettingsPage() {
   };
 
   const loadAiProfile = useCallback(async () => {
+    clearApiKeyInput();
     setNotice(null);
     setError(null);
     const res = await fetch(`${apiBase}/auth/ai-profile`, {
@@ -204,18 +229,17 @@ export default function SettingsPage() {
     if (typeof body.profile?.allowSystemFallback === "boolean") {
       setAllowSystemFallback(body.profile.allowSystemFallback);
     }
-  }, []);
+  }, [clearApiKeyInput]);
 
   const loadAuthSecurity = useCallback(async () => {
     setSecurityLoading(true);
     try {
-      const readiness = await loadSupabaseAuthReadiness();
+      const [readiness, profile] = await Promise.all([
+        loadSupabaseAuthReadiness(),
+        user ? loadSupabaseSecurityProfile() : Promise.resolve(null),
+      ]);
       setAuthReadiness(readiness);
-      if (user) {
-        setSecurityProfile(await loadSupabaseSecurityProfile());
-      } else {
-        setSecurityProfile(null);
-      }
+      setSecurityProfile(profile);
     } catch (err) {
       setSecurityProfile(null);
       setError(err instanceof Error ? err.message : "인증 보안 상태 조회에 실패했습니다.");
@@ -241,9 +265,12 @@ export default function SettingsPage() {
   }, [canManageUsers, user]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      clearApiKeyInput();
+      return;
+    }
     void loadAiProfile();
-  }, [user, loadAiProfile]);
+  }, [user, loadAiProfile, clearApiKeyInput]);
 
   useEffect(() => {
     void loadAuthSecurity();
@@ -285,6 +312,9 @@ export default function SettingsPage() {
   };
 
   const removeMfaFactor = async (factorId: string) => {
+    if (!window.confirm(
+      "이 TOTP 인증 요소를 삭제하시겠습니까? 계정 복구 수단이 줄어들 수 있습니다.",
+    )) return;
     setSecurityLoading(true);
     clearMessages();
     try {
@@ -294,6 +324,21 @@ export default function SettingsPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "MFA 요소를 해제하지 못했습니다.");
     } finally {
+      setSecurityLoading(false);
+    }
+  };
+
+  const linkIdentity = async (provider: "google" | "kakao") => {
+    const label = provider === "google" ? "Google" : "Kakao";
+    if (!window.confirm(
+      `${label} 계정을 현재 REALYTICS 계정의 추가 로그인 수단으로 연결하시겠습니까?`,
+    )) return;
+    setSecurityLoading(true);
+    clearMessages();
+    try {
+      await startSupabaseIdentityLink(provider);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "계정 연결을 시작하지 못했습니다.");
       setSecurityLoading(false);
     }
   };
@@ -321,7 +366,14 @@ export default function SettingsPage() {
     }
   };
 
-  const removeIdentity = async (identityId: string) => {
+  const removeIdentity = async (identityId: string, provider: string) => {
+    if (provider === "email") {
+      setError("기본 이메일 로그인 수단은 연결 해제할 수 없습니다.");
+      return;
+    }
+    if (!window.confirm(
+      `${providerLabel(provider)} 로그인을 현재 계정에서 연결 해제하시겠습니까?`,
+    )) return;
     setSecurityLoading(true);
     clearMessages();
     try {
@@ -349,8 +401,15 @@ export default function SettingsPage() {
   };
 
   const createInvitation = async () => {
-    if (!invitationEmail.trim()) {
+    if (invitationBindingMode === "email" && !invitationEmail.trim()) {
       setError("초대 대상 이메일을 입력해 주세요.");
+      return;
+    }
+    if (
+      invitationBindingMode === "identity"
+      && (!invitationIssuer.trim() || !invitationSubject.trim())
+    ) {
+      setError("Supabase Auth issuer와 subject를 모두 입력해 주세요.");
       return;
     }
     setInvitationLoading(true);
@@ -359,8 +418,13 @@ export default function SettingsPage() {
     try {
       const issued = await issueTenantInvitation({
         role: invitationRole,
-        invitedEmail: invitationEmail,
         expiresInHours: invitationExpiresInHours,
+        ...(invitationBindingMode === "email"
+          ? { invitedEmail: invitationEmail }
+          : {
+            invitedIssuer: invitationIssuer,
+            invitedSubject: invitationSubject,
+          }),
       });
       const invitationUrl = new URL(
         "/api/auth/supabase/invitation/start",
@@ -369,7 +433,11 @@ export default function SettingsPage() {
       invitationUrl.searchParams.set("token", issued.token);
       invitationUrl.searchParams.set("next", "/start");
       setIssuedInvitationUrl(invitationUrl.toString());
-      setInvitationEmail("");
+      if (invitationBindingMode === "email") {
+        setInvitationEmail("");
+      } else {
+        setInvitationSubject("");
+      }
       await loadInvitations();
       setNotice(
         "초대를 발급했습니다. 원문 토큰은 다시 조회할 수 없으므로 아래 링크를 지금 안전하게 전달해 주세요.",
@@ -410,10 +478,12 @@ export default function SettingsPage() {
   };
 
   const saveAiProfile = async () => {
+    const submittedApiKey = apiKeyInputRef.current?.value.trim() ?? "";
+    const hasNewCredential = Boolean(submittedApiKey);
+    clearApiKeyInput();
     setLoading(true);
     clearMessages();
     try {
-      const hasNewCredential = Boolean(apiKey.trim());
       const res = await fetch(`${apiBase}/auth/${hasNewCredential ? "ai-credentials" : "ai-profile"}`, {
         method: "POST",
         headers: {
@@ -423,28 +493,42 @@ export default function SettingsPage() {
         body: JSON.stringify({
           provider,
           model: model.trim() || selectedProvider?.defaultModel || "gemini-2.5-flash",
-          ...(hasNewCredential ? { apiKey: apiKey.trim(), expiresOnLogout: true } : {}),
+          ...(hasNewCredential ? { apiKey: submittedApiKey, expiresOnLogout: true } : {}),
           status: "active",
           allowSystemFallback,
         }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        if (hasNewCredential) {
+          throw new Error(
+            `AI API Key를 안전 저장소에 연결하지 못했습니다. 입력값은 폐기되었습니다. (HTTP ${res.status})`,
+          );
+        }
+        throw new Error(await res.text());
+      }
       await res.json();
       await loadAiProfile();
-      setApiKey("");
       setNotice(
         hasNewCredential
           ? "AI 모델과 세션용 API Key를 연결했습니다. 원문은 프로필 DB에 저장되지 않으며 로그아웃 시 폐기됩니다."
           : "AI 모델 설정을 저장했습니다.",
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "AI 모델 설정 저장에 실패했습니다.");
+      setError(
+        hasNewCredential
+          ? "AI API Key를 안전 저장소에 연결하지 못했습니다. 입력값은 폐기되었습니다."
+          : err instanceof Error
+            ? err.message
+            : "AI 모델 설정 저장에 실패했습니다.",
+      );
     } finally {
+      clearApiKeyInput();
       setLoading(false);
     }
   };
 
   const resetAiProfile = async () => {
+    clearApiKeyInput();
     setLoading(true);
     clearMessages();
     try {
@@ -457,7 +541,7 @@ export default function SettingsPage() {
       setAiProfile(body);
       setProvider("gemini");
       setModel("gemini-2.5-flash");
-      setApiKey("");
+      clearApiKeyInput();
       setAllowSystemFallback(true);
       setNotice("개인 AI 설정을 삭제했습니다. 시스템 기본 Gemini fallback으로 전환됩니다.");
     } catch (err) {
@@ -534,7 +618,18 @@ export default function SettingsPage() {
             ) : null}
             <button
               type="button"
-              onClick={() => void logout()}
+              onClick={() => {
+                clearApiKeyInput();
+                clearMessages();
+                void logout().catch((err) => {
+                  setError(
+                    err instanceof Error
+                      ? err.message
+                      : "로그인 세션을 종료하지 못했습니다. 다시 시도해 주세요.",
+                  );
+                });
+              }}
+              data-testid="settings-logout"
               className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               <LogOut className="h-4 w-4" />
@@ -608,11 +703,11 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <h3 className="text-sm font-bold text-slate-900 dark:text-white">로그인 공급자</h3>
                   <div className="flex gap-2">
-                    <button type="button" onClick={() => startSupabaseIdentityLink("google")} disabled={!googleLinkAvailable} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700">
-                      <Link2 className="mr-1 inline h-3.5 w-3.5" />{googleIdentityLinked ? "Google 연결됨" : "Google 연결"}
+                    <button type="button" onClick={() => void linkIdentity("google")} disabled={!googleLinkAvailable || !recentAal2Eligible || securityLoading} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700">
+                      <Link2 className="mr-1 inline h-3.5 w-3.5" />{securityLoading && !securityProfile ? "Google 확인 중" : googleIdentityLinked ? "Google 연결됨" : "Google 연결"}
                     </button>
-                    <button type="button" onClick={() => startSupabaseIdentityLink("kakao")} disabled={!kakaoLinkAvailable} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700">
-                      <Link2 className="mr-1 inline h-3.5 w-3.5" />{kakaoIdentityLinked ? "Kakao 연결됨" : authReadiness?.providers.kakao ? "Kakao 설정 필요" : "Kakao 연결"}
+                    <button type="button" onClick={() => void linkIdentity("kakao")} disabled={!kakaoLinkAvailable || !recentAal2Eligible || securityLoading} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700">
+                      <Link2 className="mr-1 inline h-3.5 w-3.5" />{securityLoading && !securityProfile ? "Kakao 확인 중" : kakaoIdentityLinked ? "Kakao 연결됨" : authReadiness?.providers.kakao ? "Kakao 설정 필요" : "Kakao 연결"}
                     </button>
                   </div>
                 </div>
@@ -625,8 +720,14 @@ export default function SettingsPage() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => void removeIdentity(identity.identityId)}
-                        disabled={securityLoading || (securityProfile?.identities.length ?? 0) < 2}
+                        onClick={() => void removeIdentity(identity.identityId, identity.provider)}
+                        disabled={
+                          securityLoading
+                          || !recentAal2Eligible
+                          || identity.provider === "email"
+                          || !["google", "kakao"].includes(identity.provider)
+                          || (securityProfile?.identities.length ?? 0) < 2
+                        }
                         className="rounded-md p-2 text-rose-600 disabled:cursor-not-allowed disabled:opacity-30"
                         aria-label={`${providerLabel(identity.provider)} 연결 해제`}
                       >
@@ -641,17 +742,28 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">다중요소 인증</h3>
-                    <p className="text-xs text-slate-500">현재 세션: {securityProfile?.assurance.currentLevel ?? "미확인"}</p>
+                    <p className="text-xs text-slate-500">현재 세션: {securityLoading && !securityProfile ? "확인 중" : securityProfile?.assurance.currentLevel ?? "미확인"}</p>
                   </div>
                   <button
                     type="button"
                     onClick={() => void beginTotpEnrollment()}
-                    disabled={securityLoading || Boolean(totpEnrollment)}
+                    disabled={
+                      securityLoading
+                        || Boolean(totpEnrollment)
+                        || !totpEnrollmentEligible
+                    }
                     className="rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
                   >
                     TOTP 등록
                   </button>
                 </div>
+                {securityProfile && !totpEnrollmentEligible ? (
+                  <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+                    Supabase TOTP 등록에는 이 Auth 계정에 귀속된 검증된 이메일이 필요합니다.
+                    이메일은 Tenant 가입·계정 자동 연결·권한 판단에 사용하지 않습니다. 현재 계정에는
+                    MFA용 이메일이 없으므로, 다른 사용자와 중복되지 않는 기관 이메일을 검증한 뒤 등록해 주세요.
+                  </p>
+                ) : null}
                 <div className="mt-2 space-y-2">
                   {(securityProfile?.factors ?? []).map((factor) => (
                     <div key={factor.factorId} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
@@ -659,13 +771,13 @@ export default function SettingsPage() {
                         <p className="text-sm font-bold text-slate-900 dark:text-white">{factor.friendlyName ?? factor.factorType}</p>
                         <p className="text-xs text-slate-500">{factor.status}</p>
                       </div>
-                      <button type="button" onClick={() => void removeMfaFactor(factor.factorId)} disabled={securityLoading} className="rounded-md p-2 text-rose-600 disabled:opacity-30" aria-label="MFA 요소 해제">
+                      <button type="button" onClick={() => void removeMfaFactor(factor.factorId)} disabled={securityLoading || !recentAal2Eligible} className="rounded-md p-2 text-rose-600 disabled:opacity-30" aria-label="MFA 요소 해제">
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </div>
                   ))}
                 </div>
-                {securityProfile?.assurance.currentLevel === "aal1" && verifiedTotpFactors.length ? (
+                {!recentAal2Eligible && verifiedTotpFactors.length ? (
                   <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/20">
                     <p className="text-sm font-bold text-amber-950 dark:text-amber-100">AAL2 추가 인증</p>
                     <p className="mt-1 text-xs leading-5 text-amber-800 dark:text-amber-200">
@@ -739,23 +851,104 @@ export default function SettingsPage() {
       </section>
 
       {canManageUsers ? (
+        <TenantMembershipManagement
+          currentUser={user}
+          assuranceLevel={securityProfile?.assurance.currentLevel ?? null}
+        />
+      ) : null}
+
+      <OnboardingAccessRequestManagement
+        assuranceLevel={securityProfile?.assurance.currentLevel ?? null}
+        currentTenantId={user?.tenantId ?? null}
+        canManageUsers={canManageUsers}
+      />
+
+      {canManageUsers ? (
         <Panel title="테넌트 사용자 초대" icon={<MailPlus className="h-5 w-5 text-blue-600" />}>
           <div className="grid gap-5 xl:grid-cols-[0.8fr_1.2fr]">
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
-                <label className="block sm:col-span-2">
+                <div className="sm:col-span-2">
                   <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
-                    초대 대상 이메일
+                    초대 바인딩 방식
                   </span>
-                  <input
-                    type="email"
-                    value={invitationEmail}
-                    onChange={(event) => setInvitationEmail(event.target.value)}
-                    placeholder="name@company.com"
-                    autoComplete="off"
-                    className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:focus:ring-blue-950"
-                  />
-                </label>
+                  <div className="mt-1 grid grid-cols-2 rounded-lg border border-slate-200 bg-slate-50 p-1 dark:border-slate-700 dark:bg-slate-950">
+                    {([
+                      ["email", "이메일 초대"],
+                      ["identity", "Supabase 신원 초대"],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={invitationBindingMode === value}
+                        onClick={() => {
+                          setInvitationBindingMode(value);
+                          setInvitationEmail("");
+                          setInvitationSubject("");
+                          setIssuedInvitationUrl(null);
+                          clearMessages();
+                        }}
+                        className={`h-9 rounded-md px-3 text-xs font-bold transition ${
+                          invitationBindingMode === value
+                            ? "bg-white text-blue-700 shadow-sm dark:bg-slate-800 dark:text-blue-300"
+                            : "text-slate-500 dark:text-slate-400"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {invitationBindingMode === "email" ? (
+                  <label className="block sm:col-span-2">
+                    <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      초대 대상 이메일
+                    </span>
+                    <input
+                      type="email"
+                      value={invitationEmail}
+                      onChange={(event) => setInvitationEmail(event.target.value)}
+                      placeholder="name@company.com"
+                      autoComplete="off"
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:focus:ring-blue-950"
+                    />
+                  </label>
+                ) : (
+                  <div className="space-y-3 sm:col-span-2">
+                    <label className="block">
+                      <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                        Supabase Auth issuer
+                      </span>
+                      <input
+                        type="url"
+                        value={invitationIssuer}
+                        onChange={(event) => setInvitationIssuer(event.target.value)}
+                        placeholder="https://project-ref.supabase.co/auth/v1"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 font-mono text-xs text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:focus:ring-blue-950"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                        Supabase Auth subject (사용자 UUID)
+                      </span>
+                      <input
+                        type="text"
+                        value={invitationSubject}
+                        onChange={(event) => setInvitationSubject(event.target.value)}
+                        placeholder="00000000-0000-4000-8000-000000000000"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 font-mono text-xs text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:focus:ring-blue-950"
+                      />
+                    </label>
+                    <p className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs leading-5 text-blue-800 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
+                      Supabase Auth 사용자 상세의 서명된 <code>iss</code>와 <code>sub</code>를 그대로 사용합니다.
+                      이메일은 전송하거나 동일 이메일 계정 연결의 근거로 사용하지 않습니다.
+                    </p>
+                  </div>
+                )}
                 <label className="block">
                   <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
                     부여 역할
@@ -789,12 +982,17 @@ export default function SettingsPage() {
                 </label>
               </div>
               <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
-                역할과 테넌트는 서버가 초대 레코드에서 확정합니다. 관리자·법무 승인자 또는 이메일이 없는 초대는 최근 AAL2 인증이 필요합니다.
+                역할과 테넌트는 서버가 초대 레코드에서 확정합니다. 관리자·법무 승인자 등 민감 역할은 기존 정책대로 최근 AAL2 인증이 필요합니다.
               </p>
               <button
                 type="button"
                 onClick={() => void createInvitation()}
-                disabled={invitationLoading || !invitationEmail.trim()}
+                disabled={
+                  invitationLoading
+                  || (invitationBindingMode === "email"
+                    ? !invitationEmail.trim()
+                    : !invitationIssuer.trim() || !invitationSubject.trim())
+                }
                 className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <MailPlus className="h-4 w-4" />
@@ -857,10 +1055,15 @@ export default function SettingsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="truncate text-sm font-bold text-slate-950 dark:text-white">
-                          {invitation.invitedEmail ?? "신원 바인딩 초대"}
+                          {invitation.invitedEmail ?? invitation.invitedSubject ?? "신원 바인딩 초대"}
                         </p>
                         <InvitationStatus status={invitation.status} />
                       </div>
+                      {invitation.invitedIssuer && invitation.invitedSubject ? (
+                        <p className="mt-1 break-all font-mono text-[11px] leading-4 text-slate-500">
+                          {invitation.invitedIssuer} · {invitation.invitedSubject}
+                        </p>
+                      ) : null}
                       <p className="mt-1 text-xs text-slate-500">
                         {invitationRoleLabel(invitation.role)} · 발급 {formatDateTime(invitation.issuedAt)}
                       </p>
@@ -898,6 +1101,7 @@ export default function SettingsPage() {
               <select
                 value={provider}
                 onChange={(event) => {
+                  clearApiKeyInput();
                   const next = providerOptions.find((item) => item.value === event.target.value);
                   setProvider(event.target.value);
                   setModel(next?.defaultModel ?? "");
@@ -911,16 +1115,45 @@ export default function SettingsPage() {
                 ))}
               </select>
             </label>
-            <TextInput label="모델명" value={model} onChange={setModel} />
+            <TextInput
+              label="모델명"
+              value={model}
+              onChange={setModel}
+              name="realytics-llm-model-id"
+              autoComplete="off"
+            />
             <label className="block md:col-span-2">
               <span className="text-xs font-semibold text-slate-500">API Key</span>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                placeholder={aiProfile?.profile?.apiKeyMasked ?? "새 API Key를 입력하면 기존 키를 교체합니다."}
-                className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
-              />
+              <div className="relative mt-1">
+                <input
+                  ref={apiKeyInputRef}
+                  type="text"
+                  name="realytics-llm-api-token"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  aria-label="AI API Key"
+                  data-testid="ai-api-key-input"
+                  data-form-type="other"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-bwignore="true"
+                  data-protonpass-ignore="true"
+                  onChange={(event) => setApiKeyLength(event.currentTarget.value.length)}
+                  placeholder={aiProfile?.profile?.apiKeyMasked ?? "새 API Key를 입력하면 기존 키를 교체합니다."}
+                  className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-transparent caret-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:caret-white dark:placeholder:text-slate-500"
+                  style={{ WebkitTextSecurity: "disc" } as React.CSSProperties}
+                />
+                {apiKeyLength > 0 ? (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-y-0 left-3 right-3 flex items-center overflow-hidden whitespace-nowrap font-mono text-sm tracking-wider text-slate-900 dark:text-white"
+                  >
+                    {"•".repeat(Math.min(apiKeyLength, 96))}
+                  </span>
+                ) : null}
+              </div>
               <p className="mt-1 text-xs text-slate-500">
                 키 원문은 전용 보안 입력 API로만 전달되고 프로필 DB·로그에는 저장되지 않습니다. 세션 저장소 또는 운영 Secret Manager의 참조값만 보관하며 로그아웃 시 폐기합니다.
               </p>
@@ -946,6 +1179,7 @@ export default function SettingsPage() {
               type="button"
               onClick={() => void saveAiProfile()}
               disabled={loading || !user}
+              data-testid="save-ai-profile"
               className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-bold text-white disabled:opacity-50"
             >
               <Save className="h-4 w-4" />
@@ -1077,15 +1311,22 @@ function TextInput({
   label,
   value,
   onChange,
+  name,
+  autoComplete,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  name?: string;
+  autoComplete?: string;
 }) {
   return (
     <label className="block">
       <span className="text-xs font-semibold text-re-secondary">{label}</span>
       <input
+        name={name}
+        autoComplete={autoComplete}
+        spellCheck={false}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="mt-1 h-10 w-full rounded-re-control border border-re-border bg-re-surface px-3 text-sm text-re-text outline-none focus:border-re-action"

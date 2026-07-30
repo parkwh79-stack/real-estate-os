@@ -28,7 +28,9 @@ export function HeaderUser() {
       <button
         type="button"
         onClick={() => {
-          void logout().finally(() => router.replace("/login"));
+          void logout()
+            .then(() => router.replace("/login"))
+            .catch(() => undefined);
         }}
         className="ml-2 rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
       >

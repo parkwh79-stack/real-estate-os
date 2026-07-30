@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Event, Lock
 from typing import Any, Protocol
 
 from db.postgres_runtime_pool import identity_transaction
@@ -45,6 +46,20 @@ class PrincipalMembershipDirectory:
     memberships: tuple[TenantMembershipRecord, ...]
 
 
+@dataclass
+class _DirectoryLookupFlight:
+    """One process-local lookup shared only while the query is in flight."""
+
+    completed: Event = field(default_factory=Event)
+    result: PrincipalMembershipDirectory | None = None
+    error: Exception | None = None
+    followers: int = 0
+
+
+_directory_lookup_flights: dict[tuple[Any, ...], _DirectoryLookupFlight] = {}
+_directory_lookup_flights_lock = Lock()
+
+
 class IdentityMembershipRepository(Protocol):
     def load_directory(
         self,
@@ -53,6 +68,112 @@ class IdentityMembershipRepository(Protocol):
         subject: str,
     ) -> PrincipalMembershipDirectory:
         """Load one verified principal and every tenant-membership state."""
+
+
+def _normalized_identity_key(*, issuer: str, subject: str) -> tuple[str, str]:
+    normalized_issuer = str(issuer or "").strip().rstrip("/")
+    normalized_subject = str(subject or "").strip()
+    if not normalized_issuer or not normalized_subject:
+        raise ValueError("issuer and subject are required")
+    return normalized_issuer, normalized_subject
+
+
+def _directory_lookup_key(
+    repository: IdentityMembershipRepository,
+    *,
+    issuer: str,
+    subject: str,
+) -> tuple[Any, ...]:
+    normalized_issuer, normalized_subject = _normalized_identity_key(
+        issuer=issuer,
+        subject=subject,
+    )
+    schema = getattr(repository, "_schema", None)
+    transaction_factory = getattr(repository, "_transaction", None)
+    authority_identity = (
+        id(transaction_factory)
+        if transaction_factory is not None
+        else id(repository)
+    )
+    return (
+        type(repository).__module__,
+        type(repository).__qualname__,
+        str(schema or ""),
+        authority_identity,
+        normalized_issuer,
+        normalized_subject,
+    )
+
+
+def _raise_flight_error(error: Exception) -> None:
+    try:
+        cloned = type(error)(*error.args)
+    except Exception as clone_error:
+        raise IdentityMembershipRepositoryUnavailable(
+            "identity membership lookup failed"
+        ) from clone_error
+    raise cloned from error
+
+
+def load_directory_singleflight(
+    repository: IdentityMembershipRepository,
+    *,
+    issuer: str,
+    subject: str,
+) -> PrincipalMembershipDirectory:
+    """Coalesce an identical directory read only while its query is running.
+
+    This deliberately is not a membership cache.  The flight is removed as
+    soon as the leader publishes its result (or failure), so a later request
+    must query PostgreSQL again and observes membership suspension/revocation.
+    Waiting callers retain their own reference to the completed flight.
+    """
+
+    normalized_issuer, normalized_subject = _normalized_identity_key(
+        issuer=issuer,
+        subject=subject,
+    )
+    key = _directory_lookup_key(
+        repository,
+        issuer=normalized_issuer,
+        subject=normalized_subject,
+    )
+    with _directory_lookup_flights_lock:
+        flight = _directory_lookup_flights.get(key)
+        if flight is None:
+            flight = _DirectoryLookupFlight()
+            _directory_lookup_flights[key] = flight
+            is_leader = True
+        else:
+            is_leader = False
+            flight.followers += 1
+
+    if is_leader:
+        try:
+            flight.result = repository.load_directory(
+                issuer=normalized_issuer,
+                subject=normalized_subject,
+            )
+        except Exception as exc:
+            # Publish provider failures so followers cannot remain blocked.
+            # Every caller receives a separate exception object and remains
+            # fail-closed.
+            flight.error = exc
+        finally:
+            with _directory_lookup_flights_lock:
+                if _directory_lookup_flights.get(key) is flight:
+                    del _directory_lookup_flights[key]
+                flight.completed.set()
+    else:
+        flight.completed.wait()
+
+    if flight.error is not None:
+        _raise_flight_error(flight.error)
+    if flight.result is None:
+        raise IdentityMembershipRepositoryUnavailable(
+            "identity membership lookup completed without a result"
+        )
+    return flight.result
 
 
 class PostgresIdentityMembershipRepository:
@@ -87,10 +208,10 @@ class PostgresIdentityMembershipRepository:
     ) -> PrincipalMembershipDirectory:
         # Migration 0012 stores ``btrim(issuer)`` after removing every trailing
         # slash. Apply the same canonicalization before the composite-PK lookup.
-        normalized_issuer = str(issuer or "").strip().rstrip("/")
-        normalized_subject = str(subject or "").strip()
-        if not normalized_issuer or not normalized_subject:
-            raise ValueError("issuer and subject are required")
+        normalized_issuer, normalized_subject = _normalized_identity_key(
+            issuer=issuer,
+            subject=subject,
+        )
 
         sql = f"""
             SELECT
@@ -169,6 +290,7 @@ __all__ = [
     "IdentityMembershipRepository",
     "IdentityMembershipRepositoryUnavailable",
     "IdentityPrincipalRecord",
+    "load_directory_singleflight",
     "PostgresIdentityMembershipRepository",
     "PrincipalMembershipDirectory",
     "TenantMembershipRecord",

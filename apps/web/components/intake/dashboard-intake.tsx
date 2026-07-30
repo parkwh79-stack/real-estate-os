@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Loader2, Sparkles, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
+import { backendErrorMessageForResponse } from "../../lib/backend-error";
 import { SmartIntake } from "./smart-intake";
 
 type Phase = "idle" | "creating" | "ready" | "error";
@@ -50,7 +51,11 @@ export function DashboardIntake({ onProjectCreated }: { onProjectCreated?: () =>
           headers: { ...authHeaders("web"), "Content-Type": "application/json" },
           body: JSON.stringify({ name, status: "draft" }),
         });
-        if (!res.ok) throw new Error(`심사 공간 생성 실패 (${res.status})`);
+        if (!res.ok) {
+          throw new Error(
+            await backendErrorMessageForResponse(res, { action: "새 심사 공간 생성" }),
+          );
+        }
         const body = (await res.json()) as { id?: string; project?: { id?: string } };
         const id = body.id ?? body.project?.id;
         if (!id) throw new Error("생성된 심사 ID를 받지 못했습니다.");

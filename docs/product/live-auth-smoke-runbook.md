@@ -1,11 +1,13 @@
 # Live Google/Kakao Auth Smoke Runbook
 
-Updated: 2026-07-27
+Updated: 2026-07-30
 
-Status: Google PKCE and normalized membership verified; interactive TOTP,
-second-user maker-checker, and Kakao scope remediation remain
+Status: Google PKCE, normalized membership, and TOTP AAL2 verified; Kakao PKCE
+and normalized membership verified; a second independent AAL2 checker,
+hardened PostgreSQL API runtime, cross-device revocation proof, and dedicated
+maker-checker rehearsal remain
 
-## Current hosted Gate status (2026-07-27)
+## Current hosted Gate status (2026-07-28)
 
 ### OAuth callback correction and provider-specific status
 
@@ -21,23 +23,70 @@ Google round trip now reaches `/start`; `/settings` confirms the normalized
 tenant and `admin` role returned by FastAPI. Email is display metadata only and
 is not used to join or authorize the account.
 
-Kakao reaches the hosted Supabase callback but the provider currently returns
-`invalid_scope: account_email`. Hosted GoTrue requests that scope by default,
-so the Kakao app must be converted to a Biz App and its `account_email` consent
-item enabled (or a future provider version must be proven to omit the scope).
-Until one real round trip succeeds,
-`REALYTICS_KAKAO_OAUTH_SCOPE_VERIFIED=false` keeps the Kakao button unavailable
-while Google remains usable. Supabase provider enablement alone is not treated
-as operating evidence.
+The Kakao flow now requires both sides of the email-optional contract. GoTrue
+appends `options.scopes` to its Kakao defaults, so the Web OAuth start instead
+uses a server-controlled provider query override:
+`scope=profile_nickname profile_image`. This removes `account_email` from the
+generated Kakao authorization URL. The hosted provider is enabled with
+`external_kakao_email_optional=true`, and that value was read back from the
+Management API. A Kakao Biz App and `account_email` scope are therefore not a
+login prerequisite. The Web runtime attests the deployment-specific hosted
+readback with `REALYTICS_KAKAO_EMAIL_OPTIONAL_VERIFIED=true`; provider
+enablement or email-optional configuration without the server-controlled
+scope override is insufficient. Email remains optional profile metadata. The
+verified JWT `iss + sub`, explicit invitation, and normalized PostgreSQL
+membership remain authoritative for identity and tenant access.
 
-The hosted project is **Google session-and-membership-ready; Kakao is
-scope-blocked** for the destructive smoke. Both providers are enabled in
-Supabase Auth, but enablement is not operational proof. Google completed a real
-PKCE exchange; Kakao still needs the external consent correction described
-above. The first principal and membership exist; remaining absence signals are
-a verified MFA factor/session for that user and a second invited principal for
-maker-checker. The operational Gate remains fail-closed until TOTP is verified
-and two distinct users hold fresh AAL2 sessions.
+The hosted project is **session-and-membership-proven for Google and Kakao**.
+Google additionally has one verified TOTP factor and one active AAL2 session.
+The scoped sign-out request preserved that current AAL2 session, but no second
+active session existed at the time, so actual cross-device invalidation is not
+yet claimed. Kakao was admitted through an explicit identity-bound invitation
+and now resolves to an active normalized PostgreSQL membership.
+
+The Kakao pilot identity intentionally has no provider email because the OAuth
+scope excludes `account_email`. Hosted GoTrue cannot currently enroll TOTP for
+an Auth user without an account name derived from a verified email. REALYTICS
+therefore rejects that enrollment before calling GoTrue and reports
+`verified_email_required_for_totp`. The system must not fabricate an email,
+write `auth.users` directly, or restore automatic same-email linking merely to
+pass this Gate.
+
+The operational maker-checker Gate remains fail-closed until a second human
+checker has a distinct `iss + sub`, an explicit membership, a unique verified
+contact email suitable for TOTP enrollment, and a fresh AAL2 session. The
+destructive rehearsal also requires a dedicated completed PF run and draft
+report whose lineage/readiness checks pass. One operator controlling two OAuth
+identities is not accepted as independent maker-checker evidence.
+
+The current local API process has the dedicated Identity DSN, but it is not yet
+an operating rehearsal for final approval: high-risk step-up enforcement, the
+900-second freshness limit, PostgreSQL storage mode, and the authoritative API
+runtime DSN are not configured in its local environment. Configure all four
+and restart the API before capturing maker/checker states or mutating a PF run
+or report.
+
+Before starting that API, run the dedicated API database preflight with
+`REALYTICS_MIGRATION_DATABASE_URL`, `REALYTICS_API_DATABASE_URL`, and
+`REALYTICS_API_DATABASE_ROLE` supplied by the approved secret store:
+
+```powershell
+python services/api-server/scripts/preflight_postgres_api_runtime.py
+```
+
+An `ok=false` result blocks the rehearsal. In particular, `role_nologin`,
+`wrong_login_role`, `unsafe_role_attributes`, missing project/sequence grants,
+or forbidden grants must not be waived by substituting the Supabase management
+connection. After startup, sign in as the intended provider identity, verify
+`/auth/me` returns the PostgreSQL role/permissions, then verify a reviewer sees
+assigned work but receives a structured 403 with
+`requiredPermission=project:write` for new project creation.
+
+For an administrator role correction, use Settings with a distinct AAL2
+administrator. Select the exact target `issuer + subject`, record the reason,
+and confirm the refreshed membership version and append-only audit event. Never
+change the signed-in administrator's own role or promote a Kakao/Google account
+by matching email.
 
 The current identity database rehearsal uses the dedicated
 `realytics_identity` role through the Supavisor session pooler. Its credential
@@ -66,6 +115,11 @@ MFA state, and optionally other-session revocation.
 ## Preconditions
 
 - The selected provider is enabled in the hosted Supabase project.
+- Kakao OAuth start fixes the provider query to
+  `scope=profile_nickname profile_image`, the resulting Kakao URL contains no
+  `account_email`, and hosted Kakao Auth has
+  `external_kakao_email_optional=true` verified before the Web runtime sets
+  `REALYTICS_KAKAO_EMAIL_OPTIONAL_VERIFIED=true`.
 - The provider callback is
   `https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/callback`.
 - The deployed Web callback URL is in the Supabase redirect allow-list.
@@ -172,14 +226,22 @@ session while the current browser remains authenticated.
 4. A passing harness is operating evidence for the tested environment only;
    it does not replace periodic JWKS rotation, tenant RLS, or role audits.
 
-## Implementation validation (2026-07-27)
+## Implementation validation (2026-07-28)
 
 - FastAPI assurance and final-action route contract: `11 passed`.
 - Web fail-closed auth/maker-checker evaluator: `3 passed` in Chromium.
 - Web `check-types` and full ESLint: passed with zero warnings.
 - Hosted Google real-user PKCE + normalized membership: passed for the first
   approved pilot administrator.
-- Hosted TOTP AAL2: enrollment UI reached; user-entered verification is still
-  pending and is not claimed as passed.
-- Hosted maker-checker and Kakao: blocked by the second invited principal and
-  Kakao `account_email` consent respectively.
+- Hosted Google TOTP AAL2: one verified factor and one active AAL2 session;
+  passed. The scoped other-session sign-out retained the current session, but
+  no second session existed, so cross-device revocation remains unproven.
+- Hosted Kakao configuration: server-controlled
+  `scope=profile_nickname profile_image`, provider enablement, and
+  email-optional setting verified. Real Kakao PKCE, invitation acceptance, and
+  normalized active membership passed.
+- Hosted Kakao TOTP AAL2: correctly blocked before GoTrue because the pilot
+  Auth identity has no unique verified email/account name.
+- Hosted maker-checker: blocked by the second independent human checker, that
+  checker's fresh AAL2 session, hardened PostgreSQL API runtime configuration,
+  and dedicated rehearsal run/report IDs.
