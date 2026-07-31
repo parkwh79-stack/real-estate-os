@@ -31,6 +31,7 @@ EXPECTED_MIGRATIONS = (
     "20260728083451_user_activity_append_boundary.sql",
     "20260730112222_tenant_membership_role_administration.sql",
     "20260730122658_verified_principal_onboarding.sql",
+    "20260731093559_calculation_run_tenant_read_index.sql",
 )
 
 

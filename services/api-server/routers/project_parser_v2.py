@@ -1353,7 +1353,12 @@ def _validate_derived_candidate_lineage(
                 "derived candidate inputs must be present Parser V2 candidates"
             )
 
-    calculation_runs = calculation_run_list_fn(project_id, limit=500)
+    calculation_runs = calculation_run_list_fn(
+        project_id,
+        tenant_id=tenant_id,
+        calculation_run_id=calculation_run_id,
+        limit=1,
+    )
     calculation_run = next(
         (
             item

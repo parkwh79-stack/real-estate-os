@@ -2776,7 +2776,34 @@ def list_project_calculation_runs(
     project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
     enforce_project_tenant_scope(request, project)
-    records = list_calculation_run_records(project_id, engine_key=engine_key, limit=limit)
+    try:
+        if storage_backend() in {"postgres", "postgresql"}:
+            tenant_id = str(tenant_id_from_request(request) or "").strip()
+            if not tenant_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "tenant_required"},
+                )
+            records = PostgresCalculationRunRepository(
+                tenant_id=tenant_id
+            ).list_runs(
+                project_id,
+                engine_key=engine_key,
+                limit=limit,
+            )
+        else:
+            records = list_calculation_run_records(
+                project_id,
+                engine_key=engine_key,
+                limit=limit,
+            )
+    except HTTPException:
+        raise
+    except CalculationRunRepositoryError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "calculation_run_authority_unavailable"},
+        ) from exc
     return {
         "schemaVersion": "realytics-calculation-run-list-v2",
         "projectId": project_id,

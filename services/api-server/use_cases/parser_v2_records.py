@@ -667,7 +667,12 @@ class ParserV2RecordStore:
                 raise ParserV2ApprovalError(
                     "derived candidate inputs must be present facts"
                 )
-            calculation_runs = self._list_calculation_runs(project_id, limit=500)
+            calculation_runs = self._list_calculation_runs(
+                project_id,
+                tenant_id=tenant_id,
+                calculation_run_id=calculation_run_id,
+                limit=1,
+            )
             calculation_run = next(
                 (
                     item

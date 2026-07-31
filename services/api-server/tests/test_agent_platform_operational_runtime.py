@@ -320,6 +320,42 @@ def test_outbox_failure_retries_and_then_dead_letters():
     assert dead and dead.status == OutboxEventStatus.DEAD_LETTER
 
 
+def test_outbox_dispatcher_injects_authoritative_tenant_and_project_scope():
+    repository = OperationalRepository()
+    now = datetime.now(timezone.utc)
+    repository.enqueue_outbox(
+        RuntimeOutboxEvent(
+            event_id="outbox-scope-1",
+            tenant_id="tenant-1",
+            project_id="project-1",
+            aggregate_type="calculation_run",
+            aggregate_id="calculation-1",
+            event_type="scope_test",
+            idempotency_key="outbox-scope-idem-1",
+            payload={"calculationRunId": "calculation-1"},
+            available_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    received = []
+    dispatcher = RuntimeOutboxDispatcher(
+        repository=repository,
+        handlers={"scope_test": lambda payload: received.append(payload)},
+    )
+
+    result = dispatcher.publish_batch(worker_id="outbox-scope-worker")
+
+    assert result == {"claimed": 1, "published": 1, "failed": 0}
+    assert received == [
+        {
+            "calculationRunId": "calculation-1",
+            "tenantId": "tenant-1",
+            "projectId": "project-1",
+        }
+    ]
+
+
 def test_ai_connection_falls_back_after_a_real_provider_failure(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")

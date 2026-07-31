@@ -16,6 +16,9 @@ from db.postgres import postgres_configured
 from db.repositories.legal_intelligence_repository import (
     PostgresLegalTenantOverlayRepository,
 )
+from db.repositories.calculation_run_repository import (
+    PostgresCalculationRunRepository,
+)
 
 from storage import (
     get_project_record,
@@ -25,6 +28,7 @@ from storage import (
     list_pod_ai_review_records,
     list_legal_review_records,
     list_permit_review_records,
+    storage_backend,
 )
 from use_cases.legal_review_decisions import (
     legal_evidence_readiness,
@@ -123,7 +127,20 @@ def build_deal_state_approval_readiness(
     context = _empty_context(project_id)
     try:
         records = list_deal_state_records(str(project_id), limit=1000)
-        calculation_runs = list_calculation_run_records(str(project_id), limit=500)
+        if storage_backend() in {"postgres", "postgresql"}:
+            scoped_tenant = str(tenant_id or "").strip()
+            if not scoped_tenant:
+                raise RuntimeError(
+                    "tenant_id is required for PostgreSQL approval readiness"
+                )
+            calculation_runs = PostgresCalculationRunRepository(
+                tenant_id=scoped_tenant
+            ).latest_runs_by_engine(str(project_id))
+        else:
+            calculation_runs = list_calculation_run_records(
+                str(project_id),
+                limit=500,
+            )
         active_overrides = list_assumption_override_records(str(project_id), status="active")
     except Exception as exc:
         context["gates"].append(_gate(

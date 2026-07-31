@@ -2822,6 +2822,9 @@ def list_deal_state_records(
 def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
     """Persist deterministic calculation output with input evidence and assumptions."""
     now = datetime.now(timezone.utc).isoformat()
+    tenant_id = str(
+        record.get("tenantId") or record.get("tenant_id") or "legacy"
+    )
     engine_key = record.get("engineKey") or record.get("engine_key") or record.get("calculationType") or "calculation"
     run_id = record.get("calculationRunId") or record.get("calculation_run_id") or f"calc:{engine_key}:{uuid4()}"
     run_source_locator = record.get("sourceLocator") or record.get("source_locator") or {
@@ -2831,6 +2834,7 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
     normalized = {
         **record,
         "schemaVersion": record.get("schemaVersion") or "realytics-calculation-run-v2",
+        "tenantId": tenant_id,
         "projectId": project_id,
         "calculationRunId": str(run_id),
         "engineKey": engine_key,
@@ -2853,13 +2857,14 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
         "updatedAt": now,
     }
     outbox = _new_runtime_outbox_payload(
-        tenant_id=str(record.get("tenantId") or "legacy"),
+        tenant_id=tenant_id,
         project_id=str(project_id),
         aggregate_type="calculation_run",
         aggregate_id=normalized["calculationRunId"],
         event_type="calculation_run_upserted",
         updated_at=now,
         payload={
+            "tenantId": tenant_id,
             "projectId": str(project_id),
             "calculationRunId": normalized["calculationRunId"],
             "engineKey": normalized.get("engineKey"),
@@ -2931,11 +2936,22 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
     return normalized
 
 
-def materialize_calculation_run_record(project_id: str, calculation_run_id: str) -> list[Dict[str, Any]]:
+def materialize_calculation_run_record(
+    project_id: str,
+    calculation_run_id: str,
+    *,
+    tenant_id: str | None = None,
+) -> list[Dict[str, Any]]:
     """Idempotently rebuild Deal State projections from a durable CalculationRun."""
     run = next(
         (
-            item for item in list_calculation_run_records(project_id, limit=500)
+            item
+            for item in list_calculation_run_records(
+                project_id,
+                tenant_id=tenant_id,
+                calculation_run_id=calculation_run_id,
+                limit=1,
+            )
             if str(item.get("calculationRunId")) == str(calculation_run_id)
         ),
         None,
@@ -3038,23 +3054,41 @@ def _risk_issue_ids(record: Dict[str, Any]) -> list[str]:
 def list_calculation_run_records(
     project_id: str,
     *,
+    tenant_id: str | None = None,
+    calculation_run_id: str | None = None,
     engine_key: str | None = None,
     limit: int = 100,
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 100), 500))
-    if storage_backend() == "postgres":
-        from db import postgres
+    if storage_backend() in {"postgres", "postgresql"}:
+        from db.repositories.calculation_run_repository import (
+            PostgresCalculationRunRepository,
+        )
 
-        where: Dict[str, Any] = {"project_id": project_id}
-        if engine_key:
-            where["engine_key"] = engine_key
-        records = postgres.list_typed_jsonb_records("calculation_runs", where=where, limit=limit)
+        scoped_tenant = str(tenant_id or "").strip()
+        if not scoped_tenant:
+            raise RuntimeError(
+                "tenant_id is required for PostgreSQL CalculationRun reads"
+            )
+        repository = PostgresCalculationRunRepository(tenant_id=scoped_tenant)
+        if calculation_run_id:
+            record = repository.get_run(project_id, calculation_run_id)
+            records = [record] if record is not None else []
+        else:
+            records = repository.list_runs(
+                project_id,
+                engine_key=engine_key,
+                limit=limit,
+            )
     elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         records = list(state.get("calculation_runs", {}).get(project_id, {}).values())
     else:
         query = "SELECT payload_json FROM calculation_runs WHERE project_id = ?"
         params: list[Any] = [project_id]
+        if calculation_run_id:
+            query += " AND calculation_run_id = ?"
+            params.append(calculation_run_id)
         if engine_key:
             query += " AND engine_key = ?"
             params.append(engine_key)
@@ -3062,6 +3096,13 @@ def list_calculation_run_records(
         params.append(limit)
         with _connect_sqlite() as conn:
             records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
+    if calculation_run_id:
+        records = [
+            record
+            for record in records
+            if str(record.get("calculationRunId") or "")
+            == str(calculation_run_id)
+        ]
     if engine_key:
         records = [record for record in records if record.get("engineKey") == engine_key]
     return sorted(records, key=lambda item: item.get("createdAt") or "", reverse=True)[:limit]

@@ -45,11 +45,16 @@ def _request_agent_run_recovery(payload: dict[str, Any]) -> None:
 def _materialize_calculation_run(payload: dict[str, Any]) -> None:
     from storage import materialize_calculation_run_record
 
+    tenant_id = str(payload.get("tenantId") or "")
     project_id = str(payload.get("projectId") or "")
     run_id = str(payload.get("calculationRunId") or "")
-    if not project_id or not run_id:
+    if not tenant_id or not project_id or not run_id:
         raise RuntimeError("OUTBOX_CALCULATION_REFERENCE_MISSING")
-    materialize_calculation_run_record(project_id, run_id)
+    materialize_calculation_run_record(
+        project_id,
+        run_id,
+        tenant_id=tenant_id,
+    )
 
 
 def _verify_agent_handoff(payload: dict[str, Any]) -> None:

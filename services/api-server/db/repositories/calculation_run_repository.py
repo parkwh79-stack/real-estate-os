@@ -120,7 +120,7 @@ def select_local_export_runs(
 
 
 class PostgresCalculationRunRepository:
-    """Read an export lineage in one tenant-scoped PostgreSQL statement."""
+    """Read CalculationRun authority inside one tenant-scoped transaction."""
 
     def __init__(
         self,
@@ -134,6 +134,162 @@ class PostgresCalculationRunRepository:
         if transaction_factory is None:
             raise TypeError("transaction_factory is required")
         self._transaction = transaction_factory
+
+    def list_runs(
+        self,
+        project_id: str,
+        *,
+        engine_key: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List normalized runs without bypassing the project tenant's RLS.
+
+        The runtime transaction establishes the transaction-local tenant
+        setting used by FORCE RLS.  Explicit tenant/project predicates keep
+        the query indexable and the returned rows are checked again before
+        they cross the repository boundary.
+        """
+
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise ValueError("project_id is required")
+        normalized_engine_key = str(engine_key or "").strip() or None
+        normalized_limit = max(1, min(int(limit or 100), 500))
+        predicates = ["tenant_id = %s", "project_id = %s"]
+        params: list[Any] = [self.tenant_id, normalized_project_id]
+        if normalized_engine_key is not None:
+            predicates.append("engine_key = %s")
+            params.append(normalized_engine_key)
+        params.append(normalized_limit)
+        sql = f"""
+            SELECT
+                'run' AS row_kind,
+                tenant_id,
+                project_id,
+                calculation_run_id,
+                engine_key,
+                status,
+                created_at,
+                payload_json
+            FROM realytics.calculation_runs
+            WHERE {' AND '.join(predicates)}
+            ORDER BY created_at DESC NULLS LAST, calculation_run_id DESC
+            LIMIT %s
+        """
+        try:
+            with self._transaction(self.tenant_id) as connection:
+                rows = connection.execute(sql, tuple(params)).fetchall()
+        except CalculationRunRepositoryError:
+            raise
+        except Exception as exc:
+            raise CalculationRunRepositoryError(
+                "Normalized CalculationRun authority is unavailable"
+            ) from exc
+        return self._records_from_rows(
+            rows,
+            project_id=normalized_project_id,
+            engine_key=normalized_engine_key,
+        )
+
+    def get_run(
+        self,
+        project_id: str,
+        calculation_run_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve an exact CalculationRun without a bounded list scan."""
+
+        normalized_project_id = str(project_id or "").strip()
+        normalized_run_id = str(calculation_run_id or "").strip()
+        if not normalized_project_id:
+            raise ValueError("project_id is required")
+        if not normalized_run_id:
+            raise ValueError("calculation_run_id is required")
+        sql = """
+            SELECT
+                'run' AS row_kind,
+                tenant_id,
+                project_id,
+                calculation_run_id,
+                engine_key,
+                status,
+                created_at,
+                payload_json
+            FROM realytics.calculation_runs
+            WHERE tenant_id = %s
+              AND project_id = %s
+              AND calculation_run_id = %s
+            LIMIT 1
+        """
+        try:
+            with self._transaction(self.tenant_id) as connection:
+                rows = connection.execute(
+                    sql,
+                    (self.tenant_id, normalized_project_id, normalized_run_id),
+                ).fetchall()
+        except CalculationRunRepositoryError:
+            raise
+        except Exception as exc:
+            raise CalculationRunRepositoryError(
+                "Normalized CalculationRun authority is unavailable"
+            ) from exc
+        records = self._records_from_rows(
+            rows,
+            project_id=normalized_project_id,
+            calculation_run_id=normalized_run_id,
+        )
+        if len(records) > 1:
+            raise CalculationRunPayloadError(
+                "CalculationRun exact query returned more than one row"
+            )
+        return records[0] if records else None
+
+    def latest_runs_by_engine(self, project_id: str) -> list[dict[str, Any]]:
+        """Return the latest normalized run for every populated engine key."""
+
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise ValueError("project_id is required")
+        sql = """
+            SELECT DISTINCT ON (engine_key)
+                'run' AS row_kind,
+                tenant_id,
+                project_id,
+                calculation_run_id,
+                engine_key,
+                status,
+                created_at,
+                payload_json
+            FROM realytics.calculation_runs
+            WHERE tenant_id = %s
+              AND project_id = %s
+              AND engine_key IS NOT NULL
+              AND btrim(engine_key) <> ''
+            ORDER BY engine_key,
+                     created_at DESC NULLS LAST,
+                     calculation_run_id DESC
+        """
+        try:
+            with self._transaction(self.tenant_id) as connection:
+                rows = connection.execute(
+                    sql,
+                    (self.tenant_id, normalized_project_id),
+                ).fetchall()
+        except CalculationRunRepositoryError:
+            raise
+        except Exception as exc:
+            raise CalculationRunRepositoryError(
+                "Normalized CalculationRun authority is unavailable"
+            ) from exc
+        records = self._records_from_rows(
+            rows,
+            project_id=normalized_project_id,
+        )
+        engine_keys = [str(record.get("engineKey") or "") for record in records]
+        if len(engine_keys) != len(set(engine_keys)):
+            raise CalculationRunPayloadError(
+                "Latest CalculationRun query returned duplicate engine keys"
+            )
+        return records
 
     def select_export_runs(
         self,
@@ -378,6 +534,44 @@ class PostgresCalculationRunRepository:
             }
         )
         return record
+
+    def _records_from_rows(
+        self,
+        rows: Sequence[Any],
+        *,
+        project_id: str,
+        engine_key: str | None = None,
+        calculation_run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        try:
+            for row in rows:
+                row_tenant_id = str(self._value(row, 1, "tenant_id") or "")
+                row_project_id = str(self._value(row, 2, "project_id") or "")
+                row_run_id = str(
+                    self._value(row, 3, "calculation_run_id") or ""
+                )
+                row_engine_key = str(self._value(row, 4, "engine_key") or "")
+                if (
+                    row_tenant_id != self.tenant_id
+                    or row_project_id != project_id
+                    or (engine_key is not None and row_engine_key != engine_key)
+                    or (
+                        calculation_run_id is not None
+                        and row_run_id != calculation_run_id
+                    )
+                ):
+                    raise CalculationRunPayloadError(
+                        "CalculationRun query returned data outside its scope"
+                    )
+                records.append(self._record(row))
+        except CalculationRunRepositoryError:
+            raise
+        except Exception as exc:
+            raise CalculationRunPayloadError(
+                "CalculationRun query returned malformed data"
+            ) from exc
+        return records
 
     @staticmethod
     def _value(row: Any, index: int, key: str) -> Any:
