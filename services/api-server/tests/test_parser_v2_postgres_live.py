@@ -183,7 +183,7 @@ def _insert_live_legal_gate_case(
     snapshot_version = int(suffix[:7], 16) + 1
     snapshot_hash = _stable_hash(f"snapshot:{suffix}")
     claim_hash = _stable_hash(f"claim:{suffix}")
-    claim_set_hash = _stable_hash(f"claim-1:{claim_hash}")
+    claim_set_hash = hashlib.sha256(f"claim-1:{claim_hash}".encode("utf-8")).hexdigest()
 
     cursor.execute(
         "SELECT set_config('realytics.tenant_id', %s, true)",
@@ -296,47 +296,40 @@ def _insert_live_legal_gate_case(
         "expectedClaimCount": declared_count,
         "verifiedClaimCount": declared_count,
     }
-    cursor.execute(
-        """
-        INSERT INTO legal_required_claim_sets(
-            legal_required_claim_set_id, tenant_id, project_id,
-            claim_set_key, claim_set_version, review_scope, status,
-            claim_set_sha256, created_by, created_at,
-            approved_by, approved_at, metadata_json
-        ) VALUES (
-            %s, %s, %s, %s, 1, 'approval_gate', 'approved',
-            %s, 'live-policy-maker', %s,
-            'live-policy-checker', %s, '{}'::jsonb
+    draft_id = required_claim_set_id + ":draft"
+    # The policy is append-only: review produces version 2 of a sealed draft.
+    for set_id, version, status, predecessor, reviewer, role, approved_at in (
+        (draft_id, 1, "draft", None, None, None, None),
+        (required_claim_set_id, 2, "approved", draft_id,
+         "live-policy-checker", "legal_counsel_approver", now),
+    ):
+        cursor.execute(
+            """
+            INSERT INTO legal_required_claim_sets(
+                legal_required_claim_set_id, tenant_id, project_id,
+                claim_set_key, claim_set_version, review_scope, status,
+                claim_set_sha256, created_by, created_at,
+                supersedes_claim_set_id, approved_by, approver_role,
+                approved_at, metadata_json
+            ) VALUES (
+                %s, %s, %s, %s, %s, 'approval_gate', %s,
+                %s, 'live-policy-maker', %s, %s, %s, %s, %s, '{}'::jsonb
+            )
+            """,
+            (set_id, TENANT_A, PROJECT_A, f"live-required-claims-{suffix}",
+             version, status, claim_set_hash, now, predecessor, reviewer, role, approved_at),
         )
-        """,
-        (
-            required_claim_set_id,
-            TENANT_A,
-            PROJECT_A,
-            f"live-required-claims-{suffix}",
-            claim_set_hash,
-            now,
-            now,
-        ),
-    )
-    cursor.execute(
-        """
-        INSERT INTO legal_required_claims(
-            legal_required_claim_id, tenant_id, project_id,
-            legal_required_claim_set_id, claim_key,
-            claim_text_sha256, ordinal, metadata_json
-        ) VALUES (
-            %s, %s, %s, %s, 'claim-1', %s, 1, '{}'::jsonb
+        cursor.execute(
+            """
+            INSERT INTO legal_required_claims(
+                legal_required_claim_id, tenant_id, project_id,
+                legal_required_claim_set_id, claim_key,
+                claim_text_sha256, ordinal, metadata_json
+            ) VALUES (%s, %s, %s, %s, 'claim-1', %s, 1, '{}'::jsonb)
+            """,
+            (f"legal-live-required-claim-{suffix}-{version}",
+             TENANT_A, PROJECT_A, set_id, claim_hash),
         )
-        """,
-        (
-            f"legal-live-required-claim-{suffix}",
-            TENANT_A,
-            PROJECT_A,
-            required_claim_set_id,
-            claim_hash,
-        ),
-    )
     cursor.execute(
         """
         INSERT INTO legal_evidence_snapshots(
