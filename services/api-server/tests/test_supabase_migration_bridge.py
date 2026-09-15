@@ -32,6 +32,7 @@ EXPECTED_MIGRATIONS = (
     "20260730112222_tenant_membership_role_administration.sql",
     "20260730122658_verified_principal_onboarding.sql",
     "20260731093559_calculation_run_tenant_read_index.sql",
+    "20260915005540_legal_governance_trigger_record_dispatch.sql",
 )
 
 

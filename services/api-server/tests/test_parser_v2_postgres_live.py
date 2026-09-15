@@ -674,6 +674,62 @@ def test_live_migrations_apply_once_and_are_idempotent(
 
 
 @pytest.mark.parametrize(
+    ("table_name", "function_name", "values"),
+    (
+        ("project_legal_matters", "delegation", {"status": "open"}),
+        ("project_legal_matters", "delegation", {"status": "resolved"}),
+        ("legal_required_claim_sets", "delegation", {"status": "draft"}),
+        ("legal_required_claim_sets", "delegation", {"status": "approved"}),
+        ("legal_waivers", "delegation", {"status": "draft"}),
+        ("counsel_opinions", "delegation", {"status": "draft"}),
+        ("counsel_opinions", "delegation", {"status": "approved"}),
+        ("legal_analysis_versions", "delegation", {"human_review_status": "pending"}),
+        ("legal_analysis_versions", "delegation", {"human_review_status": "approved"}),
+        ("project_legal_matters", "snapshot", {"status": "open"}),
+        ("counsel_opinions", "snapshot", {"status": "draft"}),
+        ("legal_analysis_versions", "snapshot", {"report_eligible": False}),
+        (
+            "legal_waivers", "snapshot",
+            {"status": "draft", "conditions_json": "[]",
+             "cure_condition_outcomes_json": "[]", "cure_status": "not_started"},
+        ),
+    ),
+)
+def test_live_governance_triggers_dispatch_before_resolving_table_columns(
+    live_database: _LiveDatabase,
+    table_name: str,
+    function_name: str,
+    values: dict[str, Any],
+) -> None:
+    from psycopg import sql
+
+    conn = live_database.connect_admin()
+    try:
+        # Retain each real record shape while isolating this trigger from the
+        # unrelated constraints covered by the complete governance tests below.
+        conn.execute(sql.SQL(
+            "CREATE TEMP TABLE {} ON COMMIT DROP AS SELECT * FROM {}.{} WITH NO DATA"
+        ).format(sql.Identifier(table_name), sql.Identifier(live_database.schema_name),
+                 sql.Identifier(table_name)))
+        conn.execute(sql.SQL(
+            "CREATE TRIGGER test_dispatch AFTER INSERT ON pg_temp.{} "
+            "FOR EACH ROW EXECUTE FUNCTION {}.{}()"
+        ).format(sql.Identifier(table_name), sql.Identifier(live_database.schema_name),
+                 sql.Identifier(f"legal_assert_governance_{function_name}")))
+        conn.execute(sql.SQL("INSERT INTO pg_temp.{} ({}) VALUES ({})").format(
+            sql.Identifier(table_name),
+            sql.SQL(", ").join(map(sql.Identifier, values)),
+            sql.SQL(", ").join(sql.Placeholder() for _ in values),
+        ), tuple(values.values()))
+        assert conn.execute(sql.SQL("SELECT count(*) FROM pg_temp.{}").format(
+            sql.Identifier(table_name),
+        )).fetchone()[0] == 1
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+@pytest.mark.parametrize(
     (
         "declared_count",
         "item_has_provision",
