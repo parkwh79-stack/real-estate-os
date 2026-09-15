@@ -29,6 +29,14 @@ from db.postgres_identity_runtime_preflight import (
     IdentityRuntimePreflightError,
     assert_identity_runtime_connection,
 )
+from db.postgres_pf_worker_privileges import (
+    DEFAULT_PF_WORKER_DATABASE_ROLE,
+    PF_WORKER_DATABASE_ROLE_ENV,
+)
+from db.postgres_pf_worker_runtime_preflight import (
+    PFWorkerRuntimePreflightError,
+    assert_pf_worker_runtime_connection,
+)
 
 
 DEFAULT_CONNECTION_BUDGET = 20
@@ -65,7 +73,7 @@ SELECT
     set_config(%s, %s, true)
 """.strip()
 READINESS_SQL = "SELECT 1"
-SAFE_RUNTIME_SEARCH_PATH = "pg_catalog, realytics, extensions"
+SAFE_RUNTIME_SEARCH_PATH = "pg_catalog, realytics, extensions, pg_temp"
 
 
 class RuntimePoolName(StrEnum):
@@ -402,6 +410,11 @@ def _build_pool_spec(
             environ.get(IDENTITY_DATABASE_ROLE_ENV)
             or DEFAULT_IDENTITY_DATABASE_ROLE
         ).strip()
+    elif name is RuntimePoolName.PF_WORKER:
+        expected_database_role = str(
+            environ.get(PF_WORKER_DATABASE_ROLE_ENV)
+            or DEFAULT_PF_WORKER_DATABASE_ROLE
+        ).strip()
     return RuntimePoolSpec(
         name=name,
         dsn=dsn,
@@ -484,10 +497,7 @@ def _build_pool_spec(
         postgis_schema=str(
             environ.get("REALYTICS_POSTGIS_SCHEMA") or "extensions"
         ).strip(),
-        require_role_preflight=(
-            hardened
-            and name in {RuntimePoolName.API, RuntimePoolName.IDENTITY}
-        ),
+        require_role_preflight=hardened,
     )
 
 
@@ -612,11 +622,11 @@ class RuntimePoolRegistry:
                                 )
                             if spec.require_role_preflight:
                                 try:
-                                    preflight = (
-                                        assert_identity_runtime_connection
-                                        if name is RuntimePoolName.IDENTITY
-                                        else assert_api_runtime_connection
-                                    )
+                                    preflight = {
+                                        RuntimePoolName.API: assert_api_runtime_connection,
+                                        RuntimePoolName.IDENTITY: assert_identity_runtime_connection,
+                                        RuntimePoolName.PF_WORKER: assert_pf_worker_runtime_connection,
+                                    }[name]
                                     preflight(
                                         connection,
                                         expected_role=(
@@ -628,6 +638,7 @@ class RuntimePoolRegistry:
                                 except (
                                     ApiRuntimePreflightError,
                                     IdentityRuntimePreflightError,
+                                    PFWorkerRuntimePreflightError,
                                 ) as exc:
                                     raise RuntimeDatabaseConfigurationError(
                                         str(exc)
@@ -693,15 +704,12 @@ def build_runtime_pool_registry(
                 f"{name.value} runtime pool; REALYTICS_DATABASE_URL is not "
                 "a fallback for role-scoped runtime traffic"
             )
-        if (
-            hardened
-            and name in {RuntimePoolName.API, RuntimePoolName.IDENTITY}
-        ):
-            role_env = (
-                API_DATABASE_ROLE_ENV
-                if name is RuntimePoolName.API
-                else IDENTITY_DATABASE_ROLE_ENV
-            )
+        if hardened:
+            role_env = {
+                RuntimePoolName.API: API_DATABASE_ROLE_ENV,
+                RuntimePoolName.IDENTITY: IDENTITY_DATABASE_ROLE_ENV,
+                RuntimePoolName.PF_WORKER: PF_WORKER_DATABASE_ROLE_ENV,
+            }[name]
             if not str(env.get(role_env) or "").strip():
                 raise RuntimeDatabaseConfigurationError(
                     f"{role_env} is required for the hardened {name.value} "
@@ -717,6 +725,21 @@ def build_runtime_pool_registry(
                 name,
                 dsn=dsn,
                 environ=env,
+            )
+
+    if hardened:
+        roles = [spec.expected_database_role for spec in specs.values()]
+        if len(roles) != len(set(roles)):
+            raise RuntimeDatabaseConfigurationError(
+                "Each hardened runtime pool requires a distinct login role"
+            )
+        worker = specs.get(RuntimePoolName.PF_WORKER)
+        if worker and worker.expected_database_role in {
+            str(env.get(API_DATABASE_ROLE_ENV) or "realytics_runtime").strip(),
+            str(env.get(IDENTITY_DATABASE_ROLE_ENV) or DEFAULT_IDENTITY_DATABASE_ROLE).strip(),
+        }:
+            raise RuntimeDatabaseConfigurationError(
+                "The PF worker must not reuse the API or identity login role"
             )
 
     replica_count = _positive_int(

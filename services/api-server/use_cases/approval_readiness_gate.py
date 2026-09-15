@@ -10,6 +10,8 @@ records.
 """
 
 from collections.abc import Mapping
+import json
+from copy import deepcopy
 from typing import Any, Dict, List
 
 from db.postgres import postgres_configured
@@ -19,6 +21,8 @@ from db.repositories.legal_intelligence_repository import (
 from db.repositories.calculation_run_repository import (
     PostgresCalculationRunRepository,
 )
+from db.postgres_runtime_pool import api_tenant_transaction
+from db.repositories.request_project_repository import current_project_scope
 
 from storage import (
     get_project_record,
@@ -29,6 +33,7 @@ from storage import (
     list_legal_review_records,
     list_permit_review_records,
     storage_backend,
+    _with_effective_assumption_override_status,
 )
 from use_cases.legal_review_decisions import (
     legal_evidence_readiness,
@@ -134,14 +139,18 @@ def build_deal_state_approval_readiness(
                     "tenant_id is required for PostgreSQL approval readiness"
                 )
             calculation_runs = PostgresCalculationRunRepository(
-                tenant_id=scoped_tenant
+                tenant_id=scoped_tenant,
+                transaction_factory=_readiness_transaction_factory(scoped_tenant),
             ).latest_runs_by_engine(str(project_id))
+            active_overrides = _active_normalized_assumption_overrides(
+                str(project_id), tenant_id=scoped_tenant,
+            )
         else:
             calculation_runs = list_calculation_run_records(
                 str(project_id),
                 limit=500,
             )
-        active_overrides = list_assumption_override_records(str(project_id), status="active")
+            active_overrides = list_assumption_override_records(str(project_id), status="active")
     except Exception as exc:
         context["gates"].append(_gate(
             "DEAL_STATE_RECORDS_READABLE",
@@ -647,6 +656,55 @@ def _normalized_legal_readiness_required() -> bool:
     return True
 
 
+def _readiness_transaction_factory(tenant_id: str):
+    """Use the owning request/worker pool without switching identities."""
+    scope = current_project_scope()
+    if scope is None:
+        return api_tenant_transaction
+    if scope.tenant_id != tenant_id:
+        raise ValueError("Readiness tenant does not match the active runtime scope")
+    if scope.worker_id and scope.transaction_factory is None:
+        raise RuntimeError("Worker readiness requires its dedicated transaction factory")
+    return scope.transaction_factory or api_tenant_transaction
+
+
+def _active_normalized_assumption_overrides(project_id: str, *, tenant_id: str) -> list[dict[str, Any]]:
+    """Read persisted override authority; the app_state document is not a fallback."""
+    with _readiness_transaction_factory(tenant_id)(tenant_id) as connection:
+        rows = connection.execute(
+            """
+            SELECT tenant_id, project_id, override_id, check_key, canonical_field,
+                   status, approved_by, approved_at, updated_at, payload_json
+              FROM realytics.assumption_overrides
+             WHERE tenant_id = %s AND project_id = %s AND status = 'active'
+             ORDER BY updated_at DESC, override_id
+            """,
+            (tenant_id, project_id),
+        ).fetchall()
+    result = []
+    for row in rows:
+        if row[0] != tenant_id or row[1] != project_id:
+            raise ValueError("Assumption override row violates its runtime scope")
+        payload = json.loads(row[9]) if isinstance(row[9], str) else deepcopy(row[9])
+        if not isinstance(payload, dict):
+            raise ValueError("Assumption override payload is invalid")
+        if any(payload.get(key) not in (None, "", tenant_id) for key in ("tenantId", "tenant_id")):
+            raise ValueError("Assumption override payload tenant mismatch")
+        if payload.get("projectId") not in (None, "", project_id):
+            raise ValueError("Assumption override payload project mismatch")
+        payload.update({
+            "tenantId": row[0], "projectId": row[1], "overrideId": row[2],
+            "checkKey": row[3], "canonicalField": row[4], "status": row[5],
+            "approvedBy": row[6],
+            "approvedAt": row[7].isoformat() if hasattr(row[7], "isoformat") else row[7],
+            "updatedAt": row[8].isoformat() if hasattr(row[8], "isoformat") else row[8],
+        })
+        effective = _with_effective_assumption_override_status(payload)
+        if effective.get("effectiveStatus") == "active":
+            result.append(effective)
+    return result
+
+
 def _load_normalized_legal_readiness(
     project_id: str,
     legal_review: Mapping[str, Any] | None,
@@ -684,9 +742,11 @@ def _load_normalized_legal_readiness(
         )
 
     try:
+        transaction_factory = _readiness_transaction_factory(scoped_tenant)
         repository = PostgresLegalTenantOverlayRepository(
             tenant_id=scoped_tenant,
             project_id=project_id,
+            connection_factory=lambda: transaction_factory(scoped_tenant),
         )
         return repository.evaluate_latest_approval_readiness()
     except Exception as exc:

@@ -17,6 +17,8 @@ from db.postgres_api_runtime_preflight import (
 from db.postgres_runtime_privileges import (
     PROJECT_RUNTIME_SEQUENCE_PRIVILEGES,
     PROJECT_RUNTIME_TABLE_PRIVILEGES,
+    required_table_privileges,
+    required_column_privileges,
 )
 
 
@@ -59,6 +61,37 @@ class _FakeCursor:
                 (str(schema), str(privilege))
                 in self.connection.schema_grants,
             )
+            return
+        if "AS runtime_owned_objects" in normalized:
+            self.rows = [(item,) for item in self.connection.owned_objects]
+            return
+        if "AS expected_function" in normalized:
+            self.rows = [(item,) for item in self.connection.missing_functions]
+            return
+        if "WITH unlisted_runtime_relations" in normalized:
+            self.rows = [(item,) for item in self.connection.unlisted_privileges]
+            return
+        if "WITH runtime_table_contract" in normalized:
+            _schema, entries, _role = params
+            self.rows = [
+                (f"{entry['relation_name']}.{entry['privilege']}", entry["required"])
+                for entry in json.loads(entries)
+                if ((entry["relation_name"], entry["privilege"]) in self.connection.table_grants)
+                != entry["required"]
+            ]
+            return
+        if "runtime_column_contract" in normalized:
+            entries, all_entries, _schema, _schema_again, _role = params
+            self.rows = [
+                (f"{entry['relation_name']}.{entry['column_name']}.{entry['privilege']}", entry["required"])
+                for entry in json.loads(entries)
+                if self.connection.column_allowed(entry["relation_name"], entry["column_name"], entry["privilege"])
+                != entry["required"]
+            ]
+            for entry in json.loads(all_entries):
+                for table, column, privilege in self.connection.column_grants:
+                    if (table, privilege) == (entry["relation_name"], entry["privilege"]) and column not in entry["allowed_columns"]:
+                        self.rows.append((f"{table}.{column}.{privilege}", False))
             return
         if "has_table_privilege" in normalized:
             _role, privilege, _schema, relation = params
@@ -109,7 +142,7 @@ class _FakeConnection:
         }
         self.table_grants = {
             (table, privilege)
-            for table, privileges in PROJECT_RUNTIME_TABLE_PRIVILEGES.items()
+            for table, privileges in required_table_privileges().items()
             for privilege in privileges
         }
         self.sequence_grants = {
@@ -119,6 +152,18 @@ class _FakeConnection:
             for privilege in privileges
         }
         self.closed = False
+        self.owned_objects: tuple[str, ...] = ()
+        self.missing_functions: tuple[str, ...] = ()
+        self.unlisted_privileges: tuple[str, ...] = ()
+        self.column_grants = {
+            (table, column, privilege)
+            for table, grants in required_column_privileges().items()
+            for privilege, columns in grants.items()
+            for column in columns
+        }
+
+    def column_allowed(self, table, column, privilege) -> bool:
+        return (table, privilege) in self.table_grants or (table, column, privilege) in self.column_grants
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
@@ -250,6 +295,19 @@ def test_wrong_runtime_login_role_is_distinct_from_privilege_failures() -> None:
     assert runtime.closed is True
 
 
+def test_preflight_inspects_actual_api_database_not_only_named_deployment_role() -> None:
+    deployment = _FakeConnection(current_role="deployment", session_role="deployment")
+    runtime = _FakeConnection()
+    runtime.table_grants.remove(("calculation_runs", "INSERT"))
+    result = run_api_runtime_preflight(
+        environ=_environment(),
+        connector=lambda dsn: deployment if dsn == MIGRATION_DSN else runtime,
+    )
+    assert result.ok is False
+    assert any("calculation_runs.INSERT" in issue.objects for issue in result.issues)
+    assert deployment.closed and runtime.closed
+
+
 def test_connection_failures_never_echo_dsn_or_driver_exception() -> None:
     secret = "do-not-leak-this-password"
     environ = _environment()
@@ -284,3 +342,114 @@ def test_assertion_error_contains_codes_but_not_credentials() -> None:
 
     assert "wrong_login_role" in str(captured.value)
     assert "secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize("table", ["calculation_runs", "runtime_outbox_events", "async_jobs", "agent_runs"])
+def test_api_startup_rejects_missing_durable_write_privilege(table) -> None:
+    connection = _FakeConnection()
+    connection.table_grants.remove((table, "INSERT"))
+    with pytest.raises(ApiRuntimePreflightError) as captured:
+        assert_api_runtime_connection(connection, expected_role=ROLE)
+    assert any(f"{table}.INSERT" in issue.objects for issue in captured.value.result.issues)
+
+
+def test_api_rejects_database_owner_even_with_exact_table_acl() -> None:
+    connection = _FakeConnection()
+    connection.owned_objects = ("database:postgres",)
+    with pytest.raises(ApiRuntimePreflightError) as captured:
+        assert_api_runtime_connection(connection, expected_role=ROLE)
+    assert ApiRuntimePreflightCode.FORBIDDEN_OWNERSHIP in _codes(captured.value.result.issues)
+
+
+@pytest.mark.parametrize("grant", [("projects", "project_id", "REFERENCES"), ("user_activity_logs", "payload_json", "UPDATE")])
+def test_api_rejects_column_only_project_and_audit_privileges(grant) -> None:
+    connection = _FakeConnection()
+    connection.column_grants.add(grant)
+    with pytest.raises(ApiRuntimePreflightError) as captured:
+        assert_api_runtime_connection(connection, expected_role=ROLE)
+    assert any(".".join(grant) in issue.objects for issue in captured.value.result.issues)
+
+
+def _worker_connection():
+    from db.postgres_pf_worker_privileges import PF_WORKER_TABLE_PRIVILEGES
+    connection = _FakeConnection(current_role="realytics_pf_worker", session_role="realytics_pf_worker")
+    connection.table_grants = {
+        (table, privilege) for table, privileges in PF_WORKER_TABLE_PRIVILEGES.items()
+        for privilege in privileges
+    }
+    connection.column_grants = set()
+    connection.sequence_grants = set()
+    return connection
+
+
+def test_pf_worker_exact_direct_login_and_execution_grants_pass() -> None:
+    from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection
+    assert_pf_worker_runtime_connection(_worker_connection(), expected_role="realytics_pf_worker")
+
+
+@pytest.mark.parametrize("unsafe_index", range(1, 7))
+def test_pf_worker_rejects_all_privileged_role_attributes(unsafe_index) -> None:
+    from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection, PFWorkerRuntimePreflightError
+    connection = _worker_connection()
+    attributes = list(connection.role_state)
+    attributes[unsafe_index] = True
+    connection.role_state = tuple(attributes)
+    with pytest.raises(PFWorkerRuntimePreflightError, match="unsafe_pf_worker_role_attributes"):
+        assert_pf_worker_runtime_connection(connection, expected_role="realytics_pf_worker")
+
+
+@pytest.mark.parametrize("table", [
+    "report_publications", "parser_review_decisions", "parser_approved_snapshots",
+    "parser_canonical_selections", "legal_review_decisions", "legal_approval_delegations",
+    "tenant_memberships", "onboarding_profiles", "projects", "calculation_runs", "deal_state_records",
+])
+def test_pf_worker_rejects_human_approval_identity_and_input_writes(table) -> None:
+    from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection, PFWorkerRuntimePreflightError
+    connection = _worker_connection()
+    connection.table_grants.add((table, "INSERT"))
+    with pytest.raises(PFWorkerRuntimePreflightError, match="pf_worker_forbidden_runtime_privilege"):
+        assert_pf_worker_runtime_connection(connection, expected_role="realytics_pf_worker")
+
+
+def test_pf_worker_rejects_column_only_identity_grant() -> None:
+    from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection, PFWorkerRuntimePreflightError
+    connection = _worker_connection()
+    connection.column_grants.add(("tenant_memberships", "role", "UPDATE"))
+    with pytest.raises(PFWorkerRuntimePreflightError, match="pf_worker_forbidden_runtime_privilege"):
+        assert_pf_worker_runtime_connection(connection, expected_role="realytics_pf_worker")
+
+
+@pytest.mark.parametrize("grant", ["app_state.SELECT", "user_ai_profiles.column.SELECT", "learning_promotions.INSERT"])
+def test_pf_worker_rejects_unlisted_private_relation_access(grant) -> None:
+    from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection, PFWorkerRuntimePreflightError
+    connection = _worker_connection()
+    connection.unlisted_privileges = (grant,)
+    with pytest.raises(PFWorkerRuntimePreflightError, match="pf_worker_forbidden_runtime_privilege"):
+        assert_pf_worker_runtime_connection(connection, expected_role="realytics_pf_worker")
+
+
+@pytest.mark.parametrize("defect,code", [
+    ("session", "wrong_pf_worker_login_role"),
+    ("nologin", "pf_worker_role_nologin"),
+    ("membership", "pf_worker_inherited_role_membership"),
+    ("ownership", "pf_worker_forbidden_ownership"),
+    ("missing_write", "pf_worker_missing_runtime_privilege"),
+    ("sequence", "pf_worker_forbidden_runtime_privilege"),
+])
+def test_pf_worker_startup_rejects_unsafe_or_incomplete_checkout(defect, code) -> None:
+    from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection, PFWorkerRuntimePreflightError
+    connection = _worker_connection()
+    if defect == "session":
+        connection.session_role = "postgres"
+    elif defect == "nologin":
+        connection.role_state = (False, *connection.role_state[1:])
+    elif defect == "membership":
+        connection.parent_roles = ("realytics_runtime",)
+    elif defect == "ownership":
+        connection.owned_objects = ("function:realytics.approval_helper",)
+    elif defect == "missing_write":
+        connection.table_grants.remove(("async_jobs", "UPDATE"))
+    elif defect == "sequence":
+        connection.sequence_grants.add(("project_id_sequence", "USAGE"))
+    with pytest.raises(PFWorkerRuntimePreflightError, match=code):
+        assert_pf_worker_runtime_connection(connection, expected_role="realytics_pf_worker")

@@ -1,6 +1,10 @@
 # REALYTICS OS Next Work Roadmap
 
 Updated: 2026-09-15
+
+최신 실행 상태와 신규 인프라 제안은
+[운영 연결 준비](runtime-activation-progress-2026-09-15.md)와
+[인프라 구성안](infrastructure-proposal-2026-09-15.md)을 기준으로 한다.
 Purpose: 파일럿 승인 가능성과 부동산 OS 운영화를 위한 통합 개발 로드맵
 
 현재 GitHub 업로드·원격 DB 적용·검증 상태와 다음 실행 순서는

@@ -1180,6 +1180,101 @@ def test_live_runtime_readiness_and_exact_privilege_manifest(
         conn.close()
 
 
+def test_live_pf_worker_login_grants_and_forbidden_approval_writes(
+    live_database: _LiveDatabase,
+) -> None:
+    """Rehearse a real direct LOGIN only inside the disposable test database."""
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+    from db.postgres_pf_worker_privileges import render_pf_worker_role_sql
+    from db.postgres_pf_worker_runtime_preflight import (
+        assert_pf_worker_runtime_connection, PFWorkerRuntimePreflightError,
+    )
+    role = _validated_identifier("pf_worker_live")
+    password = uuid4().hex
+    admin = live_database.connect_admin()
+    worker = None
+    created = False
+    try:
+        with admin.cursor() as cursor:
+            cursor.execute(sql.SQL(
+                "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB "
+                "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+            ).format(sql.Identifier(role), sql.Literal(password)))
+            cursor.execute("SELECT current_database()")
+            for statement in render_pf_worker_role_sql(
+                role_name=role, schema_name=live_database.schema_name,
+                database_name=cursor.fetchone()[0],
+            ):
+                cursor.execute(statement)
+        admin.commit()
+        created = True
+        worker = _POSTGRES_CONNECT(make_conninfo(live_database.dsn, user=role, password=password))
+        assert_pf_worker_runtime_connection(worker, expected_role=role)
+        worker.rollback()
+
+        with worker.cursor() as cursor:
+            cursor.execute("SELECT set_config('realytics.tenant_id', %s, true)", (TENANT_A,))
+            cursor.execute("SELECT project_id FROM realytics.projects WHERE project_id = %s", (PROJECT_A,))
+            assert cursor.fetchone() == (PROJECT_A,)
+            cursor.execute("SELECT count(*) FROM realytics.projects WHERE project_id = %s", (PROJECT_B,))
+            assert cursor.fetchone() == (0,)
+        worker.rollback()
+        for table in (
+            "report_publications", "parser_review_decisions", "tenant_memberships",
+            "projects", "calculation_runs",
+        ):
+            with pytest.raises(psycopg.Error) as denied:
+                worker.execute(sql.SQL("INSERT INTO realytics.{} DEFAULT VALUES").format(sql.Identifier(table)))
+            assert denied.value.sqlstate == "42501"
+            worker.rollback()
+
+        # A column-only identity grant must fail the same effective audit even
+        # though has_table_privilege(..., 'UPDATE') remains false.
+        admin.execute(sql.SQL("GRANT UPDATE (role) ON realytics.tenant_memberships TO {}").format(sql.Identifier(role)))
+        admin.commit()
+        with pytest.raises(PFWorkerRuntimePreflightError, match="pf_worker_forbidden_runtime_privilege"):
+            assert_pf_worker_runtime_connection(worker, expected_role=role)
+        worker.rollback()
+        admin.execute(sql.SQL("REVOKE UPDATE (role) ON realytics.tenant_memberships FROM {}").format(sql.Identifier(role)))
+        admin.commit()
+
+        # An unlisted private table and a future column grant cannot escape
+        # the catalog-based deny check. Reprovisioning resets only this role.
+        unlisted_table = _validated_identifier("pf_unlisted")
+        admin.execute(sql.SQL("CREATE TABLE realytics.{} (payload text)").format(sql.Identifier(unlisted_table)))
+        admin.execute(sql.SQL("GRANT SELECT (payload) ON realytics.{} TO {}").format(sql.Identifier(unlisted_table), sql.Identifier(role)))
+        admin.commit()
+        with pytest.raises(PFWorkerRuntimePreflightError, match="pf_worker_forbidden_runtime_privilege"):
+            assert_pf_worker_runtime_connection(worker, expected_role=role)
+        worker.rollback()
+        database_name = admin.execute("SELECT current_database()").fetchone()[0]
+        for statement in render_pf_worker_role_sql(role_name=role, database_name=database_name):
+            admin.execute(statement)
+        admin.commit()
+        assert_pf_worker_runtime_connection(worker, expected_role=role)
+        worker.rollback()
+        # PUBLIC is intentionally not mutated by the renderer; a shared leak
+        # must still be rejected as an effective grant.
+        admin.execute(sql.SQL("GRANT SELECT ON realytics.{} TO PUBLIC").format(sql.Identifier(unlisted_table)))
+        admin.commit()
+        with pytest.raises(PFWorkerRuntimePreflightError, match="pf_worker_forbidden_runtime_privilege"):
+            assert_pf_worker_runtime_connection(worker, expected_role=role)
+        worker.rollback()
+        admin.execute(sql.SQL("DROP TABLE realytics.{}").format(sql.Identifier(unlisted_table)))
+        admin.commit()
+    finally:
+        if worker is not None:
+            worker.close()
+        admin.rollback()
+        if created:
+            admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+            admin.commit()
+        admin.close()
+
+
 def test_live_runtime_project_create_update_and_soft_delete(
     live_database: _LiveDatabase,
 ) -> None:

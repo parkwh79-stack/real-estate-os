@@ -20,7 +20,18 @@ from db.postgres_runtime_privileges import (
     PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES,
     PROJECT_RUNTIME_SEQUENCE_PRIVILEGES,
     PROJECT_RUNTIME_TABLE_PRIVILEGES,
+    required_table_privileges,
+    forbidden_table_privileges,
+    required_column_privileges,
+    forbidden_column_privileges,
+    LEGAL_INTELLIGENCE_RUNTIME_FUNCTIONS,
+    LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS,
     validate_database_identifier,
+)
+from db.postgres_privilege_inspection import (
+    inspect_privilege_manifest,
+    owned_runtime_objects,
+    missing_function_privileges,
 )
 
 
@@ -51,6 +62,9 @@ class ApiRuntimePreflightCode(StrEnum):
     FORBIDDEN_PROJECT_PRIVILEGE = "forbidden_project_privilege"
     MISSING_SEQUENCE_PRIVILEGE = "missing_sequence_privilege"
     FORBIDDEN_SEQUENCE_PRIVILEGE = "forbidden_sequence_privilege"
+    MISSING_RUNTIME_PRIVILEGE = "missing_runtime_privilege"
+    FORBIDDEN_RUNTIME_PRIVILEGE = "forbidden_runtime_privilege"
+    FORBIDDEN_OWNERSHIP = "forbidden_ownership"
 
 
 @dataclass(frozen=True)
@@ -331,6 +345,40 @@ def inspect_api_runtime_role(
             sequence=True,
             expected=False,
         )
+        owned_objects = owned_runtime_objects(
+            cursor, role=role, schemas=(schema, postgis_schema)
+        )
+        # The project-specific codes remain stable; the complete serving-role
+        # contract additionally covers calculation, durable jobs, Parser and
+        # identity administration columns before the pool becomes ready.
+        missing_runtime, forbidden_runtime = inspect_privilege_manifest(
+            cursor,
+            role=role,
+            schema=schema,
+            required_tables={
+                table: privileges for table, privileges in required_table_privileges().items()
+                if table not in PROJECT_RUNTIME_TABLE_PRIVILEGES
+            },
+            forbidden_tables=forbidden_table_privileges(),
+            required_columns=required_column_privileges(),
+            forbidden_columns=forbidden_column_privileges(),
+        )
+        # Project table-level findings keep their established codes, while
+        # column-only REFERENCES/UPDATE grants still use the complete audit.
+        project_table_findings = {
+            f"{table}.{privilege}"
+            for table, privileges in PROJECT_RUNTIME_FORBIDDEN_PRIVILEGES.items()
+            for privilege in privileges
+        }
+        forbidden_runtime = tuple(
+            finding for finding in forbidden_runtime if finding not in project_table_findings
+        )
+        missing_runtime = (*missing_runtime, *missing_function_privileges(
+            cursor, role=role, signatures=(
+                *(f'"{schema}".{signature}' for signature in LEGAL_INTELLIGENCE_RUNTIME_FUNCTIONS),
+                *(f'"{postgis_schema}".{signature}' for signature in LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS),
+            ),
+        ))
 
     grouped_findings = (
         (
@@ -362,6 +410,21 @@ def inspect_api_runtime_role(
             forbidden_sequences,
             ApiRuntimePreflightCode.FORBIDDEN_SEQUENCE_PRIVILEGE,
             "The API database role can inspect or reset the project sequence.",
+        ),
+        (
+            missing_runtime,
+            ApiRuntimePreflightCode.MISSING_RUNTIME_PRIVILEGE,
+            "The API role is missing required normalized runtime privileges.",
+        ),
+        (
+            forbidden_runtime,
+            ApiRuntimePreflightCode.FORBIDDEN_RUNTIME_PRIVILEGE,
+            "The API role has privileges outside its runtime manifest.",
+        ),
+        (
+            owned_objects,
+            ApiRuntimePreflightCode.FORBIDDEN_OWNERSHIP,
+            "The API role must not own the database, runtime schemas, relations, or functions.",
         ),
     )
     for findings, code, message in grouped_findings:
@@ -556,6 +619,14 @@ def run_api_runtime_preflight(
             expected_role=expected_role,
         )
         issues.extend(login_issues)
+        # Matching role names do not prove these DSNs point to the same DB.
+        # Validate the actual serving connection's schema and effective ACLs.
+        issues.extend(inspect_api_runtime_role(
+            runtime_connection,
+            expected_role=expected_role,
+            schema_name=schema_name,
+            postgis_schema_name=postgis_schema_name,
+        ))
     except Exception:
         issues.append(
             ApiRuntimePreflightIssue(

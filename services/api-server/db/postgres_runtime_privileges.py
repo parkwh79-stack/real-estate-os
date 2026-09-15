@@ -443,6 +443,7 @@ PARSER_V2_MANAGED_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "pod_ai_reviews": ("SELECT", "INSERT", "UPDATE"),
     "agent_handoffs": ("SELECT", "INSERT", "UPDATE"),
     "recalculation_events": ("SELECT", "INSERT", "UPDATE"),
+    "assumption_overrides": ("SELECT",),
     "async_jobs": ("SELECT", "INSERT", "UPDATE"),
     "agent_runs": ("SELECT", "INSERT", "UPDATE"),
     "agent_run_steps": ("SELECT", "INSERT", "UPDATE"),
@@ -567,6 +568,7 @@ FORBIDDEN_READ_ONLY_PRIVILEGES = (
     *FORBIDDEN_APPEND_ONLY_PRIVILEGES,
 )
 FORBIDDEN_MANAGED_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "assumption_overrides": FORBIDDEN_READ_ONLY_PRIVILEGES,
     "schema_migrations": (
         "INSERT",
         "UPDATE",

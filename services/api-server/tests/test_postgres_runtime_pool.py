@@ -452,6 +452,7 @@ def test_hardened_pf_worker_must_run_with_only_its_dedicated_pool() -> None:
         {
             "REALYTICS_ENVIRONMENT": "staging",
             runtime_pool.RUNTIME_POOL_ROLES_ENV: "pf_worker",
+            "REALYTICS_PF_WORKER_DATABASE_ROLE": "realytics_pf_worker",
             "REALYTICS_PF_WORKER_DATABASE_URL": (
                 "postgresql://pf:secret@pf.example.test:5432/realytics"
             ),
@@ -463,6 +464,42 @@ def test_hardened_pf_worker_must_run_with_only_its_dedicated_pool() -> None:
     }
     assert registry.required_connection_budget == 3
     assert set(pools) == {runtime_pool.RuntimePoolName.PF_WORKER}
+    spec = registry.specs[runtime_pool.RuntimePoolName.PF_WORKER]
+    assert spec.expected_database_role == "realytics_pf_worker"
+    assert spec.require_role_preflight is True
+
+
+def test_hardened_worker_checks_role_before_becoming_ready(monkeypatch) -> None:
+    from db.postgres_pf_worker_runtime_preflight import PFWorkerRuntimePreflightError, PFWorkerRuntimePreflightIssue
+    registry, pools = _registry({
+        "REALYTICS_ENVIRONMENT": "staging",
+        runtime_pool.RUNTIME_POOL_ROLES_ENV: "pf_worker",
+        "REALYTICS_PF_WORKER_DATABASE_URL": DIRECT_DSN,
+        "REALYTICS_PF_WORKER_DATABASE_ROLE": "realytics_pf_worker",
+    })
+    called = []
+    def reject(connection, **kwargs):
+        called.append(kwargs["expected_role"])
+        raise PFWorkerRuntimePreflightError((PFWorkerRuntimePreflightIssue("wrong_pf_worker_login_role"),))
+    monkeypatch.setattr(runtime_pool, "assert_pf_worker_runtime_connection", reject)
+    with pytest.raises(runtime_pool.RuntimeDatabaseConfigurationError, match="wrong_pf_worker_login_role"):
+        registry.open_all()
+    assert called == ["realytics_pf_worker"]
+    assert registry.opened is False
+    assert pools[runtime_pool.RuntimePoolName.PF_WORKER].close_calls
+
+
+@pytest.mark.parametrize("role", [None, "realytics_runtime", "realytics_identity"])
+def test_hardened_worker_requires_distinct_explicit_role(role) -> None:
+    env = {
+        "REALYTICS_ENVIRONMENT": "staging",
+        runtime_pool.RUNTIME_POOL_ROLES_ENV: "pf_worker",
+        "REALYTICS_PF_WORKER_DATABASE_URL": DIRECT_DSN,
+    }
+    if role:
+        env["REALYTICS_PF_WORKER_DATABASE_ROLE"] = role
+    with pytest.raises(runtime_pool.RuntimeDatabaseConfigurationError):
+        _registry(env)
 
 
 @pytest.mark.parametrize(
