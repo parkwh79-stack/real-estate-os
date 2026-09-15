@@ -41,6 +41,9 @@ Supabase 적용 이력과 남은 운영 조건을 대조한다.
   시각도 현행 DB 시계 제한에 맞게 고쳤다. 운영 DB의 시간·승인 제한은 유지한다.
   API의 같은 projection 조회도 `FOR SHARE OF projection`으로 잠금 대상을 명시한다.
   nullable outer join의 근거 쪽을 잠그려다 승인 조회가 실패하지 않도록 맞췄다.
+  승인 저장 후 실제 readiness 검사에는 단조 증가 snapshot 버전, 정식 freshness
+  정책, 명시적 원문 계보와 본문 SHA-256이 필요했다. 기존 시험 자료를 이 계약에
+  맞추고 실패 시 readiness 사유 전체를 출력하도록 보강했다.
   main 병합 및 실제 운영
   배포 완료와 코드 업로드 완료는 별도 상태다.
 

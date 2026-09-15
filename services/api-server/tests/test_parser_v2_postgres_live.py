@@ -180,7 +180,6 @@ def _insert_live_legal_gate_case(
     snapshot_id = f"legal-live-snapshot-{suffix}"
     legal_review_id = f"legal-live-review-{suffix}"
     required_claim_set_id = f"legal-live-required-claims-{suffix}"
-    snapshot_version = int(suffix[:7], 16) + 1
     snapshot_hash = _stable_hash(f"snapshot:{suffix}")
     claim_hash = _stable_hash(f"claim:{suffix}")
     claim_set_hash = hashlib.sha256(f"claim-1:{claim_hash}".encode("utf-8")).hexdigest()
@@ -189,6 +188,12 @@ def _insert_live_legal_gate_case(
         "SELECT set_config('realytics.tenant_id', %s, true)",
         (TENANT_A,),
     )
+    cursor.execute(
+        "SELECT COALESCE(MAX(snapshot_version), 0) + 1 "
+        "FROM legal_evidence_snapshots WHERE tenant_id = %s AND project_id = %s",
+        (TENANT_A, PROJECT_A),
+    )
+    snapshot_version = int(cursor.fetchone()[0])
     cursor.execute(
         """
         INSERT INTO legal_source_providers(
@@ -270,6 +275,16 @@ def _insert_live_legal_gate_case(
     )
     cursor.execute(
         """
+        INSERT INTO legal_resource_version_lineages(
+            legal_resource_version_lineage_id, legal_resource_id,
+            legal_resource_version_id, lineage_type, continuity_status,
+            validation_policy, validated_at
+        ) VALUES (%s, %s, %s, 'initial', 'initial', 'not_applicable', %s)
+        """,
+        (f"legal-live-lineage-{suffix}", resource_id, version_id, now),
+    )
+    cursor.execute(
+        """
         INSERT INTO legal_provisions(
             legal_provision_id, legal_resource_version_id, legal_resource_id,
             provision_type, provision_identifier, display_path, body_text,
@@ -283,7 +298,7 @@ def _insert_live_legal_gate_case(
             provision_id,
             version_id,
             resource_id,
-            _stable_hash(f"provision:{suffix}"),
+            hashlib.sha256("라이브 조문".encode("utf-8")).hexdigest(),
         ),
     )
 
@@ -341,7 +356,7 @@ def _insert_live_legal_gate_case(
             legal_review_id,
             created_by, created_at, metadata_json
         ) VALUES (
-            %s, %s, %s, %s, %s, 'live-policy-v1',
+            %s, %s, %s, %s, %s, 'legal-freshness-v1',
             %s, 'verified', FALSE, FALSE, TRUE,
             %s, %s, %s, 'live-test', %s, %s::jsonb
         )
@@ -994,7 +1009,7 @@ def test_live_normalized_approval_readiness_rechecks_snapshot_and_decision(
         expected_snapshot_sha256="sha256:" + ("f" * 64),
     )
 
-    assert ready["pass"] is True
+    assert ready["pass"] is True, json.dumps(ready, sort_keys=True, default=str)
     assert ready["source"] == "normalized_postgres"
     assert ready["lineageValid"] is True
     assert ready["legalReviewProjectionId"] == (
