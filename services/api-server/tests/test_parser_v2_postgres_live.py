@@ -167,7 +167,11 @@ def _insert_live_legal_gate_case(
 ) -> dict[str, Any]:
     """Insert one complete legal lineage plus a deferred gate snapshot."""
 
-    now = "2026-07-18T00:00:00+00:00"
+    # Approval triggers deliberately reject approvals outside the database's
+    # five-minute causal window. Use its clock rather than an expired fixture.
+    cursor.execute("SELECT statement_timestamp()")
+    database_clock = cursor.fetchone()[0]
+    now = database_clock.isoformat()
     provider_id = f"legal-live-provider-{suffix}"
     source_fetch_id = f"legal-live-fetch-{suffix}"
     resource_id = f"legal-live-resource-{suffix}"
@@ -344,7 +348,7 @@ def _insert_live_legal_gate_case(
             legal_review_id,
             created_by, created_at, metadata_json
         ) VALUES (
-            %s, %s, %s, %s, DATE '2026-07-18', 'live-policy-v1',
+            %s, %s, %s, %s, %s, 'live-policy-v1',
             %s, 'verified', FALSE, FALSE, TRUE,
             %s, %s, %s, 'live-test', %s, %s::jsonb
         )
@@ -354,6 +358,7 @@ def _insert_live_legal_gate_case(
             TENANT_A,
             PROJECT_A,
             snapshot_version,
+            database_clock.date(),
             snapshot_hash,
             required_claim_set_id,
             claim_set_hash,
@@ -834,6 +839,12 @@ def test_live_normalized_approval_readiness_rechecks_snapshot_and_decision(
     finally:
         conn.close()
 
+    # The decision must occur after the evidence/projection was persisted.
+    clock_connection = live_database.connect_admin()
+    try:
+        decision_clock = clock_connection.execute("SELECT statement_timestamp()").fetchone()[0]
+    finally:
+        clock_connection.close()
     repository = PostgresLegalTenantOverlayRepository(
         tenant_id=TENANT_A,
         project_id=PROJECT_A,
