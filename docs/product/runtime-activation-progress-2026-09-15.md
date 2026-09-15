@@ -53,18 +53,44 @@
 검사는 원격의 폐기 가능한 PostgreSQL CI로 보완한다. 최종 집중 검사는 전체 검사
 수집 후 추가된 수정도 포함한다. Supabase dry-run은 이번 새 migration 한 개만
 대상이며 seed와 역할 생성은 없다.
-폐기 가능한 PostgreSQL CI와 원격 권한 적용·migration 원장 대조 결과는 완료 후
-갱신한다. 로컬 테스트 산출물과 비밀값은 Git에 포함하지 않는다.
+실제 PostgreSQL CI는 **56 passed / 0 skipped**이며 새 migration의 전체 적용과
+직접 Worker LOGIN, tenant 분리, 승인·identity 쓰기 거부, 미등록 테이블·컬럼 및
+PUBLIC 권한 누수 검출을 포함한다. 로컬 테스트 산출물과 비밀값은 Git에 포함하지 않는다.
+
+## Supabase 적용 결과
+
+검증한 코드 커밋은 `e1b06e3e899a91ac4bbdb9335177cb51237f16ba`이며
+[CI 실행 34936530114](https://github.com/parkwh79-stack/real-estate-os/actions/runs/34936530114)의
+PostgreSQL 단계 통과 후 연결된 프로젝트에 새 migration 한 개를 적용했다.
+같은 커밋의 CI 다섯 항목은 모두 성공했다: API **2,253 passed / 41 skipped**,
+PostgreSQL **56 passed / 0 skipped**, browser **238 passed**, Web 타입·lint·build와
+Windows cleanup **6개** 통과. 일반 API job의 40개 DB 검사는 별도 PostgreSQL
+job에서 실행하며, private 원본 워크북 한 개는 로컬에만 있어 CI에서 건너뛴다.
+Vercel Preview도 성공했다. Main 병합과 운영 배포는 아직 진행하지 않았다.
+
+- 적용 후 **998개 검사 불일치 0건**. 적용 전 부족했던 권한 127개를 정렬했다.
+- 로컬 원본, Supabase 배포 원장, 애플리케이션 원장 **각 26개**의 버전과 원본
+  SHA-256이 모두 일치한다. 재실행 dry-run은 up-to-date이며 남은 migration은 없다.
+- 실제 `realytics_identity` TLS LOGIN의 preflight는 **문제 0건**이다.
+  `extensions` USAGE는 true, CREATE는 false다.
+- 같은 연결에서 명명된 API 역할 전체를 읽기 전용 검사한 결과는 의도한
+  `role_nologin` 한 개뿐이다. API 실제 LOGIN 연결 성공으로 표현하지 않는다.
+  Runtime의 NOLOGIN, identity의 LOGIN과 두 역할의 안전한 속성은 그대로다.
+- PF 역할·비밀번호·유료 자원은 생성하지 않았다. 업무 레코드와 기존 원본은
+  수정하지 않았다. 보안 advisor는 기존 Auth 유출 비밀번호 차단 미설정 경고
+  한 개만 남았으며 새 경고는 없다.
+
+증거는 무시된 `.runtime/activation-20260915-remote-postflight.json`과
+`.runtime/activation-20260915-identity-postflight.json`에 비밀값 없이 보관한다.
+현재 배포 상태와 사람 검토 조건은 아래 후속 항목을 따른다.
 
 ## 남은 실행 순서
 
-1. 새 migration의 실제 PostgreSQL 검증 후 기존 Supabase 권한을 반영하고,
-   identity 실제 로그인 검사 및 세 migration 원장의 버전·해시를 다시 대조한다.
-2. PF Worker의 공유 `orchestrations`·`assumption_proposals` payload 안에서
+1. PF Worker의 공유 `orchestrations`·`assumption_proposals` payload 안에서
    자동 초안과 사람 결정을 DB가 구분하도록 쓰기 경계를 구현한다. 역할 검사만
    통과해도 이 조건이 끝나기 전에는 Worker를 운영에 올리지 않는다.
-3. 신규 계정·리전·예산·보존 기간을 확정하고 검토 가능한 IaC를 준비한 뒤 기반을
+2. 신규 계정·리전·예산·보존 기간을 확정하고 검토 가능한 IaC를 준비한 뒤 기반을
    구성한다. 전용 LOGIN 비밀을 저장소로 주입하고 합성 tenant로 인수 검사한다.
-4. 실제 S3·ClamAV·복원, 두 사용자의 로그인·AAL2 승인, Web/API 연결을 확인한다.
-5. 751 담당 검토자가 원본 버전과 금액 의미를 확정하면 승인 입력과 새 계산을
+3. 실제 S3·ClamAV·복원, 두 사용자의 로그인·AAL2 승인, Web/API 연결을 확인한다.
+4. 751 담당 검토자가 원본 버전과 금액 의미를 확정하면 승인 입력과 새 계산을
    연결해 복구한다. 별도 Agent Worker의 완전한 tenant/lease 구현은 별도 인수한다.

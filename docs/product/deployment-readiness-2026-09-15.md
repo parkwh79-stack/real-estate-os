@@ -3,6 +3,11 @@
 2026-09-15. 문서 커밋 `36afc00`을 기준으로 저장소·GitHub·로컬 설정의 존재 여부를
 읽기 전용으로 확인했다. 비밀값을 출력하거나 원격 리소스를 만들지 않았다.
 
+같은 날의 후속 실행에서 기존 DB 권한 보정과 실제 identity 로그인 검사를 완료했다.
+998개 권한 검사 불일치 0건, migration 원장 각 26개 일치이며 API는 NOLOGIN을
+유지한다. 아래는 보정 전 인벤토리다. 최신 결과와 남은 조건은
+[운영 연결 준비 기록](runtime-activation-progress-2026-09-15.md)을 따른다.
+
 ## 완료한 확인
 
 - [GitHub CI 34916409466](https://github.com/parkwh79-stack/real-estate-os/actions/runs/34916409466)은

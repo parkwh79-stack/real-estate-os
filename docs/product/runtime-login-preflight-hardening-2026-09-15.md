@@ -91,3 +91,9 @@ External activation still requires dedicated secrets, an actual deployed-network
 checkout, real object storage/scanner/restore verification, and independent
 human approval evidence. Unit tests and the disposable database rehearsal do
 not substitute for those checks.
+
+The disposable PostgreSQL CI at `e1b06e3` subsequently passed all **56 checks
+with zero skips**, including the direct worker-login and privilege-drift test.
+Hosted API grant alignment and the existing identity login were then verified;
+the API remains NOLOGIN and no worker role was activated. See
+[hosted verification](runtime-activation-progress-2026-09-15.md).
