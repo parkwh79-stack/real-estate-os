@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from db import postgres
-from db.postgres_runtime_privileges import required_table_privileges
+from db.postgres_runtime_privileges import (
+    required_column_privileges, required_sequence_privileges, required_table_privileges,
+)
 
 
 class _LegalReadinessCursor:
@@ -47,10 +49,14 @@ class _LegalReadinessCursor:
             self.rows = [(True,)]
         elif normalized.endswith("'CREATE')"):
             self.rows = [(False,)]
+        elif "has_column_privilege" in normalized:
+            column, privilege, _schema, table = params
+            self.rows = [(column in required_column_privileges().get(table, {}).get(privilege, ()),)]
         elif "WHEN relation_oid IS NULL THEN FALSE" in normalized:
             privilege, _schema, table = params
+            manifest = required_sequence_privileges() if "has_sequence_privilege" in normalized else required_table_privileges()
             self.rows = [
-                (privilege in required_table_privileges().get(table, ()),)
+                (privilege in manifest.get(table, ()),)
             ]
         else:  # pragma: no cover - catches readiness SQL contract drift
             raise AssertionError(f"unexpected readiness SQL: {normalized}")

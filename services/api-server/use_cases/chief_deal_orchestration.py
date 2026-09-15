@@ -2146,7 +2146,11 @@ def _missing_inputs(project_data: Dict[str, Any]) -> List[MissingInputRegisterIt
     if not regulation:
         add("regulation_data_missing", "legal", "용도지역, 지구단위계획, 건축가능성 검토자료가 필요합니다.", ["land_legal", "market_product"], "high", ["토지이용계획", "조례/법규 API", "건축 기본계획"])
     if not legal:
-        add("legal_cp_missing", "legal", "인허가, 신탁, 담보, 책임준공 등 법무 선행조건 검토자료가 필요합니다.", ["land_legal", "pf_credit"], "high", ["법률 검토 메모", "대출약정 초안", "신탁계약"])
+        from use_cases.stored_permit_evidence import PERMIT_TOKENS
+        has_stored_legal_document = any(any(token in str(kind).casefold() for token in PERMIT_TOKENS) for kind in docs)
+        message = ("등록된 인허가·법무 원본의 파싱·검토·승인 입력 연결을 확인해야 합니다. 미확인 선행조건은 계속 보완이 필요합니다."
+                   if has_stored_legal_document else "인허가, 신탁, 담보, 책임준공 등 법무 선행조건 검토자료가 필요합니다.")
+        add("legal_cp_missing", "legal", message, ["land_legal", "pf_credit"], "high", ["법률 검토 메모", "대출약정 초안", "신탁계약"])
     if not (market.get("transactionComparables") or market.get("manualComparables") or "market_evidence" in docs):
         add("market_evidence_missing", "market", "실거래, 분양사례, 임대료, 미분양/청약 등 시장근거가 필요합니다.", ["market_product", "pf_credit"], "high", ["국토부 실거래가", "분양사례", "임대료/Rent Roll", "제휴 데이터"])
     if not _has_any(project_data, "product_mix", "productMix"):

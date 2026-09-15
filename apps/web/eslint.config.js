@@ -6,6 +6,7 @@ export default [
     name: "realytics/generated-artifacts",
     ignores: [
       ".next/**",
+      ".next-e2e/**",
       ".pytest_cache/**",
       "coverage/**",
       "playwright-report/**",

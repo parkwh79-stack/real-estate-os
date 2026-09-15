@@ -2,6 +2,19 @@ from use_cases.approved_workbook_authority import GOVERNED_WORKBOOK_CORE_FIELDS
 from use_cases.feasibility_input_builder import FIELDS, build_feasibility_input_draft, canonical_product_mix_to_runtime
 
 
+def test_reapplying_candidate_does_not_remove_review_requirement():
+    project = {"feasibility_input": {"total_revenue": 1000, "total_cost": 600}}
+    first = build_feasibility_input_draft(project)
+    assert first["needsReview"] is True
+    project["feasibility_input_sources"] = {
+        key: {**source, "value": first["feasibilityInput"].get(key)}
+        for key, source in first["fieldSources"].items()
+    }
+    second = build_feasibility_input_draft(project)
+    assert second["needsReview"] is True
+    assert second["fieldSources"] == first["fieldSources"]
+
+
 def _approved_study(metrics):
     snapshot_id = "approved-snapshot-1"
     snapshot_hash = "a" * 64

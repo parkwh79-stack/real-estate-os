@@ -96,8 +96,9 @@ def test_no_matching_kid_rejected():
 
 
 def test_es256_token_verifies_against_supabase_style_jwk():
-    jwt = pytest.importorskip("jwt")
-    ec = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ec")
+    # These are required runtime dependencies. A missing verifier must fail CI.
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import ec
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_jwk = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(private_key.public_key()))
     public_jwk.update({"kid": "supabase-es256", "alg": "ES256", "use": "sig"})

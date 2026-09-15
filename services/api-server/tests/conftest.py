@@ -1,4 +1,40 @@
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
+
+
+# Must run before collection imports main/routers and their module-level stores.
+# A fixture alone is too late: the app loads fixtures and opens storage on import.
+# Never reuse a caller-supplied runtime path or development credentials.
+_TEST_RUNTIME = tempfile.TemporaryDirectory(prefix="realytics-pytest-", ignore_cleanup_errors=True)
+_TEST_ROOT = Path(_TEST_RUNTIME.name).resolve()
+for _key in list(os.environ):
+    if _key.startswith(("REALYTICS_", "VWORLD_")) and _key != "REALYTICS_TEST_DATABASE_URL":
+        os.environ.pop(_key, None)
+for _key in (
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
+    "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "TOGETHER_API_KEY",
+    "DATA_GO_KR_API_KEY", "MOLIT_API_KEY", "LAW_OC",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+):
+    os.environ.pop(_key, None)
+os.environ.update({
+    "REALYTICS_ENVIRONMENT": "test",
+    "REALYTICS_LOAD_LOCAL_ENV": "false",
+    "REALYTICS_RUNTIME_DIR": str(_TEST_ROOT),
+    "REALYTICS_TEST_ISOLATION": "true",
+    "REALYTICS_STORAGE_BACKEND": "sqlite",
+    "REALYTICS_SQLITE_FILE": str(_TEST_ROOT / "realytics.sqlite3"),
+    "REALYTICS_STATE_FILE": str(_TEST_ROOT / "state.json"),
+    "REALYTICS_OBJECT_STORAGE": "local",
+    "REALYTICS_IDP_MODE": "off",
+    "REALYTICS_ENABLE_LOCAL_AUTH": "true",
+    "REALYTICS_ENABLE_OAUTH_MOCKS": "true",
+    "REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS": "true",
+    "AWS_EC2_METADATA_DISABLED": "true",
+})
 
 
 @pytest.fixture(autouse=True)

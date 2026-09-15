@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
+from core.runtime_paths import runtime_data_dir
 
 
 class VisualQAAgent:
@@ -17,7 +18,7 @@ class VisualQAAgent:
     A4_TOLERANCE = 2.0
 
     def __init__(self, baseline_dir: Optional[Path] = None):
-        self.baseline_dir = Path(baseline_dir) if baseline_dir else Path(__file__).resolve().parent.parent / "data" / "runtime" / "baselines"
+        self.baseline_dir = Path(baseline_dir) if baseline_dir else runtime_data_dir() / "baselines"
         self.baseline_dir.mkdir(parents=True, exist_ok=True)
 
     def analyze_pdf_structure(self, pdf_bytes: bytes) -> Dict[str, Any]:

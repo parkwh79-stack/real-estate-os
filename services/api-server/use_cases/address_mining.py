@@ -102,7 +102,9 @@ def _pdf_text_bytes(content: bytes) -> str:
 
 
 def _default_archive_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "data" / "runtime" / "uploads"
+    from core.runtime_paths import runtime_data_dir
+
+    return runtime_data_dir() / "uploads"
 
 
 def mine_project_address(

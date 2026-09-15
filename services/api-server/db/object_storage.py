@@ -393,5 +393,7 @@ def get_object_storage(default_base_dir: Path | str | None = None) -> ObjectStor
         )
     if backend != "local":
         raise RuntimeError(f"Unsupported REALYTICS_OBJECT_STORAGE backend: {backend}")
-    base = default_base_dir or (Path(__file__).resolve().parents[1] / "data" / "runtime" / "uploads")
+    from core.runtime_paths import runtime_data_dir
+
+    base = default_base_dir or (runtime_data_dir() / "uploads")
     return LocalObjectStorage(base)

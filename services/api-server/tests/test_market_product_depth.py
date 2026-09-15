@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from agents.market_product_depth_agent import MarketProductDepthAgent
 from agents.pod_ai_reviewer_agent import _market_product_findings
@@ -59,6 +60,28 @@ def test_absorption_model_uses_benchmark_when_no_forecast():
     assert ab["monthlyAbsorptionRate"] == 0.06
     assert ab["estimatedMonthsToSellout"]
     assert ab["curve"] and ab["curve"][-1]["cumulativeRate"] <= 1.0
+
+
+def test_three_percent_absorption_reaches_sellout_in_month_34():
+    result = MarketProductDepthAgent()._absorption_model(
+        {"project": {"type": "commercial"}, "architectural_plan": {"total_units": 100}}, {}
+    )
+    assert result["estimatedMonthsToSellout"] == 34
+    assert result["curve"][-1] == {"month": 34, "cumulativeRate": 1.0}
+
+
+@pytest.mark.parametrize("rate", [-0.1, 1.1, float("inf"), float("nan"), "bad"])
+def test_invalid_explicit_absorption_is_not_replaced_with_benchmark(rate):
+    result = MarketProductDepthAgent()._absorption_model({}, {"absorptionForecast": {"monthlyAbsorptionRate": rate}})
+    assert result["status"] == "invalid_input"
+    assert result["estimatedMonthsToSellout"] is None
+    assert result["curve"] == []
+
+
+def test_zero_absorption_has_no_sellout():
+    result = MarketProductDepthAgent()._absorption_model({}, {"absorptionForecast": {"monthlyAbsorptionRate": 0}})
+    assert result["monthlyAbsorptionRate"] == 0
+    assert result["estimatedMonthsToSellout"] is None
 
 
 def test_ai_next_actions_deterministic_mode_lists_gaps():

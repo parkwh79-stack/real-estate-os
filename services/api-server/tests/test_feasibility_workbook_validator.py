@@ -486,6 +486,29 @@ def test_yongin_profile_does_not_infer_unattested_monetary_basis(tmp_path):
     ]
 
 
+def test_yongin_does_not_sum_dates_subtotals_or_invent_peak_funding(tmp_path):
+    path = tmp_path / "yongin.xlsx"
+    _build_yongin_public_rental_workbook(path)
+    from openpyxl import load_workbook
+    workbook = load_workbook(path)
+    workbook['cash']['E1'] = 2027
+    workbook['cash']['E8'] = 1000
+    workbook['cash']['E9'] = 1000  # a subtotal is not another transaction
+    workbook.save(path)
+    workbook.close()
+    study = import_feasibility_study_from_workbook(path)
+    assert study['metrics']['total_revenue'] == 850_000_000
+    assert study['monthly_cash_flow'] == []
+    assert study['schedule'] == []
+    for key in ('max_minus', 'required_equity', 'ltv', 'exit_sale_rate'):
+        assert study['metrics'][key] is None
+    workbook = load_workbook(path)
+    workbook['손익']['A3'] = '아파트 착공 2030년8월 / 공기 40개월'
+    workbook.save(path)
+    workbook.close()
+    assert import_feasibility_study_from_workbook(path)['schedule'][0]['planned_date'] == '2030-08'
+
+
 class _ParserRecordMemory:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, dict]] = {}

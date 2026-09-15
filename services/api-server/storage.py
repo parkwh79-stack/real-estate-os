@@ -10,11 +10,12 @@ from typing import Any, Dict
 from uuid import uuid4
 
 from core.text_normalization import normalize_match_text
+from core.runtime_paths import runtime_data_dir
 
 
 STATE_VERSION = 16
-DEFAULT_STATE_FILE = Path(__file__).parent / "data" / "runtime" / "state.json"
-DEFAULT_SQLITE_FILE = Path(__file__).parent / "data" / "runtime" / "realytics.sqlite3"
+DEFAULT_STATE_FILE = runtime_data_dir() / "state.json"
+DEFAULT_SQLITE_FILE = runtime_data_dir() / "realytics.sqlite3"
 MAX_JSON_ACTIVITY_LOGS = 10000
 ASSUMPTION_OVERRIDE_STATUSES = {"active", "revoked", "expired", "superseded"}
 GLOSSARY_CANDIDATE_STATUSES = {"pending_review", "approved", "rejected", "needs_revision", "merged", "free_text"}
@@ -298,19 +299,11 @@ def save_state(
 def upsert_project_record(project_id: str, payload: Dict[str, Any], project_id_counter: int | None = None) -> bool:
     """Persist a single project row in the authoritative typed store."""
     if storage_backend() in {"postgres", "postgresql"}:
-        from db import postgres
-
-        metadata = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
-        postgres.upsert_typed_jsonb_record(
-            "projects",
-            {
-                "project_id": str(project_id),
-                "tenant_id": metadata.get("tenantId") or metadata.get("tenant_id"),
-                "created_by": metadata.get("createdBy") or metadata.get("created_by"),
-                "updated_at": metadata.get("updated_at") or metadata.get("updatedAt") or datetime.now(timezone.utc),
-            },
-            payload,
-        )
+        from db.repositories.request_project_repository import current_project_scope
+        scope = current_project_scope()
+        if scope is None:
+            raise RuntimeError("A verified request/job scope is required for project persistence")
+        scope.update(str(project_id), payload)
         return True
     if storage_backend() != "sqlite":
         return False
@@ -371,9 +364,11 @@ def delete_project_record_cascade(project_id: str) -> bool:
 
 def get_project_record(project_id: str) -> Dict[str, Any] | None:
     if storage_backend() == "postgres":
-        from db import postgres
-
-        return postgres.get_typed_jsonb_record("projects", {"project_id": str(project_id)})
+        from db.repositories.request_project_repository import current_project_scope
+        scope = current_project_scope()
+        if scope is None:
+            raise RuntimeError("A verified request/job scope is required for project reads")
+        return scope.get(str(project_id))
     state = load_state() or default_state()
     return (state.get("projects") or {}).get(str(project_id))
 
@@ -565,12 +560,9 @@ def _upsert_postgres_typed_record(
     values: Dict[str, Any],
     normalized: Dict[str, Any],
 ) -> None:
-    """Dual-write critical audit data to app_state and its typed table."""
+    """Persist critical audit data only in its normalized typed authority."""
     from db import postgres
 
-    state = _load_json_state() or default_state()
-    state.setdefault(store_key, {}).setdefault(str(project_id), {})[str(record_id)] = normalized
-    _save_json_state_from_state(state)
     postgres.upsert_typed_jsonb_record(table, values, normalized)
 
 
@@ -626,10 +618,6 @@ def create_agent_run_record(record: Dict[str, Any]) -> tuple[Dict[str, Any], boo
             agent_id=str(values.get("agent_id") or ""),
             idempotency_key=str(values.get("idempotency_key") or ""),
         )
-        if created:
-            state = _load_json_state() or default_state()
-            state.setdefault("agent_runs", {})[run_id] = normalized
-            _save_json_state_from_state(state)
         return persisted or normalized, created
     if backend == "json":
         with _AGENT_RUNTIME_LOCK:
@@ -754,11 +742,6 @@ def update_agent_run_record(
             )
         if not updated:
             raise RuntimeError("AGENT_RUN_VERSION_CONFLICT")
-        state = _load_json_state() or default_state()
-        state.setdefault("agent_runs", {})[str(run_id)] = normalized
-        if outbox_event:
-            state.setdefault("runtime_outbox_events", {})[str(outbox_event["eventId"])] = outbox_event
-        _save_json_state_from_state(state)
         return normalized
     if backend == "json":
         with _AGENT_RUNTIME_LOCK:
@@ -856,9 +839,6 @@ def upsert_agent_run_step_record(record: Dict[str, Any]) -> Dict[str, Any]:
         from db import postgres
 
         postgres.upsert_typed_jsonb_record("agent_run_steps", values, normalized)
-        state = _load_json_state() or default_state()
-        state.setdefault("agent_run_steps", {}).setdefault(str(values["run_id"]), {})[str(values["step_id"])] = normalized
-        _save_json_state_from_state(state)
     elif storage_backend() == "json":
         with _AGENT_RUNTIME_LOCK:
             state = _load_json_state() or default_state()
@@ -926,9 +906,6 @@ def upsert_brain_usage_event_record(record: Dict[str, Any]) -> Dict[str, Any]:
         from db import postgres
 
         postgres.upsert_typed_jsonb_record("brain_usage_events", values, normalized)
-        state = _load_json_state() or default_state()
-        state.setdefault("brain_usage_events", {}).setdefault(str(values["run_id"]), {})[str(values["event_id"])] = normalized
-        _save_json_state_from_state(state)
     elif storage_backend() == "json":
         with _AGENT_RUNTIME_LOCK:
             state = _load_json_state() or default_state()
@@ -1038,10 +1015,6 @@ def upsert_operational_record(table: str, record: Dict[str, Any]) -> Dict[str, A
         from db import postgres
 
         postgres.upsert_typed_jsonb_record(table, values, normalized)
-        with _AGENT_RUNTIME_LOCK:
-            state = _load_json_state() or default_state()
-            state.setdefault(spec["store"], {})[str(key_value)] = normalized
-            _save_json_state_from_state(state)
         return normalized
     if backend == "json":
         with _AGENT_RUNTIME_LOCK:
@@ -2497,7 +2470,7 @@ def upsert_agent_handoff_record(project_id: str, record: Dict[str, Any]) -> Dict
         "updatedAt": now,
     }
     outbox = _new_runtime_outbox_payload(
-        tenant_id=str(record.get("tenantId") or "legacy"),
+        tenant_id=_normalized_tenant_scope(record=record) if storage_backend() == "postgres" else str(record.get("tenantId") or "legacy"),
         project_id=str(project_id),
         aggregate_type="agent_handoff",
         aggregate_id=normalized["handoffId"],
@@ -2531,10 +2504,6 @@ def upsert_agent_handoff_record(project_id: str, record: Dict[str, Any]) -> Dict
             _runtime_outbox_values(outbox),
             outbox,
         )
-        state = _load_json_state() or default_state()
-        state.setdefault("agent_handoffs", {}).setdefault(str(project_id), {})[normalized["handoffId"]] = normalized
-        state.setdefault("runtime_outbox_events", {})[outbox["eventId"]] = outbox
-        _save_json_state_from_state(state)
         return normalized
     if storage_backend() == "json":
         state = _load_json_state() or default_state()
@@ -2661,6 +2630,9 @@ def _deal_state_typed_values(project_id: str, normalized: Dict[str, Any]) -> Dic
 def upsert_deal_state_records(
     project_id: str,
     records: list[Dict[str, Any]],
+    *,
+    tenant_id: str | None = None,
+    transaction_factory=None,
 ) -> list[Dict[str, Any]]:
     """Persist a materialized deal-state batch in one backend transaction."""
     if not records:
@@ -2670,21 +2642,13 @@ def upsert_deal_state_records(
         _normalize_deal_state_record(project_id, record, now=now) for record in records
     ]
     if storage_backend() == "postgres":
-        from db import postgres
-
-        state = _load_json_state() or default_state()
-        project_records = state.setdefault("deal_state_records", {}).setdefault(project_id, {})
-        for normalized in normalized_rows:
-            project_records[normalized["recordId"]] = normalized
-        _save_json_state_from_state(state)
-        postgres.upsert_typed_jsonb_records(
-            "deal_state_records",
-            [
-                (_deal_state_typed_values(project_id, normalized), normalized)
-                for normalized in normalized_rows
-            ],
-        )
-        return normalized_rows
+        from db.repositories.deal_state_repository import PostgresDealStateRepository
+        scoped_tenant = _normalized_tenant_scope(tenant_id)
+        for row in normalized_rows:
+            _normalized_tenant_scope(scoped_tenant, row)
+            row["tenantId"] = scoped_tenant
+        repository_options = _runtime_transaction_options(transaction_factory)
+        return PostgresDealStateRepository(tenant_id=scoped_tenant, **repository_options).upsert_records(project_id, normalized_rows)
     if storage_backend() == "json":
         state = _load_json_state() or default_state()
         project_records = state.setdefault("deal_state_records", {}).setdefault(project_id, {})
@@ -2743,6 +2707,7 @@ def _deal_state_record_has_source_locator(record: Dict[str, Any]) -> bool:
 def list_deal_state_records(
     project_id: str,
     *,
+    tenant_id: str | None = None,
     record_type: str | None = None,
     calculation_run_id: str | None = None,
     review_status: str | None = None,
@@ -2752,16 +2717,11 @@ def list_deal_state_records(
 ) -> list[Dict[str, Any]]:
     limit = max(1, min(int(limit or 200), 1000))
     if storage_backend() == "postgres":
-        from db import postgres
-
-        where: Dict[str, Any] = {"project_id": project_id}
-        if record_type:
-            where["record_type"] = record_type
-        if calculation_run_id:
-            where["calculation_run_id"] = calculation_run_id
-        if review_status and review_status != "unreviewed":
-            where["review_status"] = review_status
-        records = postgres.list_typed_jsonb_records("deal_state_records", where=where, limit=limit)
+        from db.repositories.deal_state_repository import PostgresDealStateRepository
+        records = PostgresDealStateRepository(tenant_id=_normalized_tenant_scope(tenant_id), **_runtime_transaction_options()).list_records(
+            project_id, record_type=record_type, calculation_run_id=calculation_run_id,
+            review_status=review_status if review_status != "unreviewed" else None, limit=limit,
+        )
     elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         records = list(state.get("deal_state_records", {}).get(project_id, {}).values())
@@ -2819,10 +2779,32 @@ def list_deal_state_records(
     return sorted(records, key=lambda item: item.get("updatedAt") or "", reverse=True)[:limit]
 
 
-def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+def _runtime_transaction_options(transaction_factory=None):
+    from db.repositories.request_project_repository import current_project_scope
+    scope = current_project_scope()
+    factory = transaction_factory or (scope.transaction_factory if scope is not None else None)
+    return {"transaction_factory": factory} if factory else {}
+
+
+def _normalized_tenant_scope(tenant_id: str | None = None, record=None) -> str:
+    from db.repositories.request_project_repository import current_project_scope
+    scope = current_project_scope()
+    scoped = scope.tenant_id if scope is not None else str(tenant_id or "").strip()
+    if not scoped:
+        raise RuntimeError("A verified tenant is required for normalized persistence")
+    if tenant_id and tenant_id != scoped:
+        raise ValueError("Tenant scope does not match request authority")
+    for key in ("tenantId", "tenant_id"):
+        claimed = (record or {}).get(key)
+        if claimed and claimed != scoped:
+            raise ValueError("Record tenant does not match persistence authority")
+    return scoped
+
+
+def upsert_calculation_run_record(project_id: str, record: Dict[str, Any], *, tenant_id: str | None = None, transaction_factory=None) -> Dict[str, Any]:
     """Persist deterministic calculation output with input evidence and assumptions."""
     now = datetime.now(timezone.utc).isoformat()
-    tenant_id = str(
+    tenant_id = _normalized_tenant_scope(tenant_id, record) if storage_backend() == "postgres" else str(
         record.get("tenantId") or record.get("tenant_id") or "legacy"
     )
     engine_key = record.get("engineKey") or record.get("engine_key") or record.get("calculationType") or "calculation"
@@ -2873,29 +2855,14 @@ def upsert_calculation_run_record(project_id: str, record: Dict[str, Any]) -> Di
     )
 
     if storage_backend() == "postgres":
-        from db import postgres
-
-        postgres.upsert_typed_jsonb_record_with_outbox(
-            "calculation_runs",
-            {
-                "project_id": project_id,
-                "calculation_run_id": normalized["calculationRunId"],
-                "engine_key": normalized.get("engineKey"),
-                "engine_version": normalized.get("engineVersion"),
-                "status": normalized.get("status"),
-                "created_at": normalized.get("createdAt"),
-                "updated_at": normalized.get("updatedAt"),
-            },
-            normalized,
-            _runtime_outbox_values(outbox),
-            outbox,
+        from db.repositories.calculation_run_repository import PostgresCalculationRunRepository
+        projections = _materialize_calculation_run_record(project_id, normalized, persist=False)
+        projections = [_normalize_deal_state_record(project_id, {**row, "tenantId": tenant_id}, now=now)
+                       for row in projections]
+        repository_options = _runtime_transaction_options(transaction_factory)
+        return PostgresCalculationRunRepository(tenant_id=tenant_id, **repository_options).upsert_run_with_outbox(
+            project_id, normalized, outbox, deal_state_records=projections,
         )
-        state = _load_json_state() or default_state()
-        state.setdefault("calculation_runs", {}).setdefault(str(project_id), {})[
-            normalized["calculationRunId"]
-        ] = normalized
-        state.setdefault("runtime_outbox_events", {})[outbox["eventId"]] = outbox
-        _save_json_state_from_state(state)
     elif storage_backend() == "json":
         state = _load_json_state() or default_state()
         state.setdefault("calculation_runs", {})
@@ -2941,6 +2908,7 @@ def materialize_calculation_run_record(
     calculation_run_id: str,
     *,
     tenant_id: str | None = None,
+    transaction_factory=None,
 ) -> list[Dict[str, Any]]:
     """Idempotently rebuild Deal State projections from a durable CalculationRun."""
     run = next(
@@ -2949,6 +2917,7 @@ def materialize_calculation_run_record(
             for item in list_calculation_run_records(
                 project_id,
                 tenant_id=tenant_id,
+                transaction_factory=transaction_factory,
                 calculation_run_id=calculation_run_id,
                 limit=1,
             )
@@ -2958,12 +2927,15 @@ def materialize_calculation_run_record(
     )
     if run is None:
         raise KeyError(f"CalculationRun not found: {calculation_run_id}")
-    return _materialize_calculation_run_record(project_id, run)
+    return _materialize_calculation_run_record(project_id, run, transaction_factory=transaction_factory)
 
 
 def _materialize_calculation_run_record(
     project_id: str,
     normalized: Dict[str, Any],
+    *,
+    persist: bool = True,
+    transaction_factory=None,
 ) -> list[Dict[str, Any]]:
     materialized_records: list[Dict[str, Any]] = []
     run_source_locator = (
@@ -3033,8 +3005,8 @@ def _materialize_calculation_run_record(
                 "sourceLocator": {"calculationRunId": normalized["calculationRunId"]},
             }
         )
-    if materialized_records:
-        upsert_deal_state_records(project_id, materialized_records)
+    if materialized_records and persist:
+        upsert_deal_state_records(project_id, materialized_records, tenant_id=normalized.get("tenantId"), transaction_factory=transaction_factory)
     return materialized_records
 
 
@@ -3055,6 +3027,7 @@ def list_calculation_run_records(
     project_id: str,
     *,
     tenant_id: str | None = None,
+    transaction_factory=None,
     calculation_run_id: str | None = None,
     engine_key: str | None = None,
     limit: int = 100,
@@ -3065,12 +3038,13 @@ def list_calculation_run_records(
             PostgresCalculationRunRepository,
         )
 
-        scoped_tenant = str(tenant_id or "").strip()
+        scoped_tenant = _normalized_tenant_scope(tenant_id)
         if not scoped_tenant:
             raise RuntimeError(
                 "tenant_id is required for PostgreSQL CalculationRun reads"
             )
-        repository = PostgresCalculationRunRepository(tenant_id=scoped_tenant)
+        repository_options = _runtime_transaction_options(transaction_factory)
+        repository = PostgresCalculationRunRepository(tenant_id=scoped_tenant, **repository_options)
         if calculation_run_id:
             record = repository.get_run(project_id, calculation_run_id)
             records = [record] if record is not None else []
@@ -4174,6 +4148,11 @@ def _project_payload_id(payload: Dict[str, Any]) -> str:
 
 def _connect_sqlite() -> sqlite3.Connection:
     path = sqlite_file_path()
+    if os.environ.get("REALYTICS_TEST_ISOLATION") == "true":
+        production_root = (Path(__file__).resolve().parent / "data" / "runtime").resolve()
+        resolved = path.resolve()
+        if resolved == production_root or production_root in resolved.parents:
+            raise RuntimeError("Tests must not open the development runtime database")
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row

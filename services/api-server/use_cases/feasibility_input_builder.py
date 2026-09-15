@@ -180,8 +180,14 @@ def build_feasibility_input_draft(
         _set(field, v2_metrics.get(field), "feasibility_workbook_v2", 0.92)
 
     # 2) existing feasibility_input for any field the workbook does not cover
+    previous_sources = project_data.get("feasibility_input_sources") or {}
     for field in FIELDS:
-        _set(field, existing.get(field), "feasibility_input", 0.8)
+        previous = previous_sources.get(field) or {}
+        if previous and _num(previous.get("value")) == _num(existing.get(field)):
+            _set(field, existing.get(field), str(previous.get("source") or "feasibility_input"),
+                 float(previous.get("confidence") or 0.6), needs_review=previous.get("needsReview") is not False)
+        else:
+            _set(field, existing.get(field), "feasibility_input", 0.6, needs_review=True)
 
     # 3) parsed_fact records for feasibility fields. Distinguish REAL parsed document
     #    values from auto_supplement benchmark PROXIES (factOrigin=auto_supplement) —

@@ -60,6 +60,8 @@ def test_scenario_engine_agent_execution():
             assert "tranche" in tranche_rec
             assert "recoveryRatio" in tranche_rec
             assert 0.0 <= tranche_rec["recoveryRatio"] <= 1.0
+            assert tranche_rec["claimAmount"] >= tranche_rec["principalAmount"]
+            assert tranche_rec["shortfall"] == max(0, tranche_rec["claimAmount"] - tranche_rec["recoveredAmount"])
 
     # Verify risk flags and Korean report fragments
     assert len(result.riskFlags) >= 0

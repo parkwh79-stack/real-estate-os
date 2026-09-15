@@ -688,8 +688,10 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setPlan(nextPlan);
       setApprovalGate(nextPlan.approvalReadinessGate ?? null);
       await Promise.all([loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Chief Deal Room 계획을 불러오지 못했습니다.");
+      return false;
     } finally {
       setLoading(false);
     }
@@ -762,6 +764,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
+      setApprovalGate(nextPlan.approvalReadinessGate ?? null);
       await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
       setError(null);
       return true;
@@ -801,6 +804,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
+      setApprovalGate(nextPlan.approvalReadinessGate ?? null);
       await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
       setError(null);
     } catch (err) {
@@ -824,7 +828,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(cleanText(body?.detail, "새 자료 반영 재분석에 실패했습니다."));
       setReanalyzeResult(body);
-      await loadPlan();
+      if (!(await loadPlan())) return;
       await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
       setError(null);
     } catch (err) {

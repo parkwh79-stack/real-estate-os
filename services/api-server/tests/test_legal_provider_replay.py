@@ -665,6 +665,7 @@ def test_repository_begin_replay_fails_closed_for_catalog_drift_or_expiry(
 
 def test_repository_rejects_object_key_not_bound_to_dead_letter() -> None:
     repository = PostgresLegalProviderReplayRepository(
+        clock=lambda: NOW,
         connection_factory=lambda: pytest.fail(
             "unbound approval must fail before opening PostgreSQL"
         ),
@@ -686,6 +687,7 @@ def test_repository_rejects_object_key_not_bound_to_dead_letter() -> None:
 
 def test_locator_binding_does_not_decode_a_different_object_identity() -> None:
     repository = PostgresLegalProviderReplayRepository(
+        clock=lambda: NOW,
         connection_factory=lambda: pytest.fail(
             "percent-encoded identity must fail before opening PostgreSQL"
         ),
@@ -707,6 +709,7 @@ def test_locator_binding_does_not_decode_a_different_object_identity() -> None:
 
 def test_locator_binding_rejects_dead_letter_substring_collision() -> None:
     repository = PostgresLegalProviderReplayRepository(
+        clock=lambda: NOW,
         connection_factory=lambda: pytest.fail(
             "substring collision must fail before opening PostgreSQL"
         ),

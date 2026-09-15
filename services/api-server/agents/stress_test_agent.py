@@ -134,7 +134,7 @@ class StressTestAgent:
         # only the rate shock adds incremental interest. When no feasibility
         # finance cost is supplied, estimate the base from the tranche stack.
         base_finance = request.financeCost
-        if base_finance <= 0 and sorted_tranches:
+        if base_finance <= 0 and sorted_tranches and request.baseCashFlowRequest is None:
             base_finance = sum(t.amount * (t.interestRate + t.feeRate) for t in sorted_tranches) * finance_years
         exposure = pf_amount or sum(t.amount for t in sorted_tranches)
         rate_shock = exposure * driver.interestRateDelta * finance_years
@@ -165,6 +165,8 @@ class StressTestAgent:
         )
         if engine_series is not None:
             return engine_series, "cash_flow_engine", engine_diagnostics
+        if request.baseCashFlowRequest is not None:
+            raise ValueError("cash_flow_bound_stress_failed: " + str(engine_diagnostics.get("fallbackReason")))
         fallback_series = self._build_scenario_cashflow(
             schedule=schedule,
             land_cost=request.landCost,
@@ -220,6 +222,10 @@ class StressTestAgent:
                     for t in request.pfStructure
                 ],
             }
+            if request.baseCashFlowRequest is not None:
+                from use_cases.cash_flow_dependencies import scale_cash_flow_request
+                engine_request = scale_cash_flow_request(request.baseCashFlowRequest,
+                    revenue=adjusted_revenue, construction=adjusted_construction, finance=adjusted_finance)
             result = run_cash_flow_engine(engine_request)
             rows = result.get("monthlyCashFlow") or []
             series = [float(row.get("netCashFlowBeforePfDraw") or 0.0) for row in rows]

@@ -77,12 +77,13 @@ def test_activity_middleware_appends_with_membership_resolved_user(
     captured: dict[str, Any] = {}
 
     class _ProjectRepository:
+        tenant_id = "tenant-1"
         @staticmethod
         def get(project_id: str) -> dict[str, Any]:
             return {
                 "id": project_id,
                 "project": {"id": project_id, "name": "검토 사업"},
-                "_meta": {"tenantId": "tenant-1"},
+                "_meta": {"tenantId": "tenant-1", "stateVersion": 1},
             }
 
     class _ActivityRepository:

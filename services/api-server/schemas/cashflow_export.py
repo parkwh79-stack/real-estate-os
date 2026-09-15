@@ -29,6 +29,7 @@ class CashflowExportCompletionRequest(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    export_purpose: Literal["draft", "approved"] = Field(default="draft", alias="exportPurpose")
 
     anchor_calculation_run_id: str = Field(
         alias="anchorCalculationRunId",

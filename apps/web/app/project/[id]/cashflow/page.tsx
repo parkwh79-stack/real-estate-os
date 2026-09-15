@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Calculator, Download, Loader2, PlayCircle, RefreshCw, ShieldCheck, TrendingDown, Wallet } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { fetchLatestCalculationRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
+import { trancheAmounts, amountInEok } from "../../../../lib/tranche-display";
 
 const SCENARIO_ENGINES = ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"];
 
@@ -209,15 +210,12 @@ function ScenarioDetailPanel({ runs }: { runs: Record<string, CalculationRunReco
       saleRate: Number(scenario.saleRate ?? 0),
       discountRate: Number(scenario.discountRate ?? 0),
       tranche: String((tranche as Record<string, unknown>).tranche ?? "-"),
-      principalClaim: Number((tranche as Record<string, unknown>).principalClaim ?? 0),
-      paymentReceived: Number((tranche as Record<string, unknown>).paymentReceived ?? 0),
-      shortfall: Number((tranche as Record<string, unknown>).shortfall ?? 0),
-      recoveryRatio: Number((tranche as Record<string, unknown>).recoveryRatio ?? 0),
+      ...trancheAmounts(tranche as Record<string, unknown>),
     })),
   ).slice(0, 18);
   return (
     <section className="grid gap-3 xl:grid-cols-3">
-      <DetailTable title="Tranche별 회수 및 금액" run={runs.tranche_recovery} headers={["시나리오", "Tranche", "청구액", "회수액", "부족액", "회수율"]} rows={trancheRows.map((row) => [row.scenario, row.tranche, formatValue(row.principalClaim / 1e8), formatValue(row.paymentReceived / 1e8), formatValue(row.shortfall / 1e8), `${(row.recoveryRatio * 100).toFixed(1)}%`])} />
+      <DetailTable title="Tranche별 회수 및 금액" run={runs.tranche_recovery} headers={["시나리오", "Tranche", "총청구액", "회수액", "부족액", "회수율"]} rows={trancheRows.map((row) => [row.scenario, row.tranche, formatValue(amountInEok(row.claimAmount)), formatValue(amountInEok(row.recoveredAmount)), formatValue(amountInEok(row.shortfall)), row.recoveryRatio === null ? "-" : `${(row.recoveryRatio * 100).toFixed(1)}%`])} />
       <DetailTable title="상환 Waterfall" run={runs.waterfall} headers={["시나리오", "가용현금", "청구액", "부족액", "잔여현금"]} rows={waterfallRows.slice(0, 8).map((row) => [String(row.scenarioId ?? "-"), formatValue(Number(row.cashAvailable ?? 0) / 1e8), formatValue(Number(row.totalClaimAmount ?? 0) / 1e8), formatValue(Number(row.totalShortfall ?? 0) / 1e8), formatValue(Number(row.remainingCash ?? 0) / 1e8)])} />
       <DetailTable title="미분양 LTV 주요 구간" run={runs.unsold_ltv} headers={["분양률", "할인율", "미분양가치", "미분양 LTV", "위험등급"]} rows={ltvRows.slice(0, 8).map((row) => [ `${(Number(row.saleRate ?? 0) * 100).toFixed(0)}%`, `${(Number(row.discountRate ?? 0) * 100).toFixed(0)}%`, formatValue(Number(row.discountedUnsoldValue ?? 0) / 1e8), `${(Number(row.unsoldLtv ?? 0) * 100).toFixed(1)}%`, String(row.riskLevel ?? "-") ])} />
     </section>

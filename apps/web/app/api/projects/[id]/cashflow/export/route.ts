@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
 import { createHash } from "node:crypto";
 import { fetchAuthenticatedBackend } from "../../../../../../lib/authenticated-backend-fetch";
+import { trancheAmounts, amountInEok } from "../../../../../../lib/tranche-display";
 
 export const runtime = "nodejs";
 
@@ -44,18 +45,15 @@ const CASHFLOW_EXPORT_ENGINE_KEYS = [
 ] as const;
 
 type CashflowExportPackage = {
+  exportPurpose: "draft" | "approved";
   anchorCalculationRunId: string;
   runs: Record<(typeof CASHFLOW_EXPORT_ENGINE_KEYS)[number], AnyRecord>;
   calculationRunIds: Record<(typeof CASHFLOW_EXPORT_ENGINE_KEYS)[number], string>;
 };
 
-async function loadExportPackage(projectId: string): Promise<{
-  anchorCalculationRunId: string;
-  runs: CashflowExportPackage["runs"];
-  calculationRunIds: CashflowExportPackage["calculationRunIds"];
-}> {
+async function loadExportPackage(projectId: string, purpose: "draft" | "approved"): Promise<CashflowExportPackage> {
   const response = await fetchAuthenticatedBackend(
-    `/projects/${encodeURIComponent(projectId)}/cashflow-export-package`,
+    `/projects/${encodeURIComponent(projectId)}/cashflow-export-package?purpose=${purpose}`,
   );
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as {
@@ -77,6 +75,8 @@ async function loadExportPackage(projectId: string): Promise<{
     projectId?: unknown;
     anchorCalculationRunId?: unknown;
     reportEligible?: unknown;
+    exportPurpose?: unknown;
+    downloadEligible?: unknown;
     engineKeys?: unknown;
     runs?: unknown;
     missingEngineKeys?: unknown;
@@ -87,7 +87,9 @@ async function loadExportPackage(projectId: string): Promise<{
   if (
     body?.schemaVersion !== "realytics-cashflow-export-package-v1"
     || body.projectId !== projectId
-    || body.reportEligible !== true
+    || body.exportPurpose !== purpose
+    || body.downloadEligible !== true
+    || body.reportEligible !== (purpose === "approved")
     || typeof body.anchorCalculationRunId !== "string"
     || !body.anchorCalculationRunId
     || !Array.isArray(engineKeys)
@@ -129,6 +131,7 @@ async function loadExportPackage(projectId: string): Promise<{
     ]),
   ) as CashflowExportPackage["calculationRunIds"];
   return {
+    exportPurpose: purpose,
     anchorCalculationRunId: body.anchorCalculationRunId,
     runs: typedRuns,
     calculationRunIds,
@@ -148,6 +151,7 @@ async function recordExportCompletion(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        exportPurpose: exportPackage.exportPurpose,
         anchorCalculationRunId: exportPackage.anchorCalculationRunId,
         calculationRunIds: exportPackage.calculationRunIds,
         artifactSha256,
@@ -209,8 +213,10 @@ function exportErrorResponse(error: unknown): NextResponse {
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   let exportPackage: CashflowExportPackage;
+  const purpose = new URL(_request.url).searchParams.get("purpose") ?? "draft";
+  if (purpose !== "draft" && purpose !== "approved") return exportErrorResponse(new BackendExportError(400, "invalid_export_purpose"));
   try {
-    exportPackage = await loadExportPackage(id);
+    exportPackage = await loadExportPackage(id, purpose);
   } catch (error) {
     return exportErrorResponse(error);
   }
@@ -260,10 +266,15 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   for (const row of (runs.waterfall?.resultSnapshot?.rows ?? []) as AnyRecord[]) waterfall.addRow([row.scenarioId, money(row.cashAvailable) / 1e8, money(row.totalClaimAmount) / 1e8, money(row.totalShortfall) / 1e8, money(row.remainingCash) / 1e8]);
 
   const recovery = workbook.addWorksheet("03_Tranche회수율");
-  addTitle(recovery, "Tranche별 회수율 및 금액", "원금청구액, 회수액, 부족액, 회수율을 시나리오별로 표시");
-  recovery.addRow(["시나리오", "Tranche", "원금청구액", "회수액", "부족액", "회수율"]);
+  addTitle(recovery, "Tranche별 회수율 및 금액", "이자·수수료 포함 총청구액, 회수액, 부족액, 회수율 (미산출은 빈칸)");
+  recovery.addRow(["시나리오", "Tranche", "총청구액", "회수액", "부족액", "회수율"]);
   setHeader(recovery.getRow(3));
-  for (const scenario of (runs.tranche_recovery?.resultSnapshot?.rows ?? []) as AnyRecord[]) for (const tranche of (scenario.tranches ?? []) as AnyRecord[]) recovery.addRow([scenario.scenarioId, tranche.tranche, money(tranche.principalClaim) / 1e8, money(tranche.paymentReceived) / 1e8, money(tranche.shortfall) / 1e8, `${(money(tranche.recoveryRatio) * 100).toFixed(1)}%`]);
+  for (const scenario of (runs.tranche_recovery?.resultSnapshot?.rows ?? []) as AnyRecord[]) {
+    for (const tranche of (scenario.tranches ?? []) as AnyRecord[]) {
+      const amounts = trancheAmounts(tranche);
+      recovery.addRow([scenario.scenarioId, tranche.tranche, amountInEok(amounts.claimAmount), amountInEok(amounts.recoveredAmount), amountInEok(amounts.shortfall), amounts.recoveryRatio === null ? null : `${(amounts.recoveryRatio * 100).toFixed(1)}%`]);
+    }
+  }
 
   const ltv = workbook.addWorksheet("04_미분양LTV");
   addTitle(ltv, "미분양 LTV Matrix", "분양률·할인율별 미분양 환가가치와 LTV");
@@ -278,13 +289,15 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   for (const [key, metric] of Object.entries((runs.discount_stress?.resultSnapshot?.metrics ?? {}) as AnyRecord)) if (key.endsWith(".exitSaleRate")) stress.addRow([key.replace(".exitSaleRate", "").replace("discount", "") + "%", `${money(metric.value) * 100}%`, `${money((runs.discount_stress?.resultSnapshot?.metrics ?? {})[key.replace("exitSaleRate", "seniorRecoveryRatio")]?.value) * 100}%`]);
 
   for (const sheet of workbook.worksheets) {
+    if (purpose === "draft") sheet.getCell("A1").value = `검토용 초안 — ${sheet.getCell("A1").value}`;
+    sheet.headerFooter.oddFooter = purpose === "draft" ? "검토용 초안 — 승인·투자의사결정용 자료 아님" : "승인 보고서용 계산자료";
     sheet.eachRow((row) => row.eachCell((cell) => { cell.border = { top: { style: "thin", color: { argb: "FFE2E8F0" } }, bottom: { style: "thin", color: { argb: "FFE2E8F0" } } }; }));
     sheet.views = [{ state: "frozen", ySplit: 3 }];
   }
   const buffer = await workbook.xlsx.writeBuffer();
   const artifact = new Uint8Array(buffer);
   const safeProjectId = id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "project";
-  const fileName = `REALYTICS_${safeProjectId}_CashFlow_Calculation.xlsx`;
+  const fileName = `REALYTICS_${safeProjectId}_CashFlow_${purpose === "draft" ? "DRAFT" : "APPROVED"}.xlsx`;
   try {
     await recordExportCompletion(id, exportPackage, artifact, fileName);
   } catch (error) {

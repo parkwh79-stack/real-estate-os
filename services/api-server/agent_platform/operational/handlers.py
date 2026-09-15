@@ -44,6 +44,7 @@ def _request_agent_run_recovery(payload: dict[str, Any]) -> None:
 
 def _materialize_calculation_run(payload: dict[str, Any]) -> None:
     from storage import materialize_calculation_run_record
+    from db.postgres_runtime_pool import pf_worker_tenant_transaction
 
     tenant_id = str(payload.get("tenantId") or "")
     project_id = str(payload.get("projectId") or "")
@@ -54,6 +55,7 @@ def _materialize_calculation_run(payload: dict[str, Any]) -> None:
         project_id,
         run_id,
         tenant_id=tenant_id,
+        transaction_factory=pf_worker_tenant_transaction,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -159,25 +160,27 @@ def _import_yongin_public_rental(workbook_path: Path, validation: Dict[str, Any]
                 "contract_area_sqm": _to_float(overview.cell(row, 5).value),
                 "provenance": _provenance(source_name, "xlsx", overview.title, f"A{row}:M{row}", None),
             })
+        # TODO-SDD: this profile needs a reviewed transaction-row map. Whole-column
+        # summation double-counts subtotals, balances and financing transfers.
         monthly_cash_flow = []
-        for column in range(5, cash.max_column + 1):
-            period = cash.cell(1, column).value
-            if period is None:
-                continue
-            net = sum(_to_float(cash.cell(row, column).value) or 0 for row in range(1, cash.max_row + 1))
-            monthly_cash_flow.append({
-                "month_index": len(monthly_cash_flow),
-                "period": str(period),
-                "cash_in": {},
-                "cash_out": {},
-                "net_cash_flow": net * KRW_PER_THOUSAND,
-                "source_locator": {"sourceType": "excel_column", "sourceDocument": source_name, "sheetName": cash.title, "cell": f"{_column_name(column)}1:{_column_name(column)}{cash.max_row}"},
-            })
+        start_match = re.search(r"착공\s*(\d{4})년\s*(\d{1,2})월", str(profit["A3"].value or ""))
+        schedule = []
+        if start_match and 1 <= int(start_match[2]) <= 12:
+            schedule.append({"key": "construction_start", "label": "construction start",
+                "planned_date": f"{start_match[1]}-{int(start_match[2]):02d}",
+                "provenance": _provenance(source_name, "xlsx", profit.title, "A3", None)})
+        metrics = _metrics(total_revenue, total_cost, development_profit, pf_amount, None)
+        # These require a verified timing, collateral or repayment basis. Revenue
+        # is not collateral value; total cost minus PF is not peak equity need.
+        for key in ("required_equity", "max_minus", "ltv", "exit_sale_rate", "break_even_sale_rate"):
+            metrics[key] = None
         raw_import = {
             "profile": validation.get("profile"),
             "validationStatus": validation.get("status"),
             "sourceWorkbook": source_name,
             "sourceDocument": source_document or {},
+            "unitScale": {profit.title: "KRW_THOUSAND", cash.title: "KRW_THOUSAND"},
+            "unresolvedFields": ["monthly_cash_flow", "max_minus", "required_equity", "ltv", "exit_sale_rate", "break_even_sale_rate"],
             "mappedCells": {
                 "grossFloorArea": f"{overview.title}!D15",
                 "totalRevenue": f"{profit.title}!I24",
@@ -187,7 +190,8 @@ def _import_yongin_public_rental(workbook_path: Path, validation: Dict[str, Any]
                 "productMix": f"{overview.title}!A18:M25",
             },
             "limitations": [
-                "Product-level rental conversion and legal approval conditions remain subject to review."
+                "Product-level rental conversion and legal approval conditions remain subject to review.",
+                "Monthly transactions, peak funding, equity, collateral LTV and exit repayment require reviewed source mappings."
             ],
         }
         _attach_profile_governed_fact_basis(raw_import)
@@ -201,9 +205,9 @@ def _import_yongin_public_rental(workbook_path: Path, validation: Dict[str, Any]
             "revenue_items": [_line_item("total_revenue", "Total revenue", "sales_and_rental_revenue", total_revenue, profit.title, "I24", source_name)],
             "cost_items": [_line_item("total_cost", "Total project cost", "total_project_cost", total_cost, profit.title, "I81", source_name)],
             "financing": [{"tranche_id": "pf", "name": "PF", "priority": "senior", "amount": pf_amount, "excel_row_id": f"{cash.title}!D34"}],
-            "schedule": [{"key": "construction_start", "label": "construction start", "planned_date": "2027-04", "provenance": _provenance(source_name, "xlsx", profit.title, "A3", None)}],
+            "schedule": schedule,
             "monthly_cash_flow": monthly_cash_flow,
-            "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, min((row.get("net_cash_flow") or 0) for row in monthly_cash_flow) if monthly_cash_flow else None),
+            "metrics": metrics,
             "raw_import": raw_import,
         }
     finally:

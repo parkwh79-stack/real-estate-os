@@ -20,12 +20,14 @@ export default defineConfig({
     { name: "mobile-chromium", use: { ...devices["Pixel 7"] } },
   ],
   webServer: liveAuthSmoke ? undefined : {
-    command: "npm run dev",
+    command: `npm exec next -- dev --port ${new URL(baseURL).port || "3000"} --webpack`,
     url: `${baseURL}/login`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     env: {
       REALYTICS_API_ORIGIN: "http://127.0.0.1:8000",
+      REALYTICS_WEB_ORIGIN: baseURL,
+      REALYTICS_NEXT_DIST_DIR: ".next-e2e",
     },
   },
 });

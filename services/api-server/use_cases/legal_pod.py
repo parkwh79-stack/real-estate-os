@@ -840,6 +840,12 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             "verified" if verified_permit_documents else "missing"
         ),
         "verifiedEvidenceCount": len(verified_permit_documents),
+        "storedDocumentCount": len(supplied_permit_documents),
+        "documentEvidenceStages": [
+            {"sourceDocumentId": item.get("archiveId") or item.get("originalFileHash"),
+             "stage": item.get("evidenceStage") or "candidate"}
+            for item in supplied_permit_documents
+        ],
         "parserFailureReason": (
             None
             if verified_permit_documents

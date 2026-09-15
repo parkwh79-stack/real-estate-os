@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from db.malware_scanner import MalwareScanner, get_malware_scanner
+from core.runtime_paths import runtime_data_dir
 from db.object_storage import (
     LocalObjectStorage,
     ObjectStorage,
@@ -42,7 +43,8 @@ class UploadArchiveRepository:
         malware_scanner: MalwareScanner | None = None,
     ):
         self.api_server_root = (api_server_root or Path(__file__).resolve().parents[2]).resolve()
-        self.archive_root = (archive_root or self.api_server_root / "data" / "runtime" / "uploads").resolve()
+        default_runtime = self.api_server_root / "data" / "runtime" if api_server_root else runtime_data_dir()
+        self.archive_root = (archive_root or default_runtime / "uploads").resolve()
         self.object_storage = object_storage or get_object_storage(self.archive_root)
         self.malware_scanner = malware_scanner or get_malware_scanner()
 
@@ -386,7 +388,11 @@ class UploadArchiveRepository:
     def relative_archive_path(self, archive_path: Path) -> str:
         resolved_path = archive_path.resolve()
         if self.api_server_root != resolved_path and self.api_server_root not in resolved_path.parents:
-            raise ValueError("Invalid archive path")
+            # Configured local runtimes (notably tests) may live outside source.
+            # Keep metadata relative; downloads use the verified archiveObjectKey.
+            if self.archive_root not in resolved_path.parents:
+                raise ValueError("Invalid archive path")
+            return resolved_path.relative_to(self.archive_root).as_posix()
         return str(resolved_path.relative_to(self.api_server_root)).replace("\\", "/")
 
     @classmethod

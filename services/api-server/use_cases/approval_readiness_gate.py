@@ -854,10 +854,10 @@ def _metric_uses_latest_calculation_run(
         return False
     engine_key = _engine_key_from_metric(metric_record)
     if not engine_key:
-        return True
+        return False
     latest = latest_run_by_engine.get(engine_key)
     if not latest:
-        return True
+        return False
     return str(latest.get("calculationRunId")) == str(calculation_run_id)
 
 

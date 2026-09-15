@@ -603,8 +603,9 @@ class ParserV2AppendBatch:
 class ParserV2PostgresRepository:
     """Connection owner and transaction boundary for normalized Parser V2 rows."""
 
-    def __init__(self, connect_fn: Connect = postgres.connect) -> None:
-        self._connect = connect_fn
+    def __init__(self, connect_fn: Connect | None = None) -> None:
+        self._connect = connect_fn or postgres.connect
+        self._runtime_scoped = connect_fn is None
 
     def bind(self, conn: Any, tenant_id: str, project_id: str) -> "ParserV2PostgresSession":
         """Bind an existing transaction without committing it.
@@ -632,6 +633,17 @@ class ParserV2PostgresRepository:
     def transaction(
         self, tenant_id: str, project_id: str
     ) -> Iterator["ParserV2PostgresSession"]:
+        from db.repositories.request_project_repository import current_project_scope
+        scope = current_project_scope()
+        if self._runtime_scoped and scope is not None:
+            if scope.tenant_id != tenant_id:
+                raise ParserV2TenantScopeError("Parser tenant differs from runtime authority")
+            from db.repositories.runtime_record_repository import scoped_transaction
+            with scoped_transaction() as conn:
+                session = self.bind(conn, tenant_id, project_id)
+                yield session
+                session.validate_batch()
+            return
         conn = self._connect()
         try:
             session = self.bind(conn, tenant_id, project_id)

@@ -78,7 +78,8 @@ def test_submit_records_failure():
         _BoomRepo(), project_id, failing_project, {}, background=False, store=store,
     )
     assert job["status"] == "failed"
-    assert "boom" in job["error"]
+    assert job["error"] == "job_execution_failed:AgentExecutionFailed"
+    assert "boom" not in job["error"]
 
 
 def test_submit_background_eventually_completes():

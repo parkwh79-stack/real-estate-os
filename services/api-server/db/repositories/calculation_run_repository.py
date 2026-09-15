@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any
 
@@ -99,6 +100,7 @@ def select_local_export_runs(
                 record
                 for record in candidates
                 if calculation_run_parent_id(record) == anchor_id
+                and (not anchor.get("financialInputHash") or record.get("financialInputHash") == anchor.get("financialInputHash"))
             ]
             if eligible:
                 selected = eligible[0]
@@ -134,6 +136,173 @@ class PostgresCalculationRunRepository:
         if transaction_factory is None:
             raise TypeError("transaction_factory is required")
         self._transaction = transaction_factory
+
+    def upsert_run_with_outbox(
+        self,
+        project_id: str,
+        record: Mapping[str, Any],
+        outbox_event: Mapping[str, Any],
+        *,
+        deal_state_records: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """Atomically persist one run and its idempotent delivery event."""
+
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise ValueError("project_id is required")
+        normalized = deepcopy(dict(record))
+        run_tenant_id = str(normalized.get("tenantId") or "").strip()
+        run_project_id = str(normalized.get("projectId") or "").strip()
+        run_id = str(normalized.get("calculationRunId") or "").strip()
+        if run_tenant_id != self.tenant_id or run_project_id != normalized_project_id:
+            raise CalculationRunPayloadError(
+                "CalculationRun write scope does not match its repository"
+            )
+        if not run_id:
+            raise CalculationRunPayloadError("CalculationRun id is required")
+
+        outbox = deepcopy(dict(outbox_event))
+        outbox_tenant_id = str(outbox.get("tenantId") or "").strip()
+        outbox_project_id = str(outbox.get("projectId") or "").strip()
+        outbox_aggregate_id = str(outbox.get("aggregateId") or "").strip()
+        if (
+            outbox_tenant_id != self.tenant_id
+            or outbox_project_id != normalized_project_id
+            or outbox_aggregate_id != run_id
+            or str(outbox.get("aggregateType") or "") != "calculation_run"
+            or str(outbox.get("eventType") or "") != "calculation_run_upserted"
+        ):
+            raise CalculationRunPayloadError(
+                "CalculationRun outbox lineage does not match its aggregate"
+            )
+
+        run_sql = """
+            INSERT INTO realytics.calculation_runs (
+                tenant_id,
+                project_id,
+                calculation_run_id,
+                engine_key,
+                engine_version,
+                status,
+                created_at,
+                updated_at,
+                payload_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (project_id, calculation_run_id) DO UPDATE SET
+                engine_key = EXCLUDED.engine_key,
+                engine_version = EXCLUDED.engine_version,
+                status = EXCLUDED.status,
+                updated_at = EXCLUDED.updated_at,
+                payload_json = EXCLUDED.payload_json
+            WHERE calculation_runs.tenant_id = EXCLUDED.tenant_id
+            RETURNING tenant_id, project_id, calculation_run_id
+        """
+        outbox_sql = """
+            INSERT INTO realytics.runtime_outbox_events (
+                event_id,
+                tenant_id,
+                project_id,
+                aggregate_type,
+                aggregate_id,
+                event_type,
+                idempotency_key,
+                status,
+                attempt_count,
+                max_attempts,
+                available_at,
+                lease_owner,
+                lease_expires_at,
+                created_at,
+                updated_at,
+                published_at,
+                payload_json
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s::jsonb
+            )
+            ON CONFLICT (idempotency_key) DO UPDATE SET
+                idempotency_key = EXCLUDED.idempotency_key
+            WHERE runtime_outbox_events.tenant_id = EXCLUDED.tenant_id
+              AND runtime_outbox_events.project_id IS NOT DISTINCT FROM
+                  EXCLUDED.project_id
+              AND runtime_outbox_events.aggregate_type = EXCLUDED.aggregate_type
+              AND runtime_outbox_events.aggregate_id = EXCLUDED.aggregate_id
+              AND runtime_outbox_events.event_type = EXCLUDED.event_type
+            RETURNING
+                event_id,
+                tenant_id,
+                project_id,
+                aggregate_type,
+                aggregate_id,
+                event_type
+        """
+        run_params = (
+            self.tenant_id,
+            normalized_project_id,
+            run_id,
+            normalized.get("engineKey"),
+            normalized.get("engineVersion"),
+            normalized.get("status"),
+            normalized.get("createdAt"),
+            normalized.get("updatedAt"),
+            self._json_payload(normalized),
+        )
+        outbox_params = (
+            outbox.get("eventId"),
+            self.tenant_id,
+            normalized_project_id,
+            outbox.get("aggregateType"),
+            run_id,
+            outbox.get("eventType"),
+            outbox.get("idempotencyKey"),
+            outbox.get("status"),
+            int(outbox.get("attemptCount") or 0),
+            int(outbox.get("maxAttempts") or 8),
+            outbox.get("availableAt"),
+            outbox.get("leaseOwner"),
+            outbox.get("leaseExpiresAt"),
+            outbox.get("createdAt"),
+            outbox.get("updatedAt"),
+            outbox.get("publishedAt"),
+            self._json_payload(outbox),
+        )
+        try:
+            with self._transaction(self.tenant_id) as connection:
+                run_row = connection.execute(run_sql, run_params).fetchone()
+                if run_row is None or (
+                    str(self._value(run_row, 0, "tenant_id") or "") != self.tenant_id
+                    or str(self._value(run_row, 1, "project_id") or "") != normalized_project_id
+                    or str(self._value(run_row, 2, "calculation_run_id") or "") != run_id
+                ):
+                    raise CalculationRunPayloadError("CalculationRun write returned an invalid scope")
+                outbox_row = connection.execute(
+                    outbox_sql,
+                    outbox_params,
+                ).fetchone()
+                if outbox_row is None or (
+                    str(self._value(outbox_row, 1, "tenant_id") or "") != self.tenant_id
+                    or str(self._value(outbox_row, 2, "project_id") or "") != normalized_project_id
+                    or str(self._value(outbox_row, 3, "aggregate_type") or "") != "calculation_run"
+                    or str(self._value(outbox_row, 4, "aggregate_id") or "") != run_id
+                    or str(self._value(outbox_row, 5, "event_type") or "") != "calculation_run_upserted"
+                ):
+                    raise CalculationRunPayloadError("CalculationRun outbox write returned an invalid scope")
+                if deal_state_records:
+                    from db.repositories.deal_state_repository import PostgresDealStateRepository
+                    PostgresDealStateRepository(
+                        tenant_id=self.tenant_id,
+                        transaction_factory=lambda _tenant: nullcontext(connection),
+                    ).upsert_records(normalized_project_id, deal_state_records)
+        except CalculationRunRepositoryError:
+            raise
+        except Exception as exc:
+            raise CalculationRunRepositoryError(
+                "Normalized CalculationRun write authority is unavailable"
+            ) from exc
+
+        return normalized
 
     def list_runs(
         self,
@@ -361,6 +530,8 @@ class PostgresCalculationRunRepository:
                 JOIN anchor
                   ON candidate.parent_calculation_run_id
                      = anchor.calculation_run_id
+                 AND (NULLIF(anchor.payload_json ->> 'financialInputHash', '') IS NULL
+                      OR candidate.payload_json ->> 'financialInputHash' = anchor.payload_json ->> 'financialInputHash')
             ),
             presence AS (
                 SELECT
@@ -369,6 +540,8 @@ class PostgresCalculationRunRepository:
                     count(candidate.calculation_run_id) FILTER (
                         WHERE candidate.parent_calculation_run_id
                               = anchor.calculation_run_id
+                          AND (NULLIF(anchor.payload_json ->> 'financialInputHash', '') IS NULL
+                               OR candidate.payload_json ->> 'financialInputHash' = anchor.payload_json ->> 'financialInputHash')
                     ) AS eligible_count
                 FROM requested
                 LEFT JOIN candidates AS candidate
@@ -578,6 +751,16 @@ class PostgresCalculationRunRepository:
         if isinstance(row, Mapping):
             return row.get(key)
         return row[index]
+
+    @staticmethod
+    def _json_payload(value: Mapping[str, Any]) -> str:
+        return json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
 
 
 __all__ = [

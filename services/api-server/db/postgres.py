@@ -759,62 +759,19 @@ _TYPED_JSONB_TABLES: Dict[str, Dict[str, Any]] = {
 }
 
 
+# All typed business relations acquire tenant authority in migration 0012 or
+# their creation migration. Include the column when request-scoped writes bind it.
+for _typed_spec in _TYPED_JSONB_TABLES.values():
+    if "tenant_id" not in _typed_spec["columns"]:
+        _typed_spec["columns"] = (*_typed_spec["columns"], "tenant_id")
+
+
 def claim_async_job_record(*, worker_id: str, now, lease_expires_at) -> Dict[str, Any] | None:
     """Claim one queued/expired asynchronous job with SKIP LOCKED semantics."""
-    conn = connect()
-    try:
-        ensure_schema(conn)
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, payload_json
-                FROM async_jobs
-                WHERE attempt_count < max_attempts AND (
-                    status = 'queued'
-                    OR (status = 'running' AND lease_expires_at < %s)
-                )
-                ORDER BY created_at, id
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """,
-                (now,),
-            )
-            row = cur.fetchone()
-            if not row:
-                conn.commit()
-                return None
-            job_id, raw_payload = row
-            payload = dict(raw_payload)
-            payload.update(
-                {
-                    "status": "running",
-                    "startedAt": payload.get("startedAt") or now.isoformat(),
-                    "leaseOwner": worker_id,
-                    "leaseExpiresAt": lease_expires_at.isoformat(),
-                    "attemptCount": int(payload.get("attemptCount") or 0) + 1,
-                    "updatedAt": now.isoformat(),
-                }
-            )
-            cur.execute(
-                """
-                UPDATE async_jobs
-                SET status = 'running', attempt_count = %s, lease_owner = %s,
-                    lease_expires_at = %s, updated_at = %s, payload_json = %s::jsonb
-                WHERE id = %s
-                """,
-                (
-                    payload["attemptCount"],
-                    worker_id,
-                    lease_expires_at,
-                    now,
-                    json.dumps(payload, ensure_ascii=False, default=str),
-                    job_id,
-                ),
-            )
-        conn.commit()
-        return payload
-    finally:
-        conn.close()
+    from db.repositories.runtime_record_repository import claim_scoped_job
+    return claim_scoped_job(worker_id=worker_id, now=now, lease_expires_at=lease_expires_at)
+
+
 
 
 def insert_typed_jsonb_record(
@@ -825,6 +782,9 @@ def insert_typed_jsonb_record(
     conn=None,
 ) -> bool:
     """Insert an immutable/idempotent runtime row and report whether it won."""
+    from db.repositories.runtime_record_repository import request_tenant, insert_request_record
+    if conn is None and request_tenant() is not None:
+        return insert_request_record(table, values, payload)
     spec = _TYPED_JSONB_TABLES.get(table)
     if spec is None:
         raise ValueError(f"Unsupported typed PostgreSQL table: {table}")
@@ -863,6 +823,9 @@ def update_agent_run_optimistic(
     conn=None,
 ) -> bool:
     """Update one Agent run only when its persisted state version still matches."""
+    from db.repositories.runtime_record_repository import request_tenant, update_request_agent_run
+    if conn is None and request_tenant() is not None:
+        return update_request_agent_run(values, payload, expected_state_version)
     run_id = values.get("run_id")
     if not run_id:
         raise ValueError("run_id is required")
@@ -907,6 +870,9 @@ def update_agent_run_with_outbox(
     outbox_payload: Dict[str, Any],
 ) -> bool:
     """Atomically persist one AgentRun transition and its durable outbox event."""
+    from db.repositories.runtime_record_repository import request_tenant, update_request_agent_run
+    if request_tenant() is not None:
+        return update_request_agent_run(values, payload, expected_state_version, outbox=(outbox_values, outbox_payload))
     conn = connect()
     try:
         ensure_schema(conn)
@@ -977,6 +943,10 @@ def _typed_upsert_command(
 
 def upsert_typed_jsonb_record(table: str, values: Dict[str, Any], payload: Dict[str, Any], *, conn=None) -> None:
     """Write a critical audit record to its first-class PostgreSQL table."""
+    from db.repositories.runtime_record_repository import request_tenant, upsert_request_records
+    if conn is None and request_tenant() is not None:
+        upsert_request_records([(table, values, payload)])
+        return
     sql, params = _typed_upsert_command(table, values, payload)
     owns = conn is None
     if owns:
@@ -999,6 +969,10 @@ def upsert_typed_jsonb_records(
 ) -> None:
     """Write a homogeneous typed-record batch using one schema check and commit."""
     if not records:
+        return
+    from db.repositories.runtime_record_repository import request_tenant, upsert_request_records
+    if conn is None and request_tenant() is not None:
+        upsert_request_records([(table, values, payload) for values, payload in records])
         return
     commands = [_typed_upsert_command(table, values, payload) for values, payload in records]
     owns = conn is None
@@ -1023,6 +997,10 @@ def upsert_typed_jsonb_record_with_outbox(
     outbox_payload: Dict[str, Any],
 ) -> None:
     """Commit a typed aggregate and its delivery event in one transaction."""
+    from db.repositories.runtime_record_repository import request_tenant, upsert_request_records
+    if request_tenant() is not None:
+        upsert_request_records([(table, values, payload), ("runtime_outbox_events", outbox_values, outbox_payload)])
+        return
     aggregate_sql, aggregate_params = _typed_upsert_command(table, values, payload)
     outbox_sql, outbox_params = _typed_upsert_command(
         "runtime_outbox_events", outbox_values, outbox_payload,
@@ -1056,6 +1034,9 @@ def list_typed_jsonb_records(
     spec = _TYPED_JSONB_TABLES.get(table)
     if spec is None:
         raise ValueError(f"Unsupported typed PostgreSQL table: {table}")
+    from db.repositories.runtime_record_repository import request_tenant, list_request_records
+    if conn is None and request_tenant() is not None:
+        return list_request_records(table, spec, where, limit)
     where = where or {}
     allowed = set(spec["columns"])
     if any(column not in allowed for column in where):

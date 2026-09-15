@@ -17,6 +17,8 @@ import {
 type Mode = "login" | "signup" | "recovery" | "reset" | "confirmation";
 
 export function AccountAccessPanel() {
+  const [ready, setReady] = useState(false);
+  const [switchAccount, setSwitchAccount] = useState(false);
   const [mode, setMode] = useState<Mode>("login");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
@@ -39,6 +41,8 @@ export function AccountAccessPanel() {
     }
     const code = query.get("error");
     if (code) setError(loginErrorMessage(code));
+    setSwitchAccount(query.get("switch") === "1");
+    setReady(true);
   }, []);
 
   useEffect(() => {
@@ -170,7 +174,8 @@ export function AccountAccessPanel() {
   }
 
   return (
-    <div>
+    <fieldset disabled={!ready || busy} aria-busy={!ready || busy} className="min-w-0 border-0 p-0">
+      {switchAccount ? <p role="status" className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">계정 전환을 위해 로그아웃했습니다. 사용할 계정으로 다시 로그인해 주세요.</p> : null}
       {mode === "login" || mode === "signup" ? (
         <div className="grid grid-cols-2 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="계정 접근 방식">
           <button type="button" role="tab" aria-selected={mode === "login"} onClick={() => changeMode("login")} className={`h-10 rounded-lg text-sm font-bold ${mode === "login" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}>
@@ -224,7 +229,7 @@ export function AccountAccessPanel() {
           이메일과 비밀번호입니다.
         </p>
       </div>
-    </div>
+    </fieldset>
   );
 }
 

@@ -112,7 +112,10 @@ def test_cashflow_export_package_returns_latest_fixed_engine_runs():
     body = response.json()
     assert body["schemaVersion"] == "realytics-cashflow-export-package-v1"
     assert body["generatedBy"] == "cashflow-export-admin"
-    assert body["reportEligible"] is True
+    assert body["reportEligible"] is False
+    assert body["downloadEligible"] is True
+    assert body["exportPurpose"] == "draft"
+    assert client.get(f"/projects/{project_id}/cashflow-export-package?purpose=approved", headers=headers).status_code == 409
     assert body["anchorCalculationRunId"] == "cashflow-export-current"
     assert body["runs"]["cash_flow_engine"]["calculationRunId"] == "cashflow-export-current"
     assert body["runs"]["waterfall"]["calculationRunId"] == "waterfall-export-current"

@@ -17,6 +17,7 @@ from storage import (
 
 
 SERVER_MANAGED_PROJECT_FIELDS = (
+    "feasibility_input_sources",
     "_meta",
     "source_documents",
     "sourceDocuments",

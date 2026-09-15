@@ -4,6 +4,7 @@ import pytest
 
 from db import postgres
 from db.postgres_runtime_privileges import (
+    required_column_privileges,
     required_sequence_privileges,
     required_table_privileges,
 )
@@ -135,6 +136,14 @@ class _ReadinessCursor:
             self.rows = [(True,)]
         elif normalized.endswith("'CREATE')"):
             self.rows = [(self.connection.schema_create,)]
+        elif "has_column_privilege" in normalized:
+            column, privilege, _schema, table = params
+            expected = column in required_column_privileges().get(table, {}).get(privilege, ())
+            if self.connection.missing_privilege == (f"{table}.{column}", privilege):
+                expected = False
+            if self.connection.forbidden_privilege == (f"{table}.{column}", privilege):
+                expected = True
+            self.rows = [(expected,)]
         elif "WHEN relation_oid IS NULL THEN FALSE" in normalized:
             privilege, _schema, table = params
             manifest = (

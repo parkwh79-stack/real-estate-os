@@ -7,15 +7,20 @@
     "lint": "turbo run lint",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "check-types": "turbo run check-types",
+    "test:contracts": "node --experimental-strip-types --test scripts/tests/*.test.mjs",
     "supabase:migrations:render": "python services/api-server/scripts/render_supabase_migrations.py",
     "supabase:migrations:check": "python services/api-server/scripts/render_supabase_migrations.py --check",
     "supabase:db:push:dry-run": "npx --yes supabase@2.109.1 db push --include-roles --dry-run",
     "supabase:db:push": "npx --yes supabase@2.109.1 db push --include-roles"
   },
   "devDependencies": {
+    "exceljs": "^4.4.0",
     "prettier": "^3.7.4",
     "turbo": "^2.9.10",
     "typescript": "5.9.2"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   },
   "engines": {
     "node": ">=18"

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Calculator,
@@ -25,26 +25,32 @@ export default function CashFlowDetailPage() {
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async (id: string) => {
+    const version = ++requestVersion.current;
     setSelectedId(id);
     setLoading(true);
     setLoaded(false);
     setError(null);
     setCf(null);
     try {
-      setCf(await fetchLatestCashflow(id));
+      const result = await fetchLatestCashflow(id);
+      if (version === requestVersion.current) setCf(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "현금흐름 결과를 불러오지 못했습니다.");
+      if (version === requestVersion.current) setError(e instanceof Error ? e.message : "현금흐름 결과를 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
-      setLoaded(true);
+      if (version === requestVersion.current) {
+        setLoading(false);
+        setLoaded(true);
+      }
     }
   }, []);
 
   useEffect(() => {
     const stored = getStoredSelectedProjectId();
     if (stored) void load(stored);
+    return () => { requestVersion.current += 1; };
   }, [load]);
 
   const s = cf?.summary ?? {};
@@ -66,12 +72,13 @@ export default function CashFlowDetailPage() {
             <ProjectPicker value={selectedId} onChange={(id) => void load(id)} label="심사 프로젝트" />
           </div>
           <a
-            href="/api/export-cf"
-            download="REALYTICS_Formula_CashFlow_Model.xlsx"
+            href={selectedId ? `/api/projects/${encodeURIComponent(selectedId)}/cashflow/export` : undefined}
+            aria-disabled={!selectedId || loading || !cf}
+            onClick={(event) => { if (!selectedId || loading || !cf) event.preventDefault(); }}
             className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
           >
             <Download className="h-4 w-4" />
-            수식 검증형 Excel
+            프로젝트 Cash Flow Excel
           </a>
         </div>
       </div>

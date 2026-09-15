@@ -232,6 +232,8 @@ class ScenarioEngineAgent:
                             "priority": tranche.priority,
                             "claimAmount": claim,
                             "recoveredAmount": claim * recovery_ratio,
+                            "principalAmount": principal,
+                            "shortfall": max(0.0, claim - claim * recovery_ratio),
                             "recoveryRatio": round(recovery_ratio, 4),
                         }
                     )

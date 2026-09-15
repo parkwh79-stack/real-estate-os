@@ -19,6 +19,7 @@ produces 분양가/흡수/score. Missing values are surfaced, never invented.
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from typing import Any, Dict, List, Optional
 
@@ -56,7 +57,7 @@ def _num(value: Any) -> Optional[float]:
         n = float(str(value).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
-    return n if n == n else None
+    return n if math.isfinite(n) else None
 
 
 def _norm_provider(raw: Any) -> Optional[str]:
@@ -316,12 +317,18 @@ class MarketProductDepthAgent:
         forecast = forecast if isinstance(forecast, dict) else {}
         total_units = _num(forecast.get("totalUnits")) or _num((project_data.get("architectural_plan") or {}).get("total_units"))
         product_type = str((marketability or {}).get("productType") or (project_data.get("project") or {}).get("type") or "apartment").lower()
-        rate = _num(forecast.get("monthlyAbsorptionRate"))
+        raw_rate = forecast.get("monthlyAbsorptionRate")
+        rate = _num(raw_rate)
         basis = "forecast"
-        if rate is None:
+        if raw_rate is not None and (rate is None or rate < 0 or rate > 1):
+            return {"monthlyAbsorptionRate": None, "rateBasis": "invalid_forecast",
+                    "status": "invalid_input", "totalUnits": total_units,
+                    "estimatedMonthsToSellout": None, "curve": [],
+                    "note": "월 흡수율은 0~1 범위의 유한한 비율이어야 합니다. 입력 근거를 확인하세요."}
+        if raw_rate is None:
             rate = _ABSORPTION_BENCHMARK.get(product_type, 0.05)
             basis = "planning_benchmark"
-        months_to_sellout = round(1 / rate) if rate else None
+        months_to_sellout = math.ceil(1 / rate) if rate else None
         curve: List[Dict[str, Any]] = []
         if total_units and rate:
             cumulative = 0.0
@@ -337,6 +344,8 @@ class MarketProductDepthAgent:
             "totalUnits": total_units,
             "estimatedMonthsToSellout": months_to_sellout,
             "curve": curve,
+            "horizonMonths": 36,
+            "horizonComplete": bool(curve and curve[-1]["cumulativeRate"] >= 1),
             "note": "월별 흡수율은 예측 근거가 없으면 자산유형 계획 벤치마크를 사용합니다(basis 표기)." if basis == "planning_benchmark" else "",
         }
 

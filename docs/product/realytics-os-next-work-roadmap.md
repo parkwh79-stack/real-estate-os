@@ -1,7 +1,22 @@
 # REALYTICS OS Next Work Roadmap
 
-Updated: 2026-07-10  
+Updated: 2026-09-14
 Purpose: 파일럿 승인 가능성과 부동산 OS 운영화를 위한 통합 개발 로드맵
+
+## 2026-09-14 실행 기준
+
+현재 수정·검증 상태는 [재진단 후 수정 실행 기록](remediation-execution-2026-09-14.md)을
+기준으로 한다. 계산 저장과 tenant 연결, 재분석 완료 표시, CF 입력 계보,
+로그인 및 의존성 결함의 로컬 수정을 반영했다.
+[코드베이스 재진단](independent-codebase-audit-2026-09-14.md)과
+[End-to-End 진단 및 구현 계획](end-to-end-remediation-2026-09-14.md)은
+수정 전 결함과 수락 기준을 보존한 이력이다.
+
+남은 우선 작업은 [751 원본 복구 검토](project-751-source-recovery-review-2026-09-14.md)와
+[정규화 런타임 적용 전 검증](runtime-activation-gates-2026-09-14.md)이다.
+아래 Current Baseline과 기존 Status는 7월 기준 이력이며 운영 완료 판정이 아니다.
+전체 기능의 PostgreSQL authority 전환, 실제 제한 역할·승인·S3·Worker 및 복원 검증은
+미완료다. 로컬 시험 통과를 운영 승인으로 해석하지 않는다.
 
 ## 1. Product North Star
 

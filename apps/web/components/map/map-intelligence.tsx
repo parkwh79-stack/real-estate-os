@@ -3,7 +3,8 @@
 /* eslint-disable react/prop-types -- component props are declared with TypeScript interfaces. */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
+import { createParcelPopup } from "../../lib/parcel-popup";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type {
   GeoJSONSource,
@@ -310,14 +311,7 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
           const p = (feature.properties ?? {}) as Record<string, unknown>;
           popup
             .setLngLat(event.lngLat)
-            .setHTML(
-              `<div style="font-size:12px;line-height:1.55">
-                <strong>${p.addressFragment ?? p.lotNumber ?? p.pnu ?? "필지"}</strong><br/>
-                PNU ${p.pnu ?? "미확인"}<br/>
-                지목 ${p.landCategory ?? "미확인"} · 면적 ${p.areaSqm ? Number(p.areaSqm).toLocaleString("ko-KR") + "㎡" : "미확인"}<br/>
-                공시지가 ${p.officialLandPricePerSqm ? Number(p.officialLandPricePerSqm).toLocaleString("ko-KR") + "원/㎡" : "미확인"}
-              </div>`,
-            )
+            .setDOMContent(createParcelPopup(p, document))
             .addTo(map);
         };
         map.on("click", "parcel-fill", showPopup);

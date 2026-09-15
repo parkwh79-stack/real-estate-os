@@ -122,11 +122,22 @@ def test_storage_seam_routes_to_postgres(monkeypatch):
 
     assert storage.storage_backend() == "postgres"
     assert storage._use_document_store() is True
-    # A deal-state upsert goes through the document path -> PG save -> PG load.
-    storage.upsert_deal_state_record("p1", {"recordType": "metric", "key": "k1", "value": 42})
-    records = storage.list_deal_state_records("p1")
+    # Runtime Deal State uses only the tenant repository; JSON shadows are forbidden.
+    from db.repositories import deal_state_repository
+    class Repository:
+        def __init__(self, *, tenant_id, **kwargs):
+            assert tenant_id == "tenant-1"
+        def upsert_records(self, project_id, records):
+            for record in records:
+                typed[("deal_state_records", project_id, record["recordId"])] = record
+            return records
+        def list_records(self, project_id, **kwargs):
+            return [row for (table, pid, _), row in typed.items() if pid == project_id]
+    monkeypatch.setattr(deal_state_repository, "PostgresDealStateRepository", Repository)
+    storage.upsert_deal_state_records("p1", [{"recordType": "metric", "key": "k1", "value": 42}], tenant_id="tenant-1")
+    records = storage.list_deal_state_records("p1", tenant_id="tenant-1")
     assert any(r.get("key") == "k1" for r in records)
-    assert "doc" in shared  # persisted via the Postgres document store
+    assert "doc" not in shared
     assert any(key[0] == "deal_state_records" for key in typed)
 
 

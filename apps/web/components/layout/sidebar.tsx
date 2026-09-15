@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
+import { getStoredSelectedProjectId } from "../project/project-picker";
+import { withProjectContext } from "../../lib/project-navigation";
 import {
   Activity,
   BarChart3,
@@ -71,7 +73,17 @@ const TRACK_ICONS: Record<WorkflowTrack, typeof Building2> = {
 export function Sidebar() {
   const pathname = usePathname();
   const [track, setTrack] = useState<WorkflowTrack | null>(null);
-  const currentProjectId = pathname.match(/^\/project\/([^/]+)/)?.[1];
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  useEffect(() => {
+    const sync = () => setCurrentProjectId(getStoredSelectedProjectId());
+    sync();
+    window.addEventListener("popstate", sync);
+    window.addEventListener("realytics-project-changed", sync);
+    return () => {
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener("realytics-project-changed", sync);
+    };
+  }, [pathname]);
 
   useEffect(() => {
     const read = () => setTrack(getStoredWorkflowTrack());
@@ -124,7 +136,7 @@ export function Sidebar() {
           const href =
             item.key === "deal-room" && currentProjectId
               ? `/project/${currentProjectId}/chief-orchestration`
-              : item.href;
+              : withProjectContext(item.href, currentProjectId);
           const isActive =
             item.key === "deal-room"
               ? Boolean(currentProjectId && pathname.startsWith(`/project/${currentProjectId}/chief-orchestration`))

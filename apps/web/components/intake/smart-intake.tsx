@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, FileQuestion, Loader2, PlayCircle, Sparkles, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
+import { intakeProcessingFailure } from "../../lib/intake-processing-status";
 
 type Classified = {
   filename: string;
@@ -215,6 +216,8 @@ export function SmartIntake({
           );
         }
         let body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        const processingFailure = intakeProcessingFailure(body);
+        if (processingFailure) throw new Error(processingFailure);
         if (row.type === "feasibility_workbook" && body.feasibilityStudyV2Draft) {
           const candidateRes = await fetch(`${apiBase}/projects/${projectId}/feasibility-workbook/import-candidate`, {
             method: "POST",

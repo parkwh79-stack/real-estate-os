@@ -427,12 +427,9 @@ MEMBERSHIP_ADMIN_FORBIDDEN_TABLE_PRIVILEGES: Mapping[
     },
 }
 
-# Calculation persistence is shared with existing application paths.
-# Provisioning remains additive here until its complete write contract is
-# promoted into this manifest.
-PARSER_V2_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
-    "calculation_runs": ("SELECT",),
-}
+# Reserved for additive support contracts. Calculation writes now have an
+# exact, managed contract below, including forbidden destructive privileges.
+PARSER_V2_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {}
 
 # These objects have a complete, known runtime contract and can be managed
 # exactly.  The outbox dispatcher needs INSERT for idempotent enqueue, SELECT for
@@ -440,6 +437,16 @@ PARSER_V2_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
 PARSER_V2_MANAGED_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "schema_migrations": ("SELECT",),
     "runtime_outbox_events": ("SELECT", "INSERT", "UPDATE"),
+    "calculation_runs": ("SELECT", "INSERT", "UPDATE"),
+    "deal_state_records": ("SELECT", "INSERT", "UPDATE"),
+    "chief_pod_artifacts": ("SELECT", "INSERT", "UPDATE"),
+    "pod_ai_reviews": ("SELECT", "INSERT", "UPDATE"),
+    "agent_handoffs": ("SELECT", "INSERT", "UPDATE"),
+    "recalculation_events": ("SELECT", "INSERT", "UPDATE"),
+    "async_jobs": ("SELECT", "INSERT", "UPDATE"),
+    "agent_runs": ("SELECT", "INSERT", "UPDATE"),
+    "agent_run_steps": ("SELECT", "INSERT", "UPDATE"),
+    "brain_usage_events": ("SELECT", "INSERT", "UPDATE"),
 }
 
 # Final report issuance is authoritative in normalized PostgreSQL. Draft
@@ -569,6 +576,11 @@ FORBIDDEN_MANAGED_SUPPORT_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
         "TRIGGER",
     ),
     "runtime_outbox_events": ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+    **{table: ("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER") for table in (
+        "calculation_runs", "deal_state_records", "chief_pod_artifacts",
+        "pod_ai_reviews", "agent_handoffs", "recalculation_events",
+        "async_jobs", "agent_runs", "agent_run_steps", "brain_usage_events",
+    )},
 }
 REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES: Mapping[
     str, tuple[str, ...]

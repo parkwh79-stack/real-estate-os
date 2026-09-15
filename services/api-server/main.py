@@ -13,6 +13,8 @@ def _load_local_env() -> None:
     exporting them by hand. Existing environment variables always win, and the
     file is gitignored. No-op if absent.
     """
+    if os.environ.get("REALYTICS_LOAD_LOCAL_ENV", "true").strip().lower() in {"false", "0", "off"}:
+        return
     env_path = Path(__file__).resolve().parent / ".env"
     if not env_path.exists():
         return
@@ -28,7 +30,7 @@ def _load_local_env() -> None:
 
 _load_local_env()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -48,6 +50,8 @@ from db.postgres_runtime_pool import (
 )
 from db.repositories.upload_archive_repository import UploadRejectedError
 from db.repositories.activity_log_repository import PostgresActivityLogRepository
+from db.repositories.request_project_repository import project_request_scope, current_project_scope
+from db.repositories.postgres_project_repository import ProjectVersionConflict
 from storage import get_user_session, record_user_activity_log, storage_backend
 
 validate_security_configuration()
@@ -135,6 +139,18 @@ def normalized_activity_repository(
 
 @app.middleware("http")
 async def user_activity_middleware(request: Request, call_next):
+    if storage_backend() in {"postgres", "postgresql"}:
+        with project_request_scope(lambda: projects.project_repository(request)):
+            try:
+                return await _user_activity_middleware(request, call_next)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            except ProjectVersionConflict:
+                return JSONResponse(status_code=409, content={"detail": {"error": "project_version_conflict", "message": "Project changed; reload before retrying."}})
+    return await _user_activity_middleware(request, call_next)
+
+
+async def _user_activity_middleware(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or str(uuid4())
     started = time.perf_counter()
     response = None
@@ -143,12 +159,7 @@ async def user_activity_middleware(request: Request, call_next):
         if project_id:
             project = None
             if storage_backend() == "postgres":
-                # PostgreSQL is the request-time authority.  The legacy map is
-                # hydrated only as a compatibility read model for downstream
-                # use-cases that still accept the historical repository shape.
-                project = projects.project_repository(request).get(project_id)
-                if project is not None:
-                    projects.PROJECTS_DB[project_id] = project
+                project = current_project_scope().get(project_id)
             else:
                 project = projects.PROJECTS_DB.get(project_id)
             if isinstance(project, dict):

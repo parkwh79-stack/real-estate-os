@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import pytest
 
 from scripts.run_pf_review_worker import repository_for_job
 
@@ -33,7 +34,7 @@ def test_agent_platform_worker_supports_documented_direct_invocation() -> None:
     assert "REALYTICS Agent Platform outbox worker" in completed.stdout
 
 
-def test_pf_review_worker_repository_is_bound_to_job_tenant(monkeypatch) -> None:
+def test_local_pf_review_worker_repository_is_bound_to_job_tenant(monkeypatch) -> None:
     captured = {}
 
     def fake_repository(*, tenant_id):
@@ -41,10 +42,30 @@ def test_pf_review_worker_repository_is_bound_to_job_tenant(monkeypatch) -> None
         return object()
 
     monkeypatch.setattr(
-        "scripts.run_pf_review_worker.orchestration_repository",
+        "routers.projects.orchestration_repository",
         fake_repository,
     )
+    monkeypatch.setattr("storage.storage_backend", lambda: "sqlite")
 
     repository_for_job({"jobId": "job-1", "tenantId": "tenant-a"})
 
     assert captured == {"tenantId": "tenant-a"}
+
+
+def test_postgres_pf_review_repositories_share_job_tenant_and_worker_pool(monkeypatch) -> None:
+    from db.postgres_runtime_pool import pf_worker_tenant_transaction
+    from db.repositories.orchestration_repository import PostgresOrchestrationRepository
+
+    monkeypatch.setattr("storage.storage_backend", lambda: "postgres")
+    repository = repository_for_job({"jobId": "job-1", "tenantId": "tenant-a"})
+
+    assert isinstance(repository, PostgresOrchestrationRepository)
+    for bound in (repository, repository.report_repository, repository.project_snapshot_repository):
+        assert bound.tenant_id == "tenant-a"
+        assert bound._transaction is pf_worker_tenant_transaction
+
+
+@pytest.mark.parametrize("job", [{}, {"tenantId": " "}])
+def test_pf_review_repository_rejects_missing_job_tenant(job) -> None:
+    with pytest.raises(RuntimeError, match="persisted tenantId"):
+        repository_for_job(job)

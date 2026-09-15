@@ -1,5 +1,8 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response, Query
 from typing import Dict, Any
+from db.repositories.request_project_repository import current_project_scope
+from use_cases.cash_flow_dependencies import dependent_inputs, financial_input_hash
+from use_cases.stored_permit_evidence import resolve_stored_permit_documents
 from datetime import datetime, timezone
 import base64
 import tempfile
@@ -263,9 +266,20 @@ PROJECT_SNAPSHOTS_DB = {}
 project_id_counter = 1
 PARSER_V2_RUNTIME_DEPENDENCIES: Dict[str, Any] = {}
 
+
+def _project_store():
+    if storage_backend() in {"postgres", "postgresql"}:
+        scope = current_project_scope()
+        if scope is None:
+            raise RuntimeError("A verified request/job scope is required for project access")
+        return scope
+    return PROJECTS_DB
+
 def persist_state() -> None:
+    if storage_backend() in {"postgres", "postgresql"}:
+        raise RuntimeError("Global state saves are disabled for normalized PostgreSQL")
     save_state(
-        PROJECTS_DB,
+        _project_store(),
         REPORTS_DB,
         ORCHESTRATIONS_DB,
         project_id_counter,
@@ -282,7 +296,10 @@ def allocate_project_id() -> str:
 def persist_project(project_id: str) -> None:
     """Incrementally persist a single project (or cascade-delete if removed),
     falling back to a full save_state() on the json backend."""
-    payload = PROJECTS_DB.get(str(project_id))
+    if storage_backend() in {"postgres", "postgresql"}:
+        _project_store().persist(project_id)
+        return
+    payload = _project_store().get(str(project_id))
     if payload is None:
         if not delete_project_record_cascade(project_id):
             persist_state()
@@ -318,6 +335,11 @@ def project_repository(
     it is never used as a fallback after an authenticated production request.
     """
     if storage_backend() in {"postgres", "postgresql"}:
+        scope = current_project_scope()
+        if request is None and scope is not None:
+            if tenant_id and tenant_id != scope.tenant_id:
+                raise HTTPException(status_code=403, detail={"error": "tenant_scope_mismatch"})
+            return scope
         resolved_tenant_id = str(tenant_id or "").strip()
         if request is not None:
             context = identity_context_from_request(request)
@@ -341,7 +363,7 @@ def project_repository(
             )
         return PostgresProjectRepository(tenant_id=resolved_tenant_id)
     return ProjectRepository(
-        PROJECTS_DB,
+        _project_store(),
         REPORTS_DB,
         ORCHESTRATIONS_DB,
         MARKET_EVIDENCE_DB,
@@ -358,6 +380,11 @@ def report_repository(
 ):
     """Return PostgreSQL authority or the explicit local compatibility lane."""
     if storage_backend() in {"postgres", "postgresql"}:
+        if request is None and current_project_scope() is not None:
+            scope_tenant = current_project_scope().tenant_id
+            if tenant_id and tenant_id != scope_tenant:
+                raise HTTPException(status_code=403, detail={"error": "tenant_scope_mismatch"})
+            tenant_id = scope_tenant
         resolved_tenant_id = str(tenant_id or "").strip()
         if request is not None:
             context = identity_context_from_request(request)
@@ -383,7 +410,7 @@ def report_repository(
     return ReportRepository(REPORTS_DB, persist_state, persist_report=persist_report)
 
 def source_document_repository() -> SourceDocumentRepository:
-    return SourceDocumentRepository(PROJECTS_DB, persist_state, persist_project=persist_project)
+    return SourceDocumentRepository(_project_store(), persist_state, persist_project=persist_project)
 
 
 def project_source_document_read_repository(
@@ -404,7 +431,7 @@ def upload_archive_repository() -> UploadArchiveRepository:
 
 
 def _project_tenant_id(project_id: str) -> str | None:
-    project = PROJECTS_DB.get(str(project_id))
+    project = _project_store().get(str(project_id))
     if not isinstance(project, dict):
         return None
     metadata = (
@@ -487,6 +514,11 @@ def project_snapshot_repository(
         storage_backend() in {"postgres", "postgresql"}
         and not local_compatibility
     ):
+        if request is None and current_project_scope() is not None:
+            scope_tenant = current_project_scope().tenant_id
+            if tenant_id and tenant_id != scope_tenant:
+                raise HTTPException(status_code=403, detail={"error": "tenant_scope_mismatch"})
+            tenant_id = scope_tenant
         resolved_tenant_id = str(tenant_id or "").strip()
         if request is not None:
             context = identity_context_from_request(request)
@@ -519,6 +551,11 @@ def orchestration_repository(
     tenant_id: str | None = None,
 ) -> OrchestrationRepository:
     if storage_backend() in {"postgres", "postgresql"}:
+        if request is None and current_project_scope() is not None:
+            scope_tenant = current_project_scope().tenant_id
+            if tenant_id and tenant_id != scope_tenant:
+                raise HTTPException(status_code=403, detail={"error": "tenant_scope_mismatch"})
+            tenant_id = scope_tenant
         resolved_tenant_id = str(tenant_id or "").strip()
         if request is not None:
             context = identity_context_from_request(request)
@@ -655,6 +692,7 @@ _SERVER_MANAGED_PROJECT_AUTHORITY_FIELDS = frozenset(
         "source_documents",
         "sourceDocuments",
         "canonicalFeasibilityStudyV2",
+        "feasibility_input_sources",
         "canonical_feasibility_study_v2",
         "feasibilityStudyV2",
         "feasibility_study_v2",
@@ -875,7 +913,7 @@ def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, 
     LandDataConnectorRouter config and explicit options.
     """
     merged = dict(options or {})
-    project = PROJECTS_DB.get(project_id) or {}
+    project = _project_store().get(project_id) or {}
     project_pnu = str(((project.get("land") or {}).get("pnu") or "")).strip()
     if not merged.get("legalDongCode") and len(project_pnu) >= 10 and project_pnu[:10].isdigit():
         merged["legalDongCode"] = project_pnu[:10]
@@ -1257,6 +1295,7 @@ def _persist_calculation_run(
         project_id,
         {
             "engineKey": engine_key,
+            "financialInputHash": input_data.get("financialInputHash"),
             "engineVersion": input_data.get("engineVersion") or f"{engine_key}-v1",
             "inputEvidenceIds": input_data.get("inputEvidenceIds")
             or input_data.get("evidenceIds")
@@ -1283,14 +1322,17 @@ def _persist_scenario_calculation_runs(
     input_data: Dict[str, Any] | None = None,
     *,
     engines: list[str] | None = None,
+    strict: bool = True,
 ) -> Dict[str, str]:
     """Persist Waterfall / Unsold LTV / Tranche Recovery runs from one scenario
-    set. Returns {engineKey: calculationRunId}. Failures never break the API
-    response — the scenario result itself is still returned."""
+    set. Returns {engineKey: calculationRunId}. Persistence failures propagate
+    so callers can expose an incomplete dependent execution."""
     run_ids: Dict[str, str] = {}
     try:
         payloads = scenario_engine_run_payloads(scenario_dump, engines=engines)
     except Exception:
+        if strict:
+            raise
         return run_ids
     for payload in payloads:
         try:
@@ -1303,6 +1345,8 @@ def _persist_scenario_calculation_runs(
             )
             run_ids[payload["engineKey"]] = str(run.get("calculationRunId"))
         except Exception:
+            if strict:
+                raise
             continue
     return run_ids
 
@@ -1764,9 +1808,11 @@ async def learn_uploaded_feasibility_workbook(
 
 def load_fixtures():
     global project_id_counter
+    if storage_backend() in {"postgres", "postgresql"}:
+        return
     state = load_state()
     if state:
-        PROJECTS_DB.update(state["projects"])
+        _project_store().update(state["projects"])
         REPORTS_DB.update(state["reports"])
         ORCHESTRATIONS_DB.update(state["orchestrations"])
         MARKET_EVIDENCE_DB.update(state.get("market_evidence", {}))
@@ -1782,7 +1828,7 @@ def load_fixtures():
                     data = json.load(f)
                     pid = str(project_id_counter)
                     data["project"]["id"] = pid
-                    PROJECTS_DB[pid] = data
+                    _project_store()[pid] = data
                     project_id_counter += 1
         persist_state()
 
@@ -2054,7 +2100,7 @@ async def upload_business_plan(
     x_realytics_user_id: str | None = Header(default=None),
     x_realytics_ai_provider: str | None = Header(default=None),
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
 
     ai_context = ai_context_from_request(
@@ -2088,12 +2134,13 @@ def _maybe_auto_reanalyze(project_id: str, doc_types: list[str] | None) -> Dict[
     only if the project was already analyzed (has completed pod artifacts). A
     brand-new project's first upload is left for the user's "전체 자동 실행".
     Never raises: auto re-analysis must not break the upload/persist request."""
-    if project_id not in PROJECTS_DB or not _completed_pod_keys(project_id):
+    if project_id not in _project_store() or not _completed_pod_keys(project_id):
         return None
     try:
         return _reanalyze_after_evidence(project_id, changed_document_types=doc_types)
     except Exception:
-        return None
+        return {"triggered": True, "status": "failed", "cascadeComplete": False,
+                "failureCode": "auto_reanalysis_failed"}
 
 
 def _maybe_auto_reanalyze_on_upload(project_id: str, parsed_data: Dict[str, Any] | None) -> Dict[str, Any] | None:
@@ -2165,7 +2212,7 @@ async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, 
 async def smart_intake_classify(project_id: str, files: list[UploadFile] = File(...)):
     """스마트 업로드: 여러 자료를 한 번에 받아 파서 에이전트가 문서 유형을 자동
     분류하고 원본을 보관한다(사업계획서/토지대장/사업수지/토지증빙/시장자료 등)."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     results = [await _classify_intake_file(project_id, f) for f in files]
     by_type: Dict[str, int] = {}
@@ -2188,7 +2235,7 @@ def smart_intake_triage(project_id: str, request: Request, input_data: Dict[str,
     The recommendation is based only on classified document metadata. It never
     treats the uploaded material as reviewed/approved evidence.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     payload = input_data or {}
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
@@ -2217,12 +2264,12 @@ def smart_intake_triage(project_id: str, request: Request, input_data: Dict[str,
         "tracks": result.get("tracks") or [],
         "limitations": result.get("limitations") or [],
     }
-    project = dict(PROJECTS_DB[project_id])
+    project = dict(_project_store()[project_id])
     history = list(project.get("intakeTriageHistory") or [])
     history.append(history_item)
     project["intakeTriageHistory"] = history[-20:]
     project["latestIntakeTriage"] = history_item
-    PROJECTS_DB[project_id] = project
+    _project_store()[project_id] = project
     persist_project(project_id)
     record_user_activity_log(
         {
@@ -2249,7 +2296,7 @@ def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = N
     after source documents, land evidence, market evidence, feasibility inputs,
     and risk/cure decisions are sufficiently prepared.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     payload = input_data or {}
     track = str(payload.get("track") or "")
@@ -2277,7 +2324,7 @@ async def analyze_land_ledger_upload(
     project_id: str,
     file: UploadFile = File(...),
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     ledger = await parse_uploaded_land_ledger(project_id, file)
     upload_meta = ledger.get("upload")
@@ -2290,7 +2337,7 @@ async def analyze_land_ledger_upload(
     ledger_payload = {k: v for k, v in ledger.items() if k != "upload"}
     update_payload: Dict[str, Any] = {"landLedger": ledger_payload}
     parcels = ledger_payload.get("parcels") or []
-    if parcels and not (PROJECTS_DB[project_id].get("land_acquisition") or []):
+    if parcels and not (_project_store()[project_id].get("land_acquisition") or []):
         update_payload["land_acquisition"] = parcels
     project_repository().update(project_id, update_payload)
 
@@ -2307,7 +2354,7 @@ async def analyze_land_ledger_upload(
 @router.post("/{project_id}/land/parcels/resolve")
 def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """토지조서의 모든 필지에 대해 지번별 PNU·공시지가를 VWorld로 일괄 해석·저장."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:analyze")
     payload = input_data or {}
@@ -2316,7 +2363,7 @@ def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: D
     except (TypeError, ValueError):
         limit = 150
     result = resolve_project_parcels_use_case(project_repository(), project_id, limit=limit)
-    project_after = PROJECTS_DB.get(project_id) or {}
+    project_after = _project_store().get(project_id) or {}
     parcels: list[Dict[str, Any]] = []
     land_ledger = project_after.get("landLedger") or project_after.get("land_ledger")
     if isinstance(land_ledger, dict) and isinstance(land_ledger.get("parcels"), list):
@@ -2376,7 +2423,7 @@ async def validate_project_feasibility_workbook(
     project_id: str,
     file: UploadFile = File(...),
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     result = await validate_uploaded_feasibility_workbook(project_id, file)
     save_source_document_metadata_use_case(source_document_repository(), project_id, result["upload"])
@@ -2396,7 +2443,7 @@ async def extract_project_feasibility_workbook(
     Returns a reviewable draft with per-field source-cell evidence + detected unit.
     Does NOT persist — the reviewer applies via /feasibility-workbook/apply-input.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
     content = await file.read()
@@ -2441,7 +2488,7 @@ async def extract_project_feasibility_workbook(
 @router.post("/{project_id}/feasibility-workbook/apply-input")
 def apply_project_feasibility_input(project_id: str, request: Request, input_data: Dict[str, Any]):
     """Persist a reviewer-confirmed feasibility_input (from the LLM extract draft)."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "assumption:override")
     feasibility_input = input_data.get("feasibility_input") or input_data.get("feasibilityInput") or {}
@@ -2474,7 +2521,7 @@ def approve_project_feasibility_workbook_import(
     request: Request,
     input_data: Dict[str, Any],
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "assumption:override")
     authenticated_actor = str(
@@ -2507,7 +2554,7 @@ def approve_project_feasibility_workbook_import(
         if authz.get("authenticated") is True
         else claimed_approver or authenticated_actor
     )
-    project_metadata = dict((PROJECTS_DB.get(project_id) or {}).get("_meta") or {})
+    project_metadata = dict((_project_store().get(project_id) or {}).get("_meta") or {})
     tenant_id = str(
         tenant_id_from_request(request)
         or project_metadata.get("tenantId")
@@ -2548,7 +2595,7 @@ def persist_project_feasibility_workbook_candidate(
     input_data: Dict[str, Any],
 ):
     """Persist a reviewable workbook draft without changing Pod authority."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "project:analyze")
     try:
@@ -2584,7 +2631,7 @@ async def learn_project_feasibility_workbook(
     request: Request,
     file: UploadFile = File(...),
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     identity = authorize_request(request, "project:analyze")
     user = identity.get("user") or {}
@@ -2602,7 +2649,7 @@ async def validate_project_risk_report_workbook(
     project_id: str,
     file: UploadFile = File(...),
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     result = await validate_uploaded_risk_report_workbook(project_id, file)
     save_source_document_metadata_use_case(source_document_repository(), project_id, result["upload"])
@@ -2614,7 +2661,7 @@ def approve_project_risk_report_workbook_import(
     request: Request,
     input_data: Dict[str, Any],
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "risk:review")
     try:
@@ -2647,11 +2694,11 @@ def approve_project_risk_report_workbook_import(
 
 @router.post("/{project_id}/land-ledger/enrich")
 def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
 
     input_data = input_data or {}
-    land_ledger = input_data.get("landLedger") or PROJECTS_DB[project_id].get("landLedger")
+    land_ledger = input_data.get("landLedger") or _project_store()[project_id].get("landLedger")
     if not land_ledger:
         raise HTTPException(status_code=400, detail="landLedger payload or saved project landLedger is required")
 
@@ -2665,7 +2712,7 @@ def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | Non
         enriched.setdefault("enrichmentRun", {})
         enriched["enrichmentRun"]["autoPnuDiagnostics"] = options["autoPnuDiagnostics"]
     if input_data.get("persist", False):
-        project = dict(PROJECTS_DB[project_id])
+        project = dict(_project_store()[project_id])
         project["landLedger"] = enriched
         updated = update_project_use_case(project_repository(), project_id, project)
         if not updated:
@@ -2691,7 +2738,7 @@ async def upload_business_plan_and_run_pf_review(
     x_realytics_user_id: str | None = Header(default=None),
     x_realytics_ai_provider: str | None = Header(default=None),
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
 
     ai_context = ai_context_from_request(
@@ -2738,7 +2785,7 @@ async def upload_business_plan_and_run_pf_review(
 
 @router.post("/{project_id}/ai/connection/resolve")
 def resolve_project_ai_connection(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     input_data = input_data or {}
     ai_context = ai_context_from_request(
@@ -2757,9 +2804,9 @@ def resolve_project_ai_connection(project_id: str, request: Request, input_data:
 
 @router.post("/{project_id}/feasibility/calculate")
 def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    project_feasibility = PROJECTS_DB[project_id].get("feasibility_input", {})
+    project_feasibility = _project_store()[project_id].get("feasibility_input", {})
     source_data = deep_merge(project_feasibility, input_data or {})
     result = calculate_feasibility_metrics(source_data)
     run = _persist_calculation_run(project_id, engine_key="feasibility", result=result, input_data=input_data)
@@ -2892,20 +2939,35 @@ def _require_complete_cashflow_export_lineage(
     return anchor, runs
 
 
+def _cashflow_export_policy(project_id: str, request: Request, runs: Dict[str, Any], purpose: str):
+    from use_cases.approval_readiness_gate import build_deal_state_approval_readiness
+    from use_cases.cashflow_export_policy import evaluate_cashflow_export_policy
+
+    policy = evaluate_cashflow_export_policy(
+        runs, purpose,
+        lambda: build_deal_state_approval_readiness(project_id, tenant_id=tenant_id_from_request(request)),
+    )
+    if not policy["downloadEligible"]:
+        raise HTTPException(status_code=409, detail={"error": "cashflow_approved_export_not_ready", **policy})
+    return policy
+
+
 @router.get("/{project_id}/cashflow-export-package")
-def get_project_cashflow_export_package(project_id: str, request: Request):
+def get_project_cashflow_export_package(project_id: str, request: Request, purpose: str = Query("draft", pattern="^(draft|approved)$")):
     project = authoritative_project(project_id, request)
     authorization = authorize_request(request, "report:export")
     enforce_project_tenant_scope(request, project)
     actor_id = verified_actor_id(authorization)
     selection = _cashflow_export_selection(project_id, request)
     anchor, runs_by_engine = _require_complete_cashflow_export_lineage(selection)
+    policy = _cashflow_export_policy(project_id, request, runs_by_engine, purpose)
     record_sensitive_project_event(
         request,
         event_type="cashflow_export_package_read",
         project_id=project_id,
         metadata={
             "exportType": "cashflow_calculation_package",
+            "exportPurpose": purpose,
             "requestedBy": actor_id,
             "anchorCalculationRunId": anchor.get("calculationRunId"),
             "engineKeys": list(CASHFLOW_EXPORT_ENGINE_KEYS),
@@ -2922,7 +2984,7 @@ def get_project_cashflow_export_package(project_id: str, request: Request):
         "generatedAt": now_iso(),
         "generatedBy": actor_id,
         "anchorCalculationRunId": anchor.get("calculationRunId"),
-        "reportEligible": True,
+        **policy,
         "engineKeys": list(CASHFLOW_EXPORT_ENGINE_KEYS),
         "missingEngineKeys": [],
         "ineligibleEngineKeys": [],
@@ -2958,6 +3020,7 @@ def complete_project_cashflow_export(
                 "anchorCalculationRunId": anchor.get("calculationRunId"),
             },
         )
+    policy = _cashflow_export_policy(project_id, request, runs_by_engine, completion.export_purpose)
     completion_id = str(uuid4())
     completed_at = now_iso()
     record_sensitive_project_event(
@@ -2967,6 +3030,8 @@ def complete_project_cashflow_export(
         metadata={
             "completionId": completion_id,
             "exportType": "cashflow_xlsx",
+            "exportPurpose": completion.export_purpose,
+            "reportEligible": policy["reportEligible"],
             "completedBy": actor_id,
             "completedAt": completed_at,
             "anchorCalculationRunId": anchor.get("calculationRunId"),
@@ -3018,7 +3083,7 @@ def list_project_deal_state_records(
     over the record-type scope (ignoring the locator/review filters) so the UI
     can show "N of M records need a source locator" alongside the filtered view.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     records = list_deal_state_records(
@@ -3069,7 +3134,7 @@ def list_project_parsed_facts(
     validation_status: str | None = None,
     limit: int = Query(1000, ge=1, le=1000),
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     package = parsed_fact_package(project_id, limit=limit)
@@ -3093,7 +3158,7 @@ def validate_project_parsed_facts_for_pod(
     payload: Dict[str, Any],
     request: Request,
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:review")
     pod_key = str(payload.get("podKey") or payload.get("pod_key") or "").strip()
@@ -3108,7 +3173,7 @@ def validate_project_parsed_facts_for_pod(
     result = _validate_supplement_and_revalidate_parsed_facts(
         project_id,
         pod_key,
-        project_data=PROJECTS_DB[project_id],
+        project_data=_project_store()[project_id],
         source_artifact_key=payload.get("sourceArtifactKey") or payload.get("source_artifact_key"),
         actor=actor,
     )
@@ -3186,7 +3251,7 @@ def audit_project_source_locator_completeness(
     project_id: str,
     request: Request,
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:review")
     actor = identity_context_from_request(request).get("userId") or "source_locator_auditor"
@@ -3213,10 +3278,10 @@ def audit_project_source_locator_completeness(
 
 @router.post("/{project_id}/development-feasibility/analyze")
 def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     payload = input_data or {}
-    result = analyze_development_feasibility_use_case(PROJECTS_DB[project_id], payload)
+    result = analyze_development_feasibility_use_case(_project_store()[project_id], payload)
     run = _persist_calculation_run(
         project_id,
         engine_key="feasibility",
@@ -3245,13 +3310,13 @@ def analyze_asset_feasibility_comparison(
     of the feasibility engine under asset-type overrides. Scenarios without a
     revenue/cost basis are surfaced as ``insufficient_data``, never fabricated.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     payload = input_data or {}
     scenarios = payload.get("scenarios") if isinstance(payload.get("scenarios"), list) else None
     options = payload.get("options") if isinstance(payload.get("options"), dict) else None
-    return compare_asset_feasibility_use_case(PROJECTS_DB[project_id], scenarios, options)
+    return compare_asset_feasibility_use_case(_project_store()[project_id], scenarios, options)
 
 
 @router.post("/{project_id}/covenant-eod/evaluate")
@@ -3264,13 +3329,13 @@ def evaluate_covenant_eod(
     feasibility/PF numbers (목표 분양률·LTV/LTC·책임준공·Cash Sweep·상환계좌 배분·
     Equity 선투입·공사비 초과). Each item carries a source locator; missing inputs
     are surfaced as needs_evidence, never fabricated. On-demand, no persistence."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     payload = input_data or {}
     overrides = payload.get("overrides") if isinstance(payload.get("overrides"), dict) else None
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
-    return evaluate_covenant_eod_use_case(PROJECTS_DB[project_id], overrides, policy)
+    return evaluate_covenant_eod_use_case(_project_store()[project_id], overrides, policy)
 
 
 @router.post("/{project_id}/product-planning/compare")
@@ -3283,13 +3348,13 @@ def compare_product_planning(
     land (연면적·전용면적·세대/호실수·전용률·주차·분양가·임대료). Deterministic;
     planning ratios are labelled ``planning_benchmark`` and overridable, and any
     revenue/rent without a price basis is left unset, never fabricated."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     payload = input_data or {}
     scenarios = payload.get("scenarios") if isinstance(payload.get("scenarios"), list) else None
     options = payload.get("options") if isinstance(payload.get("options"), dict) else None
-    return compare_product_planning_use_case(PROJECTS_DB[project_id], scenarios, options)
+    return compare_product_planning_use_case(_project_store()[project_id], scenarios, options)
 
 
 @router.post("/{project_id}/market-product-depth/analyze")
@@ -3301,12 +3366,12 @@ def analyze_market_product_depth(
     """Market-Product depth: 제공주체(시행사/매각주관사/공공/AI) 분류·비교, 상품유형별
     분양성 Score, 흡수율 모델, AI 추가필요작업 판단. Deterministic numbers; the LLM
     only judges what additional evidence/analysis is needed (fallback deterministic)."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     payload = input_data or {}
     options = payload.get("options") if isinstance(payload.get("options"), dict) else None
-    return analyze_market_product_depth_use_case(PROJECTS_DB[project_id], options)
+    return analyze_market_product_depth_use_case(_project_store()[project_id], options)
 
 
 @router.post("/{project_id}/feasibility/build-input")
@@ -3317,7 +3382,7 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
     product plan·market price·공시지가 (flagged needsReview). With apply=true it
     persists into feasibility_input so Cash Flow / PF produce real numbers. Never
     fabricates a missing value to a made-up number."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:write")
     payload = input_data or {}
@@ -3326,15 +3391,21 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
     except Exception:
         parsed_facts = []
     options = payload.get("options") if isinstance(payload.get("options"), dict) else None
-    draft = build_feasibility_input_draft(PROJECTS_DB[project_id], parsed_facts=parsed_facts, options=options)
+    draft = build_feasibility_input_draft(_project_store()[project_id], parsed_facts=parsed_facts, options=options)
     apply = payload.get("apply", True)
     if apply and draft.get("feasibilityInput"):
-        project = PROJECTS_DB[project_id]
+        project = _project_store()[project_id]
         feasibility_input = dict(project.get("feasibility_input") or {})
         for key, value in draft["feasibilityInput"].items():
             feasibility_input[key] = value
         feasibility_input.setdefault("schema_source", "feasibility_input_builder")
-        update_payload: Dict[str, Any] = {"feasibility_input": feasibility_input}
+        update_payload: Dict[str, Any] = {
+            "feasibility_input": feasibility_input,
+            "feasibility_input_sources": {
+                key: {**source, "value": draft["feasibilityInput"].get(key)}
+                for key, source in (draft.get("fieldSources") or {}).items()
+            },
+        }
         # Materialize land area from the parsed program so map/land/feasibility engines
         # read it (it was extracted into parsed_facts but not the structured land field).
         land_area = ((draft.get("programBreakdown") or {}) or {}).get("landAreaSqm")
@@ -3377,7 +3448,7 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
 
 @router.post("/{project_id}/cashflow/calculate")
 def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     cfs = input_data.get("cashflows", [])
     max_minus = calculate_cashflow_max_minus(cfs)
@@ -3389,15 +3460,18 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
 
 @router.post("/{project_id}/cash-flow/run")
 def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    project = PROJECTS_DB[project_id]
+    project = _project_store()[project_id]
     try:
         request_data = build_cash_flow_request_use_case(project, input_data or {})
         result = run_cash_flow_use_case(project, request_data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data=request_data)
+    digest = financial_input_hash(request_data)
+    run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data={**request_data, "financialInputHash": digest})
+    scenario_input, stress_input = dependent_inputs(request_data, result, run["calculationRunId"])
+    dependent_failures = []
 
     # A Cash Flow rerun is the financial starting point for the four review
     # panels shown on the Cash Flow screen.  Persist the dependent scenario
@@ -3406,30 +3480,20 @@ def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = N
     scenario_run_ids: Dict[str, str] = {}
     discount_stress_run_id: str | None = None
     try:
-        scenario_input = {
-            "sourceMetadata": request_data.get("sourceMetadata") or request_data.get("source_metadata"),
-            "parentCalculationRunId": run["calculationRunId"],
-            "sourceLocator": {"parentCalculationRunId": run["calculationRunId"], "engineKey": "cash_flow_engine"},
-        }
-        scenario_request = build_scenario_request_from_project(project, scenario_input)
+        scenario_request = build_scenario_request_from_project({}, scenario_input)
         scenario_result = ScenarioEngineAgent().run_scenario_set(scenario_request)
         scenario_run_ids = _persist_scenario_calculation_runs(
             project_id,
             scenario_result.model_dump(),
             scenario_input,
+            strict=True,
         )
     except Exception:
-        # The primary deterministic cash-flow result remains available even
-        # when a dependent scenario cannot run because its inputs are partial.
+        dependent_failures.append({"engines": ["waterfall", "tranche_recovery", "unsold_ltv"], "status": "failed", "reason": "dependent_scenario_failed"})
         scenario_run_ids = {}
 
     try:
-        stress_input = {
-            "pfAmount": request_data.get("pfAmount") or request_data.get("pf_amount") or project.get("pf_amount") or project.get("feasibility_input", {}).get("pf_amount", 0),
-            "parentCalculationRunId": run["calculationRunId"],
-            "sourceLocator": {"parentCalculationRunId": run["calculationRunId"], "engineKey": "cash_flow_engine"},
-        }
-        stress_result = StressTestAgent().run_stress_test(build_stress_test_request_from_project(project, stress_input))
+        stress_result = StressTestAgent().run_stress_test(build_stress_test_request_from_project({}, stress_input))
         stress_payload = stress_test_run_payload(stress_result.model_dump())
         stress_run = _persist_calculation_run(
             project_id,
@@ -3440,11 +3504,15 @@ def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = N
         )
         discount_stress_run_id = str(stress_run.get("calculationRunId"))
     except Exception:
+        dependent_failures.append({"engines": ["discount_stress"], "status": "failed", "reason": "dependent_stress_failed"})
         discount_stress_run_id = None
 
     return {
         **result,
         "calculationRunId": run["calculationRunId"],
+        "financialInputHash": digest,
+        "dependentExecutionStatus": "partial" if dependent_failures else "completed",
+        "dependentFailures": dependent_failures,
         "calculationRunIds": {
             "cash_flow_engine": run["calculationRunId"],
             **scenario_run_ids,
@@ -3454,9 +3522,9 @@ def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = N
 
 @router.post("/{project_id}/pf/structure")
 def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    project = PROJECTS_DB[project_id]
+    project = _project_store()[project_id]
     feasibility = project.get("feasibility_input", {})
     source_data = {
         "tranches": input_data.get("tranches", project.get("pf_structure", [])),
@@ -3508,9 +3576,9 @@ def calculate_returns(project_id: str, input_data: Dict[str, Any] | None = None)
     interest) and accepts an explicit ``project_cashflows`` / ``equity_cashflows``
     series or monthly ``revenue_schedule`` / ``cost_schedule`` overrides.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    feasibility = PROJECTS_DB[project_id].get("feasibility_input", {})
+    feasibility = _project_store()[project_id].get("feasibility_input", {})
     source_data = deep_merge(feasibility, input_data or {})
     result = calculate_return_metrics(source_data)
     run = _persist_calculation_run(project_id, engine_key="return_metrics", result=result, input_data=input_data)
@@ -3518,10 +3586,10 @@ def calculate_returns(project_id: str, input_data: Dict[str, Any] | None = None)
 
 @router.post("/{project_id}/risk/assess")
 def assess_risk(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     input_data = input_data or {}
-    source_data = deep_merge(PROJECTS_DB[project_id], input_data.get("project_data", {}))
+    source_data = deep_merge(_project_store()[project_id], input_data.get("project_data", {}))
     raw_items = input_data.get("risk_items", source_data.get("risk_items", []))
     return build_basic_risk_matrix(source_data, raw_items)
 
@@ -3658,6 +3726,7 @@ def build_stress_test_request_from_project(project: Dict[str, Any], input_data: 
     schedule = StressTestSchedule(**input_data["schedule"]) if isinstance(input_data.get("schedule"), dict) else None
 
     return StressTestRequest(
+        baseCashFlowRequest=input_data.get("baseCashFlowRequest"),
         projectId=input_data.get("projectId") or project.get("project", {}).get("id"),
         totalRevenue=total_revenue,
         landCost=land_cost,
@@ -3683,9 +3752,9 @@ def _to_number(value: Any) -> float:
 
 @router.post("/{project_id}/stress-test/run")
 def run_project_stress_test(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    req = build_stress_test_request_from_project(PROJECTS_DB[project_id], input_data or {})
+    req = build_stress_test_request_from_project(_project_store()[project_id], input_data or {})
     result = StressTestAgent().run_stress_test(req)
     dump = result.model_dump()
     # Persist as a first-class CalculationRun (covers the discount-stress stages);
@@ -3706,12 +3775,12 @@ def run_project_stress_test(project_id: str, input_data: Dict[str, Any] | None =
 def evaluate_credit_enhancement(project_id: str, input_data: Dict[str, Any] | None = None):
     """Evaluate the six PF credit-enhancement measures and quantify their
     combined effect on senior LTV, credit grade, and DSCR."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     input_data = input_data or {}
     if input_data.get("baseSeniorLtv") in (None, ""):
         # Default the base senior LTV from the project's PF structure metrics.
-        project = PROJECTS_DB[project_id]
+        project = _project_store()[project_id]
         feasibility = project.get("feasibility_input", {})
         pf_source = {
             "tranches": project.get("pf_structure", []),
@@ -3727,7 +3796,7 @@ def evaluate_credit_enhancement(project_id: str, input_data: Dict[str, Any] | No
 @router.post("/{project_id}/cash-sweep/simulate")
 def simulate_project_cash_sweep(project_id: str, input_data: Dict[str, Any]):
     """Simulate monthly Cash Sweep + Reserve allocation against a tranche stack."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     req = CashSweepRequest(**(input_data or {}))
     return CashSweepAgent().simulate(req).model_dump()
@@ -3735,9 +3804,9 @@ def simulate_project_cash_sweep(project_id: str, input_data: Dict[str, Any]):
 
 @router.post("/{project_id}/scenarios/waterfall")
 def run_project_scenarios_waterfall(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    req = build_scenario_request_from_project(PROJECTS_DB[project_id], input_data)
+    req = build_scenario_request_from_project(_project_store()[project_id], input_data)
     agent = ScenarioEngineAgent()
     result = agent.run_scenario_set(req)
     run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(), input_data, engines=["waterfall"]).get("waterfall")
@@ -3750,9 +3819,9 @@ def run_project_scenarios_waterfall(project_id: str, input_data: Dict[str, Any])
 
 @router.post("/{project_id}/scenarios/unsold-ltv-matrix")
 def run_project_scenarios_unsold_ltv(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    req = build_scenario_request_from_project(PROJECTS_DB[project_id], input_data)
+    req = build_scenario_request_from_project(_project_store()[project_id], input_data)
     agent = ScenarioEngineAgent()
     result = agent.run_scenario_set(req)
     run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(), input_data, engines=["unsold_ltv"]).get("unsold_ltv")
@@ -3765,10 +3834,10 @@ def run_project_scenarios_unsold_ltv(project_id: str, input_data: Dict[str, Any]
 
 @router.post("/{project_id}/scenarios/recovery")
 def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    project = PROJECTS_DB[project_id]
+    project = _project_store()[project_id]
     req = build_scenario_request_from_project(project, input_data)
     agent = ScenarioEngineAgent()
     result = agent.run_scenario_set(req)
@@ -3778,7 +3847,7 @@ def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
     project_copy.setdefault("scenario_results", {})
     dump = result.model_dump()
     project_copy["scenario_results"][result.scenarioSetId] = dump
-    PROJECTS_DB[project_id] = project_copy
+    _project_store()[project_id] = project_copy
     persist_project(project_id)
 
     # Full scenario set = all three engines get their own CalculationRun so the
@@ -3789,11 +3858,11 @@ def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
 
 @router.post("/{project_id}/scenarios/restructuring")
 def run_project_scenarios_restructuring(project_id: str, input_data: Dict[str, Any] | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
 
     input_data = input_data or {}
-    project = PROJECTS_DB[project_id]
+    project = _project_store()[project_id]
     source_data = deep_merge(project, input_data.get("project_data", {}))
     req = build_scenario_request_from_project(source_data, input_data)
     scenario_result = ScenarioEngineAgent().run_scenario_set(req)
@@ -3809,9 +3878,9 @@ def analyze_marketability(
     input_data: Dict[str, Any] | None = None,
     live_comparables: bool = False,
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    source = PROJECTS_DB[project_id]
+    source = _project_store()[project_id]
     if live_comparables and MolitRtmsConnector().configured():
         import copy
 
@@ -3825,7 +3894,7 @@ def analyze_marketability(
             pass  # live data must never break the on-demand analysis
     result = analyze_marketability_use_case(source, input_data)
     if (input_data or {}).get("persist"):
-        project = dict(PROJECTS_DB[project_id])
+        project = dict(_project_store()[project_id])
         project["marketability"] = result
         project["marketabilityAnalysis"] = result
         if live_comparables and isinstance(source, dict) and source.get("market"):
@@ -3837,7 +3906,7 @@ def analyze_marketability(
 
 @router.get("/{project_id}/land-evidence")
 def list_project_land_evidence(project_id: str, request: Request, pnu: str | None = None, evidence_type: str | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "evidence:read")
     return {
@@ -3848,7 +3917,7 @@ def list_project_land_evidence(project_id: str, request: Request, pnu: str | Non
 
 @router.post("/{project_id}/land-evidence")
 def upsert_project_land_evidence(project_id: str, request: Request, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:write")
     raw_records = input_data.get("records") if isinstance(input_data.get("records"), list) else [input_data]
@@ -3872,7 +3941,7 @@ def list_project_assumption_overrides(
     status: str | None = None,
     check_key: str | None = None,
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     return {
@@ -3883,7 +3952,7 @@ def list_project_assumption_overrides(
 
 @router.post("/{project_id}/assumption-overrides")
 def upsert_project_assumption_override(project_id: str, request: Request, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "assumption:override")
     raw_records = input_data.get("records") if isinstance(input_data.get("records"), list) else [input_data]
@@ -3930,7 +3999,7 @@ def list_project_restructuring_cures(
     status: str | None = None,
     cure_type: str | None = None,
 ):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     return {
@@ -3941,7 +4010,7 @@ def list_project_restructuring_cures(
 
 @router.post("/{project_id}/restructuring-cures")
 def upsert_project_restructuring_cure(project_id: str, request: Request, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "project:write")
     raw_records = input_data.get("records") if isinstance(input_data.get("records"), list) else [input_data]
@@ -4024,7 +4093,7 @@ def review_legal_and_permits(
     request: Request,
     input_data: Dict[str, Any] | None = None,
 ):
-    project = PROJECTS_DB.get(project_id)
+    project = _project_store().get(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "project:analyze")
@@ -4043,7 +4112,7 @@ def review_legal_and_permits(
 @router.post("/{project_id}/legal-pod/run")
 def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Run the independent Legal Pod and persist its PF handoff/evidence ledger."""
-    project = PROJECTS_DB.get(project_id)
+    project = _project_store().get(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "project:analyze")
@@ -4060,7 +4129,7 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
     project_data["landEvidence"] = {
         "records": list_land_evidence_records(project_id),
     }
-    result = run_legal_pod_use_case(project_id, project_data, input_data or {})
+    result = run_legal_pod_use_case(project_id, project_data, _stored_chief_evidence_options(project_id, project_data, input_data or {}))
     user = authorization.get("user") or {}
     metadata = (
         project.get("_meta")
@@ -4172,12 +4241,12 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
     project_data["legalPermitReview"] = result["legalReview"]
     project_data["legalReview"] = result["legalReview"]
     project_data["permitReview"] = result["permitReview"]
-    PROJECTS_DB[project_id].update({
+    _project_store()[project_id].update({
         "legalPermitReview": result["legalReview"],
         "legalReview": result["legalReview"],
         "permitReview": result["permitReview"],
     })
-    upsert_project_record(project_id, PROJECTS_DB[project_id])
+    upsert_project_record(project_id, _project_store()[project_id])
     record_sensitive_project_event(
         request,
         event_type="legal_pod_run",
@@ -4219,7 +4288,7 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
 
 @router.get("/{project_id}/legal-reviews")
 def list_project_legal_reviews(project_id: str, request: Request, limit: int = Query(20, ge=1, le=200)):
-    project = PROJECTS_DB.get(project_id)
+    project = _project_store().get(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "project:read")
@@ -4290,7 +4359,7 @@ def decide_project_legal_review(
 ):
     """Record an append-only, principal-bound legal human decision."""
 
-    project = PROJECTS_DB.get(project_id)
+    project = _project_store().get(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "legal:review")
@@ -4413,7 +4482,7 @@ def decide_project_legal_review(
 
 @router.get("/{project_id}/permit-reviews")
 def list_project_permit_reviews(project_id: str, request: Request, limit: int = Query(20, ge=1, le=200)):
-    project = PROJECTS_DB.get(project_id)
+    project = _project_store().get(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "project:read")
@@ -4478,7 +4547,7 @@ def list_project_permit_reviews(project_id: str, request: Request, limit: int = 
 @router.get("/{project_id}/legal-pod/law-changes")
 def list_project_legal_law_changes(project_id: str, request: Request, limit: int = Query(100, ge=1, le=500)):
     """Return source-backed legal reference changes across Legal Pod runs."""
-    project = PROJECTS_DB.get(project_id)
+    project = _project_store().get(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "project:read")
@@ -4731,7 +4800,7 @@ def _hydrated_project_source(
     input_data: Dict[str, Any],
     authoritative_source: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    base = authoritative_source or PROJECTS_DB.get(project_id)
+    base = authoritative_source or _project_store().get(project_id)
     if base is None:
         raise LookupError("Project not found")
     source_data = deep_merge(base, (input_data or {}).get("project_data", {}))
@@ -4936,7 +5005,7 @@ def _summarize_chief_artifacts(records: list[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _persist_shared_deal_state_graph(project_id: str, plan: Dict[str, Any], *, source: str = "workspace_context") -> Dict[str, Any]:
-    project_data = PROJECTS_DB.get(project_id)
+    project_data = _project_store().get(project_id)
     if not project_data:
         return {}
     graph = plan.get("sharedDealStateGraph") or {}
@@ -5030,7 +5099,7 @@ def _validate_supplement_and_revalidate_parsed_facts(
 @router.post("/{project_id}/chief-orchestration/unsold-ltv-cure")
 def apply_unsold_ltv_cure_and_rerun(project_id: str, request: Request, input_data: Dict[str, Any]):
     """Persist a source-backed Unsold LTV cure, rerun PF review, and refresh Gate v2."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     # A cure is a lender-side risk review action, not an edit to the project's
     # master data. Reviewers may submit it with risk:review; project:write
@@ -5074,7 +5143,7 @@ def apply_unsold_ltv_cure_and_rerun(project_id: str, request: Request, input_dat
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    project_data = attach_approved_assumption_overrides(project_id, PROJECTS_DB[project_id])
+    project_data = attach_approved_assumption_overrides(project_id, _project_store()[project_id])
     project_data = attach_active_restructuring_cures(project_id, project_data)
     project_data = dict(project_data)
     project_data["adoptedRestructuringCures"] = [saved_cure]
@@ -5084,7 +5153,7 @@ def apply_unsold_ltv_cure_and_rerun(project_id: str, request: Request, input_dat
         project_data,
         {"trigger": "unsold_ltv_cure", "cureId": saved_cure.get("cureId")},
     )
-    PROJECTS_DB[project_id] = project_data
+    _project_store()[project_id] = project_data
     record_sensitive_project_event(
         request,
         event_type="unsold_ltv_cure_rerun_completed",
@@ -5494,7 +5563,7 @@ def get_project_workspace_context(
     the same hydrated project, Evidence Vault, Assumption Book, pod artifacts,
     and persisted Shared Deal State Graph.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
 
@@ -5567,7 +5636,7 @@ def get_project_workspace_context(
 def plan_orchestration(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Intent router: inspect available materials and return the workflow menu,
     missing data, and a recommended default before any agents run."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     payload = input_data or {}
     source_data = _hydrated_project_source(project_id, payload)
@@ -5609,7 +5678,7 @@ def plan_chief_deal_orchestration(project_id: str, request: Request, input_data:
     preliminary decision gate so the user can see what the orchestrator will do
     before any approval-sensitive analysis is treated as final.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     payload = input_data or {}
@@ -5657,10 +5726,23 @@ def _persist_chief_recalculation_event(project_id: str, event: Dict[str, Any]) -
     return persisted
 
 
+def _stored_chief_evidence_options(project_id: str, project: Dict[str, Any], options: Dict[str, Any]) -> Dict[str, Any]:
+    tenant_id = _project_tenant_id(project_id)
+    try:
+        documents = resolve_stored_permit_documents(project_id, project, parser_v2_record_store(), tenant_id)
+        return {**options, "parsedDocuments": documents}
+    except Exception:
+        # Preserve the existence of the original without promoting inaccessible review records.
+        documents = resolve_stored_permit_documents(project_id, project, None, None)
+        for document in documents:
+            document["evidenceStage"] = "authority_unavailable"
+        return {**options, "parsedDocuments": documents, "permitEvidenceStatus": "authority_unavailable"}
+
+
 @router.post("/{project_id}/chief-orchestration/run-pod")
 def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Chief Deal Orchestrator: execute a single agent pod and trigger downstream events."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:analyze")
     payload = input_data or {}
@@ -5682,9 +5764,10 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
         "ai_context": ai_context_from_request(request, payload_ai_context=payload_ai_context),
     }
 
-    project_data = PROJECTS_DB[project_id]
+    project_data = _project_store()[project_id]
     try:
         pod_runner = run_chief_deal_pod_with_cascade_use_case if options.get("autoCascade") else run_chief_deal_pod_use_case
+        options = _stored_chief_evidence_options(project_id, project_data, options)
         plan = pod_runner(
             project_id,
             pod_key,
@@ -5726,7 +5809,7 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
 @router.post("/{project_id}/chief-orchestration/run-all-pods")
 def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Chief Deal Orchestrator: execute the selected track's pod graph in order."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:analyze")
     payload = input_data or {}
@@ -5745,11 +5828,11 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         "ai_context": ai_context_from_request(request, payload_ai_context=payload_ai_context),
     }
 
-    project_data = PROJECTS_DB[project_id]
+    project_data = _project_store()[project_id]
     plan = run_chief_deal_all_pods_use_case(
         project_id,
         project_data,
-        options,
+        _stored_chief_evidence_options(project_id, project_data, options),
         artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
         review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
         event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
@@ -5803,24 +5886,36 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
 
 
 def _completed_pod_keys(project_id: str) -> set:
-    """Pods that have a persisted artifact = already completed at least once."""
+    """Completed artifacts excluding currently failed, blocked or stale Pod runs."""
     keys = set()
+    runs = (_project_store().get(project_id, {}).get("chief_orchestration_state") or {}).get("podRuns") or {}
     for record in list_chief_pod_artifact_records(project_id):
         pod_key = record.get("podKey") or record.get("pod_key")
-        if pod_key:
+        current_status = (runs.get(str(pod_key)) or {}).get("status")
+        if pod_key and record.get("status", "completed") == "completed" and current_status not in {"blocked", "failed", "needs_recalculation"}:
             keys.add(str(pod_key))
     return keys
 
 
 def _reanalyze_after_evidence(project_id: str, *, changed_document_types: list[str] | None, options: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Re-run still-open + document-affected pods with the standard persistence sinks."""
-    project_data = PROJECTS_DB[project_id]
+    project_data = _project_store()[project_id]
+    def validated_runner(pid, pod_key, data, runner_options, **sinks):
+        plan = run_chief_deal_pod_use_case(pid, pod_key, data, runner_options, **sinks)
+        plan["parsedFactValidation"] = _validate_supplement_and_revalidate_parsed_facts(
+            pid, pod_key, project_data=data,
+            source_artifact_key=_latest_pod_artifact_key_from_plan(plan, pod_key),
+            actor="evidence_reanalysis",
+        )
+        _persist_shared_deal_state_graph(pid, plan, source=f"evidence_reanalysis:{pod_key}")
+        return plan
     summary = reanalyze_after_evidence_use_case(
         project_id,
         project_data,
         completed_pod_keys=_completed_pod_keys(project_id),
+        run_pod=validated_runner,
         changed_document_types=changed_document_types,
-        options=options or {},
+        options=_stored_chief_evidence_options(project_id, project_data, options or {}),
         artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
         review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
         event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
@@ -5828,7 +5923,7 @@ def _reanalyze_after_evidence(project_id: str, *, changed_document_types: list[s
         handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
     )
     if summary.get("triggered"):
-        upsert_project_record(project_id, PROJECTS_DB[project_id])
+        upsert_project_record(project_id, _project_store()[project_id])
     return summary
 
 
@@ -5838,7 +5933,7 @@ def reanalyze_chief_deal(project_id: str, request: Request, input_data: Dict[str
     pods plus the pods the new document type feeds. Each pod re-run re-validates
     parsed facts, auto-supplements, regenerates the AI review, and cascades. Pods
     that still lack evidence stay blocked honestly."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:analyze")
     payload = input_data or {}
@@ -5858,10 +5953,10 @@ def reanalyze_chief_deal(project_id: str, request: Request, input_data: Dict[str
 @router.get("/{project_id}/chief-orchestration/artifacts")
 def list_chief_deal_artifacts(project_id: str, request: Request, pod_key: str | None = None):
     """List persisted Chief Deal Room pod artifacts for audit/review."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
-    state = PROJECTS_DB[project_id].get("chief_orchestration_state") or {}
+    state = _project_store()[project_id].get("chief_orchestration_state") or {}
     records = list_chief_pod_artifact_records(project_id, pod_key=pod_key)
     if not records:
         artifacts = state.get("artifacts") or {}
@@ -5889,7 +5984,7 @@ def list_chief_deal_pod_ai_reviews(
     limit: int = 100,
 ):
     """List persisted Pod AI Reviewer records for Chief Deal Room audit/review."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     safe_limit = max(1, min(500, int(limit or 100)))
@@ -5913,7 +6008,7 @@ def list_chief_deal_pod_ai_reviews(
 @router.get("/{project_id}/chief-orchestration/pod-ai-reviews/{review_id:path}")
 def get_chief_deal_pod_ai_review(project_id: str, review_id: str, request: Request):
     """Read a persisted Pod AI Reviewer record by ID."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     record = get_pod_ai_review_record(project_id, review_id)
@@ -5930,7 +6025,7 @@ def list_chief_agent_runs(
     limit: int = 100,
 ):
     """List durable Agent executions associated with the current project."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     records = list_agent_run_records(
@@ -5950,7 +6045,7 @@ def list_chief_agent_runs(
 @router.get("/{project_id}/chief-orchestration/agent-runs/{agent_run_id}")
 def get_chief_agent_run(project_id: str, agent_run_id: str, request: Request):
     """Read a durable Agent run with ordered steps and secret-free Brain usage."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     record = get_agent_run_record(agent_run_id)
@@ -5973,7 +6068,7 @@ def cancel_chief_agent_run(
     payload: Dict[str, Any] | None = None,
 ):
     """Request cooperative cancellation; terminal runs remain immutable."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "project:analyze")
     record = get_agent_run_record(agent_run_id)
@@ -6006,7 +6101,7 @@ def list_chief_deal_recalculation_events(
     limit: int = 100,
 ):
     """List persisted Event Bus recalculation triggers for the Deal Room."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     safe_limit = max(1, min(500, int(limit or 100)))
@@ -6036,7 +6131,7 @@ def list_chief_deal_handoffs(
     limit: int = 100,
 ):
     """List persisted AgentHandoffEnvelope records for Pod-to-Pod audit."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     records = list_agent_handoff_records(
@@ -6060,12 +6155,12 @@ def list_chief_deal_events(project_id: str, request: Request, limit: int = 100):
 
     Combines the in-project orchestration state (fast, current) with the durable
     activity log (queryable across restarts/state rebuilds)."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     limit = max(1, min(500, limit))
 
-    state = PROJECTS_DB[project_id].get("chief_orchestration_state") or {}
+    state = _project_store()[project_id].get("chief_orchestration_state") or {}
     state_events = [e for e in (state.get("learningLoopEvents") or []) if isinstance(e, dict)]
 
     durable = list_recalculation_event_records(project_id, limit=limit)
@@ -6099,12 +6194,12 @@ def list_chief_deal_events(project_id: str, request: Request, limit: int = 100):
 @router.get("/{project_id}/chief-orchestration/artifacts/{artifact_key:path}")
 def get_chief_deal_artifact(project_id: str, artifact_key: str, request: Request):
     """Read a persisted Chief Deal Room pod artifact by key."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     record = get_chief_pod_artifact_record(project_id, artifact_key)
     if not record:
-        record = ((PROJECTS_DB[project_id].get("chief_orchestration_state") or {}).get("artifacts") or {}).get(artifact_key)
+        record = ((_project_store()[project_id].get("chief_orchestration_state") or {}).get("artifacts") or {}).get(artifact_key)
     if not record:
         raise HTTPException(status_code=404, detail="Chief pod artifact not found")
     return record
@@ -6112,7 +6207,7 @@ def get_chief_deal_artifact(project_id: str, artifact_key: str, request: Request
 
 @router.get("/{project_id}/prompt-artifacts")
 def list_project_prompt_artifacts(project_id: str, request: Request, artifact_type: str | None = None, workflow: str | None = None):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     return {
@@ -6136,7 +6231,7 @@ def list_project_prompt_artifacts(project_id: str, request: Request, artifact_ty
 
 @router.get("/{project_id}/prompt-artifacts/{artifact_id}")
 def get_project_prompt_artifact(project_id: str, artifact_id: str, request: Request):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     record = get_prompt_artifact_record(project_id, artifact_id)
@@ -6147,7 +6242,7 @@ def get_project_prompt_artifact(project_id: str, artifact_id: str, request: Requ
 
 @router.post("/{project_id}/prompt-artifacts")
 def upsert_project_prompt_artifact(project_id: str, request: Request, input_data: Dict[str, Any]):
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:write")
     artifact = upsert_prompt_artifact_record(
@@ -6171,13 +6266,13 @@ def upsert_project_prompt_artifact(project_id: str, request: Request, input_data
 
 
 def _project_name(project_id: str) -> str:
-    return (PROJECTS_DB.get(project_id, {}).get("project", {}) or {}).get("name") or project_id
+    return (_project_store().get(project_id, {}).get("project", {}) or {}).get("name") or project_id
 
 
 @router.get("/{project_id}/developability-score")
 def get_project_developability_score(project_id: str):
     """Composite developability score (개발가능성 점수화) from land/regulation/feasibility/market."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, {})
     return score_developability_use_case(source_data)
@@ -6186,7 +6281,7 @@ def get_project_developability_score(project_id: str):
 @router.get("/{project_id}/monitoring")
 def get_project_monitoring(project_id: str):
     """Live PF covenant monitoring (DSCR/LTV/LTC/Exit/sales-rate vs thresholds + stress EOD signal)."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, {})
     return monitor_covenants_use_case(source_data)
@@ -6205,7 +6300,7 @@ def get_project_map_intelligence(
     `resolve_geometry=true` and a configured VWorld key, parcel boundaries are
     fetched live from the VWorld cadastral layer by PNU (capped, best-effort).
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, {})
     geometry_resolution: Dict[str, Any] | None = None
@@ -6235,7 +6330,7 @@ def set_project_monitoring_thresholds(project_id: str, request: Request, input_d
     known keys with positive numeric values are saved; the rest fall back to the
     standard PF defaults.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     payload = input_data or {}
     raw = payload.get("thresholds", payload)
@@ -6285,7 +6380,7 @@ def get_portfolio_monitoring():
     critical-first alert feed, and a trend arrow vs each project's prior run."""
     history = _snapshot_history_by_project()
     entries: list[Dict[str, Any]] = []
-    for project_id in list(PROJECTS_DB.keys()):
+    for project_id in list(_project_store().keys()):
         source_data = _hydrated_project_source(project_id, {})
         entries.append({
             "projectId": project_id,
@@ -6300,7 +6395,7 @@ def get_portfolio_monitoring():
 def annotate_project_terms(project_id: str, input_data: Dict[str, Any] | None = None):
     """Attach controlled-vocabulary identity (termId + canonicalField + sourceLocator)
     to extracted terms in the project's parsed data, for report and audit linkage."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, input_data or {})
     return annotate_terms_use_case(source_data, project_id=project_id)
@@ -6310,7 +6405,7 @@ def annotate_project_terms(project_id: str, input_data: Dict[str, Any] | None = 
 def kakao_intake_plan(project_id: str, input_data: Dict[str, Any] | None = None):
     """KakaoTalk intake → intent menu. Runs the Orchestration Planner and returns
     both the plan and a KakaoTalk-safe message presenting the workflow choices."""
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     source_data = _hydrated_project_source(project_id, input_data or {})
     plan = plan_orchestration_use_case(project_id, source_data)
@@ -6340,7 +6435,7 @@ def run_orchestration_workflow(
     When ``channel == 'kakao'`` the response also carries a KakaoTalk-safe
     completion message so the intake flow can notify the user of the result.
     """
-    if project_id not in PROJECTS_DB:
+    if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, "project:analyze")
     if not authorization.get("authenticated"):
@@ -6351,7 +6446,7 @@ def run_orchestration_workflow(
                 "scope": "orchestration_workflow",
             },
         )
-    enforce_project_tenant_scope(request, PROJECTS_DB[project_id])
+    enforce_project_tenant_scope(request, _project_store()[project_id])
     input_data = input_data or {}
     workflow = input_data.get("workflow")
     if not workflow:
@@ -6818,10 +6913,10 @@ source_documents_router = build_project_source_documents_router(
     audit_recorder=record_sensitive_project_event,
 )
 PARSER_V2_RUNTIME_DEPENDENCIES = build_parser_v2_runtime_dependencies(
-    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+    project_lookup=lambda project_id: _project_store().get(str(project_id)),
 )
 parser_v2_router = build_project_parser_v2_router(
-    project_lookup=lambda project_id: PROJECTS_DB.get(str(project_id)),
+    project_lookup=lambda project_id: _project_store().get(str(project_id)),
     source_document_repository_factory=source_document_repository,
     upload_archive_repository_factory=upload_archive_repository,
     audit_recorder=record_sensitive_project_event,
