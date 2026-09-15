@@ -1,7 +1,7 @@
 """Optional live PostgreSQL contract tests for normalized Parser V2.
 
 Set ``REALYTICS_TEST_DATABASE_URL`` to an isolated, disposable database.  The
-suite creates a uniquely named schema plus a temporary unprivileged runtime role
+suite creates a uniquely named database plus a temporary unprivileged runtime role
 and applies the production privilege provisioner.  It skips when the supplied
 deployment role cannot create/SET ROLE.  It never falls back to the normal
 application DSN.
@@ -548,12 +548,21 @@ def _seed_tenants_projects_and_profiles(conn: Any) -> None:
 @pytest.fixture(scope="module")
 def live_database() -> _LiveDatabase:
     from psycopg import sql
+    from psycopg.conninfo import make_conninfo
 
     assert TEST_DSN is not None
-    schema_name = _validated_identifier("parser_v2_live")
+    # Production repositories use the realytics schema. A second schema in the
+    # same DB also collides with historical policy-name catalog checks. Exercise
+    # the unchanged migration chain in a fresh database with its real namespace.
+    schema_name = "realytics"
+    database_name = _validated_identifier("parser_v2_live_db")
     candidate_role = _validated_identifier("parser_v2_runtime")
     runtime_role: str | None = None
-    conn = postgres.connect(TEST_DSN)
+    maintenance = _POSTGRES_CONNECT(TEST_DSN)
+    maintenance.autocommit = True
+    maintenance.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(database_name)))
+    isolated_dsn = make_conninfo(TEST_DSN, dbname=database_name)
+    conn = postgres.connect(isolated_dsn)
     try:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -609,7 +618,7 @@ def live_database() -> _LiveDatabase:
         runtime_role = candidate_role
 
         database = _LiveDatabase(
-            dsn=TEST_DSN,
+            dsn=isolated_dsn,
             schema_name=schema_name,
             runtime_role=runtime_role,
             first_migration_ledger=first_ledger,
@@ -618,27 +627,16 @@ def live_database() -> _LiveDatabase:
         _seed_tenants_projects_and_profiles(conn)
         yield database
     finally:
-        conn.rollback()
         try:
-            with conn.cursor() as cursor:
-                cursor.execute("RESET ROLE")
-                cursor.execute("SET search_path TO public")
-            conn.commit()
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                        sql.Identifier(schema_name)
-                    )
-                )
-                if runtime_role:
-                    cursor.execute(
-                        sql.SQL("DROP ROLE IF EXISTS {}").format(
-                            sql.Identifier(runtime_role)
-                        )
-                    )
-            conn.commit()
+            conn.rollback()
         finally:
             conn.close()
+            try:
+                maintenance.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database_name)))
+                if runtime_role:
+                    maintenance.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(runtime_role)))
+            finally:
+                maintenance.close()
 
 
 def test_live_migrations_apply_once_and_are_idempotent(
