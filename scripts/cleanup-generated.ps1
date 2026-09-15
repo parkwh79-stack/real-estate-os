@@ -6,7 +6,32 @@ param(
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
-$root = (Resolve-Path -LiteralPath $ProjectRoot).Path.TrimEnd('\', '/')
+# Windows CI can supply an 8.3 alias (RUNNER~1) while enumeration returns long
+# names. Canonicalize both sides before enforcing the containment boundary.
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class RealyticsCleanupPath {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathName(string path, StringBuilder output, uint length);
+    public static string Expand(string path) {
+        var output = new StringBuilder(32768);
+        uint length = GetLongPathName(path, output, (uint)output.Capacity);
+        if (length == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (length >= output.Capacity) throw new ArgumentException("Path is too long");
+        return output.ToString();
+    }
+}
+'@
+function Get-CanonicalPath([string]$Path) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    return [RealyticsCleanupPath]::Expand([IO.Path]::GetFullPath($Path))
+}
+$root = (Get-CanonicalPath (Resolve-Path -LiteralPath $ProjectRoot).Path).TrimEnd('\', '/')
 if (!(Test-Path -LiteralPath (Join-Path $root 'AGENTS.md')) -or
     !(Test-Path -LiteralPath (Join-Path $root '.git'))) {
     throw 'Expected the project root containing AGENTS.md and .git.'
@@ -20,7 +45,7 @@ $tracked = @(& git -C $root -c core.quotepath=false ls-files)
 if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect tracked files; refusing cleanup.' }
 
 function Assert-SafePath([string]$Path) {
-    $full = [IO.Path]::GetFullPath($Path)
+    $full = Get-CanonicalPath $Path
     if (!$full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Outside project: $full"
     }

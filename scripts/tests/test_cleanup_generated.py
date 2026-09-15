@@ -34,11 +34,28 @@ class CleanupSafetyTests(unittest.TestCase):
             if not path.is_symlink():
                 os.utime(path, (old, old))
 
-    def run_cleanup(self, apply=False):
-        args = [SHELL, "-NoProfile", "-File", str(SCRIPT), "-ProjectRoot", str(self.root)]
+    def run_cleanup(self, apply=False, project_root=None):
+        args = [SHELL, "-NoProfile", "-File", str(SCRIPT), "-ProjectRoot", str(project_root or self.root)]
         if apply:
             args.append("-Apply")
-        return subprocess.run(args, check=True, capture_output=True, text=True)
+        result = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    @unittest.skipUnless(os.name == "nt", "Windows short path contract")
+    def test_short_windows_root_keeps_containment_checks(self):
+        import ctypes
+        output = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(self.root), output, len(output))
+        self.assertGreater(length, 0)
+        removable = self.make(".pytest_cache/cache")
+        original = self.make("services/api-server/data/runtime/uploads/original.pdf")
+        self.age()
+        self.assertIn("Candidate", self.run_cleanup(project_root=output.value).stdout)
+        self.assertTrue(removable.exists())
+        self.run_cleanup(apply=True, project_root=output.value)
+        self.assertFalse(removable.exists())
+        self.assertTrue(original.exists())
 
     def test_dry_run_does_not_delete(self):
         cache = self.make(".pytest_cache/cache")
