@@ -882,12 +882,11 @@ def test_live_gate_snapshot_reconciles_counts_and_corpus_lineage(
 def test_live_normalized_approval_readiness_rechecks_snapshot_and_decision(
     live_database: _LiveDatabase,
 ) -> None:
-    decision_clock = datetime.now(timezone.utc)
-    delegation_valid_from = decision_clock - timedelta(days=1)
-    delegation_valid_until = decision_clock + timedelta(days=1)
-    delegation_created_at = decision_clock - timedelta(days=2)
     conn = live_database.connect_admin()
     try:
+        delegation_created_at = conn.execute("SELECT statement_timestamp()").fetchone()[0]
+        delegation_valid_from = delegation_created_at
+        delegation_valid_until = delegation_created_at + timedelta(days=1)
         suffix = uuid4().hex
         with conn.cursor() as cursor:
             case = _insert_live_legal_gate_case(

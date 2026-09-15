@@ -37,6 +37,8 @@ Supabase 적용 이력과 남은 운영 조건을 대조한다.
   두 종류의 검토 테이블에서 정상 predecessor는 통과하고 누락·다른 테넌트·다른
   프로젝트 predecessor는 거부하는 PostgreSQL 회귀 검사를 추가한다.
   근거: [PostgreSQL 동적 SQL 결과 확인](https://www.postgresql.org/docs/16/plpgsql-statements.html#PLPGSQL-STATEMENTS-DIAGNOSTICS).
+  추가 검증은 55개 중 54개를 통과했다. 마지막 승인 위임 시험의 이틀 전 생성
+  시각도 현행 DB 시계 제한에 맞게 고쳤다. 운영 DB의 시간·승인 제한은 유지한다.
   main 병합 및 실제 운영
   배포 완료와 코드 업로드 완료는 별도 상태다.
 
