@@ -730,6 +730,53 @@ def test_live_governance_triggers_dispatch_before_resolving_table_columns(
 
 
 @pytest.mark.parametrize(
+    "table_name", ("project_legal_review_versions", "project_permit_review_versions"),
+)
+@pytest.mark.parametrize("predecessor_case", ("valid", "missing", "other-tenant", "other-project"))
+def test_live_review_projection_predecessor_lookup_enforces_scope(
+    live_database: _LiveDatabase, table_name: str, predecessor_case: str,
+) -> None:
+    import psycopg
+    from psycopg import sql
+
+    conn = live_database.connect_admin()
+    try:
+        table = sql.Identifier(table_name)
+        conn.execute(sql.SQL(
+            "CREATE TEMP TABLE {} ON COMMIT DROP AS SELECT * FROM {}.{} WITH NO DATA"
+        ).format(table, sql.Identifier(live_database.schema_name), table))
+        if predecessor_case != "missing":
+            conn.execute(sql.SQL(
+                "INSERT INTO pg_temp.{} (review_version_id, tenant_id, project_id, "
+                "review_id, review_version) VALUES ('prior', %s, %s, 'review', 1)"
+            ).format(table), (
+                "other" if predecessor_case == "other-tenant" else TENANT_A,
+                "other" if predecessor_case == "other-project" else PROJECT_A,
+            ))
+        conn.execute(sql.SQL(
+            "CREATE TRIGGER test_predecessor AFTER INSERT ON pg_temp.{} "
+            "FOR EACH ROW EXECUTE FUNCTION {}.legal_assert_review_projection_snapshot()"
+        ).format(table, sql.Identifier(live_database.schema_name)))
+        insert = sql.SQL(
+            "INSERT INTO pg_temp.{} (review_version_id, tenant_id, project_id, "
+            "review_id, review_version, supersedes_review_version_id) "
+            "VALUES ('next', %s, %s, 'review', 2, 'prior')"
+        ).format(table)
+        if predecessor_case == "valid":
+            conn.execute(insert, (TENANT_A, PROJECT_A))
+            assert conn.execute(sql.SQL("SELECT count(*) FROM pg_temp.{}").format(
+                table,
+            )).fetchone()[0] == 2
+        else:
+            with pytest.raises(psycopg.Error, match="predecessor is outside") as exc_info:
+                conn.execute(insert, (TENANT_A, PROJECT_A))
+            assert exc_info.value.sqlstate == "P0001"
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+@pytest.mark.parametrize(
     (
         "declared_count",
         "item_has_provision",

@@ -31,6 +31,12 @@ Supabase 적용 이력과 남은 운영 조건을 대조한다.
   발견했다. 테이블별 분기 뒤 컬럼을 해석하도록 신규 migration을 추가했다.
   과거 migration은 보존하며 승인·위임·근거·cure 검증 조건을 유지한다.
   실제 테이블 구조를 사용하는 회귀 검사와 기존 유효/무효 근거 검사를 함께 실행한다.
+  이 단계에서 47개 중 45개가 통과했고, 남은 두 건은 동적 SQL의 `FOUND`를
+  잘못 사용해 정상 projection을 없다고 판단하는 결함이었다. 신규 migration에
+  projection/decision의 `ROW_COUNT` 확인과 nullable join의 잠금 대상 수정을 추가했다.
+  두 종류의 검토 테이블에서 정상 predecessor는 통과하고 누락·다른 테넌트·다른
+  프로젝트 predecessor는 거부하는 PostgreSQL 회귀 검사를 추가한다.
+  근거: [PostgreSQL 동적 SQL 결과 확인](https://www.postgresql.org/docs/16/plpgsql-statements.html#PLPGSQL-STATEMENTS-DIAGNOSTICS).
   main 병합 및 실제 운영
   배포 완료와 코드 업로드 완료는 별도 상태다.
 

@@ -1,7 +1,10 @@
 # REALYTICS OS Next Work Roadmap
 
-Updated: 2026-09-14
+Updated: 2026-09-15
 Purpose: 파일럿 승인 가능성과 부동산 OS 운영화를 위한 통합 개발 로드맵
+
+현재 GitHub 업로드·원격 DB 적용·검증 상태와 다음 실행 순서는
+[코드 업로드와 다음 작업](publication-and-next-steps-2026-09-15.md)을 기준으로 한다.
 
 ## 2026-09-14 실행 기준
 
