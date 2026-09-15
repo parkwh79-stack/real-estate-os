@@ -69,3 +69,14 @@ def test_postgres_pf_review_repositories_share_job_tenant_and_worker_pool(monkey
 def test_pf_review_repository_rejects_missing_job_tenant(job) -> None:
     with pytest.raises(RuntimeError, match="persisted tenantId"):
         repository_for_job(job)
+
+
+def test_database_test_bootstrap_never_falls_back_to_application_dsn(monkeypatch):
+    from scripts.bootstrap_test_postgres import main
+    from db import postgres
+
+    monkeypatch.delenv("REALYTICS_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setenv("REALYTICS_DATABASE_URL", "postgresql://application@test.invalid/app")
+    monkeypatch.setattr(postgres, "connect", lambda *_: pytest.fail("Application DSN accessed"))
+    with pytest.raises(RuntimeError, match="disposable REALYTICS_TEST_DATABASE_URL"):
+        main()

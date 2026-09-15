@@ -59,7 +59,7 @@ jobs:
         run: python scripts/render_supabase_migrations.py --check
       - run: pip install -r requirements.txt
       - name: Bootstrap dedicated database roles
-        run: python -c "from pathlib import Path; from db.postgres import connect; c=connect(); c.execute(Path('../../supabase/roles.sql').read_text()); c.commit(); c.close()"
+        run: python scripts/bootstrap_test_postgres.py
       - name: Apply all PostgreSQL migrations
         run: python -c "from db.postgres import connect, ensure_schema; c=connect(); c.execute('CREATE SCHEMA IF NOT EXISTS realytics'); c.commit(); ensure_schema(c); c.close()"
       - name: Run typed PostgreSQL integration tests

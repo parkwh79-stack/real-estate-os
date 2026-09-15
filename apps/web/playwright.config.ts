@@ -28,6 +28,9 @@ export default defineConfig({
       REALYTICS_API_ORIGIN: "http://127.0.0.1:8000",
       REALYTICS_WEB_ORIGIN: baseURL,
       REALYTICS_NEXT_DIST_DIR: ".next-e2e",
+      // Contract tests intercept auth routes; never depend on a developer's .env.
+      NEXT_PUBLIC_SUPABASE_URL: "https://auth.e2e.invalid",
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_e2e_fixture_only",
     },
   },
 });

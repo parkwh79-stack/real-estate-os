@@ -15,6 +15,10 @@ Supabase 적용 이력과 남은 운영 조건을 대조한다.
   GitHub의 첫 실행에서 API와 웹 품질 검사가 통과했다. Windows의 8.3 경로명과
   PostgreSQL 역할 bootstrap 누락을 추가 발견해 수정하고 다시 검증한다.
   정리 도구의 경로 경계 검사를 유지한 로컬 회귀시험 6개가 통과했다.
+  일반 PostGIS에는 Supabase의 기본 역할도 없어 시험 전용 bootstrap에서 생성한다.
+  이 도구는 명시적인 시험 DSN만 허용하며 애플리케이션 DSN으로 대체하지 않는다.
+  브라우저 계약 검사는 `.env`의 실제 Supabase 설정에 의존하던 부분을 제거하고
+  인증 라우트 대역용 가짜 설정을 사용한다. 실제 인증 smoke 설정에는 적용하지 않는다.
   main 병합 및 실제 운영
   배포 완료와 코드 업로드 완료는 별도 상태다.
 
@@ -32,6 +36,9 @@ Supabase 적용 이력과 남은 운영 조건을 대조한다.
   업무 데이터·원본·승인·비밀값과 LOGIN 설정은 변경하지 않았다.
 - runtime 역할의 계산/작업 큐/실행 원장 권한은 아직 부족하다. 역할별 권한
   provisioner와 실제 LOGIN·비밀 주입·제한 역할 검증을 함께 완료해야 한다.
+- Supabase 보안 advisor에는 유출 비밀번호 차단 비활성화 경고 1건이 있다.
+  [설정 조건과 방법](https://supabase.com/docs/guides/auth/password-security#password-strength-and-leaked-password-protection)을
+  확인해 운영 Auth 설정 단계에서 처리한다.
 
 ## 다음 작업 순서
 
