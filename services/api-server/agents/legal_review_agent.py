@@ -1,7 +1,7 @@
 from typing import Any, Dict, List
 
 from agents.korean_law_context import build_korean_law_mcp_query_plan, normalize_law_context
-from agents.legal_developability_agent import LegalDevelopabilityAgent
+from agents.legal_developability_agent import LegalDevelopabilityAgent, _first, _number
 from core.schedule import schedule_event_map
 
 
@@ -72,18 +72,18 @@ class LegalReviewAgent:
         )
 
     def _zoning_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        regulation = data.get("regulation", {})
-        legal_far = regulation.get("legal_far", 0)
-        applied_far = regulation.get("applied_far", 0)
-        legal_bcr = regulation.get("legal_bcr", 0)
-        applied_bcr = regulation.get("applied_bcr", 0)
+        regulation = data.get("regulation") if isinstance(data.get("regulation"), dict) else {}
+        legal_far = _number(_first(regulation, "legal_far", "legalFar", "statutoryFar"))
+        applied_far = _number(_first(regulation, "applied_far", "appliedFar", "plannedFar"))
+        legal_bcr = _number(_first(regulation, "legal_bcr", "legalBcr", "statutoryBcr"))
+        applied_bcr = _number(_first(regulation, "applied_bcr", "appliedBcr", "plannedBcr"))
         issues = []
-        if legal_far and applied_far and applied_far > legal_far:
+        if legal_far is not None and applied_far is not None and applied_far > legal_far:
             issues.append("Applied FAR exceeds the legal FAR limit.")
-        if legal_bcr and applied_bcr and applied_bcr > legal_bcr:
+        if legal_bcr is not None and applied_bcr is not None and applied_bcr > legal_bcr:
             issues.append("Applied BCR exceeds the legal BCR limit.")
-        if not regulation:
-            issues.append("Zoning, statutory FAR, and statutory BCR data are missing.")
+        if any(value is None for value in (legal_far, applied_far, legal_bcr, applied_bcr)):
+            issues.append("FAR and BCR limits or planned values are missing or invalid; the zoning comparison is incomplete.")
         return self._check(
             "zoning",
             "Zoning, FAR and BCR",

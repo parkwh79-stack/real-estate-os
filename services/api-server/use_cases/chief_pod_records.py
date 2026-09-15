@@ -7,6 +7,7 @@ outputs, preserve their source locators, and create typed communication records.
 """
 
 import hashlib
+from copy import deepcopy
 import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
@@ -73,7 +74,9 @@ def pod_input_snapshot(
     }
     snapshot["dependencyArtifacts"] = dependency_artifacts or {}
     snapshot["activeAssumptionOverrides"] = project_data.get("activeAssumptionOverrides") or []
-    return snapshot
+    # Executors mutate their working project. Retain the exact pre-execution
+    # values whose hash is recorded in the calculation and handoff ledgers.
+    return deepcopy(snapshot)
 
 
 def _iter_numeric_metrics(value: Any, path: str = "result") -> Iterable[Dict[str, Any]]:

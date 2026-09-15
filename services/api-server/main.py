@@ -52,6 +52,7 @@ from db.repositories.upload_archive_repository import UploadRejectedError
 from db.repositories.activity_log_repository import PostgresActivityLogRepository
 from db.repositories.request_project_repository import project_request_scope, current_project_scope
 from db.repositories.postgres_project_repository import ProjectVersionConflict
+from core.financial_input_validation import FinancialInputError
 from storage import get_user_session, record_user_activity_log, storage_backend
 
 validate_security_configuration()
@@ -78,6 +79,15 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(FinancialInputError)
+async def financial_input_error_handler(_request: Request, exc: FinancialInputError):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": {"error": "invalid_financial_input", "message": str(exc)}},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.exception_handler(UploadRejectedError)

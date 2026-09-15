@@ -77,7 +77,9 @@ class PodAIReviewerAgent:
         if not findings:
             findings = deterministic["findings"]
         else:
-            findings.extend(deterministic["guardrailFindings"])
+            # Advisory model text cannot erase a deterministic financial or
+            # evidence blocker from the displayed review status.
+            findings.extend(deterministic["findings"])
 
         review_status = _status_from_findings(findings)
         # Always keep the DETERMINISTIC findings separately, even when an LLM
@@ -250,10 +252,32 @@ class PodAIReviewerAgent:
 
 def _review_ai_context(options: Dict[str, Any], *, project_id: str, agent_id: str, evidence_ids: List[str]) -> Dict[str, Any]:
     base = dict(options.get("ai_context") or options.get("aiContext") or {})
+    # The actual provider call must receive the same residency/cost controls
+    # carried by the enclosing domain request, not just provider/model fields.
+    for snake_key, camel_key in (
+        ("data_classification", "dataClassification"),
+        ("max_cost_usd", "maxCostUsd"),
+    ):
+        if snake_key in options or camel_key in options:
+            base[snake_key] = options.get(snake_key, options.get(camel_key))
+    if options.get("local_only") or options.get("localOnly"):
+        base["local_only"] = True
+    prohibited = {
+        str(item) for item in (
+            *(base.get("prohibited_providers") or base.get("prohibitedProviders") or []),
+            *(options.get("prohibited_providers") or options.get("prohibitedProviders") or []),
+        ) if item
+    }
+    if prohibited:
+        base["prohibited_providers"] = sorted(prohibited)
     base.setdefault("project_id", project_id)
     base.setdefault("agent_id", agent_id)
     base.setdefault("input_evidence_ids", evidence_ids)
-    return resolve_ai_context(base)
+    resolved = resolve_ai_context(base)
+    for control in ("local_only", "localOnly", "data_classification", "dataClassification", "max_cost_usd", "maxCostUsd", "prohibited_providers", "prohibitedProviders"):
+        if control in base:
+            resolved[control] = base[control]
+    return resolved
 
 
 def _agent_id_for_pod(pod_key: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
@@ -115,23 +116,34 @@ class VisualQAAgent:
         }
 
     def run_visual_regression(self, pdf_bytes: bytes, report_id: str, dpi: int = 150) -> Dict[str, Any]:
+        if not isinstance(report_id, str) or not re.fullmatch(r"[\w.-]+", report_id):
+            raise ValueError("report_id must be a non-empty identifier without path separators")
+        if isinstance(dpi, bool) or not isinstance(dpi, int) or dpi <= 0:
+            raise ValueError("dpi must be a positive integer")
+        pattern = re.compile(rf"baseline_{re.escape(report_id)}_page_([1-9][0-9]*)\.png")
+        baseline_pages = {
+            int(match.group(1)): path
+            for path in self.baseline_dir.iterdir()
+            if path.is_file() and (match := pattern.fullmatch(path.name))
+        }
+        creating_baseline = not baseline_pages
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         run_diff_dir = self.baseline_dir / f"diffs_{report_id}"
         run_diff_dir.mkdir(parents=True, exist_ok=True)
 
         matches = 0
         differences = 0
+        compared = 0
         results: List[Dict[str, Any]] = []
 
         for page_idx in range(len(doc)):
             page = doc[page_idx]
             zoom = dpi / 72.0
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False)
             baseline_file = self.baseline_dir / f"baseline_{report_id}_page_{page_idx + 1}.png"
 
-            if not baseline_file.exists():
+            if creating_baseline:
                 pix.save(str(baseline_file))
-                matches += 1
                 results.append(
                     {
                         "page_index": page_idx + 1,
@@ -142,7 +154,17 @@ class VisualQAAgent:
                 )
                 continue
 
+            if page_idx + 1 not in baseline_pages:
+                differences += 1
+                results.append({"page_index": page_idx + 1, "status": "added_page", "diff_percentage": 100.0, "comment": "Current page is absent from the established baseline."})
+                continue
+
             baseline_pix = fitz.Pixmap(str(baseline_file))
+            if baseline_pix.colorspace != fitz.csRGB:
+                baseline_pix = fitz.Pixmap(fitz.csRGB, baseline_pix)
+            if baseline_pix.alpha:
+                baseline_pix = fitz.Pixmap(baseline_pix, 0)
+            compared += 1
             if pix.width != baseline_pix.width or pix.height != baseline_pix.height:
                 diff_file_path = run_diff_dir / f"diff_page_{page_idx + 1}.png"
                 pix.save(str(diff_file_path))
@@ -199,11 +221,17 @@ class VisualQAAgent:
                     }
                 )
 
+        total_pages = len(doc)
+        doc.close()
+        for page_number in sorted(set(baseline_pages) - set(range(1, total_pages + 1))):
+            differences += 1
+            results.append({"page_index": page_number, "status": "removed_page", "diff_percentage": 100.0, "comment": "Baseline page is absent from the current report."})
         return {
-            "status": "regression_detected" if differences else "passed",
+            "status": "baseline_created" if creating_baseline else "regression_detected" if differences else "passed",
             "report_id": report_id,
-            "total_pages": len(doc),
-            "pages_compared": len(doc),
+            "total_pages": total_pages,
+            "baseline_pages": total_pages if creating_baseline else len(baseline_pages),
+            "pages_compared": compared,
             "matched_pages": matches,
             "regression_pages": differences,
             "diff_output_directory": str(run_diff_dir),

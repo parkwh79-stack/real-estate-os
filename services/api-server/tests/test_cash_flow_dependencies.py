@@ -18,7 +18,10 @@ def request_data():
         "productMix": [{"type": "Apartment", "units": 2, "totalSalesRevenue": 200,
                         "monthlyCollectionAmounts": [0, 20, 30, 150]}],
         "pfStructure": [{"tranche": "Senior", "amount": 90, "repaymentPriority": 1, "interestRate": 0.05, "feeRate": 0}],
-        "costSchedule": {"rows": [{"monthIndex": 1, "constructionCost": 50, "financialCost": 10}]},
+        "costSchedule": {"rows": [
+            {"monthIndex": 0, "landCost": 20},
+            {"monthIndex": 1, "constructionCost": 50, "financialCost": 10},
+        ]},
     }
 
 
@@ -40,7 +43,8 @@ def test_stress_preserves_source_timing_and_never_mutates_base():
     original = deepcopy(base)
     changed = scale_cash_flow_request(base, revenue=100, construction=100, finance=20)
     assert changed['productMix'][0]['monthlyCollectionAmounts'] == [0, 10, 15, 75]
-    assert changed['costSchedule']['rows'][0] == {'monthIndex': 1, 'constructionCost': 100, 'financialCost': 20}
+    assert changed['costSchedule']['rows'][0] == {'monthIndex': 0, 'landCost': 20}
+    assert changed['costSchedule']['rows'][1] == {'monthIndex': 1, 'constructionCost': 100, 'financialCost': 20}
     assert changed['schedule'] == base['schedule']
     assert changed['reportEligible'] is False
     assert base == original

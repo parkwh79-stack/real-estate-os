@@ -83,7 +83,9 @@ def test_visual_regression_baseline_generation():
 
         # First run creates baseline image
         reg_report_1 = qa_agent.run_visual_regression(pdf_bytes, report_id="regression_test_id")
-        assert reg_report_1["status"] == "passed"
+        assert reg_report_1["status"] == "baseline_created"
+        assert reg_report_1["pages_compared"] == 0
+        assert reg_report_1["matched_pages"] == 0
         assert reg_report_1["results"][0]["status"] == "baseline_created"
         
         # Baseline file should be saved in the directory

@@ -11,6 +11,7 @@ the LLM only narrates.
 """
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional
 
 DEAL_OPTIMIZATION_SCHEMA_VERSION = "realytics-deal-optimization-v1"
@@ -24,7 +25,7 @@ DEFAULT_MAX_SENIOR_LTV = 0.65
 
 
 def _num(v: Any) -> Optional[float]:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
 def _eok(v: Any) -> Optional[float]:
@@ -45,7 +46,7 @@ class DealOptimizationAgent:
     ) -> Dict[str, Any]:
         fi = project_data.get("feasibility_input") or {}
         revenue = _num(fi.get("total_revenue")) or _num(fi.get("sales_revenue")) or 0.0
-        cost = _num(fi.get("total_cost")) or 0.0
+        cost = _num(fi.get("total_cost"))
         construction = _num(fi.get("construction_cost")) or 0.0
         pf_amount = sum(
             float(t.get("amount") or 0) for t in (project_data.get("pf_structure") or []) if isinstance(t, dict)
@@ -54,7 +55,9 @@ class DealOptimizationAgent:
         ltv = _num(pf_structure.get("ltv"))
         exit_rate = _num(pf_structure.get("exit_sale_rate"))
         credit_enh = artifacts.get("creditEnhancement") or {}
-        adjusted_senior_ltv = _num(credit_enh.get("adjustedSeniorLtv")) or ltv
+        adjusted_senior_ltv = _num(credit_enh.get("adjustedSeniorLtv"))
+        if adjusted_senior_ltv is None:
+            adjusted_senior_ltv = ltv
         credit_review = artifacts.get("creditReviewDecision") or {}
         restructuring = artifacts.get("restructuringPlan") or {}
         legal_gate = self._legal_gate(
@@ -69,7 +72,7 @@ class DealOptimizationAgent:
 
         levers: List[Dict[str, Any]] = []
         actions: List[str] = []
-        margin = (revenue - cost) / revenue if revenue else None
+        margin = (revenue - cost) / revenue if revenue > 0 and cost is not None else None
 
         # 1) Profitability gap -> 공사비 절감 또는 분양가 상향
         if margin is not None and margin < TARGET_MARGIN and revenue > 0:
@@ -169,12 +172,15 @@ class DealOptimizationAgent:
             return "not_recommended", "여신 취급 곤란 (부결 권고)"
         if credit_review.get("decision") == "rework_required":
             return "rework_required", "보완 후 재심"
+        if margin is None:
+            return "rework_required", "사업수지 근거 보완 후 재심"
         if not levers:
             return "approvable", "현 조건으로 승인 가능 (추가 협의 불요)"
         # If every gap has at least one feasible lever -> negotiable; else not recommended.
         gap_groups: Dict[str, List[bool]] = {}
         for lever in levers:
-            gap_groups.setdefault(lever["type"].split("_")[0], []).append(bool(lever.get("feasible")))
+            gap = "profitability" if lever["type"] in {"construction_cost_down", "sale_price_up"} else lever["type"]
+            gap_groups.setdefault(gap, []).append(bool(lever.get("feasible")))
         all_gaps_curable = all(any(group) for group in gap_groups.values())
         if all_gaps_curable:
             return "negotiable_conditional", "협의 시 조건부 가능"

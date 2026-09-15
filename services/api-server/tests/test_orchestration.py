@@ -241,7 +241,7 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert res.status_code == 200
     run = res.json()
     assert run["workflow"] == PF_REVIEW_WORKFLOW
-    assert run["status"] == "completed"
+    assert run["status"] == "completed_with_warnings", run["errors"]
     # The authenticated principal is authoritative. A caller-supplied
     # requested_by value must not be able to spoof the orchestration actor.
     assert run["user_id"] == "pytest-orchestrator"
@@ -268,7 +268,8 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     }
     AgentHandoffEnvelope.model_validate(run["handoffs"][0])
     AgentProgress.model_validate(run["agentProgress"]["marketability_analysis"])
-    assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["qualityCheck"]["pass"] is False
+    assert run["artifacts"]["qualityCheck"]["pdfVisualQA"]["status"] == "baseline_created"
     assert run["artifacts"]["qualityCheck"]["gateType"] == "report_completeness"
     assert run["artifacts"]["approvalReadinessGate"]["analysisType"] == "approval_readiness_gate"
     assert run["artifacts"]["approvalReadinessGate"]["gateType"] == "approval_readiness"
@@ -315,7 +316,8 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert run["artifacts"]["creditReviewDecision"]["analysisType"] == "credit_review_decision"
     assert run["agentProgress"]["credit_review_decision"]["status"] == "completed"
     assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
-    assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "completed"
+    assert run["artifacts"]["restructuringPlan"]["status"] == "skipped"
+    assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "skipped"
     developability = run["artifacts"]["developabilityScore"]
     assert developability["analysisType"] == "developability_score_v1"
     # This fixture has no server-verified regulatory snapshot. The
@@ -946,9 +948,10 @@ def test_pilot_input_package_template_runs_orchestration():
 
     run = OrchestrationAgent().run_pf_review("pilot-template-test", payload)
 
-    assert run["status"] == "completed"
+    assert run["status"] == "completed_with_warnings", run["errors"]
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
-    assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["qualityCheck"]["pass"] is False
+    assert run["artifacts"]["qualityCheck"]["pdfVisualQA"]["status"] == "baseline_created"
     assert run["artifacts"]["approvalReadinessGate"]["analysisType"] == "approval_readiness_gate"
     assert run["artifacts"]["creditReviewDecision"]["decision"] in {
         "approve",
@@ -1118,13 +1121,13 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
     persisted = client.get(
         f"/projects/{project_id}/orchestrations/{run['run_id']}"
     ).json()
-    assert persisted["executionStatus"] == "completed"
+    assert persisted["executionStatus"] == "completed_with_warnings"
     assert persisted["approvalStatus"] != "approved"
 
     summaries = client.get(f"/projects/{project_id}/orchestrations").json()
     assert any(
         item["run_id"] == run["run_id"]
-        and item["executionStatus"] == "completed"
+        and item["executionStatus"] == "completed_with_warnings"
         and item["approvalStatus"] != "approved"
         for item in summaries
     )
@@ -1189,7 +1192,7 @@ def test_upload_and_run_creates_orchestration(monkeypatch):
     assert res.status_code == 200
     body = res.json()
     assert body["status"] == "completed"
-    assert body["run"]["status"] == "completed"
+    assert body["run"]["status"] == "completed_with_warnings", body["run"]["errors"]
     assert body["run"]["user_id"] == "upload-test"
     assert body["run"]["artifacts"]["reportRecord"]["run_id"] == body["run"]["run_id"]
     assert body["run"]["artifacts"]["projectSnapshot"]["runId"] == body["run"]["run_id"]

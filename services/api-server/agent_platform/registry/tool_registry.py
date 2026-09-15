@@ -3,6 +3,7 @@ from __future__ import annotations
 from threading import RLock
 
 from agent_platform.contracts import ToolInterface, ToolManifest
+from agent_platform.registry.agent_registry import _version_key
 
 
 class ToolRegistryError(RuntimeError):
@@ -37,9 +38,9 @@ class ToolRegistry:
         if not candidates:
             suffix = f"@{version}" if version else ""
             raise ToolRegistryError(f"Unknown active tool: {tool_id}{suffix}")
-        return sorted(candidates, key=lambda item: item.manifest.version)[-1]
+        return max(candidates, key=lambda item: _version_key(item.manifest.version))
 
     def list_active(self) -> list[ToolManifest]:
         with self._lock:
             manifests = [tool.manifest for tool in self._tools.values() if tool.manifest.active]
-        return sorted(manifests, key=lambda item: (item.tool_id, item.version))
+        return sorted(manifests, key=lambda item: (item.tool_id, _version_key(item.version)))

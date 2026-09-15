@@ -119,6 +119,15 @@ def _runtime(handler, *, repository=None, max_retries: int = 0, result_mapper=No
     return DurableAgentRuntime(registry=registry, repository=repo), repo
 
 
+def test_domain_failed_result_stays_failed_in_durable_run():
+    from agent_platform.domain_agent_runtime import _result_mapper
+    runtime, repo = _runtime(lambda *_: {"status": "failed", "message": "offline failure"}, result_mapper=_result_mapper)
+    outcome = runtime.execute_sync(_request(), _context("failed-domain-run"))
+    assert outcome.result.status is AgentRunStatus.FAILED
+    assert outcome.run.status is AgentRunStatus.FAILED
+    assert repo.get_run("failed-domain-run").status is AgentRunStatus.FAILED
+
+
 def test_idempotent_replay_executes_handler_once():
     calls = {"count": 0}
 

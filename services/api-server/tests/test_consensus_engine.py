@@ -159,6 +159,18 @@ def test_llm_coordinator_omitted_keys_are_appended():
     }
 
 
+def test_llm_coordinator_order_is_a_permutation_and_failed_round_clears_rationale():
+    key = "revenue_feasibility_vs_marketability"
+    conn = _FakeConn(data={"order": [key, key], "rationale": {key: "old rationale"}})
+    coord = LLMCoordinator({"provider": "test"}, connection=conn)
+    ordered = coord.order_conflicts(_conflicts())
+    assert len(ordered) == len(_conflicts())
+    assert len({item["key"] for item in ordered}) == len(ordered)
+    conn._error = "offline failure"
+    coord.order_conflicts(_conflicts())
+    assert coord.rationale({"key": key, "rule": "current rule"}) == "current rule"
+
+
 def test_consensus_runs_with_llm_coordinator():
     artifacts = _artifacts(market_complete=True)
     project_data = {"feasibility_input": {"total_revenue": 130_000_000_000}, "land": {"area_sqm": 9688.0}}

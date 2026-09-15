@@ -1,4 +1,5 @@
 from typing import Dict, Any, List
+from math import isfinite
 
 from core.calculations import (
     calculate_exit_sale_rate,
@@ -18,6 +19,31 @@ def _looks_corrupted_text(value: Any) -> bool:
     return any(marker in value for marker in markers)
 
 
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).replace(",", ""))
+        return number if isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _sum_amounts(tranches: List[Dict[str, Any]]) -> float | None:
+    amounts = [_number(item.get("amount")) for item in tranches]
+    return sum(amounts) if amounts and all(amount is not None for amount in amounts) else None
+
+
+def _amount_text(value: Any) -> str:
+    number = _number(value)
+    return f"{number:,.0f}원" if number is not None else "미확인"
+
+
+def _percent_text(value: Any) -> str:
+    number = _number(value)
+    return f"{number * 100:g}%" if number is not None else "미확인"
+
+
 class ReportAgent:
     def __init__(self):
         pass
@@ -32,7 +58,6 @@ class ReportAgent:
         feasibility = input_data.get("feasibility_input", {})
         covenants = input_data.get("covenants", {})
         tranches = input_data.get("pf_structure", [])
-        expected = input_data.get("expected_results", {})
 
         # Deck headline engines injected by the orchestration run (may be absent
         # when the report is generated outside a full PF review run).
@@ -42,24 +67,21 @@ class ReportAgent:
         developability = input_data.get("developabilityScore") or {}
         rm_metrics = return_metrics.get("metrics", {}) if isinstance(return_metrics, dict) else {}
         stress_scenarios = stress_test.get("scenarios", []) if isinstance(stress_test, dict) else []
+        stress_scenarios = [s for s in stress_scenarios if isinstance(s, dict)] if isinstance(stress_scenarios, list) else []
         base_stress = next((s for s in stress_scenarios if s.get("key") == "base"), None)
 
         def _metric_value(block: Dict[str, Any], key: str):
             entry = block.get(key, {}) if isinstance(block, dict) else {}
-            return entry.get("value") if isinstance(entry, dict) else None
+            return _number(entry.get("value")) if isinstance(entry, dict) else None
 
-        total_pf = sum(t.get("amount", 0) for t in tranches)
-        total_revenue = feasibility.get("total_revenue", 0)
-        total_cost = feasibility.get("total_cost", 0)
-        finance_cost = feasibility.get("finance_cost", 0)
-        development_profit = expected.get(
-            "development_profit",
-            total_revenue - total_cost if total_revenue or total_cost else 0,
-        )
-        profit_margin = expected.get(
-            "profit_margin",
-            development_profit / total_revenue if total_revenue else 0,
-        )
+        total_pf = _sum_amounts(tranches)
+        total_revenue = _number(feasibility.get("total_revenue"))
+        total_cost = _number(feasibility.get("total_cost"))
+        finance_cost = _number(feasibility.get("finance_cost"))
+        development_profit = total_revenue - total_cost if total_revenue is not None and total_cost is not None else None
+        profit_margin = development_profit / total_revenue if development_profit is not None and total_revenue else None
+        sales_ltv = calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None and total_revenue and total_revenue > 0 else None
+        exit_rate = calculate_exit_sale_rate(total_pf, finance_cost, total_revenue) if total_pf is not None and finance_cost is not None and total_revenue and total_revenue > 0 else None
 
         # Build ScenarioSetRequest on the fly using project inputs to get rich sensitivity grids
         scenario_result = None
@@ -132,8 +154,8 @@ class ReportAgent:
                 "items": [
                     {
                         "item": u.get("item", "자료 미확인"),
-                        "amount": u.get("amount", 0),
-                        "amountMillion": self._million(u.get("amount", 0)),
+                        "amount": _number(u.get("amount")),
+                        "amountMillion": self._million(u.get("amount")),
                     }
                     for u in input_data.get("use_of_funds", [])
                 ],
@@ -152,10 +174,10 @@ class ReportAgent:
             "marketAnalysis": self._structured_market(input_data),
             "businessFeasibility": {
                 "metrics": {
-                    "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue),
-                    "ltv": calculate_sales_value_ltv(total_pf, total_revenue),
+                    "salesValueLtv": sales_ltv,
+                    "ltv": sales_ltv,
                     "ltvBasis": "gross_sales_value",
-                    "exitSalesRate": calculate_exit_sale_rate(total_pf, finance_cost, total_revenue),
+                    "exitSalesRate": exit_rate,
                     "profitMargin": profit_margin,
                     "developmentProfit": development_profit,
                     "developmentProfitMillion": self._million(development_profit),
@@ -170,6 +192,12 @@ class ReportAgent:
                     "icr": _metric_value(rm_metrics, "icr"),
                     "unsoldLtvBase": scenario_result.unsoldLtvMatrix.summary["baseCaseLtv"] if scenario_result else None,
                     "unsoldLtvStress": scenario_result.unsoldLtvMatrix.summary["stressCaseLtv"] if scenario_result else None,
+                },
+                "metricSourceFields": {
+                    "developmentProfit": ["feasibility_input.total_revenue", "feasibility_input.total_cost"],
+                    "profitMargin": ["feasibility_input.total_revenue", "feasibility_input.total_cost"],
+                    "salesValueLtv": ["pf_structure[].amount", "feasibility_input.total_revenue"],
+                    "exitSalesRate": ["pf_structure[].amount", "feasibility_input.finance_cost", "feasibility_input.total_revenue"],
                 },
                 "returnMetrics": return_metrics or None,
                 "stressTest": {
@@ -235,7 +263,7 @@ class ReportAgent:
     def _normalize_korean_report_labels(sections: Dict[str, Any]) -> None:
         claim = sections.get("claimPreservation")
         if isinstance(claim, dict):
-            claim["summary"] = "신탁, 책임준공, 보증 및 covenant를 통한 복합 채권보전 구조입니다."
+            claim["summary"] = "입력된 채권보전 방안이며 약정과 증빙 확인이 필요합니다." if claim.get("items") else "채권보전 방안과 약정 증빙이 미확인 상태입니다."
 
         discount = sections.get("discountTrigger", {})
         for trigger in discount.get("triggers", []) if isinstance(discount, dict) else []:
@@ -275,8 +303,6 @@ class ReportAgent:
         covenants = input_data.get("covenants", {})
         tranches = input_data.get("pf_structure", [])
         feasibility = input_data.get("feasibility_input", {})
-        total_pf = sum(t.get("amount", 0) for t in tranches)
-        total_revenue = feasibility.get("total_revenue", 0)
 
         # Build ScenarioSetRequest on the fly using project inputs to get rich sensitivity grids
         scenario_result = None
@@ -351,16 +377,11 @@ class ReportAgent:
             "tranches": [
                 {
                     "name": t.get("tranche", "자료 미확인"),
-                    "amount": t.get("amount", 0),
-                    "amountMillion": self._million(t.get("amount", 0)),
+                    "amount": _number(t.get("amount")),
+                    "amountMillion": self._million(t.get("amount")),
                     "interestRate": self._rate(t, "interest_rate", "interestRate"),
                     "feeRate": self._rate(t, "fee_rate", "feeRate"),
-                    "allInCost": self._rate(
-                        t,
-                        "all_in_cost",
-                        "allInCost",
-                        default=self._rate(t, "interest_rate", "interestRate") + self._rate(t, "fee_rate", "feeRate"),
-                    ),
+                    "allInCost": self._all_in_cost(t),
                     "priority": t.get("priority"),
                 }
                 for t in tranches
@@ -368,12 +389,12 @@ class ReportAgent:
         }
 
     def _structured_funding(self, feasibility: Dict[str, Any], total_pf: float) -> Dict[str, Any]:
-        total_revenue = feasibility.get("total_revenue", 0)
+        total_revenue = _number(feasibility.get("total_revenue"))
         cash_out = [
-            ("토지비", feasibility.get("land_cost", 0)),
-            ("공사비", feasibility.get("construction_cost", 0)),
-            ("금융비용", feasibility.get("finance_cost", 0)),
-            ("기타사업비", feasibility.get("other_cost", 0)),
+            ("토지비", _number(feasibility.get("land_cost"))),
+            ("공사비", _number(feasibility.get("construction_cost"))),
+            ("금융비용", _number(feasibility.get("finance_cost"))),
+            ("기타사업비", _number(feasibility.get("other_cost"))),
         ]
         return {
             "cashIn": [
@@ -391,8 +412,8 @@ class ReportAgent:
         if not parcels and land:
             parcels = [{
                 "owner": "자료 미확인",
-                "share": 1.0,
-                "area_sqm": land.get("area_sqm", 0),
+                "share": None,
+                "area_sqm": land.get("area_sqm"),
                 "mortgage": "자료 미확인",
             }]
         return {
@@ -401,8 +422,8 @@ class ReportAgent:
             "parcels": [
                 {
                     "owner": p.get("owner", "자료 미확인"),
-                    "share": p.get("share", 0),
-                    "areaSqm": p.get("area_sqm", 0),
+                    "share": _number(p.get("share")),
+                    "areaSqm": _number(p.get("area_sqm", p.get("areaSqm"))),
                     "mortgage": p.get("mortgage", "자료 미확인"),
                 }
                 for p in parcels
@@ -437,16 +458,18 @@ class ReportAgent:
 
     def _structured_sales_schedule(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [
-            {"type": "계약금", "ratio": schedule.get("contract_deposit", 0), "timing": "계약 시"},
-            {"type": "중도금", "ratio": schedule.get("middle_payment", 0), "timing": "공정률 및 약정 회차별"},
-            {"type": "잔금", "ratio": schedule.get("balance", 0), "timing": "입주 지정기간"},
+            {"type": "계약금", "ratio": _number(schedule.get("contract_deposit")), "timing": "계약 시"},
+            {"type": "중도금", "ratio": _number(schedule.get("middle_payment")), "timing": "공정률 및 약정 회차별"},
+            {"type": "잔금", "ratio": _number(schedule.get("balance")), "timing": "입주 지정기간"},
         ]
 
     def _structured_cashflow(self, data: Dict[str, Any], total_revenue: float, total_cost: float, scenario_result: Any = None) -> Dict[str, Any]:
-        profit = total_revenue - total_cost
+        has_inputs = total_revenue is not None and total_cost is not None
+        profit = total_revenue - total_cost if has_inputs else None
+        stressed_revenue = total_revenue * 0.9 if total_revenue is not None else None
         rows = [
             {"scenario": "기준", "cashIn": total_revenue, "cashOut": total_cost, "netCashFlow": profit},
-            {"scenario": "분양수입 10% 하락", "cashIn": total_revenue * 0.9, "cashOut": total_cost, "netCashFlow": total_revenue * 0.9 - total_cost},
+            {"scenario": "분양수입 10% 하락", "cashIn": stressed_revenue, "cashOut": total_cost, "netCashFlow": stressed_revenue - total_cost if has_inputs else None},
         ]
         if scenario_result:
             for w in scenario_result.waterfallScenarios:
@@ -456,9 +479,10 @@ class ReportAgent:
                         "scenario": label,
                         "cashIn": w.cashAvailable,
                         "cashOut": total_cost,
-                        "netCashFlow": w.cashAvailable - total_cost
+                        "netCashFlow": w.cashAvailable - total_cost if total_cost is not None else None
                     })
         return {
+            "status": "calculated" if has_inputs else "not_assessable",
             "assumption": "분양률 기본 및 스트레스 시나리오 기준 요약 현금흐름입니다.",
             "rows": rows,
         }
@@ -539,19 +563,25 @@ class ReportAgent:
     def _as_label_items(self, values: List[Any]) -> List[Dict[str, Any]]:
         return [{"label": str(value), "status": "반영"} for value in values]
 
-    def _million(self, amount: float) -> float:
-        return round((amount or 0) / 1_000_000, 2)
+    def _million(self, amount: Any) -> float | None:
+        number = _number(amount)
+        return round(number / 1_000_000, 2) if number is not None else None
 
-    def _rate(self, data: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
+    def _rate(self, data: Dict[str, Any], *keys: str, default: float | None = None) -> float | None:
         for key in keys:
             value = data.get(key)
             if value is None:
                 continue
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return default
+            return _number(value)
         return default
+
+    def _all_in_cost(self, tranche: Dict[str, Any]) -> float | None:
+        explicit = self._rate(tranche, "all_in_cost", "allInCost")
+        if explicit is not None:
+            return explicit
+        interest = self._rate(tranche, "interest_rate", "interestRate")
+        fee = self._rate(tranche, "fee_rate", "feeRate")
+        return interest + fee if interest is not None and fee is not None else None
 
     def _build_cover(self, project: Dict[str, Any]) -> str:
         name = project.get("name", "Unknown Project")
@@ -581,15 +611,15 @@ class ReportAgent:
         for t in tranches:
             interest_rate = self._rate(t, "interest_rate", "interestRate")
             fee_rate = self._rate(t, "fee_rate", "feeRate")
-            all_in_cost = self._rate(t, "all_in_cost", "allInCost", default=interest_rate + fee_rate)
-            md += f"| {t.get('tranche')} | {t.get('amount', 0):,}원 | {interest_rate*100}% | {fee_rate*100}% | {all_in_cost*100}% | {t.get('priority')}순위 |\n"
+            all_in_cost = self._all_in_cost(t)
+            md += f"| {t.get('tranche')} | {_amount_text(t.get('amount'))} | {_percent_text(interest_rate)} | {_percent_text(fee_rate)} | {_percent_text(all_in_cost)} | {t.get('priority')}순위 |\n"
         return md + "\n"
 
     def _build_claim_preservation(self, covenants: Dict[str, Any]) -> str:
         claims = covenants.get("claim_preservation", [])
         md = "## 2. 주요 채권보전방안\n\n"
         if not claims:
-            md += "- 해당사항 없음\n"
+            md += "- 채권보전 방안과 약정 증빙 미확인\n"
         else:
             for claim in claims:
                 md += f"- **{claim}**\n"
@@ -612,13 +642,14 @@ class ReportAgent:
                 md += f"| {t.get('month')} | {(target_rate or 0)*100}% | {(discount or 0)*100}% | Execute if target is missed |\n"
         return md + "\n"
     def _build_financing_structure(self, data: Dict[str, Any]) -> str:
-        pf = sum(t.get("amount", 0) for t in data.get("pf_structure", []))
-        rev = data.get("feasibility_input", {}).get("total_revenue", 0)
+        pf = _sum_amounts(data.get("pf_structure", []))
+        rev = _number(data.get("feasibility_input", {}).get("total_revenue"))
+        ltv = pf / rev if pf is not None and rev and rev > 0 else None
         
         md = "## 4. 자금조달 구조\n\n"
-        md += f"- **총 조달금액(PF)**: {pf:,}원\n"
-        md += f"- **총 분양수입(예상)**: {rev:,}원\n"
-        md += f"- **LTV (분양수입 대비)**: {(pf/rev*100 if rev > 0 else 0):.2f}%\n"
+        md += f"- **총 조달금액(PF)**: {_amount_text(pf)}\n"
+        md += f"- **총 분양수입(예상)**: {_amount_text(rev)}\n"
+        md += f"- **LTV (분양수입 대비)**: {_percent_text(ltv)}\n"
         return md + "\n"
 
     def _build_use_of_funds(self, data: Dict[str, Any]) -> str:
@@ -683,9 +714,9 @@ class ReportAgent:
     def _build_sales_schedule(self, data: Dict[str, Any]) -> str:
         s = data.get("sales_schedule", {})
         md = "## 9. 분양대금 납입 일정\n\n"
-        md += f"- **계약금**: {s.get('contract_deposit', 0)*100}% (계약 시)\n"
-        md += f"- **중도금**: {s.get('middle_payment', 0)*100}% (회차별 분할)\n"
-        md += f"- **잔금**: {s.get('balance', 0)*100}% (입주 시)\n"
+        md += f"- **계약금**: {_percent_text(s.get('contract_deposit'))} (계약 시)\n"
+        md += f"- **중도금**: {_percent_text(s.get('middle_payment'))} (회차별 분할)\n"
+        md += f"- **잔금**: {_percent_text(s.get('balance'))} (입주 시)\n"
         return md + "\n"
 
     def _build_revenue_distribution(self, covenants: Dict[str, Any], scenario_result: Any = None) -> str:
@@ -705,7 +736,7 @@ class ReportAgent:
             for w in scenario_result.waterfallScenarios:
                 md += f"| {w.scenarioId} | {w.saleRate*100}% | {w.discountRate*100}% | {w.cashAvailable:,}원 | {'경고 발생' if w.totalShortfall > 0 else '정상 회수'} |\n"
         else:
-            md += "분양률 시나리오 기반의 월별 Cash-In/Out 분석 결과, 본 사업의 자금 부족액(Max Minus)은 대출 한도 내에서 충분히 커버 가능함.\n"
+            md += "현금흐름 시나리오 근거가 미확인 상태이며, 자금 부족액과 대출한도 충족 여부를 확정할 수 없습니다.\n"
         return md + "\n"
 
     def _build_borrower_analysis(self, data: Dict[str, Any]) -> str:
@@ -727,19 +758,26 @@ class ReportAgent:
 
     def _build_marketability_analysis(self, data: Dict[str, Any]) -> str:
         md = "## 14. 분양성 분석\n\n"
-        md += "인근 지역 유사 평형 공급 현황 및 시세 분석 결과, 당 사업지의 경쟁 우위가 확보되어 목표 분양률 달성이 무난할 것으로 사료됨.\n"
+        market = self._structured_market(data)
+        md += f"- **비교 공급 근거**: {market['competitors']}\n"
+        md += f"- **분양가 검토 입력**: {market['priceReasonableness']}\n"
+        md += "비교사례와 흡수율 증빙 검토 전 목표 분양률 달성을 확정할 수 없습니다.\n"
         return md + "\n"
 
     def _build_feasibility_analysis(self, data: Dict[str, Any]) -> str:
-        er = data.get("expected_results", {})
+        feasibility = data.get("feasibility_input", {})
+        revenue = _number(feasibility.get("total_revenue"))
+        cost = _number(feasibility.get("total_cost"))
+        profit = revenue - cost if revenue is not None and cost is not None else None
+        margin = profit / revenue if profit is not None and revenue else None
         md = "## 15. 사업성 분석 결과\n\n"
-        md += f"- **예상 개발이익**: {er.get('development_profit', 0):,}원\n"
-        md += f"- **수익률(Margin)**: {er.get('profit_margin', 0)*100}%\n"
+        md += f"- **예상 개발이익**: {_amount_text(profit)}\n"
+        md += f"- **수익률(Margin)**: {_percent_text(margin)}\n"
         return md + "\n"
 
     def _build_exit_strategy(self, data: Dict[str, Any], scenario_result: Any = None) -> str:
         md = "## 16. Exit 전략 및 상환 재원\n\n"
-        md += "1차적으로 분양수입금을 통한 원리금 상환을 추진하며, 비상시 할인분양 또는 미분양 담보대출을 통한 대환 상환 시나리오를 확보함.\n"
+        md += "분양수입금 상환, 할인분양 및 담보대출 대환을 검토할 수 있으며, 실제 상환재원과 대환 약정의 확보 여부는 별도 증빙 확인이 필요합니다.\n"
         if scenario_result:
             md += f"\n**[시나리오 스트레스 테스트 분석]**\n{scenario_result.reportFragments.trancheRecoverySummary}\n"
         return md + "\n"

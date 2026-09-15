@@ -2,6 +2,7 @@ from typing import Any, Dict, List
 
 from agents.cash_flow_engine import run_cash_flow_engine
 from agents.cash_flow_mapper import build_cash_flow_run_request_from_feasibility_study
+from core.financial_input_validation import FinancialInputError, require_finite_numbers
 from core.calculations import (
     calculate_development_profit,
     calculate_exit_sale_rate,
@@ -77,6 +78,7 @@ ASSET_CALCULATION_PROFILES = {
 
 class DevelopmentFeasibilityAgent:
     def analyze(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
+        require_finite_numbers(project_data, "developmentFeasibility")
         land = project_data.get("land", {})
         regulation = project_data.get("regulation", {})
         feasibility = project_data.get("feasibility_input", {})
@@ -110,9 +112,33 @@ class DevelopmentFeasibilityAgent:
             logistics_analysis,
         )
         cash_flow_request_draft = build_cash_flow_run_request_from_feasibility_study(feasibility_v2_draft)
-        cash_flow_run_result = run_cash_flow_engine(cash_flow_request_draft)
+        cash_flow_run_result = None
+        cash_flow_issue = None
+        try:
+            cash_flow_run_result = run_cash_flow_engine(cash_flow_request_draft)
+        except FinancialInputError as exc:
+            if exc.code != "cash_flow_cost_total_mismatch":
+                raise
+            cash_flow_issue = {
+                "code": exc.code,
+                "severity": "blocking",
+                "message": "총사업비와 월별 비용 합계가 일치하지 않아 현금흐름 계산을 보류했습니다.",
+                "requiredEvidence": "항목별·월별 비용 배분 근거 및 총사업비 대사",
+                "sourcePaths": ["sourcesAndUses.cost.totalProjectCost", "costSchedule.rows"],
+            }
+            missing_field = "cash_flow.monthly_cost_allocation"
+            quality["missingFields"].append(missing_field)
+            quality["warnings"].append(cash_flow_issue["message"])
+            quality["blockingIssues"] = [cash_flow_issue]
+            quality["status"] = "needs_review"
+            quality["confidence"] = max(0.2, 1 - len(quality["missingFields"]) * 0.15)
+            pf["isPfReviewReady"] = False
+            engine_readiness["blockingFields"].append(missing_field)
+            for key in ("canRunCashFlow", "canRunPfScenarios", "canRunUnsoldLtvMatrix"):
+                engine_readiness[key] = False
 
         return {
+            **({"status": "completed_with_review", "dataStatus": "partial"} if cash_flow_issue else {}),
             "analysisType": "developer_and_pf_feasibility",
             "agentRole": "development_feasibility_orchestrator",
             "summary": self._summary(returns, pf, quality),

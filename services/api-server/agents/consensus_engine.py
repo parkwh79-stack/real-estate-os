@@ -95,6 +95,7 @@ class LLMCoordinator:
         return self._connection
 
     def order_conflicts(self, conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        self._rationale = {}
         keys = [c.get("key") for c in conflicts]
         by_key = {c.get("key"): c for c in conflicts}
         prompt = json.dumps(
@@ -121,7 +122,9 @@ class LLMCoordinator:
             data = result.data if result and result.error is None else None
             if not isinstance(data, dict):
                 raise ValueError("no coordinator response")
-            raw_order = [k for k in (data.get("order") or []) if k in by_key]
+            raw_order = list(dict.fromkeys(
+                k for k in (data.get("order") or []) if isinstance(k, str) and k in by_key
+            ))
             # keep it a strict permutation: append any conflicts the model omitted
             ordered_keys = raw_order + [k for k in keys if k not in raw_order]
             rationale = data.get("rationale") or {}

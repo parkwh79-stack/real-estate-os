@@ -45,6 +45,8 @@ class PodExecutionCoordinator:
         preferred_order: Iterable[str] | None = None,
     ) -> List[str]:
         by_key = {pod.pod_key: pod for pod in pods}
+        if len(by_key) != len(pods):
+            raise ValueError("Duplicate Pod keys in dependency graph")
         preferred = [key for key in (preferred_order or by_key.keys()) if key in by_key]
         rank = {key: index for index, key in enumerate(preferred)}
         indegree = {key: 0 for key in by_key}

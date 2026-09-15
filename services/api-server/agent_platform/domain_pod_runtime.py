@@ -36,6 +36,8 @@ from agent_platform.runtime import (
 )
 from agents.ai_connection import safe_ai_context
 from agent_platform.tools import ToolExecutor, build_default_tool_registry
+from agent_platform.domain_result_status import domain_result_status
+from agent_platform.domain_runtime_scope import domain_tenant_id
 
 
 DOMAIN_PODS = {
@@ -77,7 +79,7 @@ def run_domain_pod_with_contract(
     safe_context = safe_ai_context(options.get("ai_context") or options.get("aiContext") or {})
     actor = ActorContext(
         user_id=str(safe_context.get("user_id") or options.get("userId") or "anonymous"),
-        tenant_id=str(safe_context.get("tenant_id") or options.get("tenantId") or "default"),
+        tenant_id=domain_tenant_id(options, safe_context),
         roles=[str(item) for item in options.get("actorRoles") or []],
     )
     classification = _classification(options.get("dataClassification") or "confidential")
@@ -217,21 +219,23 @@ def _result_mapper(raw, request, context, manifest) -> AgentResult:
     locators = _collect_locators(artifact)
     explicit_count = sum(1 for item in locators if item.is_explicit)
     expected = max(1, len(evidence_ids))
-    status_value = str(artifact.get("status") or artifact.get("analysisStatus") or "completed")
-    needs_review = status_value in {"warning", "needs_review", "partial", "blocked"}
+    status = domain_result_status(artifact, empty=not artifact)
+    needs_review = status in {
+        AgentRunStatus.COMPLETED_WITH_REVIEW, AgentRunStatus.WAITING_FOR_HUMAN, AgentRunStatus.BLOCKED,
+    }
     quality = QualityMetrics(
         schema_valid=bool(artifact),
         evidence_coverage=min(1.0, explicit_count / expected),
         consistency_score=0.8,
         completeness_score=0.65 if needs_review else 0.9,
-        deterministic_checks_passed=bool(artifact),
+        deterministic_checks_passed=bool(artifact) and status not in {AgentRunStatus.FAILED, AgentRunStatus.BLOCKED, AgentRunStatus.CANCELLED},
     )
     return AgentResult(
         run_id=context.run_id,
         request_id=request.request_id,
         agent_id=manifest.agent_id,
         agent_version=manifest.version,
-        status=AgentRunStatus.COMPLETED_WITH_REVIEW if needs_review else AgentRunStatus.COMPLETED,
+        status=status,
         output_schema_name=manifest.output_schema_name,
         output_schema_version=manifest.output_schema_version,
         output=artifact,

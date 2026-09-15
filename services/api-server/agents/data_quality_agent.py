@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any, Dict, List
 
 from core.schedule import schedule_event_map
@@ -90,6 +91,8 @@ class DataQualityAgent:
             if extracted_name:
                 names.append(("sourceDocument.projectName", extracted_name))
         unique = {str(value).strip().lower() for _, value in names if value}
+        if not unique:
+            return self._missing("project_name_consistency", "Project name consistency", "Project name evidence is missing.", names)
         if len(unique) <= 1:
             return self._clear("project_name_consistency", "Project name consistency", names)
         return self._warning(
@@ -313,7 +316,8 @@ class DataQualityAgent:
         blocking_threshold: float,
         missing_message: str,
     ) -> Dict[str, Any]:
-        values = [(source, float(value)) for source, value in values if isinstance(value, (int, float))]
+        invalid_sources = [source for source, value in values if self._to_float(value) is None]
+        values = [(source, number) for source, value in values if (number := self._to_float(value)) is not None]
         if len(values) < 2:
             return self._missing(key, label, missing_message, values)
         numeric_values = [value for _, value in values]
@@ -330,11 +334,14 @@ class DataQualityAgent:
             "diffRatio": diff_ratio,
             "warningThreshold": warning_threshold,
             "blockingThreshold": blocking_threshold,
+            "invalidSources": invalid_sources,
         }
         if diff_ratio >= blocking_threshold:
             return self._blocking(key, label, f"{label} differs by {diff_ratio:.2%}, exceeding blocking tolerance.", metadata)
         if diff_ratio >= warning_threshold:
             return self._warning(key, label, f"{label} differs by {diff_ratio:.2%}, exceeding warning tolerance.", metadata)
+        if invalid_sources:
+            return self._warning(key, label, f"{label} includes invalid numeric evidence; the comparison is incomplete.", metadata)
         return self._clear(key, label, metadata)
 
     def _status(self, checks: List[Dict[str, Any]]) -> str:
@@ -548,13 +555,12 @@ class DataQualityAgent:
         return None
 
     def _to_float(self, value: Any) -> float | None:
-        if value in (None, ""):
+        if value in (None, "") or isinstance(value, bool):
             return None
-        if isinstance(value, (int, float)):
-            return float(value)
         try:
-            return float(str(value).replace(",", "").strip())
-        except ValueError:
+            number = float(str(value).replace(",", "").strip())
+            return number if isfinite(number) else None
+        except (TypeError, ValueError, OverflowError):
             return None
 
     def _snake(self, name: str) -> str:

@@ -7,6 +7,7 @@ infers a local ordinance limit from a zoning label alone.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any, Dict
 
 from core.schedule import schedule_event_map
@@ -26,8 +27,9 @@ def _number(value: Any) -> float | None:
             return None
         if isinstance(value, dict):
             value = value.get("value")
-        return float(str(value).replace(",", "").replace("%", ""))
-    except (TypeError, ValueError):
+        result = float(str(value).replace(",", "").replace("%", ""))
+        return result if isfinite(result) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -78,7 +80,8 @@ class LegalDevelopabilityAgent:
             conditional.append("건축허가 또는 인허가 일정 증빙이 없어 착공 가능성을 확정할 수 없습니다.")
         mcp_refs = (law_context or {}).get("references", []) if isinstance(law_context, dict) else []
         law_sources = [*OFFICIAL_LAW_SOURCES]
-        law_sources.extend({"name": item.get("title") or item.get("lawName"), "url": item.get("url"), "article": item.get("article"), "sourceType": "korean_law_mcp"} for item in mcp_refs if item.get("title") or item.get("lawName"))
+        if isinstance(mcp_refs, list):
+            law_sources.extend({"name": item.get("title") or item.get("lawName"), "url": item.get("url"), "article": item.get("article"), "sourceType": "korean_law_mcp"} for item in mcp_refs if isinstance(item, dict) and (item.get("title") or item.get("lawName")))
         if breaches:
             status = "blocked"
         elif missing:
@@ -105,4 +108,5 @@ class LegalDevelopabilityAgent:
 
     @staticmethod
     def _row(label: str, value: Any, legal_basis: str, canonical_field: str, *, required: bool, unit: str | None = None) -> Dict[str, Any]:
-        return {"field": label, "canonicalField": f"regulation.{canonical_field}", "value": value, "unit": unit, "legalBasis": legal_basis, "required": required, "sourceLocator": {"sourceType": "project_regulation", "canonicalField": f"regulation.{canonical_field}"}}
+        field_path = {"land_area": "land.area_sqm", "permit_schedule": "schedule.permit_approval"}.get(canonical_field, f"regulation.{canonical_field}")
+        return {"field": label, "canonicalField": field_path, "value": value, "unit": unit, "legalBasis": legal_basis, "required": required, "sourceLocator": {"sourceType": "project_input", "canonicalField": field_path}}

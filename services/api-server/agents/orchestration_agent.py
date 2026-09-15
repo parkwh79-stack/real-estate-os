@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from copy import deepcopy
 from typing import Any, Dict, List
 from uuid import uuid4
 
@@ -41,7 +42,9 @@ from schemas.stress_test import StressTestRequest, StressTranche
 from schemas.credit_enhancement import CreditEnhancementRequest, CreditEnhancementInput
 from schemas.cash_sweep import CashSweepRequest, CashSweepTranche
 from core.risk_assessment import build_basic_risk_matrix
-from core.secret_redaction import collect_secret_values, redact_secret_text
+from core.secret_redaction import collect_secret_values, redact_secret_text, redact_sensitive_value
+from core.agent_execution import require_successful_runtime
+from db.repositories.request_project_repository import current_project_scope
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 from agent_platform.domain_agent_runtime import run_domain_agent_callable_with_contract
 from use_cases.assumption_proposals import build_consensus_assumption_proposals
@@ -54,7 +57,8 @@ class OrchestrationAgent:
         project_data: Dict[str, Any],
         options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        options = options or {}
+        project_data = deepcopy(project_data)
+        options, tenant_id = self._runtime_context(project_data, options or {})
         ai_connection = resolve_ai_context(
             options.get("ai_context"),
             user_id=options.get("user_id") or options.get("requested_by"),
@@ -64,6 +68,7 @@ class OrchestrationAgent:
         run = {
             "run_id": str(uuid4()),
             "project_id": project_id,
+            "tenant_id": tenant_id,
             "workflow": PF_REVIEW_WORKFLOW,
             "status": "running",
             "executionStatus": "running",
@@ -783,9 +788,7 @@ class OrchestrationAgent:
             # readiness gate), so they are generated last.
             self._run_credit_document_step(run, project_data)
 
-            run["executionStatus"] = "completed" if quality["pass"] else "completed_with_warnings"
-            run["reportStatus"] = "quality_pass" if quality["pass"] else "quality_warning"
-            run["status"] = run["executionStatus"]
+            self._finalize_pf_execution(run, quality)
         except Exception as exc:
             safe_error = redact_secret_text(
                 exc,
@@ -798,7 +801,7 @@ class OrchestrationAgent:
             self._mark_failed_progress(run, safe_error)
 
         run["completed_at"] = self._now()
-        return run
+        return redact_sensitive_value(run, secrets=collect_secret_values((ai_connection, options)))
 
     # ------------------------------------------------------------------
     # Intent-driven workflow executor
@@ -817,7 +820,8 @@ class OrchestrationAgent:
         agents instead of always running the full 18-step PF review. The full
         review still delegates to ``run_pf_review``.
         """
-        options = options or {}
+        project_data = deepcopy(project_data)
+        options, tenant_id = self._runtime_context(project_data, options or {})
         if workflow == "full_pf_review":
             return self.run_pf_review(project_id, project_data, options)
 
@@ -825,6 +829,7 @@ class OrchestrationAgent:
             "run_id": str(uuid4()),
             "project_id": project_id,
             "workflow": workflow,
+            "tenant_id": tenant_id,
             "status": "running",
             "started_at": self._now(),
             "completed_at": None,
@@ -861,7 +866,43 @@ class OrchestrationAgent:
             run["status"] = "error"
             run["errors"].append({"message": str(exc), "type": exc.__class__.__name__})
         run["completed_at"] = self._now()
-        return run
+        return redact_sensitive_value(run, secrets=collect_secret_values(options))
+
+    @staticmethod
+    def _runtime_context(project_data: Dict[str, Any], options: Dict[str, Any]):
+        options = dict(options)
+        scope = current_project_scope()
+        metadata = project_data.get("_meta") or {}
+        declared = [str(value).strip() for value in (
+            options.get("tenantId"), options.get("tenant_id"),
+            metadata.get("tenantId"), metadata.get("tenant_id"),
+        ) if value is not None and str(value).strip()]
+        tenant = str(scope.tenant_id) if scope is not None else (declared[0] if declared else None)
+        if tenant is not None and any(value != tenant for value in declared):
+            raise ValueError("Orchestration tenant does not match its runtime scope")
+        if tenant is not None:
+            options["tenantId"] = tenant
+        return options, tenant
+
+    def _finalize_pf_execution(self, run: Dict[str, Any], quality: Dict[str, Any]) -> None:
+        failed = [step for step in run.get("steps", []) if step.get("status") == "failed"]
+        if failed:
+            gate = run["artifacts"].setdefault("approvalReadinessGate", {})
+            check = self._approval_readiness_check(
+                "AGENT_EXECUTION_SUCCEEDED", False,
+                "All required Agent executions must succeed before approval.", "blocking",
+            )
+            for key in ("gates", "blockers"):
+                gate[key] = [item for item in gate.get(key, []) if item.get("code") != check["code"]] + [check]
+            gate.update({"pass": False, "status": "not_ready_for_approval"})
+            gate.setdefault("summary", {})["blockingIssueCount"] = len(gate["blockers"])
+            run["approvalReadinessStatus"] = "not_ready_for_approval"
+            run["approvalStatus"] = "not_requested"
+        run["executionStatus"] = "failed" if failed else (
+            "completed" if quality["pass"] and not run.get("errors") else "completed_with_warnings"
+        )
+        run["reportStatus"] = "failed" if failed else ("quality_pass" if quality["pass"] else "quality_warning")
+        run["status"] = run["executionStatus"]
 
     def _wf_land_review(self, run, data, step, options) -> None:
         land = self._run_domain_agent(
@@ -1052,6 +1093,7 @@ class OrchestrationAgent:
             llm_required=llm_required,
         )
         run.setdefault("agentRuntimeExecutions", []).append(runtime_envelope)
+        require_successful_runtime(runtime_envelope, label=agent_id)
         return output
 
     @staticmethod
@@ -1767,12 +1809,8 @@ class OrchestrationAgent:
         missing_artifacts = [
             artifact for artifact in required_artifacts if artifact not in run["artifacts"]
         ]
-        pdf_structure_pass = True
-        pdf_visual_pass = True
-        if structure_results:
-            pdf_structure_pass = structure_results.get("status") != "failed"
-        if visual_results:
-            pdf_visual_pass = visual_results.get("status") != "failed"
+        pdf_structure_pass = bool(structure_results) and structure_results.get("status") in {"passed", "warnings"}
+        pdf_visual_pass = bool(visual_results) and visual_results.get("status") == "passed"
 
         is_passed = (
             report_quality["isComplete"]
@@ -1836,7 +1874,7 @@ class OrchestrationAgent:
             ),
             self._approval_readiness_check(
                 "LEGAL_NOT_BLOCKING",
-                legal_review.get("status") != "blocking_issue",
+                legal_review.get("status") in {"clear", "caution"},
                 f"Legal review status is {legal_review.get('status')}.",
                 severity="blocking",
             ),
@@ -1852,25 +1890,25 @@ class OrchestrationAgent:
             ),
             self._approval_readiness_check(
                 "DATA_QUALITY_NOT_BLOCKING",
-                data_quality.get("status") != "blocking",
+                data_quality.get("status") in {"clear", "needs_review"},
                 f"Data Quality status is {data_quality.get('status')}.",
                 severity="blocking",
             ),
             self._approval_readiness_check(
                 "RECONCILIATION_NOT_BLOCKING",
-                reconciliation.get("status") != "blocking",
+                reconciliation.get("status") in {"clear", "needs_review", "warning"},
                 f"Reconciliation status is {reconciliation.get('status')}.",
                 severity="blocking",
             ),
             self._approval_readiness_check(
                 "RISK_REGISTER_NOT_BLOCKING",
-                risk_register.get("status") != "blocking",
+                risk_register.get("status") in {"clear", "watch", "high_risk"},
                 f"Risk Register status is {risk_register.get('status')}.",
                 severity="blocking",
             ),
             self._approval_readiness_check(
                 "CREDIT_DECISION_NOT_REJECT_OR_REWORK",
-                credit_review.get("decision") not in {"reject_recommended", "rework_required"},
+                credit_review.get("decision") in {"approve", "conditional_approval"},
                 f"Credit Review decision is {credit_review.get('decision')}.",
                 severity="blocking",
             ),
@@ -1889,6 +1927,12 @@ class OrchestrationAgent:
         ]
 
         unresolved_handoffs = self._unresolved_handoff_reviews(run)
+        gates.append(self._approval_readiness_check(
+            "AGENT_EXECUTION_SUCCEEDED",
+            not any(step.get("status") == "failed" for step in run.get("steps", [])),
+            "Agent execution failures must be resolved before approval.",
+            severity="blocking",
+        ))
         unresolved_risks = self._unresolved_risk_reviews(run)
         gates.append(self._approval_readiness_check(
             "HANDOFF_REVIEWS_RESOLVED",
@@ -2145,10 +2189,14 @@ class OrchestrationAgent:
         artifact_key: str | None = None,
     ) -> None:
         title = self._step_title(key)
+        output_status = str(output.get("status") or "").casefold()
+        status = "failed" if output_status in {"failed", "error", "cancelled", "timed_out"} else (
+            "skipped" if output_status in {"skipped", "not_run"} else "completed"
+        )
         run["steps"].append({
             "key": key,
             "title": title,
-            "status": "completed",
+            "status": status,
             "started_at": self._now(),
             "completed_at": self._now(),
             "output": output,
@@ -2156,12 +2204,14 @@ class OrchestrationAgent:
         self._update_agent_progress(
             run,
             key,
-            status="completed",
+            status=status,
             progress_percent=100,
-            completed_tasks=[title],
+            completed_tasks=[title] if status == "completed" else [],
             pending_tasks=[],
             last_artifact_key=artifact_key or key,
             next_action=self._next_action_after(key),
+            blocked_tasks=[title] if status == "failed" else [],
+            review_required=status == "failed",
         )
 
     def _add_handoff(
@@ -2252,7 +2302,7 @@ class OrchestrationAgent:
             downstreamDependencies=current.get("downstreamDependencies", self._downstream_for_step(key)),
             lastArtifactKey=last_artifact_key,
             nextAction=next_action,
-            reviewRequired=review_required,
+            reviewRequired=review_required or bool(current.get("reviewRequired")),
             handoffIds=existing_handoffs,
             updatedAt=self._now(),
         ).model_dump(by_alias=True, exclude_none=True)

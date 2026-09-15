@@ -40,9 +40,12 @@ class AgentRegistry:
         with self._lock:
             if version is not None:
                 try:
-                    return self._agents[(agent_id, version)]
+                    agent = self._agents[(agent_id, version)]
                 except KeyError as exc:
                     raise AgentRegistryError(f"Unknown agent: {agent_id}@{version}") from exc
+                if not agent.manifest.active:
+                    raise AgentRegistryError(f"Inactive agent: {agent_id}@{version}")
+                return agent
             candidates = [
                 agent
                 for (registered_id, _), agent in self._agents.items()

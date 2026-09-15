@@ -1,4 +1,5 @@
 import use_cases.chief_deal_orchestration as cdo
+import pytest
 
 
 def test_cost_schedule_artifact_reads_correct_agent_keys(monkeypatch):
@@ -24,8 +25,9 @@ def test_cost_schedule_artifact_reads_correct_agent_keys(monkeypatch):
     assert artifact["engineReadiness"]["canRunCashFlow"] is False
 
 
-def test_cost_schedule_artifact_empty_when_agent_returns_nothing(monkeypatch):
+def test_cost_schedule_rejects_empty_agent_result(monkeypatch):
     monkeypatch.setattr(cdo, "analyze_development_feasibility_use_case", lambda project_data, options: {})
-    artifact = cdo._execute_pod_artifact("p1", "cost_schedule", {}, {})
-    assert artifact["costBreakdown"] == {}
-    assert artifact["dataQualityWarnings"] == []
+    project_data = {}
+    with pytest.raises(RuntimeError, match=r"DevelopmentFeasibilityAgent runtime did not complete successfully \(failed\)"):
+        cdo._execute_pod_artifact("p1", "cost_schedule", project_data, {})
+    assert project_data == {}

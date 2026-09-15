@@ -229,7 +229,7 @@ def test_remote_coding_executor_sends_only_the_isolated_job_contract(monkeypatch
         captured["timeout"] = timeout
         return Response()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("agent_platform.coding.remote_executor._open_executor_request", fake_urlopen)
     executor = RemoteIsolatedCodingExecutor(
         endpoint="http://localhost:9010",
         token="ephemeral-worker-token",
@@ -391,7 +391,7 @@ def test_ai_connection_falls_back_after_a_real_provider_failure(monkeypatch):
 def test_selected_workflow_domain_agents_use_durable_runtime():
     run = OrchestrationAgent().run_workflow(
         "project-domain-runtime",
-        {"feasibility_input": {"total_revenue": 1000, "total_cost": 800}},
+        {"feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 800}},
         "feasibility",
         {"tenantId": "tenant-1", "userId": "user-1"},
     )

@@ -221,6 +221,9 @@ def test_orchestration_quality_check_visual_qa():
         "feasibility_input": {
             "total_revenue": 150000000000.0,
             "total_cost": 120000000000.0,
+            "land_cost": 30000000000.0,
+            "construction_cost": 70000000000.0,
+            "other_cost": 10000000000.0,
             "finance_cost": 10000000000.0
         },
         "pf_structure": [
@@ -241,7 +244,7 @@ def test_orchestration_quality_check_visual_qa():
     agent = OrchestrationAgent()
     run = agent.run_pf_review("test-project-123", input_data)
     
-    assert run["status"] in {"completed", "completed_with_warnings"}
+    assert run["status"] == "completed_with_warnings", run.get("errors")
     assert "qualityCheck" in run["artifacts"]
     
     quality = run["artifacts"]["qualityCheck"]
@@ -249,4 +252,6 @@ def test_orchestration_quality_check_visual_qa():
     assert "pdfVisualQA" in quality
     
     assert quality["pdfStructureQA"]["status"] in {"passed", "warnings", "failed"}
-    assert quality["pdfVisualQA"]["status"] in {"passed", "regression_detected"}
+    assert quality["pdfVisualQA"]["status"] == "baseline_created"
+    assert quality["pdfVisualQA"]["pages_compared"] == 0
+    assert quality["pass"] is False

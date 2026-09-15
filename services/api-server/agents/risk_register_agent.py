@@ -23,6 +23,9 @@ class RiskRegisterAgent:
         risks = self._dedupe_and_number(risks)
         risks = sorted(risks, key=lambda item: (-item["score"], item["riskId"]))
         status = self._status(risks)
+        limitations = self._data_limitations(artifacts)
+        if status == "clear" and limitations:
+            status = "needs_review"
         top_risks = risks[:10]
         approval_conditions = self._approval_conditions(top_risks)
         return {
@@ -43,7 +46,7 @@ class RiskRegisterAgent:
                 "approvalConditions": approval_conditions,
                 "riskOwnerAgents": sorted({risk["ownerAgent"] for risk in risks if risk.get("ownerAgent")}),
             },
-            "dataLimitations": self._data_limitations(artifacts),
+            "dataLimitations": limitations,
         }
 
     def _land_risks(self, land: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -409,6 +412,8 @@ class RiskRegisterAgent:
         return conditions[:10]
 
     def _decision_band(self, status: str, risks: List[Dict[str, Any]]) -> str:
+        if status == "needs_review":
+            return "insufficient_evidence"
         if status == "blocking":
             return "rework_required"
         if status == "high_risk":

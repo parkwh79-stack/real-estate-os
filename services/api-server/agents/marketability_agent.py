@@ -363,6 +363,8 @@ class MarketabilityAgent:
             ("listing_comparables", "partner_api", "listing"),
         ]:
             for item in market.get(key, []) or []:
+                if not isinstance(item, dict):
+                    continue
                 enriched = dict(item)
                 enriched.setdefault("sourceType", source_type)
                 enriched.setdefault("comparableCategory", category)
@@ -373,6 +375,8 @@ class MarketabilityAgent:
     def _normalize_comparables(self, comparables: List[Dict[str, Any]], product_type: str) -> List[Dict[str, Any]]:
         normalized = []
         for index, item in enumerate(comparables):
+            if not isinstance(item, dict):
+                continue
             raw_price = _to_float(
                 item.get("pricePerPy")
                 or item.get("price_per_py")
@@ -398,7 +402,12 @@ class MarketabilityAgent:
                 continue
 
             source_metadata = _normalize_source(item)
-            distance = _to_float(item.get("distanceM") or item.get("distance_m")) or 9999
+            raw_distance = item.get("distanceM")
+            if raw_distance is None:
+                raw_distance = item.get("distance_m")
+            distance = _to_float(raw_distance)
+            if distance is None:
+                distance = 9999
             same_product = (item.get("productType") or product_type) == product_type
             distance_factor = 1 + min(distance, 3000) / 100000
             product_factor = 1 if same_product else 0.95
@@ -419,7 +428,7 @@ class MarketabilityAgent:
                 "priceBasis": item.get("priceBasis") or ("price_per_sqm_converted" if price_per_sqm else "price_per_py"),
                 "sourceUrlOrEvidenceId": item.get("sourceUrlOrEvidenceId") or item.get("evidenceId") or item.get("url"),
                 "baseDate": item.get("baseDate") or item.get("transactionDate") or item.get("saleDate"),
-                "confidence": item.get("confidence", 0.5),
+                "confidence": source_metadata["confidence"],
                 "sourceLocator": item.get("sourceLocator") or item.get("source_locator") or {},
                 "sourceMetadata": source_metadata,
                 "adjustmentReason": [
@@ -1135,8 +1144,9 @@ def _to_float(value: Any) -> Optional[float]:
     if value in (None, ""):
         return None
     try:
-        return float(str(value).replace(",", ""))
-    except (TypeError, ValueError):
+        number = float(str(value).replace(",", ""))
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -1290,6 +1300,8 @@ def _normalize_source(source: Dict[str, Any]) -> Dict[str, Any]:
     base_date = source.get("baseDate") or source.get("base_date") or source.get("transactionDate") or source.get("saleDate")
     license_note = source.get("licenseOrUsageNote") or source.get("license_or_usage_note") or source.get("usageNote")
     confidence = _to_float(source.get("confidence"))
+    if confidence is not None and not 0 <= confidence <= 1:
+        confidence = None
     missing = []
     if source_name == "unknown":
         missing.append("sourceName")

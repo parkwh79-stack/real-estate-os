@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import math
 from typing import List, Dict, Any, Optional
 
 def sqm_to_py(sqm: float) -> float:
@@ -232,7 +233,13 @@ def _dated_cashflows(cashflows: List[Dict[str, Any]]) -> List[tuple[date, float]
         if not raw_date:
             raise ValueError("Every XIRR cash flow requires a date")
         when = _parse_cashflow_date(raw_date)
-        result.append((when, _to_float(item.get("amount", item.get("value", 0.0)))))
+        raw_amount = item.get("amount", item.get("value"))
+        if isinstance(raw_amount, bool) or raw_amount is None:
+            raise ValueError("Every XIRR cash flow requires a finite amount")
+        amount = float(raw_amount)
+        if not math.isfinite(amount):
+            raise ValueError("Every XIRR cash flow requires a finite amount")
+        result.append((when, amount))
     return sorted(result, key=lambda row: row[0])
 
 def _parse_cashflow_date(value: Any) -> date:

@@ -194,7 +194,8 @@ class LandLedgerEnrichmentAgent:
             "sourceType": record.get("sourceType", "manual_or_configured_connector"),
             "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("evidenceId"),
             "baseDate": record.get("baseDate"),
-            "fetchedAt": record.get("fetchedAt") or _now(),
+            "fetchedAt": record.get("fetchedAt"),
+            "recordedAt": _now(),
             "confidence": confidence,
         }
 
@@ -209,7 +210,8 @@ class LandLedgerEnrichmentAgent:
             "sourceName": record.get("sourceName"),
             "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("evidenceId"),
             "baseDate": record.get("baseDate"),
-            "fetchedAt": record.get("fetchedAt") or _now(),
+            "fetchedAt": record.get("fetchedAt"),
+            "recordedAt": _now(),
         }
         parcel.setdefault("evidence", []).append(_evidence("cadastral_record", record, parcel))
 
@@ -225,7 +227,7 @@ class LandLedgerEnrichmentAgent:
         )
         parcel["officialLandPriceSource"] = record.get("sourceName") or "manual_or_configured_connector"
         parcel["officialLandPriceSourceUrlOrEvidenceId"] = record.get("sourceUrlOrEvidenceId") or record.get("evidenceId")
-        parcel["officialLandPriceFetchedAt"] = record.get("fetchedAt") or _now()
+        parcel["officialLandPriceFetchedAt"] = record.get("fetchedAt")
         parcel.setdefault("evidence", []).append(_evidence("official_land_price", record, parcel))
 
     def _apply_land_use_record(self, parcel: Dict[str, Any], record: Dict[str, Any]) -> None:
@@ -241,7 +243,8 @@ class LandLedgerEnrichmentAgent:
             "sourceName": record.get("sourceName"),
             "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("evidenceId"),
             "baseDate": record.get("baseDate"),
-            "fetchedAt": record.get("fetchedAt") or _now(),
+            "fetchedAt": record.get("fetchedAt"),
+            "recordedAt": _now(),
         }
         parcel.setdefault("evidence", []).append(_evidence("land_use_planning", record, parcel))
 
@@ -251,7 +254,8 @@ class LandLedgerEnrichmentAgent:
             if key not in {"pnu", "fetchedAt"}
         } | {
             "pnu": record.get("pnu") or parcel.get("pnu"),
-            "fetchedAt": record.get("fetchedAt") or _now(),
+            "fetchedAt": record.get("fetchedAt"),
+            "recordedAt": _now(),
         })
         parcel.setdefault("evidence", []).append(_evidence("building_use", record, parcel))
 
@@ -280,7 +284,8 @@ class LandLedgerEnrichmentAgent:
             "source": record.get("sourceName") or record.get("source") or "manual_registry_evidence",
             "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("evidenceId"),
             "issuedAt": record.get("issuedAt"),
-            "fetchedAt": record.get("fetchedAt") or _now(),
+            "fetchedAt": record.get("fetchedAt"),
+            "recordedAt": _now(),
             "registeredOwner": record.get("registeredOwner"),
             "ownerMatchStatus": record.get("ownerMatchStatus", "not_verified"),
             "ownershipShare": record.get("ownershipShare"),
@@ -343,6 +348,7 @@ def _record_keys(record: Dict[str, Any]) -> List[str]:
 
 
 def _lookup_record(records: Dict[str, Dict[str, Any]], parcel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    parcel_pnus = {str(parcel[key]) for key in ("pnu", "resolvedPnu") if parcel.get(key)}
     candidates = [
         parcel.get("pnu"),
         parcel.get("resolvedPnu"),
@@ -355,6 +361,11 @@ def _lookup_record(records: Dict[str, Dict[str, Any]], parcel: Dict[str, Any]) -
             continue
         record = records.get(str(candidate))
         if record:
+            record_pnus = {str(record[key]) for key in ("pnu", "resolvedPnu") if record.get(key)}
+            if parcel_pnus and record_pnus and parcel_pnus.isdisjoint(record_pnus):
+                # Row numbers and address fragments are only fallback matches;
+                # they must never override contradictory parcel identifiers.
+                continue
             return record
     return None
 
@@ -377,7 +388,8 @@ def _evidence(evidence_type: str, record: Dict[str, Any], parcel: Dict[str, Any]
         "source": record.get("sourceName") or record.get("source") or "manual_or_configured_connector",
         "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("evidenceId"),
         "issuedAt": record.get("issuedAt"),
-        "fetchedAt": record.get("fetchedAt") or _now(),
+        "fetchedAt": record.get("fetchedAt"),
+        "recordedAt": _now(),
         "verificationStatus": record.get("verificationStatus", "attached_pending_review"),
     }
 

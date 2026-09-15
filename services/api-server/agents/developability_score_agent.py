@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional
 
 from domains.feasibility.regulatory import build_preliminary_buildable_envelope
@@ -17,7 +18,7 @@ _WEIGHTS = {
 
 
 def _num(value: Any) -> Optional[float]:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
         return float(value)
     return None
 
@@ -194,9 +195,9 @@ class DevelopabilityScoreAgent:
             irr = _num(((return_metrics.get("metrics") or {}).get("projectIrr") or {}).get("value"))
         fi = data.get("feasibility_input") or {}
         revenue = _num(fi.get("total_revenue")) or 0.0
-        cost = _num(fi.get("total_cost")) or 0.0
+        cost = _num(fi.get("total_cost"))
         margin = _num(fi.get("profit_margin"))
-        if margin is None and revenue > 0:
+        if margin is None and revenue > 0 and cost is not None:
             margin = (revenue - cost) / revenue
         if irr is None and margin is None:
             return self._dim("사업성", 0.0, False, ["사업수지/수익지표 없음"])

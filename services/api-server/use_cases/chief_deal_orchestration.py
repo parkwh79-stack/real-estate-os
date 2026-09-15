@@ -1,4 +1,6 @@
 from __future__ import annotations
+from copy import deepcopy
+from core.agent_execution import require_successful_runtime
 
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
@@ -722,6 +724,30 @@ def run_chief_deal_pod_use_case(
     calculation_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
     handoff_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
+    """Publish the project working copy only after every Pod sink succeeds."""
+    working_copy = deepcopy(project_data)
+    result = _run_chief_deal_pod_on_copy(
+        project_id, pod_key, working_copy, options,
+        artifact_sink=artifact_sink, review_sink=review_sink, event_sink=event_sink,
+        calculation_sink=calculation_sink, handoff_sink=handoff_sink,
+    )
+    project_data.clear()
+    project_data.update(working_copy)
+    return result
+
+
+def _run_chief_deal_pod_on_copy(
+    project_id: str,
+    pod_key: str,
+    project_data: Dict[str, Any],
+    options: Dict[str, Any] | None = None,
+    *,
+    artifact_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    review_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    event_sink: Callable[[Dict[str, Any]], Any] | None = None,
+    calculation_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    handoff_sink: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
     """Execute a single agent pod, update its state, run the Event Bus triggers,
     and persist the updated orchestration state and derived metrics into the project.
 
@@ -797,6 +823,7 @@ def run_chief_deal_pod_use_case(
             options=options,
             executor=lambda: _execute_pod_artifact(project_id, pod_key, project_data, options),
         )
+        require_successful_runtime(domain_runtime, label=pod_key)
         output_hash = stable_digest(artifact)
         calculation_records = calculation_records_for_pod(
             project_id=project_id,
@@ -1275,6 +1302,7 @@ def _execute_pod_artifact(
     real artifact produced by existing domain logic wherever available.
     """
     child_runtime_executions: List[Dict[str, Any]] = []
+    child_failures: List[str] = []
 
     def run_child_agent(
         *,
@@ -1287,23 +1315,30 @@ def _execute_pod_artifact(
         deterministic_authority_required: bool = False,
         llm_required: bool = False,
     ) -> Any:
-        output, envelope = run_domain_agent_callable_with_contract(
-            project_id=project_id,
-            agent_id=agent_id,
-            task_type=task_type,
-            domain=domain,
-            input_snapshot=input_snapshot,
-            executor=executor,
-            options=options,
-            parent_run_id=str(options.get("runId") or options.get("run_id") or "") or None,
-            output_schema_name=output_schema_name,
-            deterministic_authority_required=deterministic_authority_required,
-            llm_required=llm_required,
-        )
+        try:
+            output, envelope = run_domain_agent_callable_with_contract(
+                project_id=project_id,
+                agent_id=agent_id,
+                task_type=task_type,
+                domain=domain,
+                input_snapshot=input_snapshot,
+                executor=executor,
+                options=options,
+                parent_run_id=str(options.get("runId") or options.get("run_id") or "") or None,
+                output_schema_name=output_schema_name,
+                deterministic_authority_required=deterministic_authority_required,
+                llm_required=llm_required,
+            )
+        except Exception:
+            child_failures.append(agent_id)
+            raise
         child_runtime_executions.append(envelope)
+        require_successful_runtime(envelope, label=agent_id)
         return output
 
     def finalize(artifact: Dict[str, Any]) -> Dict[str, Any]:
+        if child_failures:
+            raise RuntimeError(f"Child agent execution failed: {', '.join(child_failures)}")
         nested = (
             (artifact.get("domainWorkflow") or {}).get("agentRuntimeExecutions")
             if isinstance(artifact.get("domainWorkflow"), dict)
@@ -1313,6 +1348,8 @@ def _execute_pod_artifact(
             *[item for item in nested or [] if isinstance(item, dict)],
             *child_runtime_executions,
         ]
+        for envelope in artifact["agentRuntimeExecutions"]:
+            require_successful_runtime(envelope, label=str(envelope.get("agentId") or pod_key))
         return artifact
 
     if pod_key == "land_legal":
@@ -1689,6 +1726,8 @@ def _run_domain_workflow(
 ) -> Dict[str, Any]:
     """Run an existing domain workflow and return its standard artifacts."""
     run = OrchestrationAgent().run_workflow(project_id, project_data, workflow, options)
+    if run.get("status") not in {"completed", "completed_with_warnings"}:
+        raise RuntimeError(f"Domain workflow {workflow} did not complete successfully")
     for key, value in (run.get("artifacts") or {}).items():
         if value is not None:
             project_data[key] = value
@@ -2697,90 +2736,12 @@ def _task_graph(pods: List[AgentPodPlan], workflow_track: str = "development") -
     }
 
 
-def _agent_ai_roles_v2(workflow_track: str) -> Dict[str, Any]:
-    """Define where an LLM may reason, verify, or draft.
-
-    Financial calculations remain deterministic. LLMs can classify documents,
-    extract facts with locators, reconcile assumptions, challenge the deal
-    thesis, explain results, and draft report text only when linked evidence or
-    explicit assumptions are attached.
-    """
-    base_roles = {
-        "ParserAgent": {
-            "llmUse": "required_when_document_is_unstructured",
-            "purpose": "업로드 문서에서 사업개요, 토지, 수지, PF 조건을 근거 locator와 함께 추출합니다.",
-            "guardrail": "근거 없는 숫자 생성 금지. sourceLocator 없는 값은 확정값으로 쓰지 않습니다.",
-        },
-        "IntakeTriageAgent": {
-            "llmUse": "optional_with_deterministic_fallback",
-            "purpose": "문서 분류 결과를 바탕으로 개발, PF, 금융, 실물금융, 리츠, 펀드 트랙을 추천합니다.",
-            "guardrail": "트랙 추천 신뢰도는 업무 라우팅 신뢰도이며 승인 가능성으로 해석하지 않습니다.",
-        },
-        "MarketProductPod": {
-            "llmUse": "recommended",
-            "purpose": "분양가, 임대료, 비교사례, 흡수율 근거를 해석하고 부족한 시장자료를 요청합니다.",
-            "guardrail": "비교사례, 출처, base date 없이 가격 적정성을 확정하지 않습니다.",
-        },
-        "LandLegalPod": {
-            "llmUse": "assistive_only",
-            "purpose": "토지조서, 등기, 인허가 증빙의 누락/충돌을 설명하고 보완자료 요청 문구를 생성합니다.",
-            "guardrail": "PNU, 공시지가, 등기 권리관계는 API 또는 증빙 기반으로만 판단합니다.",
-        },
-        "FeasibilityCashflowPod": {
-            "llmUse": "extract_and_explain_only",
-            "purpose": "임의 양식 사업수지 Excel 항목을 표준 스키마에 매핑하고 계산 결과를 설명합니다.",
-            "guardrail": "사업수지, Cash Flow, Max Minus, Waterfall 계산은 deterministic 함수만 사용합니다.",
-        },
-        "PFCreditPod": {
-            "llmUse": "review_and_draft",
-            "purpose": "계산 결과를 바탕으로 대주단 관점 리스크, cure, 승인조건 초안을 작성합니다.",
-            "guardrail": "Senior shortfall, LTV breach 등 수치 리스크는 LLM 의견만으로 waiver하지 않습니다.",
-        },
-        "AIRiskCommittee": {
-            "llmUse": "recommended",
-            "purpose": "Devil's Advocate, Credit Reviewer, Legal/Compliance, Market Stress, Construction Risk, Lender Persona, IC Judge 의견을 생성합니다.",
-            "guardrail": "Base, Downside, Upside, Kill Case 수치는 evidence graph와 계산엔진 결과를 기준으로만 판단합니다.",
-        },
-        "ReportStudio": {
-            "llmUse": "recommended",
-            "purpose": "PF 심사보고서, IC Memo, Term Sheet 문구 초안을 생성합니다.",
-            "guardrail": "보고서 문장은 source/evidence id 또는 assumption id에 연결합니다.",
-        },
-    }
-    track_overrides = {
-        "real_asset_finance": {
-            "MarketProductPod": {
-                "purpose": "임대료, NOI, Cap Rate, 실물 인수 comps를 해석하고 실물금융 검토자료를 요청합니다.",
-            },
-        },
-        "reit": {
-            "PFCreditPod": {
-                "purpose": "편입자산, 배당재원, 감정가, 운용구조, 공시 리스크를 투자자 보호 관점으로 검토합니다.",
-            },
-        },
-        "fund": {
-            "PFCreditPod": {
-                "purpose": "펀드 설정, 투자자모집, 대출/에쿼티 구조, 운용/회수 리스크를 검토합니다.",
-            },
-        },
-    }
-    roles = {key: dict(value) for key, value in base_roles.items()}
-    for key, patch in track_overrides.get(workflow_track, {}).items():
-        roles[key] = {**roles.get(key, {}), **patch}
-    return {
-        "schemaVersion": "realytics-agent-ai-roles-v1",
-        "workflowTrack": workflow_track,
-        "defaultBrainPolicy": "user_byok_profile_or_gemini_free_fallback",
-        "calculationPolicy": "LLM은 계산값을 직접 만들지 않고 deterministic engine 결과를 검증, 설명, 문서화합니다.",
-        "roles": roles,
-    }
 
 
 def _agent_ai_roles_v2(workflow_track: str) -> Dict[str, Any]:
     """UTF-8 clean Agent/Pod AI role policy used by the Chief task graph.
 
-    The duplicate definition intentionally overrides the legacy mojibake text
-    above without changing the surrounding orchestration logic.
+    Financial values and credit decisions remain owned by deterministic code.
     """
     base_roles = {
         "ParserAgent": {
@@ -2858,82 +2819,6 @@ def _agent_ai_roles_v2(workflow_track: str) -> Dict[str, Any]:
     }
 
 
-def _agent_ai_roles(workflow_track: str) -> Dict[str, Any]:
-    """Where an LLM is allowed to reason, explain, or draft.
-
-    Calculations remain deterministic. LLMs may classify, extract, reconcile,
-    challenge, explain, and draft report text only when evidence/assumptions are
-    attached.
-    """
-    base_roles = {
-        "ParserAgent": {
-            "llmUse": "required_when_document_is_unstructured",
-            "purpose": "업로드 문서에서 사업개요, 토지, 수지, PF 조건을 근거 locator와 함께 추출",
-            "guardrail": "근거 없는 숫자 생성 금지. sourceLocator 없는 값은 확정값으로 쓰지 않음.",
-        },
-        "IntakeTriageAgent": {
-            "llmUse": "optional_with_deterministic_fallback",
-            "purpose": "문서 분류 결과를 바탕으로 개발/PF/금융/실물금융/리츠/펀드 트랙 추천",
-            "guardrail": "트랙 추천 신뢰도는 라우팅 신뢰도이며 승인 가능성으로 해석하지 않음.",
-        },
-        "MarketProductPod": {
-            "llmUse": "recommended",
-            "purpose": "분양가, 임대료, 비교사례, 흡수율 근거를 해석하고 부족한 시장자료를 요청",
-            "guardrail": "비교사례/출처/base date 없이 가격 적정성 확정 금지.",
-        },
-        "LandLegalPod": {
-            "llmUse": "assistive_only",
-            "purpose": "토지조서·등기·인허가 증빙의 누락/충돌 설명과 보완자료 요청 문구 생성",
-            "guardrail": "PNU, 공시지가, 등기 권리관계는 API/증빙 기반. LLM 추정 금지.",
-        },
-        "FeasibilityCashflowPod": {
-            "llmUse": "extract_and_explain_only",
-            "purpose": "임의 양식 사업수지 Excel의 항목 매핑과 계산 결과 설명",
-            "guardrail": "사업수지, Cash Flow, Max Minus, Waterfall 계산은 deterministic 함수만 사용.",
-        },
-        "PFCreditPod": {
-            "llmUse": "review_and_draft",
-            "purpose": "계산 결과를 바탕으로 대주단 관점 리스크, cure, 승인조건 초안 작성",
-            "guardrail": "Senior shortfall, LTV breach 등 수치 리스크는 LLM 의견으로 waiver하지 않음.",
-        },
-        "AIRiskCommittee": {
-            "llmUse": "recommended",
-            "purpose": "Devil's Advocate, Credit Reviewer, Legal/Compliance, Market Stress, Construction Risk, Lender Persona, IC Judge 의견 생성",
-            "guardrail": "Base/Downside/Upside/Kill Case 수치와 evidence graph를 기준으로만 판단.",
-        },
-        "ReportStudio": {
-            "llmUse": "recommended",
-            "purpose": "PF 심사보고서, IC Memo, Term Sheet 문구 초안 생성",
-            "guardrail": "보고서 문장은 source/evidence id 또는 assumption id에 연결.",
-        },
-    }
-    track_overrides = {
-        "real_asset_finance": {
-            "MarketProductPod": {
-                "purpose": "임대료, NOI, Cap Rate, 실물 인수 comps를 해석하고 실물금융 검토자료를 요청",
-            },
-        },
-        "reit": {
-            "PFCreditPod": {
-                "purpose": "편입자산, 배당재원, 감정가, 운용구조, 공시 리스크를 투자자 보호 관점으로 검토",
-            },
-        },
-        "fund": {
-            "PFCreditPod": {
-                "purpose": "펀드 설정, 투자대상, 대출/에쿼티 구조, 운용·회수 리스크를 검토",
-            },
-        },
-    }
-    roles = {key: dict(value) for key, value in base_roles.items()}
-    for key, patch in track_overrides.get(workflow_track, {}).items():
-        roles[key] = {**roles.get(key, {}), **patch}
-    return {
-        "schemaVersion": "realytics-agent-ai-roles-v1",
-        "workflowTrack": workflow_track,
-        "defaultBrainPolicy": "user_byok_profile_or_gemini_free_fallback",
-        "calculationPolicy": "LLM은 계산값을 직접 만들지 않고 deterministic engine의 결과를 검증·설명·문서화한다.",
-        "roles": roles,
-    }
 
 
 def _scenario_placeholders(project_data: Dict[str, Any]) -> List[ScenarioConclusion]:

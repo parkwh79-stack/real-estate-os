@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Tuple
 
 from core.calculations import calculate_cashflow_max_minus_details
+from core.financial_input_validation import FinancialInputError, require_finite_numbers
 from core.schedule import schedule_event_map
 
 MAX_CASH_FLOW_HORIZON_MONTHS = 600
@@ -10,9 +12,18 @@ MAX_CASH_FLOW_HORIZON_MONTHS = 600
 
 def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     """Run a deterministic baseline cash-flow analysis from CashFlowRunRequest."""
+    require_finite_numbers(request, "cashFlow")
     months = _project_month_count(request)
     sales_schedule = _sales_collection_schedule(request, months)
     cost_schedule, cost_schedule_provenance = _cost_schedule(request, months)
+    declared_cost = _total_project_cost(request)
+    scheduled_cost = sum(sum(row.values()) for row in cost_schedule)
+    if declared_cost > 0 and not math.isclose(scheduled_cost, declared_cost, rel_tol=1e-9, abs_tol=1e-6):
+        raise FinancialInputError(
+            "cash_flow_cost_total_mismatch: monthly costs do not reconcile to totalProjectCost; "
+            "a reviewed cost allocation is required.",
+            code="cash_flow_cost_total_mismatch",
+        )
     allocation_policy = _collection_allocation_policy(request)
     sales_schedule_provenance = _sales_schedule_provenance(request)
     tranche_limits = _tranche_limits(request)

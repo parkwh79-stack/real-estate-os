@@ -4,14 +4,15 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 from main import app
-from routers.projects import PROJECTS_DB
-from storage import upsert_project_record
+from routers.projects import ORCHESTRATIONS_DB, PROJECTS_DB
+from storage import upsert_orchestration_run, upsert_project_record
 
 
 @pytest.fixture(autouse=True)
 def _isolated_chief_e2e_database(tmp_path, monkeypatch):
     """Keep endpoint tests off developer/pilot state and the default runtime DB."""
     original_projects = copy.deepcopy(PROJECTS_DB)
+    original_orchestrations = copy.deepcopy(ORCHESTRATIONS_DB)
     monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "chief-e2e.sqlite3"))
     monkeypatch.setenv("REALYTICS_AI_PROVIDER", "none")
@@ -33,6 +34,7 @@ def _isolated_chief_e2e_database(tmp_path, monkeypatch):
         },
     )
     PROJECTS_DB.clear()
+    ORCHESTRATIONS_DB.clear()
     project_id = "chief-e2e-project"
     project_data = {"project": {"id": project_id, "name": "Chief isolated E2E project"}}
     PROJECTS_DB[project_id] = project_data
@@ -40,6 +42,8 @@ def _isolated_chief_e2e_database(tmp_path, monkeypatch):
     yield
     PROJECTS_DB.clear()
     PROJECTS_DB.update(original_projects)
+    ORCHESTRATIONS_DB.clear()
+    ORCHESTRATIONS_DB.update(original_orchestrations)
 
 
 def first_project_id(client: TestClient) -> str:
@@ -54,7 +58,9 @@ def test_chief_orchestration_endpoints():
     project_data = PROJECTS_DB[project_id]
     project_data["source_documents"] = [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "a1"}]
     project_data["land"] = {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000}
-    project_data["landEvidence"] = [{"evidenceType": "official_land_price", "pnu": "1111010100100010000"}]
+    project_data["landEvidence"] = {
+        "officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000"},
+    }
     project_data["regulation"] = {"zoning": "residential", "far": 300, "bcr": 60}
     project_data["legal"] = {"permitStatus": "pending"}
     project_data["market"] = {
@@ -72,8 +78,9 @@ def test_chief_orchestration_endpoints():
         "total_revenue": 100_000_000_000,
         "total_cost": 80_000_000_000,
         "construction_cost": 30_000_000_000,
+        "land_cost": 50_000_000_000,
     }
-    project_data["schedule"] = {"completionMonth": 36}
+    project_data["schedule"] = {"construction_start": "2026-01", "completion": "2029-01"}
     project_data["pf_structure"] = [
         {"tranche": "Senior", "amount": 50_000_000_000, "priority": 1}
     ]
@@ -224,6 +231,20 @@ def test_recent_work_returns_resume_action_and_continuation_match():
         "approvalReadinessGate": {"status": "not_ready_for_approval"}
     }
     upsert_project_record(project_id, project_data)
+    # MOCK-DATA: resuming a review requires an existing analysis in this
+    # isolated database; a readiness flag alone is not evidence of a prior run.
+    upsert_orchestration_run(project_id, "resume-review-run", {
+        "run_id": "resume-review-run",
+        "project_id": project_id,
+        "workflow": "full_pf_review",
+        "status": "completed_with_warnings",
+        "executionStatus": "completed_with_warnings",
+        "approvalStatus": "not_requested",
+        "steps": [],
+        "errors": [],
+        "started_at": "2026-09-15T00:00:00+00:00",
+        "completed_at": "2026-09-15T00:01:00+00:00",
+    })
 
     recent = client.get("/projects/recent-work")
     assert recent.status_code == 200
@@ -231,6 +252,7 @@ def test_recent_work_returns_resume_action_and_continuation_match():
     assert body["schemaVersion"] == "realytics-recent-work-v2"
     item = next(row for row in body["items"] if row["projectId"] == project_id)
     assert item["nextAction"] == "resume_open_reviews"
+    assert item["latestRunId"] == "resume-review-run"
     assert item["approvalReadinessStatus"] == "not_ready_for_approval"
     assert item["approvalStatus"] != item["approvalReadinessStatus"]
     assert "sha-repeatable-001" in item["sourceHashes"]

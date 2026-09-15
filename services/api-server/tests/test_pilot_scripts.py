@@ -73,9 +73,10 @@ def test_pilot_run_summary_contains_key_review_sections():
 
     summary = summarize_run(run)
 
-    assert summary["status"] == "completed"
+    assert summary["status"] == "completed_with_warnings"
     assert summary["stepCount"] == 27
-    assert summary["qualityCheck"]["pass"] is True
+    assert summary["qualityCheck"]["pass"] is False
+    assert run["artifacts"]["qualityCheck"]["pdfVisualQA"]["status"] == "baseline_created"
     assert "approvalReadinessGate" in summary
     assert "creditReview" in summary
     assert "riskRegister" in summary
