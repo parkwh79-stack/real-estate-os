@@ -129,7 +129,7 @@ class _LiveDatabase:
         conn = _POSTGRES_CONNECT(self.dsn)
         with conn.cursor() as cursor:
             cursor.execute(
-                sql.SQL("SET search_path TO {}, public, pg_temp").format(
+                sql.SQL("SET search_path TO {}, extensions, public, pg_temp").format(
                     sql.Identifier(self.schema_name)
                 )
             )
@@ -565,11 +565,13 @@ def live_database() -> _LiveDatabase:
     conn = postgres.connect(isolated_dsn)
     try:
         with conn.cursor() as cursor:
+            cursor.execute("CREATE SCHEMA extensions")
+            cursor.execute("CREATE EXTENSION postgis WITH SCHEMA extensions")
             cursor.execute(
                 sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name))
             )
             cursor.execute(
-                sql.SQL("SET search_path TO {}, public, pg_temp").format(
+                sql.SQL("SET search_path TO {}, extensions, public, pg_temp").format(
                     sql.Identifier(schema_name)
                 )
             )
