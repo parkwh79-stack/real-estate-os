@@ -811,7 +811,7 @@ SELECT
     projection.created_at DESC,
     projection.review_version_id DESC
  LIMIT 1
- FOR SHARE
+ FOR SHARE OF projection
 """
 
 _LATEST_EVIDENCE_SNAPSHOT_SQL = """
