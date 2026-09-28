@@ -212,7 +212,10 @@ def _identity_context_from_request_uncached(request: Request) -> Dict[str, Any]:
                     "subject": principal.subject,
                     "membershipAuthority": authority_metadata,
                 },
-            }
+            },
+            # Membership was resolved above for this request. An unchanged
+            # local display projection must not contend with project writes.
+            skip_unchanged=True,
         )
         # The legacy user store is a read-model projection. Never read tenant,
         # role, or status back from it to authorize a verified bearer.

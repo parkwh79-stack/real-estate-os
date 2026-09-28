@@ -1,5 +1,30 @@
 import { expect, test } from "@playwright/test";
 
+test("recovery session stays on the password reset form", async ({ page }) => {
+  await page.route("**/api/backend/auth/me", async (route) => {
+    await route.fulfill({ json: {
+      authenticated: true,
+      user: { userId: "recovery-user", role: "admin", status: "active", tenantId: "recovery-test" },
+      session: { userId: "recovery-user", tenantId: "recovery-test" },
+      permissions: ["project:read", "project:write"],
+      authSource: "bearer_token",
+    } });
+  });
+  let attempted = false;
+  await page.route("**/api/auth/supabase/password/recovery", async (route) => {
+    attempted = true;
+    expect(route.request().postDataJSON().action).toBe("complete");
+    await route.fulfill({ status: 401, json: { error: "password_recovery_context_required" } });
+  });
+  await page.goto("/login?mode=reset&flow=password_recovery");
+  await page.locator('input[name="password"]').fill("Reset-only-fixture-7!");
+  await page.getByLabel("비밀번호 확인").fill("Reset-only-fixture-7!");
+  await page.getByRole("button", { name: "새 비밀번호 저장" }).click();
+  await expect.poll(() => attempted).toBe(true);
+  await expect(page.getByRole("alert").filter({ hasText: "재설정 링크가 만료" })).toBeVisible();
+  await expect(page).toHaveURL(/\/login\?mode=reset/);
+});
+
 test("unauthenticated users can reach the real login entry point", async ({ page }) => {
   await page.goto("/login");
 

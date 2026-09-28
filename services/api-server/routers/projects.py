@@ -1836,7 +1836,8 @@ def load_fixtures():
 
 load_fixtures()
 
-@router.get("/")
+@router.get("")
+@router.get("/", include_in_schema=False)
 def get_projects(request: Request):
     authorize_request(request, "project:read")
     projects = list_projects_use_case(project_repository(request))
@@ -2033,7 +2034,8 @@ def check_intake_continuation(request: Request, input_data: Dict[str, Any] | Non
             matches.append({"projectId": project_id, "projectName": _project_display_name(project_id, project), "matchedFiles": matched_files, "nextAction": "resume_existing_review"})
     return {"schemaVersion": "realytics-intake-continuation-check-v1", "matches": matches, "shouldAsk": bool(matches)}
 
-@router.post("/")
+@router.post("")
+@router.post("/", include_in_schema=False)
 def create_project(project_data: Dict[str, Any], request: Request):
     authorize_request(request, "project:write")
     reject_server_managed_project_authority_fields(project_data)

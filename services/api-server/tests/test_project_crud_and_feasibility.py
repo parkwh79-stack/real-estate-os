@@ -42,6 +42,38 @@ SERVER_MANAGED_PROJECT_FIELDS = (
 )
 
 
+@pytest.mark.parametrize("path", ["/projects", "/projects/"])
+@pytest.mark.parametrize("role", ["admin", "reviewer"])
+def test_project_collection_preserves_auth_without_redirect(path, role, monkeypatch):
+    """Next normalizes the BFF path; an upstream redirect loses its bearer."""
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+    user_id = f"collection-path-{role}"
+    upsert_user({
+        "userId": user_id,
+        "tenantId": "collection-path-test",
+        "role": role,
+        "status": "active",
+    })
+    client = TestClient(app, follow_redirects=False)
+    headers = {"X-REALYTICS-USER-ID": user_id}
+    response = client.post(path, headers=headers, json={"project": {"name": "Collection route QA"}})
+    assert "location" not in response.headers
+    assert response.status_code == (200 if role == "admin" else 403)
+    if role == "admin":
+        project_id = response.json()["project"]["id"]
+        try:
+            listed = client.get(path, headers=headers)
+            assert listed.status_code == 200
+            assert "location" not in listed.headers
+            assert any(row["project"]["id"] == project_id for row in listed.json())
+        finally:
+            client.delete(f"/projects/{project_id}", headers=headers)
+    denied = client.post(path, json={"project": {"name": "Anonymous must be denied"}})
+    assert denied.status_code == 403
+    assert "location" not in denied.headers
+
+
 def _isolated_upload_archive(tmp_path, monkeypatch):
     repository = UploadArchiveRepository(
         api_server_root=tmp_path,

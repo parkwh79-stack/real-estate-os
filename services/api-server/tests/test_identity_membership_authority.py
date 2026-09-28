@@ -152,7 +152,7 @@ def _install_authority(
         "identity_membership_repository",
         lambda: repository,
     )
-    monkeypatch.setattr(authz, "upsert_user", lambda payload: dict(payload))
+    monkeypatch.setattr(authz, "upsert_user", lambda payload, **_kwargs: dict(payload))
     return repository
 
 

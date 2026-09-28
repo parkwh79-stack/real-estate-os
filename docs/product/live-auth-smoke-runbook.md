@@ -1,13 +1,60 @@
-# Live Google/Kakao Auth Smoke Runbook
+# Live Auth Smoke Runbook
 
-Updated: 2026-07-30
+Updated: 2026-09-28
 
 Status: Google PKCE, normalized membership, and TOTP AAL2 verified; Kakao PKCE
 and normalized membership verified; a second independent AAL2 checker,
 hardened PostgreSQL API runtime, cross-device revocation proof, and dedicated
 maker-checker rehearsal remain
 
-## Current hosted Gate status (2026-07-28)
+## Local live-session verification (2026-09-28)
+
+The hosted Auth settings endpoint is reachable; email, Google and Kakao are
+enabled and email confirmation remains required. The hosted user inventory has
+two social identities and no password-bearing accounts. Existing Google session
+cookies in the browser were verified through the BFF and PostgreSQL membership
+directory; the application shows the admitted administrator. This is existing
+session verification, not a fresh email signup/password-login result.
+
+Real browser interaction found and repaired these failures:
+
+- Next normalizes `/api/backend/projects/` to `/api/backend/projects`. FastAPI
+  previously redirected `/projects` to the API origin's `/projects/`; the browser
+  followed without the BFF-issued bearer and received an anonymous 403. Both
+  collection paths now execute the same authorized handler directly.
+- A password-recovery callback establishes a session before showing the reset
+  form. The login page previously redirected that session away immediately.
+  Recovery URLs now retain the form; the server still requires its valid
+  recovery context cookie before accepting a new password.
+- Repeated identity reads wrote an unchanged local user/tenant projection and
+  could fail with SQLite `database is locked`. Bearer requests now skip that
+  write when the display projection is unchanged. PostgreSQL membership and
+  permissions are still resolved on each request; the local projection is never
+  the authorization authority. A test holds a SQLite write transaction open
+  while rereading the unchanged identity, then verifies role changes persist.
+
+The pilot uses `.runtime/login-pilot-20260928` for local business data, real
+hosted authentication/membership, and disabled cloud AI keys. The original
+`data/runtime/realytics.sqlite3` is preserved. Its approximately 1.65 GB full-state
+startup load stalled while sorting/loading orchestration payloads; optimizing
+that existing-data startup remains separate work. The small pilot does not
+certify the original database or the hosted PostgreSQL project-write runtime.
+
+The real browser created sample project `5` (`login-sample`), archived the
+synthetic Excel, and saved revenue `120.00000001` eok, cost `90` eok, and finance
+cost `5` eok with explicit sample reasons. No financial value is claimed as real
+business evidence. After an API restart and browser reload, those exact values
+and reasons were restored; the archived `손익!B2` preview still showed the
+original `12000000000` won while the corrected input remained `12000000001` won.
+Email delivery, user-entered password setup, fresh password
+login, logout/relogin and independent maker-checker remain pending.
+
+Validation: 102 focused API tests passed. The 64 desktop/mobile authentication
+checks passed after rerunning four failures: two cold-browser setup timeouts and
+two instances of an ambiguous alert selector in the new recovery test. Web type
+checking and lint passed. No hosted schema or permission changes were applied.
+
+## Historical hosted Gate status (2026-07-28)
 
 ### OAuth callback correction and provider-specific status
 

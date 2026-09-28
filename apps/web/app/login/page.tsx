@@ -18,6 +18,10 @@ export default function LoginPage() {
   const { status } = useAuth();
 
   useEffect(() => {
+    // Recovery creates an authenticated Supabase session before this page.
+    // Keep its form visible; the POST still requires the server recovery cookie.
+    const query = new URLSearchParams(window.location.search);
+    if (query.get("mode") === "reset" || query.get("flow") === "password_recovery") return;
     if (status === "authenticated") router.replace(resolveNextPath());
     if (
       status === "onboarding"

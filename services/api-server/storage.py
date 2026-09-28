@@ -3668,13 +3668,12 @@ def upsert_tenant(record: Dict[str, Any]) -> Dict[str, Any]:
     return tenant
 
 
-def upsert_user(record: Dict[str, Any]) -> Dict[str, Any]:
+def upsert_user(record: Dict[str, Any], *, skip_unchanged: bool = False) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     user_id = record.get("userId") or record.get("user_id") or record.get("email")
     if not user_id:
         raise ValueError("userId or email is required")
     tenant_id = record.get("tenantId") or record.get("tenant_id") or "default"
-    upsert_tenant({"tenantId": tenant_id, "name": record.get("tenantName") or record.get("tenant_name") or "Default Workspace"})
     user = {
         "userId": str(user_id),
         "tenantId": tenant_id,
@@ -3686,6 +3685,15 @@ def upsert_user(record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedAt": now,
         "metadata": record.get("metadata") or {},
     }
+    if skip_unchanged and storage_backend() == "sqlite":
+        existing = get_user(str(user_id))
+        if existing and all(
+            existing.get(key) == value
+            for key, value in user.items()
+            if key not in {"createdAt", "updatedAt"}
+        ):
+            return existing
+    upsert_tenant({"tenantId": tenant_id, "name": record.get("tenantName") or record.get("tenant_name") or "Default Workspace"})
     if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("identity", default_state()["identity"])
