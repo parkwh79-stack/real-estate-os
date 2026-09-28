@@ -11,9 +11,9 @@ maker-checker rehearsal remain
 
 ### Email, Kakao and Naver entry (2026-09-28 follow-up)
 
-The user requested email/password, Kakao and Naver login and confirmed that no
-Naver developer application exists yet. `/login` now exposes the existing email
-signup/login/recovery forms and available social providers together. Social
+The user requested email/password, Kakao and Naver login. A Naver developer
+application was subsequently registered as recorded below. `/login` exposes the
+existing email signup/login/recovery forms and available social providers together. Social
 first-time users follow the existing callback into onboarding; they do not gain
 tenant membership or approval rights merely by authenticating. Existing Google
 login remains available. Naver is visibly disabled as `준비 중` until configured.
@@ -39,35 +39,52 @@ SHA-256 is `bbf2117c931bd049530eb18e2aaddf21f3b99f9d6aeb6760af909c937b139b9d`.
 Live HTTP checks confirmed missing token -> 401, invalid Naver bearer -> 401,
 and POST -> 405; all three responses were non-cacheable. The invalid bearer was
 rejected through the actual Naver profile request, not a mocked response.
-No valid Naver user token has been tested yet. Provider registration, schema and
-database permissions were not changed. The Naver button remains disabled.
+No valid Naver user token has been tested yet. Supabase custom-provider settings,
+schema and database permissions were not changed. The Naver button remains
+disabled.
 
-네이버 신규 등록용 입력값:
+네이버 개발 앱에 저장된 값 (2026-09-28 설정 화면 재확인):
 
-| 항목 | 준비값 |
+| 항목 | 등록값 / 후속 설정 |
 |---|---|
 | 애플리케이션 이름 | REALYTICS |
 | 사용 API / 환경 | 네이버 로그인 / PC 웹 |
 | 서비스 URL | 개발 환경은 `http://localhost:3000`; 공개 서비스 주소는 배포 시 확정 |
-| Callback URL | `https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/callback` — Supabase 설정 화면의 표시값과 최종 대조 |
+| Callback URL | `https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/callback` — 네이버 저장 확인; Supabase 공급자 설정 화면과 대조는 연동 전에 완료 |
 | 표시용 선택 정보 | 별명, 프로필 사진. 이메일·전화번호·생년월일을 로그인 식별자로 사용하지 않음 |
 | 발급 후 저장 위치 | Client ID/Secret은 Supabase의 `custom:naver` 설정에만 입력 |
 
-네이버 개발자 계정 로그인·약관 동의는 사용자가 직접 진행한다. 발급된 비밀키를
+네이버 개발자 계정 로그인은 사용자가 직접 진행한다. 약관 동의와 앱 등록·인증키
+발급은 사용자의 명시적 확인 후 진행한다. 발급된 비밀키를
 채팅이나 GitHub에 붙여 넣지 않는다. 개발 앱의 테스트 사용자와 공개 전 검수는
 개발자센터 안내에 따라 준비한다.
 
+Registration readback on 2026-09-28 confirmed that `REALYTICS` exists in
+`개발 중` state with Client ID/Secret issued. The API settings page persists
+Naver Login, PC Web, the service/callback URLs above, and optional nickname and
+profile image only; no other profile fields are selected. No credential value
+is recorded here or added to Git. The console states that only IDs registered
+under member management can use a development app. Public review and a valid
+Naver-to-Supabase login have not been completed.
+
+The remaining configuration is in Supabase Auth > Providers. The connected
+browser currently redirects that dashboard to sign-in; a connector's access to
+the project does not establish a browser session. Continue in the authenticated
+dashboard, compare its Callback URL, and review the provider configuration before
+saving the Naver credentials there. Do not create a duplicate Naver application.
+
 Registration and activation checklist:
 
-1. In [NAVER Developers](https://developers.naver.com/apps/#/register), create
-   `REALYTICS` with `네이버 로그인` and a PC Web environment. Use the actual service
-   URL; localhost is for development and must be replaced/extended for release.
-   Request only nickname/profile image needed for display; do not require phone,
-   birth date, gender or email for identity. The app-specific ID identifies users.
+1. Completed: [NAVER Developers](https://developers.naver.com/apps/#/list)
+   contains `REALYTICS` with `네이버 로그인` and PC Web. Localhost is for development
+   and must be replaced/extended for release. Nickname/profile image are optional;
+   phone, birth date, gender and email are not requested. The app-specific ID
+   identifies users.
 2. Copy the exact Callback URL from Supabase Auth > Providers > New Provider.
    For the connected project the normal callback is
    `https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/callback`; verify the dashboard
-   value before registering it at Naver. The application callback
+   value against the registered Naver value before provider activation. The
+   application callback
    `http://localhost:3000/auth/callback` belongs in Supabase's redirect allow-list.
 3. Keep Naver Client ID/Secret in Supabase's provider settings. The
    `naver-userinfo` function is deployed; next configure OAuth2 identifier
@@ -108,8 +125,8 @@ Full GitHub CI for `272abd984f4e031de6ee58dc3d05cf4153d655b3` then passed all fi
 jobs: API 2,434 passed / 41 skipped, PostgreSQL integration 56 passed, browser
 254 passed, web quality/build and cleanup safety passed
 ([run 36385688522](https://github.com/parkwh79-stack/real-estate-os/actions/runs/36385688522)).
-The developer registration URL currently redirects to Naver's login screen;
-the browser is left there for the owner to authenticate before app setup.
+The Naver application is now registered and its saved configuration is verified;
+Supabase provider configuration and the live login rehearsal remain pending.
 
 ### Existing Google session and saved sample
 
