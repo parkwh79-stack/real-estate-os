@@ -1,10 +1,17 @@
 # Supabase integration
 
-Status: Auth connected, CLI project linked, and authoritative migrations
-0001-0015 applied to the hosted project. Cross-tenant RLS and two-session job
-claim smoke tests pass. Deployment is still controlled until separate
-API/identity/PF-worker login principals, secret injection, and deployed pool
-checkout complete.
+Status updated: 2026-09-28 documentation reconciliation.
+
+Auth and migration integration code exists. The latest recorded hosted checks
+are in [the 2026-09-15 runtime record](runtime-activation-progress-2026-09-15.md):
+26 migration entries matched and the effective grant checks passed at that time.
+The former 0001–0015 summary was an older snapshot. On 2026-09-28 the connected
+project was ACTIVE_HEALTHY and its 26 migration versions/names matched the local
+Supabase migration filenames. This read-only check did not revalidate SQL
+checksums, effective grants or production behavior. R1 review uses the existing
+project payload and requires no schema migration. API/Worker activation and deployed acceptance
+remain separate from local product development; use the existing role and secret
+boundaries below when that deployment is resumed.
 
 ## 1. Authentication path
 

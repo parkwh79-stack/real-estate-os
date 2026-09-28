@@ -1,6 +1,6 @@
 # REALYTICS x PLATFORM9 Architecture
 
-Updated: 2026-07-22
+Updated: 2026-09-28 (scope and entry points; detailed migration sections retain their original context)
 
 ## 1. Purpose
 
@@ -12,7 +12,11 @@ boundary is `docs/architecture/postgres-runtime-authority.md`. Any older
 SQLite-first or direct OAuth wording in historical sections of this document
 describes the migration history, not the production authority.
 
-The project already contains most of the core REALYTICS and PLATFORM9 functions, but the folder layout is still MVP-oriented. The immediate goal is not to move files aggressively. The goal is to create a clear map so future refactoring can be done in small, testable steps.
+The existing Agents and six Chief Pods remain the product architecture. The
+current implementation order is [the product execution plan](product/realytics-os-next-work-roadmap.md).
+Package extraction and expanded topology below are reference designs, not
+requirements to create more packages before delivering a usable review flow.
+Remove proven-unused scaffolding; keep active domain boundaries and handoffs.
 
 ## 2. Current Repository Structure
 
@@ -81,7 +85,7 @@ Browser -> Next.js Web/BFF -> FastAPI -> PostgreSQL/PostGIS
                                                         -> S3/MinIO
 ```
 
-- Supabase Auth owns Google/Kakao authentication and session/token lifecycle.
+- Supabase Auth owns email/password authentication, optional Google/Kakao linked identities, and session/token lifecycle.
 - PostgreSQL `principals` and `tenant_memberships` own application identity
   status, tenant membership, and role.
 - FastAPI owns authorization, business rules, approval gates, and use-case

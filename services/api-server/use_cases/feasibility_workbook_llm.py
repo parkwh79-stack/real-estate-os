@@ -13,6 +13,8 @@ the values are applied to the project via the audited apply endpoint.
 
 import hashlib
 import json
+import math
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
 import openpyxl
@@ -261,6 +263,22 @@ FEASIBILITY_INPUT_KEYS = {
 }
 
 
+class FeasibilityReviewConflict(ValueError):
+    """The browser's financial inputs are older than the stored review."""
+
+
+def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
+    inputs = project.get("feasibility_input") or {}
+    expected = project.get("expected_results") or {}
+    values = {key: inputs.get(key) for key in FEASIBILITY_INPUT_KEYS}
+    values.update(pf_amount=expected.get("total_pf_amount"), development_profit=expected.get("development_profit"))
+    stored_reviews = (project.get("_meta") or {}).get("feasibilityFieldReviews") or {}
+    reviews = {key: review for key, review in stored_reviews.items()
+               if isinstance(review, dict) and review.get("value") == values.get(key)}
+    state = {"values": values, "fieldReviews": reviews}
+    return {**state, "reviewHash": _stable_json(state), "analysisOnly": True}
+
+
 def apply_feasibility_input_use_case(
     project_repository,
     project_id: str,
@@ -268,6 +286,9 @@ def apply_feasibility_input_use_case(
     *,
     applied_by: str,
     source_document: Dict[str, Any] | None = None,
+    field_reviews: Dict[str, Any] | None = None,
+    field_source_documents: Dict[str, Any] | None = None,
+    expected_review_hash: str | None = None,
 ) -> Dict[str, Any]:
     """Persist a reviewer-confirmed feasibility extraction onto the project (human-gated).
 
@@ -275,16 +296,55 @@ def apply_feasibility_input_use_case(
     and the feasibility page); ``pf_amount``/``development_profit`` are routed to
     ``expected_results`` so the finance/report pages show real PF/profit too.
     """
-    numeric = {
-        key: feasibility_input[key]
-        for key in feasibility_input
-        if isinstance(feasibility_input.get(key), (int, float)) and feasibility_input.get(key) is not None
-    }
+    if not isinstance(feasibility_input, dict):
+        raise ValueError("사업수지 입력은 항목별 숫자여야 합니다.")
+    numeric = {}
+    for key in EXTRACT_FIELDS:
+        if key not in feasibility_input:
+            continue
+        value = feasibility_input[key]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or abs(value) > 9_007_199_254_740_991 or not math.isfinite(value)
+                or value != int(value) or (key != "development_profit" and value < 0)):
+            raise ValueError(f"{key}: 원 단위의 유효한 정수를 입력하세요.")
+        numeric[key] = int(value)
     if not numeric:
         raise ValueError("적용할 수치가 없습니다.")
     existing = project_repository.get(project_id)
     if not existing:
         raise LookupError("Project not found")
+
+    prior = feasibility_review_state(existing)
+    if expected_review_hash is not None and expected_review_hash != prior["reviewHash"]:
+        raise FeasibilityReviewConflict("저장된 입력이 변경되었습니다. 최신 값을 다시 불러온 뒤 수정하세요.")
+    if field_reviews is not None and not isinstance(field_reviews, dict):
+        raise ValueError("항목별 검토 정보를 확인하세요.")
+    reviews = dict(prior["fieldReviews"])
+    applied_at = datetime.now(timezone.utc).isoformat()
+    changed_reviews = {}
+    for key, value in numeric.items():
+        field_document = (field_source_documents or {}).get(key) or source_document
+        review = (field_reviews or {}).get(key) or {}
+        if not isinstance(review, dict):
+            raise ValueError(f"{key}: 검토 정보가 올바르지 않습니다.")
+        origin = review.get("origin", "user_assumption")
+        reason = str(review.get("reason") or "").strip()
+        source_cell = str(review.get("sourceCell") or "").strip()
+        if origin not in {"user_assumption", "document_correction"}:
+            raise ValueError(f"{key}: 입력 구분을 확인하세요.")
+        if field_reviews is not None and not reason:
+            raise ValueError(f"{key}: 수정 또는 가정의 이유를 입력하세요.")
+        if origin == "document_correction" and (not (field_document or {}).get("archiveId") or not source_cell):
+            raise ValueError(f"{key}: 보관된 원본 문서와 출처 셀이 필요합니다.")
+        changed_reviews[key] = {
+            "value": value, "previousValue": prior["values"].get(key),
+            "origin": origin, "reason": reason or None,
+            "sourceCell": source_cell if origin == "document_correction" else None,
+            "sourceDocument": field_document if origin == "document_correction" else None,
+            "reviewedBy": applied_by, "reviewedAt": applied_at,
+            "needsReview": True, "approvalStatus": "not_requested",
+        }
+        reviews[key] = changed_reviews[key]
 
     fi_update = {k: v for k, v in numeric.items() if k in FEASIBILITY_INPUT_KEYS}
 
@@ -293,21 +353,30 @@ def apply_feasibility_input_use_case(
         expected["total_pf_amount"] = numeric["pf_amount"]
     if "development_profit" in numeric:
         expected["development_profit"] = numeric["development_profit"]
-        revenue = fi_update.get("total_revenue") or (existing.get("feasibility_input") or {}).get("total_revenue")
-        if revenue:
-            expected["profit_margin"] = round(numeric["development_profit"] / float(revenue), 4)
+    if {"development_profit", "total_revenue"} & numeric.keys() and expected.get("development_profit") is not None:
+        revenue = fi_update.get("total_revenue", (existing.get("feasibility_input") or {}).get("total_revenue"))
+        expected["profit_margin"] = round(expected["development_profit"] / float(revenue), 4) if revenue else None
 
     history = list(((existing.get("_meta") or {}).get("appliedFeasibilityInputs") or []))
-    history.append({"appliedBy": applied_by, "fields": list(numeric.keys()), "sourceDocument": source_document or {}})
+    history.append({"appliedBy": applied_by, "appliedAt": applied_at, "fields": list(numeric.keys()),
+                    "sourceDocument": source_document or {}, "fieldReviews": changed_reviews})
 
     update_payload: Dict[str, Any] = {
         "feasibility_input": {**(existing.get("feasibility_input") or {}), **fi_update},
-        "_meta": {"appliedFeasibilityInputs": history, "feasibilityInputSource": "llm_workbook_review"},
+        "_meta": {**(existing.get("_meta") or {}), "appliedFeasibilityInputs": history,
+                  "feasibilityInputSource": "human_workbook_review", "feasibilityFieldReviews": reviews},
+        "feasibility_input_sources": {
+            **(existing.get("feasibility_input_sources") or {}),
+            **{key: {"value": value, "source": reviews[key]["origin"], "needsReview": True,
+                      "confidence": 0.6, "review": reviews[key]} for key, value in fi_update.items()},
+        },
     }
     if expected != (existing.get("expected_results") or {}):
         update_payload["expected_results"] = expected
 
     updated = project_repository.update(project_id, update_payload)
+    if updated is None:
+        raise LookupError("Project not found")
     return {
         "schemaVersion": "realytics-feasibility-input-apply-v1",
         "projectId": project_id,
@@ -315,4 +384,7 @@ def apply_feasibility_input_use_case(
         "feasibility_input": (updated or {}).get("feasibility_input"),
         "expected_results": (updated or {}).get("expected_results"),
         "project": updated,
+        "reviewState": feasibility_review_state(updated),
+        "requiresRecalculation": True,
+        "analysisOnly": True,
     }

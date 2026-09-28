@@ -4,6 +4,12 @@ Updated: 2026-07-30
 
 Status: **Controlled implementation; not production-ready**
 
+Current execution scope (2026-09-28): build and validate the local user workflow
+in [the product execution plan](realytics-os-next-work-roadmap.md). This document
+is the external-deployment reference. Its AWS, secret-store and Worker setup is
+not a prerequisite for implementing local input review, analysis or draft output.
+New paid infrastructure remains deferred; existing access controls still apply.
+
 | Environment | Purpose | Infrastructure | Deployment method | Status | Priority |
 |---|---|---|---|---|---|
 | Local | Development and deterministic regression | SQLite/Docker Compose | Manual | In progress | P0 |
@@ -80,7 +86,7 @@ service build context excludes `.env`, credentials, private keys, runtime state,
 test artifacts, and local databases. Runtime secrets are injected by the
 platform and never copied into an image layer.
 
-### 1.3 Safest next staging target: AWS ECS Fargate
+### 1.3 Deferred external staging proposal: AWS ECS Fargate
 
 Keep Vercel for Web/BFF and deploy the backend first as an isolated **staging**
 ECS Fargate workload. This is the lowest-boundary-mismatch option because the

@@ -8,8 +8,9 @@ Phase 11의 목표는 실제 금융기관 PF 심사보고서 구조를 기준으
 
 ## 구현 상태
 
-- 상태: In Progress
-- 프론트엔드 화면: `apps/web/app/report/page.tsx`
+- 2026-09-28 정리: 구조화 보고서와 PDF/DOCX/Excel 관련 내보내기 경로가 구현돼 있다. 실제 프로젝트 초안과 최종 발행 자격은 별도이며, 현재 연결 과제는 [구현 현황](current-implementation-status.md)을 따른다.
+- 실제 프로젝트 화면: `apps/web/app/project/[id]/report/page.tsx`
+- 샘플 화면: `apps/web/app/report/page.tsx`
 - 보고서 섹션 컴포넌트:
   - `apps/web/app/report/_components/sections-part1.tsx`
   - `apps/web/app/report/_components/sections-part2.tsx`

@@ -4,7 +4,9 @@ import openpyxl
 import pytest
 
 from use_cases.feasibility_workbook_llm import (
+    FeasibilityReviewConflict,
     apply_feasibility_input_use_case,
+    feasibility_review_state,
     dump_workbook_cells,
     extract_feasibility_fields_via_llm,
 )
@@ -172,3 +174,44 @@ def test_apply_rejects_empty():
     repo = _FakeRepo({"feasibility_input": {}})
     with pytest.raises(ValueError):
         apply_feasibility_input_use_case(repo, "585", {"x": "not-a-number"}, applied_by="reviewer")
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), -1, 1.5, "100", 10**18, 10**400])
+def test_invalid_review_money_does_not_mutate_project(value):
+    repo = _FakeRepo({"feasibility_input": {"total_revenue": 101}})
+    with pytest.raises(ValueError):
+        apply_feasibility_input_use_case(repo, "585", {"total_revenue": value}, applied_by="reviewer")
+    assert repo.project == {"feasibility_input": {"total_revenue": 101}}
+
+
+def test_review_preserves_assumption_and_rejects_stale_browser():
+    from use_cases.feasibility_input_builder import build_feasibility_input_draft
+
+    repo = _FakeRepo({"feasibility_input": {"total_revenue": 101}, "_meta": {"tenantId": "tenant-1"}})
+    original_hash = feasibility_review_state(repo.project)["reviewHash"]
+    result = apply_feasibility_input_use_case(
+        repo, "585", {"finance_cost": 123456789}, applied_by="reviewer",
+        field_reviews={"finance_cost": {"origin": "user_assumption", "reason": "임시 금융비용 가정"}},
+        expected_review_hash=original_hash,
+    )
+    assert result["reviewState"]["values"]["finance_cost"] == 123456789
+    review = result["reviewState"]["fieldReviews"]["finance_cost"]
+    assert review["needsReview"] is True
+    assert review["approvalStatus"] == "not_requested"
+    assert review["sourceDocument"] is None
+    assert repo.project["_meta"]["tenantId"] == "tenant-1"
+    draft = build_feasibility_input_draft(repo.project)
+    assert draft["feasibilityInput"]["finance_cost"] == 123456789
+    assert draft["fieldSources"]["finance_cost"]["source"] == "user_assumption"
+    assert draft["fieldSources"]["finance_cost"]["needsReview"] is True
+    with pytest.raises(FeasibilityReviewConflict):
+        apply_feasibility_input_use_case(repo, "585", {"finance_cost": 2}, applied_by="other", expected_review_hash=original_hash)
+    assert repo.project["feasibility_input"]["finance_cost"] == 123456789
+
+
+def test_review_preserves_zero_and_negative_document_profit():
+    repo = _FakeRepo({"feasibility_input": {"total_revenue": 100}, "expected_results": {"development_profit": 10, "profit_margin": 0.1}})
+    result = apply_feasibility_input_use_case(repo, "585", {"total_revenue": 0, "development_profit": -10}, applied_by="reviewer")
+    assert result["feasibility_input"]["total_revenue"] == 0
+    assert result["expected_results"]["development_profit"] == -10
+    assert result["expected_results"]["profit_margin"] is None

@@ -1,6 +1,6 @@
 # REALYTICS SDD Full-Stack Operating Standard
 
-Updated: 2026-07-02
+Updated: 2026-09-28
 
 Project: REALYTICS x PLATFORM9
 
@@ -20,7 +20,24 @@ Spec
   -> Operation / Monitoring
 ```
 
-REALYTICS is a real-estate development and PF review operating system. Therefore SDD must work like a deal-review control system: no major feature should move to implementation unless its inputs, evidence, assumptions, authorization, data model, workflow gate, test, and monitoring path are known.
+REALYTICS is a real-estate development and PF review operating system. For a major feature, record the user outcome, inputs, source of truth, persistence and relevant checks before calling it complete. Existing code contracts and a concise entry in the current roadmap satisfy this preparation; a separate document package is not required to start useful implementation or a clearly labelled experiment.
+
+## 1.1 Proportionate implementation (2026-09-28)
+
+- Routine copy, layout, documentation and verified unused-code cleanup: state the
+  purpose and run checks relevant to the changed path. Do not create a new SDD
+  dossier or approval stage.
+- A new user workflow: use one short task card in the existing product roadmap,
+  then implement the input → action → saved result → error/retry path.
+- Changes to financial authority, source evidence, tenant access, final approval
+  or publication: retain the relevant existing contracts and behavioral tests.
+  These controls apply to the affected action, not every exploratory analysis.
+- A missing final-approval document can remain an explicit follow-up while an
+  independent, supportable analysis runs with labelled user assumptions.
+- Preserve the existing Agents and Pods. Delete unused scaffolding and duplicate
+  implementations after checking routes, registries, callers and tests.
+
+This section governs how the detailed reference tables below are applied.
 
 ## 2. Applicability
 
@@ -44,7 +61,7 @@ Not directly adopted:
 
 ## 3. Required SDD Artifact Contract
 
-Every significant feature should have these artifacts.
+Every significant feature should cover these concerns. They may be references to existing code or a single task card; they are not seven mandatory new files.
 
 | Artifact | Required Fields | Stored / Referenced In |
 |---|---|---|
@@ -183,8 +200,8 @@ Rule: AI can assist reasoning and drafting, but deterministic engines own financ
 
 | Gate | Must Pass Before |
 |---|---|
-| `SpecReadyGate` | Coding starts |
-| `ScreenReadyGate` | UI implementation starts |
+| `SpecReadyGate` | A major user workflow is accepted as implemented; a concise task card is sufficient to begin |
+| `ScreenReadyGate` | A changed screen is accepted; existing screen policy may be reused |
 | `APIReadyGate` | Frontend depends on endpoint |
 | `DBReadyGate` | Persistent workflow is advertised as real |
 | `EvidenceGate` | Claim/metric/risk enters report or approval readiness |
@@ -216,6 +233,10 @@ A feature is done when:
 - If LLM is used, `aiBrainUsed` audit is recorded.
 
 ## 13. Immediate Application to Current Backlog
+
+The table below is the historical adoption checklist. Current priority is owned
+by [the product execution plan](realytics-os-next-work-roadmap.md); do not repeat
+completed work or require unrelated platform work before a user workflow.
 
 | Priority | Apply Now | Reason |
 |---|---|---|

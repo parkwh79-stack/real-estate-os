@@ -1,10 +1,11 @@
 # PDF Print Layout QA
 
-Updated: 2026-05-12
+Updated: 2026-09-28
 
 ## Scope
 
-This checklist covers the `/report` Phase 11 PF review report page.
+This checklist covers report layout. `/report` is the sample entry; actual
+project review uses `/project/[id]/report` and its saved report/export context.
 
 ## Implemented Controls
 
@@ -44,8 +45,10 @@ The visual agent automatically scans every generated PDF document for layout ano
 *   **Empty Page Identification:** Counts block elements to detect stray blank pages or page-break policy failures.
 
 ### 2. Pixel-Level Visual Regression
-The harness supports pixel-by-pixel rendering comparison against a certified approved baseline:
-1.  **Baseline Generation:** During the initial approved execution, the PDF pages are rasterized into high-resolution images (`baseline_*.png`) in the runtime baselines storage.
+The harness compares PDF pages with stored reference images. Stored images are
+not automatically human-approved or certified. Current PF runs use new report
+IDs; linking an approved template/report baseline across runs remains work to do.
+1.  **Baseline Generation:** The first execution for an identifier creates images (`baseline_*.png`) and returns `baseline_created`. It is not a successful comparison or an approval.
 2.  **Visual Comparer:** On subsequent runs (such as after system or style modifications), pages are re-rasterized and matched pixel-by-pixel against the references.
 3.  **Visual Layout Diff:** If changes exceed a 0.05% pixel-count threshold (protecting against sub-pixel anti-aliasing), a visual diff layout is generated (`diff_page_*.png`) highlighting modifications in bright red to aid the manual review.
 

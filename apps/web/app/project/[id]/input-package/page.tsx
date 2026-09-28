@@ -122,15 +122,15 @@ export default function InputPackagePage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refresh = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       setContext(await fetchWorkspaceContext(projectId, "input_package", activeTrack));
     } catch (err) {
       setError(err instanceof Error ? err.message : "자료 입력 패키지 상태를 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [activeTrack, projectId]);
 
@@ -318,7 +318,7 @@ export default function InputPackagePage() {
           </section>
 
           <SmartIntake projectId={projectId} onProcessed={finalizeIntake} />
-          <FeasibilityExtractReview projectId={projectId} onApplied={refresh} />
+          <FeasibilityExtractReview key={projectId} projectId={projectId} onApplied={() => void refresh(true)} />
 
           <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
             <Panel title="다음 보완 작업">

@@ -1,774 +1,145 @@
-# REALYTICS OS Next Work Roadmap
+# REALYTICS 제품 실행 계획
 
-Updated: 2026-09-15
+Updated: 2026-09-28
+Status: 현재 개발 범위와 다음 작업의 단일 기준
 
-현재 최우선 작업은 [Pod·Agent 코드 진단과 무료 로컬 검증](pod-agent-code-audit-2026-09-15.md)이다.
-사용자 후속 요청으로 신규 유료 서비스·인프라 도입은 보류했다. 금융·증거·실행 제어의
-재현된 오류를 수정하고 통합 검증한 뒤, 남은 상태 경합과 계산 계약을 처리한다.
+## 1. 먼저 만들 제품
 
-최신 실행 상태와 신규 인프라 제안은
-[운영 연결 준비](runtime-activation-progress-2026-09-15.md)와
-[인프라 구성안](infrastructure-proposal-2026-09-15.md)을 기준으로 한다.
-Purpose: 파일럿 승인 가능성과 부동산 OS 운영화를 위한 통합 개발 로드맵
+**시행·개발 실무자와 PF 검토자가 보유 자료로 사업을 이해하고, 가정을 바꿔 비교하고, 보완할 자료와 검토 초안을 남기는 도구**를 완성한다. 첫 대상은 한 프로젝트를 검토하는 실무자다. 기관 전체의 자동 승인 시스템을 먼저 구축하지 않는다.
 
-현재 GitHub 업로드·원격 DB 적용·검증 상태와 다음 실행 순서는
-[코드 업로드와 다음 작업](publication-and-next-steps-2026-09-15.md)을 기준으로 한다.
-
-## 2026-09-14 실행 기준
-
-현재 수정·검증 상태는 [재진단 후 수정 실행 기록](remediation-execution-2026-09-14.md)을
-기준으로 한다. 계산 저장과 tenant 연결, 재분석 완료 표시, CF 입력 계보,
-로그인 및 의존성 결함의 로컬 수정을 반영했다.
-[코드베이스 재진단](independent-codebase-audit-2026-09-14.md)과
-[End-to-End 진단 및 구현 계획](end-to-end-remediation-2026-09-14.md)은
-수정 전 결함과 수락 기준을 보존한 이력이다.
-
-남은 우선 작업은 [751 원본 복구 검토](project-751-source-recovery-review-2026-09-14.md)와
-[정규화 런타임 적용 전 검증](runtime-activation-gates-2026-09-14.md)이다.
-아래 Current Baseline과 기존 Status는 7월 기준 이력이며 운영 완료 판정이 아니다.
-전체 기능의 PostgreSQL authority 전환, 실제 제한 역할·승인·S3·Worker 및 복원 검증은
-미완료다. 로컬 시험 통과를 운영 승인으로 해석하지 않는다.
-
-## 1. Product North Star
-
-사용자가 사업계획서, 토지조서, 사업수지 Excel, 등기·공시지가 증빙을 업로드하면 다음 흐름이 하나의 원장과 하나의 오케스트레이션 안에서 동작해야 한다.
+핵심 사용자 흐름은 다음과 같다.
 
 ```text
-자료 업로드
-→ 문서 분류·파싱
-→ Shared Deal State Graph 저장
-→ 토지·시장·사업수지·Cash Flow·PF 병렬 분석
-→ Cross-Agent Reconciliation
-→ CalculationRun 저장
-→ Risk Register / Evidence Graph materialize
-→ cure 또는 보완자료 요청
-→ 재계산
-→ Approval Readiness Gate 재평가
-→ 심사보고서·IC Memo·승인조건 생성
+프로젝트 생성 또는 재개
+→ 사업계획서·사업수지·토지자료 올리기
+→ 핵심 숫자와 출처 확인, 누락값은 사용자 가정으로 입력
+→ 사업수지·월별 현금흐름·부족자금 계산
+→ 공사비·금리·분양가·일정 변경 전후 비교
+→ 중요한 위험과 다음 자료 요청 확인
+→ 출처·가정·한계를 포함한 검토 초안 저장·다운로드
+→ 나중에 같은 프로젝트를 열어 이어서 작업
 ```
 
-핵심 원칙:
+성공은 Agent 수나 화면 수로 판단하지 않는다. 사용자가 중복 입력을 얼마나 줄였는지, 숫자 근거를 찾고 가정을 비교하는 일을 혼자 끝냈는지로 확인한다. 첫 파일럿에서는 수동 작업 시간과 실제 앱 작업 시간을 기록한다. 성능·절감률은 측정 전 약속하지 않는다.
 
-- LLM은 계산자가 아니라 근거 기반 검토자다.
-- 금융 수치는 결정론적 계산엔진에서만 확정한다.
-- 모든 숫자·문장·리스크는 source locator와 원장 레코드를 가져야 한다.
-- 실제 자료가 없으면 자동 보강을 시도하되, 추정·벤치마크·미확보 상태를 구분한다.
-- Approval Readiness는 보고서 완성도가 아니라 증빙·계산·리스크·검토 상태를 기준으로 판단한다.
+## 2. 구현 판단
 
-## 2. Current Baseline
+### Agent·Pod는 핵심 구조로 유지
 
-현재 구현된 기반:
+사용자가 2026-09-28 재확인한 방향이다. 기존 **6개 Chief Pod, 업무 Agent,
+타입이 있는 handoff, 27단계 PF 검토 흐름을 유지**한다. 정리 대상은 사용하지
+않는 예제·중복 구현·임시 코드이며, Agent·Pod 체계를 제거하거나 하나의
+단순 계산기로 축소하는 작업이 아니다.
 
-- Shared Deal State Graph 및 `deal_state_records`
-- Evidence, Assumption, Metric, Risk Issue 저장 구조
-- CalculationRun v2 필드 확장
-- Waterfall, Unsold LTV, Tranche Recovery, Discount Stress 계산 기록
-- 사업수지·Cash Flow·PF 지표 계산 기록
-- Bonri-style 사업수지 Excel import 및 샘플 셀 provenance
-- 6개 Chief Pod와 Pod AI Review
-- Approval Readiness Gate v2
-- Risk Register·Evidence Review·Chief Deal Room 화면
-- Unsold LTV cure 저장·증빙 연결·재계산 API
-- 자산유형별 사업성 비교 API·UI
-
-현재 주요 운영 한계:
-
-- 일부 Cash Flow 화면이 저장된 CalculationRun보다 기존 표현·mock에 의존할 가능성
-- 일부 화면의 한글 인코딩 및 금융용어 표준화 미완료
-- SQLite 중심 MVP 저장 구조
-- 실제 PostgreSQL·Object Storage·Background Worker 미전환
-- 실제 프로젝트 112필지와 외부 증빙을 사용한 최종 승인 E2E 미완료
-
-## 3. P0 — Pilot Approval Critical Path
-
-### P0-01 Cash Flow 화면 실데이터 연결
-
-Status: Next
-
-Scope:
-
-- 고정 숫자 제거
-- 최신 `calculationRunId` 조회
-- `cashflow`와 `cash_flow_engine` 최신 run 비교
-- Max Minus 표시
-- PF 인출·상환 표시
-- 월별 Cash Flow 표시
-- Waterfall·Tranche Recovery·Unsold LTV 연결
-- 모든 숫자에 CalculationRun·source locator 표시
-
-API:
-
-- `GET /projects/{id}/calculation-runs?engine_key=cash_flow_engine`
-- `GET /projects/{id}/deal-state-records?record_type=metric`
-- `GET /projects/{id}/deal-state-records?record_type=risk_issue`
-
-Acceptance:
-
-- 저장된 run이 없으면 숫자를 표시하지 않고 실행 안내를 표시한다.
-- 화면의 Max Minus와 API CalculationRun metric이 일치한다.
-- 화면의 PF 인출액과 PF 구조·Cash Flow artifact가 일치한다.
-- 각 metric에 `calculationRunId`, `engineVersion`, `sourceLocator`가 표시된다.
-
-### P0-02 Approval Readiness Gate 최종 검증
-
-Status: In Progress
-
-필수 Gate:
-
-- 빈 Deal State 차단
-- blocking risk issue 해소
-- 필수 evidence 존재
-- 최신 CalculationRun metric 사용
-- 승인된 assumption 또는 active override 존재
-- source locator completeness 충족
-- Pod AI Review의 deterministic blocker 해소
-- unresolved handoff 및 review 해소
-
-Acceptance:
-
-- 빈 원장은 `not_ready`이며 blocking으로 반환한다.
-- `UNSOLD_LTV_BREACH`, `SENIOR_SHORTFALL`가 남아 있으면 승인 통과하지 않는다.
-- LLM 의견만으로 승인 차단하지 않는다.
-- Gate 결과와 required actions가 DB 원장·UI·보고서에 동일하게 표시된다.
-
-### P0-03 파일럿 실제 데이터 E2E
-
-Status: Next
-
-실행 순서:
-
-1. 사업계획서 업로드
-2. 토지조서 112필지 파싱
-3. 필지별 PNU resolve 및 법정동 검증
-4. 공시지가 보강
-5. 시장 실거래·분양사례 보강
-6. 사업수지 Excel import
-7. Feasibility CalculationRun 생성
-8. Cash Flow CalculationRun 생성
-9. PF·Waterfall·Unsold LTV 계산
-10. blocking risk 생성
-11. cure 선택 및 증빙 연결
-12. 재계산
-13. Gate 재평가
-14. 최종 승인조건·심사보고서 생성
-
-필수 결과:
-
-- run ID 목록
-- 필지별 PNU 상태
-- 공시지가 증빙 목록
-- 시장 근거 목록
-- CalculationRun 목록
-- 남은 blocker
-- 승인 가능성 결과
-- 최종 승인조건
-
-### P0-04 실제 토지 증빙 보강
-
-Status: In Progress
-
-필지별 저장 항목:
-
-- raw lot number
-- normalized lot number
-- legal dong code
-- main lot number
-- sub lot number
-- PNU
-- PNU confidence
-- land category
-- area sqm
-- official land price base year/date
-- official land price per sqm
-- zoning/land characteristics
-- registry issue date
-- registered owner
-- ownership match
-- mortgage/seizure/provisional registration/trust/easement
-- release condition
-- acquisition status and acquisition ratio
-- source URL/evidence ID
-- document page/API row/Excel cell locator
-
-원칙:
-
-- 필지별 법정동코드가 프로젝트 기본 코드와 다르면 자동 PNU를 확정하지 않는다.
-- 등기부가 없으면 등기 상태를 추정하지 않고 evidence request로 남긴다.
-- 공시지가와 지적특성은 기준일·출처 없는 값을 승인자료로 사용하지 않는다.
-
-### P0-05 원장 기반 화면 통합
-
-대상 화면:
-
-- Land
-- Marketability
-- Feasibility
-- Cash Flow
-- PF Structure
-- Risk
-- Evidence
-- Report
-
-공통 read model:
-
-- `GET /projects/{id}/workspace/context?page=...`
-- `GET /projects/{id}/deal-state-records`
-- `GET /projects/{id}/calculation-runs`
-
-각 화면은 다음을 동일하게 표시해야 한다.
-
-- 프로젝트명
-- 업로드 문서
-- 최신 run
-- evidence count
-- missing input
-- blocking risk
-- approval readiness
-
-### P0-06 한글 금융용어 표준화
-
-Status: In Progress
-
-표준 용어 예시:
-
-| 화면/원문 변형 | 표준 표시 |
+| 기존 Pod | 사용자에게 제공할 역할 |
 |---|---|
-| Official Land Price | 개별공시지가 |
-| Sales Rate | 누적 분양률 |
-| Unsold LTV | 미분양 LTV |
-| Repayment Reserve | 상환계좌 적립 |
-| Senior | 선순위 |
-| Mezzanine | 중순위 |
-| Junior | 후순위 |
-| Max Minus | 최대 부족자금 |
-| Cash Sweep | 분양수입금 상환적립 |
-| Exit Sale Rate | 대출금 회수 필요 분양률 |
-| Cure | 리스크 보완조치 |
+| 토지·법률 | 필지·권리·인허가 근거와 확인할 사항 정리 |
+| 시장·상품 | 비교사례, 상품 구성, 가격 가정 검토 |
+| 원가·공정 | 비용과 일정 입력 검토, 변경 영향 전달 |
+| 사업성·현금흐름 | 수익·월별 자금·부족자금과 가정 변경 비교 |
+| PF·신용 | 대출·상환·위험·보완조치 검토 |
+| 공공정책 | 현재 개발가능성 평가 범위를 유지하며 공공정책 특화 기능은 검증하며 확장 |
 
-적용 범위:
+문서 처리·증거·보고서 Agent도 각 단계의 기반으로 유지한다. 먼저 이 구조의
+입력과 산출물을 사용자 화면에서 끝까지 연결한다. 별도 Coding Pod 역시
+코드를 삭제하지 않으며, 미완료인 운영 활성화만 후순위로 둔다.
 
-- Chief Deal Room
-- Land
-- Marketability
-- Asset Comparison
-- Map
-- Report Studio
-- API error message
-- PDF/DOCX/Excel export
+### 기능별 진행 결정
 
-## 4. P1 — CalculationRun Registry and Auditability
+| 구분 | 기능 | 진행 결정 |
+|---|---|---|
+| 기존 구현을 연결해 먼저 제공 | 문서·Excel 입력, 숫자/출처 확인, 사업수지·CF·부족자금, PF 시나리오, 검토 초안 | 아래 R1–R3 순서로 완성. 기존 페이지와 API 재사용. |
+| 자료가 있으면 병행 | 토지 필지 확인, 업로드한 시장 비교사례, 인허가·법률 자료 정리 | 자료가 없는 항목을 명시하고 가능한 분석을 제공. |
+| 계정·자료 접근이 준비되면 확장 | 실거래·토지·법령 커넥터, 외부 팀 협업·정식 발행 | 실제 접근 조건이 갖춰진 기능부터 연결. 전 기능의 선행조건으로 삼지 않음. |
+| 현재 범위에서 보류 | 유료 인프라 신설, 결제 시스템, 자동 코딩 Worker, 자가 학습·자동 코드 수정, 리츠/펀드 전용 전체 흐름 | 첫 사용자 검토 흐름에 필요한 작업에 집중. 기존 계약·사용 중인 코드는 유지. |
+| 제품이 보장하지 않을 것 | 자료 없이 대출·인허가 확정, AI의 임의 금융 계산, 근거 없는 분양률·수익 보장 | 전문가가 판단할 수 있는 근거·가정·시나리오를 제공. |
 
-### P1-01 CalculationRun v2 완성
+기존 모듈의 상세 구현 여부는 [현재 구현 현황](current-implementation-status.md)을 따른다. 역사적 문서의 P0와 Done을 그대로 현재 작업 목록으로 복사하지 않는다.
 
-Status: In Progress
+## 3. 다음 구현 순서
 
-모든 계산 run은 다음을 저장한다.
+### R1. 자료에서 숫자 확인까지 — 첫 작업
 
-```json
-{
-  "calculationRunId": "calc:waterfall:...",
-  "engineKey": "waterfall",
-  "engineVersion": "calculation_scenario_engine_v1",
-  "inputEvidenceIds": [],
-  "assumptionIds": [],
-  "outputMetrics": [],
-  "riskIssueIds": [],
-  "sourceLocator": {},
-  "scenario": {},
-  "artifactRef": {},
-  "createdAt": "",
-  "updatedAt": ""
-}
-```
+2026-09-28 사용자가 구현과 GitHub 반영을 승인했다. 첫 변경은 기존 입력 패키지의
+사업수지 검토 영역에서 AI 없는 수동 입력, 원본 셀 확인, 수정·가정의 이유 저장,
+원 단위 보존, 저장값 재조회와 분석 화면 연결을 제공한다. 기간·상세 자금조달
+입력과 Parser V2 후보의 정식 승인 편집은 기존 전용 화면에서 계속 다룬다.
 
-엔진 목록:
+사용자 문제: 자료를 올린 뒤 어디를 고치고 무엇을 실행해야 하는지 여러 화면을 돌아다녀야 한다.
 
-- `feasibility`
-- `cashflow`
-- `cash_flow_engine`
-- `max_minus`
-- `waterfall`
-- `unsold_ltv`
-- `tranche_recovery`
-- `discount_stress`
-- `exit_sale_rate`
-- `ltv_ltc_dscr`
-- `pf_metrics`
+- 진입: `/project/[id]/input-package`와 `/project/[id]/documents/review`의 기존 흐름을 연결한다. 새 Agent나 별도 프로젝트 데이터 저장소를 만들지 않는다.
+- 기존 코드: `use_cases/document_review_workspace.py`, `parser_v2_records.py`, `feasibility_input_builder.py`, `approved_workbook_authority.py`.
+- 필수 확인: 프로젝트, 단위, 매출·원가·토지비, 사업기간, 자금조달 입력. 문서에 없는 값은 사용자 입력과 가정임을 기록한다.
+- 원본을 덮어쓰지 않고 후보 수정→저장→다시 열기→분석 실행으로 이어지는 다음 행동을 한 화면에서 알 수 있게 한다.
+- 외부 AI가 없을 때는 지원 가능한 구조화 Excel·텍스트 자료를 처리하고, 미지원 PDF/OCR은 수동 확인 경로를 제공한다. 로컬 모델 설치나 유료 키 구매를 선행시키지 않는다.
 
-추가 작업:
+완료 기준: 실제 자료 한 묶음에서 추출값의 원본 위치를 열고, 잘못 읽힌 값 하나를 수정·저장한 뒤 재열어 유지됨을 확인한다. 누락 항목 하나는 명시적 가정으로 분석에 반영되며 증거로 승격되지 않는다. 로컬 테스트는 원본과 분리한 복사본/임시 DB를 사용한다.
 
-- 모든 API에서 동일한 v2 schema 사용
-- engineVersion을 실제 코드 버전과 연결
-- 최신 run 선택 규칙 통일
-- 실패 run도 `status=failed`로 저장
-- 입력 hash와 실행 actor 저장
-- CalculationRun 간 parent/child 관계 저장
+첫 변경의 저장 계약:
 
-### P1-02 Evidence·Assumption·Metric·RiskIssue 1급 저장
+- 기존 `feasibility-workbook/apply-input`과 프로젝트 저장소를 사용한다. 별도 DB 테이블은 없다.
+- `GET feasibility-workbook/review`가 저장값, 항목별 검토 기록, 원본 목록과 검토 hash를 돌려준다.
+- 변경된 숫자만 `fieldReviews`, 항목별 `fieldSourceDocuments`, `expectedReviewHash`와 함께 저장한다. 오래된 검토 hash는 409이며, PostgreSQL 동시 쓰기는 기존 프로젝트 버전 검사를 유지한다.
+- 입력의 원본은 프로젝트에 보관된 문서로 서버에서 다시 확인한다. 원본 대조 기록도 `needsReview=true`, `approvalStatus=not_requested`이며 승인된 사실로 승격하지 않는다. 승인 workbook 기준값의 우선권은 유지한다.
+- 억원 소수 8자리까지 정확히 원 단위로 변환한다. 잘못된 숫자·소수 원·범위 초과·음수 비용을 일부 무시하고 저장하지 않는다. 음수 문서상 이익과 0은 보존한다.
+- `manual_review=true` 업로드는 외부 AI를 호출하지 않는다. 선택적으로 기존 AI 추출 경로를 이용할 수 있고, 분할 추출 응답도 표시한다. 미추출 항목은 빈 값으로 남긴다.
 
-승격 대상:
+남은 R1 검증은 실제 실무 자료의 전체 입력 묶음과 기간·대출 조건을 함께 재개해
+분석하는 것이다. 재현 가능한 소형 workbook의 저장·재조회 테스트를 실제
+사용자 파일럿 완료로 간주하지 않는다.
 
-- 보고서 문장
-- Excel 셀
-- API row
-- 문서 페이지
-- Agent artifact
-- 계산 metric
-- risk issue
-- 승인·Waive·Override 상태
+### R2. 가정 변경과 같은 기준의 결과 비교
 
-필수 연결:
+사용자 문제: 공사비·금리·분양가·일정 변경이 이익과 필요자금에 어떤 영향을 주는지 확인하기 어렵다.
 
-```text
-Report Paragraph
-  → Evidence
-  → CalculationRun / Metric
-  → Assumption
-  → RiskIssue
-  → Reviewer / Audit Event
-```
+- 기존 Feasibility·Cash Flow·PF 화면 및 결정론 계산 API를 이용한다.
+- 입력 단위·기간·CalculationRun·부모 계산 관계를 결과 화면과 다운로드에서 일치시킨다.
+- 먼저 기준안과 변경안 두 개를 비교한다. 이후 필요한 경우 하락·회수 시나리오를 확장한다.
+- 이익, 최대 부족자금, 월별 CF, 대출·상환 필요량을 설명하고, 계산할 수 없는 지표는 사유와 필요한 입력을 표시한다.
+- 재실행 UUID가 바뀐 것과 업무 숫자가 바뀐 것을 구분하는 비교 규칙을 정의한다. 기존 출처 hash는 유지한다.
 
-### P1-03 Evidence Graph 감사 화면
+완료 기준: 동일 입력의 반복 실행은 같은 업무 숫자를 보여준다. 한 가정 변경이 관계된 결과에만 반영되고 두 결과의 입력 기준을 다시 확인할 수 있다. 지원하지 않는 금융 옵션은 임의 기본값으로 처리하지 않는다.
 
-감사자가 확인할 수 있어야 하는 정보:
+### R3. 보완 요청과 검토 초안
 
-- 원본 파일명·hash
-- PDF 페이지
-- Excel sheet/cell/range
-- API provider·row locator
-- CalculationRun ID
-- engine version
-- assumption ID
-- Agent artifact key
-- 생성 시각
-- 검토자
-- 변경 이력
+사용자 문제: 결과는 많지만 무엇을 먼저 확인하고 다른 사람에게 어떻게 설명할지 알기 어렵다.
 
-### P1-04 Market-Product Pod
+- 기존 Risk·Evidence·Report 화면에서 우선 보완사항, 이유, 연결 문서, 다음 행동을 묶는다.
+- 근거가 있는 사실, 사용자 가정, 계산 결과, 미확인 항목을 초안에 구분해 담는다.
+- 기존 PDF/DOCX/Excel 생성 경로를 사용하고 동일한 입력·계산 버전을 표시한다.
+- 초안을 생성·저장하는 것과 최종 승인·발행 상태를 분리한다. 가능한 분석 초안은 제공하되 승인 상태를 꾸미지 않는다.
+- 검토된 PDF 기준 보고서/템플릿을 다음 실행에 연결하는 작업은 이 단계의 보고서 품질 과제로 처리한다.
 
-Status: 고도화 v1 Done (2026-07-10) — `agents/market_product_depth_agent.py` +
-`POST /projects/{id}/market-product-depth/analyze` + `components/market/market-depth-panel.tsx`.
-market_product Pod 아티팩트에 `marketProductDepth` 주입, Pod AI Reviewer가 소비.
+완료 기준: 초안을 다시 열고 수치 하나를 원본/가정/계산까지 추적할 수 있다. 자료를 추가한 뒤 보완사항과 관련 결과가 갱신되고, 관계없는 기존 검토가 사라지지 않는다.
 
-- 비교사례 자동 수집 ✅ (라이브 국토부 실거래가; 밸류맵 제휴 대기)
-- 제안 분양가 기준 검증 ✅ (공공 실거래 중위값 앵커)
-- **자료 제공주체 명명·비교 (시행사/매각주관사)** ✅ (dataProvider 우선·문서유형/파일명 추론)
-- 흡수율 모델 ✅ (월별 곡선; 예측 없으면 자산유형 벤치마크)
-- 상품유형별 Score ✅ (A~E)
-- **AI 추가필요작업 판단** ✅ (completeness critic, AIConnection+결정론 폴백)
-- 임대료·Cap Rate 검증 🟡 (income asset 축은 product planning/feasibility에서, 심화는 후속)
-- 청약경쟁률 ❌ / 미분양 통계 ❌ / 경쟁공급 지도 ❌ (외부데이터 의존 — 소스 확보 후)
-- 민간 데이터 license metadata 🟡
+### R4. 실제 사용자 한 명의 업무로 검증
 
-### P1-05 Cost-Schedule Pod
+R1–R3가 끝나면 실무자 한 명이 자기 자료로 “접수→수정→비교→초안”을 직접 수행한다. 막힌 화면·중복 입력·오해한 표현을 기록하고 그 항목부터 수정한다. 사용할 실제 자료와 검토할 사람은 아직 확정하지 않았다. 원본 751 기록을 임의 승인·복원하거나 정답 fixture로 덮어쓰지 않는다.
 
-- 직접공사비
-- 간접공사비
-- 설계·감리비
-- 금융비용
-- 공정률
-- 공사기간
-- 책임준공
-- 공사비 증액
-- 시공사 신용
-- VE 시나리오
-- 비용·일정 변경 시 downstream 재계산 이벤트
+외부 사용자가 접속하는 단계에서는 해당 흐름의 계정·테넌트·원본 접근·백업 복구·운영 연결을 검증한다. Coding Worker, 결제, 모든 외부 데이터 제공자의 완성은 이 사용자 검토의 전제조건이 아니다.
 
-### P1-06 Product Planning Agent
+## 4. 빠르게 만들기 위한 작업 규칙
 
-Status: Done (v1, 2026-07-10) — `agents/product_planning_agent.py` + `use_cases/product_planning.py`
-+ `POST /projects/{id}/product-planning/compare` + `components/product/product-planning-panel.tsx`
-(자산비교 페이지). 토지·규제에서 자산유형별 상품기획을 결정론 산출. 전용률·평형·주차원단위는
-`PLANNING_BENCHMARKS`(basis=planning_benchmark, override 가능), 가격 근거 없으면 분양수입/NOI
-미산정. LLM은 계산자가 아니라 market_product Pod 리뷰어로 근거검토만 얹는 구조(후속).
+1. 한 변경은 사용자 행동 하나를 끝낸다. 기존 Agent·Pod의 책임과 연결을 유지하고, 기능을 흉내 내는 새 화면과 호출자가 없는 추상화는 만들지 않는다.
+2. 짧은 목적·입출력·저장 위치·완료 기준을 기존 문서에 적고 구현한다. 경미한 수정에 별도 사양서와 승인 회의를 요구하지 않는다.
+3. 확인되지 않은 입력은 가정 또는 누락으로 표현한다. 계산 가능한 부분까지 멈추지 않는다.
+4. 회귀 위험에 맞는 테스트를 실행한다. 작은 문구 변경마다 전체 서비스를 재검증하는 절차를 추가하지 않는다.
+5. 사용하지 않는 코드, 중복 로직, 예제 앱과 임시 산출물은 참조를 확인한 뒤 삭제한다. 회귀 테스트·원본·마이그레이션은 역할이 있으므로 보존한다.
+6. 신규 유료 인프라·유료 LLM 호출은 보류한다. 기존 PC와 사용 가능한 환경으로 먼저 사용자 가치를 입증한다.
 
-대상 자산:
+개발 보조 예약은 사용자의 Codex 앱에서 매일 한국시간 11:30, 12:30, 13:30에
+이 대화로 복귀하도록 설정했다. 승인된 작업의 코딩·테스트·GitHub 반영을 수행하고
+DB 변경은 검토 후 반영한다. 컴퓨터와 앱이 켜져 있어야 하며, 13:50부터 정리해
+14:00에 마치도록 지시했다. 이 지시는 운영체제의 강제 종료 타이머가 아니다.
+제품 내부 Coding Pod/Worker를 운영 활성화한 것이 아니며 앱 설정은 Git에 들어가지 않는다.
 
-- 아파트
-- 오피스텔
-- 상가
-- 지식산업센터
-- 물류센터
-- 생활형숙박시설
-- 리츠·임대형 자산
+계산의 정확성·출처·개인정보·최종 승인 권한은 제품 신뢰를 위해 유지한다. 이 경계는 모든 탐색과 초안을 차단하는 이유로 확대하지 않는다.
 
-출력:
+## 5. 출시와 유지보수 기준
 
-- 대지·연면적
-- 세대수·호실수
-- 전용률
-- 주차대수
-- 분양가
-- 임대료
-- Cap Rate
-- 상품별 사업수지
-- 상품별 Cash Flow
-- 추천 상품 Mix
+- 로컬 분석 도구: R1–R3의 저장·재개·오류 상태와 관련 계산 회귀 확인.
+- 제한된 외부 파일럿: R4에 필요한 실제 인증·데이터 접근·백업·실행 상태 확인.
+- 정식 승인·발행: 기존 보고서/권한/증빙 계약에 따른 인수. 기능 개발과 별개로 해당 행위의 기준 적용.
+- 결함이 발견되면 먼저 작은 재현과 수정을 완료한다. 배포 전 의존성·접근 권한을 확인하고, 사용 중에는 실패 작업과 계산 지연을 관찰한다. 자료 제공자나 규칙이 바뀌면 영향받는 경로를 확인한다.
 
-### P1-07 Covenant / EOD Agent
-
-Status: Done (v1, 2026-07-10) — `agents/covenant_eod_agent.py` + `use_cases/covenant_eod.py`
-+ `POST /projects/{id}/covenant-eod/evaluate`. 결정론 feasibility/PF 산출값에서 커버넌트
-임계값과 EOD 조건을 도출하며 각 항목에 source locator를 부여한다. `covenant_monitoring`
-(사후 모니터링)과 구분되는 **정의(definition) 엔진**이다.
-
-- 목표 분양률 (Exit 분양률 기준) ✅
-- LTV 상한 (자산 프로파일) ✅ / LTC 상한·최소 DSCR (대주 정책 기본값, 라벨 명시) ✅
-- 책임준공 ✅
-- 할인분양 (EOD 트리거) ✅
-- Cash Sweep 개시 분양률 ✅
-- 상환계좌 배분 (Tranche 우선순위→시공사) ✅
-- 공사비 초과 충당 ✅
-- Equity 선투입 (requiredEquity) ✅
-- EOD 조건 5~6종 ✅
-- 조건별 source locator ✅ + **담당 reviewer 매핑** ✅ (2026-07-10): 각 covenant/EOD에
-  `responsibleReviewer`(credit_reviewer/market_stress_tester/construction_risk 등).
-- **TermSheet 소비 연결** ✅ (2026-07-10): `credit_documents.generate_credit_documents`가
-  `termSheetCovenants`를 `project_data.covenants`에 병합(리뷰어 override 우선) → term sheet가
-  실제 값 렌더. `covenantEod` 산출물도 노출.
-- **PF 화면 패널** ✅ (2026-07-10): `components/pf/covenant-eod-panel.tsx` → `/project/[id]/pf-structure`.
-- **Covenant Sheet export** ✅ (2026-07-10): `covenantSheet`(한국어 마크다운) — 커버넌트 표+EOD+담당;
-  PF 패널 다운로드 버튼(.md). Report Studio 통합 export(PDF/DOCX)는 P1-09에서.
-
-무조작: 수치 근거 없으면 `needs_evidence` + dataQualityNote, 정책 기본값은
-`sourceType=lender_policy_default`로 명시. P1-07 완결.
-
-### P1-08 PF-Credit 고도화
-
-- 대주단별 credit policy
-- 선순위·중순위·후순위 구조
-- Tranche별 회수율
-- Senior shortfall
-- Mezzanine shortfall
-- Junior recovery
-- 추가 담보
-- Bulk Sale
-- 선매입
-- Refinancing
-- DSRA
-- cure 전후 비교표
-
-### P1-09 Report Studio
-
-대상 산출물:
-
-- 토지검토서
-- 사업성 검토서
-- 사업수지표
-- Cash Flow
-- PF 심사보고서
-- IC Memo
-- Term Sheet
-- Covenant Sheet
-- Monitoring Sheet
-
-각 문단은 다음을 포함한다.
-
-- Evidence IDs
-- Metric IDs
-- Assumption IDs
-- Risk Issue IDs
-- source locator completeness
-- 생성 Agent
-- 검토 상태
-
-## 5. P1 — Data and Infrastructure
-
-### P1-10 PostgreSQL 전환
-
-- SQLite MVP 종료
-- migration 체계
-- project/tenant isolation
-- CalculationRun 인덱스
-- evidence locator 검색 인덱스
-- risk status 인덱스
-- audit log 보존정책
-- backup/restore
-
-### P1-11 Object Storage 운영화
-
-대상:
-
-- 사업계획서
-- 토지조서
-- 사업수지 Excel
-- 등기부
-- 공시지가 PDF
-- 리포트 PDF/DOCX
-
-필수 metadata:
-
-- hash
-- uploader
-- uploadedAt
-- documentType
-- parserVersion
-- download permission
-- retention policy
-
-### P1-12 Background Worker
-
-- 대용량 PDF 파싱
-- Excel 검증·import
-- 112필지 PNU 처리
-- VWorld 보강
-- 실거래가 수집
-- 시나리오 일괄 계산
-- PDF/DOCX 생성
-- 재시도·실패·중복방지
-
-### P1-13 Event Bus 운영화
-
-- 이벤트 영속화
-- retry policy
-- idempotency key
-- 실패 상태
-- downstream Pod 재계산
-- event audit trail
-- 수동 재처리 버튼
-
-## 6. P1 — Authentication and Security
-
-### P1-14 실제 로그인
-
-- OIDC
-- JWKS/RS256
-- Kakao 로그인
-- 세션 검증
-- 로그아웃 시 임시 LLM key 폐기
-- tenant isolation
-
-### P1-15 RBAC
-
-역할:
-
-- 심사역
-- 관리자
-- 검토자
-- 승인자
-- 감사자
-- 외부 사용자
-
-권한:
-
-- 조회
-- 업로드
-- 원본 다운로드
-- 승인
-- Waive
-- Override
-- cure 선택
-- 리포트 export
-- admin 설정
-
-### P1-16 Secret Manager
-
-저장 대상:
-
-- Gemini API Key
-- OpenAI API Key
-- Anthropic API Key
-- VWorld API Key
-- 국토부 API Key
-- Kakao Key
-
-금지:
-
-- DB 평문 저장
-- 로그 기록
-- report export 포함
-- frontend localStorage 영구 저장
-
-### P1-17 사용자 감사 로그
-
-- 로그인
-- 파일 업로드
-- 원본 다운로드
-- AI Brain 사용
-- token usage
-- cure 선택
-- 승인
-- Waive
-- Override
-- 리포트 export
-- Gate 결과 변경
-
-## 7. P2 — Learning and Product Expansion
-
-### P2-01 Historical Similar Case Search
-
-- 과거 PF 심사
-- 승인 여부
-- 실제 분양률
-- 실제 할인율
-- 상환완료
-- EOD 발생
-- 손실 여부
-- 회수율
-- 실제 공사비
-- 실제 준공기간
-- 유사 리스크 처리 결과
-
-### P2-02 Learning Loop
-
-- 심사역 수정
-- 승인조건 변경
-- 용어 승인
-- 리스크 Waive
-- 실제 사후성과
-- 예측값과 실제값 비교
-- 모델 drift 감시
-
-### P2-03 LLM Brain 고도화
-
-- Parser Brain
-- Land-Legal Reviewer
-- Market Reviewer
-- Feasibility Reviewer
-- Cash Flow Reviewer
-- PF-Credit Reviewer
-- Risk Committee Reviewer
-- Report Reviewer
-
-LLM의 판단은 반드시 다음을 포함한다.
-
-- evidence IDs
-- source locators
-- confidence
-- review mode
-- model/provider
-- token usage
-- deterministic result와의 구분
-
-### P2-04 LLM Provider Routing
-
-우선순위:
-
-1. 사용자 API Key
-2. 조직 API Key
-3. REALYTICS 기본 Gemini 무료 모드
-4. deterministic fallback
-
-저장·감사:
-
-- 모델명
-- provider
-- Agent ID
-- selection source
-- token usage
-- latency
-- fallback reason
-- 비용 추정
-
-### P2-05 모바일·카카오 업무 흐름
-
-- 카카오 자료 접수
-- 업무 트랙 선택
-- 보완자료 요청
-- Gate 상태 알림
-- 승인·Waive 요청
-- 모바일 심사
-- 메시지 발송 audit log
-
-### P2-06 리츠·펀드·실물금융 트랙
-
-- 리츠 편입심사
-- 임대수익
-- NOI
-- Cap Rate
-- 배당가능이익
-- 펀드 설정
-- 투자자금·대출·배당
-- 실물자산 매입
-- 임대차·공실·리파이낸싱
-
-### P2-07 운영·배포
-
-- staging
-- production
-- CI/CD
-- DB migration pipeline
-- 모니터링
-- 장애 알림
-- backup/restore
-- 보안 점검
-- 개인정보 보호
-- API rate limit
-- 운영 runbook
-
-## 8. Recommended Coding Order
-
-### Sprint 1 — Approval Critical Path
-
-- Cash Flow 화면 mock 제거
-- 최신 CalculationRun 연결
-- Gate v2 UI 정리
-- 실제 cure E2E
-- 112필지 파일럿 재실행
-
-### Sprint 2 — Evidence and Calculation Audit
-
-- CalculationRun v2 전 엔진 적용
-- Evidence/Assumption/Metric/RiskIssue 원장 승격
-- Evidence Graph 감사 화면
-- Report paragraph evidence link 검증
-
-### Sprint 3 — Domain Pod Depth
-
-- Market-Product Pod
-- Cost-Schedule Pod
-- Product Planning Agent
-- Covenant/EOD Agent
-- PF-Credit cure 비교
-
-### Sprint 4 — Infrastructure
-
-- PostgreSQL
-- Object Storage
-- Background Worker
-- Event Bus
-- migration·backup·monitoring
-
-### Sprint 5 — Security and Users
-
-- OIDC/JWKS
-- Kakao login
-- tenant isolation
-- RBAC
-- Secret Manager
-- 사용자 감사 로그
-
-### Sprint 6 — Learning and Expansion
-
-- Historical Similar Case outcome
-- Learning Loop
-- LLM Brain routing
-- 모바일·카카오 업무
-- 리츠·펀드·실물금융 트랙
-
-## 9. Definition of Done for Pilot Approval
-
-- [ ] 실제 사업계획서와 토지조서가 서버에 저장됨
-- [ ] 112필지 모두 원장에 저장됨
-- [ ] PNU 검증 결과가 필지별로 존재함
-- [ ] 공시지가 기준연도·가격·출처가 존재함
-- [ ] 등기 evidence 상태가 필지별로 존재함
-- [ ] 시장 비교사례 또는 자동보강 근거가 존재함
-- [ ] 사업수지 CalculationRun 존재
-- [ ] Cash Flow CalculationRun 존재
-- [ ] Waterfall·Unsold LTV·Tranche Recovery run 존재
-- [ ] 모든 핵심 metric에 source locator 존재
-- [ ] blocking risk가 승인·Waive·resolved·cure 중 하나로 처리됨
-- [ ] cure 증빙이 연결됨
-- [ ] 재계산 후 최신 run이 Gate에 반영됨
-- [ ] Approval Readiness Gate가 `ready` 또는 정직한 `not_ready`로 표시됨
-- [ ] 최종 심사보고서와 승인조건이 생성됨
-- [ ] 사용자의 모든 승인·수정·다운로드 행위가 audit log에 남음
-
-## 10. Known Non-Goals
-
-- LLM이 Excel 수식을 대체하지 않는다.
-- LLM이 PNU·공시지가·등기 상태를 임의로 생성하지 않는다.
-- 자료가 없다는 이유만으로 모든 작업을 차단하지 않는다. 자동 보강 후에도 부족한 항목만 명시적으로 차단한다.
-- Approval Readiness와 보고서 생성 완료를 동일하게 취급하지 않는다.
-- SQLite MVP를 PostgreSQL 운영환경으로 표시하지 않는다.
+이 문서는 과거 `mvp-definition`, `service-development-roadmap`, `release-plan`, `maintenance-plan`의 역할을 통합했다. 그 문서들의 원문과 이전 로드맵은 [통합 이전 기록](../archive/documentation-baseline-2026-09-28.md)에 남아 있다. 관련 기능 명세는 [전체 문서 지도](../README.md)에서 찾는다.

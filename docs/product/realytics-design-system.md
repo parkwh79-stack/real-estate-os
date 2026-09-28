@@ -1,12 +1,14 @@
 # REALYTICS Design System
 
-Updated: 2026-07-27
+Updated: 2026-09-28
 Status: Approved design contract v1; token/state-axis foundation implemented, screen migration incomplete
 Primary users: Korean real-estate development, PF, credit, legal, and investment professionals
 
 Implementation note (2026-07-22): `apps/web/app/globals.css` and the Tailwind
-theme expose the v1 semantic tokens. `@repo/ui` now provides controlled Button,
-Card, FinancialMetric, and five independent state-axis badges. The former
+theme expose the v1 semantic tokens. `@repo/ui` provides FinancialMetric and
+independent state-axis badges used by the Web application. Unused package-level
+Button/Card/Code exports were removed on 2026-09-28 together with the starter
+docs app; active Web controls and their design requirements remain. The former
 create-turbo alert/link behavior is removed. Existing routes that still use a
 generic status pill or raw slate/emerald/amber/rose classes remain migration
 work and must not be treated as design-system compliant yet.

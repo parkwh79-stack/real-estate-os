@@ -160,7 +160,9 @@ from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_c
 from agents.land_ledger_agent import LandLedgerParseError
 from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case, enrich_land_ledger_use_case
 from use_cases.feasibility_workbook_llm import (
+    FeasibilityReviewConflict,
     apply_feasibility_input_use_case,
+    feasibility_review_state,
     extract_feasibility_fields_via_llm,
 )
 from use_cases.intake_finalize import finalize_project_intake_use_case
@@ -2437,21 +2439,23 @@ async def extract_project_feasibility_workbook(
     file: UploadFile = File(...),
     x_realytics_user_id: str | None = Header(default=None),
     x_realytics_ai_provider: str | None = Header(default=None),
+    manual_review: bool = Query(False),
 ):
-    """LLM-extract financial figures from an arbitrary 사업수지 workbook (any layout).
+    """Archive a workbook for manual review or request optional LLM extraction.
 
     Returns a reviewable draft with per-field source-cell evidence + detected unit.
-    Does NOT persist — the reviewer applies via /feasibility-workbook/apply-input.
+    Financial values are applied separately via /feasibility-workbook/apply-input.
     """
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    enforce_project_tenant_scope(request, _project_store()[project_id])
     suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
+    if suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise HTTPException(status_code=400, detail=".xlsx 또는 .xlsm 파일로 저장해 올려 주세요.")
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail={"error": "empty_file", "message": "빈 파일입니다."})
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
     archive_meta = archive_source_document_use_case(
         upload_archive_repository(),
         project_id,
@@ -2467,16 +2471,23 @@ async def extract_project_feasibility_workbook(
         "contentType": file.content_type,
         "fileSizeBytes": len(content),
         "uploadedAt": now_iso(),
-        "parserVersion": "feasibility-workbook-llm-extract-v1",
+        "parserVersion": "manual-workbook-review-v1" if manual_review else "feasibility-workbook-llm-extract-v1",
         **archive_meta,
     }
     save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
+    if manual_review:
+        return {"project_id": project_id, "upload": upload_meta, "parsingSource": "manual_review",
+                "fields": {}, "analysisOnly": True, "reportEligible": False,
+                "note": "원본을 보관했습니다. 출처 셀을 확인하고 필요한 값을 직접 입력하세요."}
     ai_context = ai_context_from_request(
         request,
         explicit_provider=x_realytics_ai_provider,
         explicit_user_id=x_realytics_user_id,
     )
     ai_context = {**ai_context, "project_id": project_id, "agent_id": "FeasibilityWorkbookLLMAgent"}
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
     try:
         draft = extract_feasibility_fields_via_llm(tmp_path, ai_context)
     finally:
@@ -2485,12 +2496,47 @@ async def extract_project_feasibility_workbook(
     return {"project_id": project_id, "upload": upload_meta, **draft}
 
 
+@router.get("/{project_id}/feasibility-workbook/review")
+def get_project_feasibility_review(project_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    return {**feasibility_review_state(project), "sourceDocuments": [
+        {key: item.get(key) for key in ("archiveId", "originalFileName")}
+        for item in source_document_repository().list(project_id)
+        if item.get("archiveId") and str(item.get("originalFileName") or "").lower().endswith((".xlsx", ".xlsm"))
+    ]}
+
+
 @router.post("/{project_id}/feasibility-workbook/apply-input")
 def apply_project_feasibility_input(project_id: str, request: Request, input_data: Dict[str, Any]):
-    """Persist a reviewer-confirmed feasibility_input (from the LLM extract draft)."""
+    """Save reviewed analysis inputs without promoting them to approved evidence."""
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "assumption:override")
+    enforce_project_tenant_scope(request, _project_store()[project_id])
+    source_document = input_data.get("sourceDocument") or {}
+    if not isinstance(source_document, dict):
+        raise HTTPException(status_code=400, detail="원본 문서 정보를 확인하세요.")
+    archive_id = source_document.get("archiveId")
+    if archive_id:
+        stored_source = source_document_repository().find_by_archive_id(project_id, str(archive_id))
+        if not stored_source:
+            raise HTTPException(status_code=400, detail="이 프로젝트에 보관된 원본 문서가 아닙니다.")
+        source_document = {"archiveId": archive_id, "originalFileName": stored_source.get("originalFileName")}
+    else:
+        source_document = None
+    submitted_sources = input_data.get("fieldSourceDocuments") or {}
+    if not isinstance(submitted_sources, dict):
+        raise HTTPException(status_code=400, detail="항목별 원본 문서 정보를 확인하세요.")
+    field_source_documents = {}
+    for field, reference in submitted_sources.items():
+        if not isinstance(reference, dict) or not reference.get("archiveId"):
+            raise HTTPException(status_code=400, detail=f"{field}: 원본 문서를 선택하세요.")
+        stored = source_document_repository().find_by_archive_id(project_id, str(reference["archiveId"]))
+        if not stored:
+            raise HTTPException(status_code=400, detail="이 프로젝트에 보관된 원본 문서가 아닙니다.")
+        field_source_documents[field] = {"archiveId": stored["archiveId"], "originalFileName": stored.get("originalFileName")}
     feasibility_input = input_data.get("feasibility_input") or input_data.get("feasibilityInput") or {}
     try:
         result = apply_feasibility_input_use_case(
@@ -2498,8 +2544,13 @@ def apply_project_feasibility_input(project_id: str, request: Request, input_dat
             project_id,
             feasibility_input,
             applied_by=user_id_from_request(request),
-            source_document=input_data.get("sourceDocument"),
+            source_document=source_document,
+            field_reviews=input_data.get("fieldReviews"),
+            field_source_documents=field_source_documents,
+            expected_review_hash=input_data.get("expectedReviewHash"),
         )
+    except FeasibilityReviewConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

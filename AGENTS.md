@@ -75,6 +75,12 @@ full-run orchestration test.
 
 ## 4. Documentation & change convention (REQUIRED on every change)
 
+Current product scope and next work are owned by
+[`docs/product/realytics-os-next-work-roadmap.md`](docs/product/realytics-os-next-work-roadmap.md).
+Use [`docs/README.md`](docs/README.md) to distinguish current contracts from
+historical results and expansion designs. A dated audit is evidence for that
+revision, not a new requirement to redo completed work.
+
 1. **`docs/backlog.md` is the change log.** Every change adds a dated row
    (`| Priority | Module | Task | Status | Notes |`) at the top of the table with
    what/why/where. Bump the `Updated:` date.
@@ -89,6 +95,40 @@ full-run orchestration test.
    add tests for new behavior. Do not commit on a red suite.
 5. **Respect the invariants in §1.** If a change would touch them, stop and raise
    it — do not quietly change the framework.
+
+### Product delivery and deletion policy (2026-09-28 user direction)
+
+- Preserve the existing Chief Pods, business Agents, typed handoffs and the
+  27-step PF workflow. They are the product's working architecture, not cleanup
+  candidates. Improve their integration and outputs. The user explicitly
+  reaffirmed this boundary during the documentation review.
+- Continue diagnosis, reference checks and relevant verification autonomously.
+  Present proposed Agent/Pod structural changes or major feature additions and
+  removals for user approval before implementation. This does not require a new
+  approval for routine work already authorized in the conversation.
+- Deliver a complete user action: input, useful result, save/reopen, and a
+  comprehensible failure state. Prefer completing the existing path over adding
+  another Agent, framework, screen shell, or roadmap.
+- Remove demonstrably unused code, abandoned templates, duplicate implementations,
+  and disposable generated outputs in the same change. Check imports, routes,
+  dynamic registries, scripts, and tests first; remove obsolete wiring and update
+  the lockfile. Keep regression tests, fixtures, original business evidence,
+  active data and migrations. Unused runtime output is not unused source code.
+- Do not retain speculative abstractions merely for possible future use. Name a
+  current caller and user benefit before adding an abstraction or a new Agent.
+  Dynamic registry entries and indirect Pod calls are callers; a missing direct
+  import is not evidence that an Agent is unused.
+- Keep local exploration moving with explicit user assumptions, partial results,
+  and clear limitations. Missing approval evidence must not block unrelated
+  analysis. Final approval, financial truth, tenant boundaries and publication
+  still use their existing controls.
+- Scale documentation and verification to the change. A routine cleanup or UI
+  fix needs a short purpose and relevant checks; it does not require a new SDD
+  package. Put the next feature's acceptance criteria in the existing roadmap.
+- New paid infrastructure and paid provider calls remain deferred. This is a
+  development constraint, not permission to bypass existing access controls.
+- Clean temporary artifacts created by your own verification after recording
+  the result. Do not accumulate new audit scripts or full test logs in source.
 
 ## 5. Progressive Stub / Placeholder / Mock Rule
 
@@ -149,7 +189,7 @@ Forbidden in production-critical paths:
 
 ```bash
 # API tests
-cd services/api-server && ../../.runtime/api-venv/Scripts/python.exe -m pytest -q
+cd services/api-server && ../../.runtime/api-venv/Scripts/python.exe -B -m pytest -q -p no:cacheprovider
 # Web checks
 cd apps/web && npx tsc --noEmit && npm run lint
 # Run locally

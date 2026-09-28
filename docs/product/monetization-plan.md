@@ -3,6 +3,11 @@
 Updated: 2026-07-22
 Status: Pilot commercial direction; exact pricing requires business approval
 
+2026-09-28 scope: retain this commercial design for later adoption. Billing
+implementation and a paid contract are not prerequisites for the current local
+product-development exercise. New paid infrastructure/services remain deferred.
+Existing authorization and tenant controls are unchanged.
+
 The authoritative system and data contract is
 `docs/product/billing-entitlement-contract.md`.
 
