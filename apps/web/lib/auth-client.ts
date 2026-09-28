@@ -61,9 +61,9 @@ export interface SupabaseAuthReadiness {
   checkedAt: string;
   configured: boolean;
   settingsReachable: boolean;
-  providers: { google: boolean; kakao: boolean };
-  providerUsable: { google: boolean; kakao: boolean };
-  providerReady: { google: boolean; kakao: boolean };
+  providers: { google: boolean; kakao: boolean; naver: boolean };
+  providerUsable: { google: boolean; kakao: boolean; naver: boolean };
+  providerReady: { google: boolean; kakao: boolean; naver: boolean };
   canonicalOriginReady: boolean;
   configurationReady: boolean;
   backend: {
@@ -980,7 +980,7 @@ export async function revokeTenantInvitation(
 }
 
 export async function signInWithSupabaseOAuth(
-  provider: "google" | "kakao",
+  provider: "google" | "kakao" | "naver",
   nextPath = "/start",
   options: { switchAccount?: boolean } = {},
 ) {

@@ -33,8 +33,49 @@ test("unauthenticated users can reach the real login entry point", async ({ page
   await expect(page.getByLabel("이메일")).toBeVisible();
   await expect(page.getByLabel("비밀번호", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "비회원으로 체험" })).toBeVisible();
-  await expect(page.getByText(/Google·Kakao는 가입과 기관 승인이 끝난 뒤/)).toBeVisible();
+  await expect(page.getByRole("region", { name: "간편 로그인" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "네이버 로그인 · 준비 중" })).toBeDisabled();
   await expect(page.getByRole("button", { name: /Google 계정으로 로그인/ })).toHaveCount(0);
+});
+
+test("login and signup offer enabled social providers without bypassing email forms", async ({ page }) => {
+  await page.route("**/api/backend/auth/me", (route) => route.fulfill({ status: 401, json: { error: "unauthenticated" } }));
+  await page.route("**/api/auth/supabase/readiness", (route) => route.fulfill({ json: {
+    providerUsable: { google: true, kakao: true, naver: false },
+  } }));
+  await page.goto("/login");
+  await expect(page.getByRole("button", { name: "카카오로 계속하기" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Google 계정으로 로그인" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "네이버 로그인 · 준비 중" })).toBeDisabled();
+  await page.getByRole("tab", { name: "처음이신가요? 가입 신청" }).click();
+  await expect(page.getByRole("button", { name: "이메일 가입 신청" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "카카오로 계속하기" })).toBeEnabled();
+  let oauthPath = "";
+  await page.route("**/api/auth/supabase/oauth?**", async (route) => {
+    oauthPath = route.request().url();
+    await route.fulfill({ contentType: "text/html", body: "OAuth test boundary" });
+  });
+  await page.getByRole("button", { name: "카카오로 계속하기" }).click();
+  await expect.poll(() => oauthPath).toContain("provider=kakao");
+});
+
+test("verified Naver uses the same-origin OAuth entry and preserves the destination", async ({ page }) => {
+  await page.route("**/api/backend/auth/me", (route) => route.fulfill({ status: 401, json: { error: "unauthenticated" } }));
+  await page.route("**/api/auth/supabase/readiness", (route) => route.fulfill({ json: {
+    providerUsable: { google: true, kakao: true, naver: true },
+  } }));
+  let oauthPath = "";
+  await page.route("**/api/auth/supabase/oauth?**", async (route) => {
+    oauthPath = route.request().url();
+    await route.fulfill({ contentType: "text/html", body: "OAuth test boundary" });
+  });
+  await page.goto("/login?next=/project/sample&switch=1");
+  await page.getByRole("button", { name: "네이버로 계속하기" }).click();
+  await expect.poll(() => oauthPath).toContain("provider=naver");
+  const started = new URL(oauthPath);
+  expect(started.pathname).toBe("/api/auth/supabase/oauth");
+  expect(started.searchParams.get("next")).toBe("/project/sample");
+  expect(started.searchParams.get("switch")).toBe("1");
 });
 
 test("signup collects profile intent and both versioned consents", async ({ page }) => {

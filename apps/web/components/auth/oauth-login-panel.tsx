@@ -8,7 +8,7 @@ import {
   type SupabaseAuthReadiness,
 } from "../../lib/auth-client";
 
-type Provider = "google" | "kakao";
+type Provider = "google" | "kakao" | "naver";
 
 export function OAuthLoginPanel() {
   const [readiness, setReadiness] = useState<SupabaseAuthReadiness | null>(null);
@@ -34,7 +34,7 @@ export function OAuthLoginPanel() {
   }, []);
 
   const providers = useMemo(
-    () => (["google", "kakao"] as Provider[]).filter((provider) => (
+    () => (["google", "kakao", "naver"] as Provider[]).filter((provider) => (
       readiness?.providerUsable?.[provider]
     )),
     [readiness],
@@ -89,16 +89,25 @@ export function OAuthLoginPanel() {
           className="flex h-11 w-full items-center justify-center gap-3 rounded-xl border border-[#e7d000] bg-[#FEE500] text-sm font-bold text-[#191919] hover:bg-[#f5dc00] disabled:opacity-60"
         >
           {busy === "kakao" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4 fill-current" />}
-          Kakao 계정으로 로그인
+          카카오로 계속하기
         </button>
       ) : null}
+      <button
+        type="button"
+        onClick={() => void start("naver")}
+        disabled={busy !== null || !providers.includes("naver")}
+        className="flex h-11 w-full items-center justify-center gap-3 rounded-xl border border-[#028b3f] bg-[#03a94e] text-sm font-bold text-white hover:bg-[#028b3f] disabled:opacity-60"
+      >
+        {busy === "naver" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
+        {providers.includes("naver") ? "네이버로 계속하기" : "네이버 로그인 · 준비 중"}
+      </button>
       {!providers.length ? (
         <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
           현재 사용할 수 있는 연결 계정 공급자가 없습니다. 이메일 로그인을 이용해 주세요.
         </p>
       ) : null}
       <p className="text-[11px] leading-5 text-slate-500">
-        연결 계정은 본인 인증 수단입니다. 기관·역할·승인 권한은 PostgreSQL 멤버십에서 별도로 확인합니다.
+        처음 이용하면 가입 안내로 이동합니다. 프로젝트 접근은 소속 기관의 초대 또는 승인 후 가능합니다.
       </p>
     </div>
   );

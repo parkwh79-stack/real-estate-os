@@ -579,7 +579,25 @@ test("OAuth start canonicalizes an alternate loopback host before issuing PKCE s
   ).toBe(false);
 });
 
-test("auth readiness is secret-safe and reports both production providers", async ({
+test("Naver OAuth is gated until deployment verification and otherwise uses Supabase PKCE", async ({ request }) => {
+  const response = await request.get("/api/auth/supabase/oauth?provider=naver&next=/project/sample", { maxRedirects: 0 });
+  const location = new URL(response.headers().location!);
+  if (process.env.REALYTICS_NAVER_OAUTH_VERIFIED === "true") {
+    expect(location.pathname).toBe("/auth/v1/authorize");
+    expect(location.searchParams.get("provider")).toBe("custom:naver");
+    expect(location.searchParams.get("code_challenge_method")).toBe("s256");
+    expect(location.searchParams.get("code_challenge")).toBeTruthy();
+  } else {
+    expect(location.pathname).toBe("/login");
+    expect(location.searchParams.get("error")).toBe("naver_not_configured");
+    expect(response.headers()["set-cookie"]).toBeUndefined();
+  }
+  expect(response.headers()["cache-control"]).toContain("no-store");
+  const arbitraryProvider = await request.get("/api/auth/supabase/oauth?provider=custom:untrusted", { maxRedirects: 0 });
+  expect(arbitraryProvider.status()).toBe(400);
+});
+
+test("auth readiness is secret-safe and reports configured social providers", async ({
   request,
 }) => {
   const response = await request.get("/api/auth/supabase/readiness");
@@ -589,16 +607,19 @@ test("auth readiness is secret-safe and reports both production providers", asyn
   expect(body.providers).toEqual({
     google: expect.any(Boolean),
     kakao: expect.any(Boolean),
+    naver: expect.any(Boolean),
   });
   expect(body.providerUsable).toEqual({
     google: expect.any(Boolean),
     kakao: expect.any(Boolean),
+    naver: expect.any(Boolean),
   });
   expect(body.providerReady).toEqual({
     google: expect.any(Boolean),
     kakao: expect.any(Boolean),
+    naver: expect.any(Boolean),
   });
-  for (const provider of ["google", "kakao"] as const) {
+  for (const provider of ["google", "kakao", "naver"] as const) {
     expect(body.providerReady[provider]).toBe(Boolean(
       body.configured
         && body.settingsReachable

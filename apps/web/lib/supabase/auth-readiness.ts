@@ -73,6 +73,9 @@ export async function inspectSupabaseAuthReadiness() {
   const providers = {
     google: providerEnabled(settings, "google"),
     kakao: providerEnabled(settings, "kakao"),
+    // Custom providers are absent from GoTrue's public /settings response.
+    // Enable only after hosted custom:naver configuration and live OAuth proof.
+    naver: Boolean(settings) && process.env.REALYTICS_NAVER_OAUTH_VERIFIED === "true",
   };
   const providerUsable = {
     google: providers.google,
@@ -82,6 +85,7 @@ export async function inspectSupabaseAuthReadiness() {
     // hosted email-optional setting.
     kakao: providers.kakao
       && process.env.REALYTICS_KAKAO_EMAIL_OPTIONAL_VERIFIED === "true",
+    naver: providers.naver,
   };
   const backendReady = Boolean(
     (backend?.configured ?? backend?.enabled)
@@ -109,9 +113,10 @@ export async function inspectSupabaseAuthReadiness() {
   const providerReady = {
     google: sharedBoundaryReady && providerUsable.google,
     kakao: sharedBoundaryReady && providerUsable.kakao,
+    naver: sharedBoundaryReady && providerUsable.naver,
   };
   // Overall readiness intentionally remains stricter than a provider-specific
-  // live smoke: the product-level gate requires every supported provider.
+  // live smoke. Naver remains opt-in until its separate live proof is recorded.
   const configurationReady = providerReady.google && providerReady.kakao;
 
   return {
@@ -145,6 +150,7 @@ export async function inspectSupabaseAuthReadiness() {
       ...(configured && !settings ? ["supabase_auth_settings_unreachable"] : []),
       ...(!providers.google ? ["google_provider_not_enabled"] : []),
       ...(!providers.kakao ? ["kakao_provider_not_enabled"] : []),
+      ...(!providers.naver ? ["naver_live_verification_pending"] : []),
       ...(providers.kakao && !providerUsable.kakao
         ? ["kakao_email_optional_not_verified"]
         : []),

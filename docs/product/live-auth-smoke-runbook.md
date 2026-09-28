@@ -9,6 +9,98 @@ maker-checker rehearsal remain
 
 ## Local live-session verification (2026-09-28)
 
+### Email, Kakao and Naver entry (2026-09-28 follow-up)
+
+The user requested email/password, Kakao and Naver login and confirmed that no
+Naver developer application exists yet. `/login` now exposes the existing email
+signup/login/recovery forms and available social providers together. Social
+first-time users follow the existing callback into onboarding; they do not gain
+tenant membership or approval rights merely by authenticating. Existing Google
+login remains available. Naver is visibly disabled as `준비 중` until configured.
+
+Naver preparation uses Supabase's `custom:naver` OAuth2 provider and the existing
+PKCE callback/session boundary, with no new user database or custom JWT issuer.
+Free Supabase projects support up to three custom providers according to the
+[current provider guide](https://supabase.com/docs/guides/auth/custom-oauth-providers).
+The Naver [profile API](https://developers.naver.com/docs/login/profile/profile.md)
+returns a nested `response.id`; the current Supabase
+[attribute mapper](https://github.com/supabase/auth/blob/master/internal/api/provider/custom_oauth.go)
+does not resolve that nested path. `supabase/functions/naver-userinfo` therefore
+fetches the fixed Naver profile endpoint with the provider bearer and returns
+top-level `sub`, optional display name and HTTPS picture. It rejects missing or
+invalid identities, never accepts a caller-supplied ID, omits email because Naver
+does not attest `email_verified`, and never writes membership or logs tokens.
+Its `verify_jwt=false` accepts Naver tokens rather than Supabase JWTs; actual
+identity validation always occurs at Naver. The adapter is not a session issuer.
+The function is saved and tested locally; hosted deployment remains pending
+explicit approval. No function, provider, schema or permission was changed in
+the connected Supabase project during this follow-up.
+
+네이버 신규 등록용 입력값:
+
+| 항목 | 준비값 |
+|---|---|
+| 애플리케이션 이름 | REALYTICS |
+| 사용 API / 환경 | 네이버 로그인 / PC 웹 |
+| 서비스 URL | 개발 환경은 `http://localhost:3000`; 공개 서비스 주소는 배포 시 확정 |
+| Callback URL | `https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/callback` — Supabase 설정 화면의 표시값과 최종 대조 |
+| 표시용 선택 정보 | 별명, 프로필 사진. 이메일·전화번호·생년월일을 로그인 식별자로 사용하지 않음 |
+| 발급 후 저장 위치 | Client ID/Secret은 Supabase의 `custom:naver` 설정에만 입력 |
+
+네이버 개발자 계정 로그인·약관 동의는 사용자가 직접 진행한다. 발급된 비밀키를
+채팅이나 GitHub에 붙여 넣지 않는다. 개발 앱의 테스트 사용자와 공개 전 검수는
+개발자센터 안내에 따라 준비한다.
+
+Registration and activation checklist:
+
+1. In [NAVER Developers](https://developers.naver.com/apps/#/register), create
+   `REALYTICS` with `네이버 로그인` and a PC Web environment. Use the actual service
+   URL; localhost is for development and must be replaced/extended for release.
+   Request only nickname/profile image needed for display; do not require phone,
+   birth date, gender or email for identity. The app-specific ID identifies users.
+2. Copy the exact Callback URL from Supabase Auth > Providers > New Provider.
+   For the connected project the normal callback is
+   `https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/callback`; verify the dashboard
+   value before registering it at Naver. The application callback
+   `http://localhost:3000/auth/callback` belongs in Supabase's redirect allow-list.
+3. Keep Naver Client ID/Secret in Supabase's provider settings. Deploy the
+   `naver-userinfo` function from this repository, then configure OAuth2 identifier
+   `custom:naver`, authorization `https://nid.naver.com/oauth2.0/authorize`, token
+   `https://nid.naver.com/oauth2.0/token`, and UserInfo
+   `https://iorpwxxzvryuxhraiuhs.supabase.co/functions/v1/naver-userinfo`.
+   Enable email-optional. Do not map or fabricate a verified email.
+4. With the owner in a private development rehearsal, verify provider consent,
+   token exchange compatibility (including Naver's state/PKCE requirements),
+   stable subject, onboarding, admitted membership, logout/relogin and rejected
+   callback state. Upstream PKCE compatibility is not proven before this test;
+   retain Supabase-to-Web PKCE regardless. Do not advertise production readiness.
+5. Only after the hosted provider readback and live rehearsal succeed, set
+   `REALYTICS_NAVER_OAUTH_VERIFIED=true` on the Web server. The public Supabase
+   `/settings` endpoint does not enumerate custom providers, so this explicit
+   deployment attestation controls the button. Naver remains outside the existing
+   Google/Kakao high-risk identity-link/MFA release gate until separately tested.
+6. Before public Naver release, complete the developer-console testing/review
+   steps and use an actual public service URL. App-owner authentication and any
+   required consent must be completed by the user in the browser.
+
+Email/password code already exists. General-user confirmation delivery still
+needs a configured SMTP service and a real recipient test. Supabase's
+[default SMTP](https://supabase.com/docs/guides/auth/auth-smtp) only delivers to
+authorized project-team addresses and currently limits delivery to two messages
+per hour. Keep email confirmation enabled; use an existing or free-quota SMTP
+account once its sender is verified. No paid plan or SMTP signup was purchased.
+Fresh email signup/password and Naver login are not yet claimed as live passes.
+
+Validation for this follow-up: nine root contract checks passed, including four
+Naver adapter security cases. Web type checking and lint passed. All 70 focused
+desktop/mobile auth cases passed after rerunning two initial failures (browser
+startup timeout and delayed settings identity hydration); two additional Naver
+enabled-path checks passed on an isolated server using fixture configuration.
+Live readiness reports Google/Kakao usable and Naver disabled. These checks do
+not simulate successful Naver consent or claim email delivery.
+
+### Existing Google session and saved sample
+
 The hosted Auth settings endpoint is reachable; email, Google and Kakao are
 enabled and email confirmation remains required. The hosted user inventory has
 two social identities and no password-bearing accounts. Existing Google session

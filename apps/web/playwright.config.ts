@@ -31,6 +31,7 @@ export default defineConfig({
       // Contract tests intercept auth routes; never depend on a developer's .env.
       NEXT_PUBLIC_SUPABASE_URL: "https://auth.e2e.invalid",
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_e2e_fixture_only",
+      REALYTICS_NAVER_OAUTH_VERIFIED: process.env.REALYTICS_NAVER_OAUTH_VERIFIED ?? "false",
     },
   },
 });

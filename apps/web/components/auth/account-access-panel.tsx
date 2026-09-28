@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
-import { AlertCircle, CheckCircle2, Link2, LoaderCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2, LoaderCircle } from "lucide-react";
+import { OAuthLoginPanel } from "./oauth-login-panel";
 import {
   AuthClientRequestError,
   REALYTICS_PRIVACY_VERSION,
@@ -221,14 +222,12 @@ export function AccountAccessPanel() {
         <Link href="/guest" className="ml-auto rounded-lg border border-slate-300 px-3 py-2 hover:bg-slate-50">비회원으로 체험</Link>
       </div>
 
-      <div className="mt-5 flex gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs leading-5 text-slate-600">
-        <Link2 className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
-        <p>
-          Google·Kakao는 가입과 기관 승인이 끝난 뒤 설정의 계정 보안에서
-          선택적으로 연결할 수 있습니다. 현재 가입·로그인의 기본 경로는
-          이메일과 비밀번호입니다.
-        </p>
-      </div>
+      {mode === "login" || mode === "signup" ? (
+        <section aria-label="간편 로그인" className="mt-6 border-t border-slate-200 pt-5">
+          <p className="mb-3 text-center text-xs font-semibold text-slate-500">또는 다른 계정으로 계속하기</p>
+          <OAuthLoginPanel />
+        </section>
+      ) : null}
     </fieldset>
   );
 }
@@ -264,6 +263,7 @@ function loginErrorMessage(code: string) {
     oauth_code_exchange_failed: "인증 제공자가 로그인 코드를 확인하지 못했습니다. 다시 시도해 주세요.",
     oauth_provider_scope_invalid: "연결 계정의 동의 범위를 확인해 주세요.",
     oauth_not_configured: "연결 계정 로그인이 아직 운영 설정되지 않았습니다.",
+    naver_not_configured: "네이버 로그인은 연결 준비 중입니다. 이메일 또는 카카오 로그인을 이용해 주세요.",
   };
   return messages[code] ?? "로그인을 완료하지 못했습니다. 다시 시도해 주세요.";
 }

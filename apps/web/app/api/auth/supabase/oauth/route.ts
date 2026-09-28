@@ -8,11 +8,11 @@ import {
 } from "../../../../../lib/backend-session";
 import { createSupabaseServerClient } from "../../../../../lib/supabase/server";
 
-const PROVIDERS = new Set<Provider>(["google", "kakao"]);
+const PROVIDERS = new Set(["google", "kakao", "naver"]);
 const KAKAO_PROVIDER_SCOPE_OVERRIDE = "profile_nickname profile_image";
 
 export async function GET(request: NextRequest) {
-  const provider = request.nextUrl.searchParams.get("provider") as Provider | null;
+  const provider = request.nextUrl.searchParams.get("provider");
   if (!provider || !PROVIDERS.has(provider)) {
     return NextResponse.json({ error: "unsupported_oauth_provider" }, { status: 400 });
   }
@@ -31,6 +31,13 @@ export async function GET(request: NextRequest) {
     preventAuthenticatedResponseCaching(response);
     return response;
   }
+  if (provider === "naver" && process.env.REALYTICS_NAVER_OAUTH_VERIFIED !== "true") {
+    const response = NextResponse.redirect(
+      loginRetryUrl(origin, "naver_not_configured", nextPath, switchAccount),
+    );
+    preventAuthenticatedResponseCaching(response);
+    return response;
+  }
   const callback = new URL("/auth/callback", origin);
   callback.searchParams.set("next", nextPath);
   if (switchAccount) callback.searchParams.set("switch", "1");
@@ -38,7 +45,7 @@ export async function GET(request: NextRequest) {
   try {
     const supabase = await createSupabaseServerClient();
     const { data, error } = await supabase.auth.signInWithOAuth({
-      provider,
+      provider: (provider === "naver" ? "custom:naver" : provider) as Provider,
       options: {
         redirectTo: callback.toString(),
         // GoTrue appends `options.scopes` to Kakao's provider defaults, which
