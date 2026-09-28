@@ -12,7 +12,7 @@ Updated: 2026-09-28
 
 | 사용자 작업 | 확인한 구현 근거 | 현재 판단 / 필요한 작업 |
 |---|---|---|
-| 가입·로그인 | Web `/login`, Supabase password/OAuth BFF, `supabase/functions/naver-userinfo` | 이메일 가입·비밀번호·재설정과 카카오/Google 진입을 같은 화면에 연결. 네이버는 앱 신규 등록·서버 응답 변환·실제 로그인 검증 후 활성화하며 현재 준비 중. [설정 및 검증](live-auth-smoke-runbook.md). |
+| 가입·로그인 | Web `/login`, Supabase password/OAuth BFF, `supabase/functions/naver-userinfo` | 이메일 가입·비밀번호·재설정과 카카오/Google 진입을 같은 화면에 연결. 네이버 회원정보 변환 함수 v1 배포·거부 경로 확인 완료. 앱 신규 등록과 실제 로그인 검증 후 활성화하며 현재 준비 중. [설정 및 검증](live-auth-smoke-runbook.md). |
 | 프로젝트 생성·재개 | `use_cases/project_management.py`, Web `/start`, `/dashboard`, `/project/[id]` | 기존 흐름 재사용. 첫 사용자가 다음 행동을 찾을 수 있는지 실제 자료로 확인. |
 | 자료 업로드와 문서 분류 | `routers/project_source_documents.py`, `use_cases/intake_finalize.py`, `parsing_platform` | 코드 있음. 외부 AI 없이 처리되는 문서와 수동 확인이 필요한 문서를 명확히 표시. |
 | 숫자·출처 검토 | `use_cases/document_review_workspace.py`, `routers/project_parser_v2.py`, Web `/project/[id]/documents/review` | 후보 검토·스냅샷 경로 있음. 편집·저장·재개를 한 사용자 흐름으로 검증. |

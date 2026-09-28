@@ -32,9 +32,15 @@ invalid identities, never accepts a caller-supplied ID, omits email because Nave
 does not attest `email_verified`, and never writes membership or logs tokens.
 Its `verify_jwt=false` accepts Naver tokens rather than Supabase JWTs; actual
 identity validation always occurs at Naver. The adapter is not a session issuer.
-The function is saved and tested locally; hosted deployment remains pending
-explicit approval. No function, provider, schema or permission was changed in
-the connected Supabase project during this follow-up.
+After explicit user approval on 2026-09-28, `naver-userinfo` version 1 was deployed
+to the connected project and read back as `ACTIVE`. Both remote source files
+match the committed local code (ignoring line-ending differences). The bundle
+SHA-256 is `bbf2117c931bd049530eb18e2aaddf21f3b99f9d6aeb6760af909c937b139b9d`.
+Live HTTP checks confirmed missing token -> 401, invalid Naver bearer -> 401,
+and POST -> 405; all three responses were non-cacheable. The invalid bearer was
+rejected through the actual Naver profile request, not a mocked response.
+No valid Naver user token has been tested yet. Provider registration, schema and
+database permissions were not changed. The Naver button remains disabled.
 
 네이버 신규 등록용 입력값:
 
@@ -63,8 +69,8 @@ Registration and activation checklist:
    `https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/callback`; verify the dashboard
    value before registering it at Naver. The application callback
    `http://localhost:3000/auth/callback` belongs in Supabase's redirect allow-list.
-3. Keep Naver Client ID/Secret in Supabase's provider settings. Deploy the
-   `naver-userinfo` function from this repository, then configure OAuth2 identifier
+3. Keep Naver Client ID/Secret in Supabase's provider settings. The
+   `naver-userinfo` function is deployed; next configure OAuth2 identifier
    `custom:naver`, authorization `https://nid.naver.com/oauth2.0/authorize`, token
    `https://nid.naver.com/oauth2.0/token`, and UserInfo
    `https://iorpwxxzvryuxhraiuhs.supabase.co/functions/v1/naver-userinfo`.
@@ -98,6 +104,12 @@ startup timeout and delayed settings identity hydration); two additional Naver
 enabled-path checks passed on an isolated server using fixture configuration.
 Live readiness reports Google/Kakao usable and Naver disabled. These checks do
 not simulate successful Naver consent or claim email delivery.
+Full GitHub CI for `272abd984f4e031de6ee58dc3d05cf4153d655b3` then passed all five
+jobs: API 2,434 passed / 41 skipped, PostgreSQL integration 56 passed, browser
+254 passed, web quality/build and cleanup safety passed
+([run 36385688522](https://github.com/parkwh79-stack/real-estate-os/actions/runs/36385688522)).
+The developer registration URL currently redirects to Naver's login screen;
+the browser is left there for the owner to authenticate before app setup.
 
 ### Existing Google session and saved sample
 
