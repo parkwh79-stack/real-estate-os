@@ -1,6 +1,6 @@
 # Deployment Plan
 
-Updated: 2026-07-30
+Updated: 2026-10-14
 
 Status: **Controlled implementation; not production-ready**
 
@@ -69,8 +69,8 @@ command and secret set:
 |---|---|---|---|
 | Migration task | `python scripts/migrate_postgres.py` | No public listener | deployment-only direct DSN; exits after immutable migration checks |
 | API service | `uvicorn main:app --host 0.0.0.0 --port "$PORT"` | public HTTPS only through a load balancer | dedicated `api,identity` pools |
-| PF review worker | `python scripts/run_pf_review_worker.py` | no public listener | intended dedicated `pf_worker` pool and tenant-bound jobs |
-| Agent outbox worker | `python scripts/run_agent_platform_worker.py` | no public listener | dedicated worker claim/update authority |
+| PF review worker | `python scripts/run_pf_review_worker.py` | no public listener | implemented dedicated `pf_worker` pool, tenant-bound claims and exact privilege checkout; deployed rehearsal remains |
+| Agent outbox worker | `python scripts/run_agent_platform_worker.py` | no public listener | local/test compatibility only; hardened startup blocked pending dedicated role and tenant-scoped claim/update path |
 | Legal corpus worker | `python scripts/run_legal_corpus_worker.py` | egress only | dedicated legal-sync role and immutable raw-object store |
 | Coding Pod worker | `python scripts/run_coding_pod_worker.py` | egress to isolated executor only | operational job authority; no executor credentials in payloads |
 
@@ -118,16 +118,14 @@ No cloud service creation or secret provisioning is performed by this plan.
 - Dedicated LOGIN credentials for `realytics_runtime`, `realytics_identity`,
   and the PF worker are not present in the repository and must be issued and
   rotated through the approved secret workflow.
-- The PF entrypoint now builds its orchestration repository only after a job is
-  claimed and binds it to the persisted `tenantId`. However, the legacy
-  `JobStore`/operational storage claim and update functions still open
-  `REALYTICS_DATABASE_URL` directly rather than using the `pf_worker` pool with
-  transaction-local tenant context. Therefore PF and Agent workers are **not
-  approved for hardened staging yet**; an administrator or migration DSN must
-  never be supplied as a workaround.
-- The current PF worker role/grant postflight is not equivalent to the existing
-  API and identity login-role preflights. Add the exact worker privilege
-  manifest and deployed checkout test before enabling the worker service.
+- The PF worker implements its dedicated DSN/pool, tenant-bound claim/update,
+  exact privilege manifest and fail-closed checkout. Durable LOGIN credentials,
+  deployment-network checkout and a full worker rehearsal remain release
+  evidence; source code and isolated test coverage do not establish them.
+- Agent outbox workers still use the operational compatibility path. Their
+  production/staging entrypoint fails before importing or consuming work until
+  a dedicated role and tenant-scoped claim/update contract are implemented.
+  Never supply an owner/migration DSN or reuse PF worker grants as a workaround.
 - A real versioned/Object-Lock S3 bucket, KMS/IAM policy, private ClamAV service,
   backup/restore evidence, and scanner failure drill remain required.
 - `/health/ready` does not claim live S3 or ClamAV connectivity. The deployment

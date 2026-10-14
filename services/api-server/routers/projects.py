@@ -2879,7 +2879,7 @@ def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
     project_feasibility = _project_store()[project_id].get("feasibility_input", {})
     source_data = deep_merge(project_feasibility, input_data or {})
     result = calculate_feasibility_metrics(source_data)
-    run = _persist_calculation_run(project_id, engine_key="feasibility", result=result, input_data=input_data)
+    run = _persist_calculation_run(project_id, engine_key="feasibility", result=result, input_data=source_data)
     return {**result, "calculationRunId": run["calculationRunId"]}
 
 
@@ -3529,17 +3529,37 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
     return {**result, "calculationRunId": run["calculationRunId"]}
 
 @router.post("/{project_id}/cash-flow/run")
-def run_project_cash_flow(project_id: str, input_data: Dict[str, Any] | None = None):
+def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     project = _project_store()[project_id]
+    reviewed_monthly = isinstance(input_data, dict) and "reviewedMonthlyFinancing" in input_data
+    if reviewed_monthly:
+        authorize_request(request, "assumption:override")
+        enforce_project_tenant_scope(request, project)
     try:
         request_data = build_cash_flow_request_use_case(project, input_data or {})
+        if request_data.get("monthlyFinancing") is not None and not reviewed_monthly:
+            authorize_request(request, "assumption:override")
+            enforce_project_tenant_scope(request, project)
         result = run_cash_flow_use_case(project, request_data)
+    except FeasibilityReviewConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     digest = financial_input_hash(request_data)
     run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data={**request_data, "financialInputHash": digest})
+    if request_data.get("monthlyFinancing") is not None:
+        # Existing dependent engines use a different one-shot interest/claim
+        # convention. Do not attach them to a monthly-debt scenario as if equal.
+        record_sensitive_project_event(request, event_type="reviewed_monthly_cash_flow_calculated",
+            project_id=project_id, metadata={"calculationRunId": run["calculationRunId"],
+                "financialInputHash": digest, "method": request_data["monthlyFinancing"].get("method")})
+        return {**result, "calculationRunId": run["calculationRunId"], "financialInputHash": digest,
+            "dependentExecutionStatus": "partial",
+            "dependentFailures": [{"engines": ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"],
+                "status": "not_supported", "reason": "reviewed_monthly_dependent_policy_required"}],
+            "calculationRunIds": {"cash_flow_engine": run["calculationRunId"]}}
     scenario_input, stress_input = dependent_inputs(request_data, result, run["calculationRunId"])
     dependent_failures = []
 

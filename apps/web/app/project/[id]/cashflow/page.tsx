@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { useParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Calculator, Download, Loader2, PlayCircle, RefreshCw, ShieldCheck, TrendingDown, Wallet } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
-import { fetchLatestCalculationRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
+import { bindCashflowDependents, fetchLatestCalculationRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
 import { trancheAmounts, amountInEok } from "../../../../lib/tranche-display";
 
 const SCENARIO_ENGINES = ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"];
@@ -68,7 +68,7 @@ export default function ProjectCashflowPage() {
         runs = {};
       }
       setCashflow(cashflowResult);
-      setScenarioRuns(runs);
+      setScenarioRuns(bindCashflowDependents(cashflowResult, runs));
     } catch (err) {
       setError(err instanceof Error ? err.message : "계산 결과를 불러오지 못했습니다.");
     } finally {
@@ -124,6 +124,7 @@ export default function ProjectCashflowPage() {
   const rows = useMemo(() => cashflow?.monthly.slice(0, 60) ?? [], [cashflow]);
   const summary = cashflow?.summary ?? {};
   const runId = cashflow?.runId ?? "-";
+  const monthlyReview = cashflow?.monthlyFinancing != null || cashflow?.inputSnapshot?.monthlyFinancing != null;
   const inputScheduleEvidence = cashflow?.inputSnapshot
     ? JSON.stringify(
         (Array.isArray(cashflow.inputSnapshot.productMix) ? cashflow.inputSnapshot.productMix : [])
@@ -169,12 +170,19 @@ export default function ProjectCashflowPage() {
             <KpiCard label="계산 상태" value={summary.status ? String(summary.status) : "미확인"} sub={`CalculationRun ${runId.slice(0, 18)}`} icon={<ShieldCheck className="h-5 w-5 text-slate-600" />} />
           </section>
 
+          {!Object.values(scenarioRuns).some(Boolean) ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+            {cashflow.inputSnapshot?.monthlyFinancing
+              ? "월별 금융 검토안은 별도 상환 기준을 사용합니다. 기존 일괄 상환·스트레스 시나리오는 계산 기준을 연결하기 전까지 표시하지 않습니다."
+              : "현재 Cash Flow와 부모 계산·입력 기준이 일치하는 후속 시나리오가 없습니다. 같은 기준으로 다시 계산한 결과가 필요합니다."}
+          </p> : null}
           <ScenarioRegistryPanel runs={scenarioRuns} />
           <ScenarioDetailPanel runs={scenarioRuns} />
           <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">월별 Cash Flow</h2><p className="mt-1 text-xs font-semibold text-slate-500">저장된 CalculationRun의 실데이터입니다. 단위: 억원</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">원장 기준</span></div>
-              <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">Cash-In</th><th className="p-3">Cash-Out</th><th className="p-3">Net CF</th><th className="p-3">누적 CF</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.period} className={cashflow.maxMinusMonth !== null && row.period === `M${cashflow.maxMinusMonth}` ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{formatCashflowCell(row.cashInEok)}</td><td className="p-3">{formatCashflowCell(row.cashOutEok)}</td><td className={`p-3 font-bold ${row.netCashFlowEok !== null && row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.netCashFlowEok)}</td><td className={`p-3 font-black ${row.cumulativeEok !== null && row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.cumulativeEok)}</td></tr>)}</tbody></table></div>
+              <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">월별 Cash Flow</h2><p className="mt-1 text-xs font-semibold text-slate-500">{monthlyReview
+                ? "PF 인출 포함 수입 − 사업·금융비와 원금상환 포함 지출 = 순현금흐름. 월말 잔액은 운영·상환계정 합계입니다. 단위: 억원"
+                : "저장된 CalculationRun의 실데이터입니다. 단위: 억원"}</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">원장 기준</span></div>
+              <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">{monthlyReview ? "수입 (PF 포함)" : "Cash-In"}</th><th className="p-3">{monthlyReview ? "지출 (원금상환 포함)" : "Cash-Out"}</th><th className="p-3">{monthlyReview ? "순현금흐름" : "Net CF"}</th><th className="p-3">{monthlyReview ? "월말 계정합계" : "누적 CF"}</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.period} className={cashflow.maxMinusMonth !== null && row.period === `M${cashflow.maxMinusMonth}` ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{formatCashflowCell(row.cashInEok)}</td><td className="p-3">{formatCashflowCell(row.cashOutEok)}</td><td className={`p-3 font-bold ${row.netCashFlowEok !== null && row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.netCashFlowEok)}</td><td className={`p-3 font-black ${row.cumulativeEok !== null && row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.cumulativeEok)}</td></tr>)}</tbody></table></div>
             </div>
             <aside className="space-y-4"><InfoPanel title="계산 근거"><Fact label="CalculationRun" value={runId} /><Fact label="Engine" value="cash_flow_engine" /><Fact label="Input snapshot" value={inputScheduleEvidence} /><Fact label="완료 시각" value={cashflow.completedAt || "-"} /><Fact label="Source locator" value={JSON.stringify(cashflow.sourceMetadata ?? {})} /></InfoPanel><InfoPanel title="Cash Flow 위험"><RiskList flags={cashflow.riskFlags ?? []} /></InfoPanel></aside>
           </section>

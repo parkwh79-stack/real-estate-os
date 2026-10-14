@@ -419,6 +419,10 @@ export interface CashflowResult {
   riskFlags?: Array<Record<string, unknown>>;
   sourceMetadata?: Record<string, unknown>;
   inputSnapshot?: Record<string, unknown>;
+  monthlyFinancing?: Record<string, unknown>;
+  financingMonthly?: Array<{ period: string; interest: number | null; fees: number | null;
+    principalRepayment: number | null; outstandingDebt: number | null; overdueDebt: number | null;
+    unfundedOperatingCost: number | null }>;
 }
 
 interface RunListItem {
@@ -449,6 +453,24 @@ export interface CalculationRunRecord {
   inputSnapshot?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/** Show dependent results only when both their parent and exact input agree. */
+export function bindCashflowDependents(
+  cashflow: CashflowResult | null,
+  runs: Record<string, CalculationRunRecord | null>,
+): Record<string, CalculationRunRecord | null> {
+  const digest = cashflow?.inputSnapshot?.financialInputHash;
+  const monthlyReview = cashflow?.inputSnapshot?.monthlyFinancing != null;
+  return Object.fromEntries(Object.entries(runs).map(([key, run]) => {
+    const snapshot = run?.inputSnapshot ?? {};
+    const source = run?.sourceLocator ?? {};
+    const parent = snapshot.parentCalculationRunId ?? source.parentCalculationRunId;
+    const inputHash = snapshot.financialInputHash ?? source.financialInputHash;
+    const matches = !monthlyReview && typeof digest === "string" && digest.length > 0
+      && parent === cashflow?.runId && inputHash === digest;
+    return [key, matches ? run : null];
+  }));
 }
 
 export async function fetchLatestCalculationRuns(
@@ -495,6 +517,7 @@ function cashflowFromResult(
   const rows = cf?.monthlyCashFlow ?? cf?.rows;
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const summary = (cf?.summary ?? {}) as Record<string, number>;
+  const monthlyReview = cf?.monthlyFinancing != null || meta.inputSnapshot?.monthlyFinancing != null;
   return {
     runId: meta.runId,
     completedAt: meta.completedAt,
@@ -504,14 +527,19 @@ function cashflowFromResult(
     monthly: rows.map((r: Record<string, unknown>) => {
       const cashIn = (r.cashIn ?? {}) as Record<string, unknown>;
       const cashOut = (r.cashOut ?? {}) as Record<string, unknown>;
+      const financing = (r.monthlyFinancing ?? {}) as Record<string, unknown>;
+      const operatingAndFinanceCost = finiteNumberOrNull(cashOut.totalCashOut);
+      const principalRepayment = finiteNumberOrNull(financing.principalRepayment);
+      const monthlyTotalOut = operatingAndFinanceCost !== null && principalRepayment !== null
+        ? operatingAndFinanceCost + principalRepayment : null;
       return {
         period: String(r.period ?? `M${r.monthIndex ?? r.month ?? ""}`),
-        cashInEok: wonToEokOrNull(cashIn.totalCashIn ?? r.cash_in),
-        cashOutEok: wonToEokOrNull(cashOut.totalCashOut ?? r.cash_out),
-        netCashFlowEok: wonToEokOrNull(
+        cashInEok: wonToEokOrNull(monthlyReview ? cashIn.totalCashIn : cashIn.totalCashIn ?? r.cash_in),
+        cashOutEok: wonToEokOrNull(monthlyReview ? monthlyTotalOut : cashOut.totalCashOut ?? r.cash_out),
+        netCashFlowEok: wonToEokOrNull(monthlyReview ? r.netCashFlow :
           r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? r.net_cashflow,
         ),
-        cumulativeEok: wonToEokOrNull(
+        cumulativeEok: wonToEokOrNull(monthlyReview ? r.endingCash :
           r.cumulativeCashFlowBeforePfDraw ??
             r.cumulativeCashFlow ??
             r.cumulative_cashflow,
@@ -525,6 +553,16 @@ function cashflowFromResult(
     riskFlags: Array.isArray(cf?.riskFlags) ? (cf?.riskFlags as Array<Record<string, unknown>>) : [],
     sourceMetadata: (cf?.sourceMetadata ?? {}) as Record<string, unknown>,
     inputSnapshot: meta.inputSnapshot,
+    monthlyFinancing: cf?.monthlyFinancing && typeof cf.monthlyFinancing === "object"
+      ? cf.monthlyFinancing as Record<string, unknown> : undefined,
+    financingMonthly: rows.filter((row: Record<string, unknown>) => row.monthlyFinancing != null).map((row: Record<string, unknown>) => {
+      const financing = row.monthlyFinancing as Record<string, unknown>;
+      return { period: String(row.period ?? `M${row.monthIndex}`),
+        interest: finiteNumberOrNull(financing.interest), fees: finiteNumberOrNull(financing.fees),
+        principalRepayment: finiteNumberOrNull(financing.principalRepayment),
+        outstandingDebt: finiteNumberOrNull(financing.outstandingDebt), overdueDebt: finiteNumberOrNull(financing.overdueDebt),
+        unfundedOperatingCost: finiteNumberOrNull(financing.unfundedOperatingCost) };
+    }),
   };
 }
 

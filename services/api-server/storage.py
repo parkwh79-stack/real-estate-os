@@ -369,6 +369,30 @@ def get_project_record(project_id: str) -> Dict[str, Any] | None:
         if scope is None:
             raise RuntimeError("A verified request/job scope is required for project reads")
         return scope.get(str(project_id))
+    if storage_backend() == "sqlite" and sqlite_file_path().exists():
+        with _connect_sqlite() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM projects WHERE project_id = ?",
+                (str(project_id),),
+            ).fetchone()
+            if row is not None:
+                return json.loads(row["payload_json"])
+            # Match _load_sqlite_state's empty-state definition without loading
+            # other payloads. Only a genuinely empty store may import legacy JSON.
+            state_tables = (
+                "projects", "reports", "orchestrations", "risk_registers",
+                "evidence_graphs", "chief_pod_artifacts", "pod_ai_reviews",
+                "agent_runs", "agent_run_steps", "brain_usage_events",
+                "recalculation_events", "prompt_artifacts", "assumption_overrides",
+                "restructuring_cures", "glossary_terms", "glossary_term_candidates",
+                "metadata", "tenants", "users", "sessions",
+            )
+            has_state = conn.execute(
+                " UNION ALL ".join(f"SELECT 1 FROM {table}" for table in state_tables)
+                + " LIMIT 1"
+            ).fetchone()
+        if has_state is not None:
+            return None
     state = load_state() or default_state()
     return (state.get("projects") or {}).get(str(project_id))
 

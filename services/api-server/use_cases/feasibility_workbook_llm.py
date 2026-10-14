@@ -281,8 +281,12 @@ def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
     term_reviews = {key: review for key, review in stored_term_reviews.items()
                     if key in TERM_GROUPS and isinstance(review, dict) and review.get("value") == terms[key]}
     state = {"values": values, "fieldReviews": reviews, "terms": terms, "termReviews": term_reviews}
-    # Include raw inputs so edits to hidden/legacy attributes also invalidate a browser draft.
-    review_hash = _stable_json({**state, "schedule": project.get("schedule"), "pf_structure": project.get("pf_structure")})
+    # Include the complete working input, including product/collection and cost
+    # sources used by reviewed scenarios. Archival document metadata and unrelated
+    # audit/selection history do not change financial input freshness.
+    review_hash = _stable_json({**state,
+        "calculationInputs": {key: value for key, value in project.items() if key not in {"_meta", "source_documents"}},
+        "parsingSource": (project.get("_meta") or {}).get("parsing_source")})
     return {**state, "reviewHash": review_hash, "analysisOnly": True,
             "canonicalStudyPresent": bool(project.get("canonicalFeasibilityStudyV2") or project.get("feasibilityStudyV2"))}
 

@@ -245,6 +245,109 @@ def test_partial_financing_override_cannot_turn_missing_amount_into_zero():
         build_cash_flow_request_use_case(project, {"pf_structure": [{"tranche_id": "override-missing", "name": "검토 중", "priority": "senior", "amount": None}]})
 
 
+def test_pf_readiness_matches_canonical_debt_and_equity_classification():
+    project = load_example()
+    project["pf_structure"] = [
+        {"tranche_id": "senior", "name": "Tr.A", "priority": "senior", "amount": 50_000_000_000},
+        {"tranche_id": "bridge", "name": "Bridge", "priority": "bridge", "amount": 5_000_000_000},
+        {"tranche_id": "equity", "name": "Equity", "priority": "equity", "amount": 10_000_000_000},
+    ]
+
+    result = DevelopmentFeasibilityAgent().analyze(project)
+
+    pf = result["pfReadiness"]
+    funding = result["cashFlowRunRequestDraft"]["sourcesAndUses"]["funding"]
+    assert pf["totalPfAmount"] == funding["pfLoan"] + funding["bridgeLoan"] == 55_000_000_000
+    assert pf["pfLoanAmount"] == funding["pfLoan"] == 50_000_000_000
+    assert pf["bridgeLoanAmount"] == funding["bridgeLoan"] == 5_000_000_000
+    assert pf["committedEquityAmount"] == funding["equity"] == 10_000_000_000
+    assert pf["ltvByRevenue"] == 55_000_000_000 / 150_000_000_000
+    assert pf["requiredEquity"] == 65_000_000_000
+
+
+def test_unknown_equity_does_not_hide_known_debt_but_keeps_calculation_blocked():
+    project = load_example()
+    project["pf_structure"].append({"tranche_id": "missing-equity", "name": "Equity", "priority": "equity", "amount": None})
+
+    result = DevelopmentFeasibilityAgent().analyze(project)
+
+    assert result["pfReadiness"]["totalPfAmount"] == 70_000_000_000
+    assert result["pfReadiness"]["committedEquityAmount"] is None
+    assert result["pfReadiness"]["status"] == "needs_input"
+    assert result["cashFlowRunRequestDraft"] is None
+
+
+def test_logistics_ltv_uses_debt_without_counting_equity_as_a_loan():
+    project = load_logistics_example()
+    baseline = DevelopmentFeasibilityAgent().analyze(project)
+    project["pf_structure"].append({"tranche_id": "owner-equity", "name": "Owner equity", "priority": "equity", "amount": 50_000_000_000})
+
+    result = DevelopmentFeasibilityAgent().analyze(project)
+
+    assert result["pfReadiness"]["totalPfAmount"] == baseline["pfReadiness"]["totalPfAmount"]
+    assert result["logisticsAnalysis"]["exit"]["forwardSaleLtv"] == baseline["logisticsAnalysis"]["exit"]["forwardSaleLtv"]
+
+
+@pytest.mark.parametrize("schedule", [
+    {"construction_start": "M0", "completion": "M24"},
+    {"construction_start": 0, "completion": 24},
+    [{"key": "construction_start", "month_index": 0}, {"key": "completion", "month_index": 24}],
+])
+def test_month_schedule_reaches_cash_flow_calculation_without_calendar_fabrication(schedule):
+    project = load_example()
+    project["schedule"] = schedule
+
+    result = DevelopmentFeasibilityAgent().analyze(project)
+
+    assert len(result["cashFlowRunResult"]["monthlyCashFlow"]) == 25
+    assert result["cashFlowRunResult"]["monthlyCashFlow"][-1]["period"] == "M24"
+    assert all(not (row["planned_date"] or "").startswith("20") for row in result["feasibilityStudyV2Draft"]["schedule"])
+
+
+def test_schedule_mapping_retains_provenance_and_explicit_calendar_reference():
+    project = load_example()
+    project["schedule"] = [
+        {"key": "construction_start", "planned_date": "2026-01-01", "month_index": 0, "excel": {"sheet_name": "Schedule", "cell": "E25"}, "provenance": {"source_type": "xlsx", "cell": "E25"}},
+        {"key": "completion", "planned_date": "M24"},
+    ]
+
+    result = DevelopmentFeasibilityAgent().analyze(project)
+
+    start = result["feasibilityStudyV2Draft"]["schedule"][0]
+    assert start["month_index"] == 0
+    assert start["excel"] == {"sheet_name": "Schedule", "cell": "E25"}
+    assert start["provenance"] == {"source_type": "xlsx", "cell": "E25"}
+    assert result["cashFlowRunRequestDraft"]["schedule"]["construction_start"]["monthIndex"] == 0
+    assert len(result["cashFlowRunResult"]["monthlyCashFlow"]) == 25
+
+
+def test_invalid_mixed_schedule_returns_input_error_instead_of_server_failure():
+    client = TestClient(app)
+    project = load_example()
+    created = client.post("/projects/", json=project)
+    project_id = created.json().get("id") or created.json()["project"]["id"]
+
+    response = client.post(f"/projects/{project_id}/development-feasibility/analyze", json={"schedule": {"construction_start": "2026-01-01", "completion": "M24"}})
+
+    assert response.status_code == 422
+    assert "기준" in response.json()["detail"]["message"]
+
+
+@pytest.mark.parametrize("key", [1, 0, True])
+def test_non_text_schedule_key_returns_supported_analysis_and_cash_flow_errors(key):
+    client = TestClient(app)
+    created = client.post("/projects/", json=load_example())
+    project_id = created.json().get("id") or created.json()["project"]["id"]
+    payload = {"schedule": [{"key": key, "month_index": 0}]}
+
+    analysis = client.post(f"/projects/{project_id}/development-feasibility/analyze", json=payload)
+    assert analysis.status_code == 422
+    assert "문자열" in analysis.json()["detail"]["message"]
+    cash_flow = client.post(f"/projects/{project_id}/cash-flow/run", json=payload)
+    assert cash_flow.status_code == 400
+    assert "문자열" in cash_flow.json()["detail"]
+
+
 def test_development_feasibility_endpoint_returns_analysis():
     client = TestClient(app)
     project_id = bondong_project_id(client)

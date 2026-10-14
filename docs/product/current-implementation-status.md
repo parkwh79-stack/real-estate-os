@@ -1,6 +1,6 @@
 # REALYTICS 현재 구현 현황
 
-Updated: 2026-09-28
+Updated: 2026-10-14
 
 문서와 코드의 연결을 다시 점검한 현재 기준이다. 과거의 기능별 개발 일지와 중복된 상태 설명은 [통합 이전 기록](../archive/documentation-baseline-2026-09-28.md)에 보존했다. 작업 순서는 [제품 실행 계획](realytics-os-next-work-roadmap.md) 한 곳에서 관리한다.
 
@@ -12,15 +12,15 @@ Updated: 2026-09-28
 
 | 사용자 작업 | 확인한 구현 근거 | 현재 판단 / 필요한 작업 |
 |---|---|---|
-| 가입·로그인 | Web `/login`, Supabase password/OAuth BFF, `supabase/functions/naver-userinfo` | 이메일 가입·비밀번호·재설정과 카카오/Google 진입을 같은 화면에 연결. 네이버 회원정보 변환 함수 v1 배포·거부 경로 확인 완료. 앱 신규 등록과 실제 로그인 검증 후 활성화하며 현재 준비 중. [설정 및 검증](live-auth-smoke-runbook.md). |
+| 가입·로그인 | Web `/login`, Supabase password/OAuth BFF, `supabase/functions/naver-userinfo` | 이메일 가입·비밀번호·재설정과 카카오/Google 진입을 같은 화면에 연결. 네이버 앱 등록·저장 설정 확인과 회원정보 변환 함수 v1 배포 완료. Supabase 공급자 설정과 실제 로그인 검증 후 활성화하며 현재 네이버 버튼은 비활성이다. [설정 및 검증](live-auth-smoke-runbook.md). |
 | 프로젝트 생성·재개 | `use_cases/project_management.py`, Web `/start`, `/dashboard`, `/project/[id]` | 기존 흐름 재사용. 첫 사용자가 다음 행동을 찾을 수 있는지 실제 자료로 확인. |
 | 자료 업로드와 문서 분류 | `routers/project_source_documents.py`, `use_cases/intake_finalize.py`, `parsing_platform` | 코드 있음. 외부 AI 없이 처리되는 문서와 수동 확인이 필요한 문서를 명확히 표시. |
 | 숫자·출처 검토 | `use_cases/document_review_workspace.py`, `routers/project_parser_v2.py`, Web `/project/[id]/documents/review` | 후보 검토·스냅샷 경로 있음. 편집·저장·재개를 한 사용자 흐름으로 검증. |
-| 사업수지 Excel 검증·입력 | `use_cases/approved_workbook_authority.py`, `workbook_import_approval.py`, `feasibility_input_builder.py`, `feasibility_workbook_llm.py` | 기존 입력 패키지에 AI 없는 직접 입력·원본 셀 보기·이유/가정 저장·원 단위 금액 보존·재개를 연결. 정식 승인과 분석용 입력은 구분. 실제 실무 자료 전체 흐름 검증은 남아 있음. |
-| 사업수지·월별 CF·부족자금 | `core/calculations.py`, `use_cases/development_feasibility.py`, `cash_flow.py`, Web feasibility/cashflow | 계산 엔진 있음. 가정 변경 전후를 같은 단위·기간·입력 기준으로 비교하는 경험을 완성. |
-| PF·상환·미분양 시나리오 | `agents/scenario_engine_agent.py`, `use_cases/cash_flow_dependencies.py`, Web `/project/[id]/pf-structure` | 계산·화면 있음. 동일 부모 계산을 사용하는 시나리오 묶음과 불완전 입력 설명을 우선. |
+| 사업수지 Excel 검증·입력 | `use_cases/approved_workbook_authority.py`, `workbook_import_approval.py`, `feasibility_input_builder.py`, `feasibility_workbook_llm.py` | AI 없는 직접 입력·원본 셀 보기·이유/가정 저장과 원 단위 금액·사업 일정·대출 조건의 저장·재개를 연결. 정식 승인과 분석용 입력은 구분. 실제 자료 검증의 범위와 결과는 실행 계획에 기록한다. |
+| 사업수지·월별 CF·부족자금 | `core/reviewed_monthly_financing.py`, `use_cases/cash_flow.py`, `cash_flow_comparison.py`, Web feasibility/cashflow | 명시적으로 선택한 검토 정책으로 월별 이자·수수료·잔액·상환을 계산. 저장된 두 CalculationRun의 입력·집계 차이를 비교하고 선택을 저장·재개한다. 기간·금융방식이 다르면 부분 비교로 표시하며 승인·최종 보고서 자격은 부여하지 않는다. |
+| PF·상환·미분양 시나리오 | `agents/scenario_engine_agent.py`, `use_cases/cash_flow_dependencies.py`, Web `/project/[id]/pf-structure` | 기존 계산·화면 유지. CF 화면은 같은 부모·입력 hash의 후속 결과만 표시한다. 새 월별 검토안에 기존 일괄 청구액 방식의 후속 시나리오를 붙이는 작업은 별도 상환 계약 검증까지 보류한다. |
 | 토지·시장·법률 보완 | `use_cases/land_ledger_import.py`, `market_comparables.py`, `legal_pod.py` | 업로드 자료·수동 근거를 먼저 활용. 실제 커넥터 사용 가능 여부와 자료 기준일은 별도 확인. |
-| 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 기존 로직을 이용해 다음 행동을 모은다. UUID 변경을 업무 결과 변경으로 보는 hash 문제는 남아 있음. |
+| 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 기존 로직을 이용해 다음 행동을 모은다. CF 비교는 실행 UUID·시각 차이와 업무 입력·출처 차이를 구분한다. 다른 재분석·consensus 경로는 별도로 확인한다. |
 | 검토 초안·다운로드 | `use_cases/report_generation.py`, `agents/report_export_agent.py`, Web 프로젝트 보고서와 Cash Flow export | PDF/DOCX/Excel 경로가 이미 있다. 출처·가정·미확인 항목을 포함한 초안 사용 흐름을 검증. |
 | 로그인과 조직 경계 | Web `app/api/auth/supabase`, `core/authz.py`, DB repositories | 코드 있음. 운영 준비를 단순 로그인 화면 존재로 판단하지 않음. 기존 권한 유지. |
 | 자동 코딩·자기수정 | `agent_platform/coding` | 현재 제품 우선순위에서 제외. 취소/완료 경합과 실행 격리 과제가 있어 운영 활성화하지 않음. |
@@ -46,4 +46,4 @@ API 코드 경로는 `services/api-server/` 기준이다. 프로젝트 Web 경�
 
 ## 검증의 범위
 
-[2026-09-15 코드 감사](pod-agent-code-audit-2026-09-15.md)에는 `cad030a`의 API 2,418개, 별도 PostgreSQL 56개, 브라우저 238개 통과 기록이 있다. 이는 보존한 과거 결과다. 오늘의 문서·예제 정리 및 R1 첫 변경 검증은 [backlog](../backlog.md)에 기록한다. Supabase에서 적용된 migration 26개의 버전·이름을 로컬과 대조했다. 운영 권한·백업·외부 배포 및 실제 사용자 파일럿을 재인증한 것은 아니다.
+[2026-09-15 코드 감사](pod-agent-code-audit-2026-09-15.md)는 해당 revision의 과거 결과다. 최신 R1/R2 변경·검증은 [backlog](../backlog.md)와 [실행 계획](realytics-os-next-work-roadmap.md)에 기록한다. Supabase migration 26개의 버전·이름과 Naver v1 배포 소스는 2026-10-14 대조 결과 일치하며 이번 변경에 새 migration은 없다. 실제 사업수지의 부분 저장·재개·진단을 격리 검증했지만, 원본 수식 오류와 원미만 처리·미확인 대출 조건 때문에 전체 실자료 인수는 남아 있다. 운영 권한·백업·외부 배포의 완료를 뜻하지 않는다.

@@ -1,6 +1,6 @@
 # PostgreSQL runtime authority
 
-Updated: 2026-07-30
+Updated: 2026-10-14
 
 This is the database-specific companion to
 `docs/architecture/architecture-boundary.md`. That document owns the complete
@@ -18,7 +18,7 @@ every statement, obtains IDs from the database sequence, stamps tenant and
 state version server-side, and uses compare-and-swap updates. The old
 `ProjectRepository` is retained only for SQLite/JSON local compatibility.
 
-Every runtime transaction is acquired from a role-specific bounded pool. The
+API, identity and scoped PF-worker transactions use role-specific bounded pools. The
 API process uses `api` and `identity` pools; the isolated PF worker uses only
 `pf_worker`. A transaction sets `realytics.tenant_id`, the safe search path,
 and statement/lock/idle timeouts with `SET LOCAL`. Migration connections are a
@@ -51,17 +51,15 @@ principals through the approved secret manager, injecting their role-scoped
 DSNs, and running the Python pool checkout from the deployed network.
 
 The API and identity repositories use those bounded pools today. The PF worker
-entrypoint now waits until a durable job is claimed and constructs its
-orchestration repository from that job's persisted `tenantId`; repository
-configuration failures become secret-safe terminal job failures. This closes
-the earlier tenantless repository construction defect. It does **not** complete
-the worker database cutover: legacy asynchronous-job and Agent operational
-storage functions still use the direct `db.postgres.connect()` compatibility
-path and do not consistently establish the `pf_worker` pool's transaction-local
-tenant context. Hardened PF/Agent worker deployment remains blocked until those
-claim/update paths and an exact PF-worker role postflight are migrated and live
-tested. Supplying an owner or migration DSN to make the compatibility path work
-is forbidden.
+requires a dedicated DSN, a `pf_worker`-only pool and tenant scope before claiming
+work, then constructs its orchestration repository from the persisted job tenant.
+Its exact privilege manifest and pool checkout gate are implemented. Repository
+configuration failures become secret-safe terminal job failures. Dedicated LOGIN
+activation, deployment-network checkout and a full multi-worker rehearsal still
+require live evidence. Agent operational storage remains on a direct compatibility
+path; its hardened worker entrypoint exits before importing or consuming work.
+It needs its own tenant/role contract and cannot inherit PF worker authority.
+Supplying an owner or migration DSN as a workaround is forbidden.
 
 The API pool now runs a read-only fail-closed preflight during hardened
 staging/production startup. `REALYTICS_API_DATABASE_URL` must authenticate
@@ -86,9 +84,10 @@ runtime schema relations/functions. This is deliberately narrower than the API
 privilege audit because pre-membership writes are constrained by exact column
 grants plus principal-scoped FORCE RLS.
 
-The local/hosted role is still `NOLOGIN` until an approved secret-manager
-workflow creates and rotates its credential. Source code and migration grants
-do not constitute a successful live runtime checkout.
+Migration bootstrap creates credential-free `NOLOGIN` roles. The deployed
+principal and credential state require live readback through the approved secret
+workflow; a short-lived rehearsal is not durable activation. Source code and
+migration grants do not constitute a successful live runtime checkout.
 
 ## Normalized PF report publication
 

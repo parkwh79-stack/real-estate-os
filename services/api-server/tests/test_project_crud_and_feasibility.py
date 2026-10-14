@@ -289,6 +289,15 @@ def test_feasibility_calculate_endpoint_uses_project_defaults_and_overrides(monk
     assert override_result.json()["development_profit"] == 50
     assert override_result.json()["status"] in {"weak", "thin"}
 
+    runs = client.get(f"/projects/{project_id}/calculation-runs?engine_key=feasibility").json()["records"]
+    by_id = {run["calculationRunId"]: run for run in runs}
+    baseline = by_id[base_result.json()["calculationRunId"]]
+    changed = by_id[override_result.json()["calculationRunId"]]
+    assert baseline["inputSnapshot"] == {"total_revenue": 1000, "total_cost": 700, "finance_cost": 40}
+    assert changed["inputSnapshot"] == {"total_revenue": 1000, "total_cost": 950, "finance_cost": 40}
+    assert changed["resultSnapshot"]["development_profit"] == changed["inputSnapshot"]["total_revenue"] - changed["inputSnapshot"]["total_cost"]
+    assert projects.project_repository().get(project_id)["feasibility_input"]["total_cost"] == 700
+
     client.delete(f"/projects/{project_id}")
 
 

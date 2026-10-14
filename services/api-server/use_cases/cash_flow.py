@@ -9,6 +9,8 @@ from use_cases.approved_workbook_authority import (
     has_authoritative_workbook_snapshot_binding,
 )
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
+from use_cases.feasibility_workbook_llm import FeasibilityReviewConflict, feasibility_review_state
+from core.reviewed_monthly_financing import reject_unsupported_monthly_financing_options, validate_monthly_financing_policy
 
 
 CASH_FLOW_REQUEST_TYPE = "cash_flow_run_request_v1"
@@ -33,6 +35,10 @@ def build_cash_flow_request_use_case(
 
 
 def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any]) -> Dict[str, Any]:
+    if "reviewedMonthlyFinancing" in input_data:
+        if set(input_data) != {"reviewedMonthlyFinancing"}:
+            raise ValueError("월별 검토 계산과 다른 입력 변경을 한 요청에 섞을 수 없습니다.")
+        return _reviewed_monthly_request(project_data, input_data["reviewedMonthlyFinancing"])
     direct_request = _direct_cash_flow_request(input_data)
     approved_request = _approved_canonical_cash_flow_request(project_data)
     if direct_request is not None:
@@ -61,6 +67,37 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
             + ", ".join(missing_amount_fields)
         )
     return analysis["cashFlowRunRequestDraft"]
+
+
+def _reviewed_monthly_request(project_data: Dict[str, Any], review: Any) -> Dict[str, Any]:
+    """Build an explicit working-input scenario without changing an approved study."""
+    if not isinstance(review, dict) or set(review) != {"policy", "reason", "expectedReviewHash"}:
+        raise ValueError("월별 금융 검토의 계산 방식·이유·최신 입력 상태를 확인하세요.")
+    policy = validate_monthly_financing_policy(review["policy"])
+    if policy is None:
+        raise ValueError("월별 금융 검토 방식을 직접 선택하세요.")
+    reason = review["reason"]
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
+        raise ValueError("월별 금융 검토 이유를 입력하세요(4000자 이하).")
+    expected = review["expectedReviewHash"]
+    if not isinstance(expected, str) or not expected:
+        raise ValueError("최신 검토 입력을 불러온 뒤 계산하세요.")
+    if expected != feasibility_review_state(project_data)["reviewHash"]:
+        raise FeasibilityReviewConflict("저장된 입력이 변경되었습니다. 최신 값을 다시 불러온 뒤 계산하세요.")
+    raw_financing = project_data.get("pf_structure")
+    reject_unsupported_monthly_financing_options(raw_financing)
+    if not isinstance(raw_financing, list) or not raw_financing or any(not isinstance(row, dict) for row in raw_financing):
+        raise ValueError("월별 금융 검토에는 대출 조건 행 목록이 필요합니다. 원본 금융 조건을 확인해 주세요.")
+    analysis = analyze_development_feasibility_use_case(project_data)
+    draft = analysis.get("cashFlowRunRequestDraft")
+    if not isinstance(draft, dict):
+        raise ValueError("금액이 미입력된 자금조달 항목을 확인한 뒤 계산하세요.")
+    request = _external_candidate_request(project_data, draft)
+    request["monthlyFinancing"] = policy
+    request["reviewedMonthlyFinancingReview"] = {"reason": reason.strip(), "reviewHash": expected}
+    request["sourceMetadata"].update({"analysisOnly": True, "reportEligible": False,
+                                      "sourceType": "reviewed_working_input_scenario"})
+    return request
 
 
 def _direct_cash_flow_request(input_data: Dict[str, Any]) -> Dict[str, Any] | None:

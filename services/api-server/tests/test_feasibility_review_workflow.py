@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from main import app
 from routers import projects
-from storage import get_project_record
+from storage import get_project_record, list_calculation_run_records
 
 
 def test_manual_source_correction_assumption_save_reopen_and_calculate(monkeypatch):
@@ -50,6 +50,10 @@ def test_manual_source_correction_assumption_save_reopen_and_calculate(monkeypat
         calculated = client.post(f"/projects/{pid}/feasibility/calculate", json={})
         assert calculated.status_code == 200, calculated.text
         assert calculated.json()["total_revenue"] == 853951767703
+        run = next(row for row in list_calculation_run_records(pid, engine_key="feasibility")
+                   if row["calculationRunId"] == calculated.json()["calculationRunId"])
+        assert run["inputSnapshot"]["total_revenue"] == reopened["values"]["total_revenue"]
+        assert run["inputSnapshot"]["finance_cost"] == reopened["values"]["finance_cost"]
         stale = client.post(f"/projects/{pid}/feasibility-workbook/apply-input", json=payload)
         assert stale.status_code == 409
         # No correction may overwrite the archived file.

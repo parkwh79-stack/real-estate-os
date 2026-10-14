@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import agent_platform, audit, auth, glossary, kakao, google, legal_citator, legal_corpus_operations, legal_governance, legal_intelligence, legal_provider_operations, valuemap, projects, project_assumptions, ops, market
+from routers import cash_flow_comparison
 from core.authz import enforce_project_tenant_scope, identity_context_from_request
 from core.idp import verified_principal_from_request_state
 from core.runtime_profile import (
@@ -274,6 +275,7 @@ app.include_router(projects.jobs_router)
 app.include_router(projects.source_documents_router)
 app.include_router(projects.parser_v2_router)
 app.include_router(project_assumptions.router)
+app.include_router(cash_flow_comparison.router)
 app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(glossary.router)

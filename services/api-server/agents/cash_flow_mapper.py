@@ -408,6 +408,7 @@ def _funding_sources(study: FeasibilityStudyV2) -> Dict[str, Any]:
 def _pf_structure(study: FeasibilityStudyV2) -> List[Dict[str, Any]]:
     return [
         {
+            "trancheId": tranche.tranche_id,
             "tranche": tranche.name,
             "name": tranche.priority,
             "amount": tranche.amount,

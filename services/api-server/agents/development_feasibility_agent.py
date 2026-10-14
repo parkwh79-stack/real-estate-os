@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 from agents.cash_flow_engine import run_cash_flow_engine
 from agents.cash_flow_mapper import build_cash_flow_run_request_from_feasibility_study
 from core.financial_input_validation import FinancialInputError, require_finite_numbers
+from core.schedule import schedule_month_indices
 from core.calculations import (
     calculate_development_profit,
     calculate_exit_sale_rate,
@@ -21,7 +22,7 @@ from core.logistics import (
     calculate_spec_adequacy_score,
     calculate_tenant_stability_score,
 )
-from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION
+from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION, ScheduleMilestone
 
 
 ASSET_CALCULATION_PROFILES = {
@@ -280,7 +281,14 @@ class DevelopmentFeasibilityAgent:
         pf_structure: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         missing_fields = self._missing_pf_amount_fields(pf_structure)
-        total_pf = None if missing_fields else sum(t.get("amount", 0) for t in pf_structure)
+        financing = self._financing_v2(pf_structure)
+        debt = [row for row in financing if row["priority"] != "equity"]
+        equity = [row for row in financing if row["priority"] == "equity"]
+        bridge = [row for row in debt if row["priority"] == "bridge"]
+        pf_loans = [row for row in debt if row["priority"] != "bridge"]
+        def known_total(rows: List[Dict[str, Any]]) -> float | None:
+            return None if any(row.get("amount") in (None, "") for row in rows) else sum(row.get("amount", 0) for row in rows)
+        total_pf = known_total(debt)
         total_revenue = revenue["totalRevenue"]
         total_cost = costs["totalCost"]
         recommended_by_revenue = total_revenue * 0.65
@@ -288,6 +296,10 @@ class DevelopmentFeasibilityAgent:
         recommended_pf_limit = min(recommended_by_revenue, recommended_by_cost) if total_revenue and total_cost else 0
         return {
             "totalPfAmount": total_pf,
+            "pfLoanAmount": known_total(pf_loans),
+            "bridgeLoanAmount": known_total(bridge),
+            "committedEquityAmount": known_total(equity),
+            "totalPfAmountBasis": "debt_including_bridge_excluding_equity",
             "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None else None,
             "ltvByRevenue": calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None else None,
             "ltvByRevenueBasis": "gross_sales_value",
@@ -302,7 +314,7 @@ class DevelopmentFeasibilityAgent:
             "requiredEquity": max(0, total_cost - total_pf) if total_pf is not None else None,
             "recommendedPfLimit": recommended_pf_limit,
             "headroomToRecommendedLimit": recommended_pf_limit - total_pf if total_pf is not None else None,
-            "status": "needs_input" if total_pf is None else "ready" if total_pf <= recommended_pf_limit or not recommended_pf_limit else "leverage_review_required",
+            "status": "needs_input" if missing_fields else "ready" if total_pf <= recommended_pf_limit or not recommended_pf_limit else "leverage_review_required",
             "missingFields": missing_fields,
         }
 
@@ -375,7 +387,7 @@ class DevelopmentFeasibilityAgent:
         has_revenue = revenue["totalRevenue"] > 0
         has_cost = costs["totalCost"] > 0
         missing_pf_amounts = self._missing_pf_amount_fields(pf_structure)
-        has_pf = bool(pf_structure) and not missing_pf_amounts
+        has_pf = any(row["priority"] != "equity" for row in self._financing_v2(pf_structure)) and not missing_pf_amounts
         has_schedule = bool(
             project_data.get("cashflow_input")
             or self._schedule_v2(project_data.get("schedule"))
@@ -545,7 +557,11 @@ class DevelopmentFeasibilityAgent:
                 "reason": "Project is not classified as a logistics asset.",
             }
 
-        pf_amount = sum(float(item.get("amount") or 0) for item in pf_structure)
+        pf_amount = sum(
+            float(item.get("amount") or 0)
+            for item in self._financing_v2(pf_structure)
+            if item["priority"] != "equity"
+        )
         leasable_area_py = float(project.get("leasable_area_py") or project_data.get("logistics", {}).get("leasable_area_py") or 0)
         rent_per_py = float(project.get("rent_per_py") or project_data.get("logistics", {}).get("rent_per_py") or 0)
         operating_expenses = float(project.get("operating_expenses") or project_data.get("logistics", {}).get("operating_expenses") or 0)
@@ -702,6 +718,7 @@ class DevelopmentFeasibilityAgent:
         return rows
 
     def _schedule_v2(self, schedule: Any) -> List[Dict[str, Any]]:
+        month_indices = schedule_month_indices(schedule)
         labels = {
             "land_purchase": "Land purchase",
             "permit_approval": "Permit approval",
@@ -710,25 +727,36 @@ class DevelopmentFeasibilityAgent:
             "completion": "Completion",
             "loan_maturity": "Loan maturity",
         }
-        # Legacy shape: a dict of {key: date}.
         if isinstance(schedule, dict):
-            return [
-                {"key": key, "label": labels.get(key, key), "planned_date": planned}
-                for key, value in schedule.items()
-                if (planned := self._schedule_date_value(value))
+            entries = [(str(key), value) for key, value in schedule.items()]
+        elif isinstance(schedule, list):
+            entries = [
+                (next((item.get(field) for field in ("key", "type", "event", "eventKey", "event_key", "name") if item.get(field)), None), item)
+                for item in schedule if isinstance(item, dict)
             ]
-        # Canonical FeasibilityStudyV2 shape: a list of {key, label, planned_date, ...}.
-        if isinstance(schedule, list):
-            rows: List[Dict[str, Any]] = []
-            for item in schedule:
-                if not isinstance(item, dict):
-                    continue
-                key = item.get("key") or item.get("name")
-                planned = self._schedule_date_value(item)
-                if key and planned:
-                    rows.append({"key": key, "label": item.get("label") or labels.get(key, key), "planned_date": planned})
-            return rows
-        return []
+        else:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for key, value in entries:
+            item = value if isinstance(value, dict) else {}
+            planned = self._schedule_date_value(value)
+            explicit_month = next((item[alias] for alias in ("month_index", "monthIndex") if alias in item), None)
+            if not key or (not planned and explicit_month is None):
+                continue
+            row = {"key": key, "label": item.get("label") or labels.get(key, key), "planned_date": planned}
+            for field in ("actual_date", "excel", "provenance"):
+                if field in item:
+                    row[field] = item[field]
+            if explicit_month is not None:
+                row["month_index"] = month_indices[key]
+            try:
+                ScheduleMilestone.model_validate(row)
+            except ValueError as exc:
+                raise FinancialInputError(
+                    f"{key}: 일정 및 원본 출처 형식을 확인해 주세요.", code="invalid_schedule",
+                ) from exc
+            rows.append(row)
+        return rows
 
     @staticmethod
     def _schedule_date_value(value: Any) -> str | None:

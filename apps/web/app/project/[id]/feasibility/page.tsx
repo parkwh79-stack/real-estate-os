@@ -31,6 +31,7 @@ import {
   type FinancialDecisionBinding,
 } from "../../../../lib/financial-decision-package";
 import { fetchLatestCashflow, type CashflowResult } from "../../../../lib/project-client";
+import { CashFlowReviewWorkspace } from "../../../../components/feasibility/cash-flow-review-workspace";
 import {
   displayText,
   fetchWorkspaceContext,
@@ -383,6 +384,8 @@ export default function FeasibilityPage() {
         </div>
       ) : null}
 
+      <CashFlowReviewWorkspace projectId={projectId} cashflow={cashflow} disabled={loading || running} onCalculated={load} onBusyChange={setRunning} />
+
       {loading ? (
         <div className="flex min-h-[260px] items-center justify-center rounded-re-panel border border-re-border bg-re-surface text-sm font-bold text-re-secondary">
           <Loader2 className="mr-2 h-5 w-5 animate-spin" />
@@ -686,7 +689,7 @@ function DecisionGatePanel({
 
 function Panel({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
   return (
-    <section className="rounded-re-panel border border-re-border bg-re-surface p-5 shadow-sm">
+    <section className="min-w-0 rounded-re-panel border border-re-border bg-re-surface p-5 shadow-sm">
       <div className="mb-4">
         <h2 className="text-base font-black text-re-text">{title}</h2>
         {subtitle ? <p className="mt-1 text-xs text-re-secondary">{subtitle}</p> : null}

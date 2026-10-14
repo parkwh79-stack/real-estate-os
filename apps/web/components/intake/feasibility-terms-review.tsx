@@ -86,7 +86,7 @@ export function FeasibilityTermsReview({ draft, disabled, selectedSource, onChan
           interest_rate: "", fee_rate: "", term_months: "", repayment_source: "" }],
       })}>대출 항목 추가</button>
       {reviewControls("financing", "대출 조건")}
-      <p className="mt-3 text-xs text-slate-500">조건과 검토 이유를 저장·재개할 수 있습니다. 현재 월별 현금흐름은 이 금리·수수료·상환 재원 전체를 반영하지 않으므로, 저장만으로 이자·상환액이 재계산되지는 않습니다.</p>
+      <p className="mt-3 text-xs text-slate-500">조건과 검토 이유를 저장·재개할 수 있습니다. 분석 화면에서 월별 금융 계산 방식을 선택하면 저장한 조건으로 별도 검토안을 계산합니다. 기존 예산 금융비용 방식도 사용할 수 있습니다.</p>
     </fieldset>
   </div>;
 }
