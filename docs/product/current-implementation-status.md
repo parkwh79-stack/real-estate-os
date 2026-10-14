@@ -32,6 +32,7 @@ NOI·LTV·점수를 생성하던 처리를 수정했다. 입력이 부족한 지
 |---|---|---|
 | 가입·로그인 | Web `/login`, Supabase password/OAuth BFF, `supabase/functions/naver-userinfo` | 이메일 가입·비밀번호·재설정과 카카오/Google 진입을 같은 화면에 연결. 네이버 앱 등록·저장 설정 확인과 회원정보 변환 함수 v1 배포 완료. Supabase 공급자 설정과 실제 로그인 검증 후 활성화하며 현재 네이버 버튼은 비활성이다. [설정 및 검증](live-auth-smoke-runbook.md). |
 | 프로젝트 생성·재개 | `use_cases/project_management.py`, Web `/start`, `/dashboard`, `/project/[id]` | 기존 흐름 재사용. 첫 사용자가 다음 행동을 찾을 수 있는지 실제 자료로 확인. |
+| 계산 입력·결과 이력 | `routers/projects.py`, `use_cases/calculation_run_capture.py`, Web Risk 계산 이력 | PF·수익성·시나리오·스트레스의 실제 병합/정규화 입력을 저장하고 CF 후속 계산의 부모/hash 연결을 유지한다. 최근 300개 이력에서 입력·결과 재열기와 동일 저장본 JSON 다운로드를 제공한다. 과거 누락은 미기록으로 남기며 조회 오류·재시도·프로젝트 전환을 처리한다. 합성 자료 재현과 PC/모바일 검증 완료; 과거 불완전 이력 복원과 모든 Pod/보고서 연결 완료를 뜻하지 않는다. |
 | 자료 업로드와 문서 분류 | `routers/project_source_documents.py`, `use_cases/intake_finalize.py`, `parsing_platform` | 코드 있음. 외부 AI 없이 처리되는 문서와 수동 확인이 필요한 문서를 명확히 표시. |
 | 숫자·출처 검토 | `use_cases/document_review_workspace.py`, `routers/project_parser_v2.py`, Web `/project/[id]/documents/review` | 후보 검토·스냅샷 경로 있음. 편집·저장·재개를 한 사용자 흐름으로 검증. |
 | 사업수지 Excel 검증·입력 | `use_cases/approved_workbook_authority.py`, `workbook_import_approval.py`, `feasibility_input_builder.py`, `feasibility_workbook_llm.py` | AI 없는 직접 입력·원본 셀 보기·이유/가정 저장과 원 단위 금액·사업 일정·대출 조건의 저장·재개를 연결. 정식 승인과 분석용 입력은 구분. 실제 자료 검증의 범위와 결과는 실행 계획에 기록한다. |

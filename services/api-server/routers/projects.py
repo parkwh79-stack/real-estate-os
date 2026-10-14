@@ -37,7 +37,7 @@ from core.risk_assessment import build_basic_risk_matrix
 from schemas.scenario import ScenarioSetRequest
 from schemas.stress_test import StressTestRequest, StressTranche, StressScenarioDriver, StressTestSchedule
 from agents.scenario_engine_agent import ScenarioEngineAgent
-from agents.stress_test_agent import StressTestAgent
+from agents.stress_test_agent import DEFAULT_STRESS_SCENARIOS, StressTestAgent
 from schemas.credit_enhancement import CreditEnhancementRequest
 from agents.credit_enhancement_agent import CreditEnhancementAgent
 from schemas.cash_sweep import CashSweepRequest
@@ -1281,6 +1281,7 @@ def _persist_calculation_run(
     result: Dict[str, Any],
     input_data: Dict[str, Any] | None = None,
     artifact_ref: Dict[str, Any] | None = None,
+    effective_input_captured: bool = False,
 ) -> Dict[str, Any]:
     input_data = input_data or {}
     source_locator = (
@@ -1289,9 +1290,6 @@ def _persist_calculation_run(
         or artifact_ref
         or {"engineKey": engine_key}
     )
-    scenario = input_data.get("scenario") or input_data.get("scenarioContext") or input_data.get("scenario_context")
-    if not scenario and input_data.get("scenarioId"):
-        scenario = {"scenarioId": input_data.get("scenarioId")}
     scenario = input_data.get("scenario") or input_data.get("scenarioContext") or input_data.get("scenario_context")
     if not scenario and input_data.get("scenarioId"):
         scenario = {"scenarioId": input_data.get("scenarioId")}
@@ -1313,6 +1311,7 @@ def _persist_calculation_run(
             "artifactRef": artifact_ref or {},
             "sourceLocator": source_locator,
             "inputDigest": {
+                **({"capturePolicy": "effective_request_v1"} if effective_input_captured else {}),
                 "keys": sorted(str(key) for key in input_data.keys()),
                 "source": input_data.get("source") or input_data.get("sourceName") or "api_request",
                 "sourceLocator": source_locator,
@@ -1344,8 +1343,10 @@ def _persist_scenario_calculation_runs(
                 project_id,
                 engine_key=payload["engineKey"],
                 result=payload["result"],
-                input_data={**(input_data or {}), "engineVersion": payload["engineVersion"]},
+                input_data={**(input_data or {}), "scenarioSetId": scenario_dump["scenarioSetId"],
+                            "engineVersion": payload["engineVersion"]},
                 artifact_ref=payload["artifactRef"],
+                effective_input_captured=True,
             )
             run_ids[payload["engineKey"]] = str(run.get("calculationRunId"))
         except Exception:
@@ -2909,7 +2910,8 @@ def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
     project_feasibility = _project_store()[project_id].get("feasibility_input", {})
     source_data = deep_merge(project_feasibility, input_data or {})
     result = calculate_feasibility_metrics(source_data)
-    run = _persist_calculation_run(project_id, engine_key="feasibility", result=result, input_data=source_data)
+    run = _persist_calculation_run(project_id, engine_key="feasibility", result=result,
+                                  input_data=source_data, effective_input_captured=True)
     return {**result, "calculationRunId": run["calculationRunId"]}
 
 
@@ -3396,6 +3398,7 @@ def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] 
                 "projectId": project_id,
             },
         },
+        effective_input_captured=True,
     )
     return {**result, "calculationRunId": run["calculationRunId"]}
 
@@ -3557,7 +3560,8 @@ def calculate_cashflow(project_id: str, input_data: Dict[str, Any]):
     result = build_monthly_cash_flow(input_data)
     result["cashflows"] = cfs
     result["legacy_max_minus"] = max_minus
-    run = _persist_calculation_run(project_id, engine_key="cashflow", result=result, input_data=input_data)
+    run = _persist_calculation_run(project_id, engine_key="cashflow", result=result,
+                                  input_data=input_data, effective_input_captured=True)
     return {**result, "calculationRunId": run["calculationRunId"]}
 
 @router.post("/{project_id}/cash-flow/run")
@@ -3580,7 +3584,8 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     digest = financial_input_hash(request_data)
-    run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result, input_data={**request_data, "financialInputHash": digest})
+    run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result,
+                                  input_data={**request_data, "financialInputHash": digest}, effective_input_captured=True)
     if request_data.get("monthlyFinancing") is not None:
         # Existing dependent engines use a different one-shot interest/claim
         # convention. Do not attach them to a monthly-debt scenario as if equal.
@@ -3607,7 +3612,7 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
         scenario_run_ids = _persist_scenario_calculation_runs(
             project_id,
             scenario_result.model_dump(),
-            scenario_input,
+            {**scenario_input, **scenario_request.model_dump(mode="json")},
             strict=True,
         )
     except Exception:
@@ -3615,14 +3620,16 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
         scenario_run_ids = {}
 
     try:
-        stress_result = StressTestAgent().run_stress_test(build_stress_test_request_from_project({}, stress_input))
+        stress_request = build_stress_test_request_from_project({}, stress_input)
+        stress_result = StressTestAgent().run_stress_test(stress_request)
         stress_payload = stress_test_run_payload(stress_result.model_dump())
         stress_run = _persist_calculation_run(
             project_id,
             engine_key=stress_payload["engineKey"],
             result=stress_payload["result"],
-            input_data={**stress_input, "engineVersion": stress_payload["engineVersion"]},
+            input_data={**stress_input, **stress_request.model_dump(mode="json"), "engineVersion": stress_payload["engineVersion"]},
             artifact_ref=stress_payload["artifactRef"],
+            effective_input_captured=True,
         )
         discount_stress_run_id = str(stress_run.get("calculationRunId"))
     except Exception:
@@ -3665,20 +3672,24 @@ def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
         "dscr": result["metrics"]["dscr"]["value"],
         "exit_sale_rate": result["metrics"]["exit_sale_rate"]["value"],
     }
-    pf_run = _persist_calculation_run(project_id, engine_key="pf_metrics", result=response, input_data=input_data)
+    captured_input = {**input_data, **source_data}
+    pf_run = _persist_calculation_run(project_id, engine_key="pf_metrics", result=response,
+                                    input_data=captured_input, effective_input_captured=True)
     ltv_run = _persist_calculation_run(
         project_id,
         engine_key="ltv_ltc_dscr",
         result=response,
-        input_data={**(input_data or {}), "engineVersion": "ltv_ltc_dscr_v1"},
+        input_data={**captured_input, "engineVersion": "ltv_ltc_dscr_v1"},
         artifact_ref={"type": "pf_structure", "section": "metrics", "parentCalculationRunId": pf_run["calculationRunId"]},
+        effective_input_captured=True,
     )
     exit_run = _persist_calculation_run(
         project_id,
         engine_key="exit_sale_rate",
         result=response,
-        input_data={**(input_data or {}), "engineVersion": "exit_sale_rate_v1"},
+        input_data={**captured_input, "engineVersion": "exit_sale_rate_v1"},
         artifact_ref={"type": "pf_structure", "section": "exit_sale_rate", "parentCalculationRunId": pf_run["calculationRunId"]},
+        effective_input_captured=True,
     )
     return {
         **response,
@@ -3703,7 +3714,8 @@ def calculate_returns(project_id: str, input_data: Dict[str, Any] | None = None)
     feasibility = _project_store()[project_id].get("feasibility_input", {})
     source_data = deep_merge(feasibility, input_data or {})
     result = calculate_return_metrics(source_data)
-    run = _persist_calculation_run(project_id, engine_key="return_metrics", result=result, input_data=input_data)
+    run = _persist_calculation_run(project_id, engine_key="return_metrics", result=result,
+                                  input_data=source_data, effective_input_captured=True)
     return {**result, "calculationRunId": run["calculationRunId"]}
 
 @router.post("/{project_id}/risk/assess")
@@ -3842,10 +3854,12 @@ def build_stress_test_request_from_project(project: Dict[str, Any], input_data: 
             feeRate=_to_number(tranche.get("feeRate", tranche.get("fee_rate", 0.0))),
         ))
 
-    scenarios = None
+    # Freeze the same defaults the Agent consumes, so later policy/default
+    # changes cannot reinterpret an old run's absent schedule or scenarios.
+    scenarios = [scenario.model_copy(deep=True) for scenario in DEFAULT_STRESS_SCENARIOS]
     if isinstance(input_data.get("scenarios"), list) and input_data["scenarios"]:
         scenarios = [StressScenarioDriver(**s) for s in input_data["scenarios"]]
-    schedule = StressTestSchedule(**input_data["schedule"]) if isinstance(input_data.get("schedule"), dict) else None
+    schedule = StressTestSchedule(**input_data["schedule"]) if isinstance(input_data.get("schedule"), dict) else StressTestSchedule()
 
     return StressTestRequest(
         baseCashFlowRequest=input_data.get("baseCashFlowRequest"),
@@ -3886,8 +3900,9 @@ def run_project_stress_test(project_id: str, input_data: Dict[str, Any] | None =
         project_id,
         engine_key=payload["engineKey"],
         result=payload["result"],
-        input_data={**(input_data or {}), "engineVersion": payload["engineVersion"]},
+        input_data={**(input_data or {}), **req.model_dump(mode="json"), "engineVersion": payload["engineVersion"]},
         artifact_ref=payload["artifactRef"],
+        effective_input_captured=True,
     )
     dump["calculationRunId"] = run.get("calculationRunId")
     return dump
@@ -3931,7 +3946,8 @@ def run_project_scenarios_waterfall(project_id: str, input_data: Dict[str, Any])
     req = build_scenario_request_from_project(_project_store()[project_id], input_data)
     agent = ScenarioEngineAgent()
     result = agent.run_scenario_set(req)
-    run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(), input_data, engines=["waterfall"]).get("waterfall")
+    run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(),
+        {**input_data, **req.model_dump(mode="json")}, engines=["waterfall"]).get("waterfall")
     return {
         "scenarioSetId": result.scenarioSetId,
         "waterfallScenarios": result.waterfallScenarios,
@@ -3946,7 +3962,8 @@ def run_project_scenarios_unsold_ltv(project_id: str, input_data: Dict[str, Any]
     req = build_scenario_request_from_project(_project_store()[project_id], input_data)
     agent = ScenarioEngineAgent()
     result = agent.run_scenario_set(req)
-    run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(), input_data, engines=["unsold_ltv"]).get("unsold_ltv")
+    run_id = _persist_scenario_calculation_runs(project_id, result.model_dump(),
+        {**input_data, **req.model_dump(mode="json")}, engines=["unsold_ltv"]).get("unsold_ltv")
     return {
         "scenarioSetId": result.scenarioSetId,
         "unsoldLtvMatrix": result.unsoldLtvMatrix,
@@ -3974,7 +3991,7 @@ def run_project_scenarios_recovery(project_id: str, input_data: Dict[str, Any]):
 
     # Full scenario set = all three engines get their own CalculationRun so the
     # SENIOR_SHORTFALL / UNSOLD_LTV_BREACH history is queryable per engine.
-    run_ids = _persist_scenario_calculation_runs(project_id, dump, input_data)
+    run_ids = _persist_scenario_calculation_runs(project_id, dump, {**input_data, **req.model_dump(mode="json")})
     dump["calculationRunIds"] = run_ids
     return dump
 

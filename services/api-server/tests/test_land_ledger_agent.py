@@ -58,11 +58,16 @@ def test_modern_unlabelled_numeric_columns_are_not_payment_evidence():
     assert result["landAcquisitionStatus"]["paidDepositParcels"] == 0
 
 
-def test_pilot_adapter_preserves_payment_meaning_and_missing_records(tmp_path):
-    from scripts.update_pilot_input_from_samples import _extract_land_ledger
+def test_pilot_adapter_preserves_payment_meaning_and_missing_records(tmp_path, monkeypatch):
+    import importlib
+    import sys
+    # The API/CI install need not include the optional Word extraction library.
+    monkeypatch.setitem(sys.modules, "docx", None)
+    from scripts import update_pilot_input_from_samples as pilot_adapter
+    importlib.reload(pilot_adapter)
     path = tmp_path / "joint.xlsx"
     _joint_contract_workbook(path)
-    result = _extract_land_ledger(path)
+    result = pilot_adapter._extract_land_ledger(path)
     parcels = result["landAcquisition"]
     assert parcels[0]["depositPaid"] == 0
     assert parcels[0]["balanceDue"] == 67.5

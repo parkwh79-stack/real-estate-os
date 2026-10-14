@@ -9,7 +9,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from docx import Document
 from openpyxl import load_workbook
 
 
@@ -301,6 +300,8 @@ def _extract_land_ledger(path: Path) -> Dict[str, Any]:
 
 
 def _extract_pf_terms(path: Path) -> Dict[str, Any]:
+    from docx import Document
+
     doc = Document(path)
     table = doc.tables[2]
     row_text_by_label: Dict[str, str] = {}

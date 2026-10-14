@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, GitCompare, AlertTriangle, ArrowRight } from "lucide-react";
 import {
   fetchCalculationRuns,
@@ -22,34 +22,50 @@ import {
  * (SENIOR_SHORTFALL / UNSOLD_LTV_BREACH) appearance/resolution across runs.
  */
 export function CalculationRunHistoryPanel({ projectId }: { projectId: string }) {
+  // A project change must discard its selections and pending requests together.
+  return <ProjectCalculationRunHistory key={projectId} projectId={projectId} />;
+}
+
+function ProjectCalculationRunHistory({ projectId }: { projectId: string }) {
   const [runs, setRuns] = useState<CalculationRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeEngine, setActiveEngine] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
+  const [openedRunId, setOpenedRunId] = useState<string | null>(null);
+  const pendingRequest = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
+    pendingRequest.current?.abort();
+    const controller = new AbortController();
+    pendingRequest.current = controller;
     setLoading(true);
     setError(null);
+    setRuns([]);
     try {
-      const all = await fetchCalculationRuns(projectId, { limit: 300 });
-      setRuns(all);
-    } catch {
-      setError("계산 이력을 불러오지 못했습니다.");
+      const all = await fetchCalculationRuns(projectId, { limit: 300, signal: controller.signal });
+      if (!controller.signal.aborted) setRuns(all);
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "계산 이력을 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
     void load();
+    return () => pendingRequest.current?.abort();
   }, [load]);
 
   const groups = useMemo(() => groupRunsByEngine(runs), [runs]);
 
   // Default the active engine to the first group once loaded.
   useEffect(() => {
-    if (!activeEngine && groups.length) setActiveEngine(groups[0]!.engineKey);
+    if (groups.length && !groups.some((group) => group.engineKey === activeEngine)) {
+      setActiveEngine(groups[0]!.engineKey);
+      setSelected([]);
+      setOpenedRunId(null);
+    }
   }, [groups, activeEngine]);
 
   const activeRuns = useMemo(
@@ -61,6 +77,7 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
   const selectEngine = useCallback((engineKey: string) => {
     setActiveEngine(engineKey);
     setSelected([]);
+    setOpenedRunId(null);
   }, []);
 
   const toggleSelect = useCallback((runId: string) => {
@@ -105,7 +122,7 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
   }
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <section aria-label="계산 실행 이력" className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="mb-4 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <GitCompare className="h-5 w-5 text-slate-700 dark:text-slate-200" />
@@ -120,12 +137,12 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
         </button>
       </div>
 
-      {error ? <p className="mb-3 text-sm font-bold text-rose-600 dark:text-rose-300">{error}</p> : null}
+      {error ? <p role="alert" className="mb-3 text-sm font-bold text-rose-600 dark:text-rose-300">{error}</p> : null}
 
-      {groups.length === 0 ? (
+      {error ? null : groups.length === 0 ? (
         <p className="rounded-lg bg-slate-50 p-5 text-sm text-slate-500 dark:bg-slate-800/70">
           저장된 계산 실행이 없습니다. 사업수지·현금흐름·시나리오(Waterfall/미분양 LTV/회수)·스트레스 계산을 실행하면 각 실행이
-          calculationRunId로 기록되어 여기서 비교할 수 있습니다.
+          여기서 저장된 입력·결과를 다시 열고 비교할 수 있습니다.
         </p>
       ) : (
         <>
@@ -164,6 +181,7 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
                   <th className="px-3 py-2">버전</th>
                   <th className="px-3 py-2">지표</th>
                   <th className="px-3 py-2">Blocker</th>
+                  <th className="px-3 py-2">저장 내용</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -198,6 +216,13 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
                           <span className="text-xs text-emerald-600 dark:text-emerald-400">없음</span>
                         )}
                       </td>
+                      <td className="px-3 py-2.5">
+                        <button type="button" aria-expanded={openedRunId === run.calculationRunId}
+                          onClick={() => setOpenedRunId((current) => current === run.calculationRunId ? null : run.calculationRunId)}
+                          className="whitespace-nowrap rounded border border-slate-300 px-2 py-1 text-xs font-bold dark:border-slate-600">
+                          입력·결과 보기
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -205,7 +230,12 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
             </table>
           </div>
 
+          {activeRuns.filter((run) => run.calculationRunId === openedRunId).map((run) => (
+            <SavedRunDetails key={run.calculationRunId} run={run} />
+          ))}
+
           <p className="mt-2 text-xs text-slate-400">
+            최근 300개 실행을 표시합니다. {" "}
             {selected.length === 2
               ? "선택한 두 실행을 비교합니다."
               : `비교하려면 같은 엔진의 실행 2개를 선택하세요. (현재 ${selected.length}/2)`}
@@ -214,6 +244,9 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
           {/* Comparison */}
           {comparison ? (
             <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50/50 p-4 dark:border-sky-900 dark:bg-sky-950/20">
+              {(!comparison.a.engineVersion || !comparison.b.engineVersion || comparison.a.engineVersion !== comparison.b.engineVersion) ? (
+                <p className="mb-3 text-sm text-amber-700 dark:text-amber-300">계산 버전이 다르거나 기록되지 않았습니다. 결과 차이에 계산 방식의 변경이 포함될 수 있습니다.</p>
+              ) : null}
               <div className="mb-3 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-800 dark:text-slate-100">
                 <span className="font-mono text-xs">{shortRunId(comparison.a.calculationRunId)}</span>
                 <span className="text-xs font-normal text-slate-500">{formatRunTimestamp(comparison.a)}</span>
@@ -282,6 +315,51 @@ export function CalculationRunHistoryPanel({ projectId }: { projectId: string })
           ) : null}
         </>
       )}
+    </section>
+  );
+}
+
+function SavedRunDetails({ run }: { run: CalculationRun }) {
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const hasInput = Boolean(run.inputSnapshot && Object.keys(run.inputSnapshot).length);
+  const hasResult = Boolean(run.resultSnapshot && Object.keys(run.resultSnapshot).length);
+  function download() {
+    setDownloadError(null);
+    try {
+      // The visible record is the sole export source; never fetch live project inputs.
+      const url = URL.createObjectURL(new Blob([JSON.stringify(run, null, 2)], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `calculation-${run.calculationRunId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch {
+      setDownloadError("저장 내용을 다운로드하지 못했습니다. 다시 시도해 주세요.");
+    }
+  }
+  return (
+    <section aria-label="저장된 계산 입력과 결과" className="mt-4 space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-bold">{engineLabel(run.engineKey)} · 저장된 입력과 결과</h3>
+        <button type="button" onClick={download} className="rounded border border-slate-300 px-3 py-2 text-xs font-bold dark:border-slate-600">저장 내용 다운로드 (JSON)</button>
+      </div>
+      <p className="break-all text-xs text-slate-500">실행 번호: {run.calculationRunId} · {formatRunTimestamp(run)} · 버전: {run.engineVersion ?? "미기록"}</p>
+      <p className="text-sm text-slate-600 dark:text-slate-300">실행 당시 저장한 내용입니다. 화면과 다운로드는 같은 이력을 사용합니다.</p>
+      <p className="text-sm text-slate-600 dark:text-slate-300">
+        {run.inputDigest?.capturePolicy === "effective_request_v1" && hasInput
+          ? "계산에 사용한 요청이 저장되어 있습니다."
+          : "과거 이력은 일부 입력만 저장되었을 수 있습니다. 전체 입력 저장 여부는 확인되지 않았습니다."}
+      </p>
+      {downloadError ? <p role="alert" className="text-sm text-rose-600">{downloadError}</p> : null}
+      <div className="grid gap-3 md:grid-cols-2">
+        {([ ["저장된 입력 원문", run.inputSnapshot, hasInput], ["저장된 결과 원문", run.resultSnapshot, hasResult] ] as const).map(([label, snapshot, present]) => (
+          <details key={label} className="min-w-0 rounded bg-slate-50 p-3 dark:bg-slate-800">
+            <summary className="cursor-pointer text-sm font-bold">{label}</summary>
+            {present ? <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(snapshot, null, 2)}</pre>
+              : <p className="mt-3 text-sm text-amber-700 dark:text-amber-300">미기록 — 이 실행에는 {label.includes("입력") ? "입력" : "결과"} 원문이 저장되지 않았습니다.</p>}
+          </details>
+        ))}
+      </div>
     </section>
   );
 }
