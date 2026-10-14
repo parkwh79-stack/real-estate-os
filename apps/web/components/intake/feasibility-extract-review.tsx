@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authHeaders, apiBase } from "../../lib/auth-client";
 import { eokToWon, wonToEok } from "../../lib/feasibility-review";
@@ -47,7 +48,9 @@ function rowsFromState(state: ReviewState): Row[] {
 }
 
 export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: string; onApplied?: () => void }) {
+  const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
+  const savingRef = useRef(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [reviewHash, setReviewHash] = useState("");
   const [documents, setDocuments] = useState<Source[]>([]);
@@ -58,6 +61,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
   const [notice, setNotice] = useState<string | null>(null);
   const [preview, setPreview] = useState<WorkbookCellPreview | null>(null);
   const endpoint = `${apiBase}/projects/${encodeURIComponent(projectId)}/feasibility-workbook`;
+  const activeEndpointRef = useRef<string | null>(null);
 
   const restore = useCallback((state: ReviewState) => {
     setRows(rowsFromState(state));
@@ -67,6 +71,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
 
   useEffect(() => {
     let active = true;
+    activeEndpointRef.current = endpoint;
     setBusy(true); setReviewHash(""); setRows([]); setArchiveId("");
     setPreview(null); setError(null); setNotice(null);
     void fetch(`${endpoint}/review`, { cache: "no-store", headers: authHeaders("web") })
@@ -74,7 +79,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
       .then((state) => { if (active) restore(state); })
       .catch((err) => { if (active) setError(String(err.message)); })
       .finally(() => { if (active) setBusy(false); });
-    return () => { active = false; };
+    return () => { active = false; activeEndpointRef.current = null; };
   }, [endpoint, restore]);
 
   const reload = async () => {
@@ -127,7 +132,9 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
     finally { setBusy(false); }
   };
 
-  const save = async () => {
+  const save = async (): Promise<boolean> => {
+    if (savingRef.current) return false;
+    savingRef.current = true;
     setBusy(true); setError(null); setNotice(null);
     try {
       const changed = rows.filter((row) => row.dirty);
@@ -146,14 +153,24 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
           fieldSourceDocuments: Object.fromEntries(changed.filter((row) => row.origin === "document_correction")
             .map((row) => [row.key, row.sourceDocument ?? documents.find((item) => item.archiveId === archiveId) ?? null])) }),
       }));
+      if (activeEndpointRef.current !== endpoint) return false;
       restore(result.reviewState);
       setNotice("입력과 검토 이유를 저장했습니다. 다시 열어 이어갈 수 있습니다. 변경된 값으로 사업수지를 다시 계산하세요.");
       onApplied?.();
-    } catch (err) { setError(err instanceof Error ? err.message : "입력을 저장하지 못했습니다."); }
-    finally { setBusy(false); }
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "입력을 저장하지 못했습니다.");
+      return false;
+    } finally { savingRef.current = false; setBusy(false); }
   };
 
   const hasChanges = rows.some((row) => row.dirty);
+  const continueTo = async (destination: "documents/review" | "feasibility") => {
+    if (busy || savingRef.current || !reviewHash || activeEndpointRef.current !== endpoint) return;
+    if (hasChanges && !await save()) return;
+    if (activeEndpointRef.current !== endpoint) return;
+    router.push(`/project/${encodeURIComponent(projectId)}/${destination}`);
+  };
   return (
     <section aria-label="사업수지 입력 검토" className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <h2 className="font-black text-slate-950 dark:text-white">사업수지 숫자 확인·수정·저장</h2>
@@ -199,11 +216,17 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
           <span className="block text-slate-500">{cell.coordinate}</span>{String(cell.displayValue ?? "—")}{cell.formula ? <span className="block">{cell.formula}</span> : null}
         </td>)}</tr>)}</tbody></table>
       </div> : null}
-      <p className="mt-4 text-xs text-slate-500">이 저장은 분석용 입력과 사용자 검토 기록입니다. 원본 문서와 정식 승인값을 바꾸지 않으며, 승인된 사업수지가 있는 경우 해당 기준값이 우선합니다. 기간·대출 조건은 다음 분석 화면에서 확인하세요.</p>
+      <p className="mt-4 text-xs text-slate-500">이 저장은 분석용 입력과 사용자 검토 기록입니다. 원본 문서와 정식 승인값을 바꾸지 않으며, 승인된 사업수지가 있는 경우 해당 기준값이 우선합니다. 저장 후 분석 화면에서 사업수지를 다시 계산하세요.</p>
+      {hasChanges ? <p className="mt-2 text-sm text-amber-700">저장 전 수정값이 있습니다. 아래 버튼으로 다음 화면에 이동하면 입력과 검토 이유를 먼저 저장합니다.</p> : null}
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="button" disabled={busy || !reviewHash || !hasChanges} onClick={() => void save()} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-40">검토 입력 저장</button>
-        <Link href={`/project/${encodeURIComponent(projectId)}/documents/review`} className="text-sm font-bold text-indigo-600">문서·출처 검토</Link>
-        <Link href={`/project/${encodeURIComponent(projectId)}/feasibility`} className="text-sm font-bold text-indigo-600">사업수지 분석으로 이동</Link>
+        {hasChanges || busy || !reviewHash ? <>
+          <button type="button" disabled={busy || !reviewHash} onClick={() => void continueTo("documents/review")} className="text-sm font-bold text-indigo-600 disabled:opacity-40">{hasChanges ? "저장하고 문서·출처 검토" : "문서·출처 검토"}</button>
+          <button type="button" disabled={busy || !reviewHash} onClick={() => void continueTo("feasibility")} className="text-sm font-bold text-indigo-600 disabled:opacity-40">{hasChanges ? "저장하고 사업수지 분석으로 이동" : "사업수지 분석으로 이동"}</button>
+        </> : <>
+          <Link href={`/project/${encodeURIComponent(projectId)}/documents/review`} className="text-sm font-bold text-indigo-600">문서·출처 검토</Link>
+          <Link href={`/project/${encodeURIComponent(projectId)}/feasibility`} className="text-sm font-bold text-indigo-600">사업수지 분석으로 이동</Link>
+        </>}
       </div>
     </section>
   );
