@@ -121,7 +121,35 @@ def run_summary(run: dict) -> dict:
         "sourceLocator": deepcopy(run.get("sourceLocator") or {}),
         "inputEvidenceIds": deepcopy(run.get("inputEvidenceIds") or []),
         "assumptionIds": deepcopy(run.get("assumptionIds") or []),
+        "inputReviews": input_review_rows(snapshot),
     }
+
+
+def input_review_rows(snapshot: dict) -> list[dict]:
+    """Display the review captured with this calculation, never today's project."""
+    metadata = snapshot.get("sourceMetadata") or {}
+    review = metadata.get("inputReview") if isinstance(metadata, dict) else None
+    if not isinstance(review, dict):
+        return []
+    labels = {"total_revenue": "총매출", "total_cost": "총사업비", "land_cost": "토지비",
+              "construction_cost": "공사비", "finance_cost": "금융비용", "other_cost": "기타 비용",
+              "pf_amount": "PF 금액", "development_profit": "사업이익", "schedule": "사업 일정", "financing": "대출 조건"}
+    rows = []
+    for group in ("fieldReviews", "termReviews"):
+        entries = review.get(group)
+        if not isinstance(entries, dict):
+            continue
+        for key, item in entries.items():
+            if not isinstance(item, dict):
+                continue
+            origin = item.get("origin")
+            document = item.get("sourceDocument") or {}
+            source_backed = origin == "document_correction" and isinstance(document, dict) and bool(document.get("archiveId") and item.get("sourceCell"))
+            rows.append({"field": key, "label": labels.get(key, "검토 입력"), "value": deepcopy(item.get("value")),
+                         "classification": "원본 대조 입력(최종 승인 아님)" if source_backed else "분석용 사용자 가정" if origin == "user_assumption" else "출처 미확인",
+                         "reason": item.get("reason") or "미기록", "sourceCell": item.get("sourceCell") if source_backed else None,
+                         "sourceName": document.get("originalFileName") if source_backed else None})
+    return rows
 
 
 def run_issues(run: dict) -> list[str]:

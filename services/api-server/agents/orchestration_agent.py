@@ -757,7 +757,8 @@ class OrchestrationAgent:
 
                 qa_agent = VisualQAAgent()
                 structure_results = qa_agent.analyze_pdf_structure(pdf_bytes)
-                visual_results = qa_agent.run_visual_regression(pdf_bytes, report_id=f"report-{run['run_id']}")
+                visual_results = qa_agent.run_visual_regression(pdf_bytes, report_id=f"report-{run['run_id']}",
+                    baseline_id=qa_agent.baseline_key(str(run.get("tenant_id") or "legacy"), str(project_id), str(structured_report["template"])))
             except Exception as qa_exc:
                 run["errors"].append({
                     "message": f"Visual QA execution failed: {str(qa_exc)}",
@@ -1810,7 +1811,7 @@ class OrchestrationAgent:
             artifact for artifact in required_artifacts if artifact not in run["artifacts"]
         ]
         pdf_structure_pass = bool(structure_results) and structure_results.get("status") in {"passed", "warnings"}
-        pdf_visual_pass = bool(visual_results) and visual_results.get("status") == "passed"
+        pdf_visual_pass = bool(visual_results) and visual_results.get("status") == "passed" and visual_results.get("baseline_reviewed") is True
 
         is_passed = (
             report_quality["isComplete"]

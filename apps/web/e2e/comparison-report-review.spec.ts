@@ -4,8 +4,10 @@ test.setTimeout(90_000);
 
 const comparison = {
   status: "partial", reasons: ["financing_policy_mismatch"],
-  baseline: { calculationRunId: "base-1", period: { baseMonth: "2026-01", lastMonthIndex: 24 } },
-  comparison: { calculationRunId: "changed-1", period: { baseMonth: "2026-01", lastMonthIndex: 24 } },
+  baseline: { calculationRunId: "base-1", period: { baseMonth: "2026-01", lastMonthIndex: 24 }, inputReviews: [
+    { field: "total_revenue", label: "총매출", classification: "원본 대조 입력(최종 승인 아님)", reason: "원본 매출 셀 대조", sourceName: "검증자료.xlsx", sourceCell: "사업수지!D11" }] },
+  comparison: { calculationRunId: "changed-1", period: { baseMonth: "2026-01", lastMonthIndex: 24 }, inputReviews: [
+    { field: "total_revenue", label: "총매출", classification: "분석용 사용자 가정", reason: "매출 증가 분석 가정" }] },
   metrics: [{ key: "financialCost", label: "금융비용", unit: "KRW", baselineValue: 900_000_000, comparisonValue: 400_000_000, delta: -500_000_000 }],
   inputChanges: [{ path: "pfStructure[0].interestRate", label: "대출 연 금리", before: 0.06, after: 0.05 }],
 };
@@ -77,11 +79,15 @@ test("save a comparison draft and reopen its fixed values after live inputs chan
   const captured = panel.getByLabel("초안에 고정된 비교", { exact: true });
   await expect(captured.getByRole("cell", { name: "400,000,000", exact: true })).toBeVisible();
   await expect(captured.getByText("변경안 검토 이유: 저장 당시 금리 검토", { exact: true })).toBeVisible();
+  await expect(captured.getByText("총매출 · 원본 대조 입력(최종 승인 아님)", { exact: true })).toBeVisible();
+  await expect(captured.getByText("총매출 · 분석용 사용자 가정", { exact: true })).toBeVisible();
+  await expect(captured.getByText("검증자료.xlsx · 사업수지!D11", { exact: true })).toBeVisible();
   changeLive();
   await panel.getByRole("button", { name: "비교 다시 불러오기", exact: true }).click();
   await expect(captured.getByRole("cell", { name: "400,000,000", exact: true })).toBeVisible();
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(captured.getByRole("cell", { name: "400,000,000", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(captured.getByText("매출 증가 분석 가정", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "최종 발행", exact: true })).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });

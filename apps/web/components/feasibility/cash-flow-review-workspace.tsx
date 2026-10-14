@@ -13,7 +13,8 @@ const MONTHLY_POLICY = {
   rounding: "unrounded_analysis",
 } as const;
 type Run = { calculationRunId: string; label: string; createdAt?: string; policyMode?: string;
-  period: { baseMonth: string | null; lastMonthIndex: number | null }; sourceHashes?: string[] };
+  period: { baseMonth: string | null; lastMonthIndex: number | null }; sourceHashes?: string[];
+  inputReviews?: Array<{ field: string; label: string; classification: string; reason: string; sourceName?: string | null; sourceCell?: string | null }> };
 export type Comparison = {
   status: string; reasons: string[]; baseline?: Run; comparison?: Run; sourceChanged?: boolean;
   metrics: Array<{ key: string; label: string; unit: string; baselineValue: number | null; comparisonValue: number | null; delta: number | null }>;
@@ -220,6 +221,18 @@ export function CashFlowComparisonDetails({ comparison }: { comparison: Comparis
       {comparison.reasons.map((code) => <p key={code} className="text-sm font-bold text-amber-700">{reasons[code] ?? "계산 기준을 확인해 주세요. 비교할 수 없는 입력이 있습니다."}</p>)}
       {comparison.sourceChanged ? <p className="text-sm text-amber-700">두 계산의 원본·근거 기준도 변경되었습니다.</p> : null}
       <p className="text-xs text-slate-500">기준: {period(comparison.baseline)} / 변경: {period(comparison.comparison)}</p>
+      <div aria-label="계산 당시 입력 근거와 가정" className="space-y-3 text-sm">
+        <p className="font-bold">입력 근거와 사용자 가정</p>
+        <p className="text-xs text-slate-500">각 계산에 저장된 검토 기록입니다. 최종 승인 자료가 없어도 가능한 분석은 계속할 수 있으며, 원본 대조와 최종 승인은 구분합니다.</p>
+        {([['기준안', comparison.baseline], ['변경안', comparison.comparison]] as const).map(([label, run]) =>
+          <div key={label} className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <p className="font-semibold">{label}</p>
+            {run?.inputReviews?.length ? <ul className="mt-2 space-y-2">{run.inputReviews.map((row) =>
+              <li key={row.field} className="break-words"><p>{row.label} · {row.classification}</p><p>{row.reason}</p>
+                {row.sourceName || row.sourceCell ? <p className="text-xs text-slate-500">{[row.sourceName, row.sourceCell].filter(Boolean).join(' · ')}</p> : null}
+              </li>)}</ul> : <p className="mt-2 text-slate-500">이 계산에는 항목별 검토 기록이 없습니다. 현재 프로젝트의 메모를 대신 표시하지 않습니다.</p>}
+          </div>)}
+      </div>
       {comparison.metrics.length ? <div className="overflow-x-auto"><table className="w-full min-w-[440px] text-right text-sm">
         <caption className="mb-2 text-left text-xs text-slate-500">사업 전체 집계 · 원 · 표시값 소수 둘째 자리 반올림 · 차이 = 변경 − 기준</caption>
         <thead><tr><th className="p-2 text-left">항목</th><th className="p-2">기준</th><th className="p-2">변경</th><th className="p-2">차이</th></tr></thead>

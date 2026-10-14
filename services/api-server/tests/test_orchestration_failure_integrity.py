@@ -121,7 +121,9 @@ def test_missing_review_cannot_pass_its_approval_gate(artifact, gate):
     assert check["pass"] is False
 
 
-@pytest.mark.parametrize("qa", [None, {"status": "failed"}, {"status": "regression_detected"}, {"status": "error"}])
+@pytest.mark.parametrize("qa", [None, {"status": "failed"}, {"status": "regression_detected"}, {"status": "error"},
+                              {"status": "passed"}, {"status": "passed", "baseline_reviewed": False},
+                              {"status": "baseline_created"}, {"status": "baseline_unreviewed"}])
 def test_missing_or_failed_visual_qa_cannot_pass_report_quality(qa):
     agent, run = _run()
     for key in ("landAgentReview", "developerFeasibility", "feasibility", "pfStructure",

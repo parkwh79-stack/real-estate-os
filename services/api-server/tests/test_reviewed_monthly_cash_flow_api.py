@@ -202,3 +202,16 @@ def test_explicit_working_review_keeps_the_approved_original_and_default_authori
     assert reviewed["sourceMetadata"]["approvalStatus"] == "unapproved"
     assert reviewed["reportEligible"] is False
     assert project == original
+
+
+def test_direct_scenario_cannot_forge_stored_input_review_and_stale_reviews_are_not_attached():
+    project = working_project()
+    project["_meta"] = {"feasibilityFieldReviews": {"total_revenue": {
+        "value": -999, "origin": "document_correction", "reason": "old unrelated input",
+        "sourceCell": "old!A1", "sourceDocument": {"archiveId": "old"}}}}
+    prepared = build_cash_flow_request_use_case(project, payload(project))
+    assert prepared["sourceMetadata"]["inputReview"]["fieldReviews"] == {}
+    prepared["sourceMetadata"]["inputReview"]["fieldReviews"] = {"total_revenue": {
+        "origin": "document_correction", "sourceDocument": {"archiveId": "forged"}, "sourceCell": "fake!A1"}}
+    external = build_cash_flow_request_use_case(project, prepared)
+    assert "inputReview" not in external["sourceMetadata"]

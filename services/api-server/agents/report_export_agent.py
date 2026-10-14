@@ -269,8 +269,9 @@ class ReportExportAgent:
         objects: list[bytes] = [
             b"<< /Type /Catalog /Pages 2 0 R >>",
             b"",
-            b"<< /Type /Font /Subtype /Type0 /BaseFont /HYGoThic-Medium /Encoding /UniKS-UCS2-H /DescendantFonts [4 0 R] >>",
-            f"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HYGoThic-Medium /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /DW {self._PDF_CID_WIDTH} >>".encode("ascii"),
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /HYGothic-Medium /Encoding /UniKS-UCS2-H /DescendantFonts [4 0 R] >>",
+            f"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HYGothic-Medium /FontDescriptor 5 0 R /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /DW {self._PDF_CID_WIDTH} >>".encode("ascii"),
+            b"<< /Type /FontDescriptor /FontName /HYGothic-Medium /Flags 6 /FontBBox [-6 -145 1003 880] /ItalicAngle 0 /Ascent 752 /Descent -142 /CapHeight 737 /StemV 58 >>",
         ]
         page_refs = []
         for page_lines in pages:

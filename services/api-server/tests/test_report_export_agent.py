@@ -4,9 +4,22 @@ from pathlib import Path
 import re
 
 import pytest
+import fitz
 
 from agents.report_agent import ReportAgent
 from agents.report_export_agent import ReportExportAgent
+
+
+def test_pdf_renderer_reads_korean_text_and_values_instead_of_fallback_glyphs():
+    text = "원본 대조 입력과 분석용 사용자 가정: 사업수지!D11, 매출 165,596,965,012원"
+    pdf = b64decode(ReportExportAgent().export({"title": "현금흐름 비교 검토 초안", "report_markdown": text}, "pdf")["content"])
+    with fitz.open(stream=pdf, filetype="pdf") as document:
+        rendered_text = "".join(page.get_text() for page in document)
+        assert re.sub(r"\s+", "", text) in re.sub(r"\s+", "", rendered_text)
+        for page in document:
+            for x0, y0, x1, y1, *_ in page.get_text("blocks"):
+                assert x0 >= 34 and x1 <= page.rect.width - 34
+            assert page.get_pixmap().width > 0
 
 
 def _pdf_text_lines(pdf: bytes) -> list[str]:

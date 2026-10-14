@@ -137,7 +137,7 @@ from storage import (
     upsert_calculation_run_record,
     upsert_legal_review_record,
 )
-from use_cases.cash_flow import build_cash_flow_request_use_case, run_cash_flow_use_case
+from use_cases.cash_flow import build_cash_flow_request_use_case, execute_cash_flow_request_use_case
 from agent_platform.runtime import StorageAgentRunRepository
 from agent_platform.contracts import LearningCandidate
 from agent_platform.learning import LearningLifecycleService
@@ -3572,7 +3572,7 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
         if request_data.get("monthlyFinancing") is not None and not reviewed_monthly:
             authorize_request(request, "assumption:override")
             enforce_project_tenant_scope(request, project)
-        result = run_cash_flow_use_case(project, request_data)
+        result = execute_cash_flow_request_use_case(request_data)
     except FeasibilityReviewConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

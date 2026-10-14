@@ -23,7 +23,12 @@ def run_cash_flow_use_case(
     """Run Cash Flow Engine from a direct request or the canonical feasibility path."""
     input_data = input_data or {}
     request = _cash_flow_request(project_data, input_data)
-    return run_cash_flow_engine(request)
+    return execute_cash_flow_request_use_case(request)
+
+
+def execute_cash_flow_request_use_case(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute the server-prepared request that is persisted as the input snapshot."""
+    return run_cash_flow_engine(request_data)
 
 
 def build_cash_flow_request_use_case(
@@ -42,11 +47,8 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
     direct_request = _direct_cash_flow_request(input_data)
     approved_request = _approved_canonical_cash_flow_request(project_data)
     if direct_request is not None:
-        # The API route first builds the canonical request and then passes that
-        # exact in-process value back into ``run_cash_flow_use_case``. Preserve
-        # that server-derived path, while treating every differing request as an
-        # external scenario candidate. An external replay that is byte-for-byte
-        # equivalent to the canonical mapping cannot introduce caller authority.
+        # A replay equal to the server's approved mapping cannot introduce
+        # caller authority. Every differing direct request remains a candidate.
         if approved_request is not None and direct_request == approved_request:
             return approved_request
         return _external_candidate_request(project_data, direct_request)
@@ -66,7 +68,21 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
             "대출 금액이 미입력되어 현금흐름을 계산할 수 없습니다: "
             + ", ".join(missing_amount_fields)
         )
-    return analysis["cashFlowRunRequestDraft"]
+    request = _external_candidate_request(project_data, analysis["cashFlowRunRequestDraft"])
+    # Only attach reviews to the saved working inputs they describe. Caller
+    # overrides and approved canonical studies have their own source authority.
+    if not input_data:
+        _capture_working_input_review(request, project_data)
+    return request
+
+
+def _capture_working_input_review(request: Dict[str, Any], project_data: Dict[str, Any]) -> None:
+    state = feasibility_review_state(project_data)
+    request.setdefault("sourceMetadata", {})["inputReview"] = {
+        "scope": "working_input_review_not_approval",
+        "fieldReviews": deepcopy(state["fieldReviews"]),
+        "termReviews": deepcopy(state["termReviews"]),
+    }
 
 
 def _reviewed_monthly_request(project_data: Dict[str, Any], review: Any) -> Dict[str, Any]:
@@ -97,6 +113,7 @@ def _reviewed_monthly_request(project_data: Dict[str, Any], review: Any) -> Dict
     request["reviewedMonthlyFinancingReview"] = {"reason": reason.strip(), "reviewHash": expected}
     request["sourceMetadata"].update({"analysisOnly": True, "reportEligible": False,
                                       "sourceType": "reviewed_working_input_scenario"})
+    _capture_working_input_review(request, project_data)
     return request
 
 
@@ -142,6 +159,9 @@ def _external_candidate_request(
         source_metadata = dict(source_metadata_alias) if isinstance(source_metadata_alias, dict) else {}
         candidate["sourceMetadata"] = source_metadata
     _mark_candidate_section(source_metadata)
+    # A complete caller-supplied scenario cannot forge the server's review
+    # history. Working-input paths attach verified stored records afterwards.
+    source_metadata.pop("inputReview", None)
 
     for key in (
         "source_metadata",

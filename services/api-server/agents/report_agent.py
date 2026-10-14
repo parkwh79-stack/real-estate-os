@@ -131,6 +131,12 @@ class ReportAgent:
             "sources": {"저장된 원본": sources, "고정 검증값(앞 16자리)": snapshot_hash[:16],
                 "보존 범위": "두 계산의 입력·결과·출처 원시 기록은 이 초안에 고정 보존했습니다. 이후 입력이나 선택 변경으로 이 초안의 수치는 바뀌지 않습니다."},
         }
+        input_reviews = [{"계산": side, "항목": row["label"], "구분": row["classification"],
+                          "검토 이유": row["reason"], "원본 위치": " · ".join(str(part) for part in (row.get("sourceName"), row.get("sourceCell")) if part) or "원본 근거 미지정"}
+                         for side, key in (("기준안", "baseline"), ("변경안", "comparison"))
+                         for row in comparison[key].get("inputReviews", [])]
+        if input_reviews:
+            sections["assumptions"]["입력 근거와 사용자 가정"] = input_reviews
         order = [{"index": index, "key": key, "title": title} for index, (key, title) in enumerate((
             ("comparisonSummary", "저장된 계산 비교"), ("assumptions", "계산 방식과 변경 조건"),
             ("limitations", "검토 한계와 미확인 사항"), ("sources", "원본과 저장 기준")), 1)]
@@ -146,6 +152,9 @@ class ReportAgent:
         lines.extend(f"- {row['확인 항목']}: {row['변경 전']} → {row['변경 후']}" for row in changes)
         if not changes:
             lines.append("업무 입력 변경 없음")
+        if input_reviews:
+            lines.extend(["", "입력 근거와 사용자 가정(계산 당시 저장값):"])
+            lines.extend(f"- {row['계산']} {row['항목']} · {row['구분']} · {row['검토 이유']} · {row['원본 위치']}" for row in input_reviews)
         lines.extend(["", "## 3. 검토 한계와 미확인 사항", "", *[f"- {item}" for item in caveats + missing], "", "## 4. 원본과 저장 기준", ""])
         lines.extend(f"- {row['구분']}: {row['계산 기록']} · {row['원본']} · {row['원본 위치']} · 저장 {row['저장 시각']}" for row in sources)
         lines.extend(["", f"고정 시각: {snapshot['capturedAt']}", f"고정 검증값(앞 16자리): {snapshot_hash[:16]}", "", sections["sources"]["보존 범위"]])

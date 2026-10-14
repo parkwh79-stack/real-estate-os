@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
+from hashlib import sha256
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -115,18 +118,78 @@ class VisualQAAgent:
             "page_details": page_checks,
         }
 
-    def run_visual_regression(self, pdf_bytes: bytes, report_id: str, dpi: int = 150) -> Dict[str, Any]:
+    @staticmethod
+    def baseline_key(tenant_id: str, project_id: str, template: str) -> str:
+        """Keep a project/template reference independent of each execution ID."""
+        return sha256(json.dumps([tenant_id, project_id, template], ensure_ascii=False).encode()).hexdigest()
+
+    def review_baseline(self, baseline_id: str, *, expected_manifest_hash: str, reviewer: str, reason: str) -> Dict[str, Any]:
+        """Trusted local-maintainer action after inspecting the candidate images.
+
+        Not exposed to project payloads or automatic execution. Layout review
+        never confers financial/report publication approval.
+        """
+        self._validate_identifier(baseline_id, "baseline_id")
+        path = self.baseline_dir / f"baseline_{baseline_id}.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if sha256(path.read_bytes()).hexdigest() != expected_manifest_hash or not self._valid_baseline(manifest, baseline_id):
+            raise ValueError("Baseline changed; inspect the current candidate before review")
+        if not isinstance(reviewer, str) or not reviewer.strip() or not isinstance(reason, str) or not reason.strip():
+            raise ValueError("A reviewer and review reason are required")
+        review = {"manifestHash": expected_manifest_hash, "reviewedBy": reviewer.strip(), "reason": reason.strip(),
+                  "reviewedAt": datetime.now(timezone.utc).isoformat()}
+        review_path = self.baseline_dir / f"review_{baseline_id}.json"
+        # A reviewed revision is immutable; a replacement uses a new template revision.
+        with review_path.open("x", encoding="utf-8") as stream:
+            json.dump(review, stream, ensure_ascii=False, sort_keys=True)
+        return review
+
+    @staticmethod
+    def _validate_identifier(value: str, name: str) -> None:
+        if not isinstance(value, str) or not re.fullmatch(r"[\w.-]+", value):
+            raise ValueError(f"{name} must be a non-empty identifier without path separators")
+
+    def _valid_baseline(self, manifest: dict, baseline_id: str) -> bool:
+        pages = manifest.get("pages")
+        if manifest.get("baselineId") != baseline_id or not isinstance(pages, list) or not pages:
+            return False
+        try:
+            return all(sha256((self.baseline_dir / f"baseline_{baseline_id}_page_{index}.png").read_bytes()).hexdigest() == digest
+                       for index, digest in enumerate(pages, 1))
+        except OSError:
+            return False
+
+    def run_visual_regression(self, pdf_bytes: bytes, report_id: str, dpi: int = 150, *, baseline_id: str | None = None) -> Dict[str, Any]:
         if not isinstance(report_id, str) or not re.fullmatch(r"[\w.-]+", report_id):
             raise ValueError("report_id must be a non-empty identifier without path separators")
         if isinstance(dpi, bool) or not isinstance(dpi, int) or dpi <= 0:
             raise ValueError("dpi must be a positive integer")
-        pattern = re.compile(rf"baseline_{re.escape(report_id)}_page_([1-9][0-9]*)\.png")
+        baseline_id = report_id if baseline_id is None else baseline_id
+        self._validate_identifier(baseline_id, "baseline_id")
+        pattern = re.compile(rf"baseline_{re.escape(baseline_id)}_page_([1-9][0-9]*)\.png")
         baseline_pages = {
             int(match.group(1)): path
             for path in self.baseline_dir.iterdir()
             if path.is_file() and (match := pattern.fullmatch(path.name))
         }
         creating_baseline = not baseline_pages
+        manifest_path = self.baseline_dir / f"baseline_{baseline_id}.json"
+        review_path = self.baseline_dir / f"review_{baseline_id}.json"
+        manifest_hash = None
+        reviewed = False
+        if not creating_baseline or manifest_path.exists() or review_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest_hash = sha256(manifest_path.read_bytes()).hexdigest()
+                valid = self._valid_baseline(manifest, baseline_id) and manifest.get("dpi") == dpi and len(manifest.get("pages", [])) == len(baseline_pages)
+                review = json.loads(review_path.read_text(encoding="utf-8")) if review_path.exists() else {}
+                reviewed = valid and review.get("manifestHash") == manifest_hash and bool(review.get("reviewedBy") and review.get("reason"))
+            except (OSError, ValueError, TypeError, AttributeError):
+                valid = False
+            if not valid:
+                return {"status": "baseline_invalid", "report_id": report_id, "baseline_id": baseline_id,
+                        "baseline_reviewed": False, "pages_compared": 0, "matched_pages": 0,
+                        "reason": "Reference files, render settings or manifest do not match; inspect a new baseline revision."}
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         run_diff_dir = self.baseline_dir / f"diffs_{report_id}"
         run_diff_dir.mkdir(parents=True, exist_ok=True)
@@ -140,10 +203,13 @@ class VisualQAAgent:
             page = doc[page_idx]
             zoom = dpi / 72.0
             pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False)
-            baseline_file = self.baseline_dir / f"baseline_{report_id}_page_{page_idx + 1}.png"
+            baseline_file = self.baseline_dir / f"baseline_{baseline_id}_page_{page_idx + 1}.png"
 
             if creating_baseline:
-                pix.save(str(baseline_file))
+                # Competing runs must never replace a reference another run
+                # has just captured or a maintainer has reviewed.
+                with baseline_file.open("xb") as stream:
+                    stream.write(pix.tobytes("png"))
                 results.append(
                     {
                         "page_index": page_idx + 1,
@@ -223,12 +289,23 @@ class VisualQAAgent:
 
         total_pages = len(doc)
         doc.close()
+        if creating_baseline:
+            manifest = {"baselineId": baseline_id, "sourceReportId": report_id, "pdfHash": sha256(pdf_bytes).hexdigest(),
+                        "dpi": dpi, "createdAt": datetime.now(timezone.utc).isoformat(),
+                        "pages": [sha256((self.baseline_dir / f"baseline_{baseline_id}_page_{index}.png").read_bytes()).hexdigest()
+                                  for index in range(1, total_pages + 1)]}
+            with manifest_path.open("x", encoding="utf-8") as stream:
+                json.dump(manifest, stream, ensure_ascii=False, sort_keys=True)
+            manifest_hash = sha256(manifest_path.read_bytes()).hexdigest()
         for page_number in sorted(set(baseline_pages) - set(range(1, total_pages + 1))):
             differences += 1
             results.append({"page_index": page_number, "status": "removed_page", "diff_percentage": 100.0, "comment": "Baseline page is absent from the current report."})
         return {
-            "status": "baseline_created" if creating_baseline else "regression_detected" if differences else "passed",
+            "status": "baseline_created" if creating_baseline else "regression_detected" if differences else "passed" if reviewed else "baseline_unreviewed",
             "report_id": report_id,
+            "baseline_id": baseline_id,
+            "baseline_manifest_hash": manifest_hash,
+            "baseline_reviewed": reviewed,
             "total_pages": total_pages,
             "baseline_pages": total_pages if creating_baseline else len(baseline_pages),
             "pages_compared": compared,
