@@ -74,6 +74,7 @@ from db.repositories.project_snapshot_repository import (
 )
 from db.repositories.report_repository import (
     PostgresReportRepository,
+    ReportPublicationConflict,
     ReportRepository,
 )
 from db.repositories.source_document_repository import SourceDocumentRepository
@@ -4777,6 +4778,8 @@ def create_report_export(project_id: str, report_id: str, request: Request, inpu
             report_id,
             input_data,
         )
+    except ReportPublicationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

@@ -54,6 +54,7 @@ from db.repositories.activity_log_repository import PostgresActivityLogRepositor
 from db.repositories.request_project_repository import project_request_scope, current_project_scope
 from db.repositories.postgres_project_repository import ProjectVersionConflict
 from core.financial_input_validation import FinancialInputError
+from db.repositories.report_repository import ReportPublicationConflict
 from storage import get_user_session, record_user_activity_log, storage_backend
 
 validate_security_configuration()
@@ -89,6 +90,12 @@ async def financial_input_error_handler(_request: Request, exc: FinancialInputEr
         content={"detail": {"error": "invalid_financial_input", "message": str(exc)}},
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.exception_handler(ReportPublicationConflict)
+async def report_integrity_error_handler(_request: Request, exc: ReportPublicationConflict):
+    return JSONResponse(status_code=409, content={"detail": {"error": "report_integrity_conflict", "message": str(exc)}},
+        headers={"Cache-Control": "no-store"})
 
 
 @app.exception_handler(UploadRejectedError)

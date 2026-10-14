@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List
 
 from core.calculations import calculate_pf_metrics, normalize_tranche_priority
 from core.text_normalization import build_term_surface_record
+from agents.cash_flow_engine import run_cash_flow_engine
 from agents.orchestration_agent import OrchestrationAgent
 from agents.credit_review_agent import CreditReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
@@ -26,10 +27,10 @@ from schemas.orchestration import (
     ScenarioConclusion,
     SharedDealStateGraph,
 )
-from use_cases.cash_flow import run_cash_flow_use_case
+from use_cases.cash_flow import build_cash_flow_request_use_case
 from use_cases.covenant_eod import evaluate_covenant_eod_use_case
 from use_cases.developability_score import score_developability_use_case
-from use_cases.development_feasibility import analyze_development_feasibility_use_case
+from use_cases.development_feasibility import analyze_development_feasibility_use_case, development_feasibility_input_basis
 from use_cases.product_planning import compare_product_planning_use_case
 from use_cases.land_ledger_import import enrich_land_ledger_use_case
 from use_cases.legal_review import review_legal_and_permits_use_case
@@ -270,7 +271,7 @@ def _stressed_case_metrics(base: Dict[str, Any], *, revenue_factor: float, cost_
     cost = _mul(base.get("totalCost"), cost_factor)
     pf_amount = base.get("pfAmount")
     profit = revenue - cost if revenue is not None and cost is not None else None
-    margin = profit / revenue if revenue else None
+    margin = profit / revenue if profit is not None and revenue else None
     exit_sale_rate = pf_amount / revenue if pf_amount is not None and revenue else None
     senior_shortfall = max(0.0, (pf_amount or 0.0) - (revenue or 0.0)) if pf_amount is not None and revenue is not None else None
     return {
@@ -812,6 +813,7 @@ def _run_chief_deal_pod_on_copy(
         pod_key,
         project_data,
         _dependency_artifact_refs(target_pod, pod_runs),
+        options=options,
     )
     input_hash = stable_digest(input_snapshot)
     try:
@@ -832,6 +834,8 @@ def _run_chief_deal_pod_on_copy(
             artifact=artifact,
             input_snapshot=input_snapshot,
             project_data=project_data,
+            run_id=state.get("runId") or options.get("runId") or options.get("run_id"),
+            agent_run_id=domain_runtime.get("agentRunId"),
         )
         persisted_calculations = [
             calculation_sink(record) if calculation_sink else record
@@ -912,6 +916,25 @@ def _run_chief_deal_pod_on_copy(
         raise
 
     _transition_recalculation_events(incoming_events, "completed", event_sink)
+    if pod_key == "cost_schedule" and artifact.get("artifactType") == "cost_schedule_pod_result":
+        previous_cost_schedule = project_data.get("costSchedule")
+        # Only a saved Chief artifact hash proves this is our derived projection.
+        # Preserve manual edits, approved inputs, and values of unknown origin.
+        previous_hash = stable_digest(previous_cost_schedule) if isinstance(previous_cost_schedule, dict) else None
+        is_derived_projection = (
+            isinstance(previous_cost_schedule, dict)
+            and previous_cost_schedule.get("artifactType") == "cost_schedule_pod_result"
+            and any(
+                isinstance(reference, dict)
+                and reference.get("podKey") == "cost_schedule"
+                and reference.get("artifactType") == "cost_schedule_pod_result"
+                and reference.get("outputHash") == previous_hash
+                for reference in artifacts.values()
+            )
+        )
+        if "costSchedule" not in project_data or is_derived_projection:
+            # Publish after successful sinks, including durable-runtime replays.
+            project_data["costSchedule"] = deepcopy(artifact)
     artifacts[artifact_key] = {
         "artifactKey": artifact_key,
         "podKey": pod_key,
@@ -1521,15 +1544,13 @@ def _execute_pod_artifact(
         return finalize(artifact)
 
     if pod_key == "cost_schedule":
+        input_basis = development_feasibility_input_basis(project_data, options)
         feasibility = run_child_agent(
             agent_id="DevelopmentFeasibilityAgent",
             task_type="cost_schedule_feasibility_analysis",
             domain="cost_schedule",
-            input_snapshot={
-                "feasibilityInput": project_data.get("feasibility_input"),
-                "schedule": project_data.get("schedule") or project_data.get("project_schedule"),
-            },
-            executor=lambda: analyze_development_feasibility_use_case(project_data, options),
+            input_snapshot=input_basis,
+            executor=lambda: analyze_development_feasibility_use_case(input_basis, {}),
             output_schema_name="DevelopmentFeasibilityResult",
             deterministic_authority_required=True,
         )
@@ -1541,12 +1562,11 @@ def _execute_pod_artifact(
         artifact = {
             "artifactType": "cost_schedule_pod_result",
             "costBreakdown": feasibility.get("costs") or feasibility.get("costBreakdown") or {},
-            "schedule": project_data.get("schedule") or project_data.get("project_schedule") or {},
+            "schedule": input_basis.get("schedule") or input_basis.get("project_schedule") or {},
             "dataQualityWarnings": data_quality.get("warnings") or feasibility.get("dataQualityWarnings") or [],
             "dataQualityMissingFields": data_quality.get("missingFields") or [],
             "engineReadiness": feasibility.get("downstreamEngineReadiness") or feasibility.get("engineReadiness") or {},
         }
-        project_data.setdefault("costSchedule", artifact)
         return finalize(artifact)
 
     if pod_key == "feasibility_cashflow":
@@ -1577,16 +1597,17 @@ def _execute_pod_artifact(
             "feasibility": workflow_artifacts.get("feasibility"),
         }
         try:
+            # Resolve the normal canonical/default path before execution. The
+            # same request is both the deterministic child input and its ledger
+            # snapshot; a generated draft is not an external scenario override.
+            cash_flow_request = build_cash_flow_request_use_case(project_data)
+            artifact["cashFlowRunRequest"] = deepcopy(cash_flow_request)
             artifact["cashFlowRunResult"] = run_child_agent(
                 agent_id="CashFlowEngineAgent",
                 task_type="monthly_cash_flow_calculation",
                 domain="feasibility_cashflow",
-                input_snapshot={
-                    "cashFlowRunRequestDraft": feasibility.get("cashFlowRunRequestDraft"),
-                    "financing": project_data.get("pf_structure") or project_data.get("pfStructure"),
-                    "schedule": project_data.get("schedule"),
-                },
-                executor=lambda: run_cash_flow_use_case(project_data, feasibility),
+                input_snapshot=cash_flow_request,
+                executor=lambda: run_cash_flow_engine(cash_flow_request),
                 output_schema_name="CashFlowRunResult",
                 deterministic_authority_required=True,
             )

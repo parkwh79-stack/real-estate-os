@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from main import app
 from routers.projects import ORCHESTRATIONS_DB, PROJECTS_DB
 from storage import upsert_orchestration_run, upsert_project_record
+from use_cases.cash_flow_dependencies import financial_input_hash
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +49,136 @@ def _isolated_chief_e2e_database(tmp_path, monkeypatch):
 
 def first_project_id(client: TestClient) -> str:
     return client.get("/projects/").json()[0]["project"]["id"]
+
+
+def _cost_schedule_project(client):
+    project_id = first_project_id(client)
+    data = PROJECTS_DB[project_id]
+    data.update({
+        "source_documents": [{"documentType": "business_plan", "originalFileName": "cost-review.xlsx"}],
+        "feasibility_input": {"total_revenue": 1000, "total_cost": 800,
+                              "construction_cost": 500, "land_cost": 200, "finance_cost": 50, "other_cost": 50},
+        "schedule": {"construction_start": "M0", "completion": "M2"},
+        # This regression starts after the existing dependency gate. The
+        # Land-Legal execution itself is covered by test_chief_orchestration_endpoints.
+        "chief_orchestration_state": {"podRuns": {"land_legal": {"status": "completed"}}},
+    })
+    upsert_project_record(project_id, data)
+    return project_id
+
+
+def _run_cost_schedule(client, project_id):
+    response = client.post(f"/projects/{project_id}/chief-orchestration/run-pod", json={
+        "podKey": "cost_schedule", "options": {"podAiReviewMode": "deterministic"},
+    })
+    assert response.status_code == 200, response.text
+    run = next(row for row in response.json()["podRuns"] if row["podKey"] == "cost_schedule")
+    artifact = client.get(f"/projects/{project_id}/chief-orchestration/artifacts/{run['artifactKeys'][0]}")
+    assert artifact.status_code == 200
+    return artifact.json()
+
+
+def test_cost_schedule_reexecution_publishes_latest_derived_project_value_and_cached_result():
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    first = _run_cost_schedule(client, project_id)
+    original_projection = client.get(f"/projects/{project_id}").json()["costSchedule"]
+    assert original_projection == first["result"]
+    assert original_projection["costBreakdown"]["totalCost"] == 800
+
+    updated = client.put(f"/projects/{project_id}", json={
+        "feasibility_input": {"total_cost": 900, "construction_cost": 600},
+    })
+    assert updated.status_code == 200
+    second = _run_cost_schedule(client, project_id)
+    current = client.get(f"/projects/{project_id}").json()["costSchedule"]
+    assert second["result"]["costBreakdown"]["totalCost"] == 900
+    assert current == second["result"]
+    assert current["costBreakdown"]["totalCost"] == 900
+
+    # Reopening an older, still hash-bound derived projection must also be
+    # repaired when the latest successful deterministic Pod run is replayed.
+    PROJECTS_DB[project_id]["costSchedule"] = copy.deepcopy(original_projection)
+    upsert_project_record(project_id, PROJECTS_DB[project_id])
+    replay = _run_cost_schedule(client, project_id)
+    assert replay["domainAgentRuntime"]["replayed"] is True
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == replay["result"]
+
+    # A manual edit retaining the historical artifactType is still user input:
+    # its content no longer matches a stored Chief artifact hash.
+    manual = client.put(f"/projects/{project_id}", json={"costSchedule": {"costBreakdown": {"totalCost": 123}}})
+    assert manual.status_code == 200
+    preserved = manual.json()["costSchedule"]
+    rerun = _run_cost_schedule(client, project_id)
+    assert rerun["result"]["costBreakdown"]["totalCost"] == 900
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == preserved
+
+
+@pytest.mark.parametrize("provided", [
+    {"rows": [{"monthIndex": 0, "constructionCost": 123}], "sourceType": "manual_input"},
+    {"rows": [{"monthIndex": 0, "constructionCost": 123}], "approvalStatus": "approved",
+     "approval": {"approvedInputSnapshotId": "existing-approved-input"}},
+    {"artifactType": "cost_schedule_pod_result", "costBreakdown": {"totalCost": 123}},
+    None,
+])
+def test_cost_schedule_keeps_unprovenanced_or_explicit_project_input(provided):
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    supplied = client.put(f"/projects/{project_id}", json={"costSchedule": provided})
+    assert supplied.status_code == 200
+    result = _run_cost_schedule(client, project_id)
+    assert result["result"]["costBreakdown"]["totalCost"] == 800
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == provided
+
+
+def test_cost_schedule_pod_and_child_cache_share_consumed_cost_assumptions(monkeypatch):
+    import use_cases.chief_deal_orchestration as chief
+
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    data = PROJECTS_DB[project_id]
+    data["feasibility_input"].pop("construction_cost")
+    data["feasibility_input"].pop("total_cost")
+    data["architectural_plan"] = {"gross_floor_area_sqm": 100}
+    data["cost_assumptions"] = {"construction_cost_per_sqm": 5}
+    upsert_project_record(project_id, data)
+    pod_inputs, child_inputs = [], []
+    pod_runtime = chief.run_domain_pod_with_contract
+    child_runtime = chief.run_domain_agent_callable_with_contract
+
+    def traced_pod(**kwargs):
+        pod_inputs.append(copy.deepcopy(kwargs["input_snapshot"]))
+        return pod_runtime(**kwargs)
+
+    def traced_child(**kwargs):
+        child_inputs.append(copy.deepcopy(kwargs["input_snapshot"]))
+        return child_runtime(**kwargs)
+
+    monkeypatch.setattr(chief, "run_domain_pod_with_contract", traced_pod)
+    monkeypatch.setattr(chief, "run_domain_agent_callable_with_contract", traced_child)
+    first = _run_cost_schedule(client, project_id)
+    assert first["result"]["costBreakdown"]["constructionCost"] == 500
+    assert first["result"]["costBreakdown"]["totalCost"] == 800
+    unchanged_feasibility = copy.deepcopy(PROJECTS_DB[project_id]["feasibility_input"])
+    updated = client.put(f"/projects/{project_id}", json={"cost_assumptions": {"construction_cost_per_sqm": 6}})
+    assert updated.status_code == 200
+    assert updated.json()["feasibility_input"] == unchanged_feasibility
+    second = _run_cost_schedule(client, project_id)
+    assert second["domainAgentRuntime"]["replayed"] is False
+    assert second["result"]["costBreakdown"]["constructionCost"] == 600
+    assert second["result"]["costBreakdown"]["totalCost"] == 900
+    assert first["domainAgentRuntime"]["agentRunId"] != second["domainAgentRuntime"]["agentRunId"]
+    assert first["result"]["agentRuntimeExecutions"][0]["agentRunId"] != second["result"]["agentRuntimeExecutions"][0]["agentRunId"]
+    assert second["result"]["agentRuntimeExecutions"][0]["replayed"] is False
+    assert len(child_inputs) == 2
+    assert child_inputs == [row["developmentFeasibilityInput"] for row in pod_inputs]
+
+    replay = _run_cost_schedule(client, project_id)
+    assert replay["domainAgentRuntime"]["replayed"] is True
+    assert replay["domainAgentRuntime"]["agentRunId"] == second["domainAgentRuntime"]["agentRunId"]
+    assert len(child_inputs) == 2
+    assert pod_inputs[-1]["developmentFeasibilityInput"] == child_inputs[-1]
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == replay["result"]
 
 
 def test_chief_orchestration_endpoints():
@@ -194,9 +325,20 @@ def test_chief_orchestration_endpoints():
 
     calculations_res = client.get(f"/projects/{project_id}/calculation-runs")
     assert calculations_res.status_code == 200
-    engine_keys = {row["engineKey"] for row in calculations_res.json()["records"]}
+    calculation_rows = calculations_res.json()["records"]
+    engine_keys = {row["engineKey"] for row in calculation_rows}
     assert "development_feasibility" in engine_keys
     assert "cash_flow_engine" in engine_keys
+    cash_flow_run = next(row for row in calculation_rows if row["engineKey"] == "cash_flow_engine")
+    executed_request = {key: value for key, value in cash_flow_run["inputSnapshot"].items() if key != "financialInputHash"}
+    assert executed_request["requestType"] == "cash_flow_run_request_v1"
+    assert cash_flow_run["financialInputHash"] == financial_input_hash(executed_request)
+    assert cash_flow_run["inputSnapshot"]["financialInputHash"] == cash_flow_run["financialInputHash"]
+    parent_artifact = client.get(
+        f"/projects/{project_id}/chief-orchestration/artifacts/{cash_flow_run['sourceLocator']['artifactKey']}"
+    ).json()
+    assert parent_artifact["result"]["cashFlowRunRequest"] == executed_request
+    assert parent_artifact["domainAgentRuntime"]["agentRunId"] == cash_flow_run["sourceLocator"]["agentRunId"]
 
     cure_res = client.post(
         f"/projects/{project_id}/chief-orchestration/unsold-ltv-cure",

@@ -21,7 +21,8 @@ Updated: 2026-10-14
 | PF·상환·미분양 시나리오 | `agents/scenario_engine_agent.py`, `use_cases/cash_flow_dependencies.py`, Web `/project/[id]/pf-structure` | 기존 계산·화면 유지. CF 화면은 같은 부모·입력 hash의 후속 결과만 표시한다. 새 월별 검토안에 기존 일괄 청구액 방식의 후속 시나리오를 붙이는 작업은 별도 상환 계약 검증까지 보류한다. |
 | 토지·시장·법률 보완 | `use_cases/land_ledger_import.py`, `market_comparables.py`, `legal_pod.py` | 업로드 자료·수동 근거를 먼저 활용. 실제 커넥터 사용 가능 여부와 자료 기준일은 별도 확인. |
 | 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 기존 로직을 이용해 다음 행동을 모은다. CF 비교는 실행 UUID·시각 차이와 업무 입력·출처 차이를 구분한다. 다른 재분석·consensus 경로는 별도로 확인한다. |
-| 검토 초안·다운로드 | `use_cases/report_generation.py`, `agents/report_export_agent.py`, Web 프로젝트 보고서와 Cash Flow export | PDF/DOCX/Excel 경로가 이미 있다. 출처·가정·미확인 항목을 포함한 초안 사용 흐름을 검증. |
+| 검토 초안·다운로드 | `use_cases/report_generation.py`, `agents/report_export_agent.py`, Web 프로젝트 보고서와 Cash Flow export | 저장된 CF 비교의 두 계산·입력·출처·검토 이유를 고정한 분석 초안을 기존 보고서 저장·재조회·내보내기에 연결한다. 현재 입력 변경과 분리하고 hash 검증·최종 발행 차단을 유지한다. 상세 검증과 PDF/DOCX 범위는 실행 계획을 따른다. |
+| Chief Pod 계산 계보 | `use_cases/chief_deal_orchestration.py`, `chief_pod_records.py`, `agent_platform/domain_pod_runtime.py` | 6개 Pod 모두 실행 경로가 있다. CF Pod는 실제 계산 요청·입력 hash와 Chief/Pod 실행 ID를 저장하며 소비 입력 변경 시 재실행한다. 원가 Pod·child 캐시와 실제 Agent의 입력을 일치시키고, 재실행한 파생 결과를 수동·승인 입력 보호하에 프로젝트 조회에 반영한다. 총사업비 누락은 미확인으로 유지한다. 공공정책의 전용 시뮬레이션은 미구현이며 기존 개발가능성 분석 재사용이다. |
 | 로그인과 조직 경계 | Web `app/api/auth/supabase`, `core/authz.py`, DB repositories | 코드 있음. 운영 준비를 단순 로그인 화면 존재로 판단하지 않음. 기존 권한 유지. |
 | 자동 코딩·자기수정 | `agent_platform/coding` | 현재 제품 우선순위에서 제외. 취소/완료 경합과 실행 격리 과제가 있어 운영 활성화하지 않음. |
 

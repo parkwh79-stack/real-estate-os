@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from io import BytesIO
 import zipfile
+from xml.etree import ElementTree
 
 import fitz
 import openpyxl
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -544,6 +546,62 @@ def test_workbook_preview_reads_bounded_real_cells_and_marks_focus(tmp_path, mon
         params={"sheet_name": "없는 시트", "cell_reference": "A1"},
     )
     assert missing_sheet.status_code == 404
+
+
+@pytest.mark.parametrize("array_formula", [False, True], ids=["ordinary", "array"])
+@pytest.mark.parametrize("cached_value", [0, None, "#DIV/0!", 73.5], ids=["zero", "missing", "error", "stale"])
+def test_workbook_preview_preserves_formula_text_and_saved_cache(
+    tmp_path, monkeypatch, array_formula, cached_value
+):
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "permissive")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "근거"
+    sheet["A1"], sheet["A2"] = 10, 20
+    formula = "=SUM(A1:A2)"
+    sheet["B1"] = ArrayFormula(ref="B1", text=formula) if array_formula else formula
+    original = BytesIO()
+    workbook.save(original)
+    workbook.close()
+
+    # openpyxl cannot calculate or write caches; supply a real OOXML cache in
+    # this in-memory fixture. Even a stale cache must be shown without evaluation.
+    content = BytesIO()
+    with zipfile.ZipFile(original) as source, zipfile.ZipFile(content, "w") as target:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                tree = ElementTree.fromstring(data)
+                namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                cell = tree.find(f".//{{{namespace}}}c[@r='B1']")
+                cached = cell.find(f"{{{namespace}}}v")
+                if cached is not None:
+                    cell.remove(cached)
+                if cached_value is not None:
+                    ElementTree.SubElement(cell, f"{{{namespace}}}v").text = str(cached_value)
+                    cell.set("t", "e" if isinstance(cached_value, str) else "n")
+                data = ElementTree.tostring(tree, encoding="utf-8", xml_declaration=True)
+            target.writestr(member, data)
+
+    client, archive_id, _ = _client(
+        tmp_path, content.getvalue(), "formula.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response = client.get(
+        f"/projects/project-a/source-documents/{archive_id}/workbook/cells",
+        params={"sheet_name": "근거", "cell_reference": "B1", "context_rows": 0, "context_columns": 0},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    cell = next(cell for row in body["rows"] for cell in row["cells"] if cell["coordinate"] == "B1")
+    assert cell["formula"] == formula
+    assert cell["displayValue"] == cached_value
+    assert cell["dataType"] == "f"
+    assert cell["focused"] is True
+    assert body["formulaPolicy"] == "display_only_never_executed"
 
 
 def test_workbook_preview_rejects_high_expansion_zip_before_openpyxl(tmp_path, monkeypatch):

@@ -1896,3 +1896,58 @@ def test_live_concurrent_report_publication_is_single_and_idempotent(
                 """,
                 (TENANT_A, PROJECT_A, report["report_id"]),
             )
+
+
+def test_live_frozen_comparison_report_round_trip_export_and_tenant_integrity(
+    live_database: _LiveDatabase,
+) -> None:
+    """Use the disposable CI database and runtime role, not the repository double."""
+    from agents.report_export_agent import ReportExportAgent
+    from db.repositories.report_repository import ReportPublicationConflict
+    from test_cash_flow_comparison import record
+    from use_cases.cash_flow_comparison import compare_cash_flow_runs, content_hash
+    from use_cases.report_generation import generate_and_save_cash_flow_comparison_report_use_case
+
+    @contextmanager
+    def transaction(tenant_id: str):
+        connection = live_database.connect_runtime()
+        try:
+            with connection.transaction():
+                connection.execute("SELECT set_config('realytics.tenant_id', %s, true)", (tenant_id,))
+                yield connection
+        finally:
+            connection.close()
+
+    repository = PostgresReportRepository(tenant_id=TENANT_A, transaction_factory=transaction)
+    baseline = record("comparison-live-baseline", project_id=PROJECT_A, tenant=TENANT_A)
+    changed = record("comparison-live-changed", project_id=PROJECT_A, tenant=TENANT_A, construction=500)
+    compared = compare_cash_flow_runs(baseline, changed)
+    selection = {"baselineRunId": baseline["calculationRunId"], "comparisonRunId": changed["calculationRunId"],
+        "savedAt": "2026-10-14T00:00:00Z", "savedBy": "ci-comparison-reviewer"}
+    for side in ("baseline", "comparison"):
+        selection[side + "InputHash"] = compared[side]["inputHash"]
+        selection[side + "ResultHash"] = compared[side]["resultHash"]
+    report = generate_and_save_cash_flow_comparison_report_use_case(repository, PROJECT_A, TENANT_A,
+        selection, content_hash(selection), baseline, changed, captured_by="ci-comparison-reviewer")["reportRecord"]
+    saved_snapshot = copy.deepcopy(report["report"]["cashFlowComparisonSnapshot"])
+    changed["resultSnapshot"]["summary"]["totalRevenue"] = 1
+    reopened = repository.get(PROJECT_A, report["report_id"])
+    assert reopened is not None
+    assert reopened["report"]["cashFlowComparisonSnapshot"] == saved_snapshot
+    assert reopened["status"] == "draft" and reopened["run_id"] is None
+    assert reopened["metadata"]["report_eligible"] is False
+    exported = repository.add_export(reopened, ReportExportAgent().export(reopened, "pdf"))
+    reopened = repository.get(PROJECT_A, report["report_id"])
+    assert repository.get_export(reopened, exported["export_id"]) == exported
+    foreign = PostgresReportRepository(tenant_id=TENANT_B, transaction_factory=transaction)
+    assert foreign.get(PROJECT_A, report["report_id"]) is None
+    assert repository.get(PROJECT_B, report["report_id"]) is None
+    with pytest.raises(ReportPublicationConflict):
+        repository.publish(reopened, published_by="ci-checker", published_at="2026-10-14T01:00:00Z", decision_package={})
+    with transaction(TENANT_A) as connection:
+        connection.execute("""UPDATE realytics.reports
+            SET payload_json = jsonb_set(payload_json, '{report_markdown}', '"tampered"'::jsonb)
+            WHERE tenant_id = %s AND project_id = %s AND report_id = %s""",
+            (TENANT_A, PROJECT_A, report["report_id"]))
+    with pytest.raises(ReportPublicationConflict):
+        repository.get(PROJECT_A, report["report_id"])

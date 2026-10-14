@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import hmac
 from threading import RLock
+from copy import deepcopy
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +15,8 @@ from storage import list_calculation_run_records, storage_backend
 from use_cases.cash_flow_comparison import (
     SELECTION_KEY, compare_cash_flow_runs, comparison_state_hash, run_issues, run_summary,
 )
+from use_cases.report_generation import generate_and_save_cash_flow_comparison_report_use_case
+from db.repositories.report_repository import ReportPublicationConflict
 
 router = APIRouter(prefix="/projects", tags=["cash flow comparison"])
 _selection_lock = RLock()  # Local compatibility writes; PostgreSQL retains state-version CAS.
@@ -23,6 +26,11 @@ class ComparisonSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     baselineRunId: str = Field(min_length=1, max_length=256)
     comparisonRunId: str = Field(min_length=1, max_length=256)
+    expectedComparisonHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ComparisonReportDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     expectedComparisonHash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -64,7 +72,7 @@ def _exact_run(project_id: str, tenant_id: str, run_id: str) -> dict:
     return records[0]
 
 
-def _state(project_id: str, project: dict, tenant_id: str, *, baseline_id=None, comparison_id=None):
+def _state(project_id: str, project: dict, tenant_id: str, *, baseline_id=None, comparison_id=None, capture_records=False):
     records = _records(project_id, tenant_id)
     authority_records = {row["calculationRunId"]: row for row in records}
     saved = (project.get("_meta") or {}).get(SELECTION_KEY) or None
@@ -94,11 +102,47 @@ def _state(project_id: str, project: dict, tenant_id: str, *, baseline_id=None, 
             if preview or exc.status_code != 404:
                 raise
             comparison = {"status": "incompatible", "reasons": ["saved_calculation_missing"], "metrics": [], "inputChanges": []}
-    return {"schemaVersion": "realytics-cash-flow-comparison-v1", "projectId": project_id,
+    state = {"schemaVersion": "realytics-cash-flow-comparison-v1", "projectId": project_id,
         "comparisonHash": comparison_state_hash(project, list(authority_records.values())),
         "selection": {**selected, "saved": not preview} if selected else None,
         "availableRuns": [run_summary(row) for row in authority_records.values() if not run_issues(row)],
         "comparison": comparison}
+    if capture_records:
+        state["_capturedRecords"] = deepcopy(authority_records)
+    return state
+
+
+@router.post("/{project_id}/reports/cash-flow-comparison")
+def create_cash_flow_comparison_report(project_id: str, request: Request, response: Response, input_data: ComparisonReportDraft):
+    response.headers["Cache-Control"] = "no-store"
+    with _selection_lock:
+        _, project, tenant, actor = _context(project_id, request, "report:export")
+        state = _state(project_id, project, tenant, capture_records=True)
+        if not hmac.compare_digest(input_data.expectedComparisonHash, state["comparisonHash"]):
+            raise HTTPException(409, {"error": "comparison_state_conflict", "message": "프로젝트 또는 계산 기록이 변경되었습니다. 비교를 다시 불러오세요."})
+        selection = (project.get("_meta") or {}).get(SELECTION_KEY)
+        if not isinstance(selection, dict):
+            raise HTTPException(409, {"error": "comparison_selection_required", "message": "기준안과 변경안을 먼저 비교 저장해 주세요."})
+        records = state["_capturedRecords"]
+        try:
+            baseline = records[selection["baselineRunId"]]
+            changed = records[selection["comparisonRunId"]]
+        except KeyError as exc:
+            raise HTTPException(404, {"error": "calculation_run_not_found"}) from exc
+        try:
+            result = generate_and_save_cash_flow_comparison_report_use_case(projects.report_repository(request), project_id, tenant,
+                selection, state["comparisonHash"], baseline, changed, captured_by=actor)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReportPublicationConflict as exc:
+            raise HTTPException(409, {"error": "comparison_snapshot_conflict", "message": str(exc)}) from exc
+        record, generated = result["reportRecord"], result["generated"]
+        projects.record_sensitive_project_event(request, event_type="cash_flow_comparison_report_created", project_id=project_id,
+            metadata={"reportId": record["report_id"], "comparisonHash": state["comparisonHash"],
+                "snapshotHash": generated["structuredReport"]["cashFlowComparisonSnapshotHash"], "reportEligible": False})
+        return {"project_id": project_id, "report_id": record["report_id"], "version": record["version"],
+            "status": record["status"], "template": record["template"], "report": generated["structuredReport"],
+            "report_markdown": generated["reportMarkdown"], "metadata": record["metadata"]}
 
 
 @router.get("/{project_id}/cash-flow/comparison")

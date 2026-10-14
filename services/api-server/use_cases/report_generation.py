@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from copy import deepcopy
+from datetime import datetime, timezone
 
 from agents.report_agent import ReportAgent
 from agents.report_export_agent import ReportExportAgent
@@ -9,7 +11,8 @@ from db.repositories.project_snapshot_repository import (
     ProjectSnapshotRepository,
     verify_project_snapshot_hash,
 )
-from db.repositories.report_repository import ReportRepository
+from db.repositories.report_repository import ReportRepository, ReportPublicationConflict, is_cash_flow_comparison_report, verify_cash_flow_comparison_report
+from use_cases.cash_flow_comparison import compare_cash_flow_runs, content_hash
 from storage import list_deal_state_records, list_pod_ai_review_records
 from use_cases.common import deep_merge
 from use_cases.orchestration_approval import refresh_approval_readiness_gate
@@ -164,6 +167,28 @@ def generate_and_save_pf_report_use_case(
     }
 
 
+def generate_and_save_cash_flow_comparison_report_use_case(
+    report_repository: ReportRepository, project_id: str, tenant_id: str,
+    selection: Dict[str, Any], comparison_hash: str, baseline_run: Dict[str, Any], comparison_run: Dict[str, Any],
+    *, captured_by: str | None,
+) -> Dict[str, Any]:
+    """Freeze reviewed calculations into a separate analysis draft, without new calculations."""
+    for run in (baseline_run, comparison_run):
+        if str(run.get("projectId")) != str(project_id) or str(run.get("tenantId") or "legacy") != str(tenant_id):
+            raise LookupError("Calculation run not found in this project")
+    comparison = compare_cash_flow_runs(baseline_run, comparison_run, saved_selection=selection)
+    if comparison["status"] == "incompatible":
+        raise ReportPublicationConflict("저장된 비교의 원본 계산이 변경되었거나 유효하지 않습니다. 비교를 다시 확인하고 저장해 주세요.")
+    snapshot = {"schemaVersion": "realytics-frozen-cash-flow-comparison-v1",
+        "projectId": str(project_id), "tenantId": str(tenant_id),
+        "capturedAt": datetime.now(timezone.utc).isoformat(), "capturedBy": captured_by,
+        "selection": deepcopy(selection), "comparisonHash": comparison_hash,
+        "baselineRun": deepcopy(baseline_run), "comparisonRun": deepcopy(comparison_run), "comparison": comparison}
+    generated = ReportAgent().generate_cash_flow_comparison_review(snapshot, content_hash(snapshot))
+    record = report_repository.create(project_id, generated["structuredReport"], generated["reportMarkdown"], run_id=None)
+    return {"generated": generated, "reportRecord": record}
+
+
 def build_paragraph_evidence_links(
     project_id: str,
     structured_report: Dict[str, Any],
@@ -219,6 +244,7 @@ def export_report_use_case(
 ) -> Dict[str, Any]:
     """Render a saved report record into a requested export format."""
     input_data = input_data or {}
+    verify_cash_flow_comparison_report(report_record)
     export_format = input_data.get("format", "markdown")
     return ReportExportAgent().export(report_record, export_format)
 
@@ -251,6 +277,9 @@ def publish_saved_report_use_case(
     report_record = report_repository.get(project_id, report_id)
     if not report_record:
         raise LookupError("Report not found")
+
+    if is_cash_flow_comparison_report(report_record):
+        raise ReportPublicationConflict("현금흐름 비교 검토 초안은 최종 승인 보고서로 발행할 수 없습니다.")
 
     run_id = str(report_record.get("run_id") or "").strip()
     if not run_id:

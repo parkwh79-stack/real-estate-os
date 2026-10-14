@@ -35,6 +35,7 @@ import { ConsensusPanel } from "../../../../components/orchestration/consensus-p
 import { CreditDocumentsPanel } from "../../../../components/orchestration/credit-documents-panel";
 import { SimilarCasesRagPanel } from "../../../../components/orchestration/similar-cases-rag-panel";
 import { TermAnnotationsPanel } from "../../../../components/orchestration/term-annotations-panel";
+import { ComparisonReportReview, type ComparisonReportSnapshot } from "../../../../components/feasibility/comparison-report-review";
 
 interface ProjectResponse {
   project?: { name?: string; type?: string };
@@ -97,6 +98,8 @@ interface GeneratedReportResponse {
     paragraph_evidence_source_locator_ready_section_count?: number;
   };
   report?: {
+    cashFlowComparisonSnapshot?: ComparisonReportSnapshot;
+    sectionOrder?: Array<{ key: string; title: string }>;
     paragraphEvidenceLinks?: ParagraphEvidenceLinks;
     appliedTemplate?: { name?: string; version?: number };
     templateApplication?: {
@@ -398,7 +401,9 @@ export default function ReportPreviewPage() {
   }
 
   const coverage = report?.report?.templateApplication?.sectionCoverage ?? [];
-  const sectionRows: ReportSectionRow[] = coverage.length ? coverage : defaultSectionRows();
+  const sectionRows: ReportSectionRow[] = coverage.length ? coverage : report?.report?.cashFlowComparisonSnapshot
+    ? (report.report.sectionOrder ?? []).map((section) => ({ reportSectionKey: section.key, title: section.title, enabled: true, hasReportSection: true }))
+    : defaultSectionRows();
   const sourceLocatorMissing = allRecords.filter((record) => !hasSourceLocator(record)).length;
 
   return (
@@ -444,8 +449,11 @@ export default function ReportPreviewPage() {
       {error && <Notice tone="bad" message={error} />}
       {message && <Notice tone="good" message={message} />}
 
-      <section className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <ComparisonReportReview projectId={projectId} reportId={report?.report_id} snapshot={report?.report?.cashFlowComparisonSnapshot}
+        disabled={loading || generating || publishing || selectingReport} onCreated={loadData} onBusyChange={setGenerating} />
+
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h3 className="font-bold text-slate-950 dark:text-white">저장 보고서</h3>
@@ -560,8 +568,8 @@ export default function ReportPreviewPage() {
         </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div className="mb-4 flex items-center gap-2">
             <FileText className="h-5 w-5 text-slate-700 dark:text-slate-200" />
             <h3 className="font-bold text-slate-950 dark:text-white">생성 기준</h3>
@@ -625,7 +633,7 @@ export default function ReportPreviewPage() {
           )}
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div className="mb-4 flex items-center gap-2">
             <Database className="h-5 w-5 text-slate-700 dark:text-slate-200" />
             <h3 className="font-bold text-slate-950 dark:text-white">보고서 근거 원장</h3>

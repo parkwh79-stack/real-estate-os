@@ -1,4 +1,5 @@
 from typing import Dict, Any, List
+from copy import deepcopy
 from math import isfinite
 
 from core.calculations import (
@@ -47,6 +48,108 @@ def _percent_text(value: Any) -> str:
 class ReportAgent:
     def __init__(self):
         pass
+
+    def generate_cash_flow_comparison_review(self, snapshot: Dict[str, Any], snapshot_hash: str) -> Dict[str, Any]:
+        """Describe two frozen calculations; never calculate from today's project."""
+        comparison = snapshot["comparison"]
+        baseline, changed = snapshot["baselineRun"], snapshot["comparisonRun"]
+
+        def policy_text(info):
+            if info.get("policyMode") == "reviewed_monthly_v1":
+                return "월초 잔액 이자·최초 인출 약정수수료·M0 기준 만기 일시상환"
+            return "저장된 금융비용 예산 배분(월별 이자·원금상환 잔액 미산정)"
+
+        def review_reason(run):
+            review = (run.get("inputSnapshot") or {}).get("reviewedMonthlyFinancingReview")
+            value = review.get("reason") if isinstance(review, dict) else None
+            return value.strip() if isinstance(value, str) and value.strip() else "미기록"
+
+        def value_text(value, path):
+            if value is None:
+                return "미입력"
+            if isinstance(value, bool):
+                return "적용" if value else "미적용"
+            if isinstance(value, (dict, list)):
+                return "세부 조건 변경(고정 원본 기록 참조)"
+            if isinstance(value, (int, float)):
+                lower = path.lower()
+                if "interest" in lower or "fee" in lower or "rate" in lower:
+                    return _percent_text(value)
+                if "month" in lower or "maturity" in lower:
+                    return f"{value:g}개월"
+                if any(word in lower for word in ("cost", "revenue", "amount", "price", "loan", "funding")):
+                    return _amount_text(value)
+                return f"{value:,g}"
+            return {"senior": "선순위", "mezzanine": "중순위", "junior": "후순위", "equity": "자기자본",
+                "bridge": "브리지 대출", "other": "기타", "repayment_reserve": "분양대금 상환계정", "sales_proceeds": "분양대금"}.get(str(value), str(value))
+
+        metric_rows, metric_lines, missing = [], [], []
+        for metric in comparison["metrics"]:
+            label = metric["label"]
+            before, after, delta = (_amount_text(metric.get(key)) for key in ("baselineValue", "comparisonValue", "delta"))
+            metric_rows.append({"업무 지표": label, "기준안": before, "변경안": after, "차이": delta})
+            metric_lines.append(f"| {label} | {before} | {after} | {delta} |")
+            if metric.get("status") != "available":
+                missing.append(f"{label}: 저장된 계산에 양쪽 값을 비교할 근거가 없습니다. 기존 예산 배분은 잔여 대출을 산정하지 않습니다."
+                    if metric.get("key") == "outstandingDebt" else f"{label}: 저장된 계산에 해당 값 또는 산출 근거가 없습니다.")
+        changes = [{"확인 항목": row["label"], "변경 전": value_text(row.get("before"), row["path"]),
+                    "변경 후": value_text(row.get("after"), row["path"])} for row in comparison.get("inputChanges", [])[:100]]
+        caveats = ["검토용 초안이며 최종 승인·대출조건 확정·투자의사결정용 보고서가 아닙니다."]
+        if "period_mismatch" in comparison.get("reasons", []):
+            caveats.append("두 계산의 기간 또는 기준월이 달라 사업 전체 집계만 비교합니다. 월별 수치를 같은 달로 정렬하지 않았습니다.")
+        if "financing_policy_mismatch" in comparison.get("reasons", []):
+            caveats.append("금융비용 계산 방식이 다릅니다. 입력 조건과 계산 방식을 함께 검토해야 합니다.")
+        if comparison.get("sourceChanged"):
+            caveats.append("두 계산의 원본 또는 근거가 다릅니다. 원본 위치와 저장 시점의 차이를 확인하세요.")
+        if comparison.get("inputChangesTruncated") or len(comparison.get("inputChanges", [])) > 100:
+            caveats.append("본문에는 변경 항목 중 앞 100개만 표시합니다. 전체 비교와 원시 기록은 고정 스냅샷에 보존했습니다.")
+        if any((comparison.get(side) or {}).get("policyMode") == "reviewed_monthly_v1" for side in ("baseline", "comparison")):
+            caveats.append("월별 검토 계산은 비회전 대출·만기 상환계정 원금상환만 지원합니다. 사용자 지정 자기자본 투입표·개별 인출표·분할 원금상환·이자 자본화·연체가산·변동금리는 지원하지 않습니다.")
+
+        sources = []
+        for label, run, info in (("기준안", baseline, comparison["baseline"]), ("변경안", changed, comparison["comparison"])):
+            meta = (run.get("inputSnapshot") or {}).get("sourceMetadata") or {}
+            locator = run.get("sourceLocator") or {}
+            meta = meta if isinstance(meta, dict) else {}
+            locator = locator if isinstance(locator, dict) else {}
+            name = meta.get("sourceName")
+            name = name if isinstance(name, str) and name.strip() else "원본 문서명 미확인"
+            name = {"FeasibilityStudyV2": "사업수지 검토 입력", "CashFlowRunRequest": "현금흐름 계산 입력"}.get(name, name)
+            positions = [str(locator[key]) for key in ("documentName", "fileName", "sheetName", "sheet_name", "cell", "page") if locator.get(key) is not None]
+            sources.append({"구분": label, "계산 기록": run["calculationRunId"], "저장 시각": run.get("createdAt") or "미확인",
+                "원본": str(name), "원본 위치": " · ".join(positions) or "문서 위치 미확인(저장된 계산 기록 기준)",
+                "입력 검증값(앞 12자리)": info["inputHash"][:12], "결과 검증값(앞 12자리)": info["resultHash"][:12]})
+        project = (baseline.get("inputSnapshot") or {}).get("project")
+        project_name = project.get("projectName") if isinstance(project, dict) else None
+        project_name = project_name if isinstance(project_name, str) and project_name.strip() else f"프로젝트 {snapshot['projectId']}"
+        sections = {
+            "comparisonSummary": {"대상 사업": project_name, "고정 시각": snapshot["capturedAt"], "금액 표시": "원 단위, 표시값은 반올림", "주요 지표": metric_rows},
+            "assumptions": {"기준안 계산 방식": policy_text(comparison["baseline"]), "변경안 계산 방식": policy_text(comparison["comparison"]),
+                "기준안 검토 이유": review_reason(baseline), "변경안 검토 이유": review_reason(changed),
+                "확인할 입력 변경": changes or ["업무 입력 변경 없음"]},
+            "limitations": {"검토 한계": caveats, "미확인 지표": missing or ["제시된 비교 지표는 양쪽 저장값으로 확인했습니다."]},
+            "sources": {"저장된 원본": sources, "고정 검증값(앞 16자리)": snapshot_hash[:16],
+                "보존 범위": "두 계산의 입력·결과·출처 원시 기록은 이 초안에 고정 보존했습니다. 이후 입력이나 선택 변경으로 이 초안의 수치는 바뀌지 않습니다."},
+        }
+        order = [{"index": index, "key": key, "title": title} for index, (key, title) in enumerate((
+            ("comparisonSummary", "저장된 계산 비교"), ("assumptions", "계산 방식과 변경 조건"),
+            ("limitations", "검토 한계와 미확인 사항"), ("sources", "원본과 저장 기준")), 1)]
+        report = {"template": "cash-flow-comparison-review-v1", "reportType": "cash-flow-comparison-review",
+            "title": "현금흐름 비교 검토 초안", "reportEligible": False, "displayUnit": "원", "sectionOrder": order, "sections": sections,
+            "qualityChecks": {"actualSectionCount": 4, "expectedSectionCount": 4, "isComplete": True},
+            "cashFlowComparisonSnapshot": deepcopy(snapshot), "cashFlowComparisonSnapshotHash": snapshot_hash}
+        lines = ["# 현금흐름 비교 검토 초안", "", f"대상 사업: {project_name}", "", "> 검토용 초안 — 최종 승인·대출조건 확정용 보고서가 아닙니다.", "",
+            "## 1. 저장된 계산 비교", "", "금액은 원 단위이며 표시값은 반올림했습니다.", "",
+            "| 업무 지표 | 기준안 | 변경안 | 차이 |", "| --- | ---: | ---: | ---: |", *metric_lines, "",
+            "## 2. 계산 방식과 변경 조건", "", f"기준안: {policy_text(comparison['baseline'])}", f"기준안 검토 이유: {review_reason(baseline)}",
+            f"변경안: {policy_text(comparison['comparison'])}", f"변경안 검토 이유: {review_reason(changed)}", ""]
+        lines.extend(f"- {row['확인 항목']}: {row['변경 전']} → {row['변경 후']}" for row in changes)
+        if not changes:
+            lines.append("업무 입력 변경 없음")
+        lines.extend(["", "## 3. 검토 한계와 미확인 사항", "", *[f"- {item}" for item in caveats + missing], "", "## 4. 원본과 저장 기준", ""])
+        lines.extend(f"- {row['구분']}: {row['계산 기록']} · {row['원본']} · {row['원본 위치']} · 저장 {row['저장 시각']}" for row in sources)
+        lines.extend(["", f"고정 시각: {snapshot['capturedAt']}", f"고정 검증값(앞 16자리): {snapshot_hash[:16]}", "", sections["sources"]["보존 범위"]])
+        return {"structuredReport": report, "reportMarkdown": "\n".join(lines)}
 
     def generate_structured_report(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """

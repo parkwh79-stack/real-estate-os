@@ -14,6 +14,8 @@ from typing import Any, Dict, Iterable, List
 from uuid import uuid4
 
 from schemas.orchestration import AgentHandoffEnvelope
+from use_cases.cash_flow_dependencies import financial_input_hash
+from use_cases.development_feasibility import development_feasibility_input_basis
 from use_cases.calculation_run_capture import (
     scenario_engine_run_payloads,
     stress_test_run_payload,
@@ -31,8 +33,20 @@ _POD_INPUT_KEYS: Dict[str, tuple[str, ...]] = {
     ),
     "cost_schedule": ("feasibility_input", "costs", "schedule", "project_schedule", "source_documents"),
     "feasibility_cashflow": (
+        "project",
+        "land",
+        "regulation",
+        "architectural_plan",
         "feasibility_input",
         "feasibilityStudyV2",
+        "canonicalFeasibilityStudyV2",
+        "cost_assumptions",
+        "sales_assumptions",
+        "cashflow_input",
+        "sales_schedule",
+        "salesCollectionSchedule",
+        "logistics",
+        "version",
         "product_mix",
         "productMix",
         "schedule",
@@ -66,6 +80,8 @@ def pod_input_snapshot(
     pod_key: str,
     project_data: Dict[str, Any],
     dependency_artifacts: Dict[str, Any] | None = None,
+    *,
+    options: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     snapshot = {
         key: project_data.get(key)
@@ -74,6 +90,12 @@ def pod_input_snapshot(
     }
     snapshot["dependencyArtifacts"] = dependency_artifacts or {}
     snapshot["activeAssumptionOverrides"] = project_data.get("activeAssumptionOverrides") or []
+    if pod_key == "cost_schedule":
+        snapshot["developmentFeasibilityInput"] = development_feasibility_input_basis(project_data, options)
+    if pod_key == "feasibility_cashflow":
+        metadata = project_data.get("_meta")
+        if isinstance(metadata, dict) and "parsing_source" in metadata:
+            snapshot["parsingSource"] = metadata["parsing_source"]
     # Executors mutate their working project. Retain the exact pre-execution
     # values whose hash is recorded in the calculation and handoff ledgers.
     return deepcopy(snapshot)
@@ -197,6 +219,8 @@ def calculation_records_for_pod(
     artifact: Dict[str, Any],
     input_snapshot: Dict[str, Any],
     project_data: Dict[str, Any],
+    run_id: str | None = None,
+    agent_run_id: str | None = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if pod_key == "feasibility_cashflow":
@@ -214,16 +238,25 @@ def calculation_records_for_pod(
             )
         cash_flow = artifact.get("cashFlowRunResult")
         if isinstance(cash_flow, dict):
-            records.append(
-                _generic_calculation_record(
-                    project_id=project_id,
-                    pod_key=pod_key,
-                    artifact_key=artifact_key,
-                    engine_key="cash_flow_engine",
-                    result=cash_flow,
-                    input_snapshot=input_snapshot,
-                )
+            request = artifact.get("cashFlowRunRequest")
+            if not isinstance(request, dict) or request.get("requestType") != "cash_flow_run_request_v1":
+                raise ValueError("현금흐름 계산의 실제 실행 입력이 없어 계산 기록을 저장할 수 없습니다.")
+            request = deepcopy(request)
+            digest = financial_input_hash(request)
+            record = _generic_calculation_record(
+                project_id=project_id,
+                pod_key=pod_key,
+                artifact_key=artifact_key,
+                engine_key="cash_flow_engine",
+                result=deepcopy(cash_flow),
+                input_snapshot={**request, "financialInputHash": digest},
             )
+            record["financialInputHash"] = digest
+            if run_id:
+                record["sourceLocator"]["runId"] = run_id
+            if agent_run_id:
+                record["sourceLocator"]["agentRunId"] = agent_run_id
+            records.append(record)
 
     if pod_key == "pf_credit":
         pf_structure = artifact.get("pfStructure")

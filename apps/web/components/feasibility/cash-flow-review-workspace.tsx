@@ -14,13 +14,13 @@ const MONTHLY_POLICY = {
 } as const;
 type Run = { calculationRunId: string; label: string; createdAt?: string; policyMode?: string;
   period: { baseMonth: string | null; lastMonthIndex: number | null }; sourceHashes?: string[] };
-type Comparison = {
+export type Comparison = {
   status: string; reasons: string[]; baseline?: Run; comparison?: Run; sourceChanged?: boolean;
   metrics: Array<{ key: string; label: string; unit: string; baselineValue: number | null; comparisonValue: number | null; delta: number | null }>;
   inputChanges: Array<{ path: string; label?: string; before: unknown; after: unknown }>;
   inputChangeCount?: number; inputChangesTruncated?: boolean;
 };
-type State = { comparisonHash: string; availableRuns: Run[]; selection: { baselineRunId: string; comparisonRunId: string; saved: boolean } | null;
+export type State = { comparisonHash: string; availableRuns: Run[]; selection: { baselineRunId: string; comparisonRunId: string; saved: boolean } | null;
   comparison: Comparison | null };
 const control = "min-w-0 w-full rounded-lg border border-slate-300 bg-white p-2 text-sm dark:border-slate-700 dark:bg-slate-900";
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
@@ -209,7 +209,14 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, disabled = false,
             .map((value, index) => <td key={index} className="p-2">{amount(value)}</td>)}
         </tr>)}</tbody></table></div>
     </details> : null}
-    {comparison ? <div className="mt-4 space-y-3">
+    {comparison ? <CashFlowComparisonDetails comparison={comparison} /> : null}
+    {comparison && comparison.status !== "incompatible" && state?.selection?.saved && !selectionDirty
+      ? <Link className="mt-4 inline-block text-sm font-bold text-indigo-600" href={`/project/${encodeURIComponent(projectId)}/report`}>저장된 비교로 검토 초안 만들기</Link> : null}
+  </section>;
+}
+
+export function CashFlowComparisonDetails({ comparison }: { comparison: Comparison }) {
+  return <div className="mt-4 space-y-3">
       {comparison.reasons.map((code) => <p key={code} className="text-sm font-bold text-amber-700">{reasons[code] ?? "계산 기준을 확인해 주세요. 비교할 수 없는 입력이 있습니다."}</p>)}
       {comparison.sourceChanged ? <p className="text-sm text-amber-700">두 계산의 원본·근거 기준도 변경되었습니다.</p> : null}
       <p className="text-xs text-slate-500">기준: {period(comparison.baseline)} / 변경: {period(comparison.comparison)}</p>
@@ -226,6 +233,5 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, disabled = false,
         {comparison.inputChanges.length > 30 || comparison.inputChangesTruncated ? <p className="mt-2 text-xs text-slate-500">처음 30개 변경을 표시합니다.</p> : null}
       </div>
       <p className="text-xs text-slate-500">이 비교는 검토용이며 승인·발행 상태를 부여하지 않습니다. 월별 검토안의 기존 일괄 상환·스트레스 시나리오는 별도 계산 기준 확인이 필요합니다.</p>
-    </div> : null}
-  </section>;
+    </div>;
 }

@@ -137,6 +137,7 @@ def build_workbook_cell_preview(
 
     import openpyxl
     from openpyxl.utils import get_column_letter, range_boundaries
+    from openpyxl.worksheet.formula import ArrayFormula
     from parsing_platform.adapters import inspect_office_container_safety
 
     normalized_sheet = str(sheet_name or "").strip()
@@ -208,10 +209,15 @@ def build_workbook_cell_preview(
             for column_number in range(preview_min_column, preview_max_column + 1):
                 formula_cell = formula_sheet.cell(row=row_number, column=column_number)
                 value_cell = value_sheet.cell(row=row_number, column=column_number)
+                is_formula = formula_cell.data_type == "f"
+                formula_text = (
+                    formula_cell.value.text
+                    if isinstance(formula_cell.value, ArrayFormula)
+                    else formula_cell.value
+                )
                 formula = (
-                    str(formula_cell.value)
-                    if isinstance(formula_cell.value, str)
-                    and formula_cell.value.startswith("=")
+                    formula_text
+                    if is_formula and isinstance(formula_text, str)
                     else None
                 )
                 cells.append(
@@ -219,7 +225,7 @@ def build_workbook_cell_preview(
                         "coordinate": f"{get_column_letter(column_number)}{row_number}",
                         "rowNumber": row_number,
                         "columnNumber": column_number,
-                        "displayValue": _json_cell_value(value_cell.value if formula else formula_cell.value),
+                        "displayValue": _json_cell_value(value_cell.value if is_formula else formula_cell.value),
                         "formula": formula,
                         "dataType": str(formula_cell.data_type or "n"),
                         "focused": (

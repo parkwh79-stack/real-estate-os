@@ -13,6 +13,10 @@ from xml.sax.saxutils import escape as xml_escape
 
 class ReportExportAgent:
     supported_formats = {"markdown", "json", "html", "pdf", "docx"}
+    _PDF_PAGE_WIDTH = 595
+    _PDF_HORIZONTAL_MARGIN = 42
+    _PDF_FONT_SIZE = 10
+    _PDF_CID_WIDTH = 1000
 
     def export(self, report_record: Dict[str, Any], export_format: str) -> Dict[str, Any]:
         normalized_format = export_format.lower().strip()
@@ -231,12 +235,30 @@ class ReportExportAgent:
 
     def _render_pdf(self, report_record: Dict[str, Any]) -> bytes:
         lines = self._plain_report_lines(report_record)
+        # The CID font declares /DW only: each UTF-16 code unit advances a full
+        # em, including Latin letters and spaces. Character-count width=86
+        # overflowed A4; derive the line budget from the emitted PDF geometry.
+        line_units = int(
+            (self._PDF_PAGE_WIDTH - 2 * self._PDF_HORIZONTAL_MARGIN)
+            / (self._PDF_FONT_SIZE * self._PDF_CID_WIDTH / 1000)
+        )
         wrapped_lines: list[str] = []
         for line in lines:
-            if not line:
-                wrapped_lines.append("")
-                continue
-            wrapped_lines.extend(textwrap.wrap(line, width=86, replace_whitespace=False) or [""])
+            for paragraph in line.splitlines() or [""]:
+                for wrapped in textwrap.wrap(paragraph, width=line_units, replace_whitespace=False) or [""]:
+                    # A non-BMP character occupies two UTF-16 units. Preserve
+                    # its surrogate pair in one text operator when wrapping.
+                    chunk = ""
+                    used_units = 0
+                    for character in wrapped:
+                        units = len(character.encode("utf-16-be")) // 2
+                        if used_units + units > line_units:
+                            wrapped_lines.append(chunk)
+                            chunk = ""
+                            used_units = 0
+                        chunk += character
+                        used_units += units
+                    wrapped_lines.append(chunk)
 
         page_line_count = 50
         pages = [
@@ -248,7 +270,7 @@ class ReportExportAgent:
             b"<< /Type /Catalog /Pages 2 0 R >>",
             b"",
             b"<< /Type /Font /Subtype /Type0 /BaseFont /HYGoThic-Medium /Encoding /UniKS-UCS2-H /DescendantFonts [4 0 R] >>",
-            b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HYGoThic-Medium /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /DW 1000 >>",
+            f"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HYGoThic-Medium /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /DW {self._PDF_CID_WIDTH} >>".encode("ascii"),
         ]
         page_refs = []
         for page_lines in pages:
@@ -259,7 +281,7 @@ class ReportExportAgent:
             )
             page_object_id = len(objects) + 1
             objects.append(
-                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_object_id} 0 R >>".encode("ascii")
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {self._PDF_PAGE_WIDTH} 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_object_id} 0 R >>".encode("ascii")
             )
             page_refs.append(f"{page_object_id} 0 R")
 
@@ -283,13 +305,13 @@ class ReportExportAgent:
         )
         return output.getvalue()
 
-    @staticmethod
-    def _pdf_page_stream(lines: list[str]) -> bytes:
-        commands = ["BT", "/F1 10 Tf", "14 TL"]
+    @classmethod
+    def _pdf_page_stream(cls, lines: list[str]) -> bytes:
+        commands = ["BT", f"/F1 {cls._PDF_FONT_SIZE} Tf", "14 TL"]
         y = 802
         for line in lines:
             encoded = line.encode("utf-16-be").hex().upper()
-            commands.append(f"1 0 0 1 42 {y} Tm <{encoded}> Tj")
+            commands.append(f"1 0 0 1 {cls._PDF_HORIZONTAL_MARGIN} {y} Tm <{encoded}> Tj")
             y -= 14
         commands.append("ET")
         return "\n".join(commands).encode("ascii")
