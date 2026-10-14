@@ -4,27 +4,24 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authHeaders, apiBase } from "../../lib/auth-client";
-import { eokToWon, wonToEok } from "../../lib/feasibility-review";
+import { eokToWon, wonToEok, termsDraft, termsHaveChanges, reviewedTermsPayload,
+  type FieldReview as Review, type ReviewSource as Source, type ReviewTerms, type TermsDraft } from "../../lib/feasibility-review";
 import { fetchWorkbookCellPreview, type WorkbookCellPreview } from "../../lib/document-review-workspace";
+import { FeasibilityTermsReview } from "./feasibility-terms-review";
 
 const FIELDS = [
   ["total_revenue", "총매출"], ["total_cost", "총사업비"], ["land_cost", "토지비"],
   ["construction_cost", "공사비"], ["finance_cost", "금융비용"], ["other_cost", "기타사업비"],
   ["development_profit", "문서상 개발이익"], ["pf_amount", "PF 총액"],
 ] as const;
-type Source = { archiveId: string; originalFileName: string };
-type Review = {
-  origin: "user_assumption" | "document_correction";
-  reason: string;
-  sourceCell: string;
-  sourceDocument?: Source | null;
-};
 type Row = Review & { key: string; label: string; eok: string; dirty: boolean };
 type ReviewState = {
   values: Record<string, number | null>;
   fieldReviews: Record<string, Review>;
   reviewHash: string;
   sourceDocuments?: Source[];
+  terms?: ReviewTerms;
+  termReviews?: Partial<TermsDraft["reviews"]>;
 };
 const control = "rounded-md border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-900";
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
@@ -52,6 +49,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
   const inputRef = useRef<HTMLInputElement>(null);
   const savingRef = useRef(false);
   const [rows, setRows] = useState<Row[]>([]);
+  const [terms, setTerms] = useState<TermsDraft>(() => termsDraft());
   const [reviewHash, setReviewHash] = useState("");
   const [documents, setDocuments] = useState<Source[]>([]);
   const [archiveId, setArchiveId] = useState("");
@@ -65,6 +63,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
 
   const restore = useCallback((state: ReviewState) => {
     setRows(rowsFromState(state));
+    setTerms(termsDraft(state.terms, state.termReviews));
     setReviewHash(state.reviewHash);
     if (state.sourceDocuments) setDocuments(state.sourceDocuments);
   }, []);
@@ -72,7 +71,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
   useEffect(() => {
     let active = true;
     activeEndpointRef.current = endpoint;
-    setBusy(true); setReviewHash(""); setRows([]); setArchiveId("");
+    setBusy(true); setReviewHash(""); setRows([]); setTerms(termsDraft()); setArchiveId("");
     setPreview(null); setError(null); setNotice(null);
     void fetch(`${endpoint}/review`, { cache: "no-store", headers: authHeaders("web") })
       .then(readResponse<ReviewState>)
@@ -120,7 +119,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
     finally { setBusy(false); if (inputRef.current) inputRef.current.value = ""; }
   };
 
-  const showSource = async (row: Row) => {
+  const showSource = async (row: Review) => {
     setBusy(true); setError(null); setPreview(null);
     try {
       const source = row.sourceDocument ?? documents.find((item) => item.archiveId === archiveId);
@@ -146,10 +145,11 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
         if (row.key !== "development_profit" && values[row.key]! < 0) throw new Error(`${row.label}: 음수를 입력할 수 없습니다.`);
         reviews[row.key] = { origin: row.origin, reason: row.reason.trim(), sourceCell: row.sourceCell.trim() };
       }
-      if (!changed.length) throw new Error("수정한 항목이 없습니다.");
+      const termPayload = reviewedTermsPayload(terms, documents.find((item) => item.archiveId === archiveId));
+      if (!changed.length && !termsHaveChanges(terms)) throw new Error("수정한 항목이 없습니다.");
       const result = await readResponse<{ reviewState: ReviewState }>(await fetch(`${endpoint}/apply-input`, {
         method: "POST", headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-        body: JSON.stringify({ feasibility_input: values, fieldReviews: reviews, expectedReviewHash: reviewHash,
+        body: JSON.stringify({ feasibility_input: values, fieldReviews: reviews, expectedReviewHash: reviewHash, ...termPayload,
           fieldSourceDocuments: Object.fromEntries(changed.filter((row) => row.origin === "document_correction")
             .map((row) => [row.key, row.sourceDocument ?? documents.find((item) => item.archiveId === archiveId) ?? null])) }),
       }));
@@ -164,7 +164,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
     } finally { savingRef.current = false; setBusy(false); }
   };
 
-  const hasChanges = rows.some((row) => row.dirty);
+  const hasChanges = rows.some((row) => row.dirty) || termsHaveChanges(terms);
   const continueTo = async (destination: "documents/review" | "feasibility") => {
     if (busy || savingRef.current || !reviewHash || activeEndpointRef.current !== endpoint) return;
     if (hasChanges && !await save()) return;
@@ -173,7 +173,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
   };
   return (
     <section aria-label="사업수지 입력 검토" className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <h2 className="font-black text-slate-950 dark:text-white">사업수지 숫자 확인·수정·저장</h2>
+      <h2 className="font-black text-slate-950 dark:text-white">사업수지 숫자·기간·대출 조건 확인·수정·저장</h2>
       <p className="mt-1 text-sm text-slate-500">AI 연결 없이 직접 입력할 수 있습니다. 금액은 억원 단위이며 원 단위까지 보존합니다. 빈 항목은 미입력으로 남습니다.</p>
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <button type="button" className={button} disabled={busy || !reviewHash} onClick={() => inputRef.current?.click()}>사업수지 Excel 선택</button>
@@ -209,6 +209,8 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
           <input aria-label={`${row.label} 검토 이유`} value={row.reason} onChange={(event) => edit(row.key, { reason: event.target.value })} placeholder="수정 이유 또는 가정의 근거" className={`${control} mt-2 w-full`} />
         </fieldset>)}
       </div>
+      <FeasibilityTermsReview draft={terms} disabled={busy} selectedSource={documents.find((item) => item.archiveId === archiveId)}
+        onChange={(next) => { setTerms(next); setNotice(null); }} onShowSource={(review) => void showSource(review)} />
       {preview ? <div aria-label="원본 셀 미리보기" className="mt-4 overflow-x-auto rounded-lg border p-3">
         <p className="text-sm font-bold">{preview.sheetName}!{preview.focusRange} · 원본 셀</p>
         <p className="text-xs text-slate-500">수식은 실행하지 않고 보관된 값과 수식만 표시합니다.</p>

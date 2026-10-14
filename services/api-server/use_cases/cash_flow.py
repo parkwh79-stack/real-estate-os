@@ -53,7 +53,14 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
             )
         return approved_request
 
-    return analyze_development_feasibility_use_case(project_data, input_data)["cashFlowRunRequestDraft"]
+    analysis = analyze_development_feasibility_use_case(project_data, input_data)
+    missing_amount_fields = analysis["pfReadiness"].get("missingFields", [])
+    if missing_amount_fields:
+        raise ValueError(
+            "대출 금액이 미입력되어 현금흐름을 계산할 수 없습니다: "
+            + ", ".join(missing_amount_fields)
+        )
+    return analysis["cashFlowRunRequestDraft"]
 
 
 def _direct_cash_flow_request(input_data: Dict[str, Any]) -> Dict[str, Any] | None:

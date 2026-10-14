@@ -126,6 +126,39 @@ def test_canonical_status_without_snapshot_binding_is_not_authoritative():
     assert request["sourcesAndUses"]["cost"]["totalProjectCost"] == 0
 
 
+def test_approved_canonical_financing_wins_over_incomplete_working_amount():
+    project = {
+        "pf_structure": [{"tranche_id": "incomplete", "name": "Working draft", "priority": "senior", "amount": None}],
+        "canonicalFeasibilityStudyV2": {
+            "project_name": "Approved financing",
+            "financing": [{"tranche_id": "approved", "name": "Approved senior", "priority": "senior", "amount": 80}],
+            **_approved_snapshot_binding(),
+        },
+    }
+
+    request = build_cash_flow_request_use_case(project)
+    result = run_cash_flow_use_case(project)
+
+    assert request["pfStructure"][0]["amount"] == 80
+    assert result["summary"]["pfLimit"] == 80
+
+
+def test_complete_direct_candidate_is_allowed_with_incomplete_working_amount():
+    project = {"id": "scenario-project", "pf_structure": [{"tranche_id": "incomplete", "name": "Working draft", "priority": "senior", "amount": None}]}
+    direct_request = {
+        "requestType": "cash_flow_run_request_v1",
+        "sourcesAndUses": {"cost": {}, "funding": {"pfLoan": 80}},
+        "pfStructure": [{"name": "scenario-senior", "amount": 80}],
+    }
+
+    request = build_cash_flow_request_use_case(project, direct_request)
+    result = run_cash_flow_use_case(project, request)
+
+    assert request["authorityStatus"] == "candidate"
+    assert request["reportEligible"] is False
+    assert result["summary"]["pfLimit"] == 80
+
+
 @pytest.mark.parametrize("wrapper_key", [None, "cashFlowRunRequest", "cashFlowRunRequestDraft"])
 def test_direct_request_is_project_bound_and_cannot_self_approve(wrapper_key):
     project = {

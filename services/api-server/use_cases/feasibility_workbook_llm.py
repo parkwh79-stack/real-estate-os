@@ -22,6 +22,7 @@ import openpyxl
 from agents.ai_connection import AIConnection, resolve_ai_context
 from agents.agent_policy import system_prompt_for
 from core.text_chunking import chunk_text_preserving_context
+from use_cases.feasibility_review_terms import TERM_GROUPS, patch_terms, reviewed_terms, validate_terms
 
 EXTRACT_FIELDS = [
     "total_revenue",
@@ -275,8 +276,15 @@ def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
     stored_reviews = (project.get("_meta") or {}).get("feasibilityFieldReviews") or {}
     reviews = {key: review for key, review in stored_reviews.items()
                if isinstance(review, dict) and review.get("value") == values.get(key)}
-    state = {"values": values, "fieldReviews": reviews}
-    return {**state, "reviewHash": _stable_json(state), "analysisOnly": True}
+    terms = reviewed_terms(project)
+    stored_term_reviews = (project.get("_meta") or {}).get("feasibilityTermReviews") or {}
+    term_reviews = {key: review for key, review in stored_term_reviews.items()
+                    if key in TERM_GROUPS and isinstance(review, dict) and review.get("value") == terms[key]}
+    state = {"values": values, "fieldReviews": reviews, "terms": terms, "termReviews": term_reviews}
+    # Include raw inputs so edits to hidden/legacy attributes also invalidate a browser draft.
+    review_hash = _stable_json({**state, "schedule": project.get("schedule"), "pf_structure": project.get("pf_structure")})
+    return {**state, "reviewHash": review_hash, "analysisOnly": True,
+            "canonicalStudyPresent": bool(project.get("canonicalFeasibilityStudyV2") or project.get("feasibilityStudyV2"))}
 
 
 def apply_feasibility_input_use_case(
@@ -289,6 +297,9 @@ def apply_feasibility_input_use_case(
     field_reviews: Dict[str, Any] | None = None,
     field_source_documents: Dict[str, Any] | None = None,
     expected_review_hash: str | None = None,
+    terms: Dict[str, Any] | None = None,
+    term_reviews: Dict[str, Any] | None = None,
+    term_source_documents: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Persist a reviewer-confirmed feasibility extraction onto the project (human-gated).
 
@@ -308,19 +319,55 @@ def apply_feasibility_input_use_case(
                 or value != int(value) or (key != "development_profit" and value < 0)):
             raise ValueError(f"{key}: 원 단위의 유효한 정수를 입력하세요.")
         numeric[key] = int(value)
-    if not numeric:
+    clean_terms = validate_terms(terms) if terms is not None else {}
+    if not numeric and not clean_terms:
         raise ValueError("적용할 수치가 없습니다.")
     existing = project_repository.get(project_id)
     if not existing:
         raise LookupError("Project not found")
 
     prior = feasibility_review_state(existing)
+    if clean_terms and (not isinstance(expected_review_hash, str) or not expected_review_hash):
+        raise ValueError("최신 검토 상태를 불러온 뒤 저장하세요.")
     if expected_review_hash is not None and expected_review_hash != prior["reviewHash"]:
         raise FeasibilityReviewConflict("저장된 입력이 변경되었습니다. 최신 값을 다시 불러온 뒤 수정하세요.")
     if field_reviews is not None and not isinstance(field_reviews, dict):
         raise ValueError("항목별 검토 정보를 확인하세요.")
     reviews = dict(prior["fieldReviews"])
     applied_at = datetime.now(timezone.utc).isoformat()
+    if term_reviews is not None and (not isinstance(term_reviews, dict) or term_reviews.keys() - TERM_GROUPS):
+        raise ValueError("사업기간·대출 조건 검토 정보를 확인하세요.")
+    if term_source_documents is not None and (not isinstance(term_source_documents, dict) or term_source_documents.keys() - TERM_GROUPS):
+        raise ValueError("사업기간·대출 조건 원본 문서를 확인하세요.")
+    terms_patch = patch_terms(existing, clean_terms)
+    next_terms = reviewed_terms({**existing, **terms_patch})
+    saved_term_reviews = dict(prior["termReviews"])
+    changed_term_reviews = {}
+    for group in clean_terms:
+        review = (term_reviews or {}).get(group)
+        if not isinstance(review, dict):
+            raise ValueError(f"{group}: 수정 또는 가정의 이유를 입력하세요.")
+        origin = review.get("origin")
+        reason = review.get("reason")
+        source_cell = review.get("sourceCell")
+        document = (term_source_documents or {}).get(group) or source_document
+        if not isinstance(origin, str) or origin not in {"user_assumption", "document_correction"}:
+            raise ValueError(f"{group}: 입력 구분을 확인하세요.")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
+            raise ValueError(f"{group}: 수정 또는 가정의 이유를 입력하세요(4000자 이하).")
+        if source_cell is not None and (not isinstance(source_cell, str) or len(source_cell) > 1000):
+            raise ValueError(f"{group}: 출처 셀을 확인하세요.")
+        if origin == "document_correction" and (not isinstance(document, dict) or not document.get("archiveId") or not (source_cell or "").strip()):
+            raise ValueError(f"{group}: 보관된 원본 문서와 출처 셀이 필요합니다.")
+        changed_term_reviews[group] = {
+            "value": next_terms[group], "previousValue": prior["terms"][group],
+            "origin": origin, "reason": reason.strip(),
+            "sourceCell": source_cell.strip() if origin == "document_correction" else None,
+            "sourceDocument": document if origin == "document_correction" else None,
+            "reviewedBy": applied_by, "reviewedAt": applied_at,
+            "needsReview": True, "approvalStatus": "not_requested",
+        }
+        saved_term_reviews[group] = changed_term_reviews[group]
     changed_reviews = {}
     for key, value in numeric.items():
         field_document = (field_source_documents or {}).get(key) or source_document
@@ -359,18 +406,21 @@ def apply_feasibility_input_use_case(
 
     history = list(((existing.get("_meta") or {}).get("appliedFeasibilityInputs") or []))
     history.append({"appliedBy": applied_by, "appliedAt": applied_at, "fields": list(numeric.keys()),
-                    "sourceDocument": source_document or {}, "fieldReviews": changed_reviews})
+                    "sourceDocument": source_document or {}, "fieldReviews": changed_reviews,
+                    "termReviews": changed_term_reviews})
 
     update_payload: Dict[str, Any] = {
         "feasibility_input": {**(existing.get("feasibility_input") or {}), **fi_update},
         "_meta": {**(existing.get("_meta") or {}), "appliedFeasibilityInputs": history,
-                  "feasibilityInputSource": "human_workbook_review", "feasibilityFieldReviews": reviews},
+                  "feasibilityInputSource": "human_workbook_review", "feasibilityFieldReviews": reviews,
+                  "feasibilityTermReviews": saved_term_reviews},
         "feasibility_input_sources": {
             **(existing.get("feasibility_input_sources") or {}),
             **{key: {"value": value, "source": reviews[key]["origin"], "needsReview": True,
                       "confidence": 0.6, "review": reviews[key]} for key, value in fi_update.items()},
         },
     }
+    update_payload.update(terms_patch)
     if expected != (existing.get("expected_results") or {}):
         update_payload["expected_results"] = expected
 
@@ -381,6 +431,7 @@ def apply_feasibility_input_use_case(
         "schemaVersion": "realytics-feasibility-input-apply-v1",
         "projectId": project_id,
         "appliedFields": numeric,
+        "appliedTerms": list(clean_terms),
         "feasibility_input": (updated or {}).get("feasibility_input"),
         "expected_results": (updated or {}).get("expected_results"),
         "project": updated,

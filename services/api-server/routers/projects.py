@@ -2539,6 +2539,19 @@ def apply_project_feasibility_input(project_id: str, request: Request, input_dat
         if not stored:
             raise HTTPException(status_code=400, detail="이 프로젝트에 보관된 원본 문서가 아닙니다.")
         field_source_documents[field] = {"archiveId": stored["archiveId"], "originalFileName": stored.get("originalFileName")}
+    if "terms" in input_data and not isinstance(input_data["terms"], dict):
+        raise HTTPException(status_code=400, detail="사업기간·대출 조건 항목을 확인하세요.")
+    submitted_term_sources = input_data.get("termSourceDocuments", {})
+    if not isinstance(submitted_term_sources, dict) or submitted_term_sources.keys() - {"schedule", "financing"}:
+        raise HTTPException(status_code=400, detail="사업기간·대출 조건 원본 문서를 확인하세요.")
+    term_source_documents = {}
+    for group, reference in submitted_term_sources.items():
+        if not isinstance(reference, dict) or not reference.get("archiveId"):
+            raise HTTPException(status_code=400, detail=f"{group}: 원본 문서를 선택하세요.")
+        stored = source_document_repository().find_by_archive_id(project_id, str(reference["archiveId"]))
+        if not stored:
+            raise HTTPException(status_code=400, detail="이 프로젝트에 보관된 원본 문서가 아닙니다.")
+        term_source_documents[group] = {"archiveId": stored["archiveId"], "originalFileName": stored.get("originalFileName")}
     feasibility_input = input_data.get("feasibility_input") or input_data.get("feasibilityInput") or {}
     try:
         result = apply_feasibility_input_use_case(
@@ -2550,6 +2563,9 @@ def apply_project_feasibility_input(project_id: str, request: Request, input_dat
             field_reviews=input_data.get("fieldReviews"),
             field_source_documents=field_source_documents,
             expected_review_hash=input_data.get("expectedReviewHash"),
+            terms=input_data.get("terms"),
+            term_reviews=input_data.get("termReviews"),
+            term_source_documents=term_source_documents,
         )
     except FeasibilityReviewConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2563,6 +2579,7 @@ def apply_project_feasibility_input(project_id: str, request: Request, input_dat
         project_id=project_id,
         metadata={
             "appliedFields": list((result.get("appliedFields") or {}).keys()),
+            "appliedTerms": result.get("appliedTerms") or [],
             "authorization": authz.get("authorization"),
         },
     )

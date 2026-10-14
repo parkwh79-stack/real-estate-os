@@ -111,29 +111,47 @@ class DevelopmentFeasibilityAgent:
             asset_profile_summary,
             logistics_analysis,
         )
-        cash_flow_request_draft = build_cash_flow_run_request_from_feasibility_study(feasibility_v2_draft)
+        cash_flow_request_draft = (
+            None
+            if pf["missingFields"]
+            else build_cash_flow_run_request_from_feasibility_study(feasibility_v2_draft)
+        )
         cash_flow_run_result = None
         cash_flow_issue = None
         try:
+            if pf["missingFields"]:
+                raise FinancialInputError(
+                    "대출 금액이 미입력된 금융 조건을 확인해 주세요.",
+                    code="financing_amount_missing",
+                )
             cash_flow_run_result = run_cash_flow_engine(cash_flow_request_draft)
         except FinancialInputError as exc:
-            if exc.code != "cash_flow_cost_total_mismatch":
+            if exc.code not in {"cash_flow_cost_total_mismatch", "financing_amount_missing"}:
                 raise
-            cash_flow_issue = {
-                "code": exc.code,
-                "severity": "blocking",
-                "message": "총사업비와 월별 비용 합계가 일치하지 않아 현금흐름 계산을 보류했습니다.",
-                "requiredEvidence": "항목별·월별 비용 배분 근거 및 총사업비 대사",
-                "sourcePaths": ["sourcesAndUses.cost.totalProjectCost", "costSchedule.rows"],
-            }
-            missing_field = "cash_flow.monthly_cost_allocation"
-            quality["missingFields"].append(missing_field)
+            if exc.code == "financing_amount_missing":
+                cash_flow_issue = {
+                    "code": exc.code,
+                    "severity": "blocking",
+                    "message": "대출 금액이 미입력되어 현금흐름 계산을 보류했습니다.",
+                    "requiredEvidence": "대출 조건별 금액 및 산출 근거",
+                    "sourcePaths": pf["missingFields"],
+                }
+            else:
+                cash_flow_issue = {
+                    "code": exc.code,
+                    "severity": "blocking",
+                    "message": "총사업비와 월별 비용 합계가 일치하지 않아 현금흐름 계산을 보류했습니다.",
+                    "requiredEvidence": "항목별·월별 비용 배분 근거 및 총사업비 대사",
+                    "sourcePaths": ["sourcesAndUses.cost.totalProjectCost", "costSchedule.rows"],
+                }
+                missing_field = "cash_flow.monthly_cost_allocation"
+                quality["missingFields"].append(missing_field)
+                engine_readiness["blockingFields"].append(missing_field)
             quality["warnings"].append(cash_flow_issue["message"])
             quality["blockingIssues"] = [cash_flow_issue]
             quality["status"] = "needs_review"
             quality["confidence"] = max(0.2, 1 - len(quality["missingFields"]) * 0.15)
             pf["isPfReviewReady"] = False
-            engine_readiness["blockingFields"].append(missing_field)
             for key in ("canRunCashFlow", "canRunPfScenarios", "canRunUnsoldLtvMatrix"):
                 engine_readiness[key] = False
 
@@ -261,7 +279,8 @@ class DevelopmentFeasibilityAgent:
         costs: Dict[str, Any],
         pf_structure: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        total_pf = sum(t.get("amount", 0) for t in pf_structure)
+        missing_fields = self._missing_pf_amount_fields(pf_structure)
+        total_pf = None if missing_fields else sum(t.get("amount", 0) for t in pf_structure)
         total_revenue = revenue["totalRevenue"]
         total_cost = costs["totalCost"]
         recommended_by_revenue = total_revenue * 0.65
@@ -269,22 +288,31 @@ class DevelopmentFeasibilityAgent:
         recommended_pf_limit = min(recommended_by_revenue, recommended_by_cost) if total_revenue and total_cost else 0
         return {
             "totalPfAmount": total_pf,
-            "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue),
-            "ltvByRevenue": calculate_sales_value_ltv(total_pf, total_revenue),
+            "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None else None,
+            "ltvByRevenue": calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None else None,
             "ltvByRevenueBasis": "gross_sales_value",
-            "ltcByCost": calculate_ltc(total_pf, total_cost),
-            "equityRatio": max(0, total_cost - total_pf) / total_cost if total_cost else 0,
+            "ltcByCost": calculate_ltc(total_pf, total_cost) if total_pf is not None else None,
+            "equityRatio": (max(0, total_cost - total_pf) / total_cost if total_cost else 0) if total_pf is not None else None,
             "landCostRatio": costs["costRatio"]["land"],
             "constructionCostRatio": costs["costRatio"]["construction"],
             "financialCostRatio": costs["costRatio"]["finance"],
             "developerProfitMargin": (total_revenue - total_cost) / total_revenue if total_revenue else 0,
-            "exitSaleRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue),
-            "estimatedExitSalesRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue),
-            "requiredEquity": max(0, total_cost - total_pf),
+            "exitSaleRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue) if total_pf is not None else None,
+            "estimatedExitSalesRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue) if total_pf is not None else None,
+            "requiredEquity": max(0, total_cost - total_pf) if total_pf is not None else None,
             "recommendedPfLimit": recommended_pf_limit,
-            "headroomToRecommendedLimit": recommended_pf_limit - total_pf,
-            "status": "ready" if total_pf <= recommended_pf_limit or not recommended_pf_limit else "leverage_review_required",
+            "headroomToRecommendedLimit": recommended_pf_limit - total_pf if total_pf is not None else None,
+            "status": "needs_input" if total_pf is None else "ready" if total_pf <= recommended_pf_limit or not recommended_pf_limit else "leverage_review_required",
+            "missingFields": missing_fields,
         }
+
+    @staticmethod
+    def _missing_pf_amount_fields(pf_structure: List[Dict[str, Any]]) -> List[str]:
+        return [
+            f"pf_structure.{tranche.get('tranche_id') or tranche.get('tranche') or tranche.get('name') or index}.amount"
+            for index, tranche in enumerate(pf_structure)
+            if tranche.get("amount") in (None, "")
+        ]
 
     def _sensitivity(self, revenue: Dict[str, Any], costs: Dict[str, Any]) -> List[Dict[str, Any]]:
         scenarios = [
@@ -328,6 +356,7 @@ class DevelopmentFeasibilityAgent:
             missing.append("feasibility_input.total_cost or cost breakdown")
         if not project_data.get("pf_structure"):
             missing.append("pf_structure")
+        missing.extend(self._missing_pf_amount_fields(project_data.get("pf_structure", [])))
         return {
             "missingFields": missing,
             "confidence": max(0.2, 1 - len(missing) * 0.15),
@@ -345,10 +374,11 @@ class DevelopmentFeasibilityAgent:
     ) -> Dict[str, Any]:
         has_revenue = revenue["totalRevenue"] > 0
         has_cost = costs["totalCost"] > 0
-        has_pf = bool(pf_structure)
+        missing_pf_amounts = self._missing_pf_amount_fields(pf_structure)
+        has_pf = bool(pf_structure) and not missing_pf_amounts
         has_schedule = bool(
             project_data.get("cashflow_input")
-            or project_data.get("schedule")
+            or self._schedule_v2(project_data.get("schedule"))
             or project_data.get("sales_schedule")
             or project_data.get("salesCollectionSchedule")
         )
@@ -377,7 +407,7 @@ class DevelopmentFeasibilityAgent:
                 "CashFlowEngine",
                 "CalculationScenarioEngine",
             ],
-            "canRunCashFlow": has_revenue and has_cost and has_schedule,
+            "canRunCashFlow": has_revenue and has_cost and has_schedule and not missing_pf_amounts,
             "canRunPfScenarios": has_pf and has_revenue,
             "canRunUnsoldLtvMatrix": has_pf and has_revenue and has_sales_or_product_mix,
             "requiresCashFlowScenario": has_revenue and has_cost,
@@ -400,7 +430,11 @@ class DevelopmentFeasibilityAgent:
             "canonicalSchema": FEASIBILITY_STUDY_SCHEMA_VERSION,
             "workbookContract": FEASIBILITY_WORKBOOK_VERSION,
             "sourceSchemaPath": "services/api-server/schemas/feasibility_study.py",
-            "mapperStatus": "cash_flow_request_draft_available",
+            "mapperStatus": (
+                "financing_amount_required"
+                if self._missing_pf_amount_fields(draft.get("financing", []))
+                else "cash_flow_request_draft_available"
+            ),
             "requiredMappers": [
                 "DevelopmentFeasibilityAgent output -> FeasibilityStudyV2 draft",
                 "FeasibilityStudyV2 -> CashFlowRunRequest",
@@ -648,10 +682,22 @@ class DevelopmentFeasibilityAgent:
                 "name": tranche.get("name") or tranche.get("tranche") or f"Tranche {index}",
                 "priority": self._priority_label(tranche, index),
                 "amount": tranche.get("amount"),
-                "interest_rate": tranche.get("interest_rate") or tranche.get("interestRate"),
-                "fee_rate": tranche.get("fee_rate") or tranche.get("feeRate"),
-                "term_months": tranche.get("term_months") or tranche.get("maturityMonths"),
-                "repayment_source": tranche.get("repayment_source") or "sales_proceeds",
+                "interest_rate": (
+                    tranche.get("interest_rate")
+                    if tranche.get("interest_rate") is not None
+                    else tranche.get("interestRate")
+                ),
+                "fee_rate": (
+                    tranche.get("fee_rate")
+                    if tranche.get("fee_rate") is not None
+                    else tranche.get("feeRate")
+                ),
+                "term_months": (
+                    tranche.get("term_months")
+                    if tranche.get("term_months") is not None
+                    else tranche.get("maturityMonths")
+                ),
+                "repayment_source": tranche.get("repayment_source"),
             })
         return rows
 
@@ -667,9 +713,9 @@ class DevelopmentFeasibilityAgent:
         # Legacy shape: a dict of {key: date}.
         if isinstance(schedule, dict):
             return [
-                {"key": key, "label": labels.get(key, key), "planned_date": self._schedule_date_value(value)}
+                {"key": key, "label": labels.get(key, key), "planned_date": planned}
                 for key, value in schedule.items()
-                if value
+                if (planned := self._schedule_date_value(value))
             ]
         # Canonical FeasibilityStudyV2 shape: a list of {key, label, planned_date, ...}.
         if isinstance(schedule, list):
@@ -678,19 +724,25 @@ class DevelopmentFeasibilityAgent:
                 if not isinstance(item, dict):
                     continue
                 key = item.get("key") or item.get("name")
-                planned = item.get("planned_date") or item.get("plannedDate")
-                if planned is None and item.get("value") is not None:
-                    planned = self._schedule_date_value(item.get("value"))
+                planned = self._schedule_date_value(item)
                 if key and planned:
                     rows.append({"key": key, "label": item.get("label") or labels.get(key, key), "planned_date": planned})
             return rows
         return []
 
     @staticmethod
-    def _schedule_date_value(value: Any) -> str:
+    def _schedule_date_value(value: Any) -> str | None:
+        if isinstance(value, dict):
+            # A cleared canonical date must not resurrect a stale legacy alias.
+            for key in ("planned_date", "plannedDate", "value"):
+                if key in value:
+                    return DevelopmentFeasibilityAgent._schedule_date_value(value[key])
+            return None
+        if value is None or isinstance(value, bool):
+            return None
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return f"M{int(value)}"
-        return str(value)
+        return value if isinstance(value, str) else None
 
     def _scenarios_v2(self, sensitivity: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows = []
@@ -741,6 +793,9 @@ class DevelopmentFeasibilityAgent:
         return "other"
 
     def _priority_label(self, tranche: Dict[str, Any], index: int) -> str:
+        explicit_priority = str(tranche.get("priority") or "").lower()
+        if explicit_priority in {"senior", "mezzanine", "junior", "equity", "bridge", "other"}:
+            return explicit_priority
         value = str(tranche.get("priority") or tranche.get("name") or tranche.get("tranche") or "").lower()
         tranche_name = str(tranche.get("name") or tranche.get("tranche") or "").lower()
         if value in {"1", "senior"} or "senior" in tranche_name or "tr.a" in tranche_name or "tranche a" in tranche_name:
