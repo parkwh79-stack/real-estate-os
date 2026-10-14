@@ -46,4 +46,4 @@ API 코드 경로는 `services/api-server/` 기준이다. 프로젝트 Web 경�
 
 ## 검증의 범위
 
-[2026-09-15 코드 감사](pod-agent-code-audit-2026-09-15.md)는 해당 revision의 과거 결과다. 최신 R1/R2 변경·검증은 [backlog](../backlog.md)와 [실행 계획](realytics-os-next-work-roadmap.md)에 기록한다. Supabase migration 26개의 버전·이름과 Naver v1 배포 소스는 2026-10-14 대조 결과 일치하며 이번 변경에 새 migration은 없다. 실제 사업수지의 부분 저장·재개·진단을 격리 검증했지만, 원본 수식 오류와 원미만 처리·미확인 대출 조건 때문에 전체 실자료 인수는 남아 있다. 운영 권한·백업·외부 배포의 완료를 뜻하지 않는다.
+[2026-09-15 코드 감사](pod-agent-code-audit-2026-09-15.md)는 해당 revision의 과거 결과다. 최신 R1/R2 변경·검증은 [backlog](../backlog.md)와 [실행 계획](realytics-os-next-work-roadmap.md)에 기록한다. Supabase migration 26개의 버전·이름과 Naver v1 배포 소스는 2026-10-14 대조 결과 일치하며 이번 변경에 새 migration은 없다. 실제 사업수지는 사용자 승인 반올림과 원본값·처리 이유를 보존해 저장·재개·기본 계산을 격리 검증했다. 원본 수식 오류와 미확인 대출 조건 때문에 전체 실자료·월별 금융 인수는 남아 있다. 운영 권한·백업·외부 배포의 완료를 뜻하지 않는다.
