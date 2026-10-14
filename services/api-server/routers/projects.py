@@ -149,7 +149,7 @@ from use_cases.chief_deal_orchestration import (
     run_chief_deal_pod_with_cascade_use_case,
 )
 from use_cases.common import deep_merge
-from use_cases.development_feasibility import analyze_development_feasibility_use_case
+from use_cases.development_feasibility import analyze_development_feasibility_use_case, development_feasibility_input_basis
 from use_cases.asset_feasibility_comparison import compare_asset_feasibility_use_case
 from use_cases.covenant_eod import evaluate_covenant_eod_use_case
 from use_cases.product_planning import compare_product_planning_use_case
@@ -3381,14 +3381,16 @@ def analyze_development_feasibility(project_id: str, input_data: Dict[str, Any] 
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     payload = input_data or {}
-    result = analyze_development_feasibility_use_case(_project_store()[project_id], payload)
+    input_basis = development_feasibility_input_basis(_project_store()[project_id], payload)
+    result = analyze_development_feasibility_use_case(input_basis)
     run = _persist_calculation_run(
         project_id,
         engine_key="feasibility",
         result=result,
         input_data={
             **payload,
-            "engineVersion": "development_feasibility_agent_v2",
+            **input_basis,
+            "engineVersion": result["engineVersion"],
             "sourceLocator": payload.get("sourceLocator") or {
                 "sourceType": "project_feasibility_input",
                 "projectId": project_id,

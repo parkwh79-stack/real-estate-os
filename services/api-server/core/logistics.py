@@ -5,22 +5,22 @@ def calculate_logistics_noi(leasable_area_py: float, rent_per_py: float, operati
     annual_rent = leasable_area_py * rent_per_py * 12
     return annual_rent - operating_expenses
 
-def calculate_exit_value(noi: float, cap_rate: float) -> float:
+def calculate_exit_value(noi: float, cap_rate: float) -> float | None:
     """Exit Value = NOI / Cap Rate"""
     if cap_rate <= 0:
-        return 0.0
+        return None
     return noi / cap_rate
 
-def calculate_forward_sale_ltv(pf_amount: float, forward_sale_price: float) -> float:
+def calculate_forward_sale_ltv(pf_amount: float, forward_sale_price: float) -> float | None:
     """Forward Sale LTV = PF 대출금 / 선매각금액"""
     if forward_sale_price <= 0:
-        return 0.0
+        return None
     return pf_amount / forward_sale_price
 
-def calculate_appraisal_ltv(pf_amount: float, appraisal_value: float) -> float:
+def calculate_appraisal_ltv(pf_amount: float, appraisal_value: float) -> float | None:
     """Appraisal LTV = PF 대출금 / 감정가"""
     if appraisal_value <= 0:
-        return 0.0
+        return None
     return pf_amount / appraisal_value
 
 def calculate_tenant_stability_score(tenant_credit_rating: str, lease_term_months: int) -> int:
@@ -89,7 +89,12 @@ def assess_logistics_risks(project_data: Dict[str, Any]) -> list:
     """Generates logistics specific risk items"""
     risks = []
     
-    if project_data.get("pre_sale_contract_status") != "signed":
+    contract_status = project_data.get("pre_sale_contract_status")
+    if not contract_status:
+        risks.append({"category": "Data Quality", "item": "선매입계약 상태 확인 필요",
+                      "description": "Contract status was not supplied; execution is unverified.",
+                      "severity": 3, "probability": None})
+    elif contract_status != "signed":
         risks.append({
             "category": "Market Risk",
             "item": "선매입계약 미체결 리스크",
@@ -98,8 +103,12 @@ def assess_logistics_risks(project_data: Dict[str, Any]) -> list:
             "probability": 3
         })
         
-    tenant_rating = project_data.get("tenant_credit_rating", "")
-    if "BBB" not in tenant_rating.upper() and "A" not in tenant_rating.upper():
+    tenant_rating = project_data.get("tenant_credit_rating")
+    if not tenant_rating:
+        risks.append({"category": "Data Quality", "item": "임차인 신용등급 확인 필요",
+                      "description": "Tenant credit rating was not supplied; credit quality is unverified.",
+                      "severity": 3, "probability": None})
+    elif "BBB" not in tenant_rating.upper() and "A" not in tenant_rating.upper():
          risks.append({
             "category": "Market Risk",
             "item": "임차인 신용도 리스크",

@@ -221,7 +221,7 @@ def test_cf_contract_version_reexecutes_old_artifact_and_changed_financial_input
     assert changed_runtime["replayed"] is False and executions == [True, True]
     assert changed["cashFlowRunResult"]["summary"]["totalRevenue"] == 2000
     assert current["cashFlowRunResult"]["summary"]["totalRevenue"] == 1000
-    assert manifest("feasibility_cashflow").version == "1.2.0"
+    assert manifest("feasibility_cashflow").version == "1.3.0"
     assert manifest("pf_credit").version == "1.1.0"
 
 

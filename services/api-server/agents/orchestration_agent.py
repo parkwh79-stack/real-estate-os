@@ -3,7 +3,8 @@ from copy import deepcopy
 from typing import Any, Dict, List
 from uuid import uuid4
 
-from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
+from agents.development_feasibility_agent import DevelopmentFeasibilityAgent, DEVELOPMENT_FEASIBILITY_AGENT_VERSION
+from use_cases.development_feasibility import development_feasibility_input_basis
 from agents.ai_connection import resolve_ai_context, safe_ai_context
 from agents.ai_router import describe_selection, select_ai_context
 from agents.consensus_engine import ConsensusEngine, build_consensus_coordinator
@@ -1080,9 +1081,12 @@ class OrchestrationAgent:
         deterministic_authority_required: bool = False,
         llm_required: bool = False,
     ) -> Any:
+        if agent_id == "DevelopmentFeasibilityAgent":
+            input_snapshot = development_feasibility_input_basis(project_data)
         output, runtime_envelope = run_domain_agent_callable_with_contract(
             project_id=str(run.get("project_id") or project_data.get("projectId") or ""),
             agent_id=agent_id,
+            agent_version=DEVELOPMENT_FEASIBILITY_AGENT_VERSION if agent_id == "DevelopmentFeasibilityAgent" else "1.0.0",
             task_type=task_type,
             domain=domain,
             input_snapshot=input_snapshot,

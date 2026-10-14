@@ -1338,10 +1338,14 @@ def _execute_pod_artifact(
         deterministic_authority_required: bool = False,
         llm_required: bool = False,
     ) -> Any:
+        from agents.development_feasibility_agent import DEVELOPMENT_FEASIBILITY_AGENT_VERSION
+        if agent_id == "DevelopmentFeasibilityAgent":
+            input_snapshot = development_feasibility_input_basis(project_data, options)
         try:
             output, envelope = run_domain_agent_callable_with_contract(
                 project_id=project_id,
                 agent_id=agent_id,
+                agent_version=DEVELOPMENT_FEASIBILITY_AGENT_VERSION if agent_id == "DevelopmentFeasibilityAgent" else "1.0.0",
                 task_type=task_type,
                 domain=domain,
                 input_snapshot=input_snapshot,

@@ -8,7 +8,7 @@ Updated: 2026-10-14
 the parsed ledger on the existing project. Reopen it through
 `GET /projects/{project_id}/workspace/context?page=land`. No new table is required.
 
-- Parser `land-ledger-agent-v1.2` reads explicit XLS/XLSX merged ranges. A merged
+- Parser `land-ledger-agent-v1.3` reads explicit XLS/XLSX merged ranges. A merged
   contract amount spanning multiple parcels is stored once in `contractGroups`.
   Members retain `contractGroupId` and the original anchor in `source.rawCells`;
   their parcel amounts remain null. Blank cells without a merge do not create a group.
@@ -42,10 +42,34 @@ KRW 626,000,000. Inclusive budget is KRW 46,032,000,000, with ancillary differen
 KRW 4,032,000,000. The cause of the budget difference, legal ownership and original
 37 formula errors remain unresolved. All eight source file hashes were preserved.
 
-Existing `_payment_status` / `_parcel_payment_status` still include unpaid and
-scheduled amounts in their paid-total interpretation. This increment reconciles
-contract amounts; it does not validate the existing paid-status labels. Separating
-scheduled amounts from evidenced payments is the next land correction.
+Payment correction (2026-10-14): only the explicitly labelled `depositPaid`
+column counts as recorded paid money. Unpaid deposits, interim payments and
+balances remain scheduled amounts, regardless of due date. A missing individual
+contract amount, unallocated joint contract or incomplete payment record cannot
+establish full payment; inconsistent/negative amounts require review. All owners
+must individually qualify, and their contract sum must reconcile, before the
+parcel can be labelled fully paid in the ledger. This is not bank-transfer or
+legal ownership verification.
+
+Each parcel now carries `paymentReviewVersion`, source sheet/rows, known paid and
+scheduled subtotals and missing-cell counts. All-blank amounts stay null; explicit
+zero stays zero. Legacy raw column totals remain reconciliation subtotals, not a
+missing-data assertion. Modern layouts do not guess unlabelled payment columns.
+The pilot adapter uses these same fields instead of counting scheduled interim
+payments as deposits or treating absent balance aliases as paid in full.
+
+The Land screen shows the two subtotals and gaps after save/reopen. Older saved
+ledgers request reimport and do not display their old paid-status claims. The
+former payment-string-derived acquisition percentage is replaced by a clearly
+labelled registry-owner-match parcel percentage. The legacy API acquisition ratio
+still describes contract coverage, not payment or ownership transfer.
+
+Actual Bonri source: J28 recorded paid KRW 462,400,000; K28 unpaid deposit
+KRW 3,675,000,000; L28 scheduled interim KRW 400,000,000; M28 scheduled balance
+KRW 36,836,600,000. Three parcels have positive paid entries; none qualifies as
+recorded fully paid. Thirteen owner rows have blank paid entries. Source SHA256
+remains `d55a3793149bb0d7878762b5be44484b722570043d994c825c6b3b3b60c31be8`.
+The source remains unchanged, and existing saved/approved projects were not rewritten.
 
 Verification results are recorded in the [current roadmap](realytics-os-next-work-roadmap.md).
 The sections below retain the earlier parser audit and expansion ideas as history;

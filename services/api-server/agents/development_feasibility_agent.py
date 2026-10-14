@@ -1,3 +1,4 @@
+import math
 from typing import Any, Dict, List
 
 from agents.cash_flow_engine import run_cash_flow_engine
@@ -24,6 +25,8 @@ from core.logistics import (
 )
 from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION, ScheduleMilestone
 
+
+DEVELOPMENT_FEASIBILITY_AGENT_VERSION = "2.1.0"
 
 ASSET_CALCULATION_PROFILES = {
     "apartment": {
@@ -159,6 +162,7 @@ class DevelopmentFeasibilityAgent:
         return {
             **({"status": "completed_with_review", "dataStatus": "partial"} if cash_flow_issue else {}),
             "analysisType": "developer_and_pf_feasibility",
+            "engineVersion": DEVELOPMENT_FEASIBILITY_AGENT_VERSION,
             "agentRole": "development_feasibility_orchestrator",
             "summary": self._summary(returns, pf, quality),
             "architecturalProgram": program,
@@ -557,94 +561,127 @@ class DevelopmentFeasibilityAgent:
                 "reason": "Project is not classified as a logistics asset.",
             }
 
-        pf_amount = sum(
-            float(item.get("amount") or 0)
-            for item in self._financing_v2(pf_structure)
-            if item["priority"] != "equity"
-        )
-        leasable_area_py = float(project.get("leasable_area_py") or project_data.get("logistics", {}).get("leasable_area_py") or 0)
-        rent_per_py = float(project.get("rent_per_py") or project_data.get("logistics", {}).get("rent_per_py") or 0)
-        operating_expenses = float(project.get("operating_expenses") or project_data.get("logistics", {}).get("operating_expenses") or 0)
-        cap_rate = float(project.get("cap_rate") or project_data.get("logistics", {}).get("cap_rate") or 0)
-        noi = float(project.get("noi") or calculate_logistics_noi(leasable_area_py, rent_per_py, operating_expenses))
-        exit_value = calculate_exit_value(noi, cap_rate)
-        forward_sale_price = float(project.get("forward_sale_price") or project_data.get("logistics", {}).get("forward_sale_price") or 0)
-        appraisal_value = float(project.get("appraisal_value") or project_data.get("logistics", {}).get("appraisal_value") or 0)
-        tenant_score = calculate_tenant_stability_score(
-            str(project.get("tenant_credit_rating") or ""),
-            int(project.get("lease_term_months") or 0),
-        )
-        location_score = calculate_location_score(
-            float(project.get("distance_to_ic_km") or 999),
-            float(project.get("distance_to_port_km") or 999),
-        )
-        spec_score = calculate_spec_adequacy_score(
-            float(project.get("clear_height") or 0),
-            float(project.get("floor_load") or 0),
-            bool(project.get("ramp_available")),
-        )
-        score = round((tenant_score * 0.4) + (location_score * 0.3) + (spec_score * 0.3), 2)
-        forward_sale_ltv = calculate_forward_sale_ltv(pf_amount, forward_sale_price)
-        appraisal_ltv = calculate_appraisal_ltv(pf_amount, appraisal_value) if appraisal_value else None
-        risk_flags = []
-        if forward_sale_price <= 0:
-            risk_flags.append("FORWARD_SALE_PRICE_MISSING")
-        elif forward_sale_ltv > 0.80:
-            risk_flags.append("FORWARD_SALE_LTV_HIGH")
-        if cap_rate <= 0:
-            risk_flags.append("CAP_RATE_MISSING")
-        if tenant_score < 70:
-            risk_flags.append("TENANT_STABILITY_WEAK")
-        if spec_score < 70:
-            risk_flags.append("LOGISTICS_SPEC_WEAK")
+        logistics = project_data.get("logistics") or {}
+        input_sources = {}
+        input_issues = []
 
+        def raw(key):
+            # An explicit zero/false/null in project must not revive an older
+            # alternate value. Only an absent key falls back to logistics.
+            source = "project" if key in project else "logistics"
+            input_sources[key] = f"{source}.{key}"
+            return project.get(key) if source == "project" else logistics.get(key)
+
+        def number(key, *, signed=False, positive=False, integer=False):
+            value = raw(key)
+            if value is None or value == "":
+                input_issues.append({"field": key, "reason": "missing"})
+                return None
+            try:
+                result = float(value)
+            except (TypeError, ValueError):
+                result = float("nan")
+            if (isinstance(value, bool) or not math.isfinite(result)
+                    or (not signed and result < 0) or (positive and result <= 0)
+                    or (integer and not result.is_integer())):
+                input_issues.append({"field": key, "reason": "invalid"})
+                return None
+            return int(result) if integer else result
+
+        def boolean(key):
+            value = raw(key)
+            if value is None:
+                return None
+            if not isinstance(value, bool):
+                input_issues.append({"field": key, "reason": "invalid"})
+                return None
+            return value
+
+        financing = self._financing_v2(pf_structure)
+        debt_amounts = [item.get("amount") for item in financing if item["priority"] != "equity"]
+        pf_amount = sum(float(value) for value in debt_amounts) if financing and all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+            for value in debt_amounts
+        ) else None
+        if pf_amount is None:
+            input_issues.append({"field": "pf_structure.amount", "reason": "missing_or_invalid"})
+        leasable_area_py = number("leasable_area_py")
+        rent_per_py = number("rent_per_py")
+        operating_expenses = number("operating_expenses")
+        cap_rate = number("cap_rate", positive=True)
+        supplied_noi = raw("noi")
+        noi = number("noi", signed=True) if supplied_noi is not None and supplied_noi != "" else None
+        noi_basis = "supplied_analysis_input" if noi is not None else "unavailable"
+        # Invalid supplied NOI is not silently replaced by a calculation.
+        if supplied_noi in (None, "") and all(value is not None for value in (leasable_area_py, rent_per_py, operating_expenses)):
+            noi = calculate_logistics_noi(leasable_area_py, rent_per_py, operating_expenses)
+            noi_basis = "calculated_from_lease_inputs"
+        exit_value = calculate_exit_value(noi, cap_rate) if noi is not None and cap_rate is not None else None
+        forward_sale_price = number("forward_sale_price", positive=True)
+        appraisal_value = number("appraisal_value", positive=True)
+        rating = raw("tenant_credit_rating")
+        rating = rating.strip() if isinstance(rating, str) and rating.strip() else None
+        if rating is None:
+            input_issues.append({"field": "tenant_credit_rating", "reason": "missing"})
+        lease_term = number("lease_term_months", positive=True, integer=True)
+        distance_ic = number("distance_to_ic_km")
+        distance_port = number("distance_to_port_km")
+        clear_height = number("clear_height", positive=True)
+        floor_load = number("floor_load", positive=True)
+        ramp = boolean("ramp_available")
+        if ramp is None and not any(issue["field"] == "ramp_available" for issue in input_issues):
+            input_issues.append({"field": "ramp_available", "reason": "missing"})
+        tenant_score = calculate_tenant_stability_score(rating, lease_term) if rating is not None and lease_term is not None else None
+        location_score = calculate_location_score(distance_ic, distance_port) if distance_ic is not None and distance_port is not None else None
+        spec_score = calculate_spec_adequacy_score(clear_height, floor_load, ramp) if all(value is not None for value in (clear_height, floor_load, ramp)) else None
+        score = round(tenant_score * 0.4 + location_score * 0.3 + spec_score * 0.3, 2) if all(
+            value is not None for value in (tenant_score, location_score, spec_score)
+        ) else None
+        forward_sale_ltv = calculate_forward_sale_ltv(pf_amount, forward_sale_price) if pf_amount is not None and forward_sale_price is not None else None
+        appraisal_ltv = calculate_appraisal_ltv(pf_amount, appraisal_value) if pf_amount is not None and appraisal_value is not None else None
+        risk_flags = []
+        if forward_sale_price is None:
+            risk_flags.append("FORWARD_SALE_PRICE_MISSING")
+        elif forward_sale_ltv is not None and forward_sale_ltv > 0.80:
+            risk_flags.append("FORWARD_SALE_LTV_HIGH")
+        if cap_rate is None:
+            risk_flags.append("CAP_RATE_MISSING")
+        if tenant_score is not None and tenant_score < 70:
+            risk_flags.append("TENANT_STABILITY_WEAK")
+        if spec_score is not None and spec_score < 70:
+            risk_flags.append("LOGISTICS_SPEC_WEAK")
+        metrics = {"annualNoi": noi, "capRateExitValue": exit_value, "forwardSaleLtv": forward_sale_ltv,
+                   "appraisalLtv": appraisal_ltv, "tenantScore": tenant_score, "locationScore": location_score,
+                   "specScore": spec_score, "score": score}
         return {
             "applicable": True,
             "schemaVersion": "realytics-logistics-analysis-v1",
+            "calculationPolicy": "logistics-available-inputs-v2",
+            "status": "partial" if any(value is None for value in metrics.values()) else "calculated",
+            "unavailableMetrics": [key for key, value in metrics.items() if value is None],
+            "inputIssues": input_issues,
+            "inputSources": input_sources,
+            "evidenceScope": "analysis_inputs_not_document_verification",
+            "scoreBasis": "existing_rule_based_indicator_not_credit_approval",
             "revenueMode": "lease_forward_sale_refinancing",
-            "tenant": {
-                "name": project.get("tenant_name"),
-                "creditRating": project.get("tenant_credit_rating"),
-                "leaseTermMonths": project.get("lease_term_months"),
-                "stabilityScore": tenant_score,
-            },
-            "lease": {
-                "leasableAreaPy": leasable_area_py,
-                "rentPerPy": rent_per_py,
-                "annualNoi": noi,
-                "operatingExpenses": operating_expenses,
-            },
-            "exit": {
-                "capRate": cap_rate,
-                "capRateExitValue": exit_value,
-                "forwardSalePrice": forward_sale_price,
-                "forwardBuyer": project.get("forward_buyer"),
-                "forwardSaleLtv": forward_sale_ltv,
-                "appraisalValue": appraisal_value or None,
-                "appraisalLtv": appraisal_ltv,
-            },
-            "location": {
-                "distanceToIcKm": project.get("distance_to_ic_km"),
-                "distanceToPortKm": project.get("distance_to_port_km"),
-                "score": location_score,
-            },
-            "spec": {
-                "clearHeight": project.get("clear_height"),
-                "floorLoad": project.get("floor_load"),
-                "dockCount": project.get("dock_count"),
-                "rampAvailable": bool(project.get("ramp_available")),
-                "coldChainSpec": bool(project.get("cold_chain_spec")),
-                "score": spec_score,
-            },
+            "tenant": {"name": raw("tenant_name"), "creditRating": rating,
+                       "leaseTermMonths": lease_term, "stabilityScore": tenant_score},
+            "lease": {"leasableAreaPy": leasable_area_py, "rentPerPy": rent_per_py,
+                      "annualNoi": noi, "noiBasis": noi_basis, "operatingExpenses": operating_expenses},
+            "exit": {"capRate": cap_rate, "capRateExitValue": exit_value,
+                     "forwardSalePrice": forward_sale_price, "forwardBuyer": raw("forward_buyer"),
+                     "pfAmount": pf_amount, "forwardSaleLtv": forward_sale_ltv,
+                     "appraisalValue": appraisal_value, "appraisalLtv": appraisal_ltv},
+            "location": {"distanceToIcKm": distance_ic, "distanceToPortKm": distance_port, "score": location_score},
+            "spec": {"clearHeight": clear_height, "floorLoad": floor_load,
+                     "dockCount": raw("dock_count"), "rampAvailable": ramp,
+                     "coldChainSpec": boolean("cold_chain_spec"), "score": spec_score},
             "score": score,
             "riskFlags": risk_flags,
-            "riskItems": assess_logistics_risks(project),
-            "formulas": {
-                "NOI": "leasable_area_py * rent_per_py * 12 - operating_expenses",
-                "CapRateExitValue": "NOI / cap_rate",
-                "ForwardSaleLTV": "pf_amount / forward_sale_price",
-                "AppraisalLTV": "pf_amount / appraisal_value",
-            },
+            "riskItems": assess_logistics_risks({"tenant_credit_rating": rating, "pre_sale_contract_status": raw("pre_sale_contract_status")}),
+            "formulas": {"NOI": "leasable_area_py * rent_per_py * 12 - operating_expenses",
+                         "CapRateExitValue": "NOI / cap_rate", "ForwardSaleLTV": "pf_amount / forward_sale_price",
+                         "AppraisalLTV": "pf_amount / appraisal_value"},
         }
 
     def _product_mix_v2(self, project_data: Dict[str, Any], revenue: Dict[str, Any]) -> List[Dict[str, Any]]:

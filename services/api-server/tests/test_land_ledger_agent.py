@@ -8,7 +8,66 @@ from agents.land_ledger_agent import (
     LandLedgerParseError,
     _parse_lot_number,
     _read_workbook_rows,
+    _payment_status,
 )
+
+
+@pytest.mark.parametrize("amount,paid,unpaid,interim,balance,status", [
+    (100, 10, 0, 30, 60, "balance_due"),
+    (100, 0, 10, 30, 60, "balance_due"),
+    (100, None, 100, 0, 0, "deposit_due"),
+    (100, 10, 0, 90, 0, "interim_due"),
+    (100, 100, 0, 0, 0, "fully_paid"),
+    (100, 100, 0, 0, None, "payment_unknown"),
+    (100, 100, 0, 0, 90, "payment_needs_review"),
+    (100, 110, 0, 0, 0, "payment_needs_review"),
+    (100, 0, 0, 0, 0, "payment_not_started"),
+    (100, None, None, None, None, "payment_unknown"),
+    (None, 10, 0, 30, 60, "payment_unknown"),
+    (0, 0, 0, 0, 0, "payment_unknown"),
+    (100, -10, 0, 30, 80, "payment_needs_review"),
+])
+def test_payment_classification_requires_recorded_payment(amount, paid, unpaid, interim, balance, status):
+    assert _payment_status({"individualContractAmount": amount, "depositPaid": paid,
+                            "depositUnpaid": unpaid, "interimPayment": interim, "balancePayment": balance,
+                            "balanceDueDate": "2000-01-01"}) == status
+
+
+def test_partial_owner_payment_cannot_be_promoted_by_total_or_enrichment():
+    agent = LandLedgerAgent()
+    rows = [[], [], [], [],
+            [1, "합성동", "1", "대", 100, 30.25, "A(1/2)", 100, 200, 100, 0, 0, 0],
+            [None, None, None, None, None, None, "B(1/2)", 100, None, None, 10, 0, 90]]
+    parsed = agent.analyze_rows(rows)
+    for result in (parsed, agent._rebuild_analysis(parsed)):
+        parcel = result["parcels"][0]
+        assert parcel["paymentStatus"] == "balance_due"
+        assert parcel["paymentSummary"]["knownRecordedPaidAmount"] == 100
+        assert parcel["paymentSummary"]["recordedPaidMissingCount"] == 1
+        assert result["landAcquisitionStatus"]["balancePaidParcels"] == 0
+
+
+def test_modern_unlabelled_numeric_columns_are_not_payment_evidence():
+    rows = [["title"], ["번호", "지번", "지목", "현 소유자", "지적 면적"], [], [],
+            [1, "1", "대", "합성 소유자", 100, 999, 999, 999, 999, 999, 999, 999, 999]]
+    result = LandLedgerAgent().analyze_rows(rows)
+    owner = result["parcels"][0]["owners"][0]
+    assert owner["depositPaid"] is None
+    assert owner["individualContractAmount"] is None
+    assert result["parcels"][0]["paymentStatus"] == "payment_unknown"
+    assert result["landAcquisitionStatus"]["paidDepositParcels"] == 0
+
+
+def test_pilot_adapter_preserves_payment_meaning_and_missing_records(tmp_path):
+    from scripts.update_pilot_input_from_samples import _extract_land_ledger
+    path = tmp_path / "joint.xlsx"
+    _joint_contract_workbook(path)
+    result = _extract_land_ledger(path)
+    parcels = result["landAcquisition"]
+    assert parcels[0]["depositPaid"] == 0
+    assert parcels[0]["balanceDue"] == 67.5
+    assert all(parcel["paymentStatus"] != "fully_paid" for parcel in parcels)
+    assert parcels[0]["paymentSummary"]["knownScheduledAmount"] == 75
 
 
 def test_land_ledger_agent_parses_legacy_bonri_rows_and_builds_qa():
@@ -55,6 +114,10 @@ def test_land_ledger_agent_parses_legacy_bonri_rows_and_builds_qa():
     assert result["parcels"][1]["qa"]["ownershipShareValid"] is False
     assert result["validation"]["status"] == "needs_enrichment"
     assert result["landAcquisitionStatus"]["totalRequiredParcels"] == 2
+    assert result["landAcquisitionStatus"]["paidDepositParcels"] == 0
+    assert result["landAcquisitionStatus"]["balancePaidParcels"] == 0
+    assert result["parcels"][0]["paymentStatus"] == "balance_due"
+    assert result["parcels"][0]["paymentSummary"]["knownRecordedPaidAmount"] is None
     assert result["pfSummary"]["status"] == "needs_enrichment"
     assert result["qaProcess"][0]["key"] == "source_reconciliation"
     assert result["qaProcess"][4]["key"] == "pnu_confidence"
@@ -320,6 +383,9 @@ def test_land_upload_and_budget_candidate_survive_repository_reload(tmp_path, mo
     persist_feasibility_workbook_candidate_use_case(repository, project_id, {"draft": draft}, recorded_by="test-reviewer")
     reloaded = repository.get(project_id)
     assert reloaded["landLedger"]["contractGroups"] == ledger["contractGroups"]
+    assert reloaded["landLedger"]["parcels"][0]["paymentReviewVersion"] == "ledger-recorded-payments-v1"
+    assert reloaded["landLedger"]["parcels"][0]["paymentStatus"] == "payment_unknown"
+    assert reloaded["landLedger"]["landAcquisitionStatus"]["balancePaidParcels"] == 0
     assert reloaded.get("feasibility_input") == before.get("feasibility_input")
     assert reloaded.get("canonicalFeasibilityStudyV2") == before.get("canonicalFeasibilityStudyV2")
     comparison = reconcile_land_costs_use_case(reloaded)
@@ -331,6 +397,7 @@ def test_land_upload_and_budget_candidate_survive_repository_reload(tmp_path, mo
     context = client.get(f"/projects/{project_id}/workspace/context?page=land&track=pf")
     assert context.status_code == 200, context.text
     assert context.json()["pageData"]["landCostReconciliation"] == comparison
+    assert context.json()["pageData"]["landLedger"]["parcels"] == ledger["parcels"]
     from storage import get_project_record, upsert_user
     upsert_user({"userId": "land-reviewer", "tenantId": "pytest-tenant", "role": "admin", "status": "active"})
     headers = {"x-realytics-user-id": "land-reviewer"}

@@ -31,7 +31,13 @@ async function fixture(page: Page, options: { purchase?: number | null; legacy?:
       pageData: {
         landLedger: {
           summary: { parcelCount: 2, totalContractAmount: 41_374_000_000 },
-          parcels: [1, 2].map((sequence) => ({ sequence, addressFragment: `합성동 ${sequence}`, contractGroupId: "joint", totalContractAmount: null })),
+          parcels: [1, 2].map((sequence) => ({ sequence, addressFragment: `합성동 ${sequence}`, contractGroupId: "joint", totalContractAmount: null,
+            paymentReviewVersion: options.legacy ? undefined : "ledger-recorded-payments-v1",
+            paymentStatus: options.legacy ? "fully_paid" : "payment_unknown",
+            paymentSummary: { knownRecordedPaidAmount: sequence === 1 ? 0 : null, recordedPaidMissingCount: sequence === 1 ? 0 : 1,
+              knownScheduledAmount: 100_000_000, scheduledMissingCount: 0 },
+            paymentSource: { sheet: "합성 토지조서", rows: [sequence + 4] },
+          })),
           contractGroups: [{ contractGroupId: "joint", parcelSequences: [1, 2], totalContractAmount: 12_500_000_000,
             sourceLocator: { sourceName: "합성 토지조서.xlsx", sheet: "토지조서", range: "I7:I12" } }],
         },
@@ -93,6 +99,22 @@ test("real zero and negative difference remain visible", async ({ page }) => {
 test("older ledger parsing explicitly requests reimport", async ({ page }) => {
   await fixture(page, { legacy: true });
   await expect(page.getByText(/기존 토지조서는 공동계약 구분을 위해 다시 가져와야/)).toBeVisible();
+  await expect(page.getByText(/이전 지급 완료 표시는 사용하지 않습니다/)).toHaveCount(2);
+  await expect(page.getByText("조서상 전액 기지급", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("등기 소유자 일치 필지").locator("..")).toContainText("0%");
+});
+
+test("reopened payment review keeps unknown and explicit zero apart from scheduled amounts", async ({ page }) => {
+  await fixture(page);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const panel = page.locator("section").filter({ has: page.getByRole("heading", { name: "조서상 지급 내역" }) });
+    await expect(panel.getByText("0억원", { exact: true })).toHaveCount(1);
+    await expect(panel.getByText("미확인", { exact: true })).toHaveCount(1);
+    await expect(panel.getByText("1억원", { exact: true })).toHaveCount(2);
+    await expect(panel.getByText(/미기재: 기지급 1건/)).toBeVisible();
+    await expect(panel.getByText(/합성 토지조서 · 원본 행 5/)).toBeVisible();
+    if (attempt === 0) await page.reload();
+  }
 });
 
 test("save reasoning then reopen it with the same source amounts", async ({ page }) => {

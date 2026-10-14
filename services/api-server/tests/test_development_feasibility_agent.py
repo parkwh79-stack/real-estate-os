@@ -82,6 +82,146 @@ def test_development_feasibility_agent_adds_logistics_analysis():
     assert result["feasibilityStudyV2Draft"]["raw_import"]["logisticsAnalysis"]["applicable"] is True
 
 
+def test_missing_logistics_inputs_do_not_manufacture_zero_income_ltv_or_scores():
+    project = load_logistics_example()
+    project["project"] = {"type": "logistics"}
+    project["pf_structure"] = []
+    result = DevelopmentFeasibilityAgent().analyze(project)
+    logistics = result["logisticsAnalysis"]
+    assert logistics["status"] == "partial"
+    assert logistics["lease"]["annualNoi"] is None
+    assert logistics["exit"]["forwardSaleLtv"] is None
+    assert logistics["exit"]["capRateExitValue"] is None
+    assert logistics["score"] is None
+    assert logistics["tenant"]["stabilityScore"] is None
+    assert logistics["location"]["score"] is None
+    assert logistics["spec"]["score"] is None
+    assert logistics["spec"]["rampAvailable"] is None
+    assert all(item["category"] == "Data Quality" for item in logistics["riskItems"])
+    assert "TENANT_STABILITY_WEAK" not in logistics["riskFlags"]
+    # Missing logistics data does not block independent, supplied feasibility.
+    assert result["developerReturns"]["developmentProfit"] == 44_400_000_000
+
+
+def test_logistics_explicit_zero_false_and_cleared_inputs_do_not_fall_back():
+    project = load_logistics_example()
+    project["project"].update({"noi": 0, "rent_per_py": 0, "operating_expenses": 0,
+                              "distance_to_ic_km": 0, "distance_to_port_km": 0,
+                              "ramp_available": False, "tenant_credit_rating": None})
+    project["logistics"] = {"noi": 100, "rent_per_py": 100, "distance_to_ic_km": 99,
+                            "ramp_available": True, "tenant_credit_rating": "AAA"}
+    project["pf_structure"] = [{"amount": 0, "priority": "senior"}]
+    analysis = DevelopmentFeasibilityAgent().analyze(project)["logisticsAnalysis"]
+    assert analysis["lease"]["annualNoi"] == 0
+    assert analysis["lease"]["noiBasis"] == "supplied_analysis_input"
+    assert analysis["lease"]["rentPerPy"] == 0
+    assert analysis["exit"]["capRateExitValue"] == 0
+    assert analysis["exit"]["forwardSaleLtv"] == 0
+    assert analysis["location"]["score"] == 100
+    assert analysis["spec"]["rampAvailable"] is False
+    assert analysis["spec"]["score"] == 70
+    assert analysis["tenant"]["creditRating"] is None
+    assert analysis["tenant"]["stabilityScore"] is None
+    assert analysis["score"] is None
+
+
+def test_logistics_computes_only_metrics_with_their_own_inputs():
+    agent = DevelopmentFeasibilityAgent()
+    data = {"project": {"type": "logistics"}, "logistics": {
+        "leasable_area_py": 100, "rent_per_py": 20, "operating_expenses": 1000,
+        "cap_rate": .05, "forward_sale_price": 100_000}}
+    result = agent._logistics_analysis(data, [{"amount": None}])
+    assert result["lease"]["annualNoi"] == 23_000
+    assert result["exit"]["capRateExitValue"] == 460_000
+    assert result["exit"]["forwardSaleLtv"] is None
+    assert result["inputSources"]["rent_per_py"] == "logistics.rent_per_py"
+    del data["logistics"]["operating_expenses"]
+    missing_opex = agent._logistics_analysis(data, [{"amount": 50_000}])
+    assert missing_opex["lease"]["annualNoi"] is None
+    assert missing_opex["exit"]["capRateExitValue"] is None
+    assert missing_opex["exit"]["forwardSaleLtv"] == .5
+
+
+def test_logistics_child_runtime_recalculates_changed_input_and_replays_within_same_parent():
+    from agents.orchestration_agent import OrchestrationAgent
+    from agents.development_feasibility_agent import DEVELOPMENT_FEASIBILITY_AGENT_VERSION
+    data = load_logistics_example()
+    data["project"]["noi"] = None
+    data["project"]["operating_expenses"] = 0
+    agent = OrchestrationAgent()
+    # Idempotency is intentionally scoped to the parent run; new workflows
+    # have distinct IDs and are not expected to replay each other's children.
+    run = {"run_id": "logistics-parent", "project_id": "logistics-cache-regression"}
+    def execute():
+        return agent._run_domain_agent(
+            run, project_data=data, options={}, agent_id="DevelopmentFeasibilityAgent",
+            task_type="development_feasibility_analysis", domain="feasibility_cashflow",
+            input_snapshot={}, executor=lambda: DevelopmentFeasibilityAgent().analyze(data),
+            output_schema_name="DevelopmentFeasibilityResult", deterministic_authority_required=True,
+        )
+    first = execute()
+    first_noi = first["logisticsAnalysis"]["lease"]["annualNoi"]
+    data["project"]["rent_per_py"] = 0
+    changed = execute()
+    assert first_noi > 0
+    assert changed["logisticsAnalysis"]["lease"]["annualNoi"] == 0
+    runtime = run["agentRuntimeExecutions"][-1]
+    assert runtime["agentVersion"] == DEVELOPMENT_FEASIBILITY_AGENT_VERSION
+    assert runtime["replayed"] is False
+    again = execute()
+    assert run["agentRuntimeExecutions"][-1]["replayed"] is True
+    assert again == changed
+
+
+def test_logistics_partial_result_is_persisted_with_the_consumed_inputs():
+    from storage import list_calculation_run_records
+    client = TestClient(app)
+    data = load_logistics_example()
+    data["project"] = {"name": "Synthetic partial logistics", "type": "logistics"}
+    created = client.post("/projects/", json=data)
+    assert created.status_code == 200, created.text
+    project_id = created.json()["project"]["id"]
+    response = client.post(f"/projects/{project_id}/development-feasibility/analyze", json={})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    saved = next(row for row in list_calculation_run_records(project_id, engine_key="feasibility")
+                 if row["calculationRunId"] == body["calculationRunId"])
+    assert saved["resultSnapshot"]["logisticsAnalysis"] == body["logisticsAnalysis"]
+    assert saved["inputSnapshot"]["project"]["type"] == "logistics"
+    assert "rent_per_py" not in saved["inputSnapshot"]["project"]
+    assert body["logisticsAnalysis"]["lease"]["annualNoi"] is None
+    override = {"project": {"noi": 0, "cap_rate": .05}}
+    changed = client.post(f"/projects/{project_id}/development-feasibility/analyze", json=override)
+    assert changed.status_code == 200, changed.text
+    runs = list_calculation_run_records(project_id, engine_key="feasibility")
+    latest = next(row for row in runs if row["calculationRunId"] == changed.json()["calculationRunId"])
+    assert latest["inputSnapshot"]["project"]["type"] == "logistics"
+    assert latest["inputSnapshot"]["project"]["noi"] == 0
+    replay = DevelopmentFeasibilityAgent().analyze(latest["inputSnapshot"])
+    assert replay["logisticsAnalysis"] == latest["resultSnapshot"]["logisticsAnalysis"]
+    assert next(row for row in runs if row["calculationRunId"] == body["calculationRunId"]) == saved
+
+
+@pytest.mark.parametrize("key,value,section,metric", [
+    ("cap_rate", 0, "exit", "capRateExitValue"),
+    ("forward_sale_price", 0, "exit", "forwardSaleLtv"),
+    ("distance_to_ic_km", -1, "location", "score"),
+    ("lease_term_months", 12.5, "tenant", "stabilityScore"),
+    ("ramp_available", "false", "spec", "score"),
+    ("noi", "bad input", "lease", "annualNoi"),
+    ("noi", "NaN", "lease", "annualNoi"),
+    ("clear_height", True, "spec", "score"),
+])
+def test_invalid_logistics_inputs_remain_local_to_dependent_metrics(key, value, section, metric):
+    project = load_logistics_example()
+    project["project"][key] = value
+    result = DevelopmentFeasibilityAgent().analyze(project)
+    analysis = result["logisticsAnalysis"]
+    assert analysis[section][metric] is None
+    assert {"field": key, "reason": "invalid"} in analysis["inputIssues"]
+    assert result["revenue"]["totalRevenue"] == 194_400_000_000
+
+
 @pytest.mark.parametrize(
     ("terms", "expected"),
     [

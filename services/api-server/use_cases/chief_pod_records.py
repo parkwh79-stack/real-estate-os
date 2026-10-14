@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List
 from uuid import uuid4
 
 from schemas.orchestration import AgentHandoffEnvelope
+from agents.development_feasibility_agent import DEVELOPMENT_FEASIBILITY_AGENT_VERSION
 from use_cases.cash_flow_dependencies import financial_input_hash
 from use_cases.development_feasibility import development_feasibility_input_basis
 from use_cases.calculation_run_capture import (
@@ -90,6 +91,8 @@ def pod_input_snapshot(
     }
     snapshot["dependencyArtifacts"] = dependency_artifacts or {}
     snapshot["activeAssumptionOverrides"] = project_data.get("activeAssumptionOverrides") or []
+    if pod_key in {"cost_schedule", "feasibility_cashflow"}:
+        snapshot["developmentFeasibilityVersion"] = DEVELOPMENT_FEASIBILITY_AGENT_VERSION
     if pod_key == "cost_schedule":
         snapshot["developmentFeasibilityInput"] = development_feasibility_input_basis(project_data, options)
     if pod_key == "feasibility_cashflow":

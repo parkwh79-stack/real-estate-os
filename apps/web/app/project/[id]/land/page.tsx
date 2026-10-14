@@ -29,6 +29,10 @@ type Parcel = {
   contractGroupId?: string;
   workflowStatus?: string;
   paymentStatus?: string;
+  paymentReviewVersion?: string;
+  paymentSummary?: Record<string, unknown>;
+  paymentSource?: { sheet?: string; rows?: number[] };
+  registryEvidence?: { ownerMatchStatus?: string };
   acquisitionStatus?: string;
   ownershipTransferred?: boolean;
   trusted?: boolean;
@@ -96,9 +100,14 @@ function pct(value: number, total: number) {
   return total > 0 ? Math.round((value / total) * 100) : 0;
 }
 
-function parcelHasAcquisitionEvidence(parcel: Parcel) {
-  const status = `${parcel.workflowStatus ?? ""} ${parcel.paymentStatus ?? ""} ${parcel.acquisitionStatus ?? ""}`.toLowerCase();
-  return parcel.ownershipTransferred || parcel.trusted || /contract|deposit|paid|trusted|transferred|계약|잔금|소유권|신탁/.test(status);
+function paymentStatusLabel(parcel: Parcel) {
+  if (parcel.paymentReviewVersion !== "ledger-recorded-payments-v1") return "지급 구분 재검토 필요";
+  const labels: Record<string, string> = {
+    fully_paid: "조서상 전액 기지급", deposit_paid: "조서상 일부 기지급", balance_due: "잔금 예정액 있음",
+    interim_due: "중도금 예정액 있음", deposit_due: "계약금 미지급액 있음",
+    payment_not_started: "조서상 기지급액 0", payment_unknown: "지급 상태 확인 필요", payment_needs_review: "지급 금액 대사 필요",
+  };
+  return labels[parcel.paymentStatus ?? ""] ?? "지급 상태 확인 필요";
 }
 
 export default function LandAnalysisPage() {
@@ -190,8 +199,8 @@ export default function LandAnalysisPage() {
   const hasOfficialLandPrice = Boolean(landEvidenceSummary.hasOfficialLandPrice);
   const hasRegistryEvidence = Boolean(landEvidenceSummary.hasRegistryEvidence);
   const hasPnuResolution = Boolean(landEvidenceSummary.hasPnuResolution) || pnuCount > 0;
-  const acquiredCount = Number(summary.acquiredParcelCount ?? parcels.filter(parcelHasAcquisitionEvidence).length);
-  const acquisitionRatio = Number(summary.acquisitionAreaRatio ?? (parcelCount > 0 ? acquiredCount / parcelCount : 0));
+  const acquiredCount = parcels.filter((parcel) => parcel.registryEvidence?.ownerMatchStatus === "matched").length;
+  const acquisitionRatio = parcelCount > 0 ? acquiredCount / parcelCount : 0;
 
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
   const nextAction = missingPnuCount > 0
@@ -295,7 +304,7 @@ export default function LandAnalysisPage() {
             <StatusCard label="PNU 확보" value={`${pnuCount}/${parcelCount || 0} (${pct(pnuCount, parcelCount)}%)`} tone={missingPnuCount === 0 && parcelCount > 0 ? "good" : "warn"} icon={<MapPin />} />
             <StatusCard label="공시지가 증빙" value={hasOfficialLandPrice ? "확보" : "보강 필요"} tone={hasOfficialLandPrice ? "good" : "warn"} icon={<Database />} />
             <StatusCard label="등기/제한물권 증빙" value={hasRegistryEvidence ? "확보" : "보강 필요"} tone={hasRegistryEvidence ? "good" : "warn"} icon={<ShieldCheck />} />
-            <StatusCard label="토지취득률" value={`${Math.round(acquisitionRatio * 100)}%`} tone={acquisitionRatio >= 0.8 ? "good" : "warn"} icon={<CheckCircle2 />} />
+            <StatusCard label="등기 소유자 일치 필지" value={`${Math.round(acquisitionRatio * 100)}%`} tone={acquisitionRatio >= 0.8 ? "good" : "warn"} icon={<CheckCircle2 />} />
           </section>
 
           <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
@@ -366,6 +375,24 @@ export default function LandAnalysisPage() {
               ))}
             </Panel>
           ) : null}
+
+          <Panel title="조서상 지급 내역">
+            <p className="mb-3 text-sm text-slate-500">기지급으로 기재된 금액과 미지급 계약금·중도금·잔금 예정액을 구분합니다. 조서의 기재는 이체 증빙이나 소유권 이전 확인을 대신하지 않습니다. 공란은 0으로 확정하지 않습니다.</p>
+            {sampleParcels.map((parcel, index) => {
+              const current = parcel.paymentReviewVersion === "ledger-recorded-payments-v1";
+              const payment = asRecord(parcel.paymentSummary);
+              return <div key={parcel.sequence ?? index} className="mb-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800">
+                <p className="font-bold">{displayText(parcel.addressFragment, `필지 ${index + 1}`)} · {paymentStatusLabel(parcel)}</p>
+                {current ? <>
+                  <InfoRow label="기지급 기재액 소계" value={formatKrw(payment.knownRecordedPaidAmount)} />
+                  <InfoRow label="미지급·예정 기재액 소계" value={formatKrw(payment.knownScheduledAmount)} />
+                  <p className="text-xs text-slate-500">{parcel.paymentSource?.sheet ?? "원본 시트 미확인"} · 원본 행 {parcel.paymentSource?.rows?.join(", ") || "미확인"}</p>
+                  {Number(payment.recordedPaidMissingCount) > 0 || Number(payment.scheduledMissingCount) > 0 ? <p className="mt-1 text-sm text-amber-700 dark:text-amber-300">미기재: 기지급 {formatCount(payment.recordedPaidMissingCount)} · 미지급·예정 {formatCount(payment.scheduledMissingCount)}. 기재된 금액만 합산했습니다.</p> : null}
+                </> : <p className="mt-1 text-sm text-amber-700 dark:text-amber-300">원본 토지조서를 다시 가져와 지급 구분을 확인하세요. 이전 지급 완료 표시는 사용하지 않습니다.</p>}
+              </div>;
+            })}
+            {!sampleParcels.length ? <p className="text-sm text-slate-500">토지조서를 가져오면 지급 기재액을 확인할 수 있습니다.</p> : null}
+          </Panel>
 
           <Panel title="필지별 PNU 검증 현황">
             {sampleParcels.length ? (

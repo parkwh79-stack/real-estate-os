@@ -30,7 +30,7 @@ from use_cases.pf_review import run_and_save_pf_review_use_case
 PF_REVIEW_AGENT_ID = "pf_review_orchestration_agent"
 PF_REVIEW_MANIFEST = AgentManifest(
     agent_id=PF_REVIEW_AGENT_ID,
-    version="1.0.4",
+    version="1.0.5",
     display_name="PF Review Orchestration Agent",
     domain="pf_credit",
     role="Execute and persist the deterministic PF review workflow",

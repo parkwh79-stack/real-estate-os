@@ -8,7 +8,8 @@ import xlrd
 
 
 SHARE_PATTERN = re.compile(r"\((\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)\)")
-LAND_LEDGER_AGENT_VERSION = "land-ledger-agent-v1.2"
+LAND_LEDGER_AGENT_VERSION = "land-ledger-agent-v1.3"
+PAYMENT_REVIEW_VERSION = "ledger-recorded-payments-v1"
 SQM_TO_PY = 0.3025
 DEFAULT_PNU_CONFIDENCE_THRESHOLD = 0.85
 CURRENT_OFFICIAL_PRICE_BASE_YEAR = 2026
@@ -48,6 +49,14 @@ def _detect_column_map(rows: List[List[Any]]) -> Dict[str, int]:
             text = str(value or "").replace("\n", " ").replace(" ", "").lower()
             if not text:
                 continue
+            payment_headers = {
+                "개인별계약금액": "individual_contract_amount", "합계금액": "total_contract_amount",
+                "기지급액": "deposit_paid", "미지급액": "deposit_unpaid",
+                "중도금": "interim_payment", "잔금": "balance_payment",
+            }
+            for label, field in payment_headers.items():
+                if text == label or text.startswith(label + "("):
+                    headers.setdefault(field, index)
             if "현소유자" in text or text in {"소유자", "매도인"}:
                 headers.setdefault("owner", index)
             elif "지적면적" in text or text == "면적" or "토지면적" in text:
@@ -63,6 +72,10 @@ def _detect_column_map(rows: List[List[Any]]) -> Dict[str, int]:
     if "owner" in headers and "area_sqm" in headers and "lot_number" in headers:
         # The sheet is a modern header-ledger. Do not guess payment columns
         # that are not explicitly labelled; source evidence remains intact.
+        absent_column = max((len(row) for row in rows), default=0)
+        for field in ("individual_contract_amount", "total_contract_amount", "deposit_paid",
+                      "deposit_unpaid", "interim_payment", "balance_payment"):
+            headers.setdefault(field, absent_column)
         return headers
     return {}
 
@@ -392,7 +405,13 @@ class LandLedgerAgent:
         parcel["ownerCount"] = len(owners)
         parcel["knownShareSum"] = share_sum if share_sum else None
         parcel["paymentSummary"] = _payment_summary(owners)
-        parcel["paymentStatus"] = _parcel_payment_status(parcel["paymentSummary"])
+        parcel["paymentStatus"] = _parcel_payment_status(parcel)
+        parcel["paymentReviewVersion"] = PAYMENT_REVIEW_VERSION
+        parcel["paymentSource"] = {
+            "sheet": parcel.get("source", {}).get("sheet"),
+            "rows": [owner.get("source", {}).get("row") for owner in owners],
+            "basis": "ledger_recorded_only_not_transfer_verification",
+        }
         parcel["missingFields"] = [
             field
             for field, value in [
@@ -695,7 +714,6 @@ class LandLedgerAgent:
         deposit_paid = [
             parcel for parcel in parcels
             if (parcel.get("paymentSummary", {}).get("depositPaidTotal") or 0) > 0
-            or (parcel.get("paymentSummary", {}).get("depositUnpaidTotal") or 0) > 0
         ]
         balance_paid = [
             parcel for parcel in parcels
@@ -1102,49 +1120,76 @@ def _payment_schedule_valid(parcel: Dict[str, Any]) -> bool:
     return True
 
 
-def _payment_summary(owners: List[Dict[str, Any]]) -> Dict[str, float]:
+def _payment_summary(owners: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # Legacy totals reconcile source columns; they are known subtotals, not
+    # proof that blank amounts are zero or that scheduled instalments were paid.
+    paid_values = [owner.get("depositPaid") for owner in owners]
+    scheduled_values = [owner.get(key) for owner in owners
+                        for key in ("depositUnpaid", "interimPayment", "balancePayment")]
     return {
         "individualContractAmountTotal": sum(owner.get("individualContractAmount") or 0 for owner in owners),
         "depositPaidTotal": sum(owner.get("depositPaid") or 0 for owner in owners),
         "depositUnpaidTotal": sum(owner.get("depositUnpaid") or 0 for owner in owners),
         "interimPaymentTotal": sum(owner.get("interimPayment") or 0 for owner in owners),
         "balancePaymentTotal": sum(owner.get("balancePayment") or 0 for owner in owners),
+        "knownRecordedPaidAmount": sum(value for value in paid_values if value is not None)
+        if any(value is not None for value in paid_values) else None,
+        "recordedPaidMissingCount": sum(value is None for value in paid_values),
+        "knownScheduledAmount": sum(value for value in scheduled_values if value is not None)
+        if any(value is not None for value in scheduled_values) else None,
+        "scheduledMissingCount": sum(value is None for value in scheduled_values),
     }
 
 
 def _payment_status(owner: Dict[str, Any]) -> str:
-    amount = owner.get("individualContractAmount") or 0
-    paid = sum(owner.get(key) or 0 for key in ["depositPaid", "depositUnpaid", "interimPayment", "balancePayment"])
-    if not amount:
-        return "payment_not_started"
-    if paid >= amount - 1:
-        return "fully_paid"
+    """Describe source records, never infer a transfer from an amount or due date.
+
+    Only depositPaid is explicitly labelled as paid in the supported ledger.
+    Interim/balance columns are schedules, even when their dates have passed.
+    """
+    amount = owner.get("individualContractAmount")
+    paid = owner.get("depositPaid")
+    scheduled = [owner.get(key) for key in ("depositUnpaid", "interimPayment", "balancePayment")]
+    values = [amount, paid, *scheduled]
+    if any(value is not None and value < 0 for value in values):
+        return "payment_needs_review"
+    if amount is None or amount <= 0:
+        return "payment_unknown"
+    if paid is not None and paid > amount + 1:
+        return "payment_needs_review"
+    if paid is not None and paid > 0 and paid >= amount - 1:
+        if any(value is not None and value > 0 for value in scheduled):
+            return "payment_needs_review"
+        return "fully_paid" if all(value == 0 for value in scheduled) else "payment_unknown"
     if (owner.get("balancePayment") or 0) > 0:
         return "balance_due"
     if (owner.get("interimPayment") or 0) > 0:
-        return "interim_paid"
-    if (owner.get("depositPaid") or 0) > 0 or (owner.get("depositUnpaid") or 0) > 0:
+        return "interim_due"
+    if (owner.get("depositUnpaid") or 0) > 0:
+        return "deposit_due"
+    if paid is not None and paid > 0:
         return "deposit_paid"
-    return "payment_not_started"
+    return "payment_not_started" if paid == 0 and all(value == 0 for value in scheduled) else "payment_unknown"
 
 
-def _parcel_payment_status(payment_summary: Dict[str, float]) -> str:
-    amount = payment_summary.get("individualContractAmountTotal") or 0
-    paid = sum(
-        payment_summary.get(key) or 0
-        for key in ["depositPaidTotal", "depositUnpaidTotal", "interimPaymentTotal", "balancePaymentTotal"]
-    )
-    if not amount:
-        return "payment_not_started"
-    if paid >= amount - 1:
+def _parcel_payment_status(parcel: Dict[str, Any]) -> str:
+    owners = parcel.get("owners", [])
+    states = [_payment_status(owner) for owner in owners]
+    if "payment_needs_review" in states:
+        return "payment_needs_review"
+    if not owners or parcel.get("contractGroupId") or parcel.get("totalContractAmount") is None:
+        return "payment_unknown"
+    if "payment_unknown" in states:
+        return "payment_unknown"
+    if not _payment_schedule_valid(parcel):
+        return "payment_needs_review"
+    if all(state == "fully_paid" for state in states):
         return "fully_paid"
-    if (payment_summary.get("balancePaymentTotal") or 0) > 0:
-        return "balance_due"
-    if (payment_summary.get("interimPaymentTotal") or 0) > 0:
-        return "interim_paid"
-    if (payment_summary.get("depositPaidTotal") or 0) > 0 or (payment_summary.get("depositUnpaidTotal") or 0) > 0:
-        return "deposit_paid"
-    return "payment_not_started"
+    for state in ("balance_due", "interim_due", "deposit_due", "deposit_paid"):
+        if state in states:
+            return state
+    # One owner's full payment cannot cover another owner's missing payment.
+    return "deposit_paid" if "fully_paid" in states else "payment_not_started"
 
 
 def _special_parcel_exception(parcel: Dict[str, Any]) -> Optional[str]:
