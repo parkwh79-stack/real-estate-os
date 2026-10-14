@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import threading
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -1845,24 +1846,78 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+_RISK_REVIEW_FIELDS = {
+    "reviewStatus", "reviewedBy", "reviewedAt", "comment", "reviewComment",
+    "waiverReason", "reviewHistory", "requiresHumanReview",
+}
+
+
+def _risk_review_time(record: Dict[str, Any]) -> datetime | None:
+    if not record.get("reviewedBy") or record.get("reviewStatus") not in {"approved", "waived", "needs_revision", "resolved"}:
+        return None
+    try:
+        reviewed_at = datetime.fromisoformat(str(record.get("reviewedAt") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return reviewed_at if reviewed_at.tzinfo is not None else None
+
+
+def _risk_materialization_basis(record: Dict[str, Any]) -> Dict[str, Any]:
+    ignored = _RISK_REVIEW_FIELDS | {"createdAt", "updatedAt", "created_at", "updated_at", "tenantId", "schemaVersion"}
+    basis = {key: value for key, value in record.items() if key not in ignored}
+    # These are review workflow states; business blockers/severity remain part
+    # of the source comparison and cannot inherit a prior approval when changed.
+    if basis.get("status") in {"open", "pending", "pending_review", "approved", "waived", "needs_revision", "resolved"}:
+        basis.pop("status")
+    return basis
+
+
+def _preserve_materialized_risk_review(project_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    candidate = _normalize_deal_state_record(project_id, record)
+    previous_rows = list_deal_state_records(project_id, record_id=candidate["recordId"], limit=1)
+    if not previous_rows:
+        return record
+    previous = previous_rows[0]
+    previous_time = _risk_review_time(previous)
+    if previous_time is None or _risk_materialization_basis(previous) != _risk_materialization_basis(candidate):
+        return record
+
+    incoming_time = _risk_review_time(candidate)
+    latest = candidate if incoming_time is not None and incoming_time > previous_time else previous
+    older = previous if latest is candidate else candidate
+    updated = dict(record)
+    for key in _RISK_REVIEW_FIELDS | {"status"}:
+        updated.pop(key, None)
+        if key in latest:
+            updated[key] = deepcopy(latest[key])
+    history, seen = [], set()
+    for entry in [*_as_list(latest.get("reviewHistory")), *_as_list(older.get("reviewHistory"))]:
+        digest = json.dumps(entry, sort_keys=True, ensure_ascii=False, default=str)
+        if digest not in seen:
+            history.append(deepcopy(entry))
+            seen.add(digest)
+    history.sort(key=lambda entry: (_risk_review_time(entry) if isinstance(entry, dict) else None)
+                 or datetime.min.replace(tzinfo=timezone.utc))
+    updated["reviewHistory"] = history
+    return updated
+
+
 def _materialize_risk_register_records(project_id: str, run_id: str, risk_register: Dict[str, Any]) -> None:
     for index, risk in enumerate(_as_list(risk_register.get("risks"))):
         if not isinstance(risk, dict):
             continue
         code = risk.get("code") or risk.get("riskCode") or risk.get("risk_id") or risk.get("riskId") or f"risk_{index + 1}"
         source_locator = risk.get("sourceLocator") or risk.get("source_locator") or risk.get("evidenceLocator") or {}
-        upsert_deal_state_record(
-            project_id,
-            {
-                **risk,
-                "recordId": risk.get("recordId") or _stable_deal_state_id(project_id, "risk_register", run_id, code, index),
-                "recordType": "risk_issue",
-                "key": code,
-                "sourceType": "risk_register",
-                "sourceLocator": source_locator or {"runId": run_id, "registerId": risk_register.get("registerId")},
-                "riskRegisterRunId": run_id,
-            },
-        )
+        record = {
+            **risk,
+            "recordId": risk.get("recordId") or _stable_deal_state_id(project_id, "risk_register", run_id, code, index),
+            "recordType": "risk_issue",
+            "key": code,
+            "sourceType": "risk_register",
+            "sourceLocator": source_locator or {"runId": run_id, "registerId": risk_register.get("registerId")},
+            "riskRegisterRunId": run_id,
+        }
+        upsert_deal_state_record(project_id, _preserve_materialized_risk_review(project_id, record))
 
 
 def _materialize_evidence_graph_records(project_id: str, run_id: str, graph: Dict[str, Any]) -> None:
@@ -2733,6 +2788,7 @@ def list_deal_state_records(
     *,
     tenant_id: str | None = None,
     record_type: str | None = None,
+    record_id: str | None = None,
     calculation_run_id: str | None = None,
     review_status: str | None = None,
     missing_locator: bool | None = None,
@@ -2743,7 +2799,7 @@ def list_deal_state_records(
     if storage_backend() == "postgres":
         from db.repositories.deal_state_repository import PostgresDealStateRepository
         records = PostgresDealStateRepository(tenant_id=_normalized_tenant_scope(tenant_id), **_runtime_transaction_options()).list_records(
-            project_id, record_type=record_type, calculation_run_id=calculation_run_id,
+            project_id, record_type=record_type, record_id=record_id, calculation_run_id=calculation_run_id,
             review_status=review_status if review_status != "unreviewed" else None, limit=limit,
         )
     elif storage_backend() == "json":
@@ -2755,6 +2811,9 @@ def list_deal_state_records(
         if record_type:
             query += " AND record_type = ?"
             params.append(record_type)
+        if record_id:
+            query += " AND record_id = ?"
+            params.append(record_id)
         if calculation_run_id:
             query += " AND calculation_run_id = ?"
             params.append(calculation_run_id)
@@ -2764,6 +2823,8 @@ def list_deal_state_records(
             records = [json.loads(row["payload_json"]) for row in conn.execute(query, params)]
     if record_type:
         records = [record for record in records if record.get("recordType") == record_type]
+    if record_id:
+        records = [record for record in records if record.get("recordId") == record_id]
     if calculation_run_id:
         records = [record for record in records if record.get("calculationRunId") == calculation_run_id]
     if review_status is not None:

@@ -1,6 +1,7 @@
 "use client";
 
 import { apiBase, authHeaders } from "./auth-client";
+import { backendErrorMessage, parseBackendErrorResponse } from "./backend-error";
 
 export type DealStateRecordType =
   | "metric"
@@ -51,6 +52,7 @@ export async function fetchDealStateRecords(
     limit?: number;
     actor?: string;
     latestOnly?: boolean;
+    throwOnError?: boolean;
   } = {},
 ): Promise<DealStateRecord[]> {
   const params = new URLSearchParams();
@@ -63,8 +65,12 @@ export async function fetchDealStateRecords(
     cache: "no-store",
     headers: authHeaders(options.actor ?? "web"),
   });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (options.throwOnError) throw new Error(backendErrorMessage(await parseBackendErrorResponse(res), { action: "검토 원장 조회" }));
+    return [];
+  }
   const body = (await res.json()) as DealStateRecordList;
+  if (options.throwOnError && !Array.isArray(body.records)) throw new Error("검토 원장 응답을 확인하지 못했습니다. 다시 불러오세요.");
   return body.records ?? [];
 }
 

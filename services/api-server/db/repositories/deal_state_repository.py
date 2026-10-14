@@ -113,6 +113,7 @@ class PostgresDealStateRepository:
         project_id: str,
         *,
         record_type: str | None = None,
+        record_id: str | None = None,
         calculation_run_id: str | None = None,
         review_status: str | None = None,
         limit: int = 200,
@@ -122,6 +123,7 @@ class PostgresDealStateRepository:
         params: list[Any] = [self.tenant_id, normalized_project_id]
         optional_filters = (
             ("record_type", record_type),
+            ("record_id", record_id),
             ("calculation_run_id", calculation_run_id),
             ("review_status", review_status),
         )

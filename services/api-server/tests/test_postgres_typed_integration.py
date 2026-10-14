@@ -1,6 +1,8 @@
 """Rollback-only integration against an explicitly supplied disposable PostgreSQL DB."""
 import os
 from contextlib import contextmanager
+from copy import deepcopy
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -9,6 +11,7 @@ from db import postgres
 from db.repositories.calculation_run_repository import PostgresCalculationRunRepository
 from db.repositories.deal_state_repository import PostgresDealStateRepository
 from db.repositories.postgres_project_repository import PostgresProjectRepository
+from db.repositories.request_project_repository import project_request_scope
 import storage
 
 TEST_DSN = os.environ.get('REALYTICS_TEST_DATABASE_URL')
@@ -42,6 +45,45 @@ def test_typed_tables_round_trip_in_isolated_postgres(monkeypatch):
                             (tenant, run['calculationRunId'])).fetchone()[0] == 1
         other = PostgresCalculationRunRepository(tenant_id='other-tenant', transaction_factory=transaction)
         assert other.get_run(project['id'], run['calculationRunId']) is None
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_materialized_risk_preserves_exact_record_review_in_isolated_postgres(monkeypatch):
+    tenant = f'risk-review-{uuid4()}'
+    conn = postgres.connect(TEST_DSN)
+    try:
+        postgres.ensure_schema(conn)
+        conn.execute("INSERT INTO realytics.tenants(tenant_id, name, status) VALUES (%s,%s,'active')", (tenant, tenant))
+
+        @contextmanager
+        def transaction(tenant_id):
+            conn.execute("SELECT set_config('realytics.tenant_id', %s, true)", (tenant_id,))
+            yield conn
+
+        project = PostgresProjectRepository(tenant_id=tenant, transaction_factory=transaction).create({'project': {'name': 'Isolated risk review'}})
+        monkeypatch.setattr(storage, 'storage_backend', lambda: 'postgres')
+        register = {'risks': [{'recordId': 'reviewed-risk', 'code': 'COST_SOURCE', 'severity': 'high',
+                              'status': 'open', 'reviewStatus': 'open', 'sourceLocator': {'sheetName': 'Cost', 'cell': 'B10'}}]}
+        with project_request_scope(lambda: SimpleNamespace(tenant_id=tenant), transaction_factory=transaction):
+            storage._materialize_risk_register_records(project['id'], 'risk-run', register)
+            row = storage.list_deal_state_records(project['id'], record_id='reviewed-risk', limit=1)[0]
+            entry = {'reviewStatus': 'needs_revision', 'reviewedBy': 'reviewer', 'reviewedAt': '2026-10-14T00:00:00+00:00',
+                     'comment': '보완 사유: 원가 근거 누락\n다음 할 일: 견적서 첨부'}
+            reviewed = {**row, **entry, 'reviewHistory': [entry]}
+            storage.upsert_deal_state_record(project['id'], reviewed)
+            storage._materialize_risk_register_records(project['id'], 'risk-run', register)
+            restored = storage.list_deal_state_records(project['id'], record_id='reviewed-risk', limit=1)[0]
+            assert restored['comment'] == entry['comment'] and restored['reviewHistory'] == [entry]
+            assert storage.list_deal_state_records(project['id'], record_id='missing-risk', limit=1) == []
+            changed = deepcopy(register)
+            changed['risks'][0]['sourceLocator']['cell'] = 'B11'
+            storage._materialize_risk_register_records(project['id'], 'risk-run', changed)
+            changed_row = storage.list_deal_state_records(project['id'], record_id='reviewed-risk', limit=1)[0]
+            assert changed_row['reviewStatus'] == 'open' and not changed_row.get('reviewHistory')
+        outsider = PostgresDealStateRepository(tenant_id='other-tenant', transaction_factory=transaction)
+        assert outsider.list_records(project['id'], record_id='reviewed-risk') == []
     finally:
         conn.rollback()
         conn.close()
