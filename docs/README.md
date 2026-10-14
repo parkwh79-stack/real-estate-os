@@ -1,13 +1,14 @@
 # REALYTICS 문서 지도와 정리 판단
 
-Updated: 2026-09-28
+Updated: 2026-10-14
 
 ## 현재 읽을 순서
 
 1. [제품 실행 계획](product/realytics-os-next-work-roadmap.md): 사용자 가치, 기존 Agent·Pod 유지, R1–R4 구현 순서.
 2. [구현 현황](product/current-implementation-status.md): 현재 코드 근거와 남은 연결 작업.
-3. 필요한 기능의 상세 계약: 아래 문서 목록에서 선택.
-4. [변경 이력](backlog.md): 이번 변경과 검증. 과거 진단은 해당 시점의 기록으로 읽는다.
+3. [샘플 전체 검토](product/sample-material-review-2026-10-14.md): 원본 8개·사업 구분·단위/조건 충돌과 기존 코드에 반영할 범위.
+4. 필요한 기능의 상세 계약: 아래 문서 목록에서 선택.
+5. [변경 이력](backlog.md): 이번 변경과 검증. 과거 진단은 해당 시점의 기록으로 읽는다.
 
 ## 전수 조사 범위와 한계
 
