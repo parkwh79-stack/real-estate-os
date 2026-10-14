@@ -1,8 +1,57 @@
 # Land Ledger Import, Validation, and Enrichment
 
-Updated: 2026-05-20
+Updated: 2026-10-14
 
-## Sample Reviewed
+## Current contract and source comparison
+
+`POST /projects/{project_id}/land-ledger/analyze` archives the original and saves
+the parsed ledger on the existing project. Reopen it through
+`GET /projects/{project_id}/workspace/context?page=land`. No new table is required.
+
+- Parser `land-ledger-agent-v1.2` reads explicit XLS/XLSX merged ranges. A merged
+  contract amount spanning multiple parcels is stored once in `contractGroups`.
+  Members retain `contractGroupId` and the original anchor in `source.rawCells`;
+  their parcel amounts remain null. Blank cells without a merge do not create a group.
+- Group-level owner amounts reconcile to the shared contract amount. Shares in
+  those rows are source context, not verified legal ownership of each parcel.
+  Unallocated groups remain under review, including after enrichment.
+- Missing individual contract amounts produce `individual_contract_amount_missing`
+  and `importConsistency.incompleteChecks`. Actual numerical mismatches remain in
+  `failedChecks`, even if another contract has missing details. Missing is not zero.
+- The Bonri workbook importer stores the D19 purchase budget and D26 inclusive
+  budget in `raw_import.landCostBreakdown`, with cells and source names. These are
+  not extra additive cost items. E22 is retained as `raw_import.designFar`; it no
+  longer populates `site.legal_far`. Previously saved studies are not overwritten.
+- The Land screen compares persisted ledger contracts, purchase budget, inclusive
+  budget, ancillary difference and purchase-minus-contract difference. It displays
+  source cells, missing detail, candidate/error status and required legacy reimport.
+  This comparison grants no approval and does not change calculation inputs.
+- `PUT /projects/{project_id}/land-cost-review` accepts `comment` (1–5,000 chars)
+  and `expectedComparisonHash`. It requires `project:review`, tenant scope and a
+  server-verified actor. Changed source basis returns 409; blank notes return 400.
+  The existing project JSON retains the note, source comparison snapshot and history.
+  Generic project writes cannot forge `landCostReview`. On source changes, the old
+  note remains visible as a previous-source note and is not reused automatically.
+  Failed saves preserve the typed note. Cross-user atomic CAS remains a limit of
+  the existing project JSON update path; this change does not claim to solve it.
+
+Actual-source check: 9 parcels / 22 owner records; one I7:I12 contract group of
+KRW 12,500,000,000; three missing individual amounts; no false total mismatch.
+Contracts KRW 41,374,000,000 versus purchase budget KRW 42,000,000,000 differ by
+KRW 626,000,000. Inclusive budget is KRW 46,032,000,000, with ancillary difference
+KRW 4,032,000,000. The cause of the budget difference, legal ownership and original
+37 formula errors remain unresolved. All eight source file hashes were preserved.
+
+Existing `_payment_status` / `_parcel_payment_status` still include unpaid and
+scheduled amounts in their paid-total interpretation. This increment reconciles
+contract amounts; it does not validate the existing paid-status labels. Separating
+scheduled amounts from evidenced payments is the next land correction.
+
+Verification results are recorded in the [current roadmap](realytics-os-next-work-roadmap.md).
+The sections below retain the earlier parser audit and expansion ideas as history;
+their proposed routes and P0 list do not supersede this current contract.
+
+## Earlier sample review (v1.1)
 
 File:
 

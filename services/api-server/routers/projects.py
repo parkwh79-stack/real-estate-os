@@ -158,8 +158,8 @@ from use_cases.reanalyze_on_evidence import reanalyze_after_evidence_use_case
 from use_cases.feasibility_input_builder import build_feasibility_input_draft, canonical_product_mix_to_runtime
 from use_cases.evidence_review import list_market_evidence_use_case, review_market_evidence_use_case
 from use_cases.excel_workbook_learning import learn_excel_workbook_mapping_use_case
-from agents.land_ledger_agent import LandLedgerParseError
-from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case, enrich_land_ledger_use_case
+from agents.land_ledger_agent import LAND_LEDGER_AGENT_VERSION, LandLedgerParseError
+from use_cases.land_ledger_import import analyze_land_ledger_workbook_use_case, enrich_land_ledger_use_case, reconcile_land_costs_use_case
 from use_cases.feasibility_workbook_llm import (
     FeasibilityReviewConflict,
     apply_feasibility_input_use_case,
@@ -692,6 +692,7 @@ def stamp_project_identity(project_data: Dict[str, Any], request: Request) -> Di
 _SERVER_MANAGED_PROJECT_AUTHORITY_FIELDS = frozenset(
     {
         "_meta",
+        "landCostReview",
         "source_documents",
         "sourceDocuments",
         "canonicalFeasibilityStudyV2",
@@ -1554,7 +1555,7 @@ async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[
         "contentType": file.content_type,
         "fileSizeBytes": len(content),
         "uploadedAt": uploaded_at,
-        "parserVersion": "land-ledger-agent-v1",
+        "parserVersion": LAND_LEDGER_AGENT_VERSION,
         **archive_meta,
     }
 
@@ -2322,6 +2323,34 @@ def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = N
         }
 
     return {**finalize, "track": track, "analysisRun": analysis_run}
+
+
+@router.put("/{project_id}/land-cost-review")
+def save_land_cost_review(project_id: str, payload: Dict[str, Any], request: Request):
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "project:review")
+    enforce_project_tenant_scope(request, project)
+    comment = payload.get("comment")
+    if not isinstance(comment, str) or not comment.strip() or len(comment) > 5000:
+        raise HTTPException(status_code=400, detail="검토 이유와 다음 확인 사항을 1~5,000자로 입력하세요.")
+    comparison = reconcile_land_costs_use_case(_hydrated_project_source(project_id, {}, authoritative_source=project))
+    if payload.get("expectedComparisonHash") != comparison["comparisonHash"]:
+        raise HTTPException(status_code=409, detail="비교 원본이 변경됐습니다. 최신 금액을 다시 확인한 뒤 저장하세요.")
+    if comparison["ledgerContract"]["value"] is None:
+        raise HTTPException(status_code=400, detail="토지조서를 먼저 가져와 저장하세요.")
+    previous = project.get("landCostReview") or {}
+    # A note records the reviewer's reasoning; it grants no approval and never
+    # changes any source amount, financial input or legal evidence.
+    entry = {"comparisonHash": comparison["comparisonHash"], "comment": comment.strip(),
+             "reviewedBy": verified_actor_id(authorization), "reviewedAt": now_iso(),
+             "comparison": {key: value for key, value in comparison.items() if key not in {"review", "reviewMatchesCurrentSources"}}}
+    review = {**entry, "reviewHistory": [*(previous.get("reviewHistory") or []), entry]}
+    if not project_repository(request).update(project_id, {"landCostReview": review}):
+        raise HTTPException(status_code=404, detail="Project not found")
+    record_user_activity_log({"eventType": "land_cost_review_saved", "projectId": project_id,
+                              "reviewedBy": entry["reviewedBy"], "createdAt": entry["reviewedAt"],
+                              "comparisonHash": entry["comparisonHash"]})
+    return {"projectId": project_id, "review": review}
 
 
 @router.post("/{project_id}/land-ledger/analyze")
@@ -5423,6 +5452,7 @@ def _workspace_page_data(
             **common,
             "land": source_data.get("land") or {},
             "landLedger": land_ledger or {},
+            "landCostReconciliation": reconcile_land_costs_use_case(source_data),
             "landEvidenceRecords": land_evidence_records,
             "pnuValidation": {
                 "required": True,

@@ -218,3 +218,179 @@ def test_read_workbook_rows_rejects_corrupt_workbook(tmp_path):
 
     with pytest.raises(LandLedgerParseError):
         _read_workbook_rows(corrupt)
+
+
+def _joint_contract_workbook(path, *, merge=True, missing_individual=True):
+    """Synthetic owners and parcels; only the merged-contract layout is real."""
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "합성 토지조서"
+    for row in [
+        ["Synthetic ledger"], [], [], [],
+        [1, "합성동", "1", "대", 100, 30.25, "A(1/5)", 25, 125, 0, 2.5, 0, 22.5],
+        [None, None, None, None, None, None, "B(1/5)", 25, None, 0, 2.5, 0, 22.5],
+        [None, None, None, None, None, None, "C(1/5)", 25, None, 0, 2.5, 0, 22.5],
+        [2, "합성동", "2", "대", 100, 30.25, "D(1/5)", 25, None, 0, 2.5, 0, 22.5],
+        [None, None, None, None, None, None, "E(1/5)", 25, None, 0, 2.5, 0, 22.5],
+        [3, "합성동", "3", "대", 100, 30.25, "F", None if missing_individual else 30, 30, 0, 3, 0, 27],
+        ["합계", None, None, None, 300, 90.75, None, None, 155, 0, 15.5, 0, 139.5],
+    ]:
+        sheet.append(row)
+    if merge:
+        sheet.merge_cells("I5:I9")
+    workbook.save(path)
+
+
+def test_merged_contract_is_counted_once_without_parcel_allocation(tmp_path):
+    path = tmp_path / "joint.xlsx"
+    _joint_contract_workbook(path)
+    result = LandLedgerAgent().analyze_workbook(path)
+    group = result["contractGroups"][0]
+    assert group["parcelSequences"] == [1, 2]
+    assert group["sourceLocator"]["range"] == "I5:I9"
+    assert group["totalContractAmount"] == 125
+    assert group["knownShareSum"] == pytest.approx(1)
+    assert group["amountReconciliation"]["passed"] is True
+    assert [parcel["totalContractAmount"] for parcel in result["parcels"]] == [None, None, 30]
+    assert result["parcels"][0]["source"]["rawCells"]["totalContractAmount"] == 125
+    assert result["summary"]["totalContractAmount"] == 155
+    assert result["summary"]["individualAmountMissingCount"] == 1
+    assert result["importConsistency"]["failedChecks"] == []
+    assert result["importConsistency"]["incompleteChecks"][0]["diff"] == 30
+    assert result["validation"]["status"] == "needs_review"
+    for parcel in result["parcels"][:2]:
+        codes = {issue["code"] for issue in parcel["issues"]}
+        assert "contract_group_allocation_pending" in codes
+        assert "payment_schedule_inconsistent" not in codes
+        assert parcel["qa"]["pfOutputReady"] is False
+    # Enrichment re-build must preserve the shared amount and unresolved detail.
+    rebuilt = LandLedgerAgent()._rebuild_analysis(result)
+    assert rebuilt["summary"]["totalContractAmount"] == 155
+    assert rebuilt["contractGroups"] == [group]
+
+
+def test_blank_contract_cell_without_merge_is_not_inferred(tmp_path):
+    path = tmp_path / "unmerged.xlsx"
+    _joint_contract_workbook(path, merge=False)
+    result = LandLedgerAgent().analyze_workbook(path)
+    assert result["contractGroups"] == []
+    assert result["parcels"][1]["totalContractAmount"] is None
+    assert "parcel_contract_amount_missing" in {issue["code"] for issue in result["parcels"][1]["issues"]}
+    assert "payment_schedule_inconsistent" in {issue["code"] for issue in result["parcels"][0]["issues"]}
+
+
+def test_joint_contract_mismatch_not_hidden_by_other_missing_details(tmp_path):
+    path = tmp_path / "mismatch.xlsx"
+    _joint_contract_workbook(path)
+    workbook = openpyxl.load_workbook(path)
+    workbook.active["H5"] = 20
+    workbook.save(path)
+    result = LandLedgerAgent().analyze_workbook(path)
+    assert result["contractGroups"][0]["amountReconciliation"]["passed"] is False
+    assert result["importConsistency"]["failedChecks"][0]["name"] == "contract_group:I5:I9"
+    assert result["importConsistency"]["incompleteChecks"]
+
+
+def test_land_upload_and_budget_candidate_survive_repository_reload(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from main import app
+    from routers import projects
+    from use_cases.land_ledger_import import reconcile_land_costs_use_case
+    from use_cases.workbook_import_approval import persist_feasibility_workbook_candidate_use_case
+
+    path = tmp_path / "joint.xlsx"
+    _joint_contract_workbook(path)
+    client = TestClient(app)
+    project_id = client.post("/projects/", json={
+        "project": {"name": "Synthetic land source review"},
+        "feasibility_input": {"land_cost": 150, "total_revenue": 300},
+    }).json()["project"]["id"]
+    monkeypatch.setattr(projects, "_maybe_auto_reanalyze", lambda *args: {"triggered": False})
+    response = client.post(f"/projects/{project_id}/land-ledger/analyze", files={"file": (path.name, path.read_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert response.status_code == 200, response.text
+    ledger = response.json()["landLedger"]
+    assert ledger["contractGroups"][0]["totalContractAmount"] == 125
+    # Existing candidate persistence preserves evidence without approving inputs.
+    repository = projects.project_repository()
+    before = repository.get(project_id)
+    draft = {"raw_import": {"validationStatus": "failed", "landCostBreakdown": {
+        "purchaseBudget": {"value": 160, "unit": "KRW", "excel": {"sheet_name": "사업수지", "cell": "D19"}},
+        "inclusiveBudget": {"value": 170, "unit": "KRW", "excel": {"sheet_name": "사업수지", "cell": "D26"}},
+    }}}
+    persist_feasibility_workbook_candidate_use_case(repository, project_id, {"draft": draft}, recorded_by="test-reviewer")
+    reloaded = repository.get(project_id)
+    assert reloaded["landLedger"]["contractGroups"] == ledger["contractGroups"]
+    assert reloaded.get("feasibility_input") == before.get("feasibility_input")
+    assert reloaded.get("canonicalFeasibilityStudyV2") == before.get("canonicalFeasibilityStudyV2")
+    comparison = reconcile_land_costs_use_case(reloaded)
+    assert comparison["ledgerContract"]["value"] == 155
+    assert comparison["ledgerContract"]["sourceLocator"]["range"] == "I5:I10"
+    assert comparison["ledgerContract"]["sourceTotalLocator"]["cell"] == "I11"
+    assert comparison["purchaseMinusContractKrw"] == 5
+    assert comparison["ancillaryBudgetKrw"] == 10
+    context = client.get(f"/projects/{project_id}/workspace/context?page=land&track=pf")
+    assert context.status_code == 200, context.text
+    assert context.json()["pageData"]["landCostReconciliation"] == comparison
+    from storage import get_project_record, upsert_user
+    upsert_user({"userId": "land-reviewer", "tenantId": "pytest-tenant", "role": "admin", "status": "active"})
+    headers = {"x-realytics-user-id": "land-reviewer"}
+    saved = client.put(f"/projects/{project_id}/land-cost-review", headers=headers, json={
+        "comment": "계약과 예산의 기준일 확인 필요", "expectedComparisonHash": comparison["comparisonHash"],
+        "reviewedBy": "forged-client-user",
+    })
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["review"]["reviewedBy"] == "land-reviewer"
+    durable = get_project_record(project_id)
+    assert durable["landCostReview"]["comment"] == "계약과 예산의 기준일 확인 필요"
+    assert durable["landLedger"]["contractGroups"] == ledger["contractGroups"]
+    reopened = client.get(f"/projects/{project_id}/workspace/context?page=land&track=pf").json()["pageData"]["landCostReconciliation"]
+    assert reopened["reviewMatchesCurrentSources"] is True
+    assert reopened["review"]["comment"] == "계약과 예산의 기준일 확인 필요"
+    assert len(reopened["review"]["reviewHistory"]) == 1
+    assert reopened["comparisonHash"] == comparison["comparisonHash"]
+    empty = client.put(f"/projects/{project_id}/land-cost-review", headers=headers, json={"comment": " ", "expectedComparisonHash": comparison["comparisonHash"]})
+    assert empty.status_code == 400
+    # New source basis invalidates the old note without deleting its history.
+    draft["raw_import"]["landCostBreakdown"]["purchaseBudget"]["value"] = 165
+    persist_feasibility_workbook_candidate_use_case(repository, project_id, {"draft": draft}, recorded_by="test-reviewer")
+    changed = reconcile_land_costs_use_case(repository.get(project_id))
+    assert changed["reviewMatchesCurrentSources"] is False
+    assert changed["review"]["comment"] == "계약과 예산의 기준일 확인 필요"
+    stale = client.put(f"/projects/{project_id}/land-cost-review", headers=headers, json={"comment": "stale", "expectedComparisonHash": comparison["comparisonHash"]})
+    assert stale.status_code == 409
+    assert repository.get(project_id).get("feasibility_input") == before.get("feasibility_input")
+    upsert_user({"userId": "land-viewer", "tenantId": "pytest-tenant", "role": "viewer", "status": "active"})
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
+    denied = client.put(f"/projects/{project_id}/land-cost-review", headers={"x-realytics-user-id": "land-viewer"}, json={"comment": "not allowed", "expectedComparisonHash": changed["comparisonHash"]})
+    assert denied.status_code == 403
+    forged = client.post("/projects/", headers=headers, json={"project": {"name": "forged"}, "landCostReview": {"comment": "forged"}})
+    assert forged.status_code == 400
+    repository.update(project_id, {"_meta": {"tenantId": "pytest-tenant"}})
+    upsert_user({"userId": "foreign-land-reviewer", "tenantId": "foreign-tenant", "role": "reviewer", "status": "active"})
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+    foreign = client.put(f"/projects/{project_id}/land-cost-review", headers={"x-realytics-user-id": "foreign-land-reviewer"}, json={"comment": "foreign", "expectedComparisonHash": changed["comparisonHash"]})
+    assert foreign.status_code in {403, 404}
+
+
+def test_missing_parcel_prices_do_not_become_a_zero_contract_total():
+    from use_cases.land_ledger_import import reconcile_land_costs_use_case
+
+    result = reconcile_land_costs_use_case({"landLedger": {
+        "parcels": [{"sequence": 1, "totalContractAmount": None}], "summary": {"totalContractAmount": 0},
+    }})
+    assert result["ledgerContract"]["value"] is None
+    assert result["purchaseMinusContractKrw"] is None
+
+
+@pytest.mark.parametrize("value, expected", [(None, None), (0, -155), (150, -5)])
+def test_land_comparison_preserves_missing_zero_and_negative_difference(tmp_path, value, expected):
+    from use_cases.land_ledger_import import reconcile_land_costs_use_case
+
+    path = tmp_path / "joint.xlsx"
+    _joint_contract_workbook(path)
+    ledger = LandLedgerAgent().analyze_workbook(path)
+    comparison = reconcile_land_costs_use_case({"landLedger": ledger, "feasibilityStudyV2Draft": {"raw_import": {
+        "landCostBreakdown": {"purchaseBudget": {"value": value}, "inclusiveBudget": {"value": 170}},
+    }}})
+    assert comparison["purchaseMinusContractKrw"] == expected
+    assert comparison["status"] == ("incomplete" if value is None else "needs_review")

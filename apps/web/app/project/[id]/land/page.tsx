@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -25,7 +25,8 @@ type Parcel = {
   normalizedLotNumber?: string;
   landCategory?: string;
   areaSqm?: number;
-  totalContractAmount?: number;
+  totalContractAmount?: number | null;
+  contractGroupId?: string;
   workflowStatus?: string;
   paymentStatus?: string;
   acquisitionStatus?: string;
@@ -78,8 +79,17 @@ function formatSqm(value: unknown) {
 }
 
 function formatKrw(value: unknown) {
-  const n = Number(value ?? 0);
-  return n > 0 ? `${(n / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억원` : "미확인";
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${(value / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 8 })}억원` : "미확인";
+}
+
+function sourceLabel(value: unknown) {
+  const field = asRecord(value);
+  const locator = asRecord(field.sourceLocator);
+  const provenance = asRecord(field.provenance);
+  const excel = asRecord(field.excel);
+  return [locator.sourceName ?? provenance.source_document, locator.sheet ?? excel.sheet_name,
+    locator.range ?? locator.cell ?? excel.cell].filter((part) => typeof part === "string" && part).join(" · ") || "출처 미확인";
 }
 
 function pct(value: number, total: number) {
@@ -99,16 +109,29 @@ export default function LandAnalysisPage() {
   const [running, setRunning] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reviewComment, setReviewComment] = useState("");
+  const [reviewMessage, setReviewMessage] = useState<string | null>(null);
+  const activeProject = useRef(projectId);
+  const reviewDirty = useRef(false);
+
+  useEffect(() => {
+    activeProject.current = projectId; reviewDirty.current = false;
+    setContext(null); setReviewComment(""); setReviewMessage(null); setRunning(null);
+  }, [projectId]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setContext(await fetchWorkspaceContext(projectId, "land"));
+      const next = await fetchWorkspaceContext(projectId, "land");
+      if (activeProject.current !== projectId) return;
+      setContext(next);
+      const comparison = asRecord(asRecord(next.pageData).landCostReconciliation);
+      if (!reviewDirty.current) setReviewComment(comparison.reviewMatchesCurrentSources ? String(asRecord(comparison.review).comment ?? "") : "");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "토지 저장 상태를 불러오지 못했습니다.");
+      if (activeProject.current === projectId) setError(err instanceof Error ? err.message : "토지 저장 상태를 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (activeProject.current === projectId) setLoading(false);
     }
   }, [projectId]);
 
@@ -126,6 +149,39 @@ export default function LandAnalysisPage() {
   const landEvidenceSummary = asRecord(pageData.landEvidenceSummary);
   const evidenceRecords = asArray<LandEvidenceRecord>(pageData.landEvidenceRecords);
   const parcels = asArray<Parcel>(landLedger.parcels);
+  const contractGroups = asArray<Record<string, unknown>>(landLedger.contractGroups);
+  const reconciliation = asRecord(pageData.landCostReconciliation);
+  const contract = asRecord(reconciliation.ledgerContract);
+  const purchaseBudget = asRecord(reconciliation.purchaseBudget);
+  const inclusiveBudget = asRecord(reconciliation.inclusiveBudget);
+  const savedReview = asRecord(reconciliation.review);
+
+  async function saveReview() {
+    if (!reviewComment.trim() || running) return;
+    setRunning("review"); setReviewMessage(null);
+    try {
+      const response = await fetch(`${apiBase}/projects/${projectId}/land-cost-review`, {
+        method: "PUT", headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+        body: JSON.stringify({ comment: reviewComment, expectedComparisonHash: reconciliation.comparisonHash }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(typeof body.detail === "string" ? body.detail : `검토 메모 저장 실패 (${response.status})`);
+      }
+      const body = await response.json();
+      if (activeProject.current !== projectId) return;
+      reviewDirty.current = false;
+      setReviewComment(String(body.review.comment));
+      setContext((previous) => previous ? { ...previous, pageData: { ...previous.pageData,
+        landCostReconciliation: { ...reconciliation, review: body.review, reviewMatchesCurrentSources: true },
+      } } : previous);
+      setReviewMessage("검토 메모를 저장했습니다.");
+    } catch (err) {
+      if (activeProject.current === projectId) setReviewMessage(err instanceof Error ? err.message : "검토 메모 저장에 실패했습니다.");
+    } finally {
+      if (activeProject.current === projectId) setRunning(null);
+    }
+  }
 
   const parcelCount = Number(summary.parcelCount ?? pnuValidation.parcelCount ?? parcels.length ?? 0);
   const pnuCount = Number(summary.pnuCount ?? pnuValidation.pnuCount ?? parcels.filter((p) => p.pnu || p.resolvedPnu).length);
@@ -267,6 +323,50 @@ export default function LandAnalysisPage() {
             </Panel>
           </section>
 
+          <Panel title="계약·수지 금액 대사">
+            <p className="mb-3 text-sm text-slate-500">저장된 원본 금액을 비교합니다. 차액의 원인은 별도 확인이 필요하며, 계산 입력이나 승인 상태는 변경되지 않습니다.</p>
+            <InfoRow label="토지조서 계약 합계" value={formatKrw(contract.value)} />
+            <p className="break-words text-xs text-slate-500">{sourceLabel(contract)}</p>
+            <InfoRow label="수지 순수 매입예산" value={formatKrw(purchaseBudget.value)} />
+            <p className="break-words text-xs text-slate-500">{sourceLabel(purchaseBudget)}</p>
+            <InfoRow label="수지 부대비 포함 대지비" value={formatKrw(inclusiveBudget.value)} />
+            <p className="break-words text-xs text-slate-500">{sourceLabel(inclusiveBudget)}</p>
+            <InfoRow label="수지 부대비 (포함 금액 − 순수 매입예산)" value={formatKrw(reconciliation.ancillaryBudgetKrw)} />
+            <InfoRow label="차액 (순수 매입예산 − 계약 합계)" value={formatKrw(reconciliation.purchaseMinusContractKrw)} />
+            {typeof reconciliation.individualAmountMissingCount === "number" && reconciliation.individualAmountMissingCount > 0 ? (
+              <p className="mt-3 text-sm text-amber-700 dark:text-amber-300">개인별 계약금액 {reconciliation.individualAmountMissingCount}건이 원본에 미기재되어 있습니다. 합계 불일치와 구분하여 보완하세요.</p>
+            ) : null}
+            {reconciliation.studyStatus === "candidate" ? <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">수지 검토 초안의 원본값입니다. 승인된 계산 입력을 뜻하지 않습니다.</p> : null}
+            {reconciliation.workbookValidationStatus === "failed" ? <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">수지 원본의 수식·검증 오류가 남아 있습니다.</p> : null}
+            {reconciliation.requiresLedgerReimport ? <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">기존 토지조서는 공동계약 구분을 위해 다시 가져와야 합니다.</p> : null}
+            {reconciliation.status === "incomplete" ? <p className="mt-2 text-sm text-slate-500">비교할 원본 금액이 부족합니다. 토지조서와 사업수지를 가져와 저장하세요.</p> : null}
+            <Link className="mt-3 inline-block text-sm font-semibold text-indigo-600 underline" href={`/project/${projectId}/input-package`}>자료 입력 및 원본 확인</Link>
+            {savedReview.comment && !reconciliation.reviewMatchesCurrentSources ? (
+              <p className="mt-3 whitespace-pre-wrap text-sm text-amber-700 dark:text-amber-300">이전 원본의 검토 메모입니다. 현재 자료와 다시 대조하세요.{"\n"}{String(savedReview.comment)}</p>
+            ) : null}
+            <label className="mt-4 block text-sm font-semibold" htmlFor="land-cost-review">검토 이유와 다음 확인 사항</label>
+            <textarea id="land-cost-review" aria-label="토지비 검토 메모" value={reviewComment}
+              onChange={(event) => { reviewDirty.current = true; setReviewComment(event.target.value); }} maxLength={5000} rows={3} disabled={running !== null}
+              className="mt-2 w-full rounded-lg border border-slate-300 bg-transparent p-3 text-sm dark:border-slate-600" />
+            <button type="button" onClick={() => void saveReview()} disabled={running !== null || !reviewComment.trim() || typeof reconciliation.comparisonHash !== "string" || contract.value == null}
+              className="mt-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">{running === "review" ? "저장 중…" : "검토 메모 저장"}</button>
+            {reviewMessage ? <p role="status" className="mt-2 text-sm">{reviewMessage}</p> : null}
+            {savedReview.reviewedAt ? <p className="mt-2 text-xs text-slate-500">저장된 메모 {asArray(savedReview.reviewHistory).length}건 · 마지막 저장 {String(savedReview.reviewedAt)}</p> : null}
+          </Panel>
+
+          {contractGroups.length ? (
+            <Panel title="공동계약">
+              {contractGroups.map((group, index) => (
+                <div key={String(group.contractGroupId)} className="mb-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+                  <p className="font-bold">공동계약 {index + 1}: {formatKrw(group.totalContractAmount)}</p>
+                  <p className="mt-1 text-sm">필지 번호 {asArray<number>(group.parcelSequences).join(", ")} · 필지별 금액 미배분</p>
+                  <p className="mt-1 break-words text-xs text-slate-500">{sourceLabel(group)}</p>
+                  <p className="mt-1 text-sm text-slate-500">전체 계약 합계에 한 번만 반영했습니다. 법적 소유지분과 필지별 가격은 별도 확인이 필요합니다.</p>
+                </div>
+              ))}
+            </Panel>
+          ) : null}
+
           <Panel title="필지별 PNU 검증 현황">
             {sampleParcels.length ? (
               <div className="overflow-x-auto">
@@ -292,7 +392,7 @@ export default function LandAnalysisPage() {
                           </td>
                           <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{displayText(parcel.landCategory, "미확인")}</td>
                           <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{formatSqm(parcel.areaSqm)}</td>
-                          <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{formatKrw(parcel.totalContractAmount)}</td>
+                          <td className="px-3 py-3 text-slate-600 dark:text-slate-300">{parcel.contractGroupId ? "공동계약 · 필지별 미배분" : formatKrw(parcel.totalContractAmount)}</td>
                           <td className="px-3 py-3 font-mono text-xs text-slate-600 dark:text-slate-300">{pnu || "미해석"}</td>
                           <td className="px-3 py-3 text-slate-600 dark:text-slate-300">
                             {typeof parcel.officialLandPricePerSqm === "number"

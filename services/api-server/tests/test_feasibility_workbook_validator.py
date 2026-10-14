@@ -308,6 +308,7 @@ def _build_bonri_import_workbook(path: Path, *, legacy_schedule_layout: bool = F
     business["D8"] = 165596965.01177272
     business["D11"] = 165596965.01177272
     business["D18"] = 72036344.5125
+    business["D19"] = 42000000
     business["D26"] = 46032000
     business["D33"] = 3561168
     business["D41"] = 6318199.465631289
@@ -342,6 +343,13 @@ def test_import_legacy_bonri_workbook_to_feasibility_study_v2(tmp_path):
     assert study["project_name"] == "본리동 주상복합 신축공사"
     assert study["asset_type"] == "mixed_use"
     assert study["site"]["land_area_sqm"]["value"] == 4691.9
+    assert study["site"]["legal_far"] is None
+    assert study["raw_import"]["designFar"]["value"] == pytest.approx(857.4381720430107)
+    assert study["raw_import"]["designFar"]["excel"]["cell"] == "E22"
+    assert "site.legal_far" not in study["raw_import"]["sampleProfile"]["fieldLocators"]
+    assert study["raw_import"]["landCostBreakdown"]["purchaseBudget"]["value"] == 42000000000
+    assert study["raw_import"]["landCostBreakdown"]["inclusiveBudget"]["value"] == 46032000000
+    assert len([row for row in study["cost_items"] if row["category"] == "land"]) == 1
     assert len(study["product_mix"]) == 3
     assert study["product_mix"][0]["asset_type"] == "apartment"
     assert abs(study["metrics"]["total_revenue"] - 165596965011.7727) < 1

@@ -235,8 +235,8 @@ def _import_legacy_bonri(
         saleable_area_sqm = _to_float(_cell_value(input_sheet, "M8"))
         contract_area_sqm = _py_to_sqm(_to_float(_cell_value(business, "E6")))
         unit_count = _to_float(_cell_value(sales, "I21")) + _to_float(_cell_value(sales, "I30")) + _commercial_unit_count(sales)
-        legal_far_raw = _to_float(_cell_value(input_sheet, "E22"))
-        legal_far = legal_far_raw * 100 if legal_far_raw is not None and legal_far_raw < 100 else legal_far_raw
+        design_far_raw = _to_float(_cell_value(input_sheet, "E22"))
+        design_far = design_far_raw * 100 if design_far_raw is not None and design_far_raw < 100 else design_far_raw
 
         total_revenue = _krw_from_thousand(_cell_value(business, "D11"))
         total_cost = _krw_from_thousand(_cell_value(business, "D72"))
@@ -262,6 +262,14 @@ def _import_legacy_bonri(
                 "2.현금흐름": "KRW_MILLION",
             },
             "sourceDocument": source_document or {},
+            "designFar": _value("design_far", "설계 용적률", design_far, "PERCENT", "입력", "E22", source_name),
+            # These are source budget scopes, not additional cost line items.
+            # Keeping the purchase component out of cost_items avoids counting
+            # it twice alongside the inclusive land-cost subtotal.
+            "landCostBreakdown": {
+                "purchaseBudget": _value("land_purchase_budget", "순수 토지 매입예산", _krw_from_thousand(_cell_value(business, "D19")), "KRW", "사업수지", "D19", source_name),
+                "inclusiveBudget": _value("land_inclusive_budget", "부대비 포함 대지비", _krw_from_thousand(_cell_value(business, "D26")), "KRW", "사업수지", "D26", source_name),
+            },
             "mappedCells": {
                 "grossFloorArea": "입력!F19",
                 "totalRevenue": "사업수지!D11",
@@ -288,7 +296,6 @@ def _import_legacy_bonri(
                 "address": address,
                 "land_area_sqm": _value("land_area_sqm", "대지면적", land_area_sqm, "SQM", "입력", "E8", source_name),
                 "zoning": _cell_value(input_sheet, "E6"),
-                "legal_far": _value("legal_far", "용적률", legal_far, "PERCENT", "입력", "E22", source_name),
             },
             "program": {
                 "gross_floor_area_sqm": _value("gross_floor_area_sqm", "연면적", gross_floor_area_sqm, "SQM", "입력", "F19", source_name),

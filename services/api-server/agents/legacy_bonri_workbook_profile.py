@@ -10,14 +10,16 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
-LEGACY_BONRI_PROFILE_ID = "legacy-bonri-mixed-use-pf-feasibility-v3"
+LEGACY_BONRI_PROFILE_ID = "legacy-bonri-mixed-use-pf-feasibility-v4"
 
 LEGACY_BONRI_CELL_MAP: Dict[str, Dict[str, Any]] = {
     "project.name": {"sheet": "입력", "cell": "D2", "kind": "source"},
     "site.address": {"sheet": "입력", "cell": "E5", "kind": "source"},
     "site.land_area_sqm": {"sheet": "입력", "cell": "E8", "kind": "source"},
     "site.effective_land_area_sqm": {"sheet": "입력", "cell": "E10", "kind": "calculated"},
-    "site.legal_far": {"sheet": "입력", "cell": "E22", "kind": "source"},
+    "raw_import.designFar": {"sheet": "입력", "cell": "E22", "kind": "calculated"},
+    "cost.land_purchase_budget": {"sheet": "사업수지", "cell": "D19", "kind": "source", "unit": "KRW_THOUSAND"},
+    "cost.land_inclusive_budget": {"sheet": "사업수지", "cell": "D26", "kind": "calculated", "unit": "KRW_THOUSAND"},
     "program.gross_floor_area_sqm": {"sheet": "입력", "cell": "F19", "kind": "calculated"},
     "revenue.total": {"sheet": "사업수지", "cell": "D11", "kind": "calculated", "unit": "KRW_THOUSAND"},
     "cost.total": {"sheet": "사업수지", "cell": "D72", "kind": "calculated", "unit": "KRW_THOUSAND"},

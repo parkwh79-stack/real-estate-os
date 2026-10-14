@@ -8,7 +8,7 @@ import xlrd
 
 
 SHARE_PATTERN = re.compile(r"\((\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)\)")
-LAND_LEDGER_AGENT_VERSION = "land-ledger-agent-v1.1"
+LAND_LEDGER_AGENT_VERSION = "land-ledger-agent-v1.2"
 SQM_TO_PY = 0.3025
 DEFAULT_PNU_CONFIDENCE_THRESHOLD = 0.85
 CURRENT_OFFICIAL_PRICE_BASE_YEAR = 2026
@@ -68,6 +68,11 @@ def _detect_column_map(rows: List[List[Any]]) -> Dict[str, int]:
 
 
 def _read_workbook_rows(workbook_path: Path) -> tuple[List[List[Any]], str]:
+    rows, sheet_name, _ = _read_workbook_structure(workbook_path)
+    return rows, sheet_name
+
+
+def _read_workbook_structure(workbook_path: Path) -> tuple[List[List[Any]], str, list[tuple[int, int, int, int]]]:
     """Read the first worksheet of a .xls/.xlsx ledger into rows of cell values.
 
     Supports both legacy .xls (xlrd) and modern .xlsx/.xlsm (openpyxl). Empty
@@ -83,7 +88,7 @@ def _read_workbook_rows(workbook_path: Path) -> tuple[List[List[Any]], str]:
         if suffix in (".xlsx", ".xlsm"):
             import openpyxl  # lazy: only when an xlsx is uploaded
 
-            workbook = openpyxl.load_workbook(str(workbook_path), read_only=True, data_only=True)
+            workbook = openpyxl.load_workbook(str(workbook_path), data_only=True)
             try:
                 worksheet = workbook.worksheets[0]
                 rows = [
@@ -91,18 +96,24 @@ def _read_workbook_rows(workbook_path: Path) -> tuple[List[List[Any]], str]:
                     for row in worksheet.iter_rows(values_only=True)
                 ]
                 sheet_name = worksheet.title
+                merged_cells = [
+                    (area.min_row - 1, area.max_row, area.min_col - 1, area.max_col)
+                    for area in worksheet.merged_cells.ranges
+                ]
             finally:
                 workbook.close()
-            return rows, sheet_name
+            return rows, sheet_name, merged_cells
 
         # Legacy .xls (and unknown suffixes attempted as .xls) via xlrd.
-        book = xlrd.open_workbook(str(workbook_path))
+        book = xlrd.open_workbook(str(workbook_path), formatting_info=True)
         sheet = book.sheet_by_index(0)
         rows = [
             [sheet.cell_value(row_index, column_index) for column_index in range(sheet.ncols)]
             for row_index in range(sheet.nrows)
         ]
-        return rows, sheet.name
+        sheet_name, merged_cells = sheet.name, list(sheet.merged_cells)
+        book.release_resources()
+        return rows, sheet_name, merged_cells
     except LandLedgerParseError:
         raise
     except Exception as exc:  # xlrd.XLRDError, openpyxl/zip errors, etc.
@@ -131,12 +142,13 @@ class LandLedgerAgent:
         source_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         workbook_path = Path(workbook_path)
-        rows, sheet_name = _read_workbook_rows(workbook_path)
+        rows, sheet_name, merged_cells = _read_workbook_structure(workbook_path)
         return self.analyze_rows(
             rows,
             sheet_name=sheet_name,
             source_file=(source_info or {}).get("original_file_name") or workbook_path.name,
             source_info=source_info,
+            merged_cells=merged_cells,
         )
 
     # Backwards-compatible alias for callers that pass either .xls or .xlsx.
@@ -149,6 +161,7 @@ class LandLedgerAgent:
         sheet_name: str = "land_ledger",
         source_file: Optional[str] = None,
         source_info: Optional[Dict[str, Any]] = None,
+        merged_cells: Optional[list[tuple[int, int, int, int]]] = None,
     ) -> Dict[str, Any]:
         column_map = _detect_column_map(rows)
         data_rows = rows[4:]
@@ -163,6 +176,7 @@ class LandLedgerAgent:
             sequence = _to_int(_cell(row, 0))
             if sequence is not None:
                 current = self._new_parcel(row, sequence, row_index, column_map=column_map)
+                current["source"]["sheet"] = sheet_name
                 parcels.append(current)
 
             if current is None:
@@ -172,6 +186,9 @@ class LandLedgerAgent:
             if owner:
                 current["owners"].append(self._owner_record(row, row_index, column_map=column_map))
 
+        # Only an explicit merged amount cell proves a shared contract. Blank
+        # following rows alone must never cause forward-fill or allocation.
+        contract_groups = _contract_groups(parcels, rows, merged_cells or [], sheet_name, source_file, column_map)
         lot_key_counts: Dict[str, int] = {}
         for parcel in parcels:
             lot_key = _parcel_lot_key(parcel)
@@ -187,7 +204,7 @@ class LandLedgerAgent:
             parcel["workflowStatus"] = self._parcel_workflow_status(parcel)
             parcel["pfReviewMapping"] = self._pf_review_mapping(parcel)
 
-        summary = self._summary(parcels)
+        summary = self._summary(parcels, contract_groups)
         import_consistency = self._validate_import_consistency(parcels, summary, source_totals)
         validation = self._validation(parcels, summary, source_totals)
         import_metadata = self._import_metadata(rows, sheet_name, source_file, source_info)
@@ -202,6 +219,7 @@ class LandLedgerAgent:
             "sourceTotals": source_totals,
             "summary": summary,
             "parcels": parcels,
+            "contractGroups": contract_groups,
             "validation": validation,
             "importConsistency": import_consistency,
             "landAcquisitionStatus": self._calculate_land_acquisition_status(parcels, summary),
@@ -220,7 +238,7 @@ class LandLedgerAgent:
             parcel["workflowStatus"] = self._parcel_workflow_status(parcel)
             parcel["pfReviewMapping"] = self._pf_review_mapping(parcel)
 
-        summary = self._summary(parcels)
+        summary = self._summary(parcels, analysis.get("contractGroups", []))
         source_totals = analysis.get("sourceTotals", {})
         import_consistency = self._validate_import_consistency(parcels, summary, source_totals)
         validation = self._validation(parcels, summary, source_totals)
@@ -417,6 +435,9 @@ class LandLedgerAgent:
             and area_consistent
             and ownership_valid
             and payment_schedule_valid
+            and not parcel.get("contractGroupId")
+            and parcel.get("totalContractAmount") is not None
+            and all(owner.get("individualContractAmount") is not None for owner in parcel.get("owners", []))
             and pnu_resolved
             and pnu_confident
             and official_price_attached
@@ -455,8 +476,14 @@ class LandLedgerAgent:
             issues.append(_issue("duplicate_lot_number", "blocking", "lotNumber", "The same dong/lot number was imported more than once."))
         if not qa["landCategoryMapped"]:
             issues.append(_issue("unmapped_land_category", "caution", "landCategory", "Land category could not be mapped to a standard Korean land category code."))
-        if not qa["ownershipShareValid"]:
+        if parcel.get("contractGroupId"):
+            issues.append(_issue("contract_group_allocation_pending", "caution", "contractGroupId", "공동계약 금액입니다. 필지별 계약금액과 법적 소유지분은 별도 확인이 필요합니다."))
+        elif not qa["ownershipShareValid"]:
             issues.append(_issue("ownership_share_incomplete", "caution", "ownership", "Owner share data is incomplete or does not sum to 100%."))
+        if any(owner.get("individualContractAmount") is None for owner in parcel.get("owners", [])):
+            issues.append(_issue("individual_contract_amount_missing", "caution", "individualContractAmount", "개인별 계약금액이 원본에 미기재되어 있습니다. 계약 총액 불일치와 구분해 확인하세요."))
+        if parcel.get("totalContractAmount") is None and not parcel.get("contractGroupId"):
+            issues.append(_issue("parcel_contract_amount_missing", "caution", "totalContractAmount", "필지 계약금액이 원본에 미기재되어 있습니다."))
         if not qa["paymentScheduleValid"]:
             issues.append(_issue("payment_schedule_inconsistent", "blocking", "payment", "Owner-level payments do not reconcile to purchase amounts or parcel total amount."))
         if not parcel.get("pnu"):
@@ -481,6 +508,10 @@ class LandLedgerAgent:
             return "uploaded"
         if not qa["parcelUnitConsistent"]:
             return "parsed_with_warnings"
+        if parcel.get("contractGroupId") or parcel.get("totalContractAmount") is None:
+            return "needs_review"
+        if any(owner.get("individualContractAmount") is None for owner in parcel.get("owners", [])):
+            return "needs_review"
         if not qa["ownershipShareValid"]:
             return "needs_review"
         if not qa["paymentScheduleValid"]:
@@ -535,7 +566,7 @@ class LandLedgerAgent:
             },
         }
 
-    def _summary(self, parcels: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _summary(self, parcels: List[Dict[str, Any]], contract_groups: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         status_counts: Dict[str, int] = {}
         for parcel in parcels:
             status = parcel.get("workflowStatus", "unknown")
@@ -553,7 +584,12 @@ class LandLedgerAgent:
             "ownerRecordCount": sum(len(parcel["owners"]) for parcel in parcels),
             "totalAreaSqm": sum(parcel.get("areaSqm") or 0 for parcel in parcels),
             "totalAreaPy": sum(parcel.get("areaPy") or 0 for parcel in parcels),
-            "totalContractAmount": sum(parcel.get("totalContractAmount") or 0 for parcel in parcels),
+            "totalContractAmount": sum(parcel.get("totalContractAmount") or 0 for parcel in parcels)
+            + sum(group.get("totalContractAmount") or 0 for group in (contract_groups or [])),
+            "contractGroupCount": len(contract_groups or []),
+            "individualAmountMissingCount": sum(owner.get("individualContractAmount") is None for owner in owner_records),
+            "unallocatedContractGroupAmount": sum(group.get("totalContractAmount") or 0 for group in (contract_groups or [])),
+            "contractGroupChecks": [group["amountReconciliation"] for group in (contract_groups or [])],
             "paymentTotals": payment_totals,
             "missingPnuCount": sum(1 for parcel in parcels if not parcel.get("pnu")),
             "missingOfficialLandPriceCount": sum(1 for parcel in parcels if not parcel.get("officialLandPricePerSqm")),
@@ -579,16 +615,29 @@ class LandLedgerAgent:
         for key in ["depositPaidTotal", "depositUnpaidTotal", "interimPaymentTotal", "balancePaymentTotal"]:
             if source_totals.get(key) is not None:
                 checks.append(_numeric_check(key, payment_totals[key], source_totals[key], 1.0))
-        parcel_amount_sum = sum(parcel.get("totalContractAmount") or 0 for parcel in parcels)
+        parcel_amount_sum = summary["totalContractAmount"]
         individual_amount_sum = payment_totals["individualContractAmountTotal"]
-        if individual_amount_sum:
+        incomplete_checks = []
+        if summary.get("individualAmountMissingCount"):
+            incomplete_checks.append({
+                "name": "parcel_amount_sum_vs_owner_amount_sum",
+                "status": "incomplete", "passed": None,
+                "parsedValue": parcel_amount_sum, "sourceValue": individual_amount_sum,
+                "diff": parcel_amount_sum - individual_amount_sum,
+                "missingCount": summary["individualAmountMissingCount"],
+                "reason": "individual_contract_amount_missing",
+            })
+        elif summary.get("ownerRecordCount"):
             checks.append(_numeric_check("parcel_amount_sum_vs_owner_amount_sum", parcel_amount_sum, individual_amount_sum, 1.0))
+        checks.extend(summary.get("contractGroupChecks") or [])
 
-        failed = [check for check in checks if not check["passed"]]
+        failed = [check for check in checks if check["passed"] is False]
+        incomplete_checks.extend(check for check in checks if check["passed"] is None)
         return {
-            "status": "needs_review" if failed else "passed",
+            "status": "needs_review" if failed or incomplete_checks else "passed",
             "checks": checks,
             "failedChecks": failed,
+            "incompleteChecks": incomplete_checks,
         }
 
     def _validation(
@@ -625,7 +674,7 @@ class LandLedgerAgent:
         severity_rank = {"blocking": 3, "blocking_for_enrichment": 3, "blocking_for_pf_review": 3, "caution": 2, "info": 1}
         highest = max((severity_rank.get(issue["severity"], 0) for issue in issues), default=0)
         lifecycle_status = "ready_for_pf_review"
-        if import_consistency["status"] == "needs_review" or any(issue["severity"] == "blocking" for issue in issues):
+        if summary.get("contractGroupCount") or import_consistency["status"] == "needs_review" or any(issue["severity"] == "blocking" for issue in issues):
             lifecycle_status = "needs_review"
         elif summary["missingPnuCount"] or summary["missingOfficialLandPriceCount"]:
             lifecycle_status = "needs_enrichment"
@@ -668,7 +717,8 @@ class LandLedgerAgent:
             "publicLandArea": sum(parcel.get("areaSqm") or 0 for parcel in public_land),
             "acquisitionAreaRatio": len(contracted) / len(parcels) if parcels else 0,
             "acquisitionAmountRatio": (
-                sum(parcel.get("totalContractAmount") or 0 for parcel in contracted) / summary["totalContractAmount"]
+                (sum(parcel.get("totalContractAmount") or 0 for parcel in contracted)
+                 + summary.get("unallocatedContractGroupAmount", 0)) / summary["totalContractAmount"]
                 if summary["totalContractAmount"] else 0
             ),
             "publicLandDetected": bool(public_land),
@@ -696,7 +746,8 @@ class LandLedgerAgent:
             "balanceDueAmount": balance_due_amount,
             "ownershipTransferredParcels": sum(1 for parcel in parcels if (parcel.get("registryEvidence") or {}).get("ownerMatchStatus") == "matched"),
             "restrictionReviewRequiredParcels": summary["registryEvidenceMissingCount"],
-            "status": "needs_enrichment" if pnu_ratio < 1 or official_price_ratio < 1 else "needs_legal_evidence" if registry_ratio < 1 else "ready_for_pf_review",
+            "status": "needs_review" if summary.get("contractGroupCount") or summary.get("individualAmountMissingCount")
+            else "needs_enrichment" if pnu_ratio < 1 or official_price_ratio < 1 else "needs_legal_evidence" if registry_ratio < 1 else "ready_for_pf_review",
             "reviewMemo": (
                 "This land ledger can support preliminary parcel, owner, area, purchase amount, and payment schedule review, "
                 "but it cannot be used as final legal-review or PF-approval evidence until PNU, official land price, "
@@ -769,6 +820,61 @@ class LandLedgerAgent:
         ]
 
 
+def _contract_groups(
+    parcels: List[Dict[str, Any]], rows: List[List[Any]],
+    merged_cells: list[tuple[int, int, int, int]], sheet_name: str,
+    source_file: Optional[str], column_map: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    # Modern ledgers without an explicitly mapped amount column are not the
+    # legacy H/I monetary layout and cannot inherit its contract semantics.
+    if column_map and "total_contract_amount" not in column_map:
+        return []
+    column = column_map.get("total_contract_amount", 8)
+    groups = []
+    for start, end, left, right in sorted(merged_cells):
+        if left != column or right != column + 1:
+            continue
+        members = [parcel for parcel in parcels if start <= parcel["source"]["row"] - 1 < end]
+        if len(members) < 2:
+            continue
+        if any(not start <= owner["source"]["row"] - 1 < end for parcel in members for owner in parcel["owners"]):
+            # A merge covering only part of a parcel's owner rows is ambiguous.
+            # Retain ordinary unresolved parcel checks rather than extending it.
+            continue
+        amount = _to_float(_cell(rows[start], column))
+        if amount is None:
+            continue
+        from openpyxl.utils import get_column_letter
+
+        cell_range = f"{get_column_letter(column + 1)}{start + 1}:{get_column_letter(column + 1)}{end}"
+        group_id = f"{sheet_name}!{cell_range}"
+        owners = [owner for parcel in members for owner in parcel["owners"]]
+        known_amount = sum(owner.get("individualContractAmount") or 0 for owner in owners)
+        missing_count = sum(owner.get("individualContractAmount") is None for owner in owners)
+        reconciliation = _numeric_check(f"contract_group:{cell_range}", known_amount, amount, 1.0)
+        if missing_count:
+            reconciliation.update(passed=None, status="incomplete", missingCount=missing_count)
+        group = {
+            "contractGroupId": group_id,
+            "parcelSequences": [parcel["sequence"] for parcel in members],
+            "totalContractAmount": amount,
+            "individualContractAmountTotal": known_amount,
+            "individualAmountMissingCount": missing_count,
+            "knownShareSum": sum(owner.get("share") or 0 for owner in owners),
+            "shareScope": "source_contract_group_not_verified_legal_ownership",
+            "allocationStatus": "unallocated",
+            "amountReconciliation": reconciliation,
+            "sourceLocator": {"sourceType": "excel_range", "sourceName": source_file, "sheet": sheet_name, "range": cell_range},
+        }
+        for parcel in members:
+            parcel["contractGroupId"] = group_id
+            # Keep original anchor value in source.rawCells, not as a parcel
+            # price. Never infer prices from owner shares or parcel areas.
+            parcel["totalContractAmount"] = None
+        groups.append(group)
+    return groups
+
+
 def _cell(row: List[Any], index: int) -> Any:
     return row[index] if index < len(row) else None
 
@@ -793,6 +899,7 @@ def _extract_source_totals(rows: List[List[Any]]) -> Dict[str, Any]:
         }
     return {
         "present": True,
+        "row": rows.index(total_row) + 1,
         "rowLabel": _cell(total_row, 0),
         "totalAreaSqm": _to_float(_cell(total_row, 4)),
         "totalAreaPy": _to_float(_cell(total_row, 5)),
@@ -979,7 +1086,8 @@ def _payment_schedule_valid(parcel: Dict[str, Any]) -> bool:
         return False
     total_contract_amount = parcel.get("totalContractAmount")
     individual_sum = sum(owner.get("individualContractAmount") or 0 for owner in owners)
-    if total_contract_amount and individual_sum and abs(individual_sum - total_contract_amount) > 1:
+    amounts_complete = all(owner.get("individualContractAmount") is not None for owner in owners)
+    if amounts_complete and total_contract_amount is not None and abs(individual_sum - total_contract_amount) > 1:
         return False
     for owner in owners:
         amount = owner.get("individualContractAmount")
