@@ -671,11 +671,19 @@ class OrchestrationAgent:
 
             self._run_developability_score_step(run, project_data)
 
+            report_source = deepcopy(project_data)
+            for field in ("scenariosEvaluation", "cashFlowRunResult", "returnMetrics", "stressTest", "creditEnhancement", "developabilityScore"):
+                report_source.pop(field, None)
+                if isinstance(run["artifacts"].get(field), dict):
+                    report_source[field] = deepcopy(run["artifacts"][field])
+
             def generate_report_artifact() -> Dict[str, Any]:
+                from agents.report_export_agent import ReportExportAgent
                 report_agent = ReportAgent()
+                report = report_agent.generate_structured_report(report_source)
                 return {
-                    "report": report_agent.generate_structured_report(project_data),
-                    "report_markdown": report_agent.generate_report(project_data),
+                    "report": report,
+                    "report_markdown": ReportExportAgent().export({"report": report}, "markdown")["content"],
                 }
 
             report_artifact = self._run_domain_agent(
@@ -686,6 +694,7 @@ class OrchestrationAgent:
                 task_type="phase11_report_generation",
                 domain="report_studio",
                 input_snapshot={
+                    "reportSource": report_source,
                     "creditReviewDecision": credit_review,
                     "riskRegister": risk_register,
                     "artifactKeys": sorted(run["artifacts"]),

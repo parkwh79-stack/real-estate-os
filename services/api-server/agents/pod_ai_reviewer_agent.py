@@ -133,11 +133,17 @@ class PodAIReviewerAgent:
             "Do not invent facts, source locators, PNU, official land prices, registry conclusions, "
             "market comparables, or financial calculations. Return JSON only."
         )
+        from use_cases.chief_pod_work_orders import POD_EXECUTION_AGENTS, PUBLIC_INPUTS
         prompt = json.dumps(
             {
                 "task": "Review this Chief Deal Orchestrator Pod artifact for evidence gaps, contradictions, handoffs, and report-grade limitations.",
                 "podKey": pod_key,
                 "sourceArtifactKey": source_artifact_key,
+                "workRouting": {
+                    "supportedPodAgents": POD_EXECUTION_AGENTS,
+                    "publicInputOwners": PUBLIC_INPUTS,
+                    "instructions": "Choose the existing Pod/agent that must do the next work. Use collect_public_evidence only for publicInputOwners, rerun_pod for analysis, or request_material for unavailable evidence. Never supply replacement inputs, URLs, code, approvals or financial values. An agent shared by two Pods requires payload.podKey.",
+                },
                 "requiredOutput": {
                     "confidence": "0..1",
                     "findings": [
@@ -150,7 +156,10 @@ class PodAIReviewerAgent:
                             "recommendedAction": "specific next action",
                         }
                     ],
-                    "handoffs": [],
+                    "handoffs": [{"toAgent": "supported Pod key or agent ID", "handoffType": "work_order",
+                                  "payload": {"action": "collect_public_evidence|rerun_pod|request_material",
+                                              "podKey": "supported Pod key", "missingItemId": "public input key when collecting", "reason": "specific next action"},
+                                  "evidenceIds": [], "confidence": 0.8}],
                     "reportFragments": {
                         "riskMemo": "",
                         "missingDataRequest": "",
@@ -158,7 +167,8 @@ class PodAIReviewerAgent:
                     },
                 },
                 "guardrails": POD_AI_REVIEW_GUARDRAILS,
-                "artifact": _compact_json(source_artifact, max_chars=16000),
+                "artifact": _compact_json({key: value for key, value in source_artifact.items()
+                                            if key != "inputSnapshot"}, max_chars=16000),
             },
             ensure_ascii=False,
         )

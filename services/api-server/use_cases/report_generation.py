@@ -143,11 +143,10 @@ def generate_pf_report_use_case(
     structured_report = agent.generate_structured_report(source_data)
     structured_report["title"] = "AI PF 심사보고서"
     structured_report["displayUnit"] = "백만원"
-    markdown = agent.generate_report(source_data)
     selected_template = _select_report_template(project_data, input_data)
     if selected_template:
         _apply_report_template(structured_report, selected_template)
-        markdown = _append_template_application_summary(markdown, structured_report["templateApplication"])
+    markdown = ReportExportAgent().export({"report": structured_report}, "markdown")["content"]
     return {
         "structuredReport": structured_report,
         "reportMarkdown": markdown,
@@ -171,6 +170,7 @@ def generate_and_save_pf_report_use_case(
     )
     generated["paragraphEvidenceLinks"] = paragraph_evidence_links
     generated["structuredReport"]["paragraphEvidenceLinks"] = paragraph_evidence_links
+    generated["reportMarkdown"] = ReportExportAgent().export({"report": generated["structuredReport"]}, "markdown")["content"]
     report_record = report_repository.create(
         project_id,
         generated["structuredReport"],
@@ -717,26 +717,6 @@ def _has_source_locator(record: Dict[str, Any]) -> bool:
     if not isinstance(locator, dict):
         return False
     return any(value not in (None, "") for value in locator.values())
-
-
-def _append_template_application_summary(markdown: str, application: Dict[str, Any]) -> str:
-    if not application.get("templateId"):
-        return markdown
-    enabled_count = len([
-        row for row in application.get("sectionCoverage", [])
-        if row.get("enabled") and row.get("hasReportSection")
-    ])
-    unmapped_count = len(application.get("unmappedSections") or [])
-    return (
-        markdown
-        + "\n\n---\n\n"
-        + "## 적용 보고서 템플릿\n\n"
-        + f"- 템플릿명: {application.get('name') or '-'}\n"
-        + f"- 템플릿 ID: {application.get('templateId') or '-'}\n"
-        + f"- 버전: v{application.get('version') or '-'}\n"
-        + f"- 적용 섹션 수: {enabled_count}\n"
-        + f"- 미매핑 섹션 수: {unmapped_count}\n"
-    )
 
 
 def _snake_to_camel(value: str) -> str:

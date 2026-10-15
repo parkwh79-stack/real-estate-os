@@ -48,6 +48,7 @@ from use_cases.chief_pod_records import (
     pod_input_snapshot,
     stable_digest,
 )
+from use_cases.chief_pod_work_orders import missing_input_work_plan, route_review_work_orders, finish_work_orders
 
 # An LLM opinion alone must never move a committee stance (AGENTS.md §1). We read
 # the review's `deterministicFindings` (deterministic provenance guaranteed) and
@@ -672,7 +673,10 @@ def plan_chief_deal_orchestration_use_case(
         ],
         learningLoopEvents=learning_loop_events,
     )
-    return plan.model_dump(by_alias=True)
+    result = plan.model_dump(by_alias=True)
+    result["taskGraph"]["missingInputWorkPlan"] = missing_input_work_plan(missing)
+    result["taskGraph"]["workOrders"] = deepcopy(stored_state.get("workOrders") or [])
+    return result
 
 
 def _transition_recalculation_events(
@@ -728,11 +732,26 @@ def run_chief_deal_pod_use_case(
 ) -> Dict[str, Any]:
     """Publish the project working copy only after every Pod sink succeeds."""
     working_copy = deepcopy(project_data)
-    result = _run_chief_deal_pod_on_copy(
-        project_id, pod_key, working_copy, options,
-        artifact_sink=artifact_sink, review_sink=review_sink, event_sink=event_sink,
-        calculation_sink=calculation_sink, handoff_sink=handoff_sink,
-    )
+    try:
+        result = _run_chief_deal_pod_on_copy(
+            project_id, pod_key, working_copy, options,
+            artifact_sink=artifact_sink, review_sink=review_sink, event_sink=event_sink,
+            calculation_sink=calculation_sink, handoff_sink=handoff_sink,
+        )
+    except Exception as exc:
+        # Keep business inputs/results atomic, but retain the failed attempt of
+        # an already queued work order so the next cascade cannot claim success.
+        original_state = project_data.get("chief_orchestration_state") or {}
+        incoming = [row for row in original_state.get("workOrders") or []
+                    if row.get("podKey") == pod_key and row.get("status") == "queued"]
+        finish_work_orders(incoming, now=datetime.now(timezone.utc).isoformat(),
+                           status="needs_material" if isinstance(exc, ValueError) else "failed",
+                           reason="입력·선행 Pod 확인이 필요합니다." if isinstance(exc, ValueError)
+                           else "Pod 실행에 실패했습니다. 실행 이력을 확인하세요.")
+        if incoming:
+            original_state.setdefault("podRuns", {}).setdefault(pod_key, {})["status"] = (
+                "blocked" if isinstance(exc, ValueError) else "failed")
+        raise
     project_data.clear()
     project_data.update(working_copy)
     return result
@@ -774,19 +793,26 @@ def _run_chief_deal_pod_on_copy(
     artifacts = state.setdefault("artifacts", {})
     coordinator = PodExecutionCoordinator()
     coordinator.require_ready(target_pod, pod_runs)
+    incoming_orders = [row for row in state.get("workOrders") or []
+                       if row.get("podKey") == pod_key and row.get("status") == "queued"]
 
     # 2. Check if the pod is blocked — but first let the orchestrator try to
     # self-serve the missing inputs from parsed data + public APIs (VWorld PNU/
     # 공시지가, MOLIT 실거래가) instead of immediately asking for more uploads.
     supplement_log: List[Dict[str, Any]] = []
-    if _pod_blocked(target_pod, missing):
+    if _pod_blocked(target_pod, missing) or any(row.get("action") == "collect_public_evidence" for row in incoming_orders):
         from use_cases.chief_pod_auto_supplement import auto_supplement_pod_inputs
 
         supplement_log = auto_supplement_pod_inputs(project_id, project_data)
+        for order in incoming_orders:
+            if order.get("action") == "collect_public_evidence":
+                order["collectionAttempts"] = deepcopy(supplement_log)
         missing = _missing_inputs(project_data)
         pods = _agent_pods(missing, workflow_track)
         target_pod = next((p for p in pods if p.pod_key == pod_key), target_pod)
         if _pod_blocked(target_pod, missing):
+            finish_work_orders(incoming_orders, now=datetime.now(timezone.utc).isoformat(), status="needs_material",
+                               reason="공개자료 보강 후에도 필요한 입력이 남아 있습니다.")
             still_needed = [
                 item.description
                 for item in missing
@@ -802,6 +828,7 @@ def _run_chief_deal_pod_on_copy(
 
     # 3. Execute the real domain use case and persist calculation/handoff records.
     now = datetime.now(timezone.utc).isoformat()
+    finish_work_orders(incoming_orders, now=now, status="running")
     artifact_key = f"artifact:{pod_key}:{now}"
     previous_run = dict(pod_runs.get(pod_key) or {})
     incoming_events = [
@@ -869,12 +896,14 @@ def _run_chief_deal_pod_on_copy(
         ]
         term_surface_metadata = _pod_term_surface_metadata(pod_key, artifact)
         artifact_record = {
+            "projectId": project_id,
             "artifactKey": artifact_key,
             "podKey": pod_key,
             "createdAt": now,
             "schemaVersion": "realytics-chief-pod-artifact-v2",
             "termSurfaceMetadata": term_surface_metadata,
             "inputHash": input_hash,
+            "inputSnapshot": deepcopy(input_snapshot),
             "outputHash": output_hash,
             "previousOutputHash": previous_run.get("outputHash"),
             "calculationRunIds": calculation_run_ids,
@@ -883,6 +912,7 @@ def _run_chief_deal_pod_on_copy(
             "result": artifact,
         }
         persisted_artifact = artifact_sink(artifact_record) if artifact_sink else artifact_record
+        dispatched_orders: List[Dict[str, Any]] = []
         pod_ai_review_ref: Dict[str, Any] | None = None
         if pod_key in {"land_legal", "market_product", "pf_credit", "cost_schedule", "feasibility_cashflow", "public_policy"}:
             pod_ai_review = run_pod_ai_review_with_contract(
@@ -894,6 +924,10 @@ def _run_chief_deal_pod_on_copy(
                 options=options,
             )
             persisted_review = review_sink(pod_ai_review) if review_sink else pod_ai_review
+            dispatched_orders = route_review_work_orders(
+                review=persisted_review, artifact=persisted_artifact, missing=_missing_inputs(project_data),
+                state=state, now=now, handoff_sink=handoff_sink,
+            )
             pod_ai_review_ref = {
                 "reviewId": persisted_review.get("reviewId"),
                 "reviewStatus": persisted_review.get("reviewStatus"),
@@ -913,10 +947,17 @@ def _run_chief_deal_pod_on_copy(
             if artifact_sink is not None:
                 persisted_artifact = artifact_sink(persisted_artifact)
     except Exception as exc:
+        finish_work_orders(incoming_orders, now=datetime.now(timezone.utc).isoformat(), status="failed", reason=str(exc))
         _transition_recalculation_events(incoming_events, "failed", event_sink, error=str(exc))
         raise
 
     _transition_recalculation_events(incoming_events, "completed", event_sink)
+    finish_work_orders(incoming_orders, now=datetime.now(timezone.utc).isoformat(), status="executed", artifact_key=artifact_key)
+    for order in incoming_orders:
+        if order.get("action") == "collect_public_evidence" and any(
+            item.item_id == order.get("missingItemId") for item in _missing_inputs(project_data)
+        ):
+            order.update(status="needs_material", reason="가능한 분석은 실행했으며 이 항목은 추가 자료가 필요합니다.")
     if pod_key == "cost_schedule" and artifact.get("artifactType") == "cost_schedule_pod_result":
         previous_cost_schedule = project_data.get("costSchedule")
         # Only a saved Chief artifact hash proves this is our derived projection.
@@ -987,6 +1028,8 @@ def _run_chief_deal_pod_on_copy(
         triggers.append(str(options["trigger"]))
     recalc_rules = _task_graph(pods, workflow_track)["recalculationRules"]
     event_specs: List[tuple[str, List[str]]] = []
+    for order in dispatched_orders:
+        event_specs.append((f"pod_work_order:{order['workOrderId']}", [order["podKey"]]))
     previous_output_hash = previous_run.get("outputHash")
     if previous_output_hash and previous_output_hash != output_hash:
         event_specs.append(
@@ -999,7 +1042,7 @@ def _run_chief_deal_pod_on_copy(
 
     seen_event_specs: set[tuple[str, tuple[str, ...]]] = set()
     for trigger, target_pods in event_specs:
-        target_pods = [target for target in target_pods if target != pod_key]
+        target_pods = [target for target in target_pods if target != pod_key or trigger.startswith("pod_work_order:")]
         spec_key = (trigger, tuple(target_pods))
         if not target_pods or spec_key in seen_event_specs:
             continue
@@ -1106,12 +1149,18 @@ def run_chief_deal_all_pods_use_case(
                     "artifactKeys": run.get("artifactKeys") or [],
                 }
             )
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
+            if isinstance(exc, RuntimeError) and not any(
+                row.get("podKey") == pod_key and row.get("status") == "failed"
+                for row in (project_data.get("chief_orchestration_state") or {}).get("workOrders") or []
+            ):
+                raise
+            failed_status = "failed" if isinstance(exc, RuntimeError) else "blocked"
             state = project_data.setdefault("chief_orchestration_state", {})
             pod_runs = state.setdefault("podRuns", {})
             pod_runs[str(pod_key)] = {
                 "podKey": pod_key,
-                "status": "blocked",
+                "status": failed_status,
                 "progressPercent": 0,
                 "artifactKeys": [],
                 "handoffIds": [],
@@ -1122,7 +1171,7 @@ def run_chief_deal_all_pods_use_case(
             summary_rows.append(
                 {
                     "podKey": pod_key,
-                    "status": "blocked",
+                    "status": failed_status,
                     "startedAt": started_at,
                     "completedAt": datetime.now(timezone.utc).isoformat(),
                     "error": str(exc),
@@ -1174,12 +1223,17 @@ def run_chief_deal_all_pods_use_case(
                         "completedAt": datetime.now(timezone.utc).isoformat(),
                     }
                 )
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
+                if isinstance(exc, RuntimeError) and not any(
+                    row.get("podKey") == pod_key and row.get("status") == "failed"
+                    for row in (project_data.get("chief_orchestration_state") or {}).get("workOrders") or []
+                ):
+                    raise
                 recalculation_rows.append(
                     {
                         "podKey": pod_key,
                         "round": round_index,
-                        "status": "blocked",
+                        "status": "failed" if isinstance(exc, RuntimeError) else "blocked",
                         "triggers": triggering[:5],
                         "error": str(exc),
                     }
@@ -1198,8 +1252,11 @@ def run_chief_deal_all_pods_use_case(
             seen.add(key)
             unique_supplements.append(item)
         final_plan["autoSupplements"] = unique_supplements
-    completed_count = len([row for row in summary_rows if row.get("status") == "completed"])
-    blocked_count = len([row for row in summary_rows if row.get("status") == "blocked"])
+    final_runs = [row for row in final_plan["podRuns"] if row.get("podKey") in order]
+    completed_count = sum(row.get("status") == "completed" for row in final_runs)
+    blocked_count = sum(row.get("status") == "blocked" for row in final_runs)
+    failed_count = sum(row.get("status") == "failed" for row in final_runs)
+    pending_count = sum(row.get("status") == "needs_recalculation" for row in final_runs)
     final_plan["runAllSummary"] = {
         "schemaVersion": "realytics-chief-pod-run-all-summary-v1",
         "projectId": project_id,
@@ -1207,9 +1264,11 @@ def run_chief_deal_all_pods_use_case(
         "requestedPodCount": len(order),
         "completedCount": completed_count,
         "blockedCount": blocked_count,
+        "failedCount": failed_count,
+        "pendingCount": pending_count,
         "recalculatedCount": len([r for r in recalculation_rows if r.get("status") == "recalculated"]),
         "recalculationRows": recalculation_rows,
-        "status": "completed_with_blockers" if blocked_count else "completed",
+        "status": "completed_with_blockers" if blocked_count or failed_count or pending_count else "completed",
         "rows": summary_rows,
     }
     return final_plan
@@ -1285,11 +1344,16 @@ def run_chief_deal_pod_with_cascade_use_case(
                     "startedAt": started_at,
                     "completedAt": datetime.now(timezone.utc).isoformat(),
                 })
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
+                if isinstance(exc, RuntimeError) and not any(
+                    row.get("podKey") == target_key and row.get("status") == "failed"
+                    for row in (project_data.get("chief_orchestration_state") or {}).get("workOrders") or []
+                ):
+                    raise
                 rows.append({
                     "podKey": target_key,
                     "round": round_index,
-                    "status": "blocked",
+                    "status": "failed" if isinstance(exc, RuntimeError) else "blocked",
                     "triggers": triggers[:5],
                     "error": str(exc),
                 })
@@ -1300,6 +1364,7 @@ def run_chief_deal_pod_with_cascade_use_case(
         "sourcePod": pod_key,
         "recalculatedCount": len([row for row in rows if row.get("status") == "recalculated"]),
         "blockedCount": len([row for row in rows if row.get("status") == "blocked"]),
+        "failedCount": len([row for row in rows if row.get("status") == "failed"]),
         "rows": rows,
     }
     return plan

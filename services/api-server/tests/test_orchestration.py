@@ -319,6 +319,10 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert run["artifacts"]["restructuringPlan"]["status"] == "skipped"
     assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "skipped"
     developability = run["artifacts"]["developabilityScore"]
+    saved_scenario = run["artifacts"].get("scenariosEvaluation")
+    if saved_scenario:
+        report_metrics = run["artifacts"]["phase11Report"]["report"]["sections"]["businessFeasibility"]["metrics"]
+        assert report_metrics["unsoldLtvBase"] == saved_scenario["unsoldLtvMatrix"]["summary"]["baseCaseLtv"]
     assert developability["analysisType"] == "developability_score_v1"
     # This fixture has no server-verified regulatory snapshot. The
     # developability contract must not invent a report-grade score from

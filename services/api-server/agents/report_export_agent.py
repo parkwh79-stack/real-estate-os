@@ -59,7 +59,34 @@ class ReportExportAgent:
         }
 
     def _render_markdown(self, report_record: Dict[str, Any]) -> str:
+        report = report_record.get("report") or {}
+        if report.get("reportType") == "cash-flow-comparison-review" and report_record.get("report_markdown"):
+            # Comparison drafts already seal their narrative together with the
+            # two calculations. Preserve that stored download byte-for-byte.
+            return report_record["report_markdown"]
+        if report.get("sectionOrder"):
+            lines = [f"# {report_record.get('title') or report.get('title') or 'PF Review Report'}", ""]
+            for meta, value in self._report_sections(report):
+                lines.extend([f"## {meta.get('index', '')}. {meta.get('title', '')}", ""])
+                lines.extend(self._flatten_text(value))
+                lines.append("")
+            return "\n".join(lines)
         return report_record.get("report_markdown") or f"# {report_record.get('title', 'PF Review Report')}\n"
+
+    @staticmethod
+    def _report_sections(report: Dict[str, Any]) -> list[tuple[dict, Any]]:
+        """All formats consume the saved body and saved provenance, never live reviews."""
+        rows = [(meta, (report.get("sections") or {}).get(meta.get("key")))
+                for meta in report.get("sectionOrder") or []]
+        links = report.get("paragraphEvidenceLinks") or []
+        if links:
+            rows.append(({"index": "부록", "key": "podEvidence", "title": "문단별 근거와 Pod 보완사항"}, links))
+        sources = report.get("calculationSources")
+        if sources:
+            rows.append(({"index": "부록", "key": "calculationSources", "title": "저장된 계산과 입력 기준"}, sources))
+        if report.get("templateApplication"):
+            rows.append(({"index": "부록", "key": "templateApplication", "title": "적용 보고서 템플릿"}, report["templateApplication"]))
+        return rows
 
     def _render_json(self, report_record: Dict[str, Any]) -> str:
         payload = {
@@ -79,15 +106,14 @@ class ReportExportAgent:
     def _render_html(self, report_record: Dict[str, Any]) -> str:
         report = report_record.get("report", {})
         title = report_record.get("title") or report.get("title") or "PF Review Report"
-        section_order = report.get("sectionOrder", [])
-        sections = report.get("sections", {})
+        report_sections = self._report_sections(report)
         toc_items = "\n".join(
             f'<li><a href="#{escape(str(item.get("key", "")))}">{escape(str(item.get("index", "")))}. {escape(str(item.get("title", "")))}</a></li>'
-            for item in section_order
+            for item, _ in report_sections
         )
         body = "\n".join(
-            self._render_section(item, sections.get(item.get("key")))
-            for item in section_order
+            self._render_section(item, value)
+            for item, value in report_sections
         )
 
         return f"""<!doctype html>
@@ -182,21 +208,20 @@ class ReportExportAgent:
             f"Version: {report_record.get('version', '')}",
             "",
         ]
-        section_order = report.get("sectionOrder", [])
-        sections = report.get("sections", {})
-        if section_order:
+        report_sections = self._report_sections(report)
+        if report_sections:
             lines.append("Table of Contents")
-            for item in section_order:
+            for item, _ in report_sections:
                 lines.append(f"{item.get('index', '')}. {item.get('title', item.get('key', ''))}")
             lines.append("")
 
-        for item in section_order:
+        for item, value in report_sections:
             key = item.get("key")
             lines.append(f"{item.get('index', '')}. {item.get('title', key)}")
-            lines.extend(self._flatten_text(sections.get(key), indent=0))
+            lines.extend(self._flatten_text(value, indent=0))
             lines.append("")
 
-        if not section_order:
+        if not report_sections:
             markdown = self._render_markdown(report_record)
             lines.extend(markdown.splitlines())
         return lines
@@ -261,10 +286,17 @@ class ReportExportAgent:
                     wrapped_lines.append(chunk)
 
         page_line_count = 50
-        pages = [
-            wrapped_lines[index:index + page_line_count]
-            for index in range(0, len(wrapped_lines), page_line_count)
-        ] or [[""]]
+        headings = {f"{meta.get('index', '')}. {meta.get('title', '')}"
+                    for meta, _ in self._report_sections(report_record.get("report") or {})}
+        pages: list[list[str]] = []
+        page: list[str] = []
+        for line in wrapped_lines:
+            if len(page) >= page_line_count or (line in headings and len(page) >= page_line_count - 2):
+                pages.append(page)
+                page = []
+            page.append(line)
+        if page or not pages:
+            pages.append(page or [""])
 
         objects: list[bytes] = [
             b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -319,7 +351,8 @@ class ReportExportAgent:
 
     def _render_docx(self, report_record: Dict[str, Any]) -> bytes:
         lines = self._plain_report_lines(report_record)
-        document_body = "\n".join(self._docx_paragraph(line) for line in lines)
+        document_body = "\n".join(self._docx_paragraph(line, "Title" if index == 0 else "Normal")
+                                  for index, line in enumerate(lines))
         document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
@@ -345,7 +378,13 @@ class ReportExportAgent:
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
     <w:name w:val="Normal"/>
-    <w:rPr><w:rFonts w:ascii="Malgun Gothic" w:eastAsia="Malgun Gothic"/></w:rPr>
+    <w:pPr><w:spacing w:after="100"/><w:wordWrap w:val="1"/></w:pPr>
+    <w:rPr><w:rFonts w:ascii="Malgun Gothic" w:hAnsi="Malgun Gothic" w:eastAsia="Malgun Gothic"/><w:sz w:val="20"/><w:lang w:val="ko-KR" w:eastAsia="ko-KR"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:keepNext/><w:spacing w:after="240"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="36"/></w:rPr>
   </w:style>
 </w:styles>"""
 
@@ -355,12 +394,16 @@ class ReportExportAgent:
             docx.writestr("_rels/.rels", rels)
             docx.writestr("word/document.xml", document_xml)
             docx.writestr("word/styles.xml", styles)
+            docx.writestr("word/_rels/document.xml.rels", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>''')
         return output.getvalue()
 
     @staticmethod
-    def _docx_paragraph(text: str) -> str:
+    def _docx_paragraph(text: str, style: str = "Normal") -> str:
         safe_text = xml_escape(text)
-        return f"<w:p><w:r><w:t xml:space=\"preserve\">{safe_text}</w:t></w:r></w:p>"
+        return f'<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr><w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r></w:p>'
 
     def _file_name(self, report_record: Dict[str, Any], extension: str) -> str:
         report_id = str(report_record.get("report_id", "report"))[:8]

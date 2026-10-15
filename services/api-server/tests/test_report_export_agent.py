@@ -2,6 +2,9 @@ from base64 import b64decode
 import json
 from pathlib import Path
 import re
+from io import BytesIO
+from zipfile import ZipFile
+from xml.etree import ElementTree
 
 import pytest
 import fitz
@@ -76,3 +79,41 @@ def test_standard_pf_report_pdf_keeps_all_sections_inside_page():
     assert len(report["sectionOrder"]) == 20
     for section in report["sectionOrder"]:
         assert re.sub(r"\s+", "", section["title"]) in rendered
+
+
+def test_saved_pod_findings_and_sources_are_present_in_every_output():
+    findings = [{"message": f"저장된 보완사항 {i}", "podKey": pod, "reviewId": f"review-{i}",
+                 "sourceArtifactKeys": [f"artifact-{i}"], "sourceLocators": [{"sheet": "원본", "cell": f"A{i}"}]}
+                for i, pod in enumerate(["land_legal", "market_product", "cost_schedule", "feasibility_cashflow", "pf_credit", "public_policy"])]
+    report = {"title": "동일 실행 검토", "sectionOrder": [{"key": "summary", "title": "저장된 결과", "index": 1}],
+              "sections": {"summary": {"maxMinus": -123456789}},
+              "paragraphEvidenceLinks": {"podReviewReadStatus": "loaded", "links": [{"podAiReviewFindings": findings}]}}
+    record = {"report": report, "report_markdown": "STALE_MARKDOWN_MUST_NOT_LEAK"}
+    agent = ReportExportAgent()
+    outputs = [agent.export(record, format)["content"] for format in ["markdown", "html", "json"]]
+    outputs.append("\n".join(_pdf_text_lines(b64decode(agent.export(record, "pdf")["content"]))))
+    with ZipFile(BytesIO(b64decode(agent.export(record, "docx")["content"]))) as docx:
+        tree = ElementTree.fromstring(docx.read("word/document.xml"))
+        outputs.append("\n".join(tree.itertext()))
+        assert "styles.xml" in docx.read("word/_rels/document.xml.rels").decode()
+    for output in outputs:
+        assert "-123456789" in output
+        assert "STALE_MARKDOWN_MUST_NOT_LEAK" not in output
+        for i, finding in enumerate(findings):
+            assert finding["podKey"] in output
+            assert f"review-{i}" in output and f"artifact-{i}" in output
+            assert f"A{i}" in output
+
+
+def test_report_renders_captured_cash_flow_without_synthetic_scenario_or_engine_call(monkeypatch):
+    from agents.scenario_engine_agent import ScenarioEngineAgent
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Rendering must not execute a scenario")
+    monkeypatch.setattr(ScenarioEngineAgent, "run_scenario_set", forbidden)
+    result = {"summary": {"maxMinus": -42, "totalRevenue": 0}, "monthlyCashFlow": [{"month": 0, "netCashFlow": -42}]}
+    data = {"cashFlowRunResult": result, "product_mix": [{"units": 5}], "pf_structure": [{"amount": 100}],
+            "feasibility_input": {"total_revenue": 1000, "total_cost": 500}}
+    structured = ReportAgent().generate_structured_report(data)
+    assert structured["sections"]["summaryCashFlow"]["summary"] == result["summary"]
+    assert structured["sections"]["summaryCashFlow"]["rows"] == result["monthlyCashFlow"]
+    assert "maxMinus: -42" in ReportAgent().generate_report(data)

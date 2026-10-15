@@ -249,6 +249,15 @@ interface ChiefDealOrchestrationPlan {
     recommendedRunOrder?: string[];
     edges?: Array<Record<string, unknown>>;
     recalculationRules?: Array<Record<string, unknown>>;
+    missingInputWorkPlan?: Array<{
+      itemId: string; podKey: string; agents: string[]; description: string;
+      acceptableSources: string[]; action: string; collectionPod?: string; limitation: string;
+    }>;
+    workOrders?: Array<{
+      workOrderId: string; podKey?: string; toAgent: string; reviewMode: string;
+      action: string; status: string; reason: string; requestedReason?: string;
+      sourceReviewId?: string; sourceArtifactKey?: string; resultArtifactKey?: string;
+    }>;
   };
   agentPods: AgentPodPlan[];
   podRuns: AgentPodRun[];
@@ -1746,6 +1755,13 @@ function TrackWorkflowPanel({ workflow }: { workflow: ReturnType<typeof getTrack
 function TaskGraphPanel({ taskGraph }: { taskGraph?: ChiefDealOrchestrationPlan["taskGraph"] }) {
   const stages = taskGraph?.executionStages ?? [];
   const runOrder = taskGraph?.recommendedRunOrder ?? [];
+  const workOrders = taskGraph?.workOrders ?? [];
+  const missingWork = taskGraph?.missingInputWorkPlan ?? [];
+  const workStatus: Record<string, string> = {
+    queued: "실행 대기", running: "실행 중", executed: "재검토 실행 완료",
+    needs_material: "추가 자료 필요", needs_review: "업무 확인 필요", failed: "실행 실패",
+  };
+  const podLabel = (key?: string) => key ? POD_META[key as PodKey]?.label ?? key : "담당 확인 필요";
   return (
     <div className="mt-4 space-y-3">
       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs dark:border-slate-700 dark:bg-slate-950">
@@ -1762,6 +1778,36 @@ function TaskGraphPanel({ taskGraph }: { taskGraph?: ChiefDealOrchestrationPlan[
           </div>
         ))}
       </div>
+      <section aria-label="추가 업무 배정" className="space-y-2 rounded-lg border border-slate-200 p-3 text-xs dark:border-slate-700">
+        <h3 className="font-black">추가 업무 배정</h3>
+        <p className="leading-5 text-slate-500">Pod 실행 시 검토 제안을 확인하여 자료 수집과 재검토를 이어갑니다. 실행 완료와 증빙 확인 완료는 별도로 관리합니다.</p>
+        {workOrders.length === 0 && <p className="text-slate-500">저장된 추가 업무 제안이 없습니다.</p>}
+        {workOrders.map((order) => (
+          <details key={order.workOrderId} className="rounded border border-slate-200 p-2 dark:border-slate-700">
+            <summary className="cursor-pointer font-semibold">{podLabel(order.podKey)} · {workStatus[order.status] ?? order.status}</summary>
+            <div className="mt-2 space-y-1 break-words leading-5">
+              <p>{order.reviewMode === "llm_evidence_aware_review" ? "LLM 검토 제안" : "규칙 기반 검토"} → {order.toAgent}</p>
+              {order.requestedReason && <p>{order.requestedReason}</p>}
+              <p>{order.reason}</p>
+              <p className="text-slate-500">검토 기록: {order.sourceReviewId ?? "미확인"}</p>
+              <p className="text-slate-500">검토한 결과: {order.sourceArtifactKey ?? "미확인"}</p>
+              {order.resultArtifactKey && <p className="text-slate-500">재검토 결과: {order.resultArtifactKey}</p>}
+            </div>
+          </details>
+        ))}
+        {missingWork.length > 0 && <details>
+          <summary className="cursor-pointer font-semibold">Pod별 필요한 자료와 수집 경로 {missingWork.length}건</summary>
+          <ul className="mt-2 space-y-3">
+            {missingWork.map((work) => <li key={`${work.podKey}:${work.itemId}`} className="break-words leading-5">
+              <p className="font-semibold">{podLabel(work.podKey)} · {work.description}</p>
+              <p>담당: {work.agents.join(", ")}</p>
+              <p>확인 자료: {work.acceptableSources.join(", ")}</p>
+              {work.collectionPod && <p>공개자료 수집 담당: {podLabel(work.collectionPod)}</p>}
+              <p className="text-slate-500">{work.limitation}</p>
+            </li>)}
+          </ul>
+        </details>}
+      </section>
     </div>
   );
 }

@@ -67,6 +67,26 @@ def _cost_schedule_project(client):
     return project_id
 
 
+def test_failed_queued_work_is_persisted_without_uncommitted_domain_outputs(monkeypatch):
+    from storage import get_project_record
+    import use_cases.chief_deal_orchestration as chief
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    data = PROJECTS_DB[project_id]
+    data["chief_orchestration_state"]["workOrders"] = [
+        {"workOrderId": "queued-work", "podKey": "cost_schedule", "action": "rerun_pod", "status": "queued"}]
+    upsert_project_record(project_id, data)
+    def fail(**kwargs):
+        kwargs["project_data"]["uncommitted_result"] = 999
+        raise RuntimeError("controlled execution failure")
+    monkeypatch.setattr(chief, "run_domain_pod_with_contract", fail)
+    response = client.post(f"/projects/{project_id}/chief-orchestration/run-pod", json={"podKey": "cost_schedule"})
+    assert response.status_code == 502
+    saved = get_project_record(project_id)
+    assert saved["chief_orchestration_state"]["workOrders"][0]["status"] == "failed"
+    assert "uncommitted_result" not in saved
+
+
 def _run_cost_schedule(client, project_id):
     response = client.post(f"/projects/{project_id}/chief-orchestration/run-pod", json={
         "podKey": "cost_schedule", "options": {"podAiReviewMode": "deterministic"},

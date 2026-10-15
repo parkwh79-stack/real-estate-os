@@ -77,7 +77,11 @@ def _supplement_land(
             "reason": "사업계획서 파싱과 본문 주소 추출 모두에서 주소를 찾지 못해 PNU를 자동 해석할 수 없습니다.",
         }
 
-    parcel = resolver(address)
+    try:
+        parcel = resolver(address)
+    except Exception:
+        return {"itemId": "pnu_or_land_ledger_missing", "status": "fetch_failed",
+                "source": "VWorld 연속지적도", "reason": "공개 토지자료를 조회하지 못했습니다."}
     if parcel.get("status") != "resolved":
         return {
             "itemId": "pnu_or_land_ledger_missing",
@@ -86,11 +90,14 @@ def _supplement_land(
             "reason": f"주소 '{address}' 해석 실패 ({parcel.get('status')})",
         }
 
+    if land.get("pnu") and str(land["pnu"]) != str(parcel.get("pnu")):
+        return {"itemId": "pnu_or_land_ledger_missing", "status": "needs_user_material",
+                "reason": "주소 조회 PNU와 기존 필지가 다릅니다. 기존 입력을 보존하고 대상 필지 확인을 요청합니다."}
     land["address"] = land.get("address") or address
     land["pnu"] = parcel["pnu"]
-    if parcel.get("center"):
+    if parcel.get("center") and not land.get("center"):
         land["center"] = parcel["center"]
-    if parcel.get("officialLandPricePerSqm"):
+    if parcel.get("officialLandPricePerSqm") and land.get("officialLandPricePerSqm") is None:
         land["officialLandPricePerSqm"] = parcel["officialLandPricePerSqm"]
         land["officialLandPriceBaseYear"] = parcel.get("officialLandPriceBaseYear")
     project_data["land"] = land

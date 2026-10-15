@@ -31,7 +31,7 @@ def test_schedule_event_map_adapts_canonical_rows_without_losing_source_shape():
 
 
 def test_report_markdown_accepts_canonical_schedule_event_list():
-    markdown = ReportAgent()._build_project_schedule({
+    markdown = ReportAgent().generate_report({
         "schedule": [
             {"key": "construction_start", "planned_date": "2020-05-01"},
             {"key": "completion", "planned_date": "2023-10-01"},

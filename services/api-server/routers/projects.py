@@ -5892,6 +5892,9 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
     }
 
     project_data = _project_store()[project_id]
+    pending_work_ids = {row.get("workOrderId") for row in
+                        (project_data.get("chief_orchestration_state") or {}).get("workOrders") or []
+                        if row.get("podKey") == pod_key and row.get("status") == "queued"}
     try:
         pod_runner = run_chief_deal_pod_with_cascade_use_case if options.get("autoCascade") else run_chief_deal_pod_use_case
         options = _stored_chief_evidence_options(project_id, project_data, options)
@@ -5906,8 +5909,18 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
             calculation_sink=lambda record: upsert_calculation_run_record(project_id, record),
             handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except (ValueError, RuntimeError) as e:
+        failed_work = [row for row in (project_data.get("chief_orchestration_state") or {}).get("workOrders") or []
+                       if row.get("workOrderId") in pending_work_ids and row.get("status") in {"failed", "needs_material"}]
+        if failed_work:
+            upsert_project_record(project_id, project_data)
+            record_sensitive_project_event(request, event_type="chief_pod_work_order_failed", project_id=project_id,
+                metadata={"podKey": pod_key, "workOrderIds": [row["workOrderId"] for row in failed_work]})
+        if isinstance(e, ValueError):
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if failed_work:
+            raise HTTPException(status_code=502, detail="Pod 추가 업무 실행에 실패했습니다. 저장된 업무 상태를 확인하세요.") from e
+        raise
 
     actor = str(identity_context_from_request(request).get("userId") or "chief_deal_orchestrator")
     plan["parsedFactValidation"] = _validate_supplement_and_revalidate_parsed_facts(
