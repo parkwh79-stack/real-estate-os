@@ -145,7 +145,7 @@ def test_additional_collateral_support_cures_unsold_ltv_breach():
     assert all(flag.code != "UNSOLD_LTV_BREACH" for flag in supported_result.riskFlags)
 
 
-def test_report_agent_dynamic_scenarios():
+def test_report_agent_uses_saved_scenarios_without_executing_them_again(monkeypatch):
     input_data = {
         "project": {
             "name": "Hana PF Dream Suite",
@@ -172,7 +172,17 @@ def test_report_agent_dynamic_scenarios():
         }
     }
 
-    # Generate Structured Report
+    saved = ScenarioEngineAgent().run_scenario_set(ScenarioSetRequest(
+        scenarioSetId="saved-report-scenario", productMix=input_data["product_mix"],
+        pfStructure=[{**row, "interestRate": row["interest_rate"], "feeRate": row["fee_rate"]}
+                     for row in input_data["pf_structure"]],
+    ))
+    input_data["scenariosEvaluation"] = saved.model_dump(mode="json")
+    def no_recalculation(*args, **kwargs):
+        raise AssertionError("A report must use its saved scenario result")
+    monkeypatch.setattr(ScenarioEngineAgent, "run_scenario_set", no_recalculation)
+
+    # Generate the report from the captured result.
     agent = ReportAgent()
     structured = agent.generate_structured_report(input_data)
 
@@ -181,11 +191,13 @@ def test_report_agent_dynamic_scenarios():
     
     # 1. Sales revenue distribution policy must include waterfall summary fragment
     policy = structured["sections"]["salesRevenueDistribution"]["policy"]
-    assert "Waterfall" in policy or len(policy) > 20
+    assert policy == saved.reportFragments.waterfallSummary
+    assert structured["sections"]["salesRevenueDistribution"]["waterfall"] == [row.model_dump() for row in saved.waterfallScenarios]
     
-    # 2. Structured cashflow rows must include scenario rows
+    # 2. A recovery scenario does not substitute for a saved monthly cash flow.
     cf_rows = structured["sections"]["summaryCashFlow"]["rows"]
-    assert len(cf_rows) > 2  # base case + stress cases from ScenarioEngineAgent
+    assert cf_rows == []
+    assert structured["sections"]["summaryCashFlow"]["status"] == "not_assessable"
     
     # 3. Exit Strategy fallback must contain tranche recovery summaries
     fallback = structured["sections"]["exitStrategy"]["fallback"]
@@ -200,7 +212,8 @@ def test_report_agent_dynamic_scenarios():
     metrics = structured["sections"]["businessFeasibility"]["metrics"]
     assert "unsoldLtvBase" in metrics
     assert "unsoldLtvStress" in metrics
-    assert metrics["unsoldLtvBase"] is not None
+    assert metrics["unsoldLtvBase"] == saved.unsoldLtvMatrix.summary["baseCaseLtv"]
+    assert metrics["unsoldLtvStress"] == saved.unsoldLtvMatrix.summary["stressCaseLtv"]
 
     # Generate Markdown Report
     markdown_report = agent.generate_report(input_data)

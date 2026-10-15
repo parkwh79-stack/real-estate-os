@@ -1253,6 +1253,7 @@ def test_report_generation_applies_saved_report_template(monkeypatch):
     assert report["sectionOrder"][1]["key"] == "marketAnalysis"
     assert report["sectionOrder"][1]["requiredEvidence"] == ["분양가 비교사례"]
     assert body["metadata"]["applied_template_id"] == "phase11-template-apply-test"
-    assert "## 적용 보고서 템플릿" in body["report_markdown"]
+    assert "## 부록. 적용 보고서 템플릿" in body["report_markdown"]
+    assert report["appliedTemplate"]["templateId"] in body["report_markdown"]
 
     client.delete(f"/projects/{project_id}")

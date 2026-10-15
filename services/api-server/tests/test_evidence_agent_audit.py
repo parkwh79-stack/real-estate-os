@@ -90,7 +90,8 @@ def test_empty_report_keeps_financials_unconfirmed():
     assert sections["financialTerms"]["totalAmountMillion"] is None
     for key in ("ltv", "salesValueLtv", "exitSalesRate", "developmentProfit", "developmentProfitMillion", "profitMargin"):
         assert sections["businessFeasibility"]["metrics"][key] is None
-    assert sections["summaryCashFlow"]["rows"][0]["netCashFlow"] is None
+    assert sections["summaryCashFlow"]["status"] == "not_assessable"
+    assert sections["summaryCashFlow"]["rows"] == []
     assert sections["salesPaymentSchedule"][0]["ratio"] is None
 
 
@@ -113,7 +114,8 @@ def test_empty_markdown_does_not_assert_repayment_or_market_success():
     markdown = ReportAgent().generate_report({})
     assert "충분히 커버 가능" not in markdown
     assert "달성이 무난" not in markdown
-    assert "**예상 개발이익**: 미확인" in markdown
+    assert "developmentProfit: -" in markdown
+    assert "저장된 현금흐름 계산이 없습니다" in markdown
 
 
 def test_empty_risk_register_cannot_recommend_approval():
