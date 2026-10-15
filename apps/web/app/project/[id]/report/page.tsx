@@ -35,7 +35,7 @@ import { ConsensusPanel } from "../../../../components/orchestration/consensus-p
 import { CreditDocumentsPanel } from "../../../../components/orchestration/credit-documents-panel";
 import { SimilarCasesRagPanel } from "../../../../components/orchestration/similar-cases-rag-panel";
 import { TermAnnotationsPanel } from "../../../../components/orchestration/term-annotations-panel";
-import { ComparisonReportReview, type ComparisonReportSnapshot } from "../../../../components/feasibility/comparison-report-review";
+import { ComparisonReportReview, type ComparisonReportSnapshot, type ReportCashFlowSnapshot } from "../../../../components/feasibility/comparison-report-review";
 
 interface ProjectResponse {
   project?: { name?: string; type?: string };
@@ -106,6 +106,7 @@ interface GeneratedReportResponse {
   };
   report?: {
     cashFlowComparisonSnapshot?: ComparisonReportSnapshot;
+    cashFlowCalculationSnapshot?: ReportCashFlowSnapshot;
     sectionOrder?: Array<{ key: string; title: string }>;
     paragraphEvidenceLinks?: ParagraphEvidenceLinks;
     appliedTemplate?: { name?: string; version?: number };
@@ -457,6 +458,7 @@ export default function ReportPreviewPage() {
       {message && <Notice tone="good" message={message} />}
 
       <ComparisonReportReview projectId={projectId} reportId={report?.report_id} snapshot={report?.report?.cashFlowComparisonSnapshot}
+        cashFlowSnapshot={report?.report?.cashFlowCalculationSnapshot}
         disabled={loading || generating || publishing || selectingReport} onCreated={loadData} onBusyChange={setGenerating} />
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_0.95fr]">

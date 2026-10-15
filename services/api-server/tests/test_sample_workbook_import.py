@@ -109,3 +109,29 @@ def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance(tmp_p
     }
     for key, expected in cost_mapping["monthlyCostScheduleKrw"].items():
         assert monthly_costs[key] == pytest.approx(expected, abs=cost_mapping["categoryToleranceKrw"])
+
+    # The source-derived budget calculation (not verified loan terms) can be
+    # explicitly frozen into a PF draft and reopened without the live workbook.
+    from agents.cash_flow_engine import run_cash_flow_engine
+    from db.repositories.report_repository import ReportRepository
+    from storage import upsert_calculation_run_record, upsert_report_record, load_state
+    from use_cases.cash_flow_comparison import content_hash
+    from use_cases.report_calculation_basis import freeze_cash_flow_basis
+    from use_cases.report_generation import generate_and_save_pf_report_use_case, export_report_use_case
+
+    result = run_cash_flow_engine(request)
+    run = upsert_calculation_run_record("sample-bonri", {"calculationRunId": "sample-report-cf",
+        "engineKey": "cash_flow_engine", "status": "completed",
+        "inputSnapshot": request, "resultSnapshot": result})
+    selected = freeze_cash_flow_basis(run, project_id="sample-bonri", tenant_id="legacy",
+        selection={"calculationRunId": run["calculationRunId"], "inputHash": content_hash(request), "resultHash": content_hash(result)})
+    repository = ReportRepository({}, lambda: pytest.fail("Use incremental report persistence"), upsert_report_record)
+    generated = generate_and_save_pf_report_use_case(repository, "sample-bonri", project, cash_flow_run=selected)
+    reopened = ReportRepository(load_state(project_workspace_only=True)["reports"], lambda: None).get(
+        "sample-bonri", generated["reportRecord"]["report_id"])
+    cf_section = reopened["report"]["sections"]["summaryCashFlow"]
+    assert cf_section["rows"] == result["monthlyCashFlow"]
+    assert cf_section["summary"] == result["summary"]
+    exported = json.loads(export_report_use_case(reopened, {"format": "json"})["content"])
+    assert exported["report"]["cashFlowCalculationSnapshot"] == run
+    assert hashlib.sha256(workbook_path.read_bytes()).hexdigest() == manifest["sha256"]

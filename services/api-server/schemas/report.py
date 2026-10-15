@@ -1,3 +1,13 @@
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ReportCashFlowBasis(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    calculationRunId: str = Field(min_length=1, max_length=256)
+    inputHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    resultHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 PHASE_11_TEMPLATE = "phase-11-pf-review"
 
 PHASE_11_SECTION_ORDER = [

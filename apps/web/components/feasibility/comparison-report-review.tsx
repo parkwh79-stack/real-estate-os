@@ -13,6 +13,11 @@ export type ComparisonReportSnapshot = {
   comparisonRun?: { inputSnapshot?: { reviewedMonthlyFinancingReview?: { reason?: string } } };
 };
 
+export type ReportCashFlowSnapshot = {
+  calculationRunId: string; createdAt?: string;
+  resultSnapshot: { summary: { totalRevenue?: number; totalProjectCost?: number; endingCash?: number } };
+};
+
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
 
 async function responseBody<T>(response: Response, action: string): Promise<T> {
@@ -20,8 +25,9 @@ async function responseBody<T>(response: Response, action: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function ComparisonReportReview({ projectId, reportId, snapshot, disabled, onCreated, onBusyChange }: {
+export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, disabled, onCreated, onBusyChange }: {
   projectId: string; reportId?: string; snapshot?: ComparisonReportSnapshot; disabled: boolean;
+  cashFlowSnapshot?: ReportCashFlowSnapshot;
   onCreated: (reportId: string) => Promise<void>; onBusyChange: (busy: boolean) => void;
 }) {
   const endpoint = `${apiBase}/projects/${encodeURIComponent(projectId)}`;
@@ -33,6 +39,7 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, disabled
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [cashFlowRunId, setCashFlowRunId] = useState("");
 
   useEffect(() => { activeReport.current = reportId; }, [reportId]);
 
@@ -43,13 +50,17 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, disabled
     if (!Array.isArray(result.availableRuns) || typeof result.comparisonHash !== "string") {
       throw new Error("저장된 비교를 확인하지 못했습니다. 다시 불러오세요.");
     }
-    if (activeEndpoint.current === endpoint) setSaved(result);
+    if (activeEndpoint.current === endpoint) {
+      setSaved(result);
+      setCashFlowRunId((current) => result.availableRuns.some((run) => run.calculationRunId === current) ? current : "");
+    }
   }, [endpoint]);
 
   useEffect(() => {
     const controller = new AbortController();
     activeEndpoint.current = endpoint;
     setSaved(null); setError(null); setNotice(null); setLoading(true); setBusy(false);
+    setCashFlowRunId("");
     onBusyChange(false);
     void load(controller.signal).catch((failure: unknown) => {
       if (!controller.signal.aborted && activeEndpoint.current === endpoint) {
@@ -63,6 +74,8 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, disabled
 
   const eligible = Boolean(saved?.selection?.saved && saved.comparison && saved.comparison.status !== "incompatible");
   const locked = disabled || busy || loading;
+  const selectedCashFlow = saved?.availableRuns.find((run) => run.calculationRunId === cashFlowRunId);
+  const canCreatePf = Boolean(selectedCashFlow?.inputHash && selectedCashFlow?.resultHash);
 
   async function perform(action: () => Promise<void>) {
     if (locked || inFlight.current === endpoint) return;
@@ -88,8 +101,21 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, disabled
     if (activeEndpoint.current === endpoint) setNotice("비교 검토 초안을 저장했습니다. 아래 저장 보고서에서 다시 열고 내보낼 수 있습니다.");
   }
 
-  async function download(format: "pdf" | "docx") {
-    if (!reportId || !snapshot) return;
+  async function createPf() {
+    if (!selectedCashFlow || !canCreatePf) return;
+    const report = await responseBody<{ report_id: string }>(await fetch(`${endpoint}/reports/generate`, {
+      method: "POST", headers: { "Content-Type": "application/json", ...authHeaders("web") },
+      body: JSON.stringify({ cashFlowBasis: { calculationRunId: selectedCashFlow.calculationRunId,
+        inputHash: selectedCashFlow.inputHash, resultHash: selectedCashFlow.resultHash } }),
+    }), "현금흐름을 연결한 PF 초안 생성");
+    if (activeEndpoint.current !== endpoint) return;
+    if (typeof report.report_id !== "string" || !report.report_id) throw new Error("생성된 초안의 저장 번호를 확인하지 못했습니다.");
+    await onCreated(report.report_id);
+    if (activeEndpoint.current === endpoint) setNotice("선택한 현금흐름 계산을 PF 초안에 고정해 저장했습니다.");
+  }
+
+  async function download(format: "pdf" | "docx" | "json") {
+    if (!reportId || (!snapshot && !cashFlowSnapshot)) return;
     const reportEndpoint = `${endpoint}/reports/${encodeURIComponent(reportId)}`;
     const exported = await responseBody<{ export_id: string }>(await fetch(`${reportEndpoint}/exports`, {
       method: "POST", headers: { "Content-Type": "application/json", ...authHeaders("web") },
@@ -106,10 +132,12 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, disabled
     const url = URL.createObjectURL(blob);
     try {
       const anchor = document.createElement("a");
-      anchor.href = url; anchor.download = `cash-flow-comparison-review.${format}`;
+      anchor.href = url; anchor.download = `${snapshot ? "cash-flow-comparison-review" : "pf-cash-flow-review"}.${format}`;
       document.body.appendChild(anchor); anchor.click(); anchor.remove();
     } finally { URL.revokeObjectURL(url); }
-    setNotice("선택한 초안에 고정된 비교를 내려받았습니다. 분석용 초안이며 최종 승인 자료가 아닙니다.");
+    setNotice(snapshot
+      ? "선택한 초안에 고정된 비교를 내려받았습니다. 분석용 초안이며 최종 승인 자료가 아닙니다."
+      : "선택한 초안에 고정된 계산을 내려받았습니다. 분석용 초안이며 최종 승인 자료가 아닙니다.");
   }
 
   return <section aria-label="저장된 비교와 검토 초안" className="min-w-0 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-900">
@@ -126,6 +154,37 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, disabled
     {error ? <p role="alert" className="mt-3 text-sm font-bold text-rose-600">{error}</p> : null}
     {notice ? <p role="status" className="mt-3 text-sm font-bold text-emerald-700">{notice}</p> : null}
     {eligible && saved?.comparison ? <details className="mt-3 text-sm"><summary className="cursor-pointer font-bold">생성에 사용할 현재 비교 확인</summary><CashFlowComparisonDetails comparison={saved.comparison} /></details> : null}
+    <div className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
+      <h4 className="font-bold">PF 초안의 현금흐름 기준 선택</h4>
+      <p className="mt-2 text-sm text-slate-500">선택한 계산의 요약 현금흐름표를 기본 PF 보고서에 고정합니다. 다른 절은 현재 프로젝트 자료를 사용하며, 같은 계산 기준으로 검증된 것은 아닙니다.</p>
+      <label className="mt-3 block text-sm font-bold">보고서에 넣을 현금흐름 계산
+        <select value={cashFlowRunId} onChange={(event) => setCashFlowRunId(event.target.value)} disabled={locked}
+          className="mt-2 w-full min-w-0 rounded-lg border border-slate-300 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
+          <option value="">저장 계산 선택</option>
+          {(saved?.availableRuns ?? []).map((run) => <option key={run.calculationRunId} value={run.calculationRunId}>
+            {run.label} · {run.policyMode === "reviewed_monthly_v1" ? "월별 금융 검토" : "기존 계산"} · {run.calculationRunId.slice(-8)}
+          </option>)}
+        </select>
+      </label>
+      <button type="button" className={`${button} mt-3`} disabled={locked || !canCreatePf} onClick={() => void perform(createPf)}>선택 계산으로 PF 초안 생성</button>
+      {!loading && !saved?.availableRuns.length ? <p className="mt-2 text-sm text-amber-700">선택 가능한 계산이 없습니다. 사업성 화면에서 현금흐름 계산을 저장한 뒤 다시 불러오세요.</p> : null}
+    </div>
+    {cashFlowSnapshot ? <div aria-label="PF 초안에 고정된 현금흐름" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
+      <h4 className="font-bold">선택한 PF 초안에 고정된 현금흐름</h4>
+      <p className="mt-2 break-all text-xs">계산 기록: {cashFlowSnapshot.calculationRunId}</p>
+      <p className="mt-2 text-sm text-amber-700">요약 현금흐름표의 기준입니다. 다른 절까지 동일 실행으로 검증된 것은 아닙니다.</p>
+      <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-3">
+        {([["총매출", "totalRevenue"], ["총사업비", "totalProjectCost"], ["기말 현금", "endingCash"]] as const).map(([label, key]) => {
+          const value = cashFlowSnapshot.resultSnapshot.summary[key];
+          return <div key={key}><dt>{label}</dt><dd className="break-words font-bold">{typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}원` : "미확인"}</dd></div>;
+        })}
+      </dl>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("json"))}>입력·결과 JSON 다운로드</button>
+        <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("pdf"))}>이 PF 초안 PDF 다운로드</button>
+        <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("docx"))}>이 PF 초안 Word 다운로드</button>
+      </div>
+    </div> : null}
     {snapshot ? <div aria-label="초안에 고정된 비교" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
       <h4 className="font-bold">선택한 초안에 고정된 비교</h4>
       <p className="mt-2 break-all text-xs text-slate-500">기준 계산: {snapshot.selection.baselineRunId} / 변경 계산: {snapshot.selection.comparisonRunId}</p>

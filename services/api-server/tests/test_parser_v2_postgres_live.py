@@ -1898,8 +1898,9 @@ def test_live_concurrent_report_publication_is_single_and_idempotent(
             )
 
 
-def test_live_frozen_comparison_report_round_trip_export_and_tenant_integrity(
-    live_database: _LiveDatabase,
+@pytest.mark.parametrize("report_kind", ["comparison", "pf_cashflow"])
+def test_live_frozen_report_round_trip_export_and_tenant_integrity(
+    live_database: _LiveDatabase, report_kind: str,
 ) -> None:
     """Use the disposable CI database and runtime role, not the repository double."""
     from agents.report_export_agent import ReportExportAgent
@@ -1907,6 +1908,8 @@ def test_live_frozen_comparison_report_round_trip_export_and_tenant_integrity(
     from test_cash_flow_comparison import record
     from use_cases.cash_flow_comparison import compare_cash_flow_runs, content_hash
     from use_cases.report_generation import generate_and_save_cash_flow_comparison_report_use_case
+    from agents.report_agent import ReportAgent
+    from use_cases.report_calculation_basis import attach_cash_flow_basis
 
     @contextmanager
     def transaction(tenant_id: str):
@@ -1927,13 +1930,21 @@ def test_live_frozen_comparison_report_round_trip_export_and_tenant_integrity(
     for side in ("baseline", "comparison"):
         selection[side + "InputHash"] = compared[side]["inputHash"]
         selection[side + "ResultHash"] = compared[side]["resultHash"]
-    report = generate_and_save_cash_flow_comparison_report_use_case(repository, PROJECT_A, TENANT_A,
-        selection, content_hash(selection), baseline, changed, captured_by="ci-comparison-reviewer")["reportRecord"]
-    saved_snapshot = copy.deepcopy(report["report"]["cashFlowComparisonSnapshot"])
+    if report_kind == "comparison":
+        report = generate_and_save_cash_flow_comparison_report_use_case(repository, PROJECT_A, TENANT_A,
+            selection, content_hash(selection), baseline, changed, captured_by="ci-comparison-reviewer")["reportRecord"]
+        snapshot_key = "cashFlowComparisonSnapshot"
+    else:
+        structured = ReportAgent().generate_structured_report({})
+        attach_cash_flow_basis(structured, changed)
+        markdown = ReportExportAgent().export({"report": structured}, "markdown")["content"]
+        report = repository.create(PROJECT_A, structured, markdown)
+        snapshot_key = "cashFlowCalculationSnapshot"
+    saved_snapshot = copy.deepcopy(report["report"][snapshot_key])
     changed["resultSnapshot"]["summary"]["totalRevenue"] = 1
     reopened = repository.get(PROJECT_A, report["report_id"])
     assert reopened is not None
-    assert reopened["report"]["cashFlowComparisonSnapshot"] == saved_snapshot
+    assert reopened["report"][snapshot_key] == saved_snapshot
     assert reopened["status"] == "draft" and reopened["run_id"] is None
     assert reopened["metadata"]["report_eligible"] is False
     exported = repository.add_export(reopened, ReportExportAgent().export(reopened, "pdf"))

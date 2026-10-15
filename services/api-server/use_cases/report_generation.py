@@ -11,11 +11,12 @@ from db.repositories.project_snapshot_repository import (
     ProjectSnapshotRepository,
     verify_project_snapshot_hash,
 )
-from db.repositories.report_repository import ReportRepository, ReportPublicationConflict, is_cash_flow_comparison_report, verify_cash_flow_comparison_report
+from db.repositories.report_repository import ReportRepository, ReportPublicationConflict, is_cash_flow_comparison_report, verify_report_snapshots
 from use_cases.cash_flow_comparison import compare_cash_flow_runs, content_hash
 from storage import list_deal_state_records, list_pod_ai_review_records
 from use_cases.common import deep_merge
 from use_cases.orchestration_approval import refresh_approval_readiness_gate
+from use_cases.report_calculation_basis import attach_cash_flow_basis
 
 REPORT_TEMPLATE_TO_REPORT_SECTION = {
     "cover": "cover",
@@ -158,9 +159,12 @@ def generate_and_save_pf_report_use_case(
     project_id: str,
     project_data: Dict[str, Any],
     input_data: Dict[str, Any] | None = None,
+    *, cash_flow_run: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Generate and persist a PF review report through the report repository."""
     generated = generate_pf_report_use_case(project_data, input_data)
+    if cash_flow_run is not None:
+        attach_cash_flow_basis(generated["structuredReport"], cash_flow_run)
     paragraph_evidence_links = build_paragraph_evidence_links(
         project_id,
         generated["structuredReport"],
@@ -267,7 +271,7 @@ def export_report_use_case(
 ) -> Dict[str, Any]:
     """Render a saved report record into a requested export format."""
     input_data = input_data or {}
-    verify_cash_flow_comparison_report(report_record)
+    verify_report_snapshots(report_record)
     export_format = input_data.get("format", "markdown")
     return ReportExportAgent().export(report_record, export_format)
 

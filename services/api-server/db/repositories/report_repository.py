@@ -30,6 +30,12 @@ COMPARISON_REPORT_TYPE = "cash-flow-comparison-review"
 COMPARISON_REPORT_TEMPLATE = "cash-flow-comparison-review-v1"
 
 
+def has_cash_flow_basis(record: Mapping[str, Any]) -> bool:
+    report = record.get("report") or {}
+    return ("cashFlowCalculationSnapshot" in report or "cashFlowCalculationSnapshotHash" in report
+            or "cash_flow_snapshot_hash" in (record.get("metadata") or {}))
+
+
 def is_cash_flow_comparison_report(record: Mapping[str, Any]) -> bool:
     report = record.get("report")
     metadata = record.get("metadata")
@@ -45,9 +51,27 @@ def _comparison_hash(value: Any) -> str:
         separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
 
-def verify_cash_flow_comparison_report(record: Mapping[str, Any], *, project_id: str | None = None,
+def verify_report_snapshots(record: Mapping[str, Any], *, project_id: str | None = None,
     tenant_id: str | None = None) -> None:
     """Verify the saved document, never rebind it to mutable current calculations."""
+    report = record.get("report") or {}
+    if has_cash_flow_basis(record):
+        from use_cases.report_calculation_basis import verify_cash_flow_basis
+
+        try:
+            if (record.get("status") != "draft" or record.get("run_id")
+                    or (record.get("metadata") or {}).get("report_eligible") is not False):
+                raise ValueError("Selected cash-flow reports remain analysis drafts")
+            verify_cash_flow_basis(report, project_id=str(project_id or record["project_id"]), tenant_id=tenant_id)
+            if not (record.get("metadata") or {}).get("content_sha256"):
+                raise ValueError("Report content seal missing")
+            if record["metadata"].get("cash_flow_snapshot_hash") != report["cashFlowCalculationSnapshotHash"]:
+                raise ValueError("Report snapshot metadata differs")
+            _verified_report_content_sha256(record)
+            for exported in record.get("exports") or []:
+                _verify_comparison_export(record, exported)
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise ReportPublicationConflict("보고서에 고정한 현금흐름 계산·본문 검증에 실패했습니다.") from exc
     if not is_cash_flow_comparison_report(record):
         return
     try:
@@ -137,7 +161,7 @@ class ReportRepository:
     def list_metadata(self, project_id: str) -> List[Dict[str, Any]]:
         with _LOCAL_REPORT_LOCK:
             for record in self.reports_store.get(project_id, []):
-                verify_cash_flow_comparison_report(record, project_id=project_id)
+                verify_report_snapshots(record, project_id=project_id)
             return [
                 self.metadata(record)
                 for record in self.reports_store.get(project_id, [])
@@ -149,13 +173,13 @@ class ReportRepository:
                 if record.get("report_id") == report_id:
                     record.setdefault("exports", [])
                     record.setdefault("version", 1)
-                    verify_cash_flow_comparison_report(record, project_id=project_id)
+                    verify_report_snapshots(record, project_id=project_id)
                     return record
         return None
 
     def add_export(self, report_record: Dict[str, Any], rendered: Dict[str, Any]) -> Dict[str, Any]:
         with _LOCAL_REPORT_LOCK:
-            verify_cash_flow_comparison_report(report_record)
+            verify_report_snapshots(report_record)
             export_record = _build_export_record(report_record, rendered)
             if is_cash_flow_comparison_report(report_record):
                 _verify_comparison_export(report_record, export_record)
@@ -177,8 +201,8 @@ class ReportRepository:
         be rebound to a different run/snapshot or content hash.
         """
         with _LOCAL_REPORT_LOCK:
-            if is_cash_flow_comparison_report(report_record):
-                raise ReportPublicationConflict("현금흐름 비교 검토 초안은 최종 승인 보고서로 발행할 수 없습니다.")
+            if is_cash_flow_comparison_report(report_record) or has_cash_flow_basis(report_record):
+                raise ReportPublicationConflict("현금흐름을 선택한 분석 초안은 최종 승인 보고서로 발행할 수 없습니다.")
             content_sha256 = _verified_report_content_sha256(report_record)
             publication = _build_publication_manifest(
                 published_by=published_by,
@@ -209,7 +233,7 @@ class ReportRepository:
             return report_record
 
     def get_export(self, report_record: Dict[str, Any], export_id: str) -> Dict[str, Any] | None:
-        verify_cash_flow_comparison_report(report_record)
+        verify_report_snapshots(report_record)
         for record in report_record.get("exports", []):
             if record.get("export_id") == export_id:
                 return record
@@ -217,7 +241,7 @@ class ReportRepository:
 
     @staticmethod
     def metadata(record: Dict[str, Any]) -> Dict[str, Any]:
-        verify_cash_flow_comparison_report(record)
+        verify_report_snapshots(record)
         return {
             "report_id": record["report_id"],
             "project_id": record["project_id"],
@@ -373,7 +397,7 @@ class PostgresReportRepository:
             report_markdown=report_markdown,
             run_id=run_id,
         )
-        verify_cash_flow_comparison_report(record, project_id=normalized_project_id, tenant_id=self.tenant_id)
+        verify_report_snapshots(record, project_id=normalized_project_id, tenant_id=self.tenant_id)
         connection.execute(
             """
             INSERT INTO realytics.reports (
@@ -440,7 +464,7 @@ class PostgresReportRepository:
             current = self._locked_report(connection, project_id, report_id)
             if current is None:
                 raise LookupError("Report not found")
-            verify_cash_flow_comparison_report(current, project_id=project_id, tenant_id=self.tenant_id)
+            verify_report_snapshots(current, project_id=project_id, tenant_id=self.tenant_id)
             publication = self._select_publication(
                 connection,
                 project_id,
@@ -466,7 +490,7 @@ class PostgresReportRepository:
         published_at: str,
         decision_package: Dict[str, Any],
     ) -> Dict[str, Any]:
-        if is_cash_flow_comparison_report(report_record):
+        if is_cash_flow_comparison_report(report_record) or has_cash_flow_basis(report_record):
             raise ReportPublicationConflict("현금흐름 비교 검토 초안은 최종 승인 보고서로 발행할 수 없습니다.")
         project_id, report_id = self._record_identity(report_record)
         actor = _required_text(published_by, "published_by")
@@ -687,7 +711,7 @@ class PostgresReportRepository:
                 record,
                 self._publication_manifest(publication),
             )
-        verify_cash_flow_comparison_report(record, tenant_id=self.tenant_id)
+        verify_report_snapshots(record, tenant_id=self.tenant_id)
         return record
 
     @staticmethod
@@ -836,7 +860,9 @@ def _build_draft_report_record(
     if is_cash_flow_comparison_report(record):
         record["metadata"].update({"report_type": COMPARISON_REPORT_TYPE,
             "comparison_snapshot_hash": report.get("cashFlowComparisonSnapshotHash")})
-    verify_cash_flow_comparison_report(record, project_id=project_id)
+    if "cashFlowCalculationSnapshot" in report:
+        record["metadata"]["cash_flow_snapshot_hash"] = report["cashFlowCalculationSnapshotHash"]
+    verify_report_snapshots(record, project_id=project_id)
     return record
 
 

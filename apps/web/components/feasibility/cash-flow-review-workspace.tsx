@@ -13,6 +13,7 @@ const MONTHLY_POLICY = {
   rounding: "unrounded_analysis",
 } as const;
 type Run = { calculationRunId: string; label: string; createdAt?: string; policyMode?: string;
+  inputHash?: string; resultHash?: string;
   period: { baseMonth: string | null; lastMonthIndex: number | null }; sourceHashes?: string[];
   inputReviews?: Array<{ field: string; label: string; classification: string; reason: string; sourceName?: string | null; sourceCell?: string | null }> };
 export type Comparison = {
