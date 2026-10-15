@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openpyxl import load_workbook
+from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.worksheet import Worksheet
 
 
@@ -153,6 +154,10 @@ def validate_feasibility_workbook(
             "requiredKeyCellChecks": required_key_cell_checks,
             "reconciliationChecks": reconciliation_checks,
             "formulaIntegrity": formula_integrity,
+            "calculationEvidence": {
+                "method": "saved_workbook_cache", "recalculated": False,
+                "fullCalcOnLoad": getattr(formula_wb.calculation, "fullCalcOnLoad", None),
+            },
             "definedNames": defined_names,
             "namedRangeValues": named_range_values,
             "schemaReadiness": schema_readiness,
@@ -178,6 +183,10 @@ def _detect_profile(workbook: Any) -> Dict[str, Any]:
     return LEGACY_BONRI_WORKBOOK_PROFILE
 
 
+def _formula_value(value: Any) -> Any:
+    return value.text if isinstance(value, ArrayFormula) else value
+
+
 def _sheet_profiles(workbook: Any) -> List[Dict[str, Any]]:
     profiles = []
     for sheet in workbook.worksheets:
@@ -185,7 +194,7 @@ def _sheet_profiles(workbook: Any) -> List[Dict[str, Any]]:
         non_empty_count = 0
         for row in sheet.iter_rows():
             for cell in row:
-                value = cell.value
+                value = _formula_value(cell.value)
                 if value is not None:
                     non_empty_count += 1
                 if isinstance(value, str) and value.startswith("="):
@@ -231,7 +240,7 @@ def _read_key_cells(
             }
             continue
         cached_value = _json_safe_value(value_wb[sheet_name][cell_ref].value)
-        formula_value = formula_wb[sheet_name][cell_ref].value
+        formula_value = _formula_value(formula_wb[sheet_name][cell_ref].value)
         result[key] = {
             "sheetName": sheet_name,
             "cell": cell_ref,
@@ -350,6 +359,7 @@ def _formula_integrity(
     formula_ref_samples: List[Dict[str, Any]] = []
     formula_ref_count = 0
     formula_count = 0
+    array_formula_count = 0
     volatile_formula_counts: Dict[str, int] = {}
     volatile_formula_samples: List[Dict[str, Any]] = []
     external_reference_count = 0
@@ -362,7 +372,10 @@ def _formula_integrity(
         formula_sheet: Worksheet = formula_wb[value_sheet.title]
         for row in value_sheet.iter_rows():
             for value_cell in row:
-                formula = formula_sheet[value_cell.coordinate].value
+                raw_formula = formula_sheet[value_cell.coordinate].value
+                formula = _formula_value(raw_formula)
+                if isinstance(raw_formula, ArrayFormula):
+                    array_formula_count += 1
                 if isinstance(formula, str) and formula.startswith("="):
                     formula_count += 1
                     for function_name in re.findall(r"\b(OFFSET|INDIRECT)\s*\(", formula, flags=re.IGNORECASE):
@@ -403,6 +416,7 @@ def _formula_integrity(
 
     return {
         "formulaCount": formula_count,
+        "arrayFormulaCount": array_formula_count,
         "cachedErrorCounts": cached_error_counts,
         "formulaRefCount": formula_ref_count,
         "cachedErrorSamples": cached_error_samples,
@@ -455,7 +469,7 @@ def _read_named_range_values(
             if sheet_name not in formula_wb.sheetnames or ":" in cell_range:
                 continue
             first_value = _json_safe_value(value_wb[sheet_name][cell_range].value)
-            first_formula = formula_wb[sheet_name][cell_range].value
+            first_formula = _formula_value(formula_wb[sheet_name][cell_range].value)
             break
 
         values[name] = {

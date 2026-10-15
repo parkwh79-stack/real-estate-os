@@ -219,11 +219,11 @@ def default_state() -> Dict[str, Any]:
     }
 
 
-def load_state() -> Dict[str, Any] | None:
+def load_state(*, project_workspace_only: bool = False) -> Dict[str, Any] | None:
     if _use_document_store():
         return _load_json_state()
 
-    state = _load_sqlite_state()
+    state = _load_sqlite_state(project_workspace_only=project_workspace_only)
     if state:
         return state
 
@@ -4899,7 +4899,7 @@ def _ensure_sqlite_column(
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
-def _load_sqlite_state() -> Dict[str, Any] | None:
+def _load_sqlite_state(*, project_workspace_only: bool = False) -> Dict[str, Any] | None:
     path = sqlite_file_path()
     if not path.exists():
         return None
@@ -4932,6 +4932,31 @@ def _load_sqlite_state() -> Dict[str, Any] | None:
             "SELECT project_id, snapshot_id, payload_json FROM project_snapshots ORDER BY project_id, created_at"
         ):
                 project_snapshots.setdefault(row["project_id"], {})[row["snapshot_id"]] = json.loads(row["payload_json"])
+
+        if project_workspace_only:
+            # The project router retains only these five collections. Agent,
+            # evidence and identity histories have their own targeted readers;
+            # parsing them here wastes memory and can prevent unrelated work
+            # from starting if a historic payload is malformed.
+            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            if not metadata and not any((projects, reports, orchestrations, market_evidence, project_snapshots)):
+                tables = [row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )]
+                # Existing history is not an empty workspace. In particular,
+                # do not resurrect stale JSON or seed examples over it.
+                if not any(conn.execute('SELECT 1 FROM "' + table.replace('"', '""') + '" LIMIT 1').fetchone()
+                           for table in tables):
+                    return None
+            return {
+                "version": int(metadata.get("version", STATE_VERSION)),
+                "project_id_counter": int(metadata.get("project_id_counter", 1)),
+                "projects": projects,
+                "reports": reports,
+                "orchestrations": orchestrations,
+                "market_evidence": market_evidence,
+                "project_snapshots": project_snapshots,
+            }
 
         land_evidence: Dict[str, Any] = {}
         for row in conn.execute(

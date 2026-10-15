@@ -4,7 +4,8 @@
   "sha256": "9214afc891530bb369049f9497888d16c4dbeecae69ec1b4c54637d3a61df92f",
   "workbookInventory": {
     "sheetCount": 12,
-    "formulaCount": 11982,
+    "formulaCount": 12050,
+    "arrayFormulaCount": 68,
     "formulaRefCount": 13,
     "cachedErrorCounts": {
       "#REF!": 25,

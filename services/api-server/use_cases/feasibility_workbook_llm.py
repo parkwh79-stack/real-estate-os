@@ -14,6 +14,7 @@ the values are applied to the project via the audited apply endpoint.
 import hashlib
 import json
 import math
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -287,7 +288,16 @@ def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
     review_hash = _stable_json({**state,
         "calculationInputs": {key: value for key, value in project.items() if key not in {"_meta", "source_documents"}},
         "parsingSource": (project.get("_meta") or {}).get("parsing_source")})
+    source_study = next((project[key] for key in ("feasibilityStudyV2Draft", "canonicalFeasibilityStudyV2", "feasibilityStudyV2")
+                         if isinstance(project.get(key), dict)), {})
+    raw_import = source_study.get("raw_import")
+    raw_import = raw_import if isinstance(raw_import, dict) else {}
+    workbook_review = raw_import.get("financingTermReview")
+    workbook_review = workbook_review if isinstance(workbook_review, dict) else {}
+    workbook_review = ({**deepcopy(workbook_review), "sourceDocument": deepcopy(raw_import.get("sourceDocument") or {})}
+                       if workbook_review.get("schemaVersion") == "bonri-workbook-financing-review-v1" else None)
     return {**state, "reviewHash": review_hash, "analysisOnly": True,
+            "workbookFinancingReview": workbook_review,
             "canonicalStudyPresent": bool(project.get("canonicalFeasibilityStudyV2") or project.get("feasibilityStudyV2"))}
 
 

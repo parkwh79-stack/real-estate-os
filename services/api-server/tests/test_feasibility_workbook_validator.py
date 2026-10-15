@@ -75,6 +75,28 @@ def test_validate_feasibility_workbook_fails_on_ref_formula(tmp_path):
     assert "Resolve #REF!" in result["recommendations"][0]
 
 
+def test_array_formulas_are_counted_checked_and_serializable(tmp_path):
+    import json
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    workbook_path = tmp_path / "array-errors.xlsx"
+    _build_sample_like_workbook(workbook_path)
+    book = load_workbook(workbook_path)
+    book["검토서"]["C30"] = ArrayFormula(ref="C30", text="=SUM(#REF!)")
+    book["검토서"]["C31"] = ArrayFormula(ref="C31", text='=INDIRECT("A1")')
+    book.save(workbook_path)
+    book.close()
+    result = validate_feasibility_workbook(workbook_path)
+    integrity = result["formulaIntegrity"]
+    assert integrity["formulaCount"] == integrity["arrayFormulaCount"] == 2
+    assert integrity["formulaRefCount"] == 1
+    assert integrity["volatileFormulaCount"] == 1
+    assert integrity["formulaRefSamples"][0]["formula"] == "=SUM(#REF!)"
+    assert result["status"] == "failed"
+    assert result["calculationEvidence"]["recalculated"] is False
+    json.dumps(result)
+
+
 def test_validate_feasibility_workbook_fails_blank_required_key_cells(tmp_path):
     workbook_path = tmp_path / "blank-required.xlsx"
     _build_sample_like_workbook(workbook_path)

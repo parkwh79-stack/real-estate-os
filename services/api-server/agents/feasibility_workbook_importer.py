@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -242,6 +243,7 @@ def _import_legacy_bonri(
         total_cost = _krw_from_thousand(_cell_value(business, "D72"))
         development_profit = _krw_from_thousand(_cell_value(business, "D74"))
         pf_amount = _pf_amount_from_cash_flow(cash_flow)
+        financing, financing_review = _legacy_financing(cash_flow, input_sheet, source_name)
 
         cost_items = [
             _line_item("land_cost", "대지비", "land", _krw_from_thousand(_cell_value(business, "D26")), "사업수지", "D26", source_name),
@@ -262,6 +264,7 @@ def _import_legacy_bonri(
                 "2.현금흐름": "KRW_MILLION",
             },
             "sourceDocument": source_document or {},
+            "financingTermReview": financing_review,
             "designFar": _value("design_far", "설계 용적률", design_far, "PERCENT", "입력", "E22", source_name),
             # These are source budget scopes, not additional cost line items.
             # Keeping the purchase component out of cost_items avoids counting
@@ -280,7 +283,7 @@ def _import_legacy_bonri(
             },
             "limitations": [
                 "Legacy sample workbook has no REALYTICS named ranges; mapping uses a fixed Bonri-style cell profile.",
-                "PF tranche terms beyond principal are not fully available in the workbook and require PF review documents.",
+                "Workbook rates and fees are review candidates, not verified loan terms. Legal priority, maturity basis, floating rates and repayment conditions require the actual agreement.",
             ],
         }
         _attach_profile_governed_fact_basis(
@@ -308,7 +311,7 @@ def _import_legacy_bonri(
                 _line_item("sales_revenue", "분양수입", "sales_revenue", total_revenue, "사업수지", "D11", source_name)
             ],
             "cost_items": cost_items,
-            "financing": _legacy_financing(cash_flow),
+            "financing": financing,
             "schedule": _legacy_schedule(input_sheet, source_name),
             "scenarios": _default_scenarios(),
             "monthly_cash_flow": _legacy_monthly_cash_flow(cash_flow, source_name),
@@ -457,22 +460,53 @@ def _legacy_product_mix(sales: Any, input_sheet: Any, source_name: str) -> List[
     return rows
 
 
-def _legacy_financing(cash_flow: Any) -> List[Dict[str, Any]]:
+def _legacy_financing(cash_flow: Any, input_sheet: Any, source_name: str) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     tranche_rows = [
         ("tr_a", "Tr.A", "senior", "E48"),
         ("tr_b", "Tr.B", "mezzanine", "E49"),
         ("tr_c", "Tr.C", "junior", "E50"),
         ("tr_d", "Tr.D", "other", "E51"),
     ]
-    result = []
-    for tranche_id, name, priority, cell in tranche_rows:
+    result, reviews = [], []
+    for index, (tranche_id, name, priority, cell) in enumerate(tranche_rows):
+        column = "DEFG"[index]
+        header_matches = str(_cell_value(input_sheet, f"{column}129") or "").strip() == name
+        amount_unit_matches = "백만원" in str(_cell_value(input_sheet, "C130") or "").replace(" ", "")
+        fields = {}
+        for key, row, unit in (("amount", 130, "KRW_MILLION"), ("interest_rate", 131, "RATIO"), ("fee_rate", 132, "RATIO")):
+            source = input_sheet[f"{column}{row}"]
+            raw = source.value
+            number = _to_float(raw)
+            valid = number is not None and math.isfinite(number) and number >= 0
+            context_matches = header_matches and (amount_unit_matches if key == "amount" else "%" in str(source.number_format or ""))
+            if key != "amount":
+                valid = valid and number <= 1
+            valid = valid and context_matches
+            fields[key] = {
+                "value": (_krw_from_million(number) if key == "amount" else number) if valid else None,
+                "rawValue": str(raw) if isinstance(raw, float) and not math.isfinite(raw) else raw if isinstance(raw, (str, int, float, bool)) or raw is None else str(raw),
+                "sourceCell": f"입력!{column}{row}", "sourceUnit": unit,
+                "status": "read" if valid else "missing" if raw is None else "needs_review",
+            }
         amount = _krw_from_million(_cell_value(cash_flow, cell))
-        if amount:
+        input_amount = fields["amount"]["value"]
+        reconciled = amount is not None and input_amount is not None and amount == input_amount
+        reviews.append({
+            "trancheId": tranche_id, "name": name, "fields": fields,
+            "cashFlowAmount": amount, "cashFlowSourceCell": f"2.현금흐름!{cell}",
+            "principalReconciled": reconciled,
+            "priorityBasis": "legacy_profile_assumption", "repaymentBasis": "legacy_profile_assumption",
+            "unconfirmedTerms": ["법적 상환순위", "만기와 기산일", "고정·변동금리 조건", "수수료 부과 기준", "인출·상환 조건"],
+        })
+        # Preserve an explicitly zero commitment; a blank tranche is not zero.
+        if amount or (reconciled and input_amount == 0):
             result.append({
                 "tranche_id": tranche_id,
                 "name": name,
                 "priority": priority,
                 "amount": amount,
+                "interest_rate": fields["interest_rate"]["value"] if reconciled else None,
+                "fee_rate": fields["fee_rate"]["value"] if reconciled else None,
                 "repayment_source": "분양수입금",
                 "excel_row_id": f"2.현금흐름!{cell}",
             })
@@ -485,7 +519,11 @@ def _legacy_financing(cash_flow: Any) -> List[Dict[str, Any]]:
             "amount": equity,
             "excel_row_id": "2.현금흐름!E55",
         })
-    return result
+    return result, {
+        "schemaVersion": "bonri-workbook-financing-review-v1",
+        "sourceWorkbook": source_name, "status": "needs_review", "approvalStatus": "not_requested",
+        "terms": reviews,
+    }
 
 
 def _legacy_schedule(input_sheet: Any, source_name: str) -> List[Dict[str, Any]]:

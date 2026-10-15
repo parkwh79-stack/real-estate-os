@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authHeaders, apiBase } from "../../lib/auth-client";
 import { eokToWon, wonToEok, termsDraft, termsHaveChanges, reviewedTermsPayload,
-  type FieldReview as Review, type ReviewSource as Source, type ReviewTerms, type TermsDraft } from "../../lib/feasibility-review";
+  type FieldReview as Review, type ReviewSource as Source, type ReviewTerms, type TermsDraft, type WorkbookFinancingReview } from "../../lib/feasibility-review";
 import { fetchWorkbookCellPreview, type WorkbookCellPreview } from "../../lib/document-review-workspace";
 import { FeasibilityTermsReview } from "./feasibility-terms-review";
 
@@ -22,6 +22,7 @@ type ReviewState = {
   sourceDocuments?: Source[];
   terms?: ReviewTerms;
   termReviews?: Partial<TermsDraft["reviews"]>;
+  workbookFinancingReview?: WorkbookFinancingReview | null;
 };
 const control = "rounded-md border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-900";
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
@@ -50,6 +51,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
   const savingRef = useRef(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [terms, setTerms] = useState<TermsDraft>(() => termsDraft());
+  const [workbookFinancing, setWorkbookFinancing] = useState<WorkbookFinancingReview | null>(null);
   const [reviewHash, setReviewHash] = useState("");
   const [documents, setDocuments] = useState<Source[]>([]);
   const [archiveId, setArchiveId] = useState("");
@@ -64,6 +66,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
   const restore = useCallback((state: ReviewState) => {
     setRows(rowsFromState(state));
     setTerms(termsDraft(state.terms, state.termReviews));
+    setWorkbookFinancing(state.workbookFinancingReview ?? null);
     setReviewHash(state.reviewHash);
     if (state.sourceDocuments) setDocuments(state.sourceDocuments);
   }, []);
@@ -72,7 +75,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
     let active = true;
     activeEndpointRef.current = endpoint;
     setBusy(true); setReviewHash(""); setRows([]); setTerms(termsDraft()); setArchiveId("");
-    setPreview(null); setError(null); setNotice(null);
+    setPreview(null); setError(null); setNotice(null); setWorkbookFinancing(null);
     void fetch(`${endpoint}/review`, { cache: "no-store", headers: authHeaders("web") })
       .then(readResponse<ReviewState>)
       .then((state) => { if (active) restore(state); })
@@ -209,7 +212,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
           <input aria-label={`${row.label} 검토 이유`} value={row.reason} onChange={(event) => edit(row.key, { reason: event.target.value })} placeholder="수정 이유 또는 가정의 근거" className={`${control} mt-2 w-full`} />
         </fieldset>)}
       </div>
-      <FeasibilityTermsReview draft={terms} disabled={busy} selectedSource={documents.find((item) => item.archiveId === archiveId)}
+      <FeasibilityTermsReview draft={terms} disabled={busy} workbookFinancing={workbookFinancing} selectedSource={documents.find((item) => item.archiveId === archiveId)}
         onChange={(next) => { setTerms(next); setNotice(null); }} onShowSource={(review) => void showSource(review)} />
       {preview ? <div aria-label="원본 셀 미리보기" className="mt-4 overflow-x-auto rounded-lg border p-3">
         <p className="text-sm font-bold">{preview.sheetName}!{preview.focusRange} · 원본 셀</p>

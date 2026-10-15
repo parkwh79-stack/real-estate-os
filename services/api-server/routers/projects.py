@@ -1816,7 +1816,7 @@ def load_fixtures():
     global project_id_counter
     if storage_backend() in {"postgres", "postgresql"}:
         return
-    state = load_state()
+    state = load_state(project_workspace_only=True)
     if state:
         _project_store().update(state["projects"])
         REPORTS_DB.update(state["reports"])

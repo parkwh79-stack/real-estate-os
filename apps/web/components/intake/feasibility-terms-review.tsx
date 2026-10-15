@@ -1,13 +1,14 @@
 "use client";
 
 import { FINANCING_PRIORITIES, SCHEDULE_FIELDS, type FieldReview, type FinancingDraft,
-  type ReviewSource, type TermsDraft } from "../../lib/feasibility-review";
+  type ReviewSource, type TermsDraft, type WorkbookFinancingReview } from "../../lib/feasibility-review";
 
 const control = "rounded-md border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-900";
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
 
-export function FeasibilityTermsReview({ draft, disabled, selectedSource, onChange, onShowSource }: {
+export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbookFinancing, onChange, onShowSource }: {
   draft: TermsDraft; disabled: boolean; selectedSource?: ReviewSource;
+  workbookFinancing?: WorkbookFinancingReview | null;
   onChange: (draft: TermsDraft) => void; onShowSource: (review: FieldReview) => void;
 }) {
   const editReview = (group: "schedule" | "financing", patch: Partial<FieldReview>) => onChange({
@@ -54,6 +55,27 @@ export function FeasibilityTermsReview({ draft, disabled, selectedSource, onChan
     </fieldset>
     <fieldset disabled={disabled} className="min-w-0 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
       <legend className="px-1 font-bold">대출 조건{draft.financingDirty ? " · 저장 전" : ""}</legend>
+      {workbookFinancing?.terms?.length ? <details className="mb-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+        <summary className="cursor-pointer font-bold">원본에서 읽은 대출 조건</summary>
+        <p className="mt-2 break-all text-xs text-slate-500">{workbookFinancing.sourceWorkbook}</p>
+        <p className="mt-2 text-sm">사업수지의 검토 후보입니다. 아래 저장값과 대조한 뒤 수정 이유를 남겨 저장하세요. 법적 순위·만기·고정/변동금리·수수료 부과 기준·인출과 상환 조건은 실제 약정서 확인이 필요합니다.</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">{workbookFinancing.terms.map((row) => <div key={row.trancheId}
+          className="min-w-0 rounded-md border border-slate-200 p-3 dark:border-slate-700" aria-label={`${row.name} 원본 조건`}>
+          <p className="font-bold">{row.name}</p>
+          {([ ["amount", "금액", "억원", 1e-8], ["interest_rate", "금리", "%", 100], ["fee_rate", "수수료율", "%", 100] ] as const).map(([key, label, unit, scale]) => {
+            const field = row.fields[key];
+            const value = field?.value;
+            return <div key={key} className="mt-1 text-sm">
+              <span>{label}: {typeof value === "number" && Number.isFinite(value) ? `${(value * scale).toLocaleString("ko-KR", { maximumFractionDigits: 8 })}${unit}` : field?.status === "missing" ? "미입력" : "확인 필요"}</span>
+              {field?.sourceCell ? <div className="break-all text-xs text-slate-500">{workbookFinancing.sourceDocument?.archiveId
+                ? <button type="button" className="underline" onClick={() => onShowSource({ origin: "document_correction", reason: "원본 대출 조건 대조",
+                  sourceCell: field.sourceCell, sourceDocument: workbookFinancing.sourceDocument })}>{field.sourceCell} 원본 보기</button>
+                : field.sourceCell}</div> : null}
+            </div>;
+          })}
+          {!row.principalReconciled ? <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">입력표와 현금흐름의 대출금액을 대조하지 못했습니다. 이 행의 금리·수수료를 자동 적용하지 않습니다.</p> : null}
+        </div>)}</div>
+      </details> : null}
       <p className="text-xs text-slate-500">금액은 억원, 연 금리·수수료율은 %, 만기는 개월입니다. 빈 값은 미입력, 0은 명시적인 0으로 저장합니다. 신규 행은 대출을 입력하며 기존 자기자본 항목은 보존합니다.</p>
       <p className="mt-1 text-xs text-slate-500">기존 값에 ‘원본값 확인 필요’가 표시되면 원본을 확인해 정정하거나 비워 두세요. 확인 전에는 대출 조건을 저장하지 않습니다.</p>
       {!draft.financing.length ? <p className="mt-3 text-sm text-slate-500">저장된 대출 조건이 없습니다.</p> : null}

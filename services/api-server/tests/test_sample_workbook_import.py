@@ -20,7 +20,8 @@ def test_bonri_source_manifest_contract_is_machine_readable_without_sample_file(
     assert len(manifest["sha256"]) == 64
     assert int(manifest["sha256"], 16) >= 0
     assert manifest["workbookInventory"]["sheetCount"] == 12
-    assert manifest["workbookInventory"]["formulaCount"] == 11_982
+    assert manifest["workbookInventory"]["formulaCount"] == 12_050
+    assert manifest["workbookInventory"]["arrayFormulaCount"] == 68
     assert manifest["cashFlowContract"]["transactionRange"] == "F35:BQ119"
     assert manifest["cashFlowContract"]["periodCount"] == 64
     assert manifest["goldenImport"]["periodCount"] == 64
@@ -28,7 +29,7 @@ def test_bonri_source_manifest_contract_is_machine_readable_without_sample_file(
 
 
 @pytest.mark.skipif(not list(SAMPLE_DIR.glob("*.xlsx")), reason="workspace sample workbook is not available in CI")
-def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance():
+def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance(tmp_path, monkeypatch):
     workbook_path = next(SAMPLE_DIR.glob("*.xlsx"))
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     assert hashlib.sha256(workbook_path.read_bytes()).hexdigest() == manifest["sha256"]
@@ -39,11 +40,31 @@ def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance():
     inventory = manifest["workbookInventory"]
     assert validation["sheetCount"] == inventory["sheetCount"]
     assert validation["formulaIntegrity"]["formulaCount"] == inventory["formulaCount"]
+    assert validation["formulaIntegrity"]["arrayFormulaCount"] == inventory["arrayFormulaCount"]
+    assert validation["calculationEvidence"]["recalculated"] is False
     assert validation["formulaIntegrity"]["formulaRefCount"] == inventory["formulaRefCount"]
     assert validation["formulaIntegrity"]["cachedErrorCounts"]["#REF!"] == inventory["cachedErrorCounts"]["#REF!"]
     assert validation["formulaIntegrity"]["cachedErrorCounts"]["#DIV/0!"] == inventory["cachedErrorCounts"]["#DIV/0!"]
 
     study = import_feasibility_study_from_workbook(workbook_path, project_id="sample-bonri")
+    tranches = {row["tranche_id"]: row for row in study["financing"]}
+    assert tranches["tr_a"]["interest_rate"] == 0.055
+    assert tranches["tr_a"]["fee_rate"] == 0.02
+    assert tranches["tr_b"]["amount"] == 0
+    assert tranches["tr_a"]["term_months"] is None
+    terms = study["raw_import"]["financingTermReview"]
+    assert terms["approvalStatus"] == "not_requested"
+    assert terms["terms"][0]["fields"]["interest_rate"]["sourceCell"] == "입력!D131"
+    from storage import get_project_record, upsert_project_record
+    from use_cases.feasibility_workbook_llm import feasibility_review_state
+
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "sample-review.sqlite3"))
+    project = {"project": {"id": "sample-bonri"}, "feasibilityStudyV2Draft": study,
+               "pf_structure": [{"tranche_id": "working", "amount": 1, "interest_rate": .04}]}
+    assert upsert_project_record("sample-bonri", project, 1)
+    reopened = feasibility_review_state(get_project_record("sample-bonri"))
+    assert reopened["workbookFinancingReview"]["terms"][0]["fields"]["interest_rate"]["value"] == .055
+    assert reopened["terms"]["financing"][0]["interest_rate"] == .04
     assert study["metrics"]["total_revenue"] > 0
     assert study["metrics"]["total_cost"] > 0
     assert study["raw_import"]["sampleProfile"]["fieldLocators"]["revenue.total"]["cell"] == "D11"

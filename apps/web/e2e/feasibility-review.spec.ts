@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { eokToWon, wonToEok, termsDraft, reviewedTermsPayload, type ReviewTerms } from "../lib/feasibility-review";
+import { eokToWon, wonToEok, termsDraft, reviewedTermsPayload, type ReviewTerms, type WorkbookFinancingReview } from "../lib/feasibility-review";
 
 test.setTimeout(90_000);
 
@@ -13,13 +13,14 @@ test("money survives won to eok to won without rounding", () => {
   }
 });
 
-async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: Promise<void>; initialTerms?: ReviewTerms } = {}) {
+async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: Promise<void>; initialTerms?: ReviewTerms; workbookReview?: WorkbookFinancingReview } = {}) {
   const source = { archiveId: "a".repeat(64), originalFileName: "검토자료.xlsx" };
   const state = {
     values: { total_revenue: 853951767703 } as Record<string, number>,
     fieldReviews: {} as Record<string, Record<string, unknown>>,
     terms: options.initialTerms ?? { schedule: {}, financing: [] } as ReviewTerms,
     termReviews: {} as Record<string, Record<string, unknown>>,
+    workbookFinancingReview: options.workbookReview,
     reviewHash: "first", sourceDocuments: [source],
   };
   const saves: Record<string, unknown>[] = [];
@@ -63,6 +64,52 @@ async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: 
   await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("8539.51767703", { timeout: 60_000 });
   return { panel, saves, source };
 }
+
+test("source loan candidates remain distinct from saved working terms and survive review/reopen", async ({ page }) => {
+  const workbookReview: WorkbookFinancingReview = {
+    sourceWorkbook: "검토자료.xlsx", sourceDocument: { archiveId: "a".repeat(64), originalFileName: "검토자료.xlsx" },
+    terms: [
+      { trancheId: "tr_a", name: "Tr.A", principalReconciled: true, fields: {
+        amount: { value: 50_000_000_000, sourceCell: "입력!D130", status: "read" },
+        interest_rate: { value: .055, sourceCell: "입력!D131", status: "read" },
+        fee_rate: { value: .02, sourceCell: "입력!D132", status: "read" },
+      } },
+      { trancheId: "tr_b", name: "Tr.B", principalReconciled: true, fields: {
+        amount: { value: 0, sourceCell: "입력!E130", status: "read" },
+      } },
+      { trancheId: "tr_c", name: "Tr.C", principalReconciled: false, fields: {
+        amount: { value: null, sourceCell: "입력!F130", status: "missing" },
+      } },
+    ],
+  };
+  const { panel, saves, source } = await mockReview(page, { workbookReview, initialTerms: {
+    schedule: {}, financing: [{ tranche_id: "saved", name: "검토 대출", priority: "senior",
+      amount: 50_000_000_000, interest_rate: .04, fee_rate: null, term_months: null, repayment_source: null }],
+  } });
+  await panel.getByText("원본에서 읽은 대출 조건", { exact: true }).click();
+  await expect(panel.getByLabel("Tr.A 원본 조건")).toContainText("금액: 500억원");
+  await expect(panel.getByLabel("Tr.A 원본 조건")).toContainText("금리: 5.5%");
+  await expect(panel.getByLabel("Tr.B 원본 조건")).toContainText("금액: 0억원");
+  await expect(panel.getByLabel("Tr.C 원본 조건")).toContainText("금액: 미입력");
+  await expect(panel.getByLabel("Tr.C 원본 조건")).toContainText("자동 적용하지 않습니다");
+  await expect(panel.getByLabel("대출 1 연 금리 (%)", { exact: true })).toHaveValue("4");
+  expect(saves).toHaveLength(0);
+  await panel.getByLabel("확인할 원본").selectOption(source.archiveId);
+  await panel.getByLabel("대출 1 연 금리 (%)", { exact: true }).fill("5.5");
+  await panel.getByLabel("대출 조건 입력 구분").selectOption("document_correction");
+  await panel.getByLabel("대출 조건 출처 셀").fill("입력!D131");
+  await panel.getByLabel("대출 조건 검토 이유").fill("사업수지 원본 금리 대조, 실제 약정 조건은 미확인");
+  await panel.getByRole("button", { name: "검토 입력 저장" }).click();
+  await expect(panel.getByRole("status")).toContainText("입력과 검토 이유를 저장했습니다");
+  expect(saves).toHaveLength(1);
+  await page.reload();
+  await expect(panel.getByLabel("대출 1 연 금리 (%)", { exact: true })).toHaveValue("5.5");
+  await expect(panel.getByLabel("대출 1 만기 (개월)", { exact: true })).toHaveValue("");
+  await expect(panel.getByLabel("대출 조건 출처 셀")).toHaveValue("입력!D131");
+  await panel.getByText("원본에서 읽은 대출 조건", { exact: true }).click();
+  await expect(panel.getByLabel("Tr.B 원본 조건")).toContainText("금액: 0억원");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
 
 test("correct a source value and save an assumption, then reopen the review", async ({ page }) => {
   const { panel, saves, source } = await mockReview(page);

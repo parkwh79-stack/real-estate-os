@@ -42,6 +42,11 @@ export type FinancingTerm = {
   term_months: number | null; repayment_source: string | null;
 };
 export type ReviewTerms = { schedule: Record<string, string | null>; financing: FinancingTerm[] };
+export type WorkbookFinancingReview = {
+  sourceWorkbook: string; sourceDocument?: ReviewSource;
+  terms: { trancheId: string; name: string; principalReconciled: boolean;
+    fields: Record<string, { value: number | null; sourceCell: string; status: string }> }[];
+};
 export type FinancingDraft = {
   tranche_id: string; name: string; priority: string;
   amount: string; interest_rate: string; fee_rate: string; term_months: string; repayment_source: string;
