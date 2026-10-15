@@ -163,15 +163,16 @@ def test_record_builder_rejects_untraceable_cf_result_instead_of_guessing_input(
         records(data, {"cashFlowRunResult": {"status": "completed"}})
 
 
-def test_cf_request_capture_does_not_change_other_pod_record_contract():
+def test_pf_capture_uses_its_own_request_without_claiming_cf_parentage():
     data = project()
     snapshot = pod_input_snapshot("pf_credit", data)
+    request = snapshot["pfStructureInput"]
     rows = calculation_records_for_pod(
         project_id=data["id"], pod_key="pf_credit", artifact_key="pf-artifact",
-        artifact={"pfStructure": {"seniorLimit": 900}}, input_snapshot=snapshot, project_data=data,
+        artifact={"pfStructure": {"seniorLimit": 900}, "pfStructureInput": request}, input_snapshot=snapshot, project_data=data,
     )
     assert len(rows) == 1 and rows[0]["engineKey"] == "pf_structure"
-    assert rows[0]["inputSnapshot"] == snapshot
+    assert rows[0]["inputSnapshot"] == request
     assert "financialInputHash" not in rows[0]
 
 
@@ -222,7 +223,7 @@ def test_cf_contract_version_reexecutes_old_artifact_and_changed_financial_input
     assert changed["cashFlowRunResult"]["summary"]["totalRevenue"] == 2000
     assert current["cashFlowRunResult"]["summary"]["totalRevenue"] == 1000
     assert manifest("feasibility_cashflow").version == "1.3.0"
-    assert manifest("pf_credit").version == "1.1.0"
+    assert manifest("pf_credit").version == "1.2.0"
 
 
 @pytest.mark.parametrize("field", [

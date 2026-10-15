@@ -81,7 +81,7 @@ def test_failed_domain_pod_does_not_persist_or_mutate_project(monkeypatch, statu
 @pytest.mark.parametrize("failure", ["envelope", "exception"])
 def test_caught_child_agent_failure_cannot_finalize_successful_pod(monkeypatch, failure):
     monkeypatch.setattr(chief, "_run_domain_workflow", lambda *args: {
-        "status": "completed", "artifacts": {"pfStructure": {"ltv": 0.7}},
+        "status": "completed", "artifacts": {"pfStructure": {"ltv": 0.7}, "pfStructureInput": {"tranches": []}},
     })
 
     def child(**kwargs):

@@ -1029,6 +1029,9 @@ class OrchestrationAgent:
              "stressTest", stress)
 
     def _wf_pf_structure_review(self, run, data, step, options) -> None:
+        from use_cases.pf_structure import build_pf_structure_input, execute_pf_structure_input
+
+        request = build_pf_structure_input(data, options)
         pf = self._run_domain_agent(
             run,
             project_data=data,
@@ -1036,15 +1039,12 @@ class OrchestrationAgent:
             agent_id="PFStructuringAgent",
             task_type="pf_structure_calculation",
             domain="pf_credit",
-            input_snapshot={
-                "feasibilityInput": data.get("feasibility_input"),
-                "pfStructure": data.get("pf_structure") or data.get("pfStructure"),
-                "cashFlowRunResult": data.get("cashFlowRunResult"),
-            },
-            executor=lambda: self._calculate_pf_structure(data),
+            input_snapshot=request,
+            executor=lambda: {**execute_pf_structure_input(request), "tranche_count": len(request["tranches"])},
             output_schema_name="PFStructureResult",
             deterministic_authority_required=True,
         )
+        run.setdefault("artifacts", {})["pfStructureInput"] = deepcopy(request)
         step("pf_structure_calculation", "completed",
              {"ltv": pf.get("ltv"), "ltc": pf.get("ltc"), "exit_sale_rate": pf.get("exit_sale_rate")},
              "pfStructure", pf)

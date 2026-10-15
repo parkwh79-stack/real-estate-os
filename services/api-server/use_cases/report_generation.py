@@ -77,21 +77,22 @@ _SECTION_CATEGORY_PODS = {
 _ADVISORY_REVIEW_CATEGORIES = {"guardrail", "info", "note"}
 
 
-def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str, Any]]]:
+def _load_pod_review_findings_by_pod(project_id: str, expected_artifacts: Dict[str, List[str]] | None = None) -> Dict[str, List[Dict[str, Any]]]:
     """Latest unresolved Pod AI Review findings per pod (deterministic-grounded).
 
-    Best-effort: read/shape errors yield {} so report generation never breaks."""
-    try:
-        reviews = list_pod_ai_review_records(str(project_id), limit=200)
-    except Exception:
-        return {}
+    Read failures are surfaced by the caller, never reported as no findings."""
+    reviews = list_pod_ai_review_records(str(project_id), limit=200)
     latest_by_pod: Dict[str, Dict[str, Any]] = {}
     for review in reviews:
         pod_key = str(review.get("podKey") or "")
         if not pod_key:
             continue
         current = latest_by_pod.get(pod_key)
-        if current is None or str(review.get("updatedAt") or "") >= str(current.get("updatedAt") or ""):
+        def rank(item):
+            keys = item.get("sourceArtifactKeys") or ([item["sourceArtifactKey"]] if item.get("sourceArtifactKey") else [])
+            matches = bool(set(keys) & set((expected_artifacts or {}).get(pod_key) or []))
+            return matches, str(item.get("updatedAt") or "")
+        if current is None or rank(review) >= rank(current):
             latest_by_pod[pod_key] = review
     out: Dict[str, List[Dict[str, Any]]] = {}
     for pod_key, review in latest_by_pod.items():
@@ -100,6 +101,11 @@ def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str
         source = review.get("deterministicFindings")
         if not isinstance(source, list):
             source = review.get("findings") or []
+        artifact_keys = review.get("sourceArtifactKeys") or ([review["sourceArtifactKey"]] if review.get("sourceArtifactKey") else [])
+        expected = (expected_artifacts or {}).get(pod_key)
+        binding = "unverified"
+        if expected and artifact_keys:
+            binding = "matched" if set(artifact_keys) & set(expected) else "mismatch"
         findings = [
             {
                 "findingId": f.get("findingId"),
@@ -109,6 +115,12 @@ def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str
                 "severity": f.get("severity"),
                 "message": f.get("message"),
                 "recommendedAction": f.get("recommendedAction"),
+                "runId": review.get("runId"),
+                "sourceArtifactKeys": deepcopy(artifact_keys),
+                "artifactBindingStatus": binding,
+                "sourceLocators": deepcopy(f.get("sourceLocators") or review.get("sourceLocators") or []),
+                "inputEvidenceIds": deepcopy(review.get("inputEvidenceIds") or []),
+                "inputAssumptionIds": deepcopy(review.get("inputAssumptionIds") or []),
             }
             for f in source
             if isinstance(f, dict)
@@ -153,6 +165,9 @@ def generate_and_save_pf_report_use_case(
     paragraph_evidence_links = build_paragraph_evidence_links(
         project_id,
         generated["structuredReport"],
+        expected_artifacts={key: value.get("artifactKeys") or []
+            for key, value in ((project_data.get("chief_orchestration_state") or {}).get("podRuns") or {}).items()
+            if isinstance(value, dict)},
     )
     generated["paragraphEvidenceLinks"] = paragraph_evidence_links
     generated["structuredReport"]["paragraphEvidenceLinks"] = paragraph_evidence_links
@@ -192,6 +207,7 @@ def generate_and_save_cash_flow_comparison_report_use_case(
 def build_paragraph_evidence_links(
     project_id: str,
     structured_report: Dict[str, Any],
+    *, expected_artifacts: Dict[str, List[str]] | None = None,
 ) -> Dict[str, Any]:
     """Create report-section evidence links from persisted Deal State records.
 
@@ -200,7 +216,12 @@ def build_paragraph_evidence_links(
     a later frontend heuristic.
     """
     records = list_deal_state_records(project_id, limit=1000)
-    pod_findings = _load_pod_review_findings_by_pod(project_id)
+    try:
+        pod_findings = _load_pod_review_findings_by_pod(project_id, expected_artifacts)
+        pod_review_status = "loaded"
+    except Exception:
+        pod_findings = {}
+        pod_review_status = "unavailable"
     sections = _report_sections(structured_report)
     links = [
         _build_section_link(project_id, section, records, pod_findings)
@@ -233,6 +254,8 @@ def build_paragraph_evidence_links(
         "linkedRecordCount": len(linked_record_ids),
         "sourceLocatorReadySectionCount": source_locator_ready,
         "podAiReviewFindingCount": len(linked_finding_ids),
+        "podReviewReadStatus": pod_review_status,
+        "podReviewReadMessage": "Pod 검토 이력을 조회하지 못했습니다. 지적사항이 없다는 뜻은 아닙니다." if pod_review_status == "unavailable" else None,
         "sectionsWithPodReviewCount": sum(1 for link in links if link.get("podAiReviewFindings")),
         "links": links,
     }
@@ -526,7 +549,7 @@ def _build_section_link(
     pod_review_findings: List[Dict[str, Any]] = []
     for pod_key in _SECTION_CATEGORY_PODS.get(category, ()):
         pod_review_findings.extend((pod_findings or {}).get(pod_key, []))
-    blocking_review = any(str(f.get("severity")).lower() == "blocking" for f in pod_review_findings)
+    blocking_review = any(str(f.get("severity")).lower() == "blocking" and f.get("artifactBindingStatus") != "mismatch" for f in pod_review_findings)
     return {
         "paragraphId": paragraph_id,
         "projectId": project_id,
@@ -547,7 +570,7 @@ def _build_section_link(
             "missingLocator": max(len(compact_records) - linked_with_locator, 0),
         },
         "linkedRecords": compact_records,
-        "podAiReviewFindings": pod_review_findings[:8],
+        "podAiReviewFindings": pod_review_findings,
         "podAiReviewBlocking": blocking_review,
     }
 

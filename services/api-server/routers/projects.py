@@ -38,6 +38,7 @@ from schemas.scenario import ScenarioSetRequest
 from schemas.stress_test import StressTestRequest, StressTranche, StressScenarioDriver, StressTestSchedule
 from agents.scenario_engine_agent import ScenarioEngineAgent
 from agents.stress_test_agent import DEFAULT_STRESS_SCENARIOS, StressTestAgent
+from use_cases.pf_structure import build_pf_structure_input, execute_pf_structure_input
 from schemas.credit_enhancement import CreditEnhancementRequest
 from agents.credit_enhancement_agent import CreditEnhancementAgent
 from schemas.cash_sweep import CashSweepRequest
@@ -3654,24 +3655,8 @@ def calculate_pf_structure(project_id: str, input_data: Dict[str, Any]):
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     project = _project_store()[project_id]
-    feasibility = project.get("feasibility_input", {})
-    source_data = {
-        "tranches": input_data.get("tranches", project.get("pf_structure", [])),
-        "total_revenue": input_data.get("total_revenue", feasibility.get("total_revenue", 0)),
-        "total_cost": input_data.get("total_cost", feasibility.get("total_cost", 0)),
-        "finance_cost": input_data.get("finance_cost", feasibility.get("finance_cost", 0)),
-        "other_priority_costs": input_data.get("other_priority_costs", input_data.get("finance_cost", feasibility.get("finance_cost", 0))),
-        "net_operating_income": input_data.get("net_operating_income", input_data.get("noi", 0)),
-        "debt_service": input_data.get("debt_service", 0),
-    }
-    result = calculate_pf_metrics(source_data)
-    response = {
-        **result,
-        "ltv": result["metrics"]["ltv"]["value"],
-        "ltc": result["metrics"]["ltc"]["value"],
-        "dscr": result["metrics"]["dscr"]["value"],
-        "exit_sale_rate": result["metrics"]["exit_sale_rate"]["value"],
-    }
+    source_data = build_pf_structure_input(project, input_data)
+    response = execute_pf_structure_input(source_data)
     captured_input = {**input_data, **source_data}
     pf_run = _persist_calculation_run(project_id, engine_key="pf_metrics", result=response,
                                     input_data=captured_input, effective_input_captured=True)

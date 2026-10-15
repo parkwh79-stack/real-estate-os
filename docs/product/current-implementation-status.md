@@ -1,6 +1,6 @@
 # REALYTICS 현재 구현 현황
 
-Updated: 2026-10-14
+Updated: 2026-10-15
 
 문서와 코드의 연결을 다시 점검한 현재 기준이다. 과거의 기능별 개발 일지와 중복된 상태 설명은 [통합 이전 기록](../archive/documentation-baseline-2026-09-28.md)에 보존했다. 작업 순서는 [제품 실행 계획](realytics-os-next-work-roadmap.md) 한 곳에서 관리한다.
 
@@ -42,6 +42,7 @@ NOI·LTV·점수를 생성하던 처리를 수정했다. 입력이 부족한 지
 | 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 위험별 보완 사유·다음 할 일을 기존 검토 메모로 입력·저장·재개하고 이력을 확인한다. 같은 ID/run/본문/출처 재생성은 사람 검토를 보존하며, 바뀐 근거나 새 실행에 과거 승인을 넘기지 않는다. 편집 중 다른 검토를 막고 실패 시 입력을 유지한다. 다중 사용자 동시 수정 CAS는 미구현이다. CF 비교는 실행 메타데이터와 업무 입력·출처 차이를 구분하며, 다른 재분석·consensus 경로는 별도 확인한다. |
 | 검토 초안·다운로드 | `use_cases/report_generation.py`, `agents/report_export_agent.py`, Web 프로젝트 보고서와 Cash Flow export | 저장된 CF 비교의 두 계산·입력·출처·검토 이유를 고정한 분석 초안을 기존 보고서 저장·재조회·내보내기에 연결한다. 현재 입력 변경과 분리하고 hash 검증·최종 발행 차단을 유지한다. 상세 검증과 PDF/DOCX 범위는 실행 계획을 따른다. |
 | Chief Pod 계산 계보 | `use_cases/chief_deal_orchestration.py`, `chief_pod_records.py`, `agent_platform/domain_pod_runtime.py` | 6개 Pod 모두 실행 경로가 있다. CF Pod는 실제 계산 요청·입력 hash와 Chief/Pod 실행 ID를 저장하며 소비 입력 변경 시 재실행한다. 원가 Pod·child 캐시와 실제 Agent의 입력을 일치시키고, 재실행한 파생 결과를 수동·승인 입력 보호하에 프로젝트 조회에 반영한다. 총사업비 누락은 미확인으로 유지한다. 공공정책의 전용 시뮬레이션은 미구현이며 기존 개발가능성 분석 재사용이다. |
+| PF Pod·보고서 근거 연결 | `use_cases/pf_structure.py`, `chief_pod_records.py`, `report_generation.py`, Web 보고서 | PF Pod도 실제 PF/시나리오 요청·기본값·실행 ID를 저장하고 재현하며, 입력·옵션 변경은 캐시에 반영한다. 과거 스트레스를 이번 실행으로 등록하지 않고 시나리오 입력 부족은 부분 결과로 표시한다. 저장 보고서 화면/JSON은 6개 Pod의 결정론적 지적·근거 위치·검토/실행/산출물 ID를 고정하고 연결 불일치·미확인·조회 실패를 구분한다. 새 근거의 PDF/Word 본문 반영과 모든 보고서 숫자의 동일 실행 연결·실제 계약 검증은 남아 있다. |
 | 로그인과 조직 경계 | Web `app/api/auth/supabase`, `core/authz.py`, DB repositories | 코드 있음. 운영 준비를 단순 로그인 화면 존재로 판단하지 않음. 기존 권한 유지. |
 | 자동 코딩·자기수정 | `agent_platform/coding` | 현재 제품 우선순위에서 제외. 취소/완료 경합과 실행 격리 과제가 있어 운영 활성화하지 않음. |
 

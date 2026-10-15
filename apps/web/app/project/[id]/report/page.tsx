@@ -73,6 +73,11 @@ interface PodAiReviewFinding {
   severity?: string;
   message?: string;
   recommendedAction?: string;
+  sourceLocators?: Record<string, unknown>[];
+  sourceArtifactKeys?: string[];
+  runId?: string;
+  reviewId?: string;
+  artifactBindingStatus?: string;
 }
 
 interface ParagraphEvidenceLinks {
@@ -82,6 +87,8 @@ interface ParagraphEvidenceLinks {
   sectionCount?: number;
   linkedRecordCount?: number;
   sourceLocatorReadySectionCount?: number;
+  podReviewReadStatus?: string;
+  podReviewReadMessage?: string;
   links?: ParagraphEvidenceLink[];
 }
 
@@ -736,7 +743,7 @@ function ParagraphEvidenceLinkPanel({
           <div>
             <h3 className="font-bold text-slate-950 dark:text-white">문단별 저장 근거</h3>
             <p className="mt-1 text-xs text-slate-500">
-              생성 시점에 저장된 `paragraphEvidenceLinks`를 기준으로 문단별 증거, 지표, 가정, 리스크를 추적합니다.
+              보고서 생성 당시 저장한 근거와 검토 의견입니다.
             </p>
           </div>
         </div>
@@ -747,6 +754,9 @@ function ParagraphEvidenceLinkPanel({
         </div>
       </div>
 
+      {links?.podReviewReadStatus === "unavailable" ? (
+        <p role="alert" className="mb-3 rounded bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-100">{links.podReviewReadMessage}</p>
+      ) : null}
       {!hasGeneratedLinks ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
           아직 저장된 문단별 근거 링크가 없습니다. 보고서를 생성하면 서버가 Deal State 원장을 읽어
@@ -772,10 +782,13 @@ function ParagraphEvidenceLinkPanel({
                   Pod AI Review 지적 {link.podAiReviewBlocking ? "· 차단(blocking)" : ""}
                 </p>
                 <ul className="mt-1.5 space-y-1">
-                  {(link.podAiReviewFindings ?? []).slice(0, 4).map((f, i) => (
+                  {(link.podAiReviewFindings ?? []).map((f, i) => (
                     <li key={f.findingId ?? i} className="text-xs text-slate-700 dark:text-slate-200">
                       <span className="font-mono text-[10px] text-slate-500">[{f.podKey}·{f.severity}]</span> {f.message}
                       {f.recommendedAction ? <span className="mt-0.5 block text-[11px] text-slate-500">→ {f.recommendedAction}</span> : null}
+                      <span className="mt-1 block text-[11px] text-slate-500">{f.artifactBindingStatus === "matched" ? "보고서 생성 시점의 Pod 산출물과 연결됨" : f.artifactBindingStatus === "mismatch" ? "현재 Pod 산출물과 다른 과거 검토 — 현재 계산의 지적으로 확정하지 않음" : "Pod 산출물 연결 여부 미확인"}</span>
+                      {(f.sourceLocators ?? []).map((locator, index) => <span key={index} className="mt-0.5 block break-words text-[11px] text-slate-500">근거: {locatorSummary({ sourceLocator: locator })}</span>)}
+                      <details className="mt-1 break-all text-[11px] text-slate-500"><summary className="cursor-pointer">저장된 검토 식별정보</summary>검토: {f.reviewId || "미기록"}<br />실행: {f.runId || "미기록"}<br />산출물: {f.sourceArtifactKeys?.join(", ") || "미기록"}</details>
                     </li>
                   ))}
                 </ul>

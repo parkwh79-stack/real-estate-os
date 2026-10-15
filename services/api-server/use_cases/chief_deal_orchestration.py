@@ -5,7 +5,7 @@ from core.agent_execution import require_successful_runtime
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
-from core.calculations import calculate_pf_metrics, normalize_tranche_priority
+from core.calculations import normalize_tranche_priority
 from core.text_normalization import build_term_surface_record
 from agents.cash_flow_engine import run_cash_flow_engine
 from agents.orchestration_agent import OrchestrationAgent
@@ -15,7 +15,8 @@ from agents.market_product_depth_agent import MarketProductDepthAgent
 from agents.risk_register_agent import RiskRegisterAgent
 from agents.scenario_engine_agent import ScenarioEngineAgent
 from agent_platform.bootstrap import run_pod_ai_review_with_contract
-from schemas.scenario import ScenarioSetRequest
+from schemas.scenario import ScenarioDrivers, ScenarioSetRequest, WaterfallRule
+from use_cases.pf_structure import build_pf_structure_input, execute_pf_structure_input
 from schemas.orchestration import (
     AgentPodPlan,
     AgentPodRun,
@@ -1635,42 +1636,48 @@ def _execute_pod_artifact(
         workflow_artifacts = workflow_run.get("artifacts") or {}
         standard_artifacts = _current_standard_artifacts(project_data)
         standard_artifacts.update({k: v for k, v in workflow_artifacts.items() if v is not None})
+        pf_request = workflow_artifacts.get("pfStructureInput")
+        if workflow_artifacts.get("pfStructure") is not None and not isinstance(pf_request, dict):
+            raise ValueError("PF 계산의 실제 실행 입력이 없어 현재 계산으로 연결할 수 없습니다.")
+        if pf_request is None:
+            pf_request = build_pf_structure_input(project_data, options)
         pf_structure = workflow_artifacts.get("pfStructure") or run_child_agent(
             agent_id="PFStructuringAgent",
             task_type="pf_structure_calculation",
             domain="pf_credit",
-            input_snapshot={
-                "feasibilityInput": project_data.get("feasibility_input"),
-                "pfStructure": project_data.get("pf_structure") or project_data.get("pfStructure"),
-                "cashFlowRunResult": project_data.get("cashFlowRunResult"),
-            },
-            executor=lambda: _calculate_pf_structure_artifact(project_data, options),
+            input_snapshot=pf_request,
+            executor=lambda: execute_pf_structure_input(pf_request),
             output_schema_name="PFStructureResult",
             deterministic_authority_required=True,
         )
         standard_artifacts["pfStructure"] = pf_structure
-        scenario_result = run_child_agent(
-            agent_id="ScenarioEngineAgent",
-            task_type="pf_recovery_scenario_analysis",
-            domain="pf_credit",
-            input_snapshot={
-                "productMix": project_data.get("productMix") or project_data.get("product_mix"),
-                "pfStructure": pf_structure,
-                "scenarioDrivers": project_data.get("scenarioDrivers") or project_data.get("scenario_drivers"),
-            },
-            executor=lambda: _run_pf_scenario_if_ready(project_id, project_data, options),
-            output_schema_name="ScenarioSetResult",
-            deterministic_authority_required=True,
-        )
+        scenario_request = _build_scenario_request(project_id, project_data, options)
+        scenario_result = None
+        if scenario_request is not None:
+            scenario_result = run_child_agent(
+                agent_id="ScenarioEngineAgent",
+                task_type="pf_recovery_scenario_analysis",
+                domain="pf_credit",
+                input_snapshot=scenario_request.model_dump(mode="json"),
+                executor=lambda: ScenarioEngineAgent().run_scenario_set(scenario_request).model_dump(mode="json"),
+                output_schema_name="ScenarioSetResult",
+                deterministic_authority_required=True,
+            )
         if scenario_result:
             standard_artifacts["scenariosEvaluation"] = scenario_result
             project_data["scenariosEvaluation"] = scenario_result
+        else:
+            # Preserve historical project data, but never feed it to this run's
+            # risk/credit review when the current scenario could not execute.
+            standard_artifacts.pop("scenariosEvaluation", None)
+        review_project = deepcopy({key: value for key, value in project_data.items()
+                                   if key != "chief_orchestration_state"})
         risk_register = run_child_agent(
             agent_id="RiskRegisterAgent",
             task_type="risk_register_aggregation",
             domain="pf_credit",
-            input_snapshot={"artifactKeys": sorted(standard_artifacts), "pfStructure": pf_structure},
-            executor=lambda: RiskRegisterAgent().build(project_data, standard_artifacts),
+            input_snapshot={"project": review_project, "artifacts": deepcopy(standard_artifacts)},
+            executor=lambda: RiskRegisterAgent().build(review_project, standard_artifacts),
             output_schema_name="RiskRegister",
         )
         standard_artifacts["riskRegister"] = risk_register
@@ -1679,19 +1686,27 @@ def _execute_pod_artifact(
             task_type="credit_decision_review",
             domain="pf_credit",
             input_snapshot={
+                "project": review_project,
+                "artifacts": deepcopy(standard_artifacts),
                 "riskRegister": risk_register,
                 "pfStructure": pf_structure,
                 "scenariosEvaluation": scenario_result,
             },
-            executor=lambda: CreditReviewAgent().decide(project_data, standard_artifacts),
+            executor=lambda: CreditReviewAgent().decide(review_project, standard_artifacts),
             output_schema_name="CreditReviewDecision",
         )
         standard_artifacts["creditReviewDecision"] = credit_review
         artifact = {
             "artifactType": "pf_credit_pod_result",
+            "executionStatus": "completed" if scenario_result else "completed_with_review",
+            "dataLimitations": [] if scenario_result else ["상품별 매출·수량과 대출금액이 부족해 회수 시나리오를 실행하지 않았습니다. PF 지표는 별도로 확인할 수 있습니다."],
             "domainWorkflow": _workflow_summary(workflow_run),
             "standardArtifacts": standard_artifacts,
             "pfStructure": pf_structure,
+            "pfStructureInput": deepcopy(pf_request),
+            "scenarioRunRequest": scenario_request.model_dump(mode="json") if scenario_request else None,
+            "scenarioExecutionStatus": "completed" if scenario_result else "insufficient_input",
+            "stressExecutionStatus": "not_executed_in_this_pod",
             "scenariosEvaluation": scenario_result,
             "riskRegister": risk_register,
             "creditReviewDecision": credit_review,
@@ -1702,11 +1717,12 @@ def _execute_pod_artifact(
                 task_type="covenant_eod_evaluation",
                 domain="pf_credit",
                 input_snapshot={
+                    "project": review_project,
                     "pfStructure": pf_structure,
                     "riskRegister": risk_register,
                     "creditReviewDecision": credit_review,
                 },
-                executor=lambda: evaluate_covenant_eod_use_case(project_data),
+                executor=lambda: evaluate_covenant_eod_use_case(review_project),
                 output_schema_name="CovenantEodResult",
             )
             project_data["covenantEod"] = artifact["covenantEod"]
@@ -1972,17 +1988,6 @@ def _current_standard_artifacts(project_data: Dict[str, Any]) -> Dict[str, Any]:
     return {key: project_data.get(key) for key in keys if project_data.get(key) is not None}
 
 
-def _run_pf_scenario_if_ready(
-    project_id: str,
-    project_data: Dict[str, Any],
-    options: Dict[str, Any],
-) -> Dict[str, Any] | None:
-    request = _build_scenario_request(project_id, project_data, options)
-    if request is None:
-        return None
-    return ScenarioEngineAgent().run_scenario_set(request).model_dump(by_alias=True)
-
-
 def _build_scenario_request(
     project_id: str,
     project_data: Dict[str, Any],
@@ -1999,6 +2004,9 @@ def _build_scenario_request(
             "projectId": project_id,
             "productMix": product_mix,
             "pfStructure": pf_structure,
+            "scenarioDrivers": ScenarioDrivers.model_validate(options.get("scenarioDrivers",
+                project_data.get("scenarioDrivers") or project_data.get("scenario_drivers") or {})),
+            "waterfallRule": WaterfallRule.model_validate(options.get("waterfallRule") or {}),
             "sourceMetadata": {
                 "sourceName": "Chief Deal Orchestrator",
                 "sourceType": "agent_artifact",
@@ -2010,14 +2018,16 @@ def _build_scenario_request(
 
 
 def _scenario_product_mix(project_data: Dict[str, Any], options: Dict[str, Any]) -> List[Dict[str, Any]]:
-    raw_items = options.get("productMix") or project_data.get("product_mix") or project_data.get("productMix") or []
+    raw_items = options.get("productMix", project_data.get("product_mix") or project_data.get("productMix") or [])
+    if "productMix" in options and not raw_items:
+        return []
     items: List[Dict[str, Any]] = []
     for index, item in enumerate(raw_items, start=1):
         if not isinstance(item, dict):
             continue
-        units = int(_number(item.get("units") or item.get("unitCount") or item.get("count")) or 0)
-        total_revenue = _number(item.get("totalRevenue") or item.get("total_revenue") or item.get("revenue")) or 0.0
-        avg_unit_price = _number(item.get("avgUnitPrice") or item.get("avg_unit_price") or item.get("unitPrice")) or 0.0
+        units = int(_number(item.get("units", item.get("unitCount", item.get("count")))) or 0)
+        total_revenue = _number(item.get("totalRevenue", item.get("total_revenue", item.get("revenue")))) or 0.0
+        avg_unit_price = _number(item.get("avgUnitPrice", item.get("avg_unit_price", item.get("unitPrice")))) or 0.0
         if not avg_unit_price and units and total_revenue:
             avg_unit_price = total_revenue / units
         if units > 0 and total_revenue > 0:
@@ -2029,21 +2039,18 @@ def _scenario_product_mix(project_data: Dict[str, Any], options: Dict[str, Any])
                     "totalRevenue": total_revenue,
                 }
             )
-    if items:
+    if items or raw_items or "productMix" in options:
         return items
 
     feasibility = project_data.get("feasibility_input") or {}
     total_revenue = _number(
-        options.get("totalRevenue")
-        or options.get("total_revenue")
-        or feasibility.get("total_revenue")
-        or feasibility.get("sales_revenue")
+        options.get("totalRevenue", options.get("total_revenue",
+            feasibility.get("total_revenue", feasibility.get("sales_revenue"))))
     ) or 0.0
     units = int(
         _number(
-            options.get("units")
-            or project_data.get("architectural_plan", {}).get("unit_count")
-            or project_data.get("architecturalPlan", {}).get("unitCount")
+            options.get("units", project_data.get("architectural_plan", {}).get("unit_count",
+                project_data.get("architecturalPlan", {}).get("unitCount")))
         )
         or 0
     )
@@ -2060,12 +2067,12 @@ def _scenario_product_mix(project_data: Dict[str, Any], options: Dict[str, Any])
 
 
 def _scenario_pf_structure(project_data: Dict[str, Any], options: Dict[str, Any]) -> List[Dict[str, Any]]:
-    raw_tranches = options.get("pfStructure") or options.get("tranches") or project_data.get("pf_structure") or project_data.get("pfStructure") or []
+    raw_tranches = build_pf_structure_input(project_data, options)["tranches"]
     tranches: List[Dict[str, Any]] = []
     for index, item in enumerate(raw_tranches, start=1):
         if not isinstance(item, dict):
             continue
-        amount = _number(item.get("amount") or item.get("loanAmount") or item.get("principal")) or 0.0
+        amount = _number(item.get("amount", item.get("loanAmount", item.get("principal")))) or 0.0
         if amount <= 0:
             continue
         tranches.append(
@@ -2076,8 +2083,8 @@ def _scenario_pf_structure(project_data: Dict[str, Any], options: Dict[str, Any]
                     item.get("priority") or item.get("repaymentPriority"),
                     index,
                 ),
-                "interestRate": _number(item.get("interestRate") or item.get("interest_rate")) or 0.0,
-                "feeRate": _number(item.get("feeRate") or item.get("fee_rate")) or 0.0,
+                "interestRate": _number(item.get("interestRate", item.get("interest_rate"))) or 0.0,
+                "feeRate": _number(item.get("feeRate", item.get("fee_rate"))) or 0.0,
             }
         )
     if tranches:
@@ -2124,32 +2131,6 @@ def _apply_feasibility_summary_to_project(project_data: Dict[str, Any], feasibil
         profit_margin = returns.get("profitMargin") or returns.get("developerProfitMargin")
         if profit_margin not in (None, ""):
             project_data.setdefault("expected_results", {})["profit_margin"] = profit_margin
-
-
-def _calculate_pf_structure_artifact(project_data: Dict[str, Any], options: Dict[str, Any]) -> Dict[str, Any]:
-    feasibility = project_data.get("feasibility_input", {}) or {}
-    tranches = options.get("tranches") or project_data.get("pf_structure") or project_data.get("pfStructure") or []
-    source_data = {
-        "tranches": tranches,
-        "total_revenue": options.get("total_revenue", feasibility.get("total_revenue", 0)),
-        "total_cost": options.get("total_cost", feasibility.get("total_cost", 0)),
-        "finance_cost": options.get("finance_cost", feasibility.get("finance_cost", 0)),
-        "other_priority_costs": options.get(
-            "other_priority_costs",
-            options.get("finance_cost", feasibility.get("finance_cost", 0)),
-        ),
-        "net_operating_income": options.get("net_operating_income", options.get("noi", 0)),
-        "debt_service": options.get("debt_service", 0),
-    }
-    result = calculate_pf_metrics(source_data)
-    metrics = result.get("metrics", {})
-    return {
-        **result,
-        "ltv": (metrics.get("ltv") or {}).get("value"),
-        "ltc": (metrics.get("ltc") or {}).get("value"),
-        "dscr": (metrics.get("dscr") or {}).get("value"),
-        "exit_sale_rate": (metrics.get("exit_sale_rate") or {}).get("value"),
-    }
 
 
 def _documents(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
