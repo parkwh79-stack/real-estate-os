@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessage, parseBackendErrorResponse } from "../../lib/backend-error";
 import { CashFlowComparisonDetails, type Comparison, type State } from "./cash-flow-review-workspace";
+import { ReportInputReconciliationPanel, type ReportInputReconciliation } from "./report-input-reconciliation";
 
 export type ComparisonReportSnapshot = {
   schemaVersion: string; projectId: string; capturedAt: string; comparison: Comparison;
@@ -32,10 +33,11 @@ async function responseBody<T>(response: Response, action: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, calculationSnapshots, disabled, onCreated, onBusyChange }: {
+export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, calculationSnapshots, reconciliation, disabled, onCreated, onBusyChange }: {
   projectId: string; reportId?: string; snapshot?: ComparisonReportSnapshot; disabled: boolean;
   cashFlowSnapshot?: ReportCashFlowSnapshot;
   calculationSnapshots?: ReportCalculationSnapshots;
+  reconciliation?: ReportInputReconciliation;
   onCreated: (reportId: string) => Promise<void>; onBusyChange: (busy: boolean) => void;
 }) {
   const endpoint = `${apiBase}/projects/${encodeURIComponent(projectId)}`;
@@ -236,6 +238,7 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
         <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("docx"))}>이 PF 초안 Word 다운로드</button>
       </div> : null}
     </div> : null}
+    {(cashFlowSnapshot || calculationSnapshots) ? <ReportInputReconciliationPanel value={reconciliation} /> : null}
     {snapshot ? <div aria-label="초안에 고정된 비교" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
       <h4 className="font-bold">선택한 초안에 고정된 비교</h4>
       <p className="mt-2 break-all text-xs text-slate-500">기준 계산: {snapshot.selection.baselineRunId} / 변경 계산: {snapshot.selection.comparisonRunId}</p>

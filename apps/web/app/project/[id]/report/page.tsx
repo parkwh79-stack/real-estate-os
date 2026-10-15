@@ -36,6 +36,7 @@ import { CreditDocumentsPanel } from "../../../../components/orchestration/credi
 import { SimilarCasesRagPanel } from "../../../../components/orchestration/similar-cases-rag-panel";
 import { TermAnnotationsPanel } from "../../../../components/orchestration/term-annotations-panel";
 import { ComparisonReportReview, type ComparisonReportSnapshot, type ReportCashFlowSnapshot, type ReportCalculationSnapshots } from "../../../../components/feasibility/comparison-report-review";
+import type { ReportInputReconciliation } from "../../../../components/feasibility/report-input-reconciliation";
 
 interface ProjectResponse {
   project?: { name?: string; type?: string };
@@ -108,6 +109,7 @@ interface GeneratedReportResponse {
     cashFlowComparisonSnapshot?: ComparisonReportSnapshot;
     cashFlowCalculationSnapshot?: ReportCashFlowSnapshot;
     calculationSnapshots?: ReportCalculationSnapshots;
+    calculationReconciliation?: ReportInputReconciliation;
     sectionOrder?: Array<{ key: string; title: string }>;
     paragraphEvidenceLinks?: ParagraphEvidenceLinks;
     appliedTemplate?: { name?: string; version?: number };
@@ -461,6 +463,7 @@ export default function ReportPreviewPage() {
       <ComparisonReportReview projectId={projectId} reportId={report?.report_id} snapshot={report?.report?.cashFlowComparisonSnapshot}
         cashFlowSnapshot={report?.report?.cashFlowCalculationSnapshot}
         calculationSnapshots={report?.report?.calculationSnapshots}
+        reconciliation={report?.report?.calculationReconciliation}
         disabled={loading || generating || publishing || selectingReport} onCreated={loadData} onBusyChange={setGenerating} />
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_0.95fr]">

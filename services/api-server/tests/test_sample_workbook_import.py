@@ -150,6 +150,14 @@ def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance(tmp_p
     exported = json.loads(export_report_use_case(reopened, {"format": "json"})["content"])
     assert exported["report"]["cashFlowCalculationSnapshot"] == run
     assert exported["report"]["calculationSnapshots"]["feasibility"] == feasibility_run
+    reconciliation = reopened["report"]["calculationReconciliation"]
+    assert exported["report"]["calculationReconciliation"] == reconciliation
+    assert reopened["metadata"]["calculation_reconciliation_hash"] == content_hash(reconciliation)
+    # The summary metrics capture totals, not the detailed cost fields. A
+    # matching total must not turn those missing captured inputs into a pass.
+    assert reconciliation["status"] == "incomplete"
+    assert [row["status"] for row in reconciliation["rows"]] == ["same", "same", "missing", "missing", "missing", "missing"]
+    assert reconciliation["runInputHashes"] == {"cash_flow": content_hash(request), "feasibility": content_hash(feasibility_input)}
     assert reopened["report"]["sections"]["businessFeasibility"]["사업성 요약"]["저장된 결과"] == feasibility_result
     assert "미확인" in reopened["report"]["sections"]["businessFeasibility"]["PF 지표"]["상태"]
     assert hashlib.sha256(workbook_path.read_bytes()).hexdigest() == manifest["sha256"]

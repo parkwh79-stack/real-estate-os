@@ -47,6 +47,14 @@ SQLite 기동 시 불필요한 전체 이력 로딩도 보완했다. 실제 DB�
 표시하지 않는다. 실제 본리동 원본의 사업성·예산 방식 CF도 격리 저장·재열기/JSON
 일치를 검증 대상으로 포함했다. [현재 계약과 검증](realytics-os-next-work-roadmap.md).
 
+추가로 선택 계산의 공통 예산 입력과 같은 시나리오 계열의 업무입력 대조를 보고서에
+저장한다. 차이·누락·단위 확인 필요를 구분하며 재열기와 다섯 형식 다운로드에서
+저장 입력과 대조 결과의 일치를 검증한다. 본리동의 총액은 일치하지만 상세 비용
+4항목의 입력 미보관을 그대로 표시했다. 전체 정합성 승인을 대신하지 않으며 차이가
+있는 분석 초안도 저장할 수 있다. Word는 실제 자료의 입력 대조 부록 2페이지를
+Microsoft Word 출력·PNG로 확인했고 행 분리와 제목 스타일을 보완했다. 전체 20절
+문서 인수와 나머지 절의 계산/근거 연결은 남아 있다.
+
 | 사용자 작업 | 확인한 구현 근거 | 현재 판단 / 필요한 작업 |
 |---|---|---|
 | 가입·로그인 | Web `/login`, Supabase password/OAuth BFF, `supabase/functions/naver-userinfo` | 이메일 가입·비밀번호·재설정과 카카오/Google 진입을 같은 화면에 연결. 네이버 앱 등록·저장 설정 확인과 회원정보 변환 함수 v1 배포 완료. Supabase 공급자 설정과 실제 로그인 검증 후 활성화하며 현재 네이버 버튼은 비활성이다. [설정 및 검증](live-auth-smoke-runbook.md). |
@@ -61,7 +69,7 @@ SQLite 기동 시 불필요한 전체 이력 로딩도 보완했다. 실제 DB�
 | 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 위험별 보완 사유·다음 할 일을 기존 검토 메모로 입력·저장·재개하고 이력을 확인한다. 같은 ID/run/본문/출처 재생성은 사람 검토를 보존하며, 바뀐 근거나 새 실행에 과거 승인을 넘기지 않는다. 편집 중 다른 검토를 막고 실패 시 입력을 유지한다. 다중 사용자 동시 수정 CAS는 미구현이다. CF 비교는 실행 메타데이터와 업무 입력·출처 차이를 구분하며, 다른 재분석·consensus 경로는 별도 확인한다. |
 | 검토 초안·다운로드 | `use_cases/report_generation.py`, `agents/report_export_agent.py`, Web 프로젝트 보고서와 Cash Flow export | 저장된 CF 비교의 두 계산·입력·출처·검토 이유를 고정한 분석 초안을 기존 보고서 저장·재조회·내보내기에 연결한다. 현재 입력 변경과 분리하고 hash 검증·최종 발행 차단을 유지한다. 상세 검증과 PDF/DOCX 범위는 실행 계획을 따른다. |
 | Chief Pod 계산 계보 | `use_cases/chief_deal_orchestration.py`, `chief_pod_records.py`, `agent_platform/domain_pod_runtime.py` | 6개 Pod 모두 실행 경로가 있다. CF Pod는 실제 계산 요청·입력 hash와 Chief/Pod 실행 ID를 저장하며 소비 입력 변경 시 재실행한다. 원가 Pod·child 캐시와 실제 Agent의 입력을 일치시키고, 재실행한 파생 결과를 수동·승인 입력 보호하에 프로젝트 조회에 반영한다. 총사업비 누락은 미확인으로 유지한다. 공공정책의 전용 시뮬레이션은 미구현이며 기존 개발가능성 분석 재사용이다. |
-| PF Pod·보고서 근거 연결 | `use_cases/pf_structure.py`, `chief_pod_records.py`, `report_generation.py`, Web 보고서 | PF Pod도 실제 PF/시나리오 요청·기본값·실행 ID를 저장하고 재현하며, 입력·옵션 변경은 캐시에 반영한다. 과거 스트레스를 이번 실행으로 등록하지 않고 시나리오 입력 부족은 부분 결과로 표시한다. 6개 Pod의 고정된 지적·근거를 화면/JSON과 Markdown·HTML·PDF·Word 본문에 연결했다. 보고서에서 시나리오를 새로 실행하거나 합성 CF를 만들지 않는다. Word 시각 검증, 모든 보고서 숫자의 동일 실행 연결·실제 계약 검증은 남아 있다. |
+| PF Pod·보고서 근거 연결 | `use_cases/pf_structure.py`, `chief_pod_records.py`, `report_generation.py`, Web 보고서 | PF Pod도 실제 PF/시나리오 요청·기본값·실행 ID를 저장하고 재현하며, 입력·옵션 변경은 캐시에 반영한다. 과거 스트레스를 이번 실행으로 등록하지 않고 시나리오 입력 부족은 부분 결과로 표시한다. 6개 Pod의 고정된 지적·근거를 화면/JSON과 Markdown·HTML·PDF·Word 본문에 연결했다. 보고서에서 시나리오를 새로 실행하거나 합성 CF를 만들지 않는다. 전체 20절 Word 시각 인수, 모든 보고서 숫자의 동일 실행 연결·실제 계약 검증은 남아 있다. |
 | Pod 추가 업무 배정 | `agents/pod_ai_reviewer_agent.py`, `use_cases/chief_pod_work_orders.py`, Chief 화면 | LLM 검토가 실제 담당 Agent/Pod와 수집·재검토·자료 요청을 제안하면 허용된 업무만 typed handoff와 기존 Event Bus로 실행한다. 중복과 재실행 회차를 제한하고 출처·상태·재검토 결과를 저장한다. 모델이 없으면 규칙 기반이라고 표시하며 지원하는 공개자료 보강은 계속 시도한다. 미확인 약정·권리·금융값은 임의로 채우지 않는다. 운영 LLM과 공개 API의 실통신 검증은 남아 있다. |
 | 로그인과 조직 경계 | Web `app/api/auth/supabase`, `core/authz.py`, DB repositories | 코드 있음. 운영 준비를 단순 로그인 화면 존재로 판단하지 않음. 기존 권한 유지. |
 | 자동 코딩·자기수정 | `agent_platform/coding` | 현재 제품 우선순위에서 제외. 취소/완료 경합과 실행 격리 과제가 있어 운영 활성화하지 않음. |

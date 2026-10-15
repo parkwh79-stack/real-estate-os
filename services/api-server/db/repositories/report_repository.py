@@ -61,6 +61,14 @@ def verify_report_snapshots(record: Mapping[str, Any], *, project_id: str | None
     tenant_id: str | None = None) -> None:
     """Verify the saved document, never rebind it to mutable current calculations."""
     report = record.get("report") or {}
+    if "calculationReconciliation" in report or "calculation_reconciliation_hash" in (record.get("metadata") or {}):
+        from use_cases.report_input_reconciliation import verify_input_reconciliation
+        try:
+            verify_input_reconciliation(report)
+            if record["metadata"].get("calculation_reconciliation_hash") != _comparison_hash(report["calculationReconciliation"]):
+                raise ValueError("Input reconciliation seal differs")
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise ReportPublicationConflict("저장된 계산 입력 대사 검증에 실패했습니다.") from exc
     if has_cash_flow_basis(record) or has_calculation_bases(record):
         from use_cases.report_calculation_basis import verify_cash_flow_basis, verify_calculation_bases
 
@@ -876,6 +884,8 @@ def _build_draft_report_record(
         record["metadata"]["cash_flow_snapshot_hash"] = report["cashFlowCalculationSnapshotHash"]
     if "calculationSnapshots" in report:
         record["metadata"]["calculation_snapshots_hash"] = report["calculationSnapshotsHash"]
+    if "calculationReconciliation" in report:
+        record["metadata"]["calculation_reconciliation_hash"] = _comparison_hash(report["calculationReconciliation"])
     verify_report_snapshots(record, project_id=project_id)
     return record
 

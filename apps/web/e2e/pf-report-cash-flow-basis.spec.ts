@@ -16,7 +16,17 @@ async function fixture(page: Page, failure = 0, additional = false) {
     sections: { summaryCashFlow: { summary: snapshot.resultSnapshot.summary } } } };
   const calculationSnapshots = { feasibility: { calculationRunId: "saved-feasibility-original",
     inputSnapshot: { total_revenue: 2800 }, resultSnapshot: { total_revenue: 2800 } } };
-  const additionalDetail = { ...metadata, report_markdown: "# 저장된 사업성 · 2800원", report: { calculationSnapshots } };
+  const reconciliation = { schemaVersion: "report-input-reconciliation-v1", summary: "입력 차이 1개 · 추가 확인 1개",
+    limitation: "저장 입력의 대조이며 전체 정합성 승인은 아닙니다.", rows: [{ key: "total_revenue", label: "총매출 입력",
+      status: "different", missingCount: 1, values: [
+        { slot: "feasibility", label: "사업성 요약", calculationRunId: "saved-feasibility-original", value: 2800,
+          unit: "KRW", currency: "KRW", unitSource: "engine_contract_krw", status: "present" },
+        { slot: "pf", label: "PF 지표", calculationRunId: "saved-pf", value: 3000,
+          unit: "KRW", currency: "KRW", unitSource: "captured", status: "present" },
+        { slot: "returns", label: "수익률", calculationRunId: "missing-input", value: null,
+          unit: "KRW", currency: "KRW", unitSource: "captured", status: "missing" },
+      ] }], sameFamilyChecks: [{ label: "상환순서 / 회수", status: "different", leftRunId: "waterfall", rightRunId: "recovery" }] };
+  const additionalDetail = { ...metadata, report_markdown: "# 저장된 사업성 · 2800원", report: { calculationSnapshots, calculationReconciliation: reconciliation } };
   const activeDetail = additional ? additionalDetail : detail;
   await page.route("**/api/backend/**", async (route) => {
     const path = new URL(route.request().url()).pathname.replace(/\/$/, "");
@@ -67,6 +77,12 @@ test("additional calculation alone is selected, saved, reopened and downloaded w
   await expect(saved).toContainText("saved-feasibility-original");
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(saved).toContainText("미선택 항목은 미확인");
+  const reconciliationPanel = page.getByRole("region", { name: "저장 보고서의 입력 대사", exact: true });
+  await expect(reconciliationPanel).toContainText("2,800 원");
+  await expect(reconciliationPanel).toContainText("3,000 원");
+  await expect(reconciliationPanel).toContainText("미기록");
+  await expect(reconciliationPanel).not.toContainText("99,999");
+  await expect(reconciliationPanel).toContainText("상환순서 / 회수");
   const waiting = page.waitForEvent("download");
   await saved.getByRole("button", { name: "입력·결과 JSON 다운로드" }).click();
   const stream = await (await waiting).createReadStream();

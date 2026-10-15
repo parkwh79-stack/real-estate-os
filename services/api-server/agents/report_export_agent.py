@@ -78,6 +78,11 @@ class ReportExportAgent:
         """All formats consume the saved body and saved provenance, never live reviews."""
         rows = [(meta, (report.get("sections") or {}).get(meta.get("key")))
                 for meta in report.get("sectionOrder") or []]
+        reconciliation = report.get("calculationReconciliation")
+        if reconciliation:
+            from use_cases.report_input_reconciliation import reconciliation_document
+            rows.append(({"index": "부록", "key": "calculationReconciliation", "title": "선택 계산의 입력 대조"},
+                         reconciliation_document(reconciliation)))
         links = report.get("paragraphEvidenceLinks") or []
         if links:
             rows.append(({"index": "부록", "key": "podEvidence", "title": "문단별 근거와 Pod 보완사항"}, links))
@@ -350,9 +355,25 @@ class ReportExportAgent:
         return "\n".join(commands).encode("ascii")
 
     def _render_docx(self, report_record: Dict[str, Any]) -> bytes:
-        lines = self._plain_report_lines(report_record)
-        document_body = "\n".join(self._docx_paragraph(line, "Title" if index == 0 else "Normal")
-                                  for index, line in enumerate(lines))
+        report = report_record.get("report") or {}
+        sections = self._report_sections(report)
+        if sections:
+            paragraphs = [(str(report_record.get("title") or report.get("title") or "PF 검토 보고서"), "Title"),
+                          (f"보고서 번호: {report_record.get('report_id', '')}", "Normal"),
+                          (f"버전: {report_record.get('version', '')}", "Normal"), ("목차", "Heading1")]
+            paragraphs.extend((f"{meta.get('index', '')}. {meta.get('title', '')}", "Normal") for meta, _ in sections)
+            blocks = [self._docx_paragraph(line, style) for line, style in paragraphs]
+            for meta, value in sections:
+                blocks.append(self._docx_paragraph(f"{meta.get('index', '')}. {meta.get('title', '')}", "Heading1"))
+                if meta.get("key") == "calculationReconciliation":
+                    blocks.append(self._docx_reconciliation(report["calculationReconciliation"]))
+                else:
+                    blocks.extend(self._docx_paragraph(line) for line in self._flatten_text(value))
+        else:
+            paragraphs = [(line, "Title" if index == 0 else "Normal")
+                          for index, line in enumerate(self._plain_report_lines(report_record))]
+            blocks = [self._docx_paragraph(line, style) for line, style in paragraphs]
+        document_body = "\n".join(blocks)
         document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
@@ -386,6 +407,11 @@ class ReportExportAgent:
     <w:pPr><w:keepNext/><w:spacing w:after="240"/></w:pPr>
     <w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="36"/></w:rPr>
   </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+    <w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="0"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="26"/></w:rPr>
+  </w:style>
 </w:styles>"""
 
         output = BytesIO()
@@ -399,6 +425,41 @@ class ReportExportAgent:
   <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 </Relationships>''')
         return output.getvalue()
+
+    def _docx_reconciliation(self, reconciliation: dict) -> str:
+        """Keep each numeric comparison on one table row, including its status."""
+        from use_cases.report_input_reconciliation import STATUS_LABELS
+
+        blocks = [self._docx_paragraph(reconciliation[key]) for key in ("summary", "limitation")]
+        runs = {cell["slot"]: cell for row in reconciliation["rows"] for cell in row["values"]}
+        for cell in runs.values():
+            basis = "저장 입력 단위" if cell["unitSource"] == "captured" else "계산 API 기본 원 단위"
+            blocks.append(self._docx_paragraph(f"{cell['label']} · 계산 기록 {cell['calculationRunId']} · {basis}"))
+        widths = (2050, 1900, 3700, 1988)
+        rows = [("항목", "계산", "저장 입력과 단위", "대조 상태")]
+        for row in reconciliation["rows"]:
+            for cell in row["values"]:
+                value = format(cell["value"], ",") if cell["status"] == "present" else "미기록"
+                rows.append((row["label"], cell["label"], f"{value} {cell['currency']} / {cell['unit']}", STATUS_LABELS[row["status"]]))
+        borders = "".join(f'<w:{edge} w:val="single" w:sz="4" w:color="D9D9D9"/>' for edge in ("top", "left", "bottom", "right", "insideH", "insideV"))
+        table = [f'<w:tbl><w:tblPr><w:tblW w:w="9638" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders>{borders}</w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>']
+        table.extend(f'<w:gridCol w:w="{width}"/>' for width in widths)
+        table.append('</w:tblGrid>')
+        for index, row in enumerate(rows):
+            table.append('<w:tr><w:trPr><w:cantSplit/>' + ('<w:tblHeader/>' if index == 0 else '') + '</w:trPr>')
+            for column, (width, text) in enumerate(zip(widths, row)):
+                shade = '<w:shd w:fill="DCE6F1"/>' if index == 0 else ''
+                alignment = "center" if index == 0 else "right" if column == 2 else "left"
+                paragraph = self._docx_paragraph(text).replace('<w:pPr>', f'<w:pPr><w:jc w:val="{alignment}"/>')
+                table.append(f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/><w:vAlign w:val="center"/>{shade}</w:tcPr>{paragraph}</w:tc>')
+            table.append('</w:tr>')
+        table.append('</w:tbl>')
+        blocks.append(''.join(table) if len(rows) > 1 else self._docx_paragraph("대조 가능한 공통 예산 입력이 없습니다."))
+        if reconciliation["sameFamilyChecks"]:
+            blocks.append(self._docx_paragraph("같은 계산 계열의 전체 업무입력", "Heading1"))
+            for pair in reconciliation["sameFamilyChecks"]:
+                blocks.append(self._docx_paragraph(f"{pair['label']} · {STATUS_LABELS[pair['status']]} · {pair['leftRunId']} / {pair['rightRunId']}"))
+        return '\n'.join(blocks)
 
     @staticmethod
     def _docx_paragraph(text: str, style: str = "Normal") -> str:

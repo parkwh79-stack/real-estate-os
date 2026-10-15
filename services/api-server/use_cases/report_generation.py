@@ -17,6 +17,7 @@ from storage import list_deal_state_records, list_pod_ai_review_records
 from use_cases.common import deep_merge
 from use_cases.orchestration_approval import refresh_approval_readiness_gate
 from use_cases.report_calculation_basis import attach_cash_flow_basis, attach_calculation_bases
+from use_cases.report_input_reconciliation import attach_input_reconciliation
 
 REPORT_TEMPLATE_TO_REPORT_SECTION = {
     "cover": "cover",
@@ -168,6 +169,7 @@ def generate_and_save_pf_report_use_case(
         attach_cash_flow_basis(generated["structuredReport"], cash_flow_run)
     if calculation_runs:
         attach_calculation_bases(generated["structuredReport"], calculation_runs)
+    attach_input_reconciliation(generated["structuredReport"])
     paragraph_evidence_links = build_paragraph_evidence_links(
         project_id,
         generated["structuredReport"],
