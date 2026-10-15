@@ -7,9 +7,11 @@ from typing import Any, Callable, Dict, Iterable, List
 class MarketEvidenceRepository:
     """Repository wrapper for persisted market evidence records."""
 
-    def __init__(self, market_evidence_store: Dict[str, Dict[str, Any]], persist: Callable[[], None]):
+    def __init__(self, market_evidence_store: Dict[str, Dict[str, Any]], persist: Callable[[], None],
+                 persist_records: Callable[[str, List[Dict[str, Any]]], None] | None = None):
         self.market_evidence_store = market_evidence_store
         self.persist = persist
+        self.persist_records = persist_records
 
     def values(self, project_id: str) -> Iterable[Dict[str, Any]]:
         return self.market_evidence_store.get(project_id, {}).values()
@@ -28,6 +30,7 @@ class MarketEvidenceRepository:
 
         created_at = datetime.now(timezone.utc).isoformat()
         stored = self.market_evidence_store.setdefault(project_id, {})
+        changed = []
         for index, record in enumerate(evidence_records):
             evidence_id = record.get("evidenceId") or f"market-evidence-{index + 1:03d}"
             record_key = f"{run['run_id']}:{evidence_id}"
@@ -41,9 +44,15 @@ class MarketEvidenceRepository:
                 "createdAt": created_at,
                 "reviewStatus": "pending_review" if validation_status != "pass" else "auto_validated",
             }
+            changed.append(stored[record_key])
+        if self.persist_records is not None:
+            self.persist_records(project_id, changed)
 
-    def save(self) -> None:
-        self.persist()
+    def save(self, project_id: str | None = None, record: Dict[str, Any] | None = None) -> None:
+        if self.persist_records is not None and project_id is not None and record is not None:
+            self.persist_records(project_id, [record])
+        else:
+            self.persist()
 
     @staticmethod
     def list_sorted(records: Iterable[Dict[str, Any]], run_id: str | None = None) -> List[Dict[str, Any]]:

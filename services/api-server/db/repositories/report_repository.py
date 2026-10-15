@@ -160,10 +160,7 @@ class ReportRepository:
             if is_cash_flow_comparison_report(report_record):
                 _verify_comparison_export(report_record, export_record)
             report_record.setdefault("exports", []).append(export_record)
-            if is_cash_flow_comparison_report(report_record):
-                self._persist_record(str(report_record["project_id"]), report_record)
-            else:
-                self.persist()
+            self._persist_record(str(report_record["project_id"]), report_record)
             return export_record
 
     def publish(

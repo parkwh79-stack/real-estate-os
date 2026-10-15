@@ -127,9 +127,9 @@ class OrchestrationRepository:
     ) -> Dict[str, Dict[str, Any]]:
         """Return one latest run per requested project.
 
-        The compatibility repository is process-local, so iterating here does
-        not add database round trips.  The PostgreSQL implementation below
-        overrides this with one tenant-scoped query.
+        The compatibility repository refreshes each project's persisted runs;
+        its initial history load is deferred until that project is requested.
+        The PostgreSQL implementation uses one tenant-scoped query instead.
         """
 
         latest: Dict[str, Dict[str, Any]] = {}

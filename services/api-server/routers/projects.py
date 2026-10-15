@@ -120,6 +120,7 @@ from storage import (
     delete_project_record_cascade,
     upsert_orchestration_run,
     upsert_report_record,
+    upsert_market_evidence_records,
     upsert_project_snapshot_record,
     upsert_assumption_override_record,
     upsert_land_evidence_record,
@@ -327,6 +328,11 @@ def persist_snapshot(project_id: str, record: Dict[str, Any]) -> None:
     if not upsert_project_snapshot_record(project_id, record):
         persist_state()
 
+
+def persist_market_evidence(project_id: str, records: list[Dict[str, Any]]) -> None:
+    if not upsert_market_evidence_records(project_id, records):
+        persist_state()
+
 def project_repository(
     request: Request | None = None,
     *,
@@ -506,7 +512,7 @@ def parser_v2_record_store() -> ParserV2RecordStore:
     return factory() if callable(factory) else ParserV2RecordStore()
 
 def market_evidence_repository() -> MarketEvidenceRepository:
-    return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state)
+    return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state, persist_market_evidence)
 
 def project_snapshot_repository(
     request: Request | None = None,
@@ -1813,16 +1819,16 @@ async def learn_uploaded_feasibility_workbook(
             os.remove(tmp_path)
 
 def load_fixtures():
-    global project_id_counter
+    global project_id_counter, REPORTS_DB, ORCHESTRATIONS_DB, MARKET_EVIDENCE_DB, PROJECT_SNAPSHOTS_DB
     if storage_backend() in {"postgres", "postgresql"}:
         return
     state = load_state(project_workspace_only=True)
     if state:
         _project_store().update(state["projects"])
-        REPORTS_DB.update(state["reports"])
-        ORCHESTRATIONS_DB.update(state["orchestrations"])
-        MARKET_EVIDENCE_DB.update(state.get("market_evidence", {}))
-        PROJECT_SNAPSHOTS_DB.update(state.get("project_snapshots", {}))
+        REPORTS_DB = state["reports"]
+        ORCHESTRATIONS_DB = state["orchestrations"]
+        MARKET_EVIDENCE_DB = state.get("market_evidence", {})
+        PROJECT_SNAPSHOTS_DB = state.get("project_snapshots", {})
         project_id_counter = state["project_id_counter"]
         return
 

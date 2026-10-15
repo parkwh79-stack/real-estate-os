@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 from core.text_normalization import normalize_match_text
 from core.runtime_paths import runtime_data_dir
+from db.lazy_project_collection import LazyProjectCollection
 
 
 STATE_VERSION = 16
@@ -1468,6 +1470,32 @@ def upsert_report_record(project_id: str, record: Dict[str, Any]) -> bool:
             ),
         )
         conn.commit()
+    return True
+
+
+def upsert_market_evidence_records(project_id: str, records: list[Dict[str, Any]]) -> bool:
+    """Persist one run/review's evidence without replacing unrelated history."""
+    if storage_backend() != "sqlite":
+        return False
+    rows = []
+    for record in records:
+        key = record.get("recordKey") or record.get("record_key")
+        if not key:
+            raise ValueError("Market evidence record key is required")
+        rows.append((str(project_id), key, record.get("runId") or record.get("run_id"),
+            record.get("evidenceId"), record.get("evidenceType"), record.get("validationStatus"),
+            record.get("createdAt") or record.get("created_at"), json.dumps(record, ensure_ascii=False)))
+    if rows:
+        with _connect_sqlite() as conn:
+            conn.executemany(
+                "INSERT INTO market_evidence(project_id, record_key, run_id, evidence_id, evidence_type, "
+                "validation_status, created_at, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(project_id, record_key) DO UPDATE SET run_id=excluded.run_id, "
+                "evidence_id=excluded.evidence_id, evidence_type=excluded.evidence_type, "
+                "validation_status=excluded.validation_status, created_at=excluded.created_at, payload_json=excluded.payload_json",
+                rows,
+            )
+            conn.commit()
     return True
 
 
@@ -4899,8 +4927,30 @@ def _ensure_sqlite_column(
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
+_WORKSPACE_HISTORY_QUERIES = {
+    "reports": (None, "version, created_at"),
+    "orchestrations": ("run_id", "started_at"),
+    "market_evidence": ("record_key", "created_at, record_key"),
+    "project_snapshots": ("snapshot_id", "created_at"),
+}
+
+
+def _read_workspace_history(path: Path, collection: str, project_id: str):
+    record_key, order = _WORKSPACE_HISTORY_QUERIES[collection]
+    # The path is captured at startup; subsequent environment changes must not
+    # redirect an existing workspace's deferred reads to another database.
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM {collection} WHERE project_id = ? ORDER BY {order}", (project_id,)
+        )
+        if record_key is None:
+            return [json.loads(row["payload_json"]) for row in rows]
+        return {row[record_key]: json.loads(row["payload_json"]) for row in rows}
+
+
 def _load_sqlite_state(*, project_workspace_only: bool = False) -> Dict[str, Any] | None:
-    path = sqlite_file_path()
+    path = sqlite_file_path().resolve()
     if not path.exists():
         return None
 
@@ -4909,6 +4959,27 @@ def _load_sqlite_state(*, project_workspace_only: bool = False) -> Dict[str, Any
             row["project_id"]: json.loads(row["payload_json"])
             for row in conn.execute("SELECT project_id, payload_json FROM projects")
         }
+        if project_workspace_only:
+            histories = {
+                name: LazyProjectCollection(
+                    [row[0] for row in conn.execute(f"SELECT DISTINCT project_id FROM {name} ORDER BY project_id")],
+                    lambda project_id, name=name: _read_workspace_history(path, name, project_id),
+                )
+                for name in _WORKSPACE_HISTORY_QUERIES
+            }
+            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            if not metadata and not projects and not any(histories.values()):
+                tables = [row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )]
+                if not any(conn.execute('SELECT 1 FROM "' + table.replace('"', '""') + '" LIMIT 1').fetchone()
+                           for table in tables):
+                    return None
+            return {
+                "version": int(metadata.get("version", STATE_VERSION)),
+                "project_id_counter": int(metadata.get("project_id_counter", 1)),
+                "projects": projects, **histories,
+            }
         reports: Dict[str, Any] = {}
         for row in conn.execute(
             "SELECT project_id, payload_json FROM reports ORDER BY project_id, version, created_at"
@@ -4932,31 +5003,6 @@ def _load_sqlite_state(*, project_workspace_only: bool = False) -> Dict[str, Any
             "SELECT project_id, snapshot_id, payload_json FROM project_snapshots ORDER BY project_id, created_at"
         ):
                 project_snapshots.setdefault(row["project_id"], {})[row["snapshot_id"]] = json.loads(row["payload_json"])
-
-        if project_workspace_only:
-            # The project router retains only these five collections. Agent,
-            # evidence and identity histories have their own targeted readers;
-            # parsing them here wastes memory and can prevent unrelated work
-            # from starting if a historic payload is malformed.
-            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
-            if not metadata and not any((projects, reports, orchestrations, market_evidence, project_snapshots)):
-                tables = [row[0] for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                )]
-                # Existing history is not an empty workspace. In particular,
-                # do not resurrect stale JSON or seed examples over it.
-                if not any(conn.execute('SELECT 1 FROM "' + table.replace('"', '""') + '" LIMIT 1').fetchone()
-                           for table in tables):
-                    return None
-            return {
-                "version": int(metadata.get("version", STATE_VERSION)),
-                "project_id_counter": int(metadata.get("project_id_counter", 1)),
-                "projects": projects,
-                "reports": reports,
-                "orchestrations": orchestrations,
-                "market_evidence": market_evidence,
-                "project_snapshots": project_snapshots,
-            }
 
         land_evidence: Dict[str, Any] = {}
         for row in conn.execute(
@@ -5109,6 +5155,12 @@ def _save_sqlite_state(
     restructuring_cures: Dict[str, Any],
     project_snapshots: Dict[str, Any],
 ) -> None:
+    # Materialize deferred values before starting the destructive replacement
+    # transaction. A corrupt/unavailable source must fail before any deletion.
+    reports = dict(reports) if isinstance(reports, LazyProjectCollection) else reports
+    orchestrations = dict(orchestrations) if isinstance(orchestrations, LazyProjectCollection) else orchestrations
+    market_evidence = dict(market_evidence) if isinstance(market_evidence, LazyProjectCollection) else market_evidence
+    project_snapshots = dict(project_snapshots) if isinstance(project_snapshots, LazyProjectCollection) else project_snapshots
     with _connect_sqlite() as conn:
         conn.execute("BEGIN")
         conn.execute("DELETE FROM metadata")
