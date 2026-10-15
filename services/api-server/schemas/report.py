@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
 
 class ReportCashFlowBasis(BaseModel):
@@ -6,6 +7,14 @@ class ReportCashFlowBasis(BaseModel):
     calculationRunId: str = Field(min_length=1, max_length=256)
     inputHash: str = Field(pattern=r"^[a-f0-9]{64}$")
     resultHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+ReportCalculationSlot = Literal["feasibility", "pf", "returns", "waterfall", "unsold_ltv", "tranche_recovery"]
+
+
+class ReportCalculationSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    calculationBases: dict[ReportCalculationSlot, ReportCashFlowBasis] = Field(min_length=1, max_length=6)
 
 
 PHASE_11_TEMPLATE = "phase-11-pf-review"

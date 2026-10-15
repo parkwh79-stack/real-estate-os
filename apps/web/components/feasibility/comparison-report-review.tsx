@@ -18,6 +18,13 @@ export type ReportCashFlowSnapshot = {
   resultSnapshot: { summary: { totalRevenue?: number; totalProjectCost?: number; endingCash?: number } };
 };
 
+const calculationLabels = { feasibility: "사업성 요약", pf: "PF 지표", returns: "투자 수익률",
+  waterfall: "상환순서 시나리오", unsold_ltv: "미분양 LTV 시나리오", tranche_recovery: "트랜치 회수 시나리오" } as const;
+type CalculationSlot = keyof typeof calculationLabels;
+type CalculationChoice = { slot: CalculationSlot; calculationRunId: string; createdAt?: string;
+  engineKey: string; eligible: boolean; issue?: string; inputHash?: string; resultHash?: string };
+export type ReportCalculationSnapshots = Partial<Record<CalculationSlot, { calculationRunId: string; createdAt?: string }>>;
+
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
 
 async function responseBody<T>(response: Response, action: string): Promise<T> {
@@ -25,9 +32,10 @@ async function responseBody<T>(response: Response, action: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, disabled, onCreated, onBusyChange }: {
+export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, calculationSnapshots, disabled, onCreated, onBusyChange }: {
   projectId: string; reportId?: string; snapshot?: ComparisonReportSnapshot; disabled: boolean;
   cashFlowSnapshot?: ReportCashFlowSnapshot;
+  calculationSnapshots?: ReportCalculationSnapshots;
   onCreated: (reportId: string) => Promise<void>; onBusyChange: (busy: boolean) => void;
 }) {
   const endpoint = `${apiBase}/projects/${encodeURIComponent(projectId)}`;
@@ -40,6 +48,8 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [cashFlowRunId, setCashFlowRunId] = useState("");
+  const [choices, setChoices] = useState<CalculationChoice[] | null>(null);
+  const [selected, setSelected] = useState<Partial<Record<CalculationSlot, string>>>({});
 
   useEffect(() => { activeReport.current = reportId; }, [reportId]);
 
@@ -61,6 +71,7 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
     activeEndpoint.current = endpoint;
     setSaved(null); setError(null); setNotice(null); setLoading(true); setBusy(false);
     setCashFlowRunId("");
+    setChoices(null); setSelected({});
     onBusyChange(false);
     void load(controller.signal).catch((failure: unknown) => {
       if (!controller.signal.aborted && activeEndpoint.current === endpoint) {
@@ -75,7 +86,19 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
   const eligible = Boolean(saved?.selection?.saved && saved.comparison && saved.comparison.status !== "incompatible");
   const locked = disabled || busy || loading;
   const selectedCashFlow = saved?.availableRuns.find((run) => run.calculationRunId === cashFlowRunId);
-  const canCreatePf = Boolean(selectedCashFlow?.inputHash && selectedCashFlow?.resultHash);
+  const selectedCalculations = (choices ?? []).filter((choice) => choice.eligible && choice.inputHash && choice.resultHash && selected[choice.slot] === choice.calculationRunId);
+  const canCreatePf = Boolean(selectedCashFlow?.inputHash && selectedCashFlow?.resultHash) || selectedCalculations.length > 0;
+
+  async function loadCalculations() {
+    const result = await responseBody<{ records: CalculationChoice[] }>(await fetch(`${endpoint}/reports/calculation-bases`, {
+      cache: "no-store", headers: authHeaders("web"),
+    }), "보고서 계산 목록 조회");
+    if (!Array.isArray(result.records)) throw new Error("계산 목록을 확인하지 못했습니다. 다시 불러오세요.");
+    if (activeEndpoint.current !== endpoint) return;
+    setChoices(result.records);
+    setSelected((current) => Object.fromEntries(Object.entries(current).filter(([slot, id]) =>
+      result.records.some((choice) => choice.slot === slot && choice.calculationRunId === id && choice.eligible))));
+  }
 
   async function perform(action: () => Promise<void>) {
     if (locked || inFlight.current === endpoint) return;
@@ -102,20 +125,22 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
   }
 
   async function createPf() {
-    if (!selectedCashFlow || !canCreatePf) return;
+    if (!canCreatePf) return;
     const report = await responseBody<{ report_id: string }>(await fetch(`${endpoint}/reports/generate`, {
       method: "POST", headers: { "Content-Type": "application/json", ...authHeaders("web") },
-      body: JSON.stringify({ cashFlowBasis: { calculationRunId: selectedCashFlow.calculationRunId,
-        inputHash: selectedCashFlow.inputHash, resultHash: selectedCashFlow.resultHash } }),
-    }), "현금흐름을 연결한 PF 초안 생성");
+      body: JSON.stringify({ ...(selectedCashFlow ? { cashFlowBasis: { calculationRunId: selectedCashFlow.calculationRunId,
+        inputHash: selectedCashFlow.inputHash, resultHash: selectedCashFlow.resultHash } } : {}),
+        ...(selectedCalculations.length ? { calculationBases: Object.fromEntries(selectedCalculations.map((choice) =>
+          [choice.slot, { calculationRunId: choice.calculationRunId, inputHash: choice.inputHash, resultHash: choice.resultHash }])) } : {}) }),
+    }), "저장 계산을 연결한 PF 초안 생성");
     if (activeEndpoint.current !== endpoint) return;
     if (typeof report.report_id !== "string" || !report.report_id) throw new Error("생성된 초안의 저장 번호를 확인하지 못했습니다.");
     await onCreated(report.report_id);
-    if (activeEndpoint.current === endpoint) setNotice("선택한 현금흐름 계산을 PF 초안에 고정해 저장했습니다.");
+    if (activeEndpoint.current === endpoint) setNotice("선택한 계산을 PF 초안에 고정해 저장했습니다.");
   }
 
   async function download(format: "pdf" | "docx" | "json") {
-    if (!reportId || (!snapshot && !cashFlowSnapshot)) return;
+    if (!reportId || (!snapshot && !cashFlowSnapshot && !calculationSnapshots)) return;
     const reportEndpoint = `${endpoint}/reports/${encodeURIComponent(reportId)}`;
     const exported = await responseBody<{ export_id: string }>(await fetch(`${reportEndpoint}/exports`, {
       method: "POST", headers: { "Content-Type": "application/json", ...authHeaders("web") },
@@ -132,7 +157,7 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
     const url = URL.createObjectURL(blob);
     try {
       const anchor = document.createElement("a");
-      anchor.href = url; anchor.download = `${snapshot ? "cash-flow-comparison-review" : "pf-cash-flow-review"}.${format}`;
+      anchor.href = url; anchor.download = `${snapshot ? "cash-flow-comparison-review" : calculationSnapshots ? "pf-calculation-review" : "pf-cash-flow-review"}.${format}`;
       document.body.appendChild(anchor); anchor.click(); anchor.remove();
     } finally { URL.revokeObjectURL(url); }
     setNotice(snapshot
@@ -155,8 +180,8 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
     {notice ? <p role="status" className="mt-3 text-sm font-bold text-emerald-700">{notice}</p> : null}
     {eligible && saved?.comparison ? <details className="mt-3 text-sm"><summary className="cursor-pointer font-bold">생성에 사용할 현재 비교 확인</summary><CashFlowComparisonDetails comparison={saved.comparison} /></details> : null}
     <div className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
-      <h4 className="font-bold">PF 초안의 현금흐름 기준 선택</h4>
-      <p className="mt-2 text-sm text-slate-500">선택한 계산의 요약 현금흐름표를 기본 PF 보고서에 고정합니다. 다른 절은 현재 프로젝트 자료를 사용하며, 같은 계산 기준으로 검증된 것은 아닙니다.</p>
+      <h4 className="font-bold">PF 초안의 계산 기준 선택</h4>
+      <p className="mt-2 text-sm text-slate-500">현금흐름·사업성·PF·시나리오를 각각 선택할 수 있습니다. 선택한 입력·결과를 보고서에 보관합니다. 서로 다른 실행의 입력 정합성이나 실제 약정이 확인되었다는 뜻은 아닙니다.</p>
       <label className="mt-3 block text-sm font-bold">보고서에 넣을 현금흐름 계산
         <select value={cashFlowRunId} onChange={(event) => setCashFlowRunId(event.target.value)} disabled={locked}
           className="mt-2 w-full min-w-0 rounded-lg border border-slate-300 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
@@ -166,8 +191,23 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
           </option>)}
         </select>
       </label>
+      <button type="button" className={`${button} mt-3`} disabled={locked} onClick={() => void perform(loadCalculations)}>사업성·PF·시나리오 계산 불러오기</button>
+      {choices !== null ? <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+        <p className="text-sm text-slate-500 sm:col-span-2">계산 종류별 최근 20개 기록입니다. 추가 계산을 선택하면 사업성·상환순서·회수 절의 미선택 항목은 미확인으로 표시합니다. 과거 입력 미보관 기록은 다시 계산해야 합니다.</p>
+        {(Object.entries(calculationLabels) as [CalculationSlot, string][]).map(([slot, label]) => <label key={slot} className="min-w-0 text-sm font-bold">보고서에 넣을 {label}
+          <select className="mt-2 w-full min-w-0 rounded-lg border border-slate-300 bg-white p-2 dark:border-slate-700 dark:bg-slate-900"
+            aria-label={`보고서에 넣을 ${label}`}
+            value={selected[slot] ?? ""} disabled={locked} onChange={(event) => setSelected((current) => ({ ...current, [slot]: event.target.value }))}>
+            <option value="">미선택</option>
+            {choices.filter((choice) => choice.slot === slot).map((choice) => <option key={choice.calculationRunId} value={choice.calculationRunId} disabled={!choice.eligible}>
+              {choice.createdAt || "시각 미기록"} · {choice.calculationRunId.slice(-8)}{choice.issue ? ` · ${choice.issue}` : ""}
+            </option>)}
+          </select>
+        </label>)}
+        {!choices.some((choice) => choice.eligible) ? <p className="text-sm text-amber-700 sm:col-span-2">선택 가능한 추가 계산이 없습니다. 해당 분석을 실행·저장한 뒤 다시 불러오세요.</p> : null}
+      </div> : null}
       <button type="button" className={`${button} mt-3`} disabled={locked || !canCreatePf} onClick={() => void perform(createPf)}>선택 계산으로 PF 초안 생성</button>
-      {!loading && !saved?.availableRuns.length ? <p className="mt-2 text-sm text-amber-700">선택 가능한 계산이 없습니다. 사업성 화면에서 현금흐름 계산을 저장한 뒤 다시 불러오세요.</p> : null}
+      {!loading && !saved?.availableRuns.length ? <p className="mt-2 text-sm text-amber-700">선택 가능한 현금흐름 계산이 없습니다. 사업성 화면에서 현금흐름 계산을 저장한 뒤 다시 불러오세요.</p> : null}
     </div>
     {cashFlowSnapshot ? <div aria-label="PF 초안에 고정된 현금흐름" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
       <h4 className="font-bold">선택한 PF 초안에 고정된 현금흐름</h4>
@@ -184,6 +224,17 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
         <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("pdf"))}>이 PF 초안 PDF 다운로드</button>
         <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("docx"))}>이 PF 초안 Word 다운로드</button>
       </div>
+    </div> : null}
+    {calculationSnapshots ? <div aria-label="PF 초안에 고정된 추가 계산" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
+      <h4 className="font-bold">선택한 PF 초안에 고정된 사업성·PF·시나리오</h4>
+      <p className="mt-2 text-sm text-amber-700">아래는 저장 보고서의 계산입니다. 현재 선택과 다를 수 있으며 각 실행의 입력·결과는 JSON에 함께 보관됩니다. 미선택 항목은 미확인입니다.</p>
+      <ul className="mt-2 space-y-2 text-sm">{(Object.entries(calculationSnapshots) as [CalculationSlot, { calculationRunId: string }][]).map(([slot, run]) =>
+        <li className="break-all" key={slot}>{calculationLabels[slot]}: {run.calculationRunId}</li>)}</ul>
+      {!cashFlowSnapshot ? <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("json"))}>입력·결과 JSON 다운로드</button>
+        <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("pdf"))}>이 PF 초안 PDF 다운로드</button>
+        <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("docx"))}>이 PF 초안 Word 다운로드</button>
+      </div> : null}
     </div> : null}
     {snapshot ? <div aria-label="초안에 고정된 비교" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
       <h4 className="font-bold">선택한 초안에 고정된 비교</h4>

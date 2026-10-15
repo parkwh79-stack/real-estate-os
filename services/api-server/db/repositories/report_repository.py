@@ -36,6 +36,12 @@ def has_cash_flow_basis(record: Mapping[str, Any]) -> bool:
             or "cash_flow_snapshot_hash" in (record.get("metadata") or {}))
 
 
+def has_calculation_bases(record: Mapping[str, Any]) -> bool:
+    report = record.get("report") or {}
+    return ("calculationSnapshots" in report or "calculationSnapshotsHash" in report
+            or "calculation_snapshots_hash" in (record.get("metadata") or {}))
+
+
 def is_cash_flow_comparison_report(record: Mapping[str, Any]) -> bool:
     report = record.get("report")
     metadata = record.get("metadata")
@@ -55,23 +61,29 @@ def verify_report_snapshots(record: Mapping[str, Any], *, project_id: str | None
     tenant_id: str | None = None) -> None:
     """Verify the saved document, never rebind it to mutable current calculations."""
     report = record.get("report") or {}
-    if has_cash_flow_basis(record):
-        from use_cases.report_calculation_basis import verify_cash_flow_basis
+    if has_cash_flow_basis(record) or has_calculation_bases(record):
+        from use_cases.report_calculation_basis import verify_cash_flow_basis, verify_calculation_bases
 
         try:
             if (record.get("status") != "draft" or record.get("run_id")
                     or (record.get("metadata") or {}).get("report_eligible") is not False):
                 raise ValueError("Selected cash-flow reports remain analysis drafts")
-            verify_cash_flow_basis(report, project_id=str(project_id or record["project_id"]), tenant_id=tenant_id)
+            scope = {"project_id": str(project_id or record["project_id"]), "tenant_id": tenant_id}
+            if has_cash_flow_basis(record):
+                verify_cash_flow_basis(report, **scope)
+                if record["metadata"].get("cash_flow_snapshot_hash") != report["cashFlowCalculationSnapshotHash"]:
+                    raise ValueError("Report snapshot metadata differs")
+            if has_calculation_bases(record):
+                verify_calculation_bases(report, **scope)
+                if record["metadata"].get("calculation_snapshots_hash") != report["calculationSnapshotsHash"]:
+                    raise ValueError("Report calculation metadata differs")
             if not (record.get("metadata") or {}).get("content_sha256"):
                 raise ValueError("Report content seal missing")
-            if record["metadata"].get("cash_flow_snapshot_hash") != report["cashFlowCalculationSnapshotHash"]:
-                raise ValueError("Report snapshot metadata differs")
             _verified_report_content_sha256(record)
             for exported in record.get("exports") or []:
                 _verify_comparison_export(record, exported)
         except (KeyError, TypeError, AttributeError, ValueError) as exc:
-            raise ReportPublicationConflict("보고서에 고정한 현금흐름 계산·본문 검증에 실패했습니다.") from exc
+            raise ReportPublicationConflict("보고서에 고정한 계산·본문 검증에 실패했습니다.") from exc
     if not is_cash_flow_comparison_report(record):
         return
     try:
@@ -201,7 +213,7 @@ class ReportRepository:
         be rebound to a different run/snapshot or content hash.
         """
         with _LOCAL_REPORT_LOCK:
-            if is_cash_flow_comparison_report(report_record) or has_cash_flow_basis(report_record):
+            if is_cash_flow_comparison_report(report_record) or has_cash_flow_basis(report_record) or has_calculation_bases(report_record):
                 raise ReportPublicationConflict("현금흐름을 선택한 분석 초안은 최종 승인 보고서로 발행할 수 없습니다.")
             content_sha256 = _verified_report_content_sha256(report_record)
             publication = _build_publication_manifest(
@@ -490,7 +502,7 @@ class PostgresReportRepository:
         published_at: str,
         decision_package: Dict[str, Any],
     ) -> Dict[str, Any]:
-        if is_cash_flow_comparison_report(report_record) or has_cash_flow_basis(report_record):
+        if is_cash_flow_comparison_report(report_record) or has_cash_flow_basis(report_record) or has_calculation_bases(report_record):
             raise ReportPublicationConflict("현금흐름 비교 검토 초안은 최종 승인 보고서로 발행할 수 없습니다.")
         project_id, report_id = self._record_identity(report_record)
         actor = _required_text(published_by, "published_by")
@@ -862,6 +874,8 @@ def _build_draft_report_record(
             "comparison_snapshot_hash": report.get("cashFlowComparisonSnapshotHash")})
     if "cashFlowCalculationSnapshot" in report:
         record["metadata"]["cash_flow_snapshot_hash"] = report["cashFlowCalculationSnapshotHash"]
+    if "calculationSnapshots" in report:
+        record["metadata"]["calculation_snapshots_hash"] = report["calculationSnapshotsHash"]
     verify_report_snapshots(record, project_id=project_id)
     return record
 

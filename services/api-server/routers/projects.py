@@ -2,8 +2,10 @@ from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request,
 from typing import Dict, Any
 from db.repositories.request_project_repository import current_project_scope
 from use_cases.cash_flow_dependencies import dependent_inputs, financial_input_hash
-from schemas.report import ReportCashFlowBasis
-from use_cases.report_calculation_basis import freeze_cash_flow_basis
+from schemas.report import ReportCashFlowBasis, ReportCalculationSelection
+from use_cases.report_calculation_basis import (
+    CALCULATION_SLOTS, calculation_choice, freeze_cash_flow_basis, freeze_calculation_basis,
+)
 from use_cases.stored_permit_evidence import resolve_stored_permit_documents
 from datetime import datetime, timezone
 import base64
@@ -4701,40 +4703,48 @@ def generate_report(project_id: str, request: Request, input_data: Dict[str, Any
     authorization = authorize_request(request, "report:export")
     enforce_project_tenant_scope(request, project)
     cash_flow_run = None
-    if "cashFlowBasis" in input_data:
+    calculation_runs = {}
+    if "cashFlowBasis" in input_data or "calculationBases" in input_data:
         # Only a reference and fingerprints cross this boundary, never client
         # supplied snapshots or financial overrides disguised as saved results.
-        if set(input_data) - {"cashFlowBasis", "templateId", "options"}:
+        if set(input_data) - {"cashFlowBasis", "calculationBases", "templateId", "options"}:
             raise HTTPException(422, "저장 계산을 선택할 때 입력값이나 결과를 함께 덮어쓸 수 없습니다.")
         try:
-            basis = ReportCashFlowBasis.model_validate(input_data["cashFlowBasis"])
+            selections = ReportCalculationSelection.model_validate({"calculationBases": input_data["calculationBases"]}).calculationBases if "calculationBases" in input_data else {}
+            if "cashFlowBasis" in input_data:
+                selections["cash_flow"] = ReportCashFlowBasis.model_validate(input_data["cashFlowBasis"])
         except ValueError as exc:
-            raise HTTPException(422, "현금흐름 계산 선택 정보가 올바르지 않습니다.") from exc
+            raise HTTPException(422, "보고서 계산 선택 정보가 올바르지 않습니다.") from exc
         tenant = str((project.get("_meta") or {}).get("tenantId")
                      or (project.get("_meta") or {}).get("tenant_id") or "legacy")
         if storage_backend() in {"postgres", "postgresql"} and tenant == "legacy":
             raise HTTPException(401, {"error": "tenant_required"})
-        try:
-            records = list_calculation_run_records(project_id, tenant_id=tenant,
-                calculation_run_id=basis.calculationRunId, limit=2)
-        except (CalculationRunRepositoryError, ValueError) as exc:
-            raise HTTPException(503, "계산 저장소를 조회하지 못했습니다. 다시 시도해 주세요.") from exc
-        if len(records) != 1:
-            raise HTTPException(404, "선택한 현금흐름 계산을 찾을 수 없습니다.")
-        try:
-            cash_flow_run = freeze_cash_flow_basis(records[0], project_id=project_id,
-                tenant_id=tenant, selection=basis.model_dump())
-        except LookupError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        input_data = {key: value for key, value in input_data.items() if key != "cashFlowBasis"}
+        for slot, basis in selections.items():
+            try:
+                records = list_calculation_run_records(project_id, tenant_id=tenant,
+                    calculation_run_id=basis.calculationRunId, limit=2)
+            except (CalculationRunRepositoryError, ValueError) as exc:
+                raise HTTPException(503, "계산 저장소를 조회하지 못했습니다. 다시 시도해 주세요.") from exc
+            if len(records) != 1:
+                raise HTTPException(404, "선택한 계산을 찾을 수 없습니다.")
+            try:
+                scope = {"project_id": project_id, "tenant_id": tenant, "selection": basis.model_dump()}
+                if slot == "cash_flow":
+                    cash_flow_run = freeze_cash_flow_basis(records[0], **scope)
+                else:
+                    calculation_runs[slot] = freeze_calculation_basis(records[0], slot=slot, **scope)
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        input_data = {key: value for key, value in input_data.items() if key not in {"cashFlowBasis", "calculationBases"}}
     result = generate_and_save_pf_report_use_case(
         report_repository(request),
         project_id,
         project,
         input_data,
         cash_flow_run=cash_flow_run,
+        calculation_runs=calculation_runs,
     )
     structured_report = result["generated"]["structuredReport"]
     md_report = result["generated"]["reportMarkdown"]
@@ -4750,6 +4760,7 @@ def generate_report(project_id: str, request: Request, input_data: Dict[str, Any
             "reportEligible": (report_record.get("metadata") or {}).get("report_eligible"),
             "authorization": authorization.get("authorization"),
             "cashFlowCalculationRunId": cash_flow_run.get("calculationRunId") if cash_flow_run else None,
+            "calculationRunIds": {slot: run["calculationRunId"] for slot, run in calculation_runs.items()},
         },
     )
     return {
@@ -4770,6 +4781,29 @@ def get_reports(project_id: str, request: Request):
     authorize_request(request, "project:read")
     enforce_project_tenant_scope(request, project)
     return report_repository(request).list_metadata(project_id)
+
+@router.get("/{project_id}/reports/calculation-bases")
+def get_report_calculation_bases(project_id: str, request: Request):
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    tenant = str((project.get("_meta") or {}).get("tenantId")
+                 or (project.get("_meta") or {}).get("tenant_id") or "legacy")
+    if storage_backend() in {"postgres", "postgresql"} and tenant == "legacy":
+        raise HTTPException(401, {"error": "tenant_required"})
+    choices = []
+    try:
+        # Bound payload reads per engine; large result snapshots never cross
+        # the selection endpoint. An exact ID is looked up again at creation.
+        for slot, (_, engines) in CALCULATION_SLOTS.items():
+            for engine in engines:
+                records = list_calculation_run_records(project_id, tenant_id=tenant, engine_key=engine, limit=20)
+                choices.extend(calculation_choice(run, slot) for run in records
+                    if str(run.get("projectId")) == project_id and str(run.get("tenantId") or "legacy") == tenant)
+    except (CalculationRunRepositoryError, ValueError) as exc:
+        raise HTTPException(503, "계산 저장소를 조회하지 못했습니다. 다시 시도해 주세요.") from exc
+    return {"records": choices, "perEngineLimit": 20}
+
 
 @router.get("/{project_id}/reports/{report_id}")
 def get_report(project_id: str, report_id: str, request: Request):

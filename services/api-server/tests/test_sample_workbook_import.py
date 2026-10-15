@@ -126,7 +126,22 @@ def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance(tmp_p
     selected = freeze_cash_flow_basis(run, project_id="sample-bonri", tenant_id="legacy",
         selection={"calculationRunId": run["calculationRunId"], "inputHash": content_hash(request), "resultHash": content_hash(result)})
     repository = ReportRepository({}, lambda: pytest.fail("Use incremental report persistence"), upsert_report_record)
-    generated = generate_and_save_pf_report_use_case(repository, "sample-bonri", project, cash_flow_run=selected)
+    from core.calculations import calculate_feasibility_metrics
+    from use_cases.report_calculation_basis import freeze_calculation_basis
+    feasibility_input = {**study["metrics"], "sourceMetadata": {
+        "source": "본리동 원본 사업수지", "sourceHash": manifest["sha256"],
+        "fieldLocators": study["raw_import"]["sampleProfile"]["fieldLocators"],
+        "limitation": "원본 수식 오류·대출 약정은 미확인"}}
+    feasibility_result = calculate_feasibility_metrics(feasibility_input)
+    feasibility_run = upsert_calculation_run_record("sample-bonri", {
+        "calculationRunId": "sample-report-feasibility", "engineKey": "feasibility", "status": "completed",
+        "inputDigest": {"capturePolicy": "effective_request_v1"},
+        "inputSnapshot": feasibility_input, "resultSnapshot": feasibility_result})
+    selected_feasibility = freeze_calculation_basis(feasibility_run, slot="feasibility", project_id="sample-bonri", tenant_id="legacy",
+        selection={"calculationRunId": feasibility_run["calculationRunId"],
+                   "inputHash": content_hash(feasibility_input), "resultHash": content_hash(feasibility_result)})
+    generated = generate_and_save_pf_report_use_case(repository, "sample-bonri", project, cash_flow_run=selected,
+        calculation_runs={"feasibility": selected_feasibility})
     reopened = ReportRepository(load_state(project_workspace_only=True)["reports"], lambda: None).get(
         "sample-bonri", generated["reportRecord"]["report_id"])
     cf_section = reopened["report"]["sections"]["summaryCashFlow"]
@@ -134,4 +149,7 @@ def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance(tmp_p
     assert cf_section["summary"] == result["summary"]
     exported = json.loads(export_report_use_case(reopened, {"format": "json"})["content"])
     assert exported["report"]["cashFlowCalculationSnapshot"] == run
+    assert exported["report"]["calculationSnapshots"]["feasibility"] == feasibility_run
+    assert reopened["report"]["sections"]["businessFeasibility"]["사업성 요약"]["저장된 결과"] == feasibility_result
+    assert "미확인" in reopened["report"]["sections"]["businessFeasibility"]["PF 지표"]["상태"]
     assert hashlib.sha256(workbook_path.read_bytes()).hexdigest() == manifest["sha256"]

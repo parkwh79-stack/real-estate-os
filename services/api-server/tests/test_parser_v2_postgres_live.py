@@ -1898,7 +1898,7 @@ def test_live_concurrent_report_publication_is_single_and_idempotent(
             )
 
 
-@pytest.mark.parametrize("report_kind", ["comparison", "pf_cashflow"])
+@pytest.mark.parametrize("report_kind", ["comparison", "pf_cashflow", "pf_calculations"])
 def test_live_frozen_report_round_trip_export_and_tenant_integrity(
     live_database: _LiveDatabase, report_kind: str,
 ) -> None:
@@ -1936,10 +1936,15 @@ def test_live_frozen_report_round_trip_export_and_tenant_integrity(
         snapshot_key = "cashFlowComparisonSnapshot"
     else:
         structured = ReportAgent().generate_structured_report({})
-        attach_cash_flow_basis(structured, changed)
+        if report_kind == "pf_calculations":
+            from use_cases.report_calculation_basis import attach_calculation_bases
+            from test_pf_report_calculation_bases import feasibility_record
+            attach_calculation_bases(structured, {"feasibility": feasibility_record(PROJECT_A, TENANT_A)})
+        else:
+            attach_cash_flow_basis(structured, changed)
         markdown = ReportExportAgent().export({"report": structured}, "markdown")["content"]
         report = repository.create(PROJECT_A, structured, markdown)
-        snapshot_key = "cashFlowCalculationSnapshot"
+        snapshot_key = "calculationSnapshots" if report_kind == "pf_calculations" else "cashFlowCalculationSnapshot"
     saved_snapshot = copy.deepcopy(report["report"][snapshot_key])
     changed["resultSnapshot"]["summary"]["totalRevenue"] = 1
     reopened = repository.get(PROJECT_A, report["report_id"])
