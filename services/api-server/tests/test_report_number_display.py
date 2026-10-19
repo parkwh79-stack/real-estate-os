@@ -119,7 +119,7 @@ def test_nested_cost_shares_and_collection_step_rate_keep_percentage_context_onl
 
 
 def test_word_empty_pod_links_are_compact_but_not_treated_as_approved_or_silently_loaded():
-    evidence = {"podReviewReadStatus": "unavailable", "podReviewReadMessage": "검토 저장소 조회 실패",
+    evidence = {"podReviewReadStatus": "loaded", "podReviewReadMessage": None,
                 "links": [{"title": f"검토 절 {i}", "sectionKey": str(i), "linkedRecordCount": 0,
                            "requiredEvidence": ["실제 약정 확인"], "sourceLocatorCoverage": {"linked": 0},
                            "linkedRecords": [], "podAiReviewFindings": [], "podAiReviewBlocking": False}
@@ -129,13 +129,18 @@ def test_word_empty_pod_links_are_compact_but_not_treated_as_approved_or_silentl
     xml = agent._docx_empty_pod_evidence(evidence)
     root = ElementTree.fromstring('<w:body xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + xml + '</w:body>')
     text = ''.join(root.itertext())
-    assert "검토 저장소 조회 실패" in text and "unavailable" in text
+    assert "조회 완료" in text
     assert "승인을 뜻하지 않습니다" in text
     assert all(f"검토 절 {i}" in text for i in range(20))
     assert "실제 약정 확인" in text and "linkedRecordCount" not in text
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
     assert len(root.findall('.//w:tr', ns)) == 21
     assert evidence == before
+    evidence.update(podReviewReadStatus="unavailable", podReviewReadMessage="검토 저장소 조회 실패")
+    failed = agent._docx_empty_pod_evidence(evidence)
+    assert "검토 저장소 조회 실패" in failed and "unavailable" in failed
+    assert "각 절에 등록된 근거·Pod 지적이 없습니다" not in failed
+    evidence.update(podReviewReadStatus="loaded", podReviewReadMessage=None)
     evidence["links"][0]["linkedRecords"] = [{"claim": "계약 확인 필요", "sourceLocator": {"cell": "A7"}}]
     detailed = agent._docx_empty_pod_evidence(evidence)
     assert "계약 확인 필요" in detailed and "A7" in detailed

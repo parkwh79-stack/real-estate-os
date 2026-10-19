@@ -519,7 +519,8 @@ class ReportExportAgent:
         links = evidence.get("links") if isinstance(evidence, dict) else None
         detail_keys = ("linkedRecords", "podAiReviewFindings", "evidenceRecordIds", "metricRecordIds",
                        "riskIssueRecordIds", "assumptionRecordIds", "linkedRecordCount", "podAiReviewBlocking")
-        if not (isinstance(links, list) and links and all(isinstance(link, dict)
+        if not (isinstance(evidence, dict) and evidence.get("podReviewReadStatus") == "loaded"
+                and isinstance(links, list) and links and all(isinstance(link, dict)
                 and not any(link.get(key) for key in detail_keys)
                 and not any((link.get("sourceLocatorCoverage") or {}).values()) for link in links)):
             return '\n'.join(self._docx_paragraph(line) for line in self._flatten_text(evidence))
