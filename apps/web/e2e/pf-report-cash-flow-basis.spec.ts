@@ -12,7 +12,9 @@ async function fixture(page: Page, failure = 0, additional = false) {
   const snapshot = { calculationRunId: run.calculationRunId, createdAt: "2026-10-14T00:00:00Z",
     inputSnapshot: { sourceMetadata: { reviewReason: "합성 검토 가정" } },
     resultSnapshot: { summary: { totalRevenue: 1000, totalProjectCost: 600, endingCash: 400 } } };
-  const detail = { ...metadata, report_markdown: "# 저장된 현금흐름 · 1000원", report: { cashFlowCalculationSnapshot: snapshot,
+  const financingBasis = { schemaVersion: "report-financing-inputs-v1", sectionRunIds: {
+    fundingStructure: run.calculationRunId, useOfFunds: run.calculationRunId, financialTerms: null } };
+  const detail = { ...metadata, report_markdown: "# 저장된 현금흐름 · 1000원\n자금사용 총사업비 예산: 600\n금융조건: 미확인 — PF 계산 미선택", report: { cashFlowCalculationSnapshot: snapshot, financingBasis,
     sections: { summaryCashFlow: { summary: snapshot.resultSnapshot.summary } } } };
   const calculationSnapshots = { feasibility: { calculationRunId: "saved-feasibility-original",
     inputSnapshot: { total_revenue: 2800 }, resultSnapshot: { total_revenue: 2800 } } };
@@ -26,7 +28,8 @@ async function fixture(page: Page, failure = 0, additional = false) {
         { slot: "returns", label: "수익률", calculationRunId: "missing-input", value: null,
           unit: "KRW", currency: "KRW", unitSource: "captured", status: "missing" },
       ] }], sameFamilyChecks: [{ label: "상환순서 / 회수", status: "different", leftRunId: "waterfall", rightRunId: "recovery" }] };
-  const additionalDetail = { ...metadata, report_markdown: "# 저장된 사업성 · 2800원", report: { calculationSnapshots, calculationReconciliation: reconciliation } };
+  const additionalDetail = { ...metadata, report_markdown: "# 저장된 사업성 · 2800원", report: { calculationSnapshots, calculationReconciliation: reconciliation,
+    financingBasis: { schemaVersion: "report-financing-inputs-v1", sectionRunIds: { fundingStructure: null, useOfFunds: null, financialTerms: null } } } };
   const activeDetail = additional ? additionalDetail : detail;
   await page.route("**/api/backend/**", async (route) => {
     const path = new URL(route.request().url()).pathname.replace(/\/$/, "");
@@ -83,6 +86,9 @@ test("additional calculation alone is selected, saved, reopened and downloaded w
   await expect(reconciliationPanel).toContainText("미기록");
   await expect(reconciliationPanel).not.toContainText("99,999");
   await expect(reconciliationPanel).toContainText("상환순서 / 회수");
+  const funding = page.getByRole("region", { name: "저장 보고서의 자금·금융조건 기준", exact: true });
+  await expect(funding.getByText("금융조건: 미확인 — 해당 계산 미선택", { exact: true })).toBeVisible();
+  await expect(funding.getByText("자금조달: 미확인 — 해당 계산 미선택", { exact: true })).toBeVisible();
   const waiting = page.waitForEvent("download");
   await saved.getByRole("button", { name: "입력·결과 JSON 다운로드" }).click();
   const stream = await (await waiting).createReadStream();
@@ -120,7 +126,12 @@ test("selected calculation is sent as references, saved, reopened and downloaded
   expect(posts).toEqual([{ cashFlowBasis: { calculationRunId: "saved-cash-flow-original", inputHash: "a".repeat(64), resultHash: "b".repeat(64) } }]);
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(saved).toContainText("1,000원");
-  await expect(saved).toContainText("다른 절까지 동일 실행으로 검증된 것은 아닙니다");
+  await expect(saved).toContainText("요약 현금흐름표·자금조달·자금사용 절의 기준");
+  const funding = page.getByRole("region", { name: "저장 보고서의 자금·금융조건 기준", exact: true });
+  await expect(funding.getByText("자금조달: saved-cash-flow-original", { exact: true })).toBeVisible();
+  await expect(funding.getByText("자금사용: saved-cash-flow-original", { exact: true })).toBeVisible();
+  await expect(funding).toContainText("금융조건: 미확인");
+  await expect(page.locator("pre")).toContainText("자금사용 총사업비 예산: 600");
   const waiting = page.waitForEvent("download");
   await saved.getByRole("button", { name: "입력·결과 JSON 다운로드" }).click();
   const download = await waiting;

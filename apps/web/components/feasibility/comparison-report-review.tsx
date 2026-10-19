@@ -25,6 +25,9 @@ type CalculationSlot = keyof typeof calculationLabels;
 type CalculationChoice = { slot: CalculationSlot; calculationRunId: string; createdAt?: string;
   engineKey: string; eligible: boolean; issue?: string; inputHash?: string; resultHash?: string };
 export type ReportCalculationSnapshots = Partial<Record<CalculationSlot, { calculationRunId: string; createdAt?: string }>>;
+export type ReportFinancingBasis = { schemaVersion: string; sectionRunIds: {
+  financialTerms: string | null; fundingStructure: string | null; useOfFunds: string | null;
+} };
 
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
 
@@ -33,11 +36,12 @@ async function responseBody<T>(response: Response, action: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, calculationSnapshots, reconciliation, disabled, onCreated, onBusyChange }: {
+export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, calculationSnapshots, reconciliation, financingBasis, disabled, onCreated, onBusyChange }: {
   projectId: string; reportId?: string; snapshot?: ComparisonReportSnapshot; disabled: boolean;
   cashFlowSnapshot?: ReportCashFlowSnapshot;
   calculationSnapshots?: ReportCalculationSnapshots;
   reconciliation?: ReportInputReconciliation;
+  financingBasis?: ReportFinancingBasis;
   onCreated: (reportId: string) => Promise<void>; onBusyChange: (busy: boolean) => void;
 }) {
   const endpoint = `${apiBase}/projects/${encodeURIComponent(projectId)}`;
@@ -214,7 +218,9 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
     {cashFlowSnapshot ? <div aria-label="PF 초안에 고정된 현금흐름" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
       <h4 className="font-bold">선택한 PF 초안에 고정된 현금흐름</h4>
       <p className="mt-2 break-all text-xs">계산 기록: {cashFlowSnapshot.calculationRunId}</p>
-      <p className="mt-2 text-sm text-amber-700">요약 현금흐름표의 기준입니다. 다른 절까지 동일 실행으로 검증된 것은 아닙니다.</p>
+      <p className="mt-2 text-sm text-amber-700">{financingBasis
+        ? "요약 현금흐름표·자금조달·자금사용 절의 기준입니다. 금융조건은 별도 선택한 PF 계산을 사용합니다."
+        : "요약 현금흐름표의 기준입니다. 다른 절까지 동일 실행으로 검증된 것은 아닙니다."}</p>
       <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-3">
         {([["총매출", "totalRevenue"], ["총사업비", "totalProjectCost"], ["기말 현금", "endingCash"]] as const).map(([label, key]) => {
           const value = cashFlowSnapshot.resultSnapshot.summary[key];
@@ -238,6 +244,12 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
         <button type="button" className={button} disabled={locked || !reportId} onClick={() => void perform(() => download("docx"))}>이 PF 초안 Word 다운로드</button>
       </div> : null}
     </div> : null}
+    {financingBasis ? <section aria-label="저장 보고서의 자금·금융조건 기준" className="mt-4 space-y-2 border-t border-slate-200 pt-4 text-sm dark:border-slate-700">
+      <h4 className="font-bold">자금·금융조건 절의 계산 기준</h4>
+      {([["fundingStructure", "자금조달"], ["useOfFunds", "자금사용"], ["financialTerms", "금융조건"]] as const).map(([key, label]) =>
+        <p key={key} className="break-all">{label}: {financingBasis.sectionRunIds[key] || "미확인 — 해당 계산 미선택"}</p>)}
+      <p className="text-slate-500">저장된 금액과 조건은 아래 보고서 미리보기와 다운로드에서 확인할 수 있습니다.</p>
+    </section> : null}
     {(cashFlowSnapshot || calculationSnapshots) ? <ReportInputReconciliationPanel value={reconciliation} /> : null}
     {snapshot ? <div aria-label="초안에 고정된 비교" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">
       <h4 className="font-bold">선택한 초안에 고정된 비교</h4>

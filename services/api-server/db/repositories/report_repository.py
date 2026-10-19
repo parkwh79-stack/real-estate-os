@@ -32,6 +32,14 @@ COMPARISON_REPORT_TEMPLATE = "cash-flow-comparison-review-v1"
 
 def has_cash_flow_basis(record: Mapping[str, Any]) -> bool:
     report = record.get("report") or {}
+    if "financingBasis" in report or "financing_basis_hash" in (record.get("metadata") or {}):
+        from use_cases.report_financing_basis import verify_financing_basis
+        try:
+            verify_financing_basis(report)
+            if record["metadata"].get("financing_basis_hash") != _comparison_hash(report["financingBasis"]):
+                raise ValueError("Financing basis seal differs")
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise ReportPublicationConflict("저장된 자금·금융조건 입력 검증에 실패했습니다.") from exc
     return ("cashFlowCalculationSnapshot" in report or "cashFlowCalculationSnapshotHash" in report
             or "cash_flow_snapshot_hash" in (record.get("metadata") or {}))
 
@@ -886,6 +894,8 @@ def _build_draft_report_record(
         record["metadata"]["calculation_snapshots_hash"] = report["calculationSnapshotsHash"]
     if "calculationReconciliation" in report:
         record["metadata"]["calculation_reconciliation_hash"] = _comparison_hash(report["calculationReconciliation"])
+    if "financingBasis" in report:
+        record["metadata"]["financing_basis_hash"] = _comparison_hash(report["financingBasis"])
     verify_report_snapshots(record, project_id=project_id)
     return record
 

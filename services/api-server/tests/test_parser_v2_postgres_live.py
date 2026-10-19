@@ -1943,6 +1943,8 @@ def test_live_frozen_report_round_trip_export_and_tenant_integrity(
         else:
             attach_cash_flow_basis(structured, changed)
         from use_cases.report_input_reconciliation import attach_input_reconciliation
+        from use_cases.report_financing_basis import attach_financing_basis
+        attach_financing_basis(structured)
         attach_input_reconciliation(structured)
         markdown = ReportExportAgent().export({"report": structured}, "markdown")["content"]
         report = repository.create(PROJECT_A, structured, markdown)
@@ -1953,6 +1955,8 @@ def test_live_frozen_report_round_trip_export_and_tenant_integrity(
     assert reopened is not None
     assert reopened["report"][snapshot_key] == saved_snapshot
     if report_kind != "comparison":
+        assert reopened["report"]["financingBasis"] == report["report"]["financingBasis"]
+        assert reopened["metadata"]["financing_basis_hash"] == content_hash(reopened["report"]["financingBasis"])
         assert reopened["report"]["calculationReconciliation"] == report["report"]["calculationReconciliation"]
         assert reopened["metadata"]["calculation_reconciliation_hash"] == content_hash(reopened["report"]["calculationReconciliation"])
     assert reopened["status"] == "draft" and reopened["run_id"] is None

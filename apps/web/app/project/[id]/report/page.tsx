@@ -35,7 +35,7 @@ import { ConsensusPanel } from "../../../../components/orchestration/consensus-p
 import { CreditDocumentsPanel } from "../../../../components/orchestration/credit-documents-panel";
 import { SimilarCasesRagPanel } from "../../../../components/orchestration/similar-cases-rag-panel";
 import { TermAnnotationsPanel } from "../../../../components/orchestration/term-annotations-panel";
-import { ComparisonReportReview, type ComparisonReportSnapshot, type ReportCashFlowSnapshot, type ReportCalculationSnapshots } from "../../../../components/feasibility/comparison-report-review";
+import { ComparisonReportReview, type ComparisonReportSnapshot, type ReportCashFlowSnapshot, type ReportCalculationSnapshots, type ReportFinancingBasis } from "../../../../components/feasibility/comparison-report-review";
 import type { ReportInputReconciliation } from "../../../../components/feasibility/report-input-reconciliation";
 
 interface ProjectResponse {
@@ -110,6 +110,7 @@ interface GeneratedReportResponse {
     cashFlowCalculationSnapshot?: ReportCashFlowSnapshot;
     calculationSnapshots?: ReportCalculationSnapshots;
     calculationReconciliation?: ReportInputReconciliation;
+    financingBasis?: ReportFinancingBasis;
     sectionOrder?: Array<{ key: string; title: string }>;
     paragraphEvidenceLinks?: ParagraphEvidenceLinks;
     appliedTemplate?: { name?: string; version?: number };
@@ -464,6 +465,7 @@ export default function ReportPreviewPage() {
         cashFlowSnapshot={report?.report?.cashFlowCalculationSnapshot}
         calculationSnapshots={report?.report?.calculationSnapshots}
         reconciliation={report?.report?.calculationReconciliation}
+        financingBasis={report?.report?.financingBasis}
         disabled={loading || generating || publishing || selectingReport} onCreated={loadData} onBusyChange={setGenerating} />
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_0.95fr]">
@@ -857,7 +859,7 @@ function TemplateApplication({ report }: { report: GeneratedReportResponse }) {
       <h3 className="font-bold text-slate-950 dark:text-white">템플릿 적용 결과</h3>
       <div className="mt-4 grid gap-3 md:grid-cols-4">
         <Kpi label="보고서 버전" value={`v${report.version ?? "-"}`} />
-        <Kpi label="완성도" value={report.metadata?.complete ? "완료" : "확인 필요"} />
+        <Kpi label="섹션 구성" value={report.metadata?.complete ? "전체 섹션 있음" : "구성 확인 필요"} />
         <Kpi label="적용 템플릿" value={appliedTemplate?.version ? `v${appliedTemplate.version}` : "기본"} />
         <Kpi label="미매핑" value={`${unmappedCount}개`} />
       </div>

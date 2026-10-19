@@ -367,6 +367,8 @@ class ReportExportAgent:
                 blocks.append(self._docx_paragraph(f"{meta.get('index', '')}. {meta.get('title', '')}", "Heading1"))
                 if meta.get("key") == "calculationReconciliation":
                     blocks.append(self._docx_reconciliation(report["calculationReconciliation"]))
+                elif report.get("financingBasis") and meta.get("key") in {"financialTerms", "fundingStructure", "useOfFunds"}:
+                    blocks.append(self._docx_financing(value))
                 else:
                     blocks.extend(self._docx_paragraph(line) for line in self._flatten_text(value))
         else:
@@ -435,12 +437,45 @@ class ReportExportAgent:
         for cell in runs.values():
             basis = "저장 입력 단위" if cell["unitSource"] == "captured" else "계산 API 기본 원 단위"
             blocks.append(self._docx_paragraph(f"{cell['label']} · 계산 기록 {cell['calculationRunId']} · {basis}"))
-        widths = (2050, 1900, 3700, 1988)
         rows = [("항목", "계산", "저장 입력과 단위", "대조 상태")]
         for row in reconciliation["rows"]:
             for cell in row["values"]:
                 value = format(cell["value"], ",") if cell["status"] == "present" else "미기록"
                 rows.append((row["label"], cell["label"], f"{value} {cell['currency']} / {cell['unit']}", STATUS_LABELS[row["status"]]))
+        blocks.append(self._docx_table(rows, (2050, 1900, 3700, 1988), {2}) if len(rows) > 1
+                      else self._docx_paragraph("대조 가능한 공통 예산 입력이 없습니다."))
+        if reconciliation["sameFamilyChecks"]:
+            blocks.append(self._docx_paragraph("같은 계산 계열의 전체 업무입력", "Heading1"))
+            for pair in reconciliation["sameFamilyChecks"]:
+                blocks.append(self._docx_paragraph(f"{pair['label']} · {STATUS_LABELS[pair['status']]} · {pair['leftRunId']} / {pair['rightRunId']}"))
+        return '\n'.join(blocks)
+
+    def _docx_financing(self, section: dict) -> str:
+        list_keys = {"조달 입력", "사업 수입 입력", "사용 예산 입력", "트랜치 조건"}
+        blocks = [self._docx_paragraph(line) for line in self._flatten_text(
+            {key: value for key, value in section.items() if key not in list_keys})]
+        def amount(value):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return "미확인"
+            return format(int(value) if isinstance(value, float) and value.is_integer() else value, ",")
+        for key, items in section.items():
+            if key not in list_keys or not items:
+                continue
+            blocks.append(self._docx_paragraph(key, "Heading1"))
+            if key == "트랜치 조건":
+                rows = [("명칭", "금액", "금리(소수)", "수수료율(소수)", "상환순위")]
+                rows.extend((str(item["명칭"]), amount(item["금액"]),
+                    self._scalar_text(item["금리(소수)"]), self._scalar_text(item["수수료율(소수)"]),
+                    self._scalar_text(item["상환순위 입력"])) for item in items)
+                blocks.append(self._docx_table(rows, (1950, 2650, 1600, 1600, 1838), {1, 2, 3}))
+            else:
+                rows = [("항목", "금액")]
+                rows.extend((item["항목"], amount(item["금액"])) for item in items)
+                blocks.append(self._docx_table(rows, (4838, 4800), {1}))
+        return '\n'.join(blocks)
+
+    def _docx_table(self, rows, widths, right_columns) -> str:
+        """Repeat headers and keep each record together across page breaks."""
         borders = "".join(f'<w:{edge} w:val="single" w:sz="4" w:color="D9D9D9"/>' for edge in ("top", "left", "bottom", "right", "insideH", "insideV"))
         table = [f'<w:tbl><w:tblPr><w:tblW w:w="9638" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders>{borders}</w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>']
         table.extend(f'<w:gridCol w:w="{width}"/>' for width in widths)
@@ -449,17 +484,14 @@ class ReportExportAgent:
             table.append('<w:tr><w:trPr><w:cantSplit/>' + ('<w:tblHeader/>' if index == 0 else '') + '</w:trPr>')
             for column, (width, text) in enumerate(zip(widths, row)):
                 shade = '<w:shd w:fill="DCE6F1"/>' if index == 0 else ''
-                alignment = "center" if index == 0 else "right" if column == 2 else "left"
+                alignment = "center" if index == 0 else "right" if column in right_columns else "left"
                 paragraph = self._docx_paragraph(text).replace('<w:pPr>', f'<w:pPr><w:jc w:val="{alignment}"/>')
+                if index == 0:
+                    paragraph = paragraph.replace('<w:pPr>', '<w:pPr><w:keepNext/>')
                 table.append(f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/><w:vAlign w:val="center"/>{shade}</w:tcPr>{paragraph}</w:tc>')
             table.append('</w:tr>')
         table.append('</w:tbl>')
-        blocks.append(''.join(table) if len(rows) > 1 else self._docx_paragraph("대조 가능한 공통 예산 입력이 없습니다."))
-        if reconciliation["sameFamilyChecks"]:
-            blocks.append(self._docx_paragraph("같은 계산 계열의 전체 업무입력", "Heading1"))
-            for pair in reconciliation["sameFamilyChecks"]:
-                blocks.append(self._docx_paragraph(f"{pair['label']} · {STATUS_LABELS[pair['status']]} · {pair['leftRunId']} / {pair['rightRunId']}"))
-        return '\n'.join(blocks)
+        return ''.join(table)
 
     @staticmethod
     def _docx_paragraph(text: str, style: str = "Normal") -> str:

@@ -150,6 +150,12 @@ def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance(tmp_p
     exported = json.loads(export_report_use_case(reopened, {"format": "json"})["content"])
     assert exported["report"]["cashFlowCalculationSnapshot"] == run
     assert exported["report"]["calculationSnapshots"]["feasibility"] == feasibility_run
+    assert reopened["report"]["sections"]["fundingStructure"]["조달 입력"] == [
+        {"항목": label, "금액": request["sourcesAndUses"]["funding"][key]}
+        for key, label in (("equity", "자기자본"), ("bridgeLoan", "브리지 대출"), ("pfLoan", "PF 대출"))]
+    assert reopened["report"]["sections"]["useOfFunds"]["총사업비 예산"] == request["sourcesAndUses"]["cost"]["totalProjectCost"]
+    assert "PF 계산 미선택" in reopened["report"]["sections"]["financialTerms"]["상태"]
+    assert exported["report"]["financingBasis"] == reopened["report"]["financingBasis"]
     reconciliation = reopened["report"]["calculationReconciliation"]
     assert exported["report"]["calculationReconciliation"] == reconciliation
     assert reopened["metadata"]["calculation_reconciliation_hash"] == content_hash(reconciliation)

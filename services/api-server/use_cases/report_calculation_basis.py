@@ -18,6 +18,8 @@ CALCULATION_NOTE = (
     "확인되었다는 뜻은 아닙니다. 미선택 항목은 미확인이며 다른 절은 생성 당시 프로젝트 자료입니다. "
     "분석용 초안으로 최종 승인·발행 대상이 아닙니다."
 )
+CONNECTED_CALCULATION_NOTE = CALCULATION_NOTE.replace(
+    "다른 절은 생성 당시 프로젝트 자료입니다.", "다른 절의 기준은 각 절에 표시합니다.")
 
 
 def _number_or_missing(value) -> bool:
@@ -104,14 +106,14 @@ def _calculation_block(runs: dict, slot: str) -> dict:
             "저장된 결과": deepcopy(result)}
 
 
-def calculation_sections(runs: dict) -> dict:
+def calculation_sections(runs: dict, *, note: str = CALCULATION_NOTE) -> dict:
     return {
-        "businessFeasibility": {"검토 한계": CALCULATION_NOTE,
+        "businessFeasibility": {"검토 한계": note,
             **{CALCULATION_SLOTS[slot][0]: _calculation_block(runs, slot)
                for slot in ("feasibility", "pf", "returns", "unsold_ltv")}},
-        "salesRevenueDistribution": {"검토 한계": CALCULATION_NOTE,
+        "salesRevenueDistribution": {"검토 한계": note,
             "상환순서 시나리오": _calculation_block(runs, "waterfall")},
-        "exitStrategy": {"검토 한계": CALCULATION_NOTE,
+        "exitStrategy": {"검토 한계": note,
             "트랜치 회수 시나리오": _calculation_block(runs, "tranche_recovery")},
     }
 
@@ -148,7 +150,8 @@ def verify_calculation_bases(report: dict, *, project_id: str, tenant_id: str | 
                 or (tenant_id is not None and str(run.get("tenantId") or "legacy") != tenant_id)
                 or calculation_issue(run, slot)):
             raise ValueError("Invalid calculation scope or payload")
-    for key, expected in calculation_sections(runs).items():
+    note = CONNECTED_CALCULATION_NOTE if "financingBasis" in report else CALCULATION_NOTE
+    for key, expected in calculation_sections(runs, note=note).items():
         if report["sections"].get(key) != expected:
             raise ValueError("Report values differ from saved calculations")
 
