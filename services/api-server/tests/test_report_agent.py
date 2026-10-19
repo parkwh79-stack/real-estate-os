@@ -333,7 +333,10 @@ def test_report_land_acquisition_tolerates_parsed_ledger_parcels():
     }
     section = agent.generate_report(data)
     assert "본리 1-3" in section
-    assert "735.5" in section
+    assert "736" in section
+    assert "735.5" not in section
+    structured = agent.generate_structured_report(data)
+    assert structured["sections"]["landSecuring"]["parcels"][0]["areaSqm"] == 735.5
     # share/area 없는 필지도 '-'로 안전 렌더
     assert "본리 1-4" in section
 

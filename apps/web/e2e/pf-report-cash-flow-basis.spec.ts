@@ -11,25 +11,31 @@ async function fixture(page: Page, failure = 0, additional = false) {
     created_at: "2026-10-15T01:00:00Z", metadata: { report_eligible: false } };
   const snapshot = { calculationRunId: run.calculationRunId, createdAt: "2026-10-14T00:00:00Z",
     inputSnapshot: { sourceMetadata: { reviewReason: "합성 검토 가정" } },
-    resultSnapshot: { summary: { totalRevenue: 1000, totalProjectCost: 600, endingCash: 400 } } };
+    resultSnapshot: { summary: { totalRevenue: 1000, totalProjectCost: 600.5, endingCash: 400 } } };
   const financingBasis = { schemaVersion: "report-financing-inputs-v1", sectionRunIds: {
     fundingStructure: run.calculationRunId, useOfFunds: run.calculationRunId, financialTerms: null } };
-  const detail = { ...metadata, report_markdown: "# 저장된 현금흐름 · 1000원\n자금사용 총사업비 예산: 600\n금융조건: 미확인 — PF 계산 미선택", report: { cashFlowCalculationSnapshot: snapshot, financingBasis,
+  const timingBasis = { schemaVersion: "report-timing-inputs-v1", sectionRunIds: {
+    projectSchedule: run.calculationRunId, salesPaymentSchedule: run.calculationRunId, financialStructureDiagram: run.calculationRunId } };
+  const detail = { ...metadata, report_markdown: "# 저장 당시 원본 표시 · 600.5원",
+    report_display_markdown: "# 저장된 현금흐름 · 1,000원\n자금사용 총사업비 예산: 601\n금융조건: 미확인 — PF 계산 미선택\n사업 일정: 2020-05-01\n분양수금: 분석용 결과 — 추정 포함",
+    report: { cashFlowCalculationSnapshot: snapshot, financingBasis, timingBasis,
     sections: { summaryCashFlow: { summary: snapshot.resultSnapshot.summary } } } };
   const calculationSnapshots = { feasibility: { calculationRunId: "saved-feasibility-original",
-    inputSnapshot: { total_revenue: 2800 }, resultSnapshot: { total_revenue: 2800 } } };
+    inputSnapshot: { total_revenue: 2800.5 }, resultSnapshot: { total_revenue: 2800.5 } } };
   const reconciliation = { schemaVersion: "report-input-reconciliation-v1", summary: "입력 차이 1개 · 추가 확인 1개",
     limitation: "저장 입력의 대조이며 전체 정합성 승인은 아닙니다.", rows: [{ key: "total_revenue", label: "총매출 입력",
       status: "different", missingCount: 1, values: [
-        { slot: "feasibility", label: "사업성 요약", calculationRunId: "saved-feasibility-original", value: 2800,
+        { slot: "feasibility", label: "사업성 요약", calculationRunId: "saved-feasibility-original", value: 2800.5,
           unit: "KRW", currency: "KRW", unitSource: "engine_contract_krw", status: "present" },
-        { slot: "pf", label: "PF 지표", calculationRunId: "saved-pf", value: 3000,
+        { slot: "pf", label: "PF 지표", calculationRunId: "saved-pf", value: -1234.5,
           unit: "KRW", currency: "KRW", unitSource: "captured", status: "present" },
         { slot: "returns", label: "수익률", calculationRunId: "missing-input", value: null,
           unit: "KRW", currency: "KRW", unitSource: "captured", status: "missing" },
       ] }], sameFamilyChecks: [{ label: "상환순서 / 회수", status: "different", leftRunId: "waterfall", rightRunId: "recovery" }] };
-  const additionalDetail = { ...metadata, report_markdown: "# 저장된 사업성 · 2800원", report: { calculationSnapshots, calculationReconciliation: reconciliation,
-    financingBasis: { schemaVersion: "report-financing-inputs-v1", sectionRunIds: { fundingStructure: null, useOfFunds: null, financialTerms: null } } } };
+  const additionalDetail = { ...metadata, report_markdown: "# 저장된 사업성 · 2800.5원", report_display_markdown: "# 저장된 사업성 · 2,801원",
+    report: { calculationSnapshots, calculationReconciliation: reconciliation,
+    financingBasis: { schemaVersion: "report-financing-inputs-v1", sectionRunIds: { fundingStructure: null, useOfFunds: null, financialTerms: null } },
+    timingBasis: { schemaVersion: "report-timing-inputs-v1", sectionRunIds: { projectSchedule: null, salesPaymentSchedule: null, financialStructureDiagram: null } } } };
   const activeDetail = additional ? additionalDetail : detail;
   await page.route("**/api/backend/**", async (route) => {
     const path = new URL(route.request().url()).pathname.replace(/\/$/, "");
@@ -81,14 +87,18 @@ test("additional calculation alone is selected, saved, reopened and downloaded w
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(saved).toContainText("미선택 항목은 미확인");
   const reconciliationPanel = page.getByRole("region", { name: "저장 보고서의 입력 대사", exact: true });
-  await expect(reconciliationPanel).toContainText("2,800 원");
-  await expect(reconciliationPanel).toContainText("3,000 원");
+  await expect(reconciliationPanel).toContainText("2,801 원");
+  await expect(reconciliationPanel).toContainText("-1,235 원");
+  await expect(reconciliationPanel).not.toContainText(".5");
   await expect(reconciliationPanel).toContainText("미기록");
   await expect(reconciliationPanel).not.toContainText("99,999");
   await expect(reconciliationPanel).toContainText("상환순서 / 회수");
   const funding = page.getByRole("region", { name: "저장 보고서의 자금·금융조건 기준", exact: true });
   await expect(funding.getByText("금융조건: 미확인 — 해당 계산 미선택", { exact: true })).toBeVisible();
   await expect(funding.getByText("자금조달: 미확인 — 해당 계산 미선택", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "저장 보고서의 일정·수금·구조 기준", exact: true })).toContainText("미확인 — 현금흐름 계산 미선택");
+  await expect(page.locator("pre")).toContainText("2,801원");
+  await expect(page.locator("pre")).not.toContainText("2800.5");
   const waiting = page.waitForEvent("download");
   await saved.getByRole("button", { name: "입력·결과 JSON 다운로드" }).click();
   const stream = await (await waiting).createReadStream();
@@ -131,7 +141,12 @@ test("selected calculation is sent as references, saved, reopened and downloaded
   await expect(funding.getByText("자금조달: saved-cash-flow-original", { exact: true })).toBeVisible();
   await expect(funding.getByText("자금사용: saved-cash-flow-original", { exact: true })).toBeVisible();
   await expect(funding).toContainText("금융조건: 미확인");
-  await expect(page.locator("pre")).toContainText("자금사용 총사업비 예산: 600");
+  await expect(page.locator("pre")).toContainText("자금사용 총사업비 예산: 601");
+  await expect(page.locator("pre")).not.toContainText("600.5");
+  const timing = page.getByRole("region", { name: "저장 보고서의 일정·수금·구조 기준", exact: true });
+  await expect(timing.getByText("사업 일정: saved-cash-flow-original", { exact: true })).toBeVisible();
+  await expect(timing.getByText("분양수금: saved-cash-flow-original", { exact: true })).toBeVisible();
+  await expect(page.locator("pre")).toContainText("2020-05-01");
   const waiting = page.waitForEvent("download");
   await saved.getByRole("button", { name: "입력·결과 JSON 다운로드" }).click();
   const download = await waiting;

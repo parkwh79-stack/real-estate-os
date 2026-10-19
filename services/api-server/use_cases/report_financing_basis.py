@@ -12,6 +12,7 @@ NOTE = (
     "누락값은 미확인으로 유지하며 나머지 절의 계산 기준과 최종 승인은 별도 검토합니다."
 )
 CF_NOTE = "요약 현금흐름표·자금조달·자금사용 절은 아래 저장 계산을 사용합니다. 다른 절은 각 절에 표시한 기준을 확인해 주세요. " + NOTE
+TIMING_CF_NOTE = "요약 현금흐름표·자금조달·자금사용·사업 일정·분양수금·금융구조 절은 아래 저장 현금흐름 계산을 사용합니다. 다른 절은 별도 선택 계산 또는 생성 당시 프로젝트 자료를 사용합니다. " + NOTE
 FUNDING = (("equity", "자기자본"), ("bridgeLoan", "브리지 대출"), ("pfLoan", "PF 대출"))
 REVENUE = (("totalSalesRevenue", "총 분양수입"), ("leaseDeposit", "임대보증금"),
            ("forwardSaleProceeds", "선매각 수입"), ("refinancingProceeds", "리파이낸싱 수입"),
@@ -103,5 +104,6 @@ def verify_financing_basis(report: dict) -> None:
         raise ValueError("Financing input basis differs from captured runs")
     if any(report["sections"].get(key) != value for key, value in sections.items()):
         raise ValueError("Financing report sections differ from captured inputs")
-    if report.get("cashFlowCalculationSnapshot") and report["sections"]["summaryCashFlow"].get("assumption") != CF_NOTE:
+    note = TIMING_CF_NOTE if "timingBasis" in report else CF_NOTE
+    if report.get("cashFlowCalculationSnapshot") and report["sections"]["summaryCashFlow"].get("assumption") != note:
         raise ValueError("Cash-flow financing scope differs")

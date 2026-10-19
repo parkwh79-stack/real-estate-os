@@ -8,6 +8,8 @@ export type ReportInputReconciliation = {
 
 const labels: Record<string, string> = { different: "차이 있음", same: "확인한 입력 일치",
   missing: "입력 누락", unit_mismatch: "단위 확인 필요", insufficient: "대조 대상 부족" };
+const integerDisplay = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 });
+const wholeNumber = (value: number) => integerDisplay.format(Math.abs(value) < 0.5 ? 0 : value);
 
 export function ReportInputReconciliationPanel({ value }: { value?: ReportInputReconciliation }) {
   if (!value) return <p className="mt-3 text-sm text-amber-700">이 저장 보고서에는 입력 대사 기록이 없습니다. 계산을 선택해 새 초안을 만들면 대사 결과도 저장됩니다.</p>;
@@ -20,7 +22,7 @@ export function ReportInputReconciliationPanel({ value }: { value?: ReportInputR
       {row.missingCount > 0 ? <p className="mt-1 text-xs text-amber-700">{row.missingCount}개 계산의 입력이 미기록입니다.</p> : null}
       <dl className="mt-2 space-y-2 text-sm">{row.values.map((cell) => <div key={cell.slot}>
         <dt>{cell.label}</dt><dd className="break-words font-bold">{cell.status === "present" && typeof cell.value === "number"
-          ? `${cell.value.toLocaleString("ko-KR", { maximumFractionDigits: 10 })} ${cell.unit === "KRW" ? "원" : cell.unit}` : "미기록"}</dd>
+          ? `${wholeNumber(cell.value)} ${cell.unit === "KRW" ? "원" : cell.unit}` : "미기록"}</dd>
         <dd className="break-all text-xs text-slate-500">계산 기록: {cell.calculationRunId}</dd>
         <dd className="text-xs text-slate-500">{cell.currency} / {cell.unit} · {cell.unitSource === "captured" ? "저장 단위" : "계산 API 기본 단위"}</dd>
       </div>)}</dl>
@@ -31,6 +33,6 @@ export function ReportInputReconciliationPanel({ value }: { value?: ReportInputR
         <p className="break-all text-xs text-slate-500">{pair.leftRunId} / {pair.rightRunId}</p>
       </div>)}
     </div> : null}
-    <p className="mt-3 text-sm">입력·결과 JSON 다운로드에서 각 계산의 원본 입력을 함께 확인할 수 있습니다.</p>
+    <p className="mt-3 text-sm">표시값은 정수로 반올림합니다. 입력·결과 JSON 다운로드에서 각 계산의 정확한 원본 입력을 함께 확인할 수 있습니다.</p>
   </section>;
 }

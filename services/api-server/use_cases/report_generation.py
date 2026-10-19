@@ -19,6 +19,7 @@ from use_cases.orchestration_approval import refresh_approval_readiness_gate
 from use_cases.report_calculation_basis import attach_cash_flow_basis, attach_calculation_bases
 from use_cases.report_input_reconciliation import attach_input_reconciliation
 from use_cases.report_financing_basis import attach_financing_basis
+from use_cases.report_timing_basis import attach_timing_basis
 
 REPORT_TEMPLATE_TO_REPORT_SECTION = {
     "cover": "cover",
@@ -171,6 +172,7 @@ def generate_and_save_pf_report_use_case(
     if calculation_runs:
         attach_calculation_bases(generated["structuredReport"], calculation_runs)
     attach_financing_basis(generated["structuredReport"])
+    attach_timing_basis(generated["structuredReport"])
     attach_input_reconciliation(generated["structuredReport"])
     paragraph_evidence_links = build_paragraph_evidence_links(
         project_id,

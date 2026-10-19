@@ -32,14 +32,6 @@ COMPARISON_REPORT_TEMPLATE = "cash-flow-comparison-review-v1"
 
 def has_cash_flow_basis(record: Mapping[str, Any]) -> bool:
     report = record.get("report") or {}
-    if "financingBasis" in report or "financing_basis_hash" in (record.get("metadata") or {}):
-        from use_cases.report_financing_basis import verify_financing_basis
-        try:
-            verify_financing_basis(report)
-            if record["metadata"].get("financing_basis_hash") != _comparison_hash(report["financingBasis"]):
-                raise ValueError("Financing basis seal differs")
-        except (KeyError, TypeError, AttributeError, ValueError) as exc:
-            raise ReportPublicationConflict("저장된 자금·금융조건 입력 검증에 실패했습니다.") from exc
     return ("cashFlowCalculationSnapshot" in report or "cashFlowCalculationSnapshotHash" in report
             or "cash_flow_snapshot_hash" in (record.get("metadata") or {}))
 
@@ -69,6 +61,22 @@ def verify_report_snapshots(record: Mapping[str, Any], *, project_id: str | None
     tenant_id: str | None = None) -> None:
     """Verify the saved document, never rebind it to mutable current calculations."""
     report = record.get("report") or {}
+    if "financingBasis" in report or "financing_basis_hash" in (record.get("metadata") or {}):
+        from use_cases.report_financing_basis import verify_financing_basis
+        try:
+            verify_financing_basis(report)
+            if record["metadata"].get("financing_basis_hash") != _comparison_hash(report["financingBasis"]):
+                raise ValueError("Financing basis seal differs")
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise ReportPublicationConflict("저장된 자금·금융조건 입력 검증에 실패했습니다.") from exc
+    if "timingBasis" in report or "timing_basis_hash" in (record.get("metadata") or {}):
+        from use_cases.report_timing_basis import verify_timing_basis
+        try:
+            verify_timing_basis(report)
+            if record["metadata"].get("timing_basis_hash") != _comparison_hash(report["timingBasis"]):
+                raise ValueError("Timing basis seal differs")
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise ReportPublicationConflict("저장된 일정·분양수금·금융구조 검증에 실패했습니다.") from exc
     if "calculationReconciliation" in report or "calculation_reconciliation_hash" in (record.get("metadata") or {}):
         from use_cases.report_input_reconciliation import verify_input_reconciliation
         try:
@@ -896,6 +904,8 @@ def _build_draft_report_record(
         record["metadata"]["calculation_reconciliation_hash"] = _comparison_hash(report["calculationReconciliation"])
     if "financingBasis" in report:
         record["metadata"]["financing_basis_hash"] = _comparison_hash(report["financingBasis"])
+    if "timingBasis" in report:
+        record["metadata"]["timing_basis_hash"] = _comparison_hash(report["timingBasis"])
     verify_report_snapshots(record, project_id=project_id)
     return record
 

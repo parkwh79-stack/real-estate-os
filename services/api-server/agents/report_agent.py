@@ -10,6 +10,7 @@ from core.calculations import (
 from core.schedule import schedule_event_map
 from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
 from schemas.scenario import ScenarioSetResult
+from agents.report_export_agent import ReportExportAgent
 
 
 def _looks_corrupted_text(value: Any) -> bool:
@@ -36,12 +37,12 @@ def _sum_amounts(tranches: List[Dict[str, Any]]) -> float | None:
 
 def _amount_text(value: Any) -> str:
     number = _number(value)
-    return f"{number:,.0f}원" if number is not None else "미확인"
+    return f"{ReportExportAgent.whole_number_text(number)}원" if number is not None else "미확인"
 
 
 def _percent_text(value: Any) -> str:
     number = _number(value)
-    return f"{number * 100:g}%" if number is not None else "미확인"
+    return ReportExportAgent.presentation_value(number, "interest_rate") if number is not None else "미확인"
 
 
 class ReportAgent:
@@ -85,10 +86,10 @@ class ReportAgent:
                 if "interest" in lower or "fee" in lower or "rate" in lower:
                     return _percent_text(value)
                 if "month" in lower or "maturity" in lower:
-                    return f"{value:g}개월"
+                    return f"{ReportExportAgent.whole_number_text(value)}개월"
                 if any(word in lower for word in ("cost", "revenue", "amount", "price", "loan", "funding")):
                     return _amount_text(value)
-                return f"{value:,g}"
+                return ReportExportAgent.whole_number_text(value)
             return {"senior": "선순위", "mezzanine": "중순위", "junior": "후순위", "equity": "자기자본",
                 "bridge": "브리지 대출", "other": "기타", "repayment_reserve": "분양대금 상환계정", "sales_proceeds": "분양대금"}.get(str(value), str(value))
 
@@ -153,7 +154,7 @@ class ReportAgent:
             "title": "현금흐름 비교 검토 초안", "reportEligible": False, "displayUnit": "원", "sectionOrder": order, "sections": sections,
             "qualityChecks": {"actualSectionCount": 4, "expectedSectionCount": 4, "isComplete": True},
             "cashFlowComparisonSnapshot": deepcopy(snapshot), "cashFlowComparisonSnapshotHash": snapshot_hash}
-        lines = ["# 현금흐름 비교 검토 초안", "", f"대상 사업: {project_name}", "", "> 검토용 초안 — 최종 승인·대출조건 확정용 보고서가 아닙니다.", "",
+        lines = ["# 현금흐름 비교 검토 초안", "", f"대상 사업: {project_name}", "", "> 검토용 초안 — 최종 승인·대출조건 확정용 보고서가 아닙니다.", "", ReportExportAgent.DISPLAY_NOTE, "",
             "## 1. 저장된 계산 비교", "", "금액은 원 단위이며 표시값은 반올림했습니다.", "",
             "| 업무 지표 | 기준안 | 변경안 | 차이 |", "| --- | ---: | ---: | ---: |", *metric_lines, "",
             "## 2. 계산 방식과 변경 조건", "", f"기준안: {policy_text(comparison['baseline'])}", f"기준안 검토 이유: {review_reason(baseline)}",

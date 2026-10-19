@@ -50,7 +50,8 @@ async function readState(response: Response, action: string): Promise<State> {
   return saved;
 }
 function amount(value: number | null): string {
-  return value === null || !Number.isFinite(value) ? "미확인" : value.toLocaleString("ko-KR", { maximumFractionDigits: 2 });
+  if (value === null || !Number.isFinite(value)) return "미확인";
+  return Math.abs(value) < 0.5 ? "0" : value.toLocaleString("ko-KR", { maximumFractionDigits: 0 });
 }
 function period(run?: Run): string {
   if (!run) return "미확인";
@@ -64,7 +65,10 @@ function runLabel(run: Run): string {
 function changeValue(value: unknown, path: string): string {
   if (value === null || value === undefined) return "미입력";
   if (typeof value === "number") {
-    if (/interestRate|feeRate|interest_rate|fee_rate/.test(path)) return `${amount(value * 100)}%`;
+    if (/interestRate|feeRate|interest_rate|fee_rate/.test(path)) {
+      const percent = value * 100;
+      return `${Number.isInteger(percent) ? "" : "약 "}${amount(percent)}%`;
+    }
     if (/amount|Cost|Revenue|Loan|equity|financialCost/i.test(path)) return `${amount(value)}원`;
     if (/month/i.test(path)) return `${amount(value)}개월`;
     return amount(value);

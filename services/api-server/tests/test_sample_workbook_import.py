@@ -156,6 +156,10 @@ def test_real_bonri_sample_import_uses_formula_profile_and_cell_provenance(tmp_p
     assert reopened["report"]["sections"]["useOfFunds"]["총사업비 예산"] == request["sourcesAndUses"]["cost"]["totalProjectCost"]
     assert "PF 계산 미선택" in reopened["report"]["sections"]["financialTerms"]["상태"]
     assert exported["report"]["financingBasis"] == reopened["report"]["financingBasis"]
+    assert reopened["report"]["sections"]["projectSchedule"]["저장된 일정 입력"] == request["schedule"]
+    assert reopened["report"]["sections"]["salesPaymentSchedule"]["저장된 수금 결과"] == result["salesCollectionSchedule"]
+    assert exported["report"]["timingBasis"] == reopened["report"]["timingBasis"]
+    assert reopened["metadata"]["timing_basis_hash"] == content_hash(reopened["report"]["timingBasis"])
     reconciliation = reopened["report"]["calculationReconciliation"]
     assert exported["report"]["calculationReconciliation"] == reconciliation
     assert reopened["metadata"]["calculation_reconciliation_hash"] == content_hash(reconciliation)

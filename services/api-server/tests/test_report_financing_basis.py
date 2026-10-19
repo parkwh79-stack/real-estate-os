@@ -95,23 +95,27 @@ def test_saved_pf_terms_survive_working_changes_and_all_exports(selected, monkey
     assert saved["metadata"]["financing_basis_hash"] == content_hash(report["financingBasis"])
     monkeypatch.setattr(projects, "list_calculation_run_records", lambda *a, **kw: pytest.fail("Do not rebind saved runs"))
     endpoint = f"/projects/{pid}/reports/{saved['report_id']}"
-    assert client.get(endpoint).json()["report"] == report
+    reopened = client.get(endpoint).json()
+    assert reopened["report"] == report
+    assert reopened["report_markdown"] == saved["report_markdown"]
+    assert "약 6%" in reopened["report_display_markdown"]
+    assert reopened["report_display_markdown"] == ReportExportAgent().export({"report": report}, "markdown")["content"]
     for fmt in ("json", "markdown", "html", "pdf", "docx"):
         export = client.post(endpoint + "/exports", json={"format": fmt})
         assert export.status_code == 200, export.text
         download = client.get(endpoint + f"/exports/{export.json()['export_id']}/download")
         assert download.status_code == 200
         if fmt == "json": assert download.json()["report"]["sections"]["financialTerms"] == financial
-        if fmt in {"markdown", "html"}: assert "0.058" in download.text and "changed live" not in download.text
+        if fmt in {"markdown", "html"}: assert "약 6%" in download.text and "changed live" not in download.text
         if fmt == "docx":
             with ZipFile(BytesIO(download.content)) as archive:
                 text = "".join(ElementTree.fromstring(archive.read("word/document.xml")).itertext())
-                assert "금리(소수)" in text and "0.058" in text
+                assert "금리" in text and "약 6%" in text
                 ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
                 tree = ElementTree.fromstring(archive.read("word/document.xml"))
-                table = next(t for t in tree.findall('.//w:tbl', ns) if "금리(소수)" in "".join(t.itertext()))
+                table = next(t for t in tree.findall('.//w:tbl', ns) if "수수료율" in "".join(t.itertext()))
                 rows = table.findall('w:tr', ns)
-                assert ["".join(c.itertext()) for c in rows[1].findall('w:tc', ns)] == ["Senior", "1,200", "0.058", "0.01", "1"]
+                assert ["".join(c.itertext()) for c in rows[1].findall('w:tc', ns)] == ["Senior", "1,200", "약 6%", "1%", "1"]
                 assert all(row.find('w:trPr/w:cantSplit', ns) is not None for row in rows)
 
 

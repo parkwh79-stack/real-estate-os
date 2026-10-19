@@ -28,6 +28,9 @@ export type ReportCalculationSnapshots = Partial<Record<CalculationSlot, { calcu
 export type ReportFinancingBasis = { schemaVersion: string; sectionRunIds: {
   financialTerms: string | null; fundingStructure: string | null; useOfFunds: string | null;
 } };
+export type ReportTimingBasis = { schemaVersion: string; sectionRunIds: {
+  projectSchedule: string | null; salesPaymentSchedule: string | null; financialStructureDiagram: string | null;
+} };
 
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
 
@@ -36,12 +39,13 @@ async function responseBody<T>(response: Response, action: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, calculationSnapshots, reconciliation, financingBasis, disabled, onCreated, onBusyChange }: {
+export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlowSnapshot, calculationSnapshots, reconciliation, financingBasis, timingBasis, disabled, onCreated, onBusyChange }: {
   projectId: string; reportId?: string; snapshot?: ComparisonReportSnapshot; disabled: boolean;
   cashFlowSnapshot?: ReportCashFlowSnapshot;
   calculationSnapshots?: ReportCalculationSnapshots;
   reconciliation?: ReportInputReconciliation;
   financingBasis?: ReportFinancingBasis;
+  timingBasis?: ReportTimingBasis;
   onCreated: (reportId: string) => Promise<void>; onBusyChange: (busy: boolean) => void;
 }) {
   const endpoint = `${apiBase}/projects/${encodeURIComponent(projectId)}`;
@@ -249,6 +253,12 @@ export function ComparisonReportReview({ projectId, reportId, snapshot, cashFlow
       {([["fundingStructure", "자금조달"], ["useOfFunds", "자금사용"], ["financialTerms", "금융조건"]] as const).map(([key, label]) =>
         <p key={key} className="break-all">{label}: {financingBasis.sectionRunIds[key] || "미확인 — 해당 계산 미선택"}</p>)}
       <p className="text-slate-500">저장된 금액과 조건은 아래 보고서 미리보기와 다운로드에서 확인할 수 있습니다.</p>
+    </section> : null}
+    {timingBasis ? <section aria-label="저장 보고서의 일정·수금·구조 기준" className="mt-4 space-y-2 border-t border-slate-200 pt-4 text-sm dark:border-slate-700">
+      <h4 className="font-bold">일정·분양수금·금융구조 절의 계산 기준</h4>
+      {([["projectSchedule", "사업 일정"], ["salesPaymentSchedule", "분양수금"], ["financialStructureDiagram", "금융구조"]] as const).map(([key, label]) =>
+        <p key={key} className="break-all">{label}: {timingBasis.sectionRunIds[key] || "미확인 — 현금흐름 계산 미선택"}</p>)}
+      <p className="text-slate-500">저장된 일정과 수금 결과를 사용합니다. 추정 수금 방식과 미확인 참여자는 본문에 표시합니다.</p>
     </section> : null}
     {(cashFlowSnapshot || calculationSnapshots) ? <ReportInputReconciliationPanel value={reconciliation} /> : null}
     {snapshot ? <div aria-label="초안에 고정된 비교" className="mt-5 min-w-0 border-t border-slate-200 pt-4 dark:border-slate-700">

@@ -20,6 +20,7 @@ from agents.feasibility_workbook_validator import validate_feasibility_workbook
 from agents.parser_agent import PARSER_AGENT_VERSION, ParserAgent
 from agents.parser_provenance import attach_parser_field_provenance
 from agents.risk_report_workbook_importer import import_risk_report_workbook
+from agents.report_export_agent import ReportExportAgent
 
 from core.authz import (
     authorize_request,
@@ -4771,6 +4772,7 @@ def generate_report(project_id: str, request: Request, input_data: Dict[str, Any
         "template": structured_report["template"],
         "report": structured_report,
         "report_markdown": md_report,
+        "report_display_markdown": md_report,
         "paragraphEvidenceLinks": structured_report.get("paragraphEvidenceLinks"),
         "metadata": report_record["metadata"],
     }
@@ -4818,6 +4820,7 @@ def get_report(project_id: str, report_id: str, request: Request):
         **repo.metadata(record),
         "report": record.get("report"),
         "report_markdown": record.get("report_markdown"),
+        "report_display_markdown": ReportExportAgent().export(record, "markdown")["content"],
         "exports": [repo.export_metadata(export) for export in record.get("exports", [])],
     }
 

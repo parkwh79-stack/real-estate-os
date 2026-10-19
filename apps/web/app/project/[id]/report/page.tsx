@@ -35,7 +35,7 @@ import { ConsensusPanel } from "../../../../components/orchestration/consensus-p
 import { CreditDocumentsPanel } from "../../../../components/orchestration/credit-documents-panel";
 import { SimilarCasesRagPanel } from "../../../../components/orchestration/similar-cases-rag-panel";
 import { TermAnnotationsPanel } from "../../../../components/orchestration/term-annotations-panel";
-import { ComparisonReportReview, type ComparisonReportSnapshot, type ReportCashFlowSnapshot, type ReportCalculationSnapshots, type ReportFinancingBasis } from "../../../../components/feasibility/comparison-report-review";
+import { ComparisonReportReview, type ComparisonReportSnapshot, type ReportCashFlowSnapshot, type ReportCalculationSnapshots, type ReportFinancingBasis, type ReportTimingBasis } from "../../../../components/feasibility/comparison-report-review";
 import type { ReportInputReconciliation } from "../../../../components/feasibility/report-input-reconciliation";
 
 interface ProjectResponse {
@@ -97,6 +97,7 @@ interface GeneratedReportResponse {
   report_id?: string;
   version?: number;
   report_markdown?: string;
+  report_display_markdown?: string;
   paragraphEvidenceLinks?: ParagraphEvidenceLinks;
   metadata?: {
     complete?: boolean;
@@ -111,6 +112,7 @@ interface GeneratedReportResponse {
     calculationSnapshots?: ReportCalculationSnapshots;
     calculationReconciliation?: ReportInputReconciliation;
     financingBasis?: ReportFinancingBasis;
+    timingBasis?: ReportTimingBasis;
     sectionOrder?: Array<{ key: string; title: string }>;
     paragraphEvidenceLinks?: ParagraphEvidenceLinks;
     appliedTemplate?: { name?: string; version?: number };
@@ -163,6 +165,7 @@ interface SavedReportMetadata {
 
 interface SavedReportDetail extends SavedReportMetadata {
   report_markdown?: string;
+  report_display_markdown?: string;
   report?: GeneratedReportResponse["report"] & {
     paragraphEvidenceLinks?: ParagraphEvidenceLinks;
   };
@@ -466,6 +469,7 @@ export default function ReportPreviewPage() {
         calculationSnapshots={report?.report?.calculationSnapshots}
         reconciliation={report?.report?.calculationReconciliation}
         financingBasis={report?.report?.financingBasis}
+        timingBasis={report?.report?.timingBasis}
         disabled={loading || generating || publishing || selectingReport} onCreated={loadData} onBusyChange={setGenerating} />
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_0.95fr]">
@@ -724,8 +728,9 @@ export default function ReportPreviewPage() {
           <h3 className="font-bold text-slate-950 dark:text-white">보고서 미리보기</h3>
         </div>
         <div className="min-h-[420px] rounded-lg bg-slate-50 p-4 dark:bg-slate-950">
-          {report?.report_markdown ? (
-            <pre className="whitespace-pre-wrap font-sans text-sm leading-7 text-slate-800 dark:text-slate-100">{report.report_markdown}</pre>
+          {(report?.report_display_markdown || report?.report_markdown) ? (
+            <><p className="mb-3 text-sm text-slate-500">금액·금리·비율은 정수로 반올림해 표시합니다. 계산에 사용한 정확한 값은 입력·결과 JSON에서 확인할 수 있습니다.</p>
+            <pre className="whitespace-pre-wrap font-sans text-sm leading-7 text-slate-800 dark:text-slate-100">{report.report_display_markdown || report.report_markdown}</pre></>
           ) : (
             <p className="text-sm leading-6 text-slate-500">보고서를 생성하면 Markdown 미리보기가 표시됩니다.</p>
           )}
@@ -999,6 +1004,7 @@ function generatedResponseFromSavedReport(detail: SavedReportDetail): GeneratedR
     report_id: detail.report_id,
     version: detail.version,
     report_markdown: detail.report_markdown,
+    report_display_markdown: detail.report_display_markdown,
     report: detail.report,
     paragraphEvidenceLinks: detail.report?.paragraphEvidenceLinks,
     metadata: detail.metadata,

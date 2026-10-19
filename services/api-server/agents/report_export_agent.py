@@ -5,6 +5,7 @@ import json
 import textwrap
 import zipfile
 from base64 import b64encode
+from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
 from html import escape
 from typing import Any, Dict
@@ -17,6 +18,71 @@ class ReportExportAgent:
     _PDF_HORIZONTAL_MARGIN = 42
     _PDF_FONT_SIZE = 10
     _PDF_CID_WIDTH = 1000
+    DISPLAY_NOTE = "표시값은 반올림한 정수입니다. 금리·비율은 %로 환산하며 반올림된 비율에는 ‘약’을 표시합니다. 정확한 값은 JSON 다운로드에서 확인해 주세요."
+    ENGINE_INPUT_NOTE = "저장된 결과의 입력 요약에는 엔진 기본값이 포함될 수 있습니다. 확인된 원본 입력과 누락 여부는 ‘선택 계산의 입력 대조’ 및 JSON의 저장 입력에서 확인해 주세요."
+    _PERCENT_LABELS = {
+        "금리(소수)": "금리", "수수료율(소수)": "수수료율",
+        "interestRate": "금리", "interest_rate": "금리", "feeRate": "수수료율", "fee_rate": "수수료율",
+        "allInCost": "금리·수수료율 합계", "nominal_rate_plus_fee_proxy": "명목 금리·수수료율 합계",
+        "targetRate": "목표 비율", "hurdleRate": "기준 수익률", "hurdle_rate": "기준 수익률",
+        "salesValueLtv": "분양가 기준 LTV", "sales_value_ltv": "분양가 기준 LTV",
+        "appraisal_ltv": "감정가 기준 LTV", "unsold_ltv": "미분양 담보 LTV", "unsoldLtv": "미분양 담보 LTV",
+        "senior_ltv": "선순위 LTV", "total_ltv": "총 LTV", "ltv": "LTV", "ltc": "LTC",
+        "bestCaseLtv": "최선 LTV", "baseCaseLtv": "기준 LTV", "stressCaseLtv": "스트레스 LTV", "maxLtv": "최대 LTV",
+        "exitSalesRate": "Exit 분양률", "exitSaleRate": "Exit 분양률", "exit_sale_rate": "Exit 분양률",
+        "projectIrr": "사업 IRR", "project_irr": "사업 IRR", "equityIrr": "자기자본 IRR", "equity_irr": "자기자본 IRR", "irr": "IRR",
+        "profit_margin": "이익률", "profit_on_cost": "원가 대비 수익률", "cost_ratio": "원가 비율", "recoveryRatio": "회수율", "share": "지분율",
+        "profitMargin": "이익률", "profitOnCost": "원가 대비 수익률", "breakEvenSaleRate": "손익분기 분양률",
+        "saleRate": "분양률", "saleRates": "분양률", "unsoldRate": "미분양률", "unsoldRates": "미분양률",
+        "discountRate": "할인율", "discountRates": "할인율", "ratio": "비율", "costRatio": "원가 구성비",
+        "salesRate": "분양률", "collectionRate": "수금 비율", "interestRateAddition": "추가 금리",
+        "contractAndInterimToRepayment": "계약·중도금 상환배분율", "contract_and_interim_to_repayment": "계약·중도금 상환배분율",
+        "contractAndInterimToOperating": "계약·중도금 운영배분율", "contract_and_interim_to_operating": "계약·중도금 운영배분율",
+        "allSalesProceedsToRepayment": "전체 수금 상환배분율", "all_sales_proceeds_to_repayment": "전체 수금 상환배분율",
+        "balanceToRepayment": "잔금 상환배분율", "balance_to_repayment": "잔금 상환배분율",
+        "minSalesRate": "최소 분양률", "min_sales_rate": "최소 분양률",
+        "maxSalesRate": "최대 분양률", "max_sales_rate": "최대 분양률",
+    }
+
+    @staticmethod
+    def whole_number_text(value: int | float | Decimal) -> str:
+        """Round only the displayed decimal value; ties move away from zero."""
+        number = Decimal(str(value))
+        if not number.is_finite():
+            return "미확인"
+        rounded = number.to_integral_value(rounding=ROUND_HALF_UP)
+        return "0" if rounded == 0 else format(rounded, ",f")
+
+    @classmethod
+    def presentation_value(cls, value: Any, field: str = "") -> Any:
+        """A disposable human projection. Captured inputs and JSON stay exact."""
+        if isinstance(value, dict):
+            projected = {}
+            for key, inner in value.items():
+                semantic = ("ratio" if field == "costRatio" and key in {"land", "construction", "finance", "other"}
+                            else "collectionRate" if field == "collectionSteps" and key == "rate" else key)
+                label = cls._PERCENT_LABELS.get(semantic, key) if semantic != "ratio" or key == "ratio" else key
+                if label in projected:
+                    label = f"{label} ({key})"
+                projected[label] = cls.presentation_value(
+                    inner, field if key == "value" and field in cls._PERCENT_LABELS else semantic)
+            return projected
+        if isinstance(value, list):
+            return [cls.presentation_value(item, field) for item in value]
+        if field == "금리 단위" and isinstance(value, str):
+            return "금리·수수료율은 %로 환산한 뒤 정수로 반올림합니다."
+        if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+            # Identifiers can be numbers too. They are labels, never amounts.
+            if str(field).lower().replace("_", "").endswith("id") or field in {"계산 기록", "보고서 번호", "계산 시각", "createdAt", "created_at"}:
+                return str(value)
+            if field in cls._PERCENT_LABELS:
+                number = Decimal(str(value)) * 100
+                if not number.is_finite():
+                    return "미확인"
+                rounded = number.to_integral_value(rounding=ROUND_HALF_UP)
+                return ("약 " if rounded != number else "") + cls.whole_number_text(number) + "%"
+            return cls.whole_number_text(value)
+        return value
 
     def export(self, report_record: Dict[str, Any], export_format: str) -> Dict[str, Any]:
         normalized_format = export_format.lower().strip()
@@ -65,7 +131,7 @@ class ReportExportAgent:
             # two calculations. Preserve that stored download byte-for-byte.
             return report_record["report_markdown"]
         if report.get("sectionOrder"):
-            lines = [f"# {report_record.get('title') or report.get('title') or 'PF Review Report'}", ""]
+            lines = [f"# {report_record.get('title') or report.get('title') or 'PF Review Report'}", "", self.DISPLAY_NOTE, ""]
             for meta, value in self._report_sections(report):
                 lines.extend([f"## {meta.get('index', '')}. {meta.get('title', '')}", ""])
                 lines.extend(self._flatten_text(value))
@@ -78,6 +144,10 @@ class ReportExportAgent:
         """All formats consume the saved body and saved provenance, never live reviews."""
         rows = [(meta, (report.get("sections") or {}).get(meta.get("key")))
                 for meta in report.get("sectionOrder") or []]
+        if report.get("calculationSnapshots"):
+            rows = [(meta, {"표시 안내": ReportExportAgent.ENGINE_INPUT_NOTE, **value})
+                    if meta.get("key") in {"businessFeasibility", "salesRevenueDistribution", "exitStrategy"}
+                    and isinstance(value, dict) else (meta, value) for meta, value in rows]
         reconciliation = report.get("calculationReconciliation")
         if reconciliation:
             from use_cases.report_input_reconciliation import reconciliation_document
@@ -143,6 +213,7 @@ class ReportExportAgent:
 <body>
   <h1>{escape(str(title))}</h1>
   <p class="meta">Report ID: {escape(str(report_record.get("report_id", "")))} | Version: {escape(str(report_record.get("version", "")))}</p>
+  <p class="meta">{escape(self.DISPLAY_NOTE)}</p>
   <section class="toc">
     <h2>Table of Contents</h2>
     <ol>{toc_items}</ol>
@@ -161,9 +232,12 @@ class ReportExportAgent:
 </section>"""
 
     def _render_value(self, value: Any) -> str:
+        return self._render_presented_value(self.presentation_value(value))
+
+    def _render_presented_value(self, value: Any) -> str:
         if isinstance(value, dict):
             rows = "\n".join(
-                f"<tr><th>{escape(str(key))}</th><td>{self._render_value(inner)}</td></tr>"
+                f"<tr><th>{escape(str(key))}</th><td>{self._render_presented_value(inner)}</td></tr>"
                 for key, inner in value.items()
             )
             return f"<table>{rows}</table>"
@@ -178,11 +252,11 @@ class ReportExportAgent:
                             keys.append(key)
                 header = "".join(f"<th>{escape(str(key))}</th>" for key in keys)
                 rows = "\n".join(
-                    "<tr>" + "".join(f"<td>{self._render_value(item.get(key, ''))}</td>" for key in keys) + "</tr>"
+                    "<tr>" + "".join(f"<td>{self._render_presented_value(item.get(key, ''))}</td>" for key in keys) + "</tr>"
                     for item in value
                 )
                 return f"<table><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table>"
-            items = "".join(f"<li>{self._render_value(item)}</li>" for item in value)
+            items = "".join(f"<li>{self._render_presented_value(item)}</li>" for item in value)
             return f"<ul>{items}</ul>"
         return escape(str(value if value is not None else "-"))
 
@@ -211,6 +285,7 @@ class ReportExportAgent:
             title,
             f"Report ID: {report_record.get('report_id', '')}",
             f"Version: {report_record.get('version', '')}",
+            self.DISPLAY_NOTE,
             "",
         ]
         report_sections = self._report_sections(report)
@@ -232,13 +307,16 @@ class ReportExportAgent:
         return lines
 
     def _flatten_text(self, value: Any, indent: int = 0) -> list[str]:
+        return self._flatten_presented_text(self.presentation_value(value), indent)
+
+    def _flatten_presented_text(self, value: Any, indent: int = 0) -> list[str]:
         prefix = "  " * indent
         if isinstance(value, dict):
             lines: list[str] = []
             for key, inner in value.items():
                 if isinstance(inner, (dict, list)):
                     lines.append(f"{prefix}{key}:")
-                    lines.extend(self._flatten_text(inner, indent + 1))
+                    lines.extend(self._flatten_presented_text(inner, indent + 1))
                 else:
                     lines.append(f"{prefix}{key}: {self._scalar_text(inner)}")
             return lines or [f"{prefix}-"]
@@ -249,18 +327,18 @@ class ReportExportAgent:
             for item in value:
                 if isinstance(item, (dict, list)):
                     lines.append(f"{prefix}-")
-                    lines.extend(self._flatten_text(item, indent + 1))
+                    lines.extend(self._flatten_presented_text(item, indent + 1))
                 else:
                     lines.append(f"{prefix}- {self._scalar_text(item)}")
             return lines
         return [f"{prefix}{self._scalar_text(value)}"]
 
-    @staticmethod
-    def _scalar_text(value: Any) -> str:
+    @classmethod
+    def _scalar_text(cls, value: Any) -> str:
         if value is None:
             return "-"
-        if isinstance(value, float):
-            return f"{value:.4f}".rstrip("0").rstrip(".")
+        if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+            return cls.whole_number_text(value)
         return str(value)
 
     def _render_pdf(self, report_record: Dict[str, Any]) -> bytes:
@@ -360,15 +438,23 @@ class ReportExportAgent:
         if sections:
             paragraphs = [(str(report_record.get("title") or report.get("title") or "PF 검토 보고서"), "Title"),
                           (f"보고서 번호: {report_record.get('report_id', '')}", "Normal"),
-                          (f"버전: {report_record.get('version', '')}", "Normal"), ("목차", "Heading1")]
+                          (f"버전: {report_record.get('version', '')}", "Normal"),
+                          (self.DISPLAY_NOTE, "Normal"), ("목차", "Heading1")]
             paragraphs.extend((f"{meta.get('index', '')}. {meta.get('title', '')}", "Normal") for meta, _ in sections)
             blocks = [self._docx_paragraph(line, style) for line, style in paragraphs]
+            blocks.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
             for meta, value in sections:
                 blocks.append(self._docx_paragraph(f"{meta.get('index', '')}. {meta.get('title', '')}", "Heading1"))
                 if meta.get("key") == "calculationReconciliation":
                     blocks.append(self._docx_reconciliation(report["calculationReconciliation"]))
+                elif meta.get("key") == "podEvidence":
+                    blocks.append(self._docx_empty_pod_evidence(value))
                 elif report.get("financingBasis") and meta.get("key") in {"financialTerms", "fundingStructure", "useOfFunds"}:
                     blocks.append(self._docx_financing(value))
+                elif meta.get("key") == "summaryCashFlow":
+                    blocks.append(self._docx_summary_cash_flow(value))
+                elif report.get("timingBasis") and meta.get("key") == "salesPaymentSchedule":
+                    blocks.append(self._docx_sales_collections(value))
                 else:
                     blocks.extend(self._docx_paragraph(line) for line in self._flatten_text(value))
         else:
@@ -428,6 +514,27 @@ class ReportExportAgent:
 </Relationships>''')
         return output.getvalue()
 
+    def _docx_empty_pod_evidence(self, evidence) -> str:
+        """Summarize empty linkage metadata; keep every substantive record intact."""
+        links = evidence.get("links") if isinstance(evidence, dict) else None
+        detail_keys = ("linkedRecords", "podAiReviewFindings", "evidenceRecordIds", "metricRecordIds",
+                       "riskIssueRecordIds", "assumptionRecordIds", "linkedRecordCount", "podAiReviewBlocking")
+        if not (isinstance(links, list) and links and all(isinstance(link, dict)
+                and not any(link.get(key) for key in detail_keys)
+                and not any((link.get("sourceLocatorCoverage") or {}).values()) for link in links)):
+            return '\n'.join(self._docx_paragraph(line) for line in self._flatten_text(evidence))
+        blocks = [self._docx_paragraph("각 절에 등록된 근거·Pod 지적이 없습니다. 지적 없음은 자료 확인이나 승인을 뜻하지 않습니다. 전체 연결 메타데이터는 JSON에 보관합니다.")]
+        status = evidence.get("podReviewReadStatus") or "미기록"
+        blocks.append(self._docx_paragraph("Pod 검토 조회: " + ("조회 완료" if status == "loaded" else str(status))))
+        if evidence.get("podReviewReadMessage"):
+            blocks.append(self._docx_paragraph(str(evidence["podReviewReadMessage"])))
+        rows = [("보고서 절", "필요한 자료", "등록된 근거·원본 위치·지적")]
+        for link in links:
+            required = ' · '.join(str(item) for item in link.get("requiredEvidence") or []) or "미기록"
+            rows.append((str(link.get("title") or link.get("sectionKey") or "미기록"), required, "없음 · 미확인"))
+        blocks.append(self._docx_table(rows, (2700, 3300, 3638), set()))
+        return '\n'.join(blocks)
+
     def _docx_reconciliation(self, reconciliation: dict) -> str:
         """Keep each numeric comparison on one table row, including its status."""
         from use_cases.report_input_reconciliation import STATUS_LABELS
@@ -440,7 +547,7 @@ class ReportExportAgent:
         rows = [("항목", "계산", "저장 입력과 단위", "대조 상태")]
         for row in reconciliation["rows"]:
             for cell in row["values"]:
-                value = format(cell["value"], ",") if cell["status"] == "present" else "미기록"
+                value = self.whole_number_text(cell["value"]) if cell["status"] == "present" else "미기록"
                 rows.append((row["label"], cell["label"], f"{value} {cell['currency']} / {cell['unit']}", STATUS_LABELS[row["status"]]))
         blocks.append(self._docx_table(rows, (2050, 1900, 3700, 1988), {2}) if len(rows) > 1
                       else self._docx_paragraph("대조 가능한 공통 예산 입력이 없습니다."))
@@ -457,15 +564,16 @@ class ReportExportAgent:
         def amount(value):
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 return "미확인"
-            return format(int(value) if isinstance(value, float) and value.is_integer() else value, ",")
+            return self.whole_number_text(value)
         for key, items in section.items():
             if key not in list_keys or not items:
                 continue
             blocks.append(self._docx_paragraph(key, "Heading1"))
             if key == "트랜치 조건":
-                rows = [("명칭", "금액", "금리(소수)", "수수료율(소수)", "상환순위")]
+                rows = [("명칭", "금액", "금리", "수수료율", "상환순위")]
                 rows.extend((str(item["명칭"]), amount(item["금액"]),
-                    self._scalar_text(item["금리(소수)"]), self._scalar_text(item["수수료율(소수)"]),
+                    self._scalar_text(self.presentation_value(item["금리(소수)"], "금리(소수)")),
+                    self._scalar_text(self.presentation_value(item["수수료율(소수)"], "수수료율(소수)")),
                     self._scalar_text(item["상환순위 입력"])) for item in items)
                 blocks.append(self._docx_table(rows, (1950, 2650, 1600, 1600, 1838), {1, 2, 3}))
             else:
@@ -474,10 +582,53 @@ class ReportExportAgent:
                 blocks.append(self._docx_table(rows, (4838, 4800), {1}))
         return '\n'.join(blocks)
 
-    def _docx_table(self, rows, widths, right_columns) -> str:
+    def _docx_summary_cash_flow(self, section: dict) -> str:
+        rows = section.get("rows") if isinstance(section, dict) else None
+        if not (isinstance(rows, list) and rows and all(isinstance(row, dict) and "monthIndex" in row for row in rows)):
+            return '\n'.join(self._docx_paragraph(line) for line in self._flatten_text(section))
+        blocks = [self._docx_paragraph(line) for line in self._flatten_text(
+            {key: value for key, value in section.items() if key != "rows"})]
+        blocks.append(self._docx_paragraph("월별 표는 저장된 월차·수금 구분·PF 인출·지출·순현금·기말잔액을 표시합니다. 합계나 누락값을 새로 계산하지 않습니다. 세부 계정과 원본 값은 JSON에서 확인해 주세요."))
+        table = [("월차 / 기간", "분양수금", "PF 인출", "총 지출", "순현금", "기말잔액")]
+        for row in rows:
+            inflow = row.get("cashIn") if isinstance(row.get("cashIn"), dict) else {}
+            outflow = row.get("cashOut") if isinstance(row.get("cashOut"), dict) else {}
+            sales = inflow.get("salesCollection")
+            if isinstance(sales, dict):
+                collection = '\n'.join(f"{label} {self._saved_amount(sales.get(key))}"
+                    for key, label in (("contract", "계약"), ("interim", "중도"), ("balance", "잔금")))
+            else:
+                collection = self._saved_amount(sales)
+            month = f"M{row['monthIndex']}"
+            period = row.get("period")
+            label = month if period == month else f"{month}\n{period if period is not None else '—'}"
+            table.append((label, collection, self._saved_amount(inflow.get("totalPfDraw")),
+                self._saved_amount(outflow.get("totalCashOut")), self._saved_amount(row.get("netCashFlow")),
+                self._saved_amount(row.get("endingCash"))))
+        blocks.append(self._docx_table(table, (800, 1638, 1800, 1800, 1800, 1800), {1, 2, 3, 4, 5}, font_size=18, cell_padding=80))
+        return '\n'.join(blocks)
+
+    def _docx_sales_collections(self, section: dict) -> str:
+        collections = section.get("저장된 수금 결과") if isinstance(section, dict) else None
+        if not (isinstance(collections, list) and collections and all(isinstance(row, dict) for row in collections)):
+            return '\n'.join(self._docx_paragraph(line) for line in self._flatten_text(section))
+        blocks = [self._docx_paragraph(line) for line in self._flatten_text(
+            {key: value for key, value in section.items() if key not in {"저장된 수금 결과", "수금 입력"}})]
+        blocks.append(self._docx_paragraph("계약금·중도금·잔금은 저장된 수금 결과의 구분입니다. 상품별 수금 입력과 원본 셀의 전체 내용은 JSON에서 확인해 주세요."))
+        rows = [("월차", "계약금", "중도금", "잔금")]
+        rows.extend((f"M{index}", *(self._saved_amount(row.get(key)) for key in ("contract", "interim", "balance")))
+                    for index, row in enumerate(collections))
+        blocks.append(self._docx_table(rows, (1038, 2866, 2867, 2867), {1, 2, 3}))
+        return '\n'.join(blocks)
+
+    @classmethod
+    def _saved_amount(cls, value) -> str:
+        return cls.whole_number_text(value) if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool) else "—"
+
+    def _docx_table(self, rows, widths, right_columns, *, font_size: int = 20, cell_padding: int = 100) -> str:
         """Repeat headers and keep each record together across page breaks."""
         borders = "".join(f'<w:{edge} w:val="single" w:sz="4" w:color="D9D9D9"/>' for edge in ("top", "left", "bottom", "right", "insideH", "insideV"))
-        table = [f'<w:tbl><w:tblPr><w:tblW w:w="9638" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders>{borders}</w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>']
+        table = [f'<w:tbl><w:tblPr><w:tblW w:w="9638" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders>{borders}</w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="{cell_padding}" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="{cell_padding}" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>']
         table.extend(f'<w:gridCol w:w="{width}"/>' for width in widths)
         table.append('</w:tblGrid>')
         for index, row in enumerate(rows):
@@ -486,6 +637,7 @@ class ReportExportAgent:
                 shade = '<w:shd w:fill="DCE6F1"/>' if index == 0 else ''
                 alignment = "center" if index == 0 else "right" if column in right_columns else "left"
                 paragraph = self._docx_paragraph(text).replace('<w:pPr>', f'<w:pPr><w:jc w:val="{alignment}"/>')
+                paragraph = paragraph.replace('<w:r>', f'<w:r><w:rPr><w:sz w:val="{font_size}"/></w:rPr>')
                 if index == 0:
                     paragraph = paragraph.replace('<w:pPr>', '<w:pPr><w:keepNext/>')
                 table.append(f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/><w:vAlign w:val="center"/>{shade}</w:tcPr>{paragraph}</w:tc>')
@@ -495,7 +647,7 @@ class ReportExportAgent:
 
     @staticmethod
     def _docx_paragraph(text: str, style: str = "Normal") -> str:
-        safe_text = xml_escape(text)
+        safe_text = xml_escape(text).replace('\n', '</w:t><w:br/><w:t xml:space="preserve">')
         return f'<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr><w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r></w:p>'
 
     def _file_name(self, report_record: Dict[str, Any], extension: str) -> str:

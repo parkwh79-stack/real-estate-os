@@ -96,8 +96,8 @@ def test_saved_pod_findings_and_sources_are_present_in_every_output():
         tree = ElementTree.fromstring(docx.read("word/document.xml"))
         outputs.append("\n".join(tree.itertext()))
         assert "styles.xml" in docx.read("word/_rels/document.xml.rels").decode()
-    for output in outputs:
-        assert "-123456789" in output
+    for index, output in enumerate(outputs):
+        assert ("-123456789" if index == 2 else "-123,456,789") in output
         assert "STALE_MARKDOWN_MUST_NOT_LEAK" not in output
         for i, finding in enumerate(findings):
             assert finding["podKey"] in output
