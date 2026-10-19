@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessage, parseBackendErrorResponse } from "../../lib/backend-error";
 import type { CashflowResult } from "../../lib/project-client";
+import { CashFlowPeriodBasisPanel } from "./cash-flow-period-basis";
 
 const MONTHLY_POLICY = {
   method: "reviewed_monthly_v1", interestBasis: "opening_balance", annualDayBasis: "monthly_12",
@@ -14,7 +15,7 @@ const MONTHLY_POLICY = {
 } as const;
 type Run = { calculationRunId: string; label: string; createdAt?: string; policyMode?: string;
   inputHash?: string; resultHash?: string;
-  period: { baseMonth: string | null; lastMonthIndex: number | null }; sourceHashes?: string[];
+  period: { baseMonth: string | null; lastMonthIndex: number | null; kind?: string; rowCount?: number }; sourceHashes?: string[];
   inputReviews?: Array<{ field: string; label: string; classification: string; reason: string; sourceName?: string | null; sourceCell?: string | null }> };
 export type Comparison = {
   status: string; reasons: string[]; baseline?: Run; comparison?: Run; sourceChanged?: boolean;
@@ -55,6 +56,10 @@ function amount(value: number | null): string {
 }
 function period(run?: Run): string {
   if (!run) return "미확인";
+  if (run.period.kind === "source_sequence") {
+    return run.period.lastMonthIndex === null ? "원본 순서 · 계산 범위 미확인"
+      : `원본 순서 1~${amount(run.period.lastMonthIndex + 1)} · 달력·이자기간 미확인`;
+  }
   return `${run.period.baseMonth || "명시된 월차"} · M0~M${run.period.lastMonthIndex ?? "?"}`;
 }
 function runLabel(run: Run): string {
@@ -203,6 +208,7 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, disabled = false,
     {busy ? <p role="status" className="mt-3 text-sm">계산 기록을 처리하고 있습니다.</p> : null}
     {error ? <p role="alert" className="mt-3 text-sm font-bold text-rose-600">{error}</p> : null}
     {notice ? <p role="status" className="mt-3 text-sm font-bold text-emerald-700">{notice}</p> : null}
+    {cashflow ? <CashFlowPeriodBasisPanel basis={cashflow.periodBasis} runId={cashflow.runId} projectId={projectId} /> : null}
     {cashflow?.monthlyFinancing && cashflow.financingMonthly?.length ? <details className="mt-4 rounded-lg border border-slate-200 p-3 dark:border-slate-700" open>
       <summary className="cursor-pointer text-sm font-bold">최근 저장된 월별 금융 원장 · 분석용</summary>
       <p className="mt-2 text-xs text-slate-500">예산 금융비용 {amount(typeof cashflow.monthlyFinancing.budgetFinancialCost === "number" ? cashflow.monthlyFinancing.budgetFinancialCost : null)}원

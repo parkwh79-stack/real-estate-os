@@ -32,6 +32,7 @@ import {
 } from "../../../../lib/financial-decision-package";
 import { fetchLatestCashflow, type CashflowResult } from "../../../../lib/project-client";
 import { CashFlowReviewWorkspace } from "../../../../components/feasibility/cash-flow-review-workspace";
+import { cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flow-period-basis";
 import {
   displayText,
   fetchWorkspaceContext,
@@ -107,19 +108,18 @@ function firstText(...values: unknown[]): string | undefined {
 
 function formatWonAsEok(value: number | null) {
   if (value === null) return "미확인";
-  return (value / 100_000_000).toLocaleString("ko-KR", {
-    maximumFractionDigits: 1,
-  });
+  return formatEok(value / 100_000_000);
 }
 
 function formatRatio(value: number | null) {
   if (value === null) return "미확인";
-  return (value * 100).toLocaleString("ko-KR", { maximumFractionDigits: 1 });
+  const percent = value * 100;
+  return `${Number.isInteger(percent) ? "" : "약 "}${formatEok(percent)}`;
 }
 
 function formatEok(value: number | null) {
   if (value === null) return "미확인";
-  return value.toLocaleString("ko-KR", { maximumFractionDigits: 1 });
+  return (Math.abs(value) < 0.5 ? 0 : value).toLocaleString("ko-KR", { maximumFractionDigits: 0 });
 }
 
 function formatDate(value?: string) {
@@ -230,6 +230,7 @@ export default function FeasibilityPage() {
   }
 
   const cashflowSummary = cashflow?.summary ?? {};
+  const sourceSequence = cashflow?.periodBasis?.kind === "source_sequence";
   const inputSnapshot = asRecord(cashflow?.inputSnapshot);
   const sourceMetadata = asRecord(cashflow?.sourceMetadata);
   const projectName = displayText(
@@ -458,7 +459,7 @@ export default function FeasibilityPage() {
                   rawUnit="KRW_100M"
                   displayValue={formatEok(cashflow?.maxMinusEok ?? null)}
                   displayUnit="억원"
-                  basis={cashflow?.maxMinusMonth === null || cashflow?.maxMinusMonth === undefined ? "발생월 미확인" : `M${cashflow.maxMinusMonth}`}
+                  basis={cashflow?.maxMinusPeriodIndex === null || cashflow?.maxMinusPeriodIndex === undefined ? "발생 위치 미확인" : cashFlowPeriodLabel(cashflow.periodBasis, cashflow.maxMinusPeriodIndex)}
                   valueNature="calculated"
                 />
                 <FinancialMetric
@@ -488,7 +489,7 @@ export default function FeasibilityPage() {
           </section>
 
           <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-            <Panel title="월별 Cash Flow" subtitle="최근 저장 결과의 최초 18개월 · 억원">
+            <Panel title={sourceSequence ? "원본 순서별 Cash Flow" : "월별 Cash Flow"} subtitle="최근 저장 결과의 최초 18개 계산 행 · 억원 · 정수 반올림 표시">
               {rows.length ? (
                 <div className="max-h-[520px] overflow-auto">
                   <table className="w-full min-w-[760px] border-separate border-spacing-0 text-sm">
@@ -520,9 +521,10 @@ export default function FeasibilityPage() {
                 </div>
               ) : (
                 <p className="rounded-re-control bg-re-subtle p-5 text-sm text-re-secondary">
-                  월별 Cash Flow가 아직 저장되지 않았습니다.
+                  Cash Flow가 아직 저장되지 않았습니다.
                 </p>
               )}
+              {rows.length ? <Link href={`/project/${encodeURIComponent(projectId)}/cashflow`} className="mt-3 inline-block text-sm font-bold text-re-info">저장된 현금흐름 전체 보기</Link> : null}
             </Panel>
 
             <div className="space-y-4">

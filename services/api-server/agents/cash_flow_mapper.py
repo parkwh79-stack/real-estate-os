@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any, Dict, List
 
@@ -19,6 +20,7 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
     diagnostics = _mapping_diagnostics(study, product_mix, revenue, costs, funding)
     cost_schedule = _monthly_cost_schedule(study)
     allocation_rules = _collection_allocation_rules(study)
+    period_basis = _cash_flow_period_basis(study)
 
     return {
         "requestType": "cash_flow_run_request_v1",
@@ -44,6 +46,7 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
         "scenarioSet": _scenario_set(study),
         "assetCalculationProfiles": asset_profiles,
         "mappingDiagnostics": diagnostics,
+        **({"periodBasis": period_basis} if period_basis is not None else {}),
         "sourceMetadata": {
             "sourceName": "FeasibilityStudyV2",
             "sourceType": "internal_schema",
@@ -54,6 +57,53 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
             "approvalStatus": (raw_import.get("canonicalStatus") or "unapproved"),
             "approval": raw_import.get("approval") or {},
         },
+    }
+
+
+def _cash_flow_period_basis(study: FeasibilityStudyV2) -> Dict[str, Any] | None:
+    """Project only the source timeline actually used by this request.
+
+    Working budget drafts can copy import context without copying source rows.
+    Their unrelated monthly analysis must not inherit the source-event guard.
+    Older Bonri captures can disclose event sequence, but cannot reconstruct the
+    omitted numeric headers or elapsed dates from display strings alone.
+    """
+    if not study.monthly_cash_flow:
+        return None
+    raw_import = dict(study.raw_import or {})
+    captured = raw_import.get("cashFlowPeriodBasis")
+    if isinstance(captured, dict):
+        return copy.deepcopy(captured)
+    sample_profile = raw_import.get("sampleProfile")
+    profile = raw_import.get("profile") or (sample_profile.get("templateId") if isinstance(sample_profile, dict) else None)
+    if not str(profile or "").startswith("legacy-bonri-mixed-use-pf-feasibility"):
+        return None
+    event_labels = {"토지계약", "교평등", "사업승인", "분양"}
+    if not any(row.period.strip() in event_labels for row in study.monthly_cash_flow):
+        return None
+    periods = []
+    for row in study.monthly_cash_flow:
+        source = row.source_locator or {}
+        periods.append({
+            "sourcePeriodIndex": row.month_index,
+            "label": row.period,
+            "periodKind": "event" if row.period.strip() in event_labels else "unknown",
+            "sourceMonthNumber": None,
+            # Only captured locators are retained. The old transaction range
+            # does not prove which original header cell supplied a month.
+            "sourceLocator": {
+                "sourceName": source.get("sourceDocument") or source.get("sourceName") or raw_import.get("sourceWorkbook"),
+                "sheet": source.get("sheetName") or source.get("sheet"),
+                "cell": source.get("cell"),
+            },
+        })
+    return {
+        "schemaVersion": "cash-flow-period-basis-v1", "kind": "source_sequence", "periods": periods,
+        "scheduleBindings": {event.key: {"sourcePeriodIndex": None, "sourceMonthNumber": None} for event in study.schedule},
+        "warnings": [
+            "이전에 저장된 원본 사건 순서만 확인됩니다. 월 번호 헤더와 일정 대응은 원본 파일을 다시 가져와 확인해 주세요.",
+            "사전 사건의 실제 날짜와 경과 기간은 미확인입니다. 원본 열 순번을 한 달씩의 기간으로 계산하지 않습니다.",
+        ],
     }
 
 

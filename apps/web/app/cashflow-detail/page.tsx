@@ -16,6 +16,7 @@ import {
 import { formatEok } from "../../lib/platform-data";
 import { ProjectPicker, getStoredSelectedProjectId } from "../../components/project/project-picker";
 import { fetchLatestCashflow, type CashflowResult } from "../../lib/project-client";
+import { cashFlowPeriodLabel } from "../../components/feasibility/cash-flow-period-basis";
 
 const wonToEok = (v?: number): number => (typeof v === "number" ? v / 1e8 : 0);
 
@@ -54,6 +55,7 @@ export default function CashFlowDetailPage() {
   }, [load]);
 
   const s = cf?.summary ?? {};
+  const sourceSequence = cf?.periodBasis?.kind === "source_sequence";
 
   return (
     <div className="space-y-6 pb-8">
@@ -61,10 +63,10 @@ export default function CashFlowDetailPage() {
         <div>
           <h2 className="flex items-center gap-2 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
             <CalendarDays className="h-7 w-7 text-indigo-600" />
-            월별 Cash Flow
+            {sourceSequence ? "원본 순서별 Cash Flow" : "월별 Cash Flow"}
           </h2>
           <p className="mt-1 text-sm text-slate-500">
-            선택한 프로젝트의 PF 심사(현금흐름 엔진) 실행 결과에서 월별 누적 현금흐름과 Max Minus를 표시합니다.
+            선택한 프로젝트의 PF 심사(현금흐름 엔진) 실행 결과에서 {sourceSequence ? "원본 순서별" : "월별"} 누적 현금흐름과 Max Minus를 표시합니다.
           </p>
         </div>
         <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
@@ -114,19 +116,19 @@ export default function CashFlowDetailPage() {
           <section className="grid gap-4 md:grid-cols-4">
             <KpiCard
               label="최대 자금부족 (Max Minus)"
-              value={cf.maxMinusEok === null ? "미확인" : formatEok(Math.abs(cf.maxMinusEok))}
-              sub={cf.maxMinusMonth === null ? "발생월 미확인" : `M${cf.maxMinusMonth} 시점`}
+              value={cf.maxMinusEok === null ? "미확인" : formatEok(Math.abs(cf.maxMinusEok), 0)}
+              sub={cf.maxMinusPeriodIndex === null ? "발생 위치 미확인" : `${cashFlowPeriodLabel(cf.periodBasis, cf.maxMinusPeriodIndex)} 시점`}
               icon={<TrendingDown className="h-5 w-5 text-rose-600" />}
             />
             <KpiCard
               label="총매출"
-              value={formatEok(wonToEok(s.totalRevenue))}
+              value={formatEok(wonToEok(s.totalRevenue), 0)}
               sub="사업수지 기준"
               icon={<TrendingUp className="h-5 w-5 text-emerald-600" />}
             />
             <KpiCard
               label="총사업비"
-              value={formatEok(wonToEok(s.totalProjectCost))}
+              value={formatEok(wonToEok(s.totalProjectCost), 0)}
               sub="사업수지 기준"
               icon={<Calculator className="h-5 w-5 text-sky-600" />}
             />
@@ -143,9 +145,9 @@ export default function CashFlowDetailPage() {
               <div>
                 <h3 className="flex items-center gap-2 text-lg font-bold text-slate-950 dark:text-white">
                   <FileSpreadsheet className="h-5 w-5 text-indigo-600" />
-                  월별 현금흐름 상세
+                  {sourceSequence ? "원본 순서별 현금흐름 상세" : "월별 현금흐름 상세"}
                 </h3>
-                <p className="text-sm text-slate-500">단위: 억원 · 실행 결과 {cf.monthly.length}개월</p>
+                <p className="text-sm text-slate-500">단위: 억원 · 실행 결과 {cf.monthly.length.toLocaleString("ko-KR")}개 계산 행{sourceSequence ? " · 달력·이자기간 미확인" : ""}</p>
               </div>
               <span className="shrink-0 rounded-md bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">
                 실제 실행 결과
@@ -155,7 +157,7 @@ export default function CashFlowDetailPage() {
               <table className="w-full min-w-[640px] border-collapse text-right text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-950/60">
-                    <th className="sticky left-0 z-10 bg-slate-50 p-3 text-left font-bold dark:bg-slate-950">월</th>
+                    <th className="sticky left-0 z-10 bg-slate-50 p-3 text-left font-bold dark:bg-slate-950">{sourceSequence ? "원본 순서" : "월"}</th>
                     <th className="p-3 font-bold">현금유입</th>
                     <th className="p-3 font-bold">현금유출</th>
                     <th className="p-3 font-bold">순현금흐름</th>
@@ -163,8 +165,8 @@ export default function CashFlowDetailPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {cf.monthly.map((m) => (
-                    <tr key={m.period} className={cf.maxMinusMonth !== null && m.period === `M${cf.maxMinusMonth}` ? "bg-rose-50/60 dark:bg-rose-950/20" : ""}>
+                  {cf.monthly.map((m, index) => (
+                    <tr key={m.period} className={cf.maxMinusPeriodIndex !== null && index === cf.maxMinusPeriodIndex ? "bg-rose-50/60 dark:bg-rose-950/20" : ""}>
                       <td className="sticky left-0 z-10 bg-inherit p-3 text-left font-bold text-slate-900 dark:text-white">{m.period}</td>
                       <td className="p-3 text-slate-700 dark:text-slate-300">{cell(m.cashInEok)}</td>
                       <td className="p-3 text-slate-700 dark:text-slate-300">{cell(m.cashOutEok)}</td>
@@ -188,8 +190,7 @@ export default function CashFlowDetailPage() {
 
 function cell(value: number | null): string {
   if (value === null) return "미확인";
-  if (Math.abs(value) < 0.05) return "-";
-  return value.toLocaleString("ko-KR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return (Math.abs(value) < 0.5 ? 0 : value).toLocaleString("ko-KR", { maximumFractionDigits: 0 });
 }
 
 function EmptyState({ title, body, action }: { title: string; body: string; action?: ReactNode }) {

@@ -3,6 +3,8 @@ from copy import deepcopy
 from hashlib import sha256
 import json
 
+from core.cash_flow_periods import is_source_sequence, require_stress_calendar_period
+
 
 def financial_input_hash(request: dict) -> str:
     return sha256(json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -41,6 +43,11 @@ def dependent_inputs(request: dict, result: dict, parent_id: str) -> tuple[dict,
         "schedule": {"months": max(1, len(result["monthlyCashFlow"]) - 1),
                      "salesEndMonth": max(1, len(result["monthlyCashFlow"]) - 1)},
     }
+    # The source row ordinal is not an elapsed month. Preserve the independent
+    # PF inputs, but leave duration unavailable for the caller's stress guard.
+    if is_source_sequence(source) or is_source_sequence(result):
+        stress["periodBasis"] = deepcopy(source.get("periodBasis") or result.get("periodBasis"))
+        stress["schedule"] = {"months": None, "salesEndMonth": None}
     return scenario, stress
 
 
@@ -50,6 +57,7 @@ def scale_cash_flow_request(base: dict, *, revenue: float, construction: float, 
     A nonzero amount cannot be allocated to a source schedule with a zero base;
     such scenarios require a reviewed allocation instead of inventing dates.
     """
+    require_stress_calendar_period(base)
     request = deepcopy(base)
     amounts = request["sourcesAndUses"]
     def factor(before, after):

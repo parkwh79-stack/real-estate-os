@@ -99,6 +99,17 @@ def timing_sections(report: dict) -> tuple[dict, dict]:
         "원본 위치": _business_locator(provenance.get("salesCollection")),
         "월차 기준": "저장 결과 목록의 첫 행은 M0이며 이후 행은 M1, M2 순서입니다. 누락된 결과는 월별 현금흐름이나 기본 수금비율로 다시 만들지 않습니다.",
     }
+    period_basis = _object(result.get("periodBasis"))
+    if period_basis.get("kind") == "source_sequence":
+        sections["projectSchedule"]["일정 해석"] = (
+            "저장 일정의 원본 월 순번과 현금흐름의 원본 행 순서는 다릅니다. "
+            "착공·준공의 대응은 요약 현금흐름표의 기간 기준에 표시합니다. 사전 사건의 날짜·경과 개월은 미확인입니다."
+        )
+        sections["salesPaymentSchedule"]["월차 기준"] = (
+            "수금 결과는 저장된 원본 기간 순서입니다. 한 행을 한 달이나 M0 이후의 경과개월로 해석하지 않습니다. "
+            "사전 사건의 날짜·수금 시점은 미확인입니다. 누락된 결과를 기본 비율로 다시 만들지 않습니다."
+        )
+        sections["salesPaymentSchedule"]["periodBasis"] = deepcopy(period_basis)
     project = _object(source.get("project"))
     participants = []
     participant_paths = {}

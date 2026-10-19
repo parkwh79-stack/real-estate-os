@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request,
 from typing import Dict, Any
 from db.repositories.request_project_repository import current_project_scope
 from use_cases.cash_flow_dependencies import dependent_inputs, financial_input_hash
+from core.cash_flow_periods import require_stress_calendar_period
+from core.financial_input_validation import FinancialInputError
 from schemas.report import ReportCashFlowBasis, ReportCalculationSelection
 from use_cases.report_calculation_basis import (
     CALCULATION_SLOTS, calculation_choice, freeze_cash_flow_basis, freeze_calculation_basis,
@@ -1310,7 +1312,8 @@ def _persist_calculation_run(
         {
             "engineKey": engine_key,
             "financialInputHash": input_data.get("financialInputHash"),
-            "engineVersion": input_data.get("engineVersion") or f"{engine_key}-v1",
+            "engineVersion": (result.get("engineVersion") if engine_key == "cash_flow_engine" else None)
+            or input_data.get("engineVersion") or f"{engine_key}-v1",
             "inputEvidenceIds": input_data.get("inputEvidenceIds")
             or input_data.get("evidenceIds")
             or ([input_data.get("sourceDocumentId")] if input_data.get("sourceDocumentId") else []),
@@ -3644,6 +3647,13 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
             effective_input_captured=True,
         )
         discount_stress_run_id = str(stress_run.get("calculationRunId"))
+    except FinancialInputError as exc:
+        if exc.code == "cash_flow_stress_period_unconfirmed":
+            dependent_failures.append({"engines": ["discount_stress"], "status": "not_supported",
+                                       "reason": exc.code, "message": str(exc)})
+        else:
+            dependent_failures.append({"engines": ["discount_stress"], "status": "failed", "reason": "dependent_stress_failed"})
+        discount_stress_run_id = None
     except Exception:
         dependent_failures.append({"engines": ["discount_stress"], "status": "failed", "reason": "dependent_stress_failed"})
         discount_stress_run_id = None
@@ -3818,6 +3828,7 @@ def build_scenario_request_from_project(project: Dict[str, Any], input_data: Dic
 
 def build_stress_test_request_from_project(project: Dict[str, Any], input_data: Dict[str, Any]) -> StressTestRequest:
     input_data = input_data or {}
+    require_stress_calendar_period(input_data)
     feasibility = project.get("feasibility_input", {}) or {}
 
     def pick(*keys, default=0.0):

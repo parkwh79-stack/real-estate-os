@@ -59,6 +59,23 @@ class ReportExportAgent:
         if isinstance(value, dict):
             projected = {}
             for key, inner in value.items():
+                if key == "periodBasis":
+                    projected["기간 기준"] = cls.presentation_value(cls._period_basis_document(inner))
+                    continue
+                if (key == "summary" and isinstance(inner, dict)
+                        and (value.get("periodBasis") or {}).get("kind") == "source_sequence"):
+                    inner = dict(inner)
+                    if "maxMinusMonth" in inner:
+                        ordinal = inner.pop("maxMinusMonth")
+                        # The calculator stores a one-based row ordinal here;
+                        # sourcePeriodIndex and table rows are zero-based.
+                        index = ordinal - 1 if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal > 0 else None
+                        period = next((item for item in value["periodBasis"].get("periods") or []
+                                       if item.get("sourcePeriodIndex") == index), None)
+                        inner["최대자금부족 원본 기간"] = (
+                            f"원본 {index + 1}: {period['label']}" if period is not None
+                            else f"계산 순서 {index + 1} (원본 대응 미확인)" if index is not None
+                            else "미확인")
                 semantic = ("ratio" if field == "costRatio" and key in {"land", "construction", "finance", "other"}
                             else "collectionRate" if field == "collectionSteps" and key == "rate" else key)
                 label = cls._PERCENT_LABELS.get(semantic, key) if semantic != "ratio" or key == "ratio" else key
@@ -83,6 +100,46 @@ class ReportExportAgent:
                 return ("약 " if rounded != number else "") + cls.whole_number_text(number) + "%"
             return cls.whole_number_text(value)
         return value
+
+    @staticmethod
+    def _period_basis_document(basis) -> dict:
+        """Explain captured timing without printing technical metadata as dates."""
+        if not isinstance(basis, dict) or basis.get("kind") not in {"source_sequence", "calendar_monthly"}:
+            return {"상태": "미기록"}
+        sequence = basis.get("kind") == "source_sequence"
+        document = {"구분": "원본 자료 순서 — 경과 개월 미확인" if sequence else "월별 계산 기준",
+                    "계산 행 수": basis.get("calculationPeriodCount")}
+        periods = basis.get("periods") or []
+        if sequence:
+            document["원본 기간 행 수"] = len(periods)
+            document["원본 월 번호가 확인된 행 수"] = sum(item.get("periodKind") == "monthly" for item in periods)
+            document["해석"] = "원본 행 순서는 사건·월별 기간을 함께 포함합니다. 한 행을 한 달이나 달력 날짜로 바꾸지 않습니다. 전체 기간 목록은 JSON에 보관합니다."
+            events = []
+            for item in periods:
+                if item.get("periodKind") == "monthly":
+                    continue
+                locator = item.get("sourceLocator") or {}
+                events.append({"원본 순서": item.get("sourcePeriodIndex", 0) + 1,
+                               "사건": item.get("label"), "실제 날짜·경과 개월": "미확인",
+                               "원본": locator.get("sourceName") or locator.get("sourceDocument") or "미기록",
+                               "위치": "!".join(str(value) for value in (locator.get("sheet") or locator.get("sheetName"), locator.get("cell")) if value) or "미기록"})
+            document["기간 확인이 필요한 사건"] = events
+            document["일정의 원본 대응"] = [
+                {"일정": {"construction_start": "착공", "completion": "준공"}.get(key, key),
+                 "원본 월 번호": value.get("sourceMonthNumber"),
+                 "원본 순서": value["sourcePeriodIndex"] + 1 if value.get("sourcePeriodIndex") is not None else None}
+                for key, value in (basis.get("scheduleBindings") or {}).items()]
+        interest = basis.get("interestCalculation") or {}
+        if interest.get("status") == "calculated":
+            count = interest.get("chargedPeriodCount")
+            document["월별 이자 계산"] = {"구분": "기초잔액 × 연금리 ÷ 12", "이자 발생 행 수": count,
+                                         "최초 이자 월차": interest.get("firstChargedMonthIndex"),
+                                         "마지막 이자 월차": interest.get("lastChargedMonthIndex")}
+        else:
+            document["월별 이자 계산"] = "재계산하지 않음 — 원본의 금융비용 예산을 사용하며 실제 이자기간은 미확인입니다."
+        if basis.get("warnings"):
+            document["확인할 사항"] = basis["warnings"]
+        return document
 
     def export(self, report_record: Dict[str, Any], export_format: str) -> Dict[str, Any]:
         normalized_format = export_format.lower().strip()
@@ -589,8 +646,10 @@ class ReportExportAgent:
             return '\n'.join(self._docx_paragraph(line) for line in self._flatten_text(section))
         blocks = [self._docx_paragraph(line) for line in self._flatten_text(
             {key: value for key, value in section.items() if key != "rows"})]
-        blocks.append(self._docx_paragraph("월별 표는 저장된 월차·수금 구분·PF 인출·지출·순현금·기말잔액을 표시합니다. 합계나 누락값을 새로 계산하지 않습니다. 세부 계정과 원본 값은 JSON에서 확인해 주세요."))
-        table = [("월차 / 기간", "분양수금", "PF 인출", "총 지출", "순현금", "기말잔액")]
+        sequence = (section.get("periodBasis") or {}).get("kind") == "source_sequence"
+        blocks.append(self._docx_paragraph(("표는 원본 자료의 순서이며 각 행이 한 달을 뜻하지 않습니다. " if sequence else "월별 표는 저장된 월차를 사용합니다. ")
+            + "수금 구분·PF 인출·지출·순현금·기말잔액은 저장 결과입니다. 합계나 누락값을 새로 계산하지 않습니다. 세부 계정과 원본 값은 JSON에서 확인해 주세요."))
+        table = [("원본 기간" if sequence else "월차 / 기간", "분양수금", "PF 인출", "총 지출", "순현금", "기말잔액")]
         for row in rows:
             inflow = row.get("cashIn") if isinstance(row.get("cashIn"), dict) else {}
             outflow = row.get("cashOut") if isinstance(row.get("cashOut"), dict) else {}
@@ -602,11 +661,11 @@ class ReportExportAgent:
                 collection = self._saved_amount(sales)
             month = f"M{row['monthIndex']}"
             period = row.get("period")
-            label = month if period == month else f"{month}\n{period if period is not None else '—'}"
+            label = str(period).replace(": ", "\n", 1) if sequence and period is not None else month if period == month else f"{month}\n{period if period is not None else '—'}"
             table.append((label, collection, self._saved_amount(inflow.get("totalPfDraw")),
                 self._saved_amount(outflow.get("totalCashOut")), self._saved_amount(row.get("netCashFlow")),
                 self._saved_amount(row.get("endingCash"))))
-        blocks.append(self._docx_table(table, (800, 1638, 1800, 1800, 1800, 1800), {1, 2, 3, 4, 5}, font_size=18, cell_padding=80))
+        blocks.append(self._docx_table(table, (1000, 1638, 1600, 1800, 1800, 1800), {1, 2, 3, 4, 5}, font_size=18, cell_padding=80))
         return '\n'.join(blocks)
 
     def _docx_sales_collections(self, section: dict) -> str:
@@ -616,8 +675,11 @@ class ReportExportAgent:
         blocks = [self._docx_paragraph(line) for line in self._flatten_text(
             {key: value for key, value in section.items() if key not in {"저장된 수금 결과", "수금 입력"}})]
         blocks.append(self._docx_paragraph("계약금·중도금·잔금은 저장된 수금 결과의 구분입니다. 상품별 수금 입력과 원본 셀의 전체 내용은 JSON에서 확인해 주세요."))
-        rows = [("월차", "계약금", "중도금", "잔금")]
-        rows.extend((f"M{index}", *(self._saved_amount(row.get(key)) for key in ("contract", "interim", "balance")))
+        basis = section.get("periodBasis") or {}
+        sequence = basis.get("kind") == "source_sequence"
+        labels = {item["sourcePeriodIndex"]: item["label"] for item in basis.get("periods") or []}
+        rows = [("원본 기간" if sequence else "월차", "계약금", "중도금", "잔금")]
+        rows.extend(((f"원본 {index + 1}\n{labels[index]}" if index in labels else f"계산 순서 {index + 1} (원본 미기록)") if sequence else f"M{index}", *(self._saved_amount(row.get(key)) for key in ("contract", "interim", "balance")))
                     for index, row in enumerate(collections))
         blocks.append(self._docx_table(rows, (1038, 2866, 2867, 2867), {1, 2, 3}))
         return '\n'.join(blocks)

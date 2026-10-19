@@ -244,6 +244,7 @@ def _import_legacy_bonri(
         development_profit = _krw_from_thousand(_cell_value(business, "D74"))
         pf_amount = _pf_amount_from_cash_flow(cash_flow)
         financing, financing_review = _legacy_financing(cash_flow, input_sheet, source_name)
+        schedule = _legacy_schedule(input_sheet, source_name)
 
         cost_items = [
             _line_item("land_cost", "대지비", "land", _krw_from_thousand(_cell_value(business, "D26")), "사업수지", "D26", source_name),
@@ -265,6 +266,7 @@ def _import_legacy_bonri(
             },
             "sourceDocument": source_document or {},
             "financingTermReview": financing_review,
+            "cashFlowPeriodBasis": _legacy_cash_flow_period_basis(cash_flow, source_name, schedule),
             "designFar": _value("design_far", "설계 용적률", design_far, "PERCENT", "입력", "E22", source_name),
             # These are source budget scopes, not additional cost line items.
             # Keeping the purchase component out of cost_items avoids counting
@@ -312,7 +314,7 @@ def _import_legacy_bonri(
             ],
             "cost_items": cost_items,
             "financing": financing,
-            "schedule": _legacy_schedule(input_sheet, source_name),
+            "schedule": schedule,
             "scenarios": _default_scenarios(),
             "monthly_cash_flow": _legacy_monthly_cash_flow(cash_flow, source_name),
             "metrics": _metrics(total_revenue, total_cost, development_profit, pf_amount, _max_minus_from_cash_flow(cash_flow)),
@@ -594,6 +596,82 @@ def _metrics(
         "ltc": (pf_amount or 0) / total_cost if total_cost else None,
         "exit_sale_rate": (pf_amount or 0) / total_revenue if total_revenue else None,
     }
+
+
+_LEGACY_CF_EVENT_LABELS = frozenset({"토지계약", "교평등", "사업승인", "분양"})
+
+
+def _legacy_cash_flow_period_basis(
+    cash_flow: Any, source_name: str, schedule: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Keep source-column order separate from the workbook's monthly clock.
+
+    Four named events precede month 1 in the original sample. Their column
+    positions carry no evidence of elapsed time. Row 2 owns monthly numbers;
+    row 4 is only the display label and can contain ``준공+1`` instead of 43.
+    """
+    start_col = 6
+    end_col = _last_period_column(cash_flow, start_col=start_col, header_row=4)
+    headers = list(cash_flow.iter_rows(
+        min_row=2, max_row=4, min_col=start_col, max_col=end_col, values_only=True,
+    )) if end_col is not None else []
+    month_headers = headers[0] if headers else ()
+    labels = headers[2] if len(headers) > 2 else ()
+    periods = []
+    for offset, label in enumerate(labels):
+        raw_month = month_headers[offset] if offset < len(month_headers) else None
+        source_month = _source_month_number(raw_month)
+        display_label = "" if label is None else str(label)
+        is_event = display_label.strip() in _LEGACY_CF_EVENT_LABELS and raw_month in (None, "")
+        column = _column_name(start_col + offset)
+        periods.append({
+            "sourcePeriodIndex": offset,
+            "label": display_label,
+            "periodKind": "event" if is_event else "monthly" if source_month is not None else "unknown",
+            "sourceMonthNumber": source_month,
+            "sourceLocator": {"sourceName": source_name, "sheet": "2.현금흐름",
+                              "cell": f"{column}4", "monthCell": f"{column}2"},
+        })
+    warnings = []
+    monthly_rows = [row for row in periods if row["periodKind"] != "event"]
+    source_months = [row["sourceMonthNumber"] for row in monthly_rows]
+    monthly_sequence_valid = bool(monthly_rows) and source_months == list(range(1, len(monthly_rows) + 1))
+    if not monthly_sequence_valid:
+        warnings.append("원본 월 헤더가 누락·중복·불연속되어 일정과 현금흐름 기간의 대응을 확인할 수 없습니다. 원본 2행 월 번호를 확인해 주세요.")
+        for row in monthly_rows:
+            row["periodKind"] = "unknown"
+    # Events embedded within the monthly sequence are not evidence of a valid
+    # prefix. Keep their original labels and numbers, but do not bind schedules.
+    first_monthly = next((index for index, row in enumerate(periods) if row["periodKind"] != "event"), len(periods))
+    if any(row["periodKind"] == "event" for row in periods[first_monthly:]):
+        monthly_sequence_valid = False
+        warnings.append("월별 기간 사이에 사건 열이 있어 원본 기간 순서를 확인해야 합니다.")
+        for row in periods[first_monthly:]:
+            row["periodKind"] = "unknown"
+    if any(row["periodKind"] == "event" for row in periods):
+        warnings.append("사전 사건의 실제 날짜와 경과 기간은 미확인입니다. 원본 열 순번을 한 달씩의 기간으로 계산하지 않습니다.")
+    by_month = {row["sourceMonthNumber"]: row["sourcePeriodIndex"] for row in periods
+                if row["periodKind"] == "monthly"} if monthly_sequence_valid else {}
+    bindings = {}
+    for event in schedule:
+        source_month = _source_month_number(event.get("month_index"))
+        source_index = by_month.get(source_month)
+        bindings[event["key"]] = {
+            "sourcePeriodIndex": source_index,
+            "sourceMonthNumber": source_month if source_index is not None else None,
+        }
+    return {"schemaVersion": "cash-flow-period-basis-v1", "kind": "source_sequence",
+            "periods": periods, "scheduleBindings": bindings, "warnings": warnings}
+
+
+def _source_month_number(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return int(value) if re.fullmatch(r"[1-9]\d*", value) else None
+    if isinstance(value, (int, float)) and math.isfinite(value) and value > 0 and int(value) == value:
+        return int(value)
+    return None
 
 
 def _legacy_monthly_cash_flow(cash_flow: Any, source_name: str) -> List[Dict[str, Any]]:

@@ -7,6 +7,10 @@ from core.calculations import calculate_cashflow_max_minus_details
 from core.financial_input_validation import FinancialInputError, require_finite_numbers
 from core.schedule import schedule_month_indices
 from core.reviewed_monthly_financing import ReviewedMonthlyFinancing, validate_monthly_financing_policy
+from core.cash_flow_periods import (
+    calculation_period_label, captured_period_basis, interest_calculation,
+    is_source_sequence, period_basis, require_monthly_financing_period,
+)
 
 MAX_CASH_FLOW_HORIZON_MONTHS = 600
 
@@ -14,7 +18,10 @@ MAX_CASH_FLOW_HORIZON_MONTHS = 600
 def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     """Run a deterministic baseline cash-flow analysis from CashFlowRunRequest."""
     require_finite_numbers(request, "cashFlow")
+    period_basis(request)
     monthly_policy = validate_monthly_financing_policy(request.get("monthlyFinancing"))
+    if monthly_policy is not None:
+        require_monthly_financing_period(request)
     financing = ReviewedMonthlyFinancing(request) if monthly_policy is not None else None
     months = _project_month_count(request)
     sales_schedule = _sales_collection_schedule(request, months)
@@ -54,7 +61,7 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     completion_month = schedule_month_indices(request.get("schedule")).get("completion", months) if financing else months
 
     for month_index in range(months + 1):
-        period = f"M{month_index}"
+        period = calculation_period_label(request, month_index)
         sales_collection = sales_schedule[month_index] if month_index < len(sales_schedule) else {}
         cost_out = dict(cost_schedule[month_index]) if month_index < len(cost_schedule) else {}
         cash_in_before_pf = sum(sales_collection.values())
@@ -145,6 +152,12 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
         bool(item.get("reportEligible"))
         for item in (cost_schedule_provenance, sales_schedule_provenance, allocation_policy)
     )
+    if is_source_sequence(request):
+        schedule_provenance["periodBasis"] = {
+            "sourceMode": "source_sequence_duration_unconfirmed", "reportEligible": False,
+            "warnings": ["원본 순서와 실제 달력 월차의 연결이 미확인입니다."],
+        }
+        schedule_provenance["reportEligible"] = False
     if financing is not None:
         schedule_provenance["monthlyFinancing"] = {"sourceMode": "reviewed_analysis_policy", "reportEligible": False,
                                                    "policy": financing.policy, "warnings": ["monthly_financing_analysis_only"]}
@@ -174,6 +187,7 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     }
     result = {
         "analysisType": "realytics_cash_flow_engine_v1",
+        "engineVersion": "cash_flow_engine-v2",
         "status": "completed",
         "dataStatus": "complete" if not request.get("mappingDiagnostics", {}).get("warnings") and schedule_provenance["reportEligible"] else "partial",
         "summary": summary,
@@ -185,6 +199,10 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
         "reportFragments": _report_fragments(summary, risk_flags, schedule_provenance),
         "sourceMetadata": request.get("sourceMetadata", {}),
     }
+    captured_period = captured_period_basis(request, rows, monthly_financing=financing is not None)
+    if captured_period is not None:
+        captured_period["interestCalculation"] = interest_calculation(rows, monthly_financing=financing is not None)
+        result["periodBasis"] = captured_period
     if financing is not None:
         finance_summary = financing.summary(budget_financial_cost=budget_financial_cost, budget_project_cost=scheduled_cost)
         actual_cost = sum(row["cashOut"]["totalCashOut"] for row in rows)

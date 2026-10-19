@@ -184,7 +184,11 @@ def test_word_tables_keep_all_saved_months_and_missing_values_without_summing_co
         assert ["".join(row.find('w:tc', ns).itertext()) for row in rows[1:]] == [f"M{i}" for i in range(64)]
     # Keep the full negative 12-digit amounts in the actual Bonri data readable
     # at 9pt, using wide numeric cells within the same portrait page width.
-    assert [int(column.get(f"{{{ns['w']}}}w")) for column in tables[0].findall('w:tblGrid/w:gridCol', ns)] == [800, 1638, 1800, 1800, 1800, 1800]
+    widths = [int(column.get(f"{{{ns['w']}}}w")) for column in tables[0].findall('w:tblGrid/w:gridCol', ns)]
+    assert sum(widths) == 9638
+    assert widths[0] >= 1000  # Four-character source events stay on one line.
+    assert widths[2] >= 1600  # PF draws have no negative sign in this column.
+    assert all(width >= 1800 for width in widths[3:])
     assert tables[0].find('w:tblPr/w:tblCellMar/w:left', ns).get(f"{{{ns['w']}}}w") == "80"
     cells = ["".join(cell.itertext()) for cell in tables[0].findall('w:tr', ns)[1].findall('w:tc', ns)]
     assert cells == ["M0", "계약 1,235중도 0잔금 —", "0", "1", "-1,235", "—"]

@@ -505,6 +505,7 @@ class ReportAgent:
             "assumption": "저장된 현금흐름 결과입니다. 현재 입력과의 일치 여부는 계산 이력에서 확인해야 합니다.",
             "summary": deepcopy(saved.get("summary") or {}),
             "rows": deepcopy(saved.get("monthlyCashFlow") or []),
+            **({"periodBasis": deepcopy(saved["periodBasis"])} if "periodBasis" in saved else {}),
         }
 
     def _structured_party(self, party: Dict[str, Any], role: str) -> Dict[str, Any]:

@@ -26,7 +26,7 @@ from core.logistics import (
 from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION, ScheduleMilestone
 
 
-DEVELOPMENT_FEASIBILITY_AGENT_VERSION = "2.1.0"
+DEVELOPMENT_FEASIBILITY_AGENT_VERSION = "2.2.0"
 
 ASSET_CALCULATION_PROFILES = {
     "apartment": {

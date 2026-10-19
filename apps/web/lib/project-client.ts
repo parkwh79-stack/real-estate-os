@@ -405,6 +405,20 @@ export interface CashflowMonth {
   cumulativeEok: number | null;
 }
 
+export type CashFlowPeriodBasis = {
+  schemaVersion: "cash-flow-period-basis-v1";
+  kind: "source_sequence" | "calendar_monthly";
+  periods?: Array<{ sourcePeriodIndex: number; label: string; periodKind: "event" | "monthly" | "unknown";
+    sourceMonthNumber: number | null; sourceLocator: { sourceName?: string; sheet?: string; cell?: string; monthCell?: string } }>;
+  scheduleBindings?: Record<string, { sourcePeriodIndex: number | null; sourceMonthNumber: number | null }>;
+  warnings?: string[];
+  calculationPeriodCount?: number;
+  firstCalculationPeriodIndex?: number;
+  lastCalculationPeriodIndex?: number;
+  interestCalculation?: { status: string; firstChargedMonthIndex?: number | null;
+    lastChargedMonthIndex?: number | null; chargedPeriodCount?: number; method?: string; reason?: string };
+};
+
 export interface CashflowResult {
   runId: string;
   completedAt?: string;
@@ -413,12 +427,15 @@ export interface CashflowResult {
   artifactType?: string;
   monthly: CashflowMonth[];
   maxMinusEok: number | null;
+  /** Engine compatibility value: one-based row ordinal, not an M-month index. */
   maxMinusMonth: number | null;
+  maxMinusPeriodIndex: number | null;
   summary: Record<string, number>;
   reportFragments?: Record<string, string>;
   riskFlags?: Array<Record<string, unknown>>;
   sourceMetadata?: Record<string, unknown>;
   inputSnapshot?: Record<string, unknown>;
+  periodBasis?: CashFlowPeriodBasis;
   monthlyFinancing?: Record<string, unknown>;
   financingMonthly?: Array<{ period: string; interest: number | null; fees: number | null;
     principalRepayment: number | null; outstandingDebt: number | null; overdueDebt: number | null;
@@ -518,6 +535,9 @@ function cashflowFromResult(
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const summary = (cf?.summary ?? {}) as Record<string, number>;
   const monthlyReview = cf?.monthlyFinancing != null || meta.inputSnapshot?.monthlyFinancing != null;
+  const maximumRow = summary.maxMinusMonth;
+  const maximumPeriodIndex = typeof maximumRow === "number" && Number.isSafeInteger(maximumRow)
+    && maximumRow > 0 && maximumRow <= rows.length ? maximumRow - 1 : null;
   return {
     runId: meta.runId,
     completedAt: meta.completedAt,
@@ -548,11 +568,17 @@ function cashflowFromResult(
     }),
     maxMinusEok: wonToEokOrNull(summary.maxMinus),
     maxMinusMonth: finiteNumberOrNull(summary.maxMinusMonth),
+    maxMinusPeriodIndex: maximumPeriodIndex,
     summary,
     reportFragments: (cf?.reportFragments ?? {}) as Record<string, string>,
     riskFlags: Array.isArray(cf?.riskFlags) ? (cf?.riskFlags as Array<Record<string, unknown>>) : [],
     sourceMetadata: (cf?.sourceMetadata ?? {}) as Record<string, unknown>,
     inputSnapshot: meta.inputSnapshot,
+    periodBasis: cf?.periodBasis && typeof cf.periodBasis === "object"
+      && !Array.isArray(cf.periodBasis)
+      && (cf.periodBasis as CashFlowPeriodBasis).schemaVersion === "cash-flow-period-basis-v1"
+      && ["source_sequence", "calendar_monthly"].includes((cf.periodBasis as CashFlowPeriodBasis).kind)
+      ? cf.periodBasis as CashFlowPeriodBasis : undefined,
     monthlyFinancing: cf?.monthlyFinancing && typeof cf.monthlyFinancing === "object"
       ? cf.monthlyFinancing as Record<string, unknown> : undefined,
     financingMonthly: rows.filter((row: Record<string, unknown>) => row.monthlyFinancing != null).map((row: Record<string, unknown>) => {

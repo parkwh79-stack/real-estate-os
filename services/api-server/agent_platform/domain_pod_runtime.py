@@ -178,9 +178,8 @@ def run_domain_pod_with_contract(
 def _manifest(pod_key: str) -> AgentManifest:
     return AgentManifest(
         agent_id=f"chief_{pod_key}_agent",
-        # Invalidate prior feasibility results that substituted missing logistics
-        # inputs with zero or invented scores.
-        version={"feasibility_cashflow": "1.3.0", "cost_schedule": "1.2.0", "pf_credit": "1.2.0"}.get(pod_key, "1.1.0"),
+        # Re-execute old artifacts whose source rows were treated as elapsed months.
+        version={"feasibility_cashflow": "1.4.0", "cost_schedule": "1.3.0", "pf_credit": "1.2.0"}.get(pod_key, "1.1.0"),
         display_name=f"Chief {pod_key.replace('_', ' ').title()} Agent",
         domain=pod_key,
         role="Execute deterministic domain Pod and persist its control-plane lifecycle",

@@ -8,6 +8,7 @@ from typing import Any
 
 from core.calculations import calculate_development_profit
 from core.financial_input_validation import FinancialInputError
+from core.cash_flow_periods import is_source_sequence
 from core.schedule import schedule_event_map, schedule_month_indices
 from use_cases.cash_flow_dependencies import financial_input_hash
 
@@ -78,6 +79,15 @@ def _period(run: dict) -> dict:
         isinstance(index, int) and not isinstance(index, bool) and index == offset
         for offset, index in enumerate(indices)
     )
+    try:
+        if is_source_sequence(snapshot) or is_source_sequence(result):
+            return {"basis": "source_sequence", "axis": "source_sequence", "baseMonth": None,
+                    "firstMonthIndex": None, "lastMonthIndex": None,
+                    "firstPeriodIndex": indices[0] if valid else None,
+                    "lastPeriodIndex": indices[-1] if valid else None,
+                    "rowCount": len(indices), "valid": valid}
+    except FinancialInputError:
+        valid = False
     base_month = None
     try:
         schedule_indices = schedule_month_indices(snapshot.get("schedule"))
@@ -307,6 +317,9 @@ def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: di
     if base["period"] != other["period"]:
         response["status"] = "partial"
         response["reasons"].append("period_mismatch")
+    if any(info["period"]["basis"] == "source_sequence" for info in (base, other)):
+        response["status"] = "partial"
+        response["reasons"].append("source_period_duration_unconfirmed")
     if base["policyMode"] != other["policyMode"]:
         response["status"] = "partial"
         response["reasons"].append("financing_policy_mismatch")

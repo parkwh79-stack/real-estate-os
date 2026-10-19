@@ -1941,6 +1941,15 @@ def test_live_frozen_report_round_trip_export_and_tenant_integrity(
             from test_pf_report_calculation_bases import feasibility_record
             attach_calculation_bases(structured, {"feasibility": feasibility_record(PROJECT_A, TENANT_A)})
         else:
+            from agents.cash_flow_engine import run_cash_flow_engine
+            from test_cash_flow_comparison import rehash
+            from test_cash_flow_period_basis import _request
+            source_request = _request()
+            source_request["project"]["projectId"] = PROJECT_A
+            changed["inputSnapshot"] = source_request
+            changed["resultSnapshot"] = run_cash_flow_engine(source_request)
+            changed["engineVersion"] = changed["resultSnapshot"].get("engineVersion", changed["engineVersion"])
+            rehash(changed)
             attach_cash_flow_basis(structured, changed)
         from use_cases.report_input_reconciliation import attach_input_reconciliation
         from use_cases.report_financing_basis import attach_financing_basis
@@ -1956,6 +1965,9 @@ def test_live_frozen_report_round_trip_export_and_tenant_integrity(
     reopened = repository.get(PROJECT_A, report["report_id"])
     assert reopened is not None
     assert reopened["report"][snapshot_key] == saved_snapshot
+    if report_kind == "pf_cashflow":
+        assert reopened["report"]["sections"]["summaryCashFlow"]["periodBasis"] == saved_snapshot["resultSnapshot"]["periodBasis"]
+        assert reopened["report"]["sections"]["summaryCashFlow"]["periodBasis"]["kind"] == "source_sequence"
     if report_kind != "comparison":
         assert reopened["report"]["financingBasis"] == report["report"]["financingBasis"]
         assert reopened["metadata"]["financing_basis_hash"] == content_hash(reopened["report"]["financingBasis"])

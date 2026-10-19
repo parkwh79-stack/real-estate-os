@@ -187,6 +187,8 @@ def attach_cash_flow_basis(report: dict, run: dict) -> None:
         "calculationRunId": run["calculationRunId"],
         "summary": deepcopy(saved["summary"]), "rows": deepcopy(saved["monthlyCashFlow"]),
     }
+    if "periodBasis" in saved:
+        report["sections"]["summaryCashFlow"]["periodBasis"] = deepcopy(saved["periodBasis"])
     report["calculationSources"] = [{
         "적용 범위": "12. 요약 현금흐름표", "계산 기록": run["calculationRunId"],
         "계산 시각": run.get("createdAt") or "미기록",
@@ -212,3 +214,5 @@ def verify_cash_flow_basis(report: dict, *, project_id: str, tenant_id: str | No
             or section.get("summary") != result["summary"]
             or section.get("rows") != result["monthlyCashFlow"]):
         raise ValueError("Report cash-flow values differ from the captured run")
+    if ("periodBasis" in result or "periodBasis" in section) and section.get("periodBasis") != result.get("periodBasis"):
+        raise ValueError("Report period basis differs from the captured run")

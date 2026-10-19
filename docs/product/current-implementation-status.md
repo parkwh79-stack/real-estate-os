@@ -75,6 +75,14 @@ Microsoft Word 출력·PNG로 확인했고 행 분리와 제목 스타일을 보
 전체 구현·검증 범위와 다음 작업은
 [최신 실행 계획](realytics-os-next-work-roadmap.md)을 따른다.
 
+가장 최근 후속에서는 본리동의 사전 사건 4개와 원본 월 번호 60개를 별도로 보관하고,
+착공/준공의 원본 대응 및 계산 49행을 기간 기준에 기록했다. 날짜 없는 사건을 실제
+개월로 계산하지 않으며 예산 CF·독립 PF 시나리오는 계속 제공한다. 월별 금융 재계산과
+기간 스트레스만 해당 시간 근거를 요구한다. 저장·재열기·보고서 다운로드가 같은
+기간 기준을 사용하며 과거 무기록 실행과 hash는 바꾸지 않는다. 최대부족 위치의
+1기준 순번과 화면의 0기준 행 위치 차이도 표시 계층에서 보완했다. 기존 원본 금액과
+예산 이자는 유지하며 실제 사건 날짜·납입 일정 가정·대출 약정 연결은 다음 작업이다.
+
 | 사용자 작업 | 확인한 구현 근거 | 현재 판단 / 필요한 작업 |
 |---|---|---|
 | 가입·로그인 | Web `/login`, Supabase password/OAuth BFF, `supabase/functions/naver-userinfo` | 이메일 가입·비밀번호·재설정과 카카오/Google 진입을 같은 화면에 연결. 네이버 앱 등록·저장 설정 확인과 회원정보 변환 함수 v1 배포 완료. Supabase 공급자 설정과 실제 로그인 검증 후 활성화하며 현재 네이버 버튼은 비활성이다. [설정 및 검증](live-auth-smoke-runbook.md). |
@@ -83,13 +91,13 @@ Microsoft Word 출력·PNG로 확인했고 행 분리와 제목 스타일을 보
 | 자료 업로드와 문서 분류 | `routers/project_source_documents.py`, `use_cases/intake_finalize.py`, `parsing_platform` | 코드 있음. 외부 AI 없이 처리되는 문서와 수동 확인이 필요한 문서를 명확히 표시. |
 | 숫자·출처 검토 | `use_cases/document_review_workspace.py`, `routers/project_parser_v2.py`, Web `/project/[id]/documents/review` | 후보 검토·스냅샷 경로 있음. 편집·저장·재개를 한 사용자 흐름으로 검증. |
 | 사업수지 Excel 검증·입력 | `use_cases/approved_workbook_authority.py`, `workbook_import_approval.py`, `feasibility_input_builder.py`, `feasibility_workbook_llm.py` | AI 없는 직접 입력·원본 셀 보기·이유/가정 저장과 원 단위 금액·사업 일정·대출 조건의 저장·재개를 연결. 정식 승인과 분석용 입력은 구분. 실제 자료 검증의 범위와 결과는 실행 계획에 기록한다. |
-| 사업수지·월별 CF·부족자금 | `core/reviewed_monthly_financing.py`, `use_cases/cash_flow.py`, `cash_flow_comparison.py`, Web feasibility/cashflow | 명시적으로 선택한 검토 정책으로 월별 이자·수수료·잔액·상환을 계산. 저장된 두 CalculationRun의 입력·집계 차이를 비교하고 선택을 저장·재개한다. 기간·금융방식이 다르면 부분 비교로 표시하며 승인·최종 보고서 자격은 부여하지 않는다. |
+| 사업수지·월별 CF·부족자금 | `core/reviewed_monthly_financing.py`, `core/cash_flow_periods.py`, `use_cases/cash_flow.py`, `cash_flow_comparison.py`, Web feasibility/cashflow | 명시적 검토 정책으로 월별 이자·수수료·잔액·상환을 계산한다. 원본 사건 순서와 실제 개월은 구분하여 저장하며 시간 미확인은 해당 월별 금융·기간 스트레스에만 적용한다. 예산·독립 PF 분석과 두 저장 실행의 부분 비교는 계속 제공한다. 실제 사건/약정의 시간 연결과 최종 승인 자격은 미확인이다. |
 | PF·상환·미분양 시나리오 | `agents/scenario_engine_agent.py`, `use_cases/cash_flow_dependencies.py`, Web `/project/[id]/pf-structure` | 기존 계산·화면 유지. CF 화면은 같은 부모·입력 hash의 후속 결과만 표시한다. 새 월별 검토안에 기존 일괄 청구액 방식의 후속 시나리오를 붙이는 작업은 별도 상환 계약 검증까지 보류한다. |
 | 토지·시장·법률 보완 | `use_cases/land_ledger_import.py`, `market_comparables.py`, `legal_pod.py` | 공동계약·개인별 미기재·합계 오류를 구분하고 계약/수지 대사 메모를 저장·재개한다. 조서 기지급과 예정액·미기재를 따로 표시하며 이전 지급 완료 오판정을 재사용하지 않는다. 설계 용적률 오매핑과 물류 누락값/실제 0 구분은 보완했다. 물류 비교 자산 분류·실제 계약 대사는 남아 있다. [범위와 검증](land-ledger-import-and-enrichment.md). |
 | 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 위험별 보완 사유·다음 할 일을 기존 검토 메모로 입력·저장·재개하고 이력을 확인한다. 같은 ID/run/본문/출처 재생성은 사람 검토를 보존하며, 바뀐 근거나 새 실행에 과거 승인을 넘기지 않는다. 편집 중 다른 검토를 막고 실패 시 입력을 유지한다. 다중 사용자 동시 수정 CAS는 미구현이다. CF 비교는 실행 메타데이터와 업무 입력·출처 차이를 구분하며, 다른 재분석·consensus 경로는 별도 확인한다. |
 | 검토 초안·다운로드 | `use_cases/report_generation.py`, `agents/report_export_agent.py`, Web 프로젝트 보고서와 Cash Flow export | 저장된 CF 비교의 두 계산·입력·출처·검토 이유를 고정한 분석 초안을 기존 보고서 저장·재조회·내보내기에 연결한다. 현재 입력 변경과 분리하고 hash 검증·최종 발행 차단을 유지한다. 상세 검증과 PDF/DOCX 범위는 실행 계획을 따른다. |
 | Chief Pod 계산 계보 | `use_cases/chief_deal_orchestration.py`, `chief_pod_records.py`, `agent_platform/domain_pod_runtime.py` | 6개 Pod 모두 실행 경로가 있다. CF Pod는 실제 계산 요청·입력 hash와 Chief/Pod 실행 ID를 저장하며 소비 입력 변경 시 재실행한다. 원가 Pod·child 캐시와 실제 Agent의 입력을 일치시키고, 재실행한 파생 결과를 수동·승인 입력 보호하에 프로젝트 조회에 반영한다. 총사업비 누락은 미확인으로 유지한다. 공공정책의 전용 시뮬레이션은 미구현이며 기존 개발가능성 분석 재사용이다. |
-| PF Pod·보고서 근거 연결 | `use_cases/pf_structure.py`, `chief_pod_records.py`, `report_generation.py`, Web 보고서 | PF Pod도 실제 PF/시나리오 요청·기본값·실행 ID를 저장하고 재현하며, 입력·옵션 변경은 캐시에 반영한다. 과거 스트레스를 이번 실행으로 등록하지 않고 시나리오 입력 부족은 부분 결과로 표시한다. 6개 Pod의 고정된 지적·근거를 화면/JSON과 Markdown·HTML·PDF·Word 본문에 연결했다. 보고서에서 시나리오를 새로 실행하거나 합성 CF를 만들지 않는다. 전체 20절 Word 시각 인수, 모든 보고서 숫자의 동일 실행 연결·실제 계약 검증은 남아 있다. |
+| PF Pod·보고서 근거 연결 | `use_cases/pf_structure.py`, `chief_pod_records.py`, `report_generation.py`, Web 보고서 | PF Pod도 실제 PF/시나리오 요청·기본값·실행 ID를 저장하고 재현하며, 입력·옵션 변경은 캐시에 반영한다. 과거 스트레스를 이번 실행으로 등록하지 않고 시나리오 입력 부족은 부분 결과로 표시한다. 6개 Pod의 고정된 지적·근거를 화면/JSON과 Markdown·HTML·PDF·Word 본문에 연결했다. 보고서에서 시나리오를 새로 실행하거나 합성 CF를 만들지 않는다. 본리동 전체 20절 Word 시각 점검은 수행했고 모든 보고서 숫자의 동일 실행 연결·실제 계약 검증은 남아 있다. |
 | Pod 추가 업무 배정 | `agents/pod_ai_reviewer_agent.py`, `use_cases/chief_pod_work_orders.py`, Chief 화면 | LLM 검토가 실제 담당 Agent/Pod와 수집·재검토·자료 요청을 제안하면 허용된 업무만 typed handoff와 기존 Event Bus로 실행한다. 중복과 재실행 회차를 제한하고 출처·상태·재검토 결과를 저장한다. 모델이 없으면 규칙 기반이라고 표시하며 지원하는 공개자료 보강은 계속 시도한다. 미확인 약정·권리·금융값은 임의로 채우지 않는다. 운영 LLM과 공개 API의 실통신 검증은 남아 있다. |
 | 로그인과 조직 경계 | Web `app/api/auth/supabase`, `core/authz.py`, DB repositories | 코드 있음. 운영 준비를 단순 로그인 화면 존재로 판단하지 않음. 기존 권한 유지. |
 | 자동 코딩·자기수정 | `agent_platform/coding` | 현재 제품 우선순위에서 제외. 취소/완료 경합과 실행 격리 과제가 있어 운영 활성화하지 않음. |

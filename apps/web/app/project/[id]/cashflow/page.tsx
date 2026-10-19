@@ -7,6 +7,7 @@ import { AlertTriangle, ArrowLeft, Calculator, Download, Loader2, PlayCircle, Re
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { bindCashflowDependents, fetchLatestCalculationRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
 import { trancheAmounts, amountInEok } from "../../../../lib/tranche-display";
+import { CashFlowPeriodBasisPanel, cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flow-period-basis";
 
 const SCENARIO_ENGINES = ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"];
 
@@ -17,14 +18,14 @@ const FEAS_METHOD_LABEL: Record<string, string> = {
   no_source: "근거 없음",
 };
 
-function formatEok(value?: number | null, digits = 1): string {
+function formatEok(value?: number | null): string {
   if (typeof value !== "number" || Number.isNaN(value)) return "미확인";
-  return `${value.toLocaleString("ko-KR", { minimumFractionDigits: digits, maximumFractionDigits: digits })}억원`;
+  return `${(Math.abs(value) < 0.5 ? 0 : value).toLocaleString("ko-KR", { maximumFractionDigits: 0 })}억원`;
 }
 
 function formatCashflowCell(value: number | null): string {
   if (value === null) return "미확인";
-  return value.toLocaleString("ko-KR", { maximumFractionDigits: 1 });
+  return (Math.abs(value) < 0.5 ? 0 : value).toLocaleString("ko-KR", { maximumFractionDigits: 0 });
 }
 
 function wonSummaryToEok(value: unknown): number | null {
@@ -35,7 +36,13 @@ function wonSummaryToEok(value: unknown): number | null {
 
 function formatValue(value: unknown): string {
   if (typeof value !== "number") return String(value ?? "-");
-  return value.toLocaleString("ko-KR", { maximumFractionDigits: 4 });
+  return (Math.abs(value) < 0.5 ? 0 : value).toLocaleString("ko-KR", { maximumFractionDigits: 0 });
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return "미확인";
+  const percent = value * 100;
+  return `${Number.isInteger(percent) ? "" : "약 "}${formatValue(percent)}%`;
 }
 
 function metric(run: CalculationRunRecord | null, keys: string[]): unknown {
@@ -121,10 +128,11 @@ export default function ProjectCashflowPage() {
     }
   }, [projectId, runPod, load]);
 
-  const rows = useMemo(() => cashflow?.monthly.slice(0, 60) ?? [], [cashflow]);
+  const rows = useMemo(() => cashflow?.monthly ?? [], [cashflow]);
   const summary = cashflow?.summary ?? {};
   const runId = cashflow?.runId ?? "-";
   const monthlyReview = cashflow?.monthlyFinancing != null || cashflow?.inputSnapshot?.monthlyFinancing != null;
+  const sourceSequence = cashflow?.periodBasis?.kind === "source_sequence";
   const inputScheduleEvidence = cashflow?.inputSnapshot
     ? JSON.stringify(
         (Array.isArray(cashflow.inputSnapshot.productMix) ? cashflow.inputSnapshot.productMix : [])
@@ -140,8 +148,8 @@ export default function ProjectCashflowPage() {
           <Link href={`/project/${projectId}`} className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50" aria-label="프로젝트로 돌아가기"><ArrowLeft className="h-4 w-4" /></Link>
           <div>
             <p className="text-xs font-black uppercase tracking-wider text-indigo-600">Feasibility-Cashflow Pod</p>
-            <h1 className="mt-1 flex items-center gap-2 text-2xl font-black text-slate-950"><Wallet className="h-6 w-6 text-indigo-600" />월별 현금흐름 및 Max Minus</h1>
-            <p className="mt-1 max-w-3xl text-sm font-semibold leading-6 text-slate-500">최신 CalculationRun의 월별 현금흐름, PF 인출, 상환·회수 시나리오를 같은 원장에서 확인합니다.</p>
+            <h1 className="mt-1 flex items-center gap-2 text-2xl font-black text-slate-950"><Wallet className="h-6 w-6 text-indigo-600" />{sourceSequence ? "원본 순서별 현금흐름 및 Max Minus" : "월별 현금흐름 및 Max Minus"}</h1>
+            <p className="mt-1 max-w-3xl text-sm font-semibold leading-6 text-slate-500">최신 CalculationRun의 {sourceSequence ? "원본 순서별" : "월별"} 현금흐름, PF 인출, 상환·회수 시나리오를 같은 원장에서 확인합니다.</p>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -163,12 +171,14 @@ export default function ProjectCashflowPage() {
       {loading ? <EmptyState title="CalculationRun을 조회하는 중입니다." body="프로젝트 원장에서 최신 계산 결과와 근거를 읽고 있습니다." loading /> : !cashflow ? <EmptyState title="저장된 Cash Flow 계산 결과가 없습니다." body="파싱된 사업수지가 있으면 ‘AI 사업수지 구성’으로 total_revenue·total_cost를 채운 뒤 Cash Flow를 계산합니다. 없으면 사업수지 Excel/사업계획서를 먼저 업로드하세요." action={<div className="flex gap-2"><button type="button" onClick={() => void buildFeasibilityInput()} disabled={buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-4 text-sm font-black text-indigo-700 disabled:opacity-40"><Calculator className="h-4 w-4" />AI 사업수지 구성</button><button type="button" onClick={() => void runPod()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white"><PlayCircle className="h-4 w-4" />Pod 실행</button></div>} /> : (
         <>
           <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            <KpiCard label="Max Minus" value={cashflow.maxMinusEok === null ? "미확인" : formatEok(Math.abs(cashflow.maxMinusEok))} sub={cashflow.maxMinusMonth === null ? "발생월 미확인" : `M${cashflow.maxMinusMonth} 발생`} icon={<TrendingDown className="h-5 w-5 text-rose-600" />} tone="text-rose-700" />
+            <KpiCard label="Max Minus" value={cashflow.maxMinusEok === null ? "미확인" : formatEok(Math.abs(cashflow.maxMinusEok))} sub={cashflow.maxMinusPeriodIndex === null ? "발생 위치 미확인" : `${cashFlowPeriodLabel(cashflow.periodBasis, cashflow.maxMinusPeriodIndex)} 발생`} icon={<TrendingDown className="h-5 w-5 text-rose-600" />} tone="text-rose-700" />
             <KpiCard label="총수입" value={formatEok(wonSummaryToEok(summary.totalRevenue))} sub="분양·매각·기타 수입" icon={<Calculator className="h-5 w-5 text-emerald-600" />} />
             <KpiCard label="총사업비" value={formatEok(wonSummaryToEok(summary.totalProjectCost))} sub="토지비·공사비·금융비" icon={<Calculator className="h-5 w-5 text-sky-600" />} />
             <KpiCard label="PF 한도" value={formatEok(wonSummaryToEok(summary.pfLimit))} sub={`총 인출 ${formatEok(wonSummaryToEok(summary.totalPfDraw))}`} icon={<Wallet className="h-5 w-5 text-indigo-600" />} />
             <KpiCard label="계산 상태" value={summary.status ? String(summary.status) : "미확인"} sub={`CalculationRun ${runId.slice(0, 18)}`} icon={<ShieldCheck className="h-5 w-5 text-slate-600" />} />
           </section>
+
+          <CashFlowPeriodBasisPanel basis={cashflow.periodBasis} runId={runId} projectId={projectId} />
 
           {!Object.values(scenarioRuns).some(Boolean) ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
             {cashflow.inputSnapshot?.monthlyFinancing
@@ -179,10 +189,10 @@ export default function ProjectCashflowPage() {
           <ScenarioDetailPanel runs={scenarioRuns} />
           <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">월별 Cash Flow</h2><p className="mt-1 text-xs font-semibold text-slate-500">{monthlyReview
+              <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">{sourceSequence ? "원본 순서별 Cash Flow" : "월별 Cash Flow"}</h2><p className="mt-1 text-xs font-semibold text-slate-500">{monthlyReview
                 ? "PF 인출 포함 수입 − 사업·금융비와 원금상환 포함 지출 = 순현금흐름. 월말 잔액은 운영·상환계정 합계입니다. 단위: 억원"
-                : "저장된 CalculationRun의 실데이터입니다. 단위: 억원"}</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">원장 기준</span></div>
-              <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">{monthlyReview ? "수입 (PF 포함)" : "Cash-In"}</th><th className="p-3">{monthlyReview ? "지출 (원금상환 포함)" : "Cash-Out"}</th><th className="p-3">{monthlyReview ? "순현금흐름" : "Net CF"}</th><th className="p-3">{monthlyReview ? "월말 계정합계" : "누적 CF"}</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.period} className={cashflow.maxMinusMonth !== null && row.period === `M${cashflow.maxMinusMonth}` ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{formatCashflowCell(row.cashInEok)}</td><td className="p-3">{formatCashflowCell(row.cashOutEok)}</td><td className={`p-3 font-bold ${row.netCashFlowEok !== null && row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.netCashFlowEok)}</td><td className={`p-3 font-black ${row.cumulativeEok !== null && row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.cumulativeEok)}</td></tr>)}</tbody></table></div>
+                : sourceSequence ? "저장된 원본 순서별 분석입니다. 각 행을 실제 한 달로 해석하지 않습니다. 단위: 억원 · 표시값은 정수 반올림" : "저장된 CalculationRun의 실데이터입니다. 단위: 억원 · 표시값은 정수 반올림"}</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">원장 기준</span></div>
+              <div className="max-h-[620px] overflow-auto"><table className="w-full min-w-[720px] border-collapse text-right text-sm"><thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-xs text-slate-500"><tr><th className="p-3 text-left">기간</th><th className="p-3">{monthlyReview ? "수입 (PF 포함)" : "Cash-In"}</th><th className="p-3">{monthlyReview ? "지출 (원금상환 포함)" : "Cash-Out"}</th><th className="p-3">{monthlyReview ? "순현금흐름" : "Net CF"}</th><th className="p-3">{monthlyReview ? "월말 계정합계" : "누적 CF"}</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, index) => <tr key={row.period} className={cashflow.maxMinusPeriodIndex !== null && index === cashflow.maxMinusPeriodIndex ? "bg-rose-50" : ""}><td className="p-3 text-left font-black">{row.period}</td><td className="p-3">{formatCashflowCell(row.cashInEok)}</td><td className="p-3">{formatCashflowCell(row.cashOutEok)}</td><td className={`p-3 font-bold ${row.netCashFlowEok !== null && row.netCashFlowEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.netCashFlowEok)}</td><td className={`p-3 font-black ${row.cumulativeEok !== null && row.cumulativeEok < 0 ? "text-rose-600" : ""}`}>{formatCashflowCell(row.cumulativeEok)}</td></tr>)}</tbody></table></div>
             </div>
             <aside className="space-y-4"><InfoPanel title="계산 근거"><Fact label="CalculationRun" value={runId} /><Fact label="Engine" value="cash_flow_engine" /><Fact label="Input snapshot" value={inputScheduleEvidence} /><Fact label="완료 시각" value={cashflow.completedAt || "-"} /><Fact label="Source locator" value={JSON.stringify(cashflow.sourceMetadata ?? {})} /></InfoPanel><InfoPanel title="Cash Flow 위험"><RiskList flags={cashflow.riskFlags ?? []} /></InfoPanel></aside>
           </section>
@@ -223,9 +233,9 @@ function ScenarioDetailPanel({ runs }: { runs: Record<string, CalculationRunReco
   ).slice(0, 18);
   return (
     <section className="grid gap-3 xl:grid-cols-3">
-      <DetailTable title="Tranche별 회수 및 금액" run={runs.tranche_recovery} headers={["시나리오", "Tranche", "총청구액", "회수액", "부족액", "회수율"]} rows={trancheRows.map((row) => [row.scenario, row.tranche, formatValue(amountInEok(row.claimAmount)), formatValue(amountInEok(row.recoveredAmount)), formatValue(amountInEok(row.shortfall)), row.recoveryRatio === null ? "-" : `${(row.recoveryRatio * 100).toFixed(1)}%`])} />
+      <DetailTable title="Tranche별 회수 및 금액" run={runs.tranche_recovery} headers={["시나리오", "Tranche", "총청구액", "회수액", "부족액", "회수율"]} rows={trancheRows.map((row) => [row.scenario, row.tranche, formatValue(amountInEok(row.claimAmount)), formatValue(amountInEok(row.recoveredAmount)), formatValue(amountInEok(row.shortfall)), row.recoveryRatio === null ? "-" : formatPercent(row.recoveryRatio)])} />
       <DetailTable title="상환 Waterfall" run={runs.waterfall} headers={["시나리오", "가용현금", "청구액", "부족액", "잔여현금"]} rows={waterfallRows.slice(0, 8).map((row) => [String(row.scenarioId ?? "-"), formatValue(Number(row.cashAvailable ?? 0) / 1e8), formatValue(Number(row.totalClaimAmount ?? 0) / 1e8), formatValue(Number(row.totalShortfall ?? 0) / 1e8), formatValue(Number(row.remainingCash ?? 0) / 1e8)])} />
-      <DetailTable title="미분양 LTV 주요 구간" run={runs.unsold_ltv} headers={["분양률", "할인율", "미분양가치", "미분양 LTV", "위험등급"]} rows={ltvRows.slice(0, 8).map((row) => [ `${(Number(row.saleRate ?? 0) * 100).toFixed(0)}%`, `${(Number(row.discountRate ?? 0) * 100).toFixed(0)}%`, formatValue(Number(row.discountedUnsoldValue ?? 0) / 1e8), `${(Number(row.unsoldLtv ?? 0) * 100).toFixed(1)}%`, String(row.riskLevel ?? "-") ])} />
+      <DetailTable title="미분양 LTV 주요 구간" run={runs.unsold_ltv} headers={["분양률", "할인율", "미분양가치", "미분양 LTV", "위험등급"]} rows={ltvRows.slice(0, 8).map((row) => [ formatPercent(Number(row.saleRate ?? 0)), formatPercent(Number(row.discountRate ?? 0)), formatValue(Number(row.discountedUnsoldValue ?? 0) / 1e8), formatPercent(Number(row.unsoldLtv ?? 0)), String(row.riskLevel ?? "-") ])} />
     </section>
   );
 }
