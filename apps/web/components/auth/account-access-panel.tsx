@@ -155,7 +155,7 @@ export function AccountAccessPanel() {
         <h3 className="mt-3 text-lg font-black">이메일을 확인해 주세요</h3>
         <p className="mt-2 text-sm leading-6 text-emerald-800">
           <strong>{email}</strong>이 가입 가능한 주소라면 확인 링크가 발송됩니다.
-          링크를 확인하면 기관 가입 온보딩으로 이동합니다.
+          링크를 확인하면 로그인 계정에 맞는 작업공간으로 안내합니다.
         </p>
         <p className="mt-2 text-xs leading-5 text-emerald-800">
           이미 가입한 주소라도 계정 존재 여부 보호를 위해 같은 화면이 표시됩니다. 로그인 또는 비밀번호 찾기를 이용해 주세요.

@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
@@ -335,6 +336,7 @@ class PostgresOnboardingRepository:
                         SELECT tenant_id, name
                           FROM "{self._schema}".tenants
                          WHERE COALESCE(status, 'active') = 'active'
+                           AND tenant_id !~ '^personal-[0-9a-f]{{64}}$'
                            AND name ILIKE %s
                          ORDER BY name, tenant_id
                          LIMIT %s
@@ -368,6 +370,10 @@ class PostgresOnboardingRepository:
         request_type = payload.requestType.value
         target_tenant_id = payload.organizationId
         organization_name = payload.organizationName
+        if request_type == "existing_organization" and re.fullmatch(
+            r"personal-[0-9a-f]{64}", str(target_tenant_id or "")
+        ):
+            raise OnboardingLifecycleError("organization_not_found")
         try:
             with self._self_transaction(issuer, subject) as connection:
                 with connection.cursor() as cursor:

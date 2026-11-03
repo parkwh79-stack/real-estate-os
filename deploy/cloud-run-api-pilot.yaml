@@ -23,7 +23,7 @@ spec:
       timeoutSeconds: 120
       containers:
         - name: api
-          image: asia-northeast1-docker.pkg.dev/realytics-api-pilot-20261103/pilot-api/api@sha256:47a6a1fc667e94334ecf6627236e83112bb8414d83972e09a23f8e2c2cc463c5
+          image: asia-northeast1-docker.pkg.dev/realytics-api-pilot-20261103/pilot-api/api@sha256:916d6223e3fae0c55266c76f001cd15ec563caa3750b9853b3a7d32e7efc5a5b
           ports:
             - containerPort: 8000
           resources:
@@ -46,6 +46,7 @@ spec:
             - {name: REALYTICS_IDP_JWKS_URL, value: 'https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/.well-known/jwks.json'}
             - {name: REALYTICS_IDP_AUDIENCE, value: authenticated}
             - {name: REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY, value: postgres}
+            - {name: REALYTICS_SIMPLE_SIGNUP_ENABLED, value: 'true'}
             - {name: REALYTICS_ENABLE_LOCAL_AUTH, value: 'false'}
             - {name: REALYTICS_ENABLE_OAUTH_MOCKS, value: 'false'}
             - {name: REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS, value: 'false'}

@@ -115,7 +115,11 @@ def test_activity_middleware_appends_with_membership_resolved_user(
         },
     )
     monkeypatch.setattr(main, "normalized_activity_repository", activity_repository)
-    monkeypatch.setattr(main, "record_user_activity_log", lambda event: event)
+    legacy_calls = []
+    def forbidden_legacy_activity(event):
+        legacy_calls.append(event)
+        raise AssertionError("PostgreSQL activity must use the normalized repository")
+    monkeypatch.setattr(main, "record_user_activity_log", forbidden_legacy_activity)
 
     scope = {
         "type": "http",
@@ -142,6 +146,7 @@ def test_activity_middleware_appends_with_membership_resolved_user(
     assert captured["event"]["projectId"] == "project-1"
     assert captured["event"]["statusCode"] == 200
     assert captured["event"]["metadata"] == {"queryKeys": ["tab"]}
+    assert legacy_calls == []
 
 
 def test_reserved_project_routes_are_not_activity_project_ids() -> None:

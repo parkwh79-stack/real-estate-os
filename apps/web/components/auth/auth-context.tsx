@@ -62,7 +62,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [authSource, setAuthSource] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), []);
+  const refresh = useCallback(() => {
+    setStatus((current) => current === "authority_unavailable" ? "loading" : current);
+    setNonce((n) => n + 1);
+  }, []);
   const logout = useCallback(async () => {
     let sessionRevoked = false;
     try {
@@ -202,10 +205,10 @@ export function AuthFallback() {
         <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800">
           <span className="text-xl font-black text-slate-900 dark:text-white">RY</span>
         </div>
-        <p className="mt-4 text-base font-bold">로그인이 필요합니다</p>
+        <p className="mt-4 text-base font-bold" role="status">로그인·워크스페이스 확인 중</p>
         <p className="mt-2 text-xs leading-5 text-slate-500">
-          안전한 접근을 위해 사용자 세션을 확인하고 있습니다.<br />
-          잠시 후 로그인 페이지로 이동합니다.
+          사용자 세션과 워크스페이스 권한을 확인하고 있습니다.<br />
+          서버를 처음 시작할 때는 최대 2분 정도 걸릴 수 있습니다.
         </p>
       </div>
     </div>

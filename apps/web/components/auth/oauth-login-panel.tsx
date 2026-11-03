@@ -107,7 +107,7 @@ export function OAuthLoginPanel() {
         </p>
       ) : null}
       <p className="text-[11px] leading-5 text-slate-500">
-        처음 이용하면 가입 안내로 이동합니다. 프로젝트 접근은 소속 기관의 초대 또는 승인 후 가능합니다.
+        처음 이용하면 로그인 계정과 작업공간을 확인한 뒤 안내합니다.
       </p>
     </div>
   );

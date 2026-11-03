@@ -267,13 +267,14 @@ async def _user_activity_middleware(request: Request, call_next):
                     # Activity logging must never break the product workflow.
                     pass
 
-            try:
-                # Retain this projection until audit/export endpoints move to
-                # normalized PostgreSQL.
-                record_user_activity_log(event)
-            except Exception:
-                # Activity logging must never break the product workflow.
-                pass
+            if storage_backend() not in {"postgres", "postgresql"}:
+                try:
+                    # Local compatibility retains its projection. PostgreSQL
+                    # uses the normalized append above, never legacy app_state.
+                    record_user_activity_log(event)
+                except Exception:
+                    # Activity logging must never break the product workflow.
+                    pass
 
 app.include_router(valuemap.router)
 app.include_router(projects.router)

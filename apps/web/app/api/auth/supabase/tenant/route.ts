@@ -9,6 +9,8 @@ import {
 } from "../../../../../lib/backend-session";
 import { createSupabaseServerClient } from "../../../../../lib/supabase/server";
 
+export const maxDuration = 150;
+
 export async function POST(request: NextRequest) {
   if (!requestIsSameOrigin(request)) {
     return authJson({ error: "cross_site_request_rejected" }, 403);

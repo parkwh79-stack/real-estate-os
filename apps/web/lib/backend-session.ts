@@ -2,10 +2,8 @@ import "server-only";
 
 import type { CookieOptions } from "@supabase/ssr";
 import type { NextRequest, NextResponse } from "next/server";
-import {
-  classifyRealyticsBearerIdentity,
-  type RealyticsBearerIdentityResult,
-} from "./backend-identity-result";
+import type { RealyticsBearerIdentityResult } from "./backend-identity-result";
+import { fetchRealyticsBearerIdentity } from "./backend-bearer-identity";
 import {
   classifyInvitationAcceptanceResponse,
   type InvitationAcceptanceResult,
@@ -66,16 +64,6 @@ export const SUPABASE_PASSWORD_POLICY = Object.freeze({
 const AUTH_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_AUTH_EMAIL_LENGTH = 254;
 const MAX_AUTH_DISPLAY_NAME_LENGTH = 120;
-const ONBOARDING_IDENTITY_ERRORS = new Set([
-  "principal_not_registered",
-  "principal_disabled",
-  "principal_inactive",
-  "no_active_tenant_membership",
-  "tenant_membership_not_found",
-  "tenant_membership_inactive",
-  "tenant_inactive",
-  "invalid_membership_role",
-]);
 
 export function normalizedAuthEmail(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -330,45 +318,11 @@ export async function realyticsAcceptsBearer(
   if (!backendAuthorityConfigured()) {
     return { status: "backend_unavailable" };
   }
-  try {
-    const selectedTenantId = normalizedTenantSelector(tenantId);
-    const response = await fetch(`${BACKEND_ORIGIN}/auth/me`, {
-      cache: "no-store",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        ...(selectedTenantId
-          ? { "X-REALYTICS-TENANT-ID": selectedTenantId }
-          : {}),
-      },
-      signal: AbortSignal.timeout(10_000),
-    });
-    const identity = (await response.json().catch(() => null)) as unknown;
-    const classified = classifyRealyticsBearerIdentity(
-      response.status,
-      identity,
-    );
-    // Some deployed FastAPI revisions used 503 while the identity DSN was
-    // healthy but the issuer/subject had no membership row. Preserve those
-    // explicit domain errors as onboarding. Unknown 503s and the dedicated
-    // authority-unavailable codes remain fail-closed as an unavailable store.
-    if (
-      classified.status === "backend_unavailable"
-      && ONBOARDING_IDENTITY_ERRORS.has(backendIdentityErrorCode(identity))
-    ) {
-      return { status: "not_provisioned" };
-    }
-    return classified;
-  } catch {
-    return { status: "backend_unavailable" };
-  }
-}
-
-function backendIdentityErrorCode(payload: unknown): string {
-  if (!payload || typeof payload !== "object") return "";
-  const detail = (payload as { detail?: unknown }).detail;
-  if (!detail || typeof detail !== "object") return "";
-  const error = (detail as { error?: unknown }).error;
-  return typeof error === "string" ? error : "";
+  return fetchRealyticsBearerIdentity(
+    BACKEND_ORIGIN,
+    accessToken,
+    normalizedTenantSelector(tenantId),
+  );
 }
 
 export function accessStateForIdentityResult(

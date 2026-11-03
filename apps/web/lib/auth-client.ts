@@ -269,6 +269,14 @@ export interface OnboardingStatus {
   };
 }
 
+export interface DefaultWorkspace {
+  schemaVersion: "realytics-default-workspace-v1";
+  tenantId: string;
+  role: string;
+  created: boolean;
+  next: "/dashboard";
+}
+
 export interface OnboardingOrganization {
   organizationId: string;
   name: string;
@@ -568,6 +576,34 @@ export async function loadOnboardingStatus(): Promise<OnboardingStatus> {
     profile: body.profile ?? null,
     requests: body.requests ?? body.accessRequests ?? [],
   };
+}
+
+export async function simpleSignupEnabled(): Promise<boolean> {
+  const response = await fetch(`${apiBase}/auth/workspaces/default`, {
+    cache: "no-store", headers: authHeaders(),
+  }).then(assertOk);
+  const body = await response.json() as Record<string, unknown>;
+  if (body.schemaVersion !== "realytics-default-workspace-capability-v1"
+    || typeof body.enabled !== "boolean") {
+    throw new AuthClientRequestError("default_workspace_response_invalid", 502, "작업공간 설정을 확인하지 못했습니다.");
+  }
+  return body.enabled;
+}
+
+export async function prepareDefaultWorkspace(): Promise<DefaultWorkspace> {
+  const response = await fetch(`${apiBase}/auth/workspaces/default`, {
+    method: "POST", cache: "no-store",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }).then(assertOk);
+  const body = await response.json() as Partial<DefaultWorkspace>;
+  if (body.schemaVersion !== "realytics-default-workspace-v1"
+    || typeof body.tenantId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.tenantId)
+    || typeof body.role !== "string" || !body.role
+    || typeof body.created !== "boolean" || body.next !== "/dashboard") {
+    throw new AuthClientRequestError("default_workspace_response_invalid", 502, "작업공간 응답을 확인하지 못했습니다.");
+  }
+  return body as DefaultWorkspace;
 }
 
 export async function selectSupabaseTenant(tenantId: string): Promise<{

@@ -34,6 +34,9 @@ import {
 } from "../../../../../lib/supabase/auth-email-errors";
 import { createSupabaseServerClient } from "../../../../../lib/supabase/server";
 
+// Leave time for one bounded membership lookup while the API starts from zero.
+export const maxDuration = 150;
+
 type PasswordPayload = {
   mode?: unknown;
   email?: unknown;

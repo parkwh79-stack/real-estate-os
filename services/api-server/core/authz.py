@@ -183,7 +183,8 @@ def identity_context_from_request(request: Request) -> Dict[str, Any]:
 def _identity_context_from_request_uncached(request: Request) -> Dict[str, Any]:
     principal = principal_from_request(request)
     if principal:
-        if identity_membership_authority() == "postgres":
+        membership_authority = identity_membership_authority()
+        if membership_authority == "postgres":
             principal, authority_metadata = _resolve_postgres_membership(
                 request,
                 principal,
@@ -195,28 +196,27 @@ def _identity_context_from_request_uncached(request: Request) -> Dict[str, Any]:
                 "source": "verified_bearer_claims",
                 "mode": "claims_compatibility",
             }
-        user = upsert_user(
-            {
-                "userId": principal.user_id,
-                "tenantId": principal.tenant_id,
-                "email": principal.email,
-                "displayName": principal.display_name,
-                "role": principal.role,
-                "status": "active",
-                "metadata": {
-                    "identityProvider": principal.provider,
-                    "tokenId": principal.token_id,
-                    "authSource": "bearer_token",
-                    "principalType": principal.principal_type,
-                    "issuer": principal.issuer,
-                    "subject": principal.subject,
-                    "membershipAuthority": authority_metadata,
-                },
+        user = {
+            "userId": principal.user_id,
+            "tenantId": principal.tenant_id,
+            "email": principal.email,
+            "displayName": principal.display_name,
+            "role": principal.role,
+            "status": "active",
+            "metadata": {
+                "identityProvider": principal.provider,
+                "tokenId": principal.token_id,
+                "authSource": "bearer_token",
+                "principalType": principal.principal_type,
+                "issuer": principal.issuer,
+                "subject": principal.subject,
+                "membershipAuthority": authority_metadata,
             },
-            # Membership was resolved above for this request. An unchanged
-            # local display projection must not contend with project writes.
-            skip_unchanged=True,
-        )
+        }
+        # Only the explicit local claims lane maintains a legacy display
+        # projection. Normalized authorization must not load/create app_state.
+        if membership_authority != "postgres":
+            user = upsert_user(user, skip_unchanged=True)
         # The legacy user store is a read-model projection. Never read tenant,
         # role, or status back from it to authorize a verified bearer.
         user = {

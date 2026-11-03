@@ -20,8 +20,13 @@ import {
   type OnboardingStatus,
 } from "../../lib/auth-client";
 import { useAuth } from "../../components/auth/auth-context";
+import { DefaultWorkspaceGate } from "../../components/auth/default-workspace-gate";
 
 export default function OnboardingPage() {
+  return <DefaultWorkspaceGate><OrganizationOnboardingPage /></DefaultWorkspaceGate>;
+}
+
+function OrganizationOnboardingPage() {
   const {
     status: authStatus,
     user,
@@ -345,8 +350,8 @@ export default function OnboardingPage() {
           <AlertCircle className="h-8 w-8 text-amber-600" />
           <h1 className="mt-4 text-2xl font-black">워크스페이스 권한 정보를 확인할 수 없습니다</h1>
           <p className="mt-3 text-sm leading-6 text-slate-600">
-            로그인 세션은 유효하지만 PostgreSQL 멤버십 권위 서비스가 응답하지 않습니다.
-            보안을 위해 로그인 화면이나 빈 워크스페이스로 전환하지 않았습니다.
+            로그인 세션은 유효하지만 서버 연결 또는 워크스페이스 권한 확인을 완료하지 못했습니다.
+            서버가 처음 시작 중이거나 일시적으로 응답하지 않을 수 있습니다. 잠시 후 다시 확인해 주세요.
           </p>
           <div className="mt-6 flex flex-wrap gap-2">
             <button type="button" onClick={refreshAuth} className="inline-flex h-10 items-center gap-2 rounded-xl bg-slate-950 px-4 text-sm font-bold text-white">

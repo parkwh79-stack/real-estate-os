@@ -295,6 +295,12 @@ async function mockMemberlessPrincipal(
       });
       return;
     }
+    if (path.endsWith("/auth/workspaces/default") && route.request().method() === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        schemaVersion: "realytics-default-workspace-capability-v1", enabled: false,
+      }) });
+      return;
+    }
     if (await handler(route, path)) return;
     await route.fulfill({
       status: 404,

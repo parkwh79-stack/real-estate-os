@@ -1,8 +1,40 @@
 # Identity, Tenant, and Access Contract
 
-Updated: 2026-07-30
+Updated: 2026-11-03
 Status: Approved policy contract; email/password onboarding implemented; live onboarding/RLS rehearsal pending
 Production identity provider: Supabase Auth email/password, with Google and Kakao as optional linked identities
+
+## Simple signup pilot (2026-11-03 owner direction)
+
+The owner deferred organization invitations and approval during initial signup.
+A verified account can enter the dashboard through a basic analysis workspace:
+sign up/sign in -> prepare the server-selected workspace -> verify its tenant
+selection -> dashboard. Existing email confirmation, identity verification,
+tenant isolation and final financial/publication gates remain.
+
+- The server-owned REALYTICS_SIMPLE_SIGNUP_ENABLED flag defaults closed and is
+  enabled only for the existing Cloud Run pilot. GET /auth/workspaces/default
+  advertises capability to a verified human without querying the database.
+- POST accepts no client identity, tenant, role or redirect inputs. It uses the
+  verified issuer/subject and existing API principal transaction. An active
+  single membership is reused with its original role; multiple memberships keep
+  the existing selection. Otherwise the server atomically creates a stable
+  personal workspace, analyst membership and append-only creation event.
+- Repeated/concurrent signup is idempotent. Guest/service tokens, disabled
+  principals, revoked memberships and conflicting workspace records fail closed.
+  No organization request is approved and no policy-consent record is invented.
+- Personal workspaces are absent from organization search and cannot be targeted
+  by organization access requests. Existing organization records and workflows
+  remain available when the pilot flag is off and for their authorized admins.
+- The BFF continues to verify Supabase cookies and the selected tenant. The
+  browser never receives a bearer token, chooses a role or grants membership.
+  Workspace preparation writes are not automatically retried; explicit retries
+  are safe because the transaction is idempotent.
+- No schema, password, role grant or identity-reader write is required.
+
+This approved basic-workspace lane supersedes the organization-approval
+prerequisite for this pilot's initial dashboard entry. It is not organization,
+reviewer, platform-operator, legal or final-approval authority.
 
 Email-first onboarding follow-up (2026-07-30): a user may create a Supabase
 email/password account, confirm the email, and retain that authenticated session
@@ -100,8 +132,9 @@ Supabase Auth proves identity
   -> FastAPI applies permissions and domain approval policy
 ```
 
-An authenticated person is not automatically a tenant member, project reader,
-reviewer, legal approver, or paying customer.
+Authentication alone never grants a shared-organization role, reviewer/legal
+approval or commercial entitlement. The enabled simple-signup lane above grants
+only a server-recorded basic analysis membership before dashboard access.
 
 ## 2. Sources of truth
 

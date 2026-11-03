@@ -595,3 +595,57 @@ No legacy Parser V2 backfill, dual-write, count/hash reconciliation, or producti
 rollback report is included. No production tenant should be switched to
 `postgres_normalized` until those artifacts, backup/restore evidence, multi-worker
 results, and an explicit rollout approval exist.
+
+
+## Simple signup and authenticated-request recovery (2026-11-03)
+
+Owner direction: defer institution onboarding and let a signed-up user enter the
+dashboard. The pilot exposes the server-gated default-workspace capability,
+performs one idempotent verified-principal POST, verifies its tenant through the
+existing BFF, and opens /dashboard. No client role/tenant selection is trusted for
+provisioning. New spaces receive analyst only; existing single memberships keep
+their role. Pending institution requests, profiles and consent records stay
+unchanged. Anonymous/service identities, disabled principals, revoked
+memberships, duplicate creation and private-workspace organization requests are
+covered by negative tests. Existing organization mode remains available when
+the flag is disabled; it is not the initial pilot flow.
+
+Actual Cloud Run request logs identified a separate login failure: authenticated
+/auth/me returned HTTP 500 in about 0.1 seconds, after normalized membership
+resolution called storage.upsert_user -> upsert_tenant -> legacy app_state DDL.
+The narrow API role correctly denied CREATE on realytics. The fix uses an
+in-memory user projection for normalized authorization and removes PostgreSQL
+compatibility-activity writes. Claims/SQLite compatibility and normalized
+project activity append remain. No CREATE grant, owner DSN, migration or
+membership-approval bypass was introduced.
+
+Scale-to-zero stays min0/max1. Read-only bearer identity lookup now shares the
+existing bounded 120-second BFF budget instead of aborting at 10 seconds; its
+three login/callback/tenant functions allow 150 seconds. Cache stays no-store,
+redirects are not followed and no login/invitation write retry is added. The UI
+describes checking/temporary unavailability without asserting every 5xx is a
+PostgreSQL outage. Existing-session retry preserves the security boundary.
+
+Local final backend group: 117 passed. The earlier 52-check authentication group
+overlaps it. Combined desktop/mobile signup, organization-mode and invitation regression:
+38 passed (including 12 new simple-signup cases); cold-start identity checks:
+9 passed. Web types passed. The first full lint scanned this task's generated
+cache, producing warnings only; after its removal the full source lint and
+final default-path type check both passed.
+Hosted exact-head results are recorded with the PR. Initial UI fixture/locator errors were fixed
+before passing; no unverified real-user session is claimed. Real PostgreSQL
+concurrent creation, isolation, revocation and rollback cases were added to the
+existing no-skip CI lane.
+
+Cloud Build fe2613b8-7845-4014-8fbb-ff5a3f2bbed3 succeeded from 419 reviewed API
+inputs, all 26 canonical migrations, zero forbidden secret/runtime/test paths.
+Image digest: sha256:916d6223e3fae0c55266c76f001cd15ec563caa3750b9853b3a7d32e7efc5a5b.
+The pilot manifest enables REALYTICS_SIMPLE_SIGNUP_ENABLED without changing
+secrets, service identity, storage, ClamAV or scaling. Verify the actual revision
+and the same Vercel branch deployment after rollout. Browser automation in this
+Windows task could not attach because its MXC security environment failed;
+real existing-cookie acceptance therefore needs the owner's browser check.
+
+Verification cleanup: recorded and removed this task's 122 generated files
+(101,160,077 bytes), preserving original samples, the existing development cache
+and active databases. No production membership rows were altered by local tests.

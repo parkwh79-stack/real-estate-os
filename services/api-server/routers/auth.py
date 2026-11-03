@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from core.oauth_redirects import safe_relative_path, web_session_url
 
 from core.authz import (
@@ -22,6 +22,7 @@ from core.onboarding_policy import (
 from core.credential_session import credential_session_binding_from_request
 from core.idp import idp_status, principal_from_request
 from core.runtime_profile import (
+    identity_membership_authority,
     legacy_oauth_sessions_enabled,
     local_auth_bootstrap_enabled,
 )
@@ -40,6 +41,11 @@ from db.repositories.identity_membership_admin_repository import (
     IdentityMembershipAdministrationRepositoryUnavailable,
     MembershipRoleChangeError,
     PostgresIdentityMembershipAdministrationRepository,
+)
+from db.repositories.default_workspace_repository import (
+    DefaultWorkspaceError,
+    DefaultWorkspaceUnavailable,
+    PostgresDefaultWorkspaceRepository,
 )
 from db.repositories.onboarding_repository import (
     OnboardingLifecycleError,
@@ -331,6 +337,75 @@ def get_identity_context(request: Request):
             "Header/session based identity is an MVP control. Bearer-token identity is available when REALYTICS_IDP_MODE is configured.",
         ],
     }
+
+
+
+def default_workspace_repository() -> PostgresDefaultWorkspaceRepository:
+    return PostgresDefaultWorkspaceRepository()
+
+
+def _simple_signup_enabled() -> bool:
+    return (
+        os.environ.get("REALYTICS_SIMPLE_SIGNUP_ENABLED", "").strip().lower() == "true"
+        and identity_membership_authority() == "postgres"
+    )
+
+
+def _verified_signup_principal(request: Request):
+    principal = _verified_onboarding_principal(request)
+    claims = principal.claims
+    app_metadata = claims.get("app_metadata")
+    app_metadata = app_metadata if isinstance(app_metadata, dict) else {}
+    service_token = (
+        any(str(claims.get(key) or "").strip().casefold() == "client_credentials"
+            for key in ("gty", "grant_type"))
+        or str(claims.get("token_use") or "").strip().casefold() == "client"
+        or str(claims.get("idtyp") or "").strip().casefold() == "app"
+        or any(str(value or "").strip().casefold() == "service" for value in (
+            claims.get("realytics_principal_type"),
+            app_metadata.get("realytics_principal_type"),
+        ))
+    )
+    if claims.get("is_anonymous") is True or service_token:
+        raise HTTPException(status_code=403, detail={"error": "registered_account_required"})
+    return principal
+
+
+@router.get("/workspaces/default")
+def get_default_workspace_capability(request: Request):
+    _verified_signup_principal(request)
+    return JSONResponse(
+        {"schemaVersion": "realytics-default-workspace-capability-v1", "enabled": _simple_signup_enabled()},
+        headers={"Cache-Control": "no-store, private"},
+    )
+
+
+@router.post("/workspaces/default")
+def create_default_workspace(
+    request: Request,
+    payload: Dict[str, Any] | None = Body(default=None),
+):
+    principal = _verified_signup_principal(request)
+    if not _simple_signup_enabled():
+        raise HTTPException(status_code=404, detail={"error": "simple_signup_disabled"})
+    if payload:
+        raise HTTPException(status_code=400, detail={"error": "workspace_bootstrap_payload_forbidden"})
+    try:
+        workspace = default_workspace_repository().ensure_for_principal(
+            issuer=principal.issuer, subject=principal.subject,
+            email=principal.email, display_name=principal.display_name,
+        )
+    except DefaultWorkspaceError as exc:
+        status = 400 if exc.code == "tenant_selection_required" else 409 if exc.code == "default_workspace_conflict" else 403
+        raise HTTPException(status_code=status, detail={"error": exc.code}) from exc
+    except DefaultWorkspaceUnavailable as exc:
+        raise HTTPException(
+            status_code=503, detail={"error": "identity_membership_authority_unavailable"},
+        ) from exc
+    return JSONResponse(
+        {"schemaVersion": "realytics-default-workspace-v1", **workspace, "next": "/dashboard"},
+        headers={"Cache-Control": "no-store, private"},
+    )
 
 
 @router.get("/onboarding/status")

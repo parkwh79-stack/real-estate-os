@@ -1992,3 +1992,159 @@ def test_live_frozen_report_round_trip_export_and_tenant_integrity(
             (TENANT_A, PROJECT_A, report["report_id"]))
     with pytest.raises(ReportPublicationConflict):
         repository.get(PROJECT_A, report["report_id"])
+
+
+def test_live_default_workspace_is_idempotent_isolated_and_hidden_from_organization_search(
+    live_database: _LiveDatabase,
+):
+    from db.repositories.default_workspace_repository import PostgresDefaultWorkspaceRepository
+    from db.repositories.onboarding_repository import PostgresOnboardingRepository
+
+    issuer = f"https://signup-{uuid4().hex}.example/auth/v1"
+
+    @contextmanager
+    def transaction(verified_issuer: str, verified_subject: str):
+        connection = live_database.connect_runtime()
+        try:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT set_config('realytics.principal_issuer', %s, true), "
+                    "set_config('realytics.principal_subject', %s, true), "
+                    "set_config('realytics.tenant_id', '', true)",
+                    (verified_issuer, verified_subject),
+                )
+                yield connection
+        finally:
+            connection.close()
+
+    repository = PostgresDefaultWorkspaceRepository(
+        transaction_factory=transaction, schema_name=live_database.schema_name,
+    )
+
+    def signup(subject):
+        return repository.ensure_for_principal(
+            issuer=issuer, subject=subject, email="synthetic@example.test", display_name="Synthetic User",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        same_account = list(executor.map(signup, ["same-account", "same-account"]))
+    assert sorted(row["created"] for row in same_account) == [False, True]
+    tenant_id = same_account[0]["tenantId"]
+    assert same_account[1]["tenantId"] == tenant_id
+    assert all(row["role"] == "analyst" for row in same_account)
+    another = signup("other-account")
+    assert another["tenantId"] != tenant_id and another["created"] is True
+
+    organization_id = f"default-workspace-test-org-{uuid4().hex}"
+    admin = live_database.connect_admin()
+    try:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM tenant_memberships WHERE issuer = %s",
+                (issuer,),
+            )
+            assert cursor.fetchone()[0] == 2
+            cursor.execute(
+                "SELECT COUNT(*) FROM tenant_identity_access_events WHERE actor_issuer = %s "
+                "AND event_type = 'default_workspace_created'",
+                (issuer,),
+            )
+            assert cursor.fetchone()[0] == 2
+            cursor.execute("SELECT metadata_json FROM tenants WHERE tenant_id = %s", (tenant_id,))
+            assert cursor.fetchone()[0]["workspaceType"] == "personal"
+            cursor.execute(
+                "INSERT INTO tenants(tenant_id, name, status, metadata_json) "
+                "VALUES (%s, %s, 'active', '{}'::jsonb)",
+                (organization_id, "내 작업공간 검증 기관"),
+            )
+        admin.commit()
+    finally:
+        admin.close()
+
+    directory = PostgresOnboardingRepository(
+        self_transaction_factory=transaction, review_transaction_factory=transaction,
+        schema_name=live_database.schema_name,
+    )
+    search = directory.search_organizations(issuer=issuer, subject="same-account", query="내 작업공간")
+    assert search == [{"organizationId": organization_id, "name": "내 작업공간 검증 기관"}]
+
+
+def test_live_default_workspace_revocation_and_late_audit_failure_remain_atomic(
+    live_database: _LiveDatabase,
+):
+    from db.repositories.default_workspace_repository import (
+        DefaultWorkspaceError, DefaultWorkspaceUnavailable,
+        PostgresDefaultWorkspaceRepository, default_workspace_id,
+    )
+
+    issuer = f"https://signup-denial-{uuid4().hex}.example/auth/v1"
+
+    @contextmanager
+    def transaction(verified_issuer: str, verified_subject: str):
+        connection = live_database.connect_runtime()
+        try:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT set_config('realytics.principal_issuer', %s, true), "
+                    "set_config('realytics.principal_subject', %s, true), "
+                    "set_config('realytics.tenant_id', '', true)",
+                    (verified_issuer, verified_subject),
+                )
+                yield connection
+        finally:
+            connection.close()
+
+    repository = PostgresDefaultWorkspaceRepository(
+        transaction_factory=transaction, schema_name=live_database.schema_name,
+    )
+    created = repository.ensure_for_principal(
+        issuer=issuer, subject="revoked-account", email=None, display_name=None,
+    )
+    admin = live_database.connect_admin()
+    try:
+        admin.execute(
+            "UPDATE tenant_memberships SET status = 'revoked', membership_version = membership_version + 1 "
+            "WHERE issuer = %s AND subject = %s",
+            (issuer, "revoked-account"),
+        )
+        admin.commit()
+    finally:
+        admin.close()
+    with pytest.raises(DefaultWorkspaceError, match="no_active_tenant_membership"):
+        repository.ensure_for_principal(
+            issuer=issuer, subject="revoked-account", email=None, display_name=None,
+        )
+
+    failing = PostgresDefaultWorkspaceRepository(
+        transaction_factory=transaction, schema_name=live_database.schema_name,
+        event_id_factory=lambda: None,  # Real NOT NULL failure occurs after the membership insert.
+    )
+    with pytest.raises(DefaultWorkspaceUnavailable):
+        failing.ensure_for_principal(
+            issuer=issuer, subject="late-failure-account", email=None, display_name=None,
+        )
+    admin = live_database.connect_admin()
+    try:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT status FROM tenant_memberships WHERE issuer = %s AND subject = %s",
+                (issuer, "revoked-account"),
+            )
+            assert cursor.fetchone()[0] == "revoked"
+            cursor.execute(
+                "SELECT COUNT(*) FROM principals WHERE issuer = %s AND subject = %s",
+                (issuer, "late-failure-account"),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                "SELECT COUNT(*) FROM tenants WHERE tenant_id = %s",
+                (default_workspace_id(issuer, "late-failure-account"),),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                "SELECT COUNT(*) FROM tenant_identity_access_events WHERE tenant_id = %s",
+                (created["tenantId"],),
+            )
+            assert cursor.fetchone()[0] == 1
+    finally:
+        admin.close()

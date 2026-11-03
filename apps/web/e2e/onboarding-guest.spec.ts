@@ -118,6 +118,7 @@ async function mockMemberlessOnboarding(
 
 test("verified memberless user saves a versioned onboarding profile", async ({ page }) => {
   const state = await mockMemberlessOnboarding(page);
+  await mockOrganizationMode(page);
   await page.goto("/onboarding");
 
   await expect(page.getByRole("heading", { name: "기관 워크스페이스 가입" })).toBeVisible();
@@ -178,6 +179,8 @@ test("policy mismatch reloads authoritative versions and requires fresh consent"
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ userId: "policy-subject", identities: [{ identityId: "email-1", provider: "email", email: "policy@example.com", createdAt: null, lastSignInAt: null }], factors: [], assurance: { currentLevel: "aal1", nextLevel: "aal2", currentAuthenticationMethods: [] }, totpEnrollment: { eligible: true, accountNameSource: "verified_email", limitation: null }, operationalForHighRiskActions: false, limitations: [] }) });
   });
 
+  await mockOrganizationMode(page);
+
   await page.goto("/onboarding");
   await page.getByLabel("표시명").fill("정책 확인자");
   await page.getByLabel(/이용약관 realytics-terms-2026-07-30/).check();
@@ -211,6 +214,7 @@ test("new organization normalizes a required business number and does not reques
     privacyVersion: "realytics-privacy-2026-07-30",
     profileVersion: 1,
   });
+  await mockOrganizationMode(page);
   await page.goto("/onboarding");
 
   await page.getByLabel("기관 검색").fill("금융");
@@ -265,6 +269,8 @@ test("multi-tenant Supabase user selects a FastAPI-verified workspace without a 
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ selected: true, tenantId: selectedTenant }) });
   });
 
+  await mockOrganizationMode(page);
+
   await page.goto("/onboarding");
   await expect(page.getByRole("heading", { name: "접속할 워크스페이스를 선택하세요" })).toBeVisible();
   await expect(page).toHaveURL(/\/onboarding/);
@@ -287,11 +293,51 @@ test("valid Supabase session fails closed when the PostgreSQL identity authority
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ userId: "valid-sub", identities: [{ identityId: "email-1", provider: "email", email: "valid@example.com", createdAt: null, lastSignInAt: null }], factors: [], assurance: { currentLevel: "aal1", nextLevel: "aal2", currentAuthenticationMethods: [] }, totpEnrollment: { eligible: true, accountNameSource: "verified_email", limitation: null }, operationalForHighRiskActions: false, limitations: [] }) });
   });
 
+  await mockOrganizationMode(page);
+
   await page.goto("/onboarding");
   await expect(page.getByTestId("identity-authority-unavailable")).toBeVisible();
-  await expect(page.getByText("로그인 세션은 유효하지만 PostgreSQL 멤버십 권위 서비스가 응답하지 않습니다.")).toBeVisible();
+  await expect(page.getByText("로그인 세션은 유효하지만 서버 연결 또는 워크스페이스 권한 확인을 완료하지 못했습니다.", { exact: false })).toBeVisible();
   await expect(page).toHaveURL(/\/onboarding/);
   expect(onboardingStatusRequests).toBe(0);
+});
+
+
+test("authority retry waits for one lookup and recovers without another login or fake membership", async ({ page }) => {
+  await mockMemberlessOnboarding(page);
+  let requests = 0;
+  let recovering = false;
+  let releaseLookup!: () => void;
+  const pendingLookup = new Promise<void>((resolve) => { releaseLookup = resolve; });
+  await page.route("**/api/backend/auth/me", async (route) => {
+    requests += 1;
+    if (!recovering) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "backend_unavailable" }) });
+      return;
+    }
+    await pendingLookup;
+    await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ detail: { error: "principal_not_registered" } }) });
+  });
+
+  try {
+    await mockOrganizationMode(page);
+    await page.goto("/onboarding");
+    await expect(page.getByTestId("identity-authority-unavailable")).toBeVisible();
+    const beforeRetry = requests;
+    recovering = true;
+    await page.getByRole("button", { name: "다시 확인", exact: true }).click();
+    await expect.poll(() => requests).toBe(beforeRetry + 1);
+    await expect(page.getByRole("status").filter({ hasText: "로그인·워크스페이스 확인 중" })).toBeVisible();
+    await expect(page.getByTestId("identity-authority-unavailable")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "기관 워크스페이스 가입" })).toHaveCount(0);
+    await expect(page).toHaveURL(/\/onboarding/);
+    expect(requests).toBe(beforeRetry + 1);
+  } finally {
+    releaseLookup();
+  }
+  await expect(page.getByRole("heading", { name: "기관 워크스페이스 가입" })).toBeVisible();
+  await expect(page.getByText("new@example.com")).toBeVisible();
+  await expect(page).toHaveURL(/\/onboarding/);
 });
 
 test("each rejected access request resubmits from its own persisted snapshot", async ({ page }) => {
@@ -324,6 +370,8 @@ test("each rejected access request resubmits from its own persisted snapshot", a
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ userId: "rejected-sub", identities: [{ identityId: "email-1", provider: "email", email: "rejected@example.com", createdAt: null, lastSignInAt: null }], factors: [], assurance: { currentLevel: "aal1", nextLevel: "aal2", currentAuthenticationMethods: [] }, totpEnrollment: { eligible: true, accountNameSource: "verified_email", limitation: null }, operationalForHighRiskActions: false, limitations: [] }) });
   });
 
+  await mockOrganizationMode(page);
+
   await page.goto("/onboarding");
   const existingForm = page.getByTestId("resubmit-form-rejected-existing");
   await existingForm.getByLabel("요청 역할").selectOption("analyst");
@@ -335,3 +383,12 @@ test("each rejected access request resubmits from its own persisted snapshot", a
   await newForm.getByRole("button", { name: "이 보완값으로 재제출" }).click();
   await expect.poll(() => payloads.get("rejected-new")).toEqual({ expectedRequestVersion: 6, message: "신규 신청 메시지", organizationName: "스냅샷자산운용", businessRegistrationNumber: "9876543210" });
 });
+
+
+async function mockOrganizationMode(page: Page) {
+  await page.route("**/api/backend/auth/workspaces/default", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      schemaVersion: "realytics-default-workspace-capability-v1", enabled: false,
+    }) });
+  });
+}

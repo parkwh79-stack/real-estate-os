@@ -152,7 +152,9 @@ def _install_authority(
         "identity_membership_repository",
         lambda: repository,
     )
-    monkeypatch.setattr(authz, "upsert_user", lambda payload, **_kwargs: dict(payload))
+    def legacy_projection_forbidden(*_args, **_kwargs):
+        raise AssertionError("Normalized identity must not write a legacy user projection")
+    monkeypatch.setattr(authz, "upsert_user", legacy_projection_forbidden)
     return repository
 
 
@@ -569,3 +571,85 @@ def test_postgres_repository_uses_parameterized_read_only_query():
     assert "INSERT" not in sql.upper()
     assert "UPDATE" not in sql.upper()
     assert "CREATE" not in sql.upper()
+
+
+def test_hardened_auth_me_never_loads_or_saves_legacy_state_and_rechecks_revocation(monkeypatch):
+    from fastapi.testclient import TestClient
+    import main as api_main
+    import storage as legacy_storage
+    from db import postgres as legacy_postgres
+    from db.repositories.identity_membership_repository import IdentityMembershipRepositoryUnavailable
+
+    repository = _install_authority(
+        monkeypatch,
+        _directory(_membership("governed-tenant", role="viewer", version=4)),
+        principal=_principal(token_tenant="forged-tenant", token_role="admin"),
+    )
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "postgres")
+    monkeypatch.setattr(api_main, "storage_backend", lambda: "postgres")
+    legacy_calls = []
+
+    def forbidden(*_args, **_kwargs):
+        legacy_calls.append("forbidden_compatibility_access")
+        raise AssertionError("Normalized auth must not access compatibility state or DDL")
+
+    for owner, name in (
+        (authz, "upsert_user"), (authz, "get_user"), (authz, "get_user_session"),
+        (legacy_storage, "upsert_user"), (legacy_storage, "upsert_tenant"),
+        (legacy_storage, "load_state"), (legacy_storage, "save_state"),
+        (legacy_storage, "_load_json_state"), (legacy_storage, "_save_json_state"),
+        (legacy_postgres, "load_state_document"),
+        (legacy_postgres, "_ensure_app_state_table"),
+        (api_main, "record_user_activity_log"),
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+
+    client = TestClient(api_main.app)
+    response = client.get("/auth/me", headers={"authorization": "Bearer verified-test-token"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["authenticated"] is True
+    assert body["user"]["userId"] == "legacy-directory-user"
+    assert body["user"]["tenantId"] == "governed-tenant"
+    assert body["user"]["role"] == "viewer"
+    assert body["user"]["metadata"]["membershipAuthority"]["membershipVersion"] == 4
+    assert "user:manage" not in body["permissions"]
+    assert legacy_calls == []
+
+    repository.directory = _directory(_membership("governed-tenant", role="viewer", status="revoked", version=5))
+    revoked = client.get("/auth/me", headers={"authorization": "Bearer verified-test-token"})
+    assert revoked.status_code == 403
+    assert revoked.json()["detail"]["error"] == "no_active_tenant_membership"
+    assert repository.calls == [(ISSUER, SUBJECT), (ISSUER, SUBJECT)]
+
+    def unavailable(**_kwargs):
+        raise IdentityMembershipRepositoryUnavailable("synthetic directory outage")
+    monkeypatch.setattr(repository, "load_directory", unavailable)
+    outage = client.get("/auth/me", headers={"authorization": "Bearer verified-test-token"})
+    assert outage.status_code == 503
+    assert outage.json()["detail"]["error"] == "identity_membership_authority_unavailable"
+    assert legacy_calls == []
+
+
+def test_claims_compatibility_still_persists_its_user_projection(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ENVIRONMENT", "development")
+    monkeypatch.setenv("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY", "claims")
+    principal = _principal(token_tenant="local-tenant", token_role="analyst")
+    monkeypatch.setattr(authz, "principal_from_request", lambda _request: principal)
+    calls = []
+
+    def upsert(payload, **kwargs):
+        calls.append((dict(payload), kwargs))
+        return {**payload, "role": "admin", "tenantId": "stale-tenant", "status": "disabled", "legacyDisplayMarker": "preserved"}
+
+    monkeypatch.setattr(authz, "upsert_user", upsert)
+    context = authz.identity_context_from_request(_request(tenant_header="local-tenant"))
+    assert len(calls) == 1
+    assert calls[0][0]["tenantId"] == "local-tenant"
+    assert calls[0][1] == {"skip_unchanged": True}
+    assert context["membershipAuthority"]["source"] == "verified_bearer_claims"
+    assert context["user"]["legacyDisplayMarker"] == "preserved"
+    assert context["user"]["tenantId"] == "local-tenant"
+    assert context["user"]["role"] == "analyst"
+    assert context["user"]["status"] == "active"
+    assert "user:manage" not in context["permissions"]
