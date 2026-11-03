@@ -7,6 +7,7 @@ from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from core.oauth_redirects import safe_relative_path, web_session_url
 
 from core.runtime_profile import (
     legacy_oauth_sessions_enabled,
@@ -31,9 +32,7 @@ router = APIRouter(prefix="/integrations/google", tags=["google"])
 
 
 def _safe_relative_redirect_path(value: Any) -> str:
-    path = str(value or "/start")
-    if not path.startswith("/") or path.startswith("//") or "://" in path:
-        return "/start"
+    path = safe_relative_path(value)
     if path in {"/", "/dashboard"}:
         return "/start"
     return path
@@ -244,8 +243,5 @@ def _mock_google_callback(redirect_path: str):
 
 def _redirect_to_web_session(session: Dict[str, Any], redirect_path: str):
     web_base_url = os.environ.get("REALYTICS_WEB_BASE_URL", "http://localhost:3000")
-    session_url = (
-        f"{web_base_url.rstrip('/')}/auth/kakao/session"  # shared frontend session receiver
-        f"?session_id={quote(session['sessionId'])}&redirect={quote(redirect_path)}"
-    )
+    session_url = web_session_url(web_base_url, session["sessionId"], redirect_path)
     return RedirectResponse(session_url, status_code=303)

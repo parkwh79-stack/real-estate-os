@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict
-from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from core.oauth_redirects import safe_relative_path, web_session_url
 
 from core.authz import (
     authorize_request,
@@ -1255,10 +1255,7 @@ def kakao_oidc_callback(
     web_base_url = os.environ.get("REALYTICS_WEB_BASE_URL")
     if web_base_url:
         redirect_path = _safe_relative_redirect_path(identity.get("redirectPath"))
-        session_url = (
-            f"{web_base_url.rstrip('/')}/auth/kakao/session"
-            f"?session_id={quote(session['sessionId'])}&redirect={quote(redirect_path)}"
-        )
+        session_url = web_session_url(web_base_url, session["sessionId"], redirect_path)
         return RedirectResponse(session_url, status_code=303)
 
     return {
@@ -1275,10 +1272,7 @@ def kakao_oidc_callback(
 
 
 def _safe_relative_redirect_path(value: Any) -> str:
-    path = str(value or "/dashboard")
-    if not path.startswith("/") or path.startswith("//") or "://" in path:
-        return "/dashboard"
-    return path
+    return safe_relative_path(value, default="/dashboard")
 
 
 @router.get("/stats")

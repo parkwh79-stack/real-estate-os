@@ -408,6 +408,6 @@ def _refresh_approval_readiness_gate(run: Dict[str, Any]) -> None:
         )
     except Exception as exc:
         run.setdefault("artifacts", {})["approvalReadinessGateRefreshError"] = {
-            "message": str(exc),
+            "message": "Approval readiness could not be refreshed. Approval remains unavailable.",
             "type": exc.__class__.__name__,
         }

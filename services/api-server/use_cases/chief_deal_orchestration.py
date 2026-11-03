@@ -1165,7 +1165,7 @@ def run_chief_deal_all_pods_use_case(
                 "artifactKeys": [],
                 "handoffIds": [],
                 "recalculationEvents": [],
-                "error": str(exc),
+                "error": "pod_execution_failed" if failed_status == "failed" else "pod_input_validation_failed",
                 "blockedAt": datetime.now(timezone.utc).isoformat(),
             }
             summary_rows.append(

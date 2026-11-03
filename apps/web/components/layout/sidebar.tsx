@@ -135,7 +135,7 @@ export function Sidebar() {
           const Icon = item.icon;
           const href =
             item.key === "deal-room" && currentProjectId
-              ? `/project/${currentProjectId}/chief-orchestration`
+              ? `/project/${encodeURIComponent(currentProjectId)}/chief-orchestration`
               : withProjectContext(item.href, currentProjectId);
           const isActive =
             item.key === "deal-room"
@@ -146,7 +146,7 @@ export function Sidebar() {
           return (
             <Link
               key={item.key}
-              href={href}
+              href={href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") ? href : "/dashboard"}
               className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition-colors ${
                 isActive
                   ? "bg-slate-950 text-white dark:bg-white dark:text-slate-950"

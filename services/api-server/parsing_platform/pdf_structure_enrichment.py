@@ -8,6 +8,7 @@ a high-confidence table boundary.
 """
 
 import hashlib
+import inspect
 import json
 import math
 import re
@@ -255,7 +256,19 @@ class NativePdfTableExtractor:
     def _finder_for_page(self, page: Any) -> Callable[[], Any] | None:
         if self._page_table_finder is _DEFAULT_PAGE_TABLE_FINDER:
             native = getattr(page, "find_tables", None)
-            return native if callable(native) else None
+            if not callable(native):
+                return None
+            # PyMuPDF 2.x defaults to layout-gated detection. This adapter's
+            # contract is deterministic native grid geometry, including small
+            # tables that the layout classifier can reject. Preserve that
+            # contract on both old and new supported library signatures.
+            parameters = inspect.signature(native).parameters
+            if "use_layout" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            ):
+                return lambda: native(use_layout=False)
+            return native
         configured = self._page_table_finder
         if callable(configured):
             return lambda: configured(page)

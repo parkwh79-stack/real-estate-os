@@ -43,7 +43,7 @@ from schemas.stress_test import StressTestRequest, StressTranche
 from schemas.credit_enhancement import CreditEnhancementRequest, CreditEnhancementInput
 from schemas.cash_sweep import CashSweepRequest, CashSweepTranche
 from core.risk_assessment import build_basic_risk_matrix
-from core.secret_redaction import collect_secret_values, redact_secret_text, redact_sensitive_value
+from core.secret_redaction import collect_secret_values, redact_sensitive_value
 from core.agent_execution import require_successful_runtime
 from db.repositories.request_project_repository import current_project_scope
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
@@ -270,7 +270,7 @@ class OrchestrationAgent:
                     pf_structure["unsoldLtvSummary"] = scenario_run_result.reportFragments.unsoldLtvSummary
                     pf_structure["trancheRecoverySummary"] = scenario_run_result.reportFragments.trancheRecoverySummary
             except Exception as exc:
-                run["errors"].append({"message": f"Scenario calculation failed: {str(exc)}", "type": exc.__class__.__name__})
+                run["errors"].append({"message": "Scenario calculation failed. Check the input evidence.", "type": exc.__class__.__name__})
 
             run["artifacts"]["pfStructure"] = pf_structure
             self._complete_step(run, "pf_structure_calculation", pf_structure, artifact_key="pfStructure")
@@ -771,7 +771,7 @@ class OrchestrationAgent:
                     baseline_id=qa_agent.baseline_key(str(run.get("tenant_id") or "legacy"), str(project_id), str(structured_report["template"])))
             except Exception as qa_exc:
                 run["errors"].append({
-                    "message": f"Visual QA execution failed: {str(qa_exc)}",
+                    "message": "Visual QA execution failed. The report has not passed visual review.",
                     "type": qa_exc.__class__.__name__
                 })
 
@@ -801,10 +801,7 @@ class OrchestrationAgent:
 
             self._finalize_pf_execution(run, quality)
         except Exception as exc:
-            safe_error = redact_secret_text(
-                exc,
-                secrets=collect_secret_values(ai_connection),
-            )
+            safe_error = "PF review execution failed. Retry or contact an operator with the run ID."
             run["executionStatus"] = "failed"
             run["reportStatus"] = "failed" if run.get("reportStatus") == "not_started" else run.get("reportStatus")
             run["status"] = run["executionStatus"]

@@ -13,7 +13,7 @@ import hashlib
 import os
 import shutil
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Optional, Protocol
 
 
@@ -62,8 +62,16 @@ class LocalObjectStorage:
         self.base_dir = Path(base_dir).resolve()
 
     def _resolve(self, key: str) -> Path:
+        # Object operations must never address the storage root, a drive/UNC
+        # path, or parent components, even if normalization lands inside root.
+        if not isinstance(key, str) or not key or "\\" in key:
+            raise ValueError("Invalid object key")
+        if PureWindowsPath(key).drive or (os.name == "nt" and ":" in key):
+            raise ValueError("Invalid object key")
+        if any(part in {"", ".", ".."} for part in key.split("/")):
+            raise ValueError("Invalid object key")
         path = (self.base_dir / key).resolve()
-        if self.base_dir != path and self.base_dir not in path.parents:
+        if path == self.base_dir or not path.is_relative_to(self.base_dir):
             raise ValueError("Invalid object key (path traversal)")
         return path
 

@@ -33,7 +33,7 @@ def _document(content: bytes, filename: str = "table.pdf") -> ArchivedDocument:
     )
 
 
-def _table_pdf_bytes() -> bytes:
+def _table_pdf_bytes(amount: str = "100") -> bytes:
     pdf = fitz.open()
     page = pdf.new_page(width=300, height=300)
     for x in (50, 150, 250):
@@ -44,12 +44,48 @@ def _table_pdf_bytes() -> bytes:
         ("Product", 65, 80),
         ("Revenue", 165, 80),
         ("Apartment", 65, 130),
-        ("100", 165, 130),
+        (amount, 165, 130),
     ):
         page.insert_text((x, y), text)
     content = pdf.tobytes()
     pdf.close()
     return content
+
+
+def test_native_table_detection_explicitly_disables_layout_gate():
+    calls = []
+
+    class NewPage:
+        def find_tables(self, *, use_layout=True):
+            calls.append(use_layout)
+            return "native-grid"
+
+    assert NativePdfTableExtractor()._finder_for_page(NewPage())() == "native-grid"
+    assert calls == [False]
+
+
+def test_native_table_detection_supports_legacy_signature():
+    class LegacyPage:
+        def find_tables(self):
+            return "legacy-grid"
+
+    assert NativePdfTableExtractor()._finder_for_page(LegacyPage())() == "legacy-grid"
+
+
+def test_native_table_detection_supports_keyword_forwarding_wrapper():
+    class WrappedPage:
+        def find_tables(self, **kwargs):
+            assert kwargs == {"use_layout": False}
+            return "wrapped-grid"
+
+    assert NativePdfTableExtractor()._finder_for_page(WrappedPage())() == "wrapped-grid"
+
+
+@pytest.mark.parametrize("amount", ["0.74", "-0.74", "1,234.56"])
+def test_native_pdf_table_preserves_financial_punctuation(amount):
+    artifact = NativePdfTableExtractor().extract(_document(_table_pdf_bytes(amount)))
+    assert artifact.metadata["status"] == "completed"
+    assert artifact.chunks[-1].text == amount
 
 
 @pytest.mark.skipif(

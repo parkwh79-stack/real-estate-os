@@ -377,13 +377,9 @@ class UploadArchiveRepository:
     ) -> Path:
         if not isinstance(self.object_storage, LocalObjectStorage):
             raise RuntimeError("Remote object storage does not expose a local archive directory")
-        archive_dir = (
-            self.archive_root
-            / self.project_prefix(project_id, tenant_id=tenant_id)
-        ).resolve()
-        if self.archive_root != archive_dir and self.archive_root not in archive_dir.parents:
-            raise ValueError("Invalid project archive path")
-        return archive_dir
+        return self.object_storage._resolve(
+            self.project_prefix(project_id, tenant_id=tenant_id)
+        )
 
     def relative_archive_path(self, archive_path: Path) -> str:
         resolved_path = archive_path.resolve()

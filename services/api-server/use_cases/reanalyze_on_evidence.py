@@ -133,7 +133,7 @@ def reanalyze_after_evidence_use_case(
                 "pod": pod,
                 "before": "completed" if was_completed else "blocked",
                 "after": "blocked",
-                "reason": str(exc)[:200],
+                "reason": "pod_input_validation_failed",
             })
         except Exception:
             rows.append({"pod": pod, "before": "completed" if was_completed else "blocked",
@@ -156,7 +156,7 @@ def reanalyze_after_evidence_use_case(
                 rows.append({"pod": pod, "before": "needs_recalculation",
                              "after": _execution_status(result, _pod_state(project_data, pod), previous)})
             except ValueError as exc:
-                rows.append({"pod": pod, "before": "needs_recalculation", "after": "blocked", "reason": str(exc)[:200]})
+                rows.append({"pod": pod, "before": "needs_recalculation", "after": "blocked", "reason": "pod_input_validation_failed"})
             except Exception:
                 rows.append({"pod": pod, "before": "needs_recalculation", "after": "failed", "reason": "pod_execution_failed"})
 

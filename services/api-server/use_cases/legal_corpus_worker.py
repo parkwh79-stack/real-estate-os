@@ -771,7 +771,7 @@ def inspect_legal_corpus_runtime_configuration(
             "configurationStatus": "invalid",
             "workerEnabled": False,
             "errorCode": "LEGAL_CORPUS_RUNTIME_CONFIGURATION_INVALID",
-            "message": str(exc),
+            "message": "Legal corpus worker configuration is invalid. Contact an operator.",
             "registry": [
                 item.as_public_dict()
                 for item in registry.capabilities()

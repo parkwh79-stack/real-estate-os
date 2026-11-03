@@ -155,7 +155,7 @@ def build_deal_state_approval_readiness(
         context["gates"].append(_gate(
             "DEAL_STATE_RECORDS_READABLE",
             False,
-            f"Deal State records could not be read: {exc}",
+            "Deal State records could not be read. Retry or contact an operator.",
             "blocking",
         ))
         context["readable"] = False

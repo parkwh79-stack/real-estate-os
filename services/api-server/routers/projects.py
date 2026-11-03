@@ -1153,7 +1153,7 @@ def attach_persisted_land_evidence(project_id: str, project_data: Dict[str, Any]
         except Exception as exc:
             enriched_project["landEvidence"]["ledgerHydrationWarning"] = {
                 "message": "Stored land evidence was attached as a flat package, but could not be merged into the land ledger.",
-                "error": str(exc),
+                "error": "land_ledger_hydration_failed",
             }
     return enriched_project
 
@@ -3650,7 +3650,7 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
     except FinancialInputError as exc:
         if exc.code == "cash_flow_stress_period_unconfirmed":
             dependent_failures.append({"engines": ["discount_stress"], "status": "not_supported",
-                                       "reason": exc.code, "message": str(exc)})
+                                       "reason": "cash_flow_stress_period_unconfirmed", "message": "사건·일정의 시간 근거를 확인한 뒤 기간 스트레스를 실행해 주세요."})
         else:
             dependent_failures.append({"engines": ["discount_stress"], "status": "failed", "reason": "dependent_stress_failed"})
         discount_stress_run_id = None

@@ -149,7 +149,7 @@ def _supplement_market(
             "itemId": "market_evidence_missing",
             "status": "fetch_failed",
             "source": "국토부 실거래가 공개 API",
-            "reason": str(exc)[:160],
+            "reason": "실거래 자료 조회에 실패했습니다. 연결 설정을 확인하거나 다시 시도해 주세요.",
         }
     if not records:
         return {

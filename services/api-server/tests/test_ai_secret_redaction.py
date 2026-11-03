@@ -253,5 +253,8 @@ def test_pf_review_never_returns_or_persists_resolved_inline_api_key(monkeypatch
     serialized = json.dumps(run)
     assert run["ai_connection"]["api_key"] == "[redacted]"
     assert run["options"]["ai_context"]["api_key"] == "[redacted]"
-    assert run["errors"][0]["message"] == "project load failed with api_key=[redacted]"
+    assert run["errors"][0]["message"] == (
+        "PF review execution failed. Retry or contact an operator with the run ID."
+    )
+    assert "project load failed with" not in serialized
     assert exact not in serialized

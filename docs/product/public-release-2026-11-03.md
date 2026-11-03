@@ -59,7 +59,8 @@ provider configuration need review before changing it; no paid upgrade is author
 
 1. Verify the exact pushed commit's CI and security jobs, then merge PR #2 and
    confirm main's checks. Do not substitute a previous green run.
-2. Main protection is configured: six required checks, current-base requirement,
+2. Main protection is configured: ten required checks including the aggregate
+   CodeQL alert gate, bound to their GitHub publisher apps; current-base requirement,
    conversation resolution, admin enforcement and no force-push/deletion. PR
    review count is zero for the single-owner workflow; a second human approver
    is not silently invented. Private reporting and dependency alerts are enabled.
@@ -92,3 +93,69 @@ claimed until the applicable live gates above pass.
 - Supabase migration wrapper check and Git whitespace check: passed.
 - Full API, Web types/lint/build, PostgreSQL, browser E2E and new security jobs
   must be verified on the exact uploaded commit through CI before merge.
+
+## Hosted checks and Vercel setup follow-up
+
+Uploaded security changes: `18ffb17`, followed by the narrowly scoped historical
+comment false-positive fix `1c61be4`. PR #2 is ready for review, NOT merged.
+That commit's secret scan, Web quality, PostgreSQL integration, cleanup
+and CodeQL analysis jobs passed. However the CodeQL aggregate gate reported
+39 findings (16 high, 23 medium) requiring triage, and full API tests reported
+2 failed / 3,040 passed / 46 skipped. The failures are the native PDF table
+locator tests in `test_pdf_enrichment_modules.py` and
+`test_pdf_structure_enrichment.py`, which returned `available_no_tables`
+instead of `completed`. Do not waive findings or weaken tests just to deploy.
+The CodeQL findings are static-analysis candidates, not all confirmed exploits.
+
+Per the owner's later request, followed https://vercel.com/get-started.md:
+installed global CLI 65.10.0, verified the existing account and Hobby team,
+installed the official Vercel Codex plugin in user scope, and added the global
+shared MCP endpoint https://mcp.vercel.com with successful OAuth. The current
+session subsequently loaded its MCP tools. Documentation search, team listing,
+project access and environment metadata inspection passed after the owner
+approved the real-estate-os2 team access request. CLI team access also passed.
+Existing MCP entries and mutation approval settings were not replaced.
+
+The existing realytics-web project uses Next.js, apps/web, Node 22 and the main
+production branch. Only Preview configuration variables are currently present;
+no REALYTICS_API_ORIGIN was returned. Preview deployment succeeded, but production
+environment/actual API/worker hosting and runtime LOGIN remain unresolved. No
+new cloud resource, paid subscription, production promotion or DB reset occurred.
+
+## Remediation follow-up (2026-11-03)
+
+- Reproduced both PDF failures with PyMuPDF 2.1 in an isolated dependency target.
+  The new native API forwards `**kwargs` and defaults to layout-gated table
+  detection. Explicitly disable that gate for this deterministic grid adapter,
+  preserving legacy signatures and exact cell locators. Pin the tested library
+  version; add decimal/negative/grouped-number and forwarding-wrapper regressions.
+- Restrict the VWorld proxy to fixed-origin, validated coordinates/layers/bounds,
+  prohibit upstream redirects, and bound request time. Encode project link IDs
+  and enforce local sidebar links.
+- Reject local storage root operations, parent/ambiguous/drive paths and resolved
+  symlink escape. Reuse that boundary for archive-directory access; preserve
+  existing valid POSIX colon-containing components while rejecting Windows ADS.
+- Do not expose raw exception strings from Pod, Gate, scenario or worker results.
+  Preserve failed/blocked statuses and existing structured findings. Pilot CLI
+  details require an explicit output file instead of public console logs.
+- Build legacy OAuth receiver URLs from the operator-configured origin with
+  encoded query data and validated relative navigation; reject encoded external
+  redirects, backslashes/control characters and invalid configured origins.
+  Existing production restrictions on legacy/mock sessions remain unchanged.
+- Focused PDF/storage checks: 42 passed before the wrapper regression was added;
+  later overlapping security/OAuth/PDF/storage checks: 59 passed. Web contracts:
+  11 passed; Web types and lint passed. The first local full run caught the old
+  exception-message expectation; the stronger non-disclosure assertion now
+  passes. Final combined focused API regression: **137 passed**; public-repository
+  and cleanup safety: **13 passed**; Git whitespace check passed.
+  That slow Windows full run was stopped; exact-head hosted full API,
+  PostgreSQL, browser and security checks still govern merging.
+- The owner confirmed **there is no existing API/Worker server**. Do not configure
+  a fictitious API origin or promote the Web as a functioning production stack.
+  Continue GitHub/Preview verification; obtaining hosting approval, runtime
+  secrets, private storage and a deployed end-to-end rehearsal remains separate.
+  No new paid resource is authorized. No additional Supabase migration is needed
+  for these code-only fixes.
+
+CodeQL findings have not been dismissed or waived. Re-scan the exact remediation
+commit before judging which findings are fixed or still require investigation.

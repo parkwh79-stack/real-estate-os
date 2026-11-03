@@ -38,6 +38,33 @@ def test_local_rejects_path_traversal(tmp_path):
         store.put("../escape.bin", b"x")
 
 
+@pytest.mark.parametrize("key", ["", ".", "..", "/", "a/..", "a/../b", "a//b", "../sibling/file", "C:/file", "a\\..\\file"])
+def test_local_storage_never_targets_root_or_ambiguous_paths(tmp_path, key):
+    store = LocalObjectStorage(tmp_path / "objects")
+    store.put("keep/original.bin", b"original")
+    with pytest.raises(ValueError):
+        store.delete_prefix(key)
+    assert store.get("keep/original.bin") == b"original"
+
+
+def test_local_storage_rejects_symlink_escape(tmp_path):
+    base = tmp_path / "objects"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "evidence.bin").write_bytes(b"private")
+    try:
+        (base / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating symlinks requires OS privileges")
+    store = LocalObjectStorage(base)
+    with pytest.raises(ValueError):
+        store.get("linked/evidence.bin")
+    with pytest.raises(ValueError):
+        store.delete_prefix("linked")
+    assert (outside / "evidence.bin").read_bytes() == b"private"
+
+
 def test_factory_defaults_to_local(tmp_path, monkeypatch):
     monkeypatch.delenv("REALYTICS_OBJECT_STORAGE", raising=False)
     store = get_object_storage(default_base_dir=tmp_path)

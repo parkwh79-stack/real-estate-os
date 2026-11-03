@@ -202,7 +202,7 @@ def build_project_source_documents_router(
                     "ETag": etag,
                     "X-Content-Type-Options": "nosniff",
                 },
-                content=str(exc),
+                content="Requested byte range is not satisfiable.",
                 media_type="text/plain",
             )
 
