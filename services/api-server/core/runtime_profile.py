@@ -146,8 +146,16 @@ def validate_security_configuration() -> None:
     if (os.environ.get("REALYTICS_SECRET_BACKEND") or "").lower() not in {
         "aws",
         "aws_secrets_manager",
+        "google_secret_manager",
     }:
-        errors.append("REALYTICS_SECRET_BACKEND=aws_secrets_manager")
+        errors.append("REALYTICS_SECRET_BACKEND=aws_secrets_manager or google_secret_manager")
+    if (os.environ.get("REALYTICS_SECRET_BACKEND") or "").lower() == "google_secret_manager":
+        from core.google_secret_store import google_secret_config
+
+        try:
+            google_secret_config()
+        except RuntimeError as exc:
+            errors.append(str(exc))
     if (os.environ.get("REALYTICS_ASYNC_JOB_MODE") or "").lower() != "external_worker":
         errors.append("REALYTICS_ASYNC_JOB_MODE=external_worker")
     if (os.environ.get("REALYTICS_OBJECT_STORAGE") or "").lower() != "s3":

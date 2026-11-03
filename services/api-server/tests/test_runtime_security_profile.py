@@ -30,6 +30,8 @@ SECURITY_ENV_KEYS = [
     "REALYTICS_PG_HOST",
     "REALYTICS_STORAGE_BACKEND",
     "REALYTICS_SECRET_BACKEND",
+    "REALYTICS_GCP_PROJECT",
+    "REALYTICS_GCP_SECRET_LOCATION",
     "REALYTICS_ASYNC_JOB_MODE",
     "REALYTICS_OBJECT_STORAGE",
     "REALYTICS_S3_BUCKET",
@@ -63,7 +65,7 @@ def test_hardened_profile_fails_fast_when_security_configuration_is_missing(monk
         validate_security_configuration()
 
 
-def test_hardened_profile_accepts_strict_oidc_and_https_origin(monkeypatch):
+def _configure_hardened_profile(monkeypatch):
     _clear_security_env(monkeypatch)
     monkeypatch.setenv("REALYTICS_ENVIRONMENT", "production")
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
@@ -80,10 +82,29 @@ def test_hardened_profile_accepts_strict_oidc_and_https_origin(monkeypatch):
     monkeypatch.setenv("REALYTICS_OBJECT_STORAGE", "s3")
     monkeypatch.setenv("REALYTICS_S3_BUCKET", "realytics-documents")
 
+
+def test_hardened_profile_accepts_strict_oidc_and_https_origin(monkeypatch):
+    _configure_hardened_profile(monkeypatch)
     validate_security_configuration()
     assert rbac_mode() == "strict"
     assert idp.tenant_isolation_mode() == "strict"
     assert cors_origins() == ["https://app.realytics.example"]
+
+
+def test_hardened_google_secret_backend_requires_explicit_project_and_location(monkeypatch):
+    _configure_hardened_profile(monkeypatch)
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "google_secret_manager")
+    with pytest.raises(RuntimeError, match="REALYTICS_GCP_PROJECT"):
+        validate_security_configuration()
+    monkeypatch.setenv("REALYTICS_GCP_PROJECT", "test-project")
+    with pytest.raises(RuntimeError, match="REALYTICS_GCP_SECRET_LOCATION"):
+        validate_security_configuration()
+    monkeypatch.setenv("REALYTICS_GCP_SECRET_LOCATION", "asia-northeast1")
+    validate_security_configuration()
+    # Choosing Google secrets cannot bypass unrelated production controls.
+    monkeypatch.setenv("REALYTICS_ENABLE_LOCAL_AUTH", "true")
+    with pytest.raises(RuntimeError, match="REALYTICS_ENABLE_LOCAL_AUTH=false"):
+        validate_security_configuration()
 
 
 def test_hardened_profile_cannot_enable_legacy_auth_or_oauth_mocks(monkeypatch):

@@ -41,3 +41,21 @@ def test_compose_uses_runtime_injection_and_canonical_environment_key() -> None:
     assert "- .:/app" not in compose
     assert "- .env" in compose
     assert "- .env.example" not in compose
+
+
+def test_cloud_source_upload_reuses_secret_exclusions_before_docker_build() -> None:
+    ignore = (API_ROOT / ".gcloudignore").read_text(encoding="utf-8")
+
+    # Docker exclusions alone do not protect the source archive sent to Google.
+    # gcloud's documented top-level include shares the existing secret policy.
+    assert "#!include:.dockerignore" in ignore.splitlines()
+    assert not any(line.startswith("!") for line in ignore.splitlines())
+    for pattern in (
+        ".gcloudignore",
+        "**/.venv/",
+        "**/venv/",
+        "**/data/runtime/",
+        "**/.pytest*.out",
+        "**/.pytest*.err",
+    ):
+        assert pattern in ignore.splitlines()

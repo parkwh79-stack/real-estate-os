@@ -1,0 +1,9 @@
+# Cloud Build / Cloud Run upload boundary, before Docker sees the source.
+# Keep the Docker exclusion list as the shared secret/runtime policy.
+#!include:.dockerignore
+.gcloudignore
+**/.venv/
+**/venv/
+**/data/runtime/
+**/.pytest*.out
+**/.pytest*.err

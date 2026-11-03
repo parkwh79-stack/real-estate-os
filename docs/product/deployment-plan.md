@@ -1,6 +1,6 @@
 # Deployment Plan
 
-Updated: 2026-10-14
+Updated: 2026-11-03
 
 Status: **Controlled implementation; not production-ready**
 
@@ -8,7 +8,123 @@ Current execution scope (2026-09-28): build and validate the local user workflow
 in [the product execution plan](realytics-os-next-work-roadmap.md). This document
 is the external-deployment reference. Its AWS, secret-store and Worker setup is
 not a prerequisite for implementing local input review, analysis or draft output.
-New paid infrastructure remains deferred; existing access controls still apply.
+The 2026-11-03 approval below permits a narrowly scoped Cloud Run API pilot;
+other paid infrastructure remains deferred. Existing access controls still apply.
+
+### Current execution decision: Cloud Run API pilot (2026-11-03)
+
+The owner selected a **new Google Cloud project**, with **KRW 1,000/month as a
+target budget**, accepting possible small overages. This is not authorization
+for unlimited expenditure, always-on workers, additional paid databases, or
+production promotion. Preserve the existing Vercel Web and Supabase Auth/private
+PostgreSQL authority; do not migrate to Firestore or replace membership checks.
+
+Cost controls to verify before serving traffic:
+
+- Request-based Cloud Run billing, minimum instances zero, maximum instances one
+  as an initial pilot limit; size memory and concurrency from measured startup
+  and request behavior. Instance limits are not monetary spending limits.
+- Configure a Cloud Run spend cap below the monthly target, plus a project-wide
+  budget alert in the billing account currency. Spend caps use gross estimated
+  costs, exclude credits/discounts, and are not enforced instantaneously. They
+  cover the selected service, not Cloud Build, Artifact Registry, Secret Manager,
+  storage or all networking charges. Never promise a KRW 1,000 hard ceiling.
+- Review build/image retention, log volume, secret versions and network costs.
+  Do not create a VPC connector, always-on worker pool, load balancer, Cloud SQL
+  instance, or paid AI workload as a side effect of this API deployment.
+- If the cap stops the API, preserve the explicit unavailable state; do not
+  silently lift the cap or grant local/claim-based access to restore the UI.
+
+The owner selected **3 days** for pilot source-document retention on 2026-11-03.
+Prepare per-object governance/unlocked retention for clean, active originals;
+do not lock the bucket or use irreversible compliance retention without separate
+approval. This selection does not authorize automatic deletion after day 3,
+deletion of existing local/Supabase evidence, or applying a production retention
+standard to historical data. Quarantine is a separate lifecycle and must not
+inherit an active-original lock that prevents normal quarantine cleanup. No
+bucket/retention policy has been provisioned yet.
+
+Readiness remains **blocked**, not deployed: Google Secret Manager has an
+implemented adapter with offline tests, but live scoped IAM validation remains.
+Object storage still supports S3 only in the hardened profile. A Google object
+storage adapter with equivalent versioning, retention, encryption and failure
+tests is required before using that provider. Do not spoof AWS configuration,
+select development mode on a public server, or inject a migration/owner DSN into
+the API.
+
+Deploy the API first only after its hardened startup and dedicated API/identity
+database preflights pass. Set Vercel `REALYTICS_API_ORIGIN` only after HTTPS
+readiness and real bearer/membership checks pass; test cross-tenant denials too.
+An API-only pilot does **not** complete PDF parsing, Pod reruns or other queued
+work. Keep that limitation explicit until separately deployed workers pass
+their own least-privilege and durable-job checks. Existing production promotion
+and evidence/approval gates remain in force.
+
+Build from `services/api-server`, not the monorepo root. Its `.gcloudignore`
+includes the existing `.dockerignore` policy and also excludes virtualenvs,
+nested runtime data and test output logs. Docker exclusions alone do not prevent
+source files from reaching the remote build archive. Before every source upload,
+inspect `gcloud meta list-files-for-upload` from that directory, reject any secret
+or runtime artifact, and confirm required migrations/source files remain present.
+This local listing is not a deployment or authorization to upload business data.
+
+Preparation evidence (2026-11-03): official SHA256-verified Google Cloud CLI
+591.0.0 installed in an isolated user-local tools/config directory; no existing
+CLI configuration or global PATH changed. The actual gcloud upload inventory
+contains 416 files and all 26 canonical migrations, with zero matching secret,
+runtime, test, virtualenv, database or log paths. Container/upload contract tests:
+4 passed. After adding the Google secret adapter the inventory is 417 files,
+again with zero forbidden paths. Google account authorization subsequently
+succeeded. Created only the
+new `realytics-api-pilot-20261103` project (`REALYTICS API Pilot`), initially with
+automatic Cloud API enablement disabled. The owner then selected the existing
+KRW account named `내 결제 계정`; read-back confirms `billingEnabled=true`.
+Only Billing/Budget APIs were explicitly enabled for this setup. Created a
+project-scoped monthly KRW 1,000 alert budget (including credits), with
+50%/80%/100% current-spend notifications to billing/project recipients. Created
+a separate Cloud Run-only KRW 800 gross-estimated monthly spend cap, initially
+returned as `CONFIGURED`. It excludes credits, covers service
+`152E-C115-5142` only, and does not guarantee the total bill stays below KRW 1,000.
+No source upload, service account, secret payload, storage or Cloud Run workload
+has been created yet. No pre-existing project or account-wide budget was changed.
+
+#### Google session credential adapter
+
+The existing `/auth/ai-credentials`, profile replacement and session-revocation
+flows now support `REALYTICS_SECRET_BACKEND=google_secret_manager`. Set an explicit
+`REALYTICS_GCP_PROJECT` and `REALYTICS_GCP_SECRET_LOCATION`; managed runtime ADC
+provides credentials. Never generate/download a service-account key for Cloud Run.
+The adapter uses unique `realytics-user-ai-<uuid>` names, an explicit replica
+region, numeric pinned versions (not `latest`), payload CRC32C, bounded requests,
+and the existing user/tenant/session envelope. It rejects cross-project/static
+secret references before network access. No plaintext key is written to the
+database, source tree or session-memory fallback by this backend.
+
+Application TTL remains exact (up to 24 hours); automatic cloud deletion uses a
+small buffer and a minimum 120 seconds to satisfy Google's minimum expiration
+window. A failed version write attempts to remove its own new secret; cloud TTL
+bounds an orphan if cleanup also fails. Expired credentials never resolve even
+before cloud deletion occurs. Logout/replacement explicitly revokes the stored
+reference through the existing profile workflow. Missing secrets differ from
+permissions/network/integrity failures, whose provider details are not exposed.
+
+The runtime identity must receive only the reviewed create/add/access/delete
+permissions for this BYOK namespace; static API/identity DSNs need separate
+secret-scoped access. Do not grant project-wide Secret Manager Admin to the API.
+No live IAM or secret-provider smoke test has run yet, and this adapter does not
+make GCS, ClamAV, PostgreSQL roles or Workers ready. Related offline secret/auth/
+container tests: 73 passed; final focused rerun: 44 passed (overlapping tests,
+not additive). Full local API regression: **3,120 passed, 44 skipped** in 742.31s.
+Web `tsc --noEmit`, full lint, dependency `pip check`, and `git diff --check`
+passed. A focused invocation from the monorepo root failed import collection;
+rerunning from the documented API working directory passed without a code fix.
+The local existing PDF environment remains unchanged; pinned-dependency hosted
+CI/security checks must pass on the pushed revision. Skips and mocked Google
+SDK transports are not evidence of live PostgreSQL/IAM/Cloud Run acceptance.
+
+Official references: [Cloud Run billing settings](https://docs.cloud.google.com/run/docs/configuring/billing-settings),
+[spend cap scope and limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps),
+[pricing](https://cloud.google.com/run/pricing).
 
 | Environment | Purpose | Infrastructure | Deployment method | Status | Priority |
 |---|---|---|---|---|---|

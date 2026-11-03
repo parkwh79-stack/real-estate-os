@@ -42,6 +42,30 @@ def ingest_user_credential(
     now = _utc_now()
     expires_at = now + timedelta(seconds=_credential_ttl_seconds())
     backend = secret_backend()
+    if backend == "google_secret_manager":
+        from core.google_secret_store import create_record
+
+        reference = create_record(
+            {
+                "schemaVersion": "realytics-session-secret-v1",
+                "secret": str(secret),
+                "userId": normalized_user_id,
+                "tenantId": normalized_tenant_id,
+                "sessionId": normalized_session_id,
+                "provider": provider,
+                "expiresOnLogout": bool(expires_on_logout),
+                "createdAt": now.isoformat(),
+                "expiresAt": expires_at.isoformat(),
+            },
+            ttl_seconds=int((expires_at - now).total_seconds()),
+        )
+        return {
+            "credentialRef": reference,
+            "backend": backend,
+            "expiresOnLogout": bool(expires_on_logout),
+            "expiresAt": expires_at.isoformat(),
+            "masked": _mask_secret(str(secret)),
+        }
     if backend in {"aws", "aws_secrets_manager"}:
         return _ingest_aws_secret(
             user_id=normalized_user_id,
@@ -88,6 +112,19 @@ def resolve_user_credential(
     if not credential_ref:
         return None
     reference = str(credential_ref)
+    if reference.startswith("gcp-sm://"):
+        from core.google_secret_store import read_record
+
+        record = read_record(reference)
+        if record is None or _record_is_expired(record, _utc_now()):
+            return None
+        if not _record_matches_boundary(
+            record, user_id=user_id, tenant_id=tenant_id,
+            session_id=session_id, require_all=True,
+        ):
+            return None
+        value = record.get("secret")
+        return value if isinstance(value, str) and value else None
     if reference.startswith("session-secret://"):
         with _LOCK:
             _prune_expired_locked(_utc_now())
@@ -123,6 +160,18 @@ def credential_access_status(
     if not credential_ref:
         return "missing"
     reference = str(credential_ref)
+    if reference.startswith("gcp-sm://"):
+        from core.google_secret_store import read_record
+
+        record = read_record(reference)
+        if record is None:
+            return "missing"
+        if not _record_matches_boundary(
+            record, user_id=user_id, tenant_id=tenant_id,
+            session_id=session_id, require_all=True,
+        ):
+            return "forbidden"
+        return "expired" if _record_is_expired(record, _utc_now()) else "active"
     if reference.startswith("session-secret://"):
         with _LOCK:
             record = _SESSION_SECRETS.get(reference)
@@ -169,6 +218,17 @@ def revoke_credential(
     if not credential_ref:
         return False
     reference = str(credential_ref)
+    if reference.startswith("gcp-sm://"):
+        from core.google_secret_store import delete_record, read_record
+
+        if any(value is not None for value in (user_id, tenant_id, session_id)):
+            record = read_record(reference)
+            if record is None or not _record_matches_boundary(
+                record, user_id=user_id, tenant_id=tenant_id,
+                session_id=session_id, require_all=True,
+            ):
+                return False
+        return delete_record(reference)
     if reference.startswith("session-secret://"):
         with _LOCK:
             record = _SESSION_SECRETS.get(reference)
