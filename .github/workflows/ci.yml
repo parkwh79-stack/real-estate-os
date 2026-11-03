@@ -1,5 +1,8 @@
 name: REALYTICS CI
 
+permissions:
+  contents: read
+
 on:
   pull_request:
   push:
@@ -88,7 +91,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m unittest -q scripts/tests/test_cleanup_generated.py
+      - run: python -m unittest -q scripts/tests/test_cleanup_generated.py scripts/tests/test_public_repository_contract.py
 
   browser-e2e:
     runs-on: ubuntu-latest
