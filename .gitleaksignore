@@ -5,5 +5,7 @@ c4ac2f1ad1078bb03f1a57fa3a95421c82e5fd40:services/api-server/tests/test_auth_ide
 # Deterministic discount-stress metric identifiers, not credentials.
 fa7c7ad3f449dd51d07af5bfb680fba2220b021e:services/api-server/tests/test_orchestration.py:generic-api-key:683
 f1b559ca899916e50525c0e36a85f51ba78b57e8:services/api-server/tests/test_orchestration.py:generic-api-key:522
-# TypeScript property type: key: Phase11SectionKey.
+# TypeScript property annotation (not a credential).
 489300bd8ddd04bdc324dc200b43329e1193d6b2:apps/web/lib/report-types.ts:generic-api-key:28
+# The historical explanatory comment quoting that same annotation.
+18ffb17bc302ec761744414b5f930216f22dc26a:.gitleaksignore:generic-api-key:8
