@@ -99,8 +99,16 @@ no historical/user originals were touched. ClamAV's startup TCP probe passed;
 an authenticated real-upload/EICAR drill is still not established.
 
 Web preview branch `codex/parser-v2-postgres-runtime` now has
-`REALYTICS_API_ORIGIN` set to the verified API. Vercel redeployment is in
-progress. No real user bearer/membership or cross-tenant browser E2E completion
+`REALYTICS_API_ORIGIN` set to the verified API. Vercel deployment
+`dpl_2KeFhL8g4TAuUT8wRendDL9an1Zw` (commit `84009e4`) is READY. At
+2026-11-03 08:00:56 UTC, the stable branch URL
+`https://realytics-web-git-codex-parser-v2-postgr-05604e-real-estate-os2.vercel.app`
+returned `/api/auth/supabase/readiness` with `configurationReady=true`, backend
+`reachable/configured/ready=true`, PostgreSQL membership authority, and both
+Google/Kakao `providerReady=true`. `operational=false` correctly remains until
+real-user AAL2 maker/checker acceptance; Naver live verification is also pending.
+Secret scan and CodeQL passed for this commit; API/browser CI was still running
+when this evidence was recorded. No real user bearer/membership or cross-tenant browser E2E completion
 is claimed: browser automation failed to start in this Windows environment.
 Owner must finish the existing-cookie login acceptance check in the web UI.
 Scale-to-zero is retained for the KRW 1,000 target; initial startup took about
