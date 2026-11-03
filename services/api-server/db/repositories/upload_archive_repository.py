@@ -12,7 +12,6 @@ from core.runtime_paths import runtime_data_dir
 from db.object_storage import (
     LocalObjectStorage,
     ObjectStorage,
-    S3ObjectStorage,
     get_object_storage,
     sha256_bytes,
 )
@@ -121,12 +120,12 @@ class UploadArchiveRepository:
             )
         retention_until = None
         retention_mode = None
-        if isinstance(self.object_storage, S3ObjectStorage):
-            if self.object_storage.retention_days:
+        if self.object_storage.backend in {"s3", "gcs"}:
+            if getattr(self.object_storage, "retention_days", None):
                 retention_until = datetime.now(timezone.utc) + timedelta(
                     days=self.object_storage.retention_days
                 )
-            retention_mode = self.object_storage.retention_mode
+            retention_mode = getattr(self.object_storage, "retention_mode", None)
         stored = self.object_storage.put(
             object_key,
             content,
@@ -228,7 +227,7 @@ class UploadArchiveRepository:
         archive_id, archive_tenant, object_key = binding
         if self.hardened_storage_required() and not archive_tenant:
             return None
-        if self.hardened_storage_required() and self.object_storage.backend != "s3":
+        if self.hardened_storage_required() and self.object_storage.backend not in {"s3", "gcs"}:
             return None
         if self.hardened_storage_required() and (
             document.get("storageLifecycleStatus") != "active"
@@ -256,7 +255,7 @@ class UploadArchiveRepository:
             str(name).lower(): str(value)
             for name, value in dict(head.get("metadata") or {}).items()
         }
-        if self.object_storage.backend == "s3":
+        if self.object_storage.backend in {"s3", "gcs"}:
             if metadata.get("sha256", "").lower() != str(archive_id).lower():
                 return None
             if archive_tenant and metadata.get("tenant-id") != str(archive_tenant):
@@ -287,8 +286,8 @@ class UploadArchiveRepository:
             "archiveHashAlgorithm": "sha256",
             "archiveIntegrityStatus": "verified_metadata_binding",
             "archiveIntegrityBasis": (
-                "s3_head_sha256_metadata_version_bound"
-                if self.object_storage.backend == "s3"
+                f"{self.object_storage.backend}_head_sha256_metadata_version_bound"
+                if self.object_storage.backend in {"s3", "gcs"}
                 else "local_content_addressed_path_size_bound"
             ),
             "archiveETag": head.get("etag"),

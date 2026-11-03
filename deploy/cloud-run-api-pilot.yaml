@@ -1,0 +1,103 @@
+# Pilot only. No admin DSN, local auth, always-on worker or irreversible lock.
+# Deploy with gcloud run services replace and explicitly select project/region.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: realytics-api
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/invoker-iam-disabled: 'true'
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: '0'
+        autoscaling.knative.dev/maxScale: '1'
+        run.googleapis.com/cpu-throttling: 'true'
+        run.googleapis.com/startup-cpu-boost: 'false'
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/container-dependencies: '{"api":["clamav"]}'
+    spec:
+      serviceAccountName: realytics-api@realytics-api-pilot-20261103.iam.gserviceaccount.com
+      containerConcurrency: 8
+      timeoutSeconds: 120
+      containers:
+        - name: api
+          image: asia-northeast1-docker.pkg.dev/realytics-api-pilot-20261103/pilot-api/api@sha256:47a6a1fc667e94334ecf6627236e83112bb8414d83972e09a23f8e2c2cc463c5
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: '1'
+              memory: 1Gi
+          startupProbe:
+            httpGet: {path: /health/ready, port: 8000}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
+          env:
+            - {name: REALYTICS_ENVIRONMENT, value: staging}
+            - {name: REALYTICS_LOAD_LOCAL_ENV, value: 'false'}
+            - {name: REALYTICS_RBAC_MODE, value: strict}
+            - {name: REALYTICS_TENANT_ISOLATION_MODE, value: strict}
+            - {name: REALYTICS_IDP_MODE, value: oidc}
+            - {name: REALYTICS_IDP_PROVIDER, value: supabase}
+            - {name: REALYTICS_IDP_ISSUER, value: 'https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1'}
+            - {name: REALYTICS_IDP_JWKS_URL, value: 'https://iorpwxxzvryuxhraiuhs.supabase.co/auth/v1/.well-known/jwks.json'}
+            - {name: REALYTICS_IDP_AUDIENCE, value: authenticated}
+            - {name: REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY, value: postgres}
+            - {name: REALYTICS_ENABLE_LOCAL_AUTH, value: 'false'}
+            - {name: REALYTICS_ENABLE_OAUTH_MOCKS, value: 'false'}
+            - {name: REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS, value: 'false'}
+            - {name: REALYTICS_IDP_PERSONAL_TENANT_FALLBACK, value: 'false'}
+            - {name: REALYTICS_REQUIRE_HIGH_RISK_STEP_UP, value: 'true'}
+            - {name: REALYTICS_STEP_UP_MAX_AGE_SECONDS, value: '900'}
+            - {name: REALYTICS_CORS_ORIGINS, value: 'https://realytics-web-git-codex-parser-v2-postgr-05604e-real-estate-os2.vercel.app'}
+            - {name: REALYTICS_WEB_BASE_URL, value: 'https://realytics-web-git-codex-parser-v2-postgr-05604e-real-estate-os2.vercel.app'}
+            - {name: REALYTICS_STORAGE_BACKEND, value: postgres}
+            - {name: REALYTICS_DATABASE_SCHEMA, value: realytics}
+            - {name: REALYTICS_POSTGIS_SCHEMA, value: extensions}
+            - {name: REALYTICS_DB_POOL_ROLES, value: 'api,identity'}
+            - {name: REALYTICS_API_DATABASE_ROLE, value: realytics_runtime}
+            - {name: REALYTICS_IDENTITY_DATABASE_ROLE, value: realytics_identity}
+            - {name: REALYTICS_DB_REPLICA_COUNT, value: '1'}
+            - {name: REALYTICS_DB_CONNECTION_BUDGET, value: '8'}
+            - {name: REALYTICS_API_DB_POOL_MAX, value: '3'}
+            - {name: REALYTICS_IDENTITY_DB_POOL_MAX, value: '2'}
+            - name: REALYTICS_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: realytics-api-database-url, key: '1'}
+            - name: REALYTICS_API_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: realytics-api-database-url, key: '1'}
+            - name: REALYTICS_IDENTITY_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: realytics-identity-database-url, key: '1'}
+            - {name: REALYTICS_ASYNC_JOB_MODE, value: external_worker}
+            - {name: REALYTICS_SECRET_BACKEND, value: google_secret_manager}
+            - {name: REALYTICS_GCP_PROJECT, value: realytics-api-pilot-20261103}
+            - {name: REALYTICS_GCP_SECRET_LOCATION, value: asia-northeast1}
+            - {name: REALYTICS_OBJECT_STORAGE, value: gcs}
+            - {name: REALYTICS_GCS_BUCKET, value: realytics-pilot-evidence-294481672291}
+            - {name: REALYTICS_GCS_PREFIX, value: realytics}
+            - {name: REALYTICS_OBJECT_RETENTION_DAYS, value: '3'}
+            - {name: REALYTICS_OBJECT_LOCK_MODE, value: GOVERNANCE}
+            - {name: REALYTICS_REQUIRE_TENANT_SCOPED_OBJECTS, value: 'true'}
+            - {name: REALYTICS_MALWARE_SCANNER, value: clamav}
+            - {name: REALYTICS_CLAMAV_HOST, value: '127.0.0.1'}
+            - {name: REALYTICS_CLAMAV_PORT, value: '3310'}
+            - {name: REALYTICS_CLAMAV_TIMEOUT_SECONDS, value: '30'}
+        - name: clamav
+          image: docker.io/clamav/clamav@sha256:6d87c712e3391e13c1ba6e05dfb074d4b1ddb5a6834b23bb9da990d2a4ef042a
+          resources:
+            limits:
+              cpu: '1'
+              memory: 3Gi
+          startupProbe:
+            tcpSocket: {port: 3310}
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 24
+          env:
+            - {name: CLAMD_STARTUP_TIMEOUT, value: '230'}
+            - {name: FRESHCLAM_CHECKS, value: '1'}

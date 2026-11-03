@@ -158,9 +158,17 @@ def validate_security_configuration() -> None:
             errors.append(str(exc))
     if (os.environ.get("REALYTICS_ASYNC_JOB_MODE") or "").lower() != "external_worker":
         errors.append("REALYTICS_ASYNC_JOB_MODE=external_worker")
-    if (os.environ.get("REALYTICS_OBJECT_STORAGE") or "").lower() != "s3":
-        errors.append("REALYTICS_OBJECT_STORAGE=s3")
-    if not os.environ.get("REALYTICS_S3_BUCKET"):
+    object_backend = (os.environ.get("REALYTICS_OBJECT_STORAGE") or "").lower()
+    if object_backend not in {"s3", "gcs"}:
+        errors.append("REALYTICS_OBJECT_STORAGE=s3 or gcs")
+    if object_backend == "gcs":
+        from db.object_storage import get_object_storage
+
+        try:
+            get_object_storage()
+        except (RuntimeError, ValueError):
+            errors.append("Google object storage requires valid project, bucket and retention days")
+    elif not os.environ.get("REALYTICS_S3_BUCKET"):
         errors.append("REALYTICS_S3_BUCKET")
     try:
         origins = cors_origins()

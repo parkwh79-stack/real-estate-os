@@ -42,19 +42,90 @@ approval. This selection does not authorize automatic deletion after day 3,
 deletion of existing local/Supabase evidence, or applying a production retention
 standard to historical data. Quarantine is a separate lifecycle and must not
 inherit an active-original lock that prevents normal quarantine cleanup. No
-bucket/retention policy has been provisioned yet.
+automatic deletion or irreversible retention lock has been configured.
 
-Readiness remains **blocked**, not deployed: Google Secret Manager has an
-implemented adapter with offline tests, but live scoped IAM validation remains.
-Object storage still supports S3 only in the hardened profile. A Google object
-storage adapter with equivalent versioning, retention, encryption and failure
-tests is required before using that provider. Do not spoof AWS configuration,
+Live progress (2026-11-03): the existing identity DSN connects successfully and
+passes its dedicated-role preflight. The API role has now been activated through
+the approved secret workflow, after its complete grant manifest passed; its
+actual direct login also passes the API preflight. Provisioned
+only in the approved project: runtime service account `realytics-api`, Docker
+repository `pilot-api` in `asia-northeast1`, and private bucket
+`realytics-pilot-evidence-294481672291` in the same region. Read-back confirms
+project number 294481672291, public-access prevention, uniform access,
+versioning, and per-object retention capability. Runtime bucket IAM excludes
+retention override; BYOK lifecycle is restricted to its secret-name namespace.
+An initial bucket IAM write failed during role propagation; the bounded retry
+succeeded after verifying ownership. No original evidence has been uploaded.
+
+An earlier attempted credential bootstrap was blocked before execution because its
+planned stdout included a SCRAM verifier. No DB password was changed and no
+secret payload was created. Owner was asked to supply a deployment-only
+`REALYTICS_MIGRATION_DATABASE_URL` in the existing ignored API `.env`, never in
+chat, so activation and secret upload can run without outputting credentials.
+That owner connection must never be deployed to Cloud Run. Do not work around
+this by using the identity role for business data or weakening preflights.
+The owner subsequently supplied a working deployment-only DSN in the ignored
+local file. Generated a separate high-entropy API password and kept its SCRAM
+verifier entirely in process; stored only API/identity DSNs as Google secrets.
+The administrator credential was not uploaded. Runtime has secret-scoped access.
+Image build 44af7e6c-ee03-4123-bb04-e2895514fc3c succeeded from 418 reviewed files.
+A one-task/zero-retry/180-second Cloud Run job tests dependencies using the real
+runtime identity, without extending that identity's privileges. Its first run
+found GCS truncates retainUntilTime to milliseconds: round upward to prevent
+shortened retention and false receipt failures. Corrected focused tests: 51
+passed. Replacement image and complete live probe are being verified; no Vercel
+API origin has yet been applied. Temporary local impersonation validation was
+unsuccessful and its binding was removed; no persistent TokenCreator grant was
+added. One non-business diagnostic object remains under its three-day retention.
+
+Live rollout result (2026-11-03): Cloud Run `realytics-api-00001-9dm` is Ready at
+`https://realytics-api-obozektnwa-an.a.run.app`, using image digest
+`sha256:47a6a1fc667e94334ecf6627236e83112bb8414d83972e09a23f8e2c2cc463c5`.
+`/health/ready` returns 200 with API/identity pools both `ok`, PostgreSQL business
+and membership authority, and GCS bytes. `/auth/idp/status` confirms asymmetric
+OIDC/JWKS, strict isolation and no unsigned token fallback. Anonymous `/projects`
+returns 403; an invalid bearer token at `/auth/me` returns 401. Anonymous
+`/auth/me` intentionally returns 200 with authenticated=false and no permissions;
+HTTP 200 alone is not proof of login.
+
+The runtime-identity dependency job passed quarantine write/read/delete,
+generation+ETag-bound range reads, Unlocked retention with deletion denied, and
+session secret create/read/delete. Its first run found the millisecond receipt
+issue; its second correctly rejected a diagnostic secret missing schemaVersion;
+the corrected diagnostic passed in execution `realytics-dependency-check-6s7g6`.
+The temporary job was deleted afterward. Three tiny non-business retention
+probes remain under `operational-checks/` until their three-day holds expire;
+no historical/user originals were touched. ClamAV's startup TCP probe passed;
+an authenticated real-upload/EICAR drill is still not established.
+
+Web preview branch `codex/parser-v2-postgres-runtime` now has
+`REALYTICS_API_ORIGIN` set to the verified API. Vercel redeployment is in
+progress. No real user bearer/membership or cross-tenant browser E2E completion
+is claimed: browser automation failed to start in this Windows environment.
+Owner must finish the existing-cookie login acceptance check in the web UI.
+Scale-to-zero is retained for the KRW 1,000 target; initial startup took about
+46 seconds and may exceed the current 10-second web identity request timeout.
+After a cold start, a retry can be required; no always-on instance was enabled.
+
+Validation: full local API run had 3,138 passed, 44 skipped and one fixture
+setup error from Windows socket exhaustion (WinError 10055), not an assertion.
+The affected report module and calculation-basis neighbors passed on rerun
+(35 tests). After the timestamp fix, focused GCS/object/archive/readiness tests
+passed (51 tests). Web tsc/lint, pip check and diff check passed. Hosted CI for
+the final commit remains a separate gate; do not describe this as a clean
+single-pass full suite or a completed production approval.
+
+The hardened profile now also supports native GCS with generation-bound reads,
+CRC32C write receipts and per-object Unlocked/GOVERNANCE retention. Active clean
+originals require explicit retention; quarantine remains unlocked for cleanup.
+Live bucket IAM and retention checks remain required. Do not spoof AWS configuration,
 select development mode on a public server, or inject a migration/owner DSN into
 the API.
 
 Deploy the API first only after its hardened startup and dedicated API/identity
-database preflights pass. Set Vercel `REALYTICS_API_ORIGIN` only after HTTPS
-readiness and real bearer/membership checks pass; test cross-tenant denials too.
+database preflights pass. Wire the preview Web/BFF after HTTPS readiness and
+negative-auth checks, then require real bearer/membership and cross-tenant
+browser checks before declaring the login pilot accepted or promoting production.
 An API-only pilot does **not** complete PDF parsing, Pod reruns or other queued
 work. Keep that limitation explicit until separately deployed workers pass
 their own least-privilege and durable-job checks. Existing production promotion

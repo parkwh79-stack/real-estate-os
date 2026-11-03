@@ -75,8 +75,8 @@ def readiness_payload(application: Any) -> tuple[int, dict[str, Any]]:
     if hardened:
         try:
             object_storage = get_object_storage()
-            if object_storage.backend != "s3":
-                raise RuntimeError("s3_required")
+            if object_storage.backend not in {"s3", "gcs"}:
+                raise RuntimeError("managed_object_storage_required")
             object_storage_status = "configured"
         except Exception:
             object_storage_status = "invalid"
@@ -103,9 +103,9 @@ def readiness_payload(application: Any) -> tuple[int, dict[str, Any]]:
                 ),
                 "membership": identity_membership_authority(),
                 "objectBytes": (
-                    "s3"
+                    (os.environ.get("REALYTICS_OBJECT_STORAGE") or "").strip().casefold()
                     if (os.environ.get("REALYTICS_OBJECT_STORAGE") or "").strip().casefold()
-                    == "s3"
+                    in {"s3", "gcs"}
                     else "local"
                 ),
             },

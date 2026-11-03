@@ -363,6 +363,19 @@ def get_object_storage(default_base_dir: Path | str | None = None) -> ObjectStor
     of truth across worker hosts.
     """
     backend = (os.environ.get("REALYTICS_OBJECT_STORAGE") or "local").strip().lower()
+    if backend == "gcs":
+        from db.gcs_object_storage import GCSObjectStorage
+
+        try:
+            days = int(os.environ.get("REALYTICS_OBJECT_RETENTION_DAYS") or "0")
+        except ValueError:
+            raise RuntimeError("REALYTICS_OBJECT_RETENTION_DAYS must be a positive integer") from None
+        return GCSObjectStorage(
+            os.environ.get("REALYTICS_GCS_BUCKET") or "",
+            os.environ.get("REALYTICS_GCP_PROJECT") or "",
+            prefix=os.environ.get("REALYTICS_GCS_PREFIX") or "",
+            retention_days=days,
+        )
     if backend == "s3":
         bucket = os.environ.get("REALYTICS_S3_BUCKET")
         if not bucket:
