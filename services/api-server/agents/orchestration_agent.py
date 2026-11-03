@@ -872,7 +872,7 @@ class OrchestrationAgent:
             run["status"] = "completed" if not run["errors"] else "completed_with_warnings"
         except Exception as exc:  # pragma: no cover - defensive
             run["status"] = "error"
-            run["errors"].append({"message": str(exc), "type": exc.__class__.__name__})
+            run["errors"].append({"message": "Workflow execution failed. Check the run status and input evidence.", "type": exc.__class__.__name__})
         run["completed_at"] = self._now()
         return redact_sensitive_value(run, secrets=collect_secret_values(options))
 
@@ -1161,8 +1161,8 @@ class OrchestrationAgent:
                 "unmappedCandidates": summary.get("unmappedCandidateCount"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Term annotation failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Term annotation failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "term_annotation_failed"}
         self._complete_step(run, "term_annotation", output, artifact_key="termAnnotations")
 
     def _run_credit_document_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1186,8 +1186,8 @@ class OrchestrationAgent:
                 "icMemoApprovalReady": ic_memo.get("recommendation", {}).get("approvalReady"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Credit document generation failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Credit document generation failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "credit_document_generation_failed"}
         self._complete_step(run, "credit_document_generation", output, artifact_key="icMemo")
 
     def _add_term_sheet_contribution_handoffs(self, run: Dict[str, Any], term_sheet: Dict[str, Any]) -> None:
@@ -1239,8 +1239,8 @@ class OrchestrationAgent:
                 "actionCount": len(optimization.get("borrowerActions", [])),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Deal optimization failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Deal optimization failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "deal_optimization_failed"}
         self._complete_step(run, "deal_optimization", output, artifact_key="dealOptimization")
 
     def _run_developability_score_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1262,8 +1262,8 @@ class OrchestrationAgent:
                 "gaps": score.get("gaps", []),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Developability score failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Developability score failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "developability_score_failed"}
         self._complete_step(run, "developability_score", output, artifact_key="developabilityScore")
 
     def _maybe_inject_live_market_comparables(
@@ -1294,7 +1294,7 @@ class OrchestrationAgent:
             }
         except Exception as exc:  # external data must never break the credit run
             run.setdefault("errors", []).append(
-                {"message": f"Live market comparables fetch failed: {exc}", "type": exc.__class__.__name__}
+                {"message": "Live market comparables fetch failed.", "type": exc.__class__.__name__}
             )
 
     def _run_return_metrics_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1317,8 +1317,8 @@ class OrchestrationAgent:
                 "icr": metrics.get("icr", {}).get("value"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Return metrics failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Return metrics failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "return_metrics_failed"}
         self._complete_step(run, "return_metrics", output, artifact_key="returnMetrics")
 
     @staticmethod
@@ -1393,8 +1393,8 @@ class OrchestrationAgent:
                 "seniorBreakScenarioKey": stress.get("seniorBreakScenarioKey"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Stress test failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Stress test failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "stress_test_failed"}
         self._complete_step(run, "stress_test", output, artifact_key="stressTest")
 
     def _run_credit_enhancement_step(self, run: Dict[str, Any], project_data: Dict[str, Any], pf_structure: Dict[str, Any]) -> None:
@@ -1418,8 +1418,8 @@ class OrchestrationAgent:
                 "missingCriticalMeasures": credit_enh.get("missingCriticalMeasures"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Credit enhancement failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Credit enhancement failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "credit_enhancement_failed"}
         self._complete_step(run, "credit_enhancement_review", output, artifact_key="creditEnhancement")
 
     def _run_cash_sweep_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1454,8 +1454,8 @@ class OrchestrationAgent:
                 "endingTotalBalance": cash_sweep.get("endingTotalBalance"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Cash sweep failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Cash sweep failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "cash_sweep_failed"}
         self._complete_step(run, "cash_sweep_simulation", output, artifact_key="cashSweep")
 
     def _review_land_readiness(self, data: Dict[str, Any]) -> Dict[str, Any]:

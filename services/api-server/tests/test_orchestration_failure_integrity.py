@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -38,10 +39,11 @@ def test_failed_workflow_does_not_mutate_callers_project(monkeypatch):
     before = deepcopy(project)
     def fail(run, data, step, options):
         data["feasibility_input"]["total_cost"] = 999
-        raise RuntimeError("execution failed")
+        raise RuntimeError("execution failed: private-db-host/internal-document-path")
     monkeypatch.setattr(agent, "_wf_feasibility", fail)
     result = agent.run_workflow("p1", project, "feasibility", {})
     assert result["status"] in {"error", "failed"}
+    assert "private-db-host/internal-document-path" not in json.dumps(result)
     assert project == before
 
 

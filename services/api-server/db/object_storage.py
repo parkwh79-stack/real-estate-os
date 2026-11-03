@@ -70,10 +70,13 @@ class LocalObjectStorage:
             raise ValueError("Invalid object key")
         if any(part in {"", ".", ".."} for part in key.split("/")):
             raise ValueError("Invalid object key")
-        path = (self.base_dir / key).resolve()
-        if path == self.base_dir or not path.is_relative_to(self.base_dir):
+        # Normalize symlinks before checking the directory boundary. Include
+        # the separator so e.g. objects-private cannot pass for objects.
+        root = os.path.normcase(str(self.base_dir))
+        normalized = os.path.normcase(os.path.realpath(os.path.join(root, key)))
+        if normalized == root or not normalized.startswith(os.path.join(root, "")):
             raise ValueError("Invalid object key (path traversal)")
-        return path
+        return Path(normalized)
 
     def put(
         self,

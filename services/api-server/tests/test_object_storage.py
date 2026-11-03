@@ -49,7 +49,7 @@ def test_local_storage_never_targets_root_or_ambiguous_paths(tmp_path, key):
 
 def test_local_storage_rejects_symlink_escape(tmp_path):
     base = tmp_path / "objects"
-    outside = tmp_path / "outside"
+    outside = tmp_path / "objects-private"
     base.mkdir()
     outside.mkdir()
     (outside / "evidence.bin").write_bytes(b"private")
@@ -63,6 +63,18 @@ def test_local_storage_rejects_symlink_escape(tmp_path):
     with pytest.raises(ValueError):
         store.delete_prefix("linked")
     assert (outside / "evidence.bin").read_bytes() == b"private"
+
+
+def test_local_storage_rejects_symlink_to_storage_root(tmp_path):
+    store = LocalObjectStorage(tmp_path)
+    store.put("keep/original.bin", b"original")
+    try:
+        (tmp_path / "root-alias").symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating symlinks requires OS privileges")
+    with pytest.raises(ValueError):
+        store.delete_prefix("root-alias")
+    assert store.get("keep/original.bin") == b"original"
 
 
 def test_factory_defaults_to_local(tmp_path, monkeypatch):

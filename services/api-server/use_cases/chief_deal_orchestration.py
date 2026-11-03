@@ -947,8 +947,8 @@ def _run_chief_deal_pod_on_copy(
             if artifact_sink is not None:
                 persisted_artifact = artifact_sink(persisted_artifact)
     except Exception as exc:
-        finish_work_orders(incoming_orders, now=datetime.now(timezone.utc).isoformat(), status="failed", reason=str(exc))
-        _transition_recalculation_events(incoming_events, "failed", event_sink, error=str(exc))
+        finish_work_orders(incoming_orders, now=datetime.now(timezone.utc).isoformat(), status="failed", reason="pod_execution_failed")
+        _transition_recalculation_events(incoming_events, "failed", event_sink, error="pod_execution_failed")
         raise
 
     _transition_recalculation_events(incoming_events, "completed", event_sink)
@@ -1174,7 +1174,7 @@ def run_chief_deal_all_pods_use_case(
                     "status": failed_status,
                     "startedAt": started_at,
                     "completedAt": datetime.now(timezone.utc).isoformat(),
-                    "error": str(exc),
+                    "error": "pod_execution_failed" if isinstance(exc, RuntimeError) else "pod_input_validation_failed",
                 }
             )
             # Re-plan so the UI sees the blocked state and updated missing-input
@@ -1235,7 +1235,7 @@ def run_chief_deal_all_pods_use_case(
                         "round": round_index,
                         "status": "failed" if isinstance(exc, RuntimeError) else "blocked",
                         "triggers": triggering[:5],
-                        "error": str(exc),
+                        "error": "pod_execution_failed" if isinstance(exc, RuntimeError) else "pod_input_validation_failed",
                     }
                 )
 
@@ -1355,7 +1355,7 @@ def run_chief_deal_pod_with_cascade_use_case(
                     "round": round_index,
                     "status": "failed" if isinstance(exc, RuntimeError) else "blocked",
                     "triggers": triggers[:5],
-                    "error": str(exc),
+                    "error": "pod_execution_failed" if isinstance(exc, RuntimeError) else "pod_input_validation_failed",
                 })
                 break
     plan = plan_chief_deal_orchestration_use_case(project_id, project_data, options)
@@ -1523,7 +1523,7 @@ def _execute_pod_artifact(
                 artifact["landLedgerEnrichmentError"] = {
                     "status": "needs_review",
                     "reason": "land_ledger_structure_incomplete",
-                    "message": str(exc),
+                    "message": "토지 증빙 보강에 실패했습니다. 자료와 연결 상태를 확인해 주세요.",
                     "nextAction": "토지조서 원본을 재파싱하거나 필지별 owners/payment/area 필드를 보강하십시오.",
                 }
         project_data["legal"] = artifact["legalPermitReview"]
@@ -1683,7 +1683,7 @@ def _execute_pod_artifact(
             )
         except Exception as exc:  # pragma: no cover - defensive artifact, not a hard pod failure
             artifact["cashFlowRunError"] = {
-                "message": str(exc),
+                "message": "월별 현금흐름을 계산하지 못했습니다. 입력 근거와 계산 상태를 확인해 주세요.",
                 "reason": "cash_flow_engine_input_not_ready",
             }
         project_data["developerFeasibility"] = artifact["developerFeasibility"]

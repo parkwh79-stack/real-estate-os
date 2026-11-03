@@ -159,3 +159,28 @@ new cloud resource, paid subscription, production promotion or DB reset occurred
 
 CodeQL findings have not been dismissed or waived. Re-scan the exact remediation
 commit before judging which findings are fixed or still require investigation.
+
+### First hosted remediation and nested-flow follow-through
+
+Commit `20c8d81` passed the full API job (**3,080 passed, 46 skipped**), PostgreSQL integration, Web quality
+(including build), cleanup safety and secret scan. Vercel deployment
+`dpl_6LP6WxyUE6FmpUaSFnYuZbKNADP9` is READY for that exact commit; it is a Preview,
+not a configured production API/Worker stack. Browser E2E also passed; the full
+REALYTICS CI run 41584337148 completed successfully.
+
+CodeQL reported zero JavaScript/TypeScript and Actions findings. Python analysis
+2083208407 reported 21 remaining findings: 15 filesystem flows and six exception
+flows. The previous complete analysis contained 41 findings (39 Python, two
+JavaScript), while the PR aggregate originally counted 39 newly introduced ones.
+These are different scopes, not contradictory totals.
+
+Follow-through changes use `realpath` normalization and a directory-separator
+boundary before returning a local path; root/drive/parent restrictions remain.
+Sibling-prefix and symlink-to-root tests guard against incorrect prefix checks.
+This is a runtime boundary, not a custom CodeQL suppression; see the
+[official path-validation guidance](https://codeql.github.com/codeql-query-help/python/py-path-injection/).
+Nested workflow, term annotation, report, metrics and recalculation errors now
+retain stable failure codes without publishing exception text. Focused updated
+storage/failure-integrity tests: 46 passed; the broader overlapping Pod/API group:
+92 passed. All hosted checks must run again for
+the final follow-through commit.
