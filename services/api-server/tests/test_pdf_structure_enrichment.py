@@ -64,6 +64,11 @@ def test_native_table_detection_explicitly_disables_layout_gate():
     assert calls == [False]
 
 
+def test_native_table_fix_has_distinct_versioned_provenance():
+    assert PDF_NATIVE_TABLE_MANIFEST.version == "2.0.1"
+    assert NativePdfTableExtractor.adapter_version == PDF_NATIVE_TABLE_MANIFEST.version
+
+
 def test_native_table_detection_supports_legacy_signature():
     class LegacyPage:
         def find_tables(self):
@@ -72,13 +77,25 @@ def test_native_table_detection_supports_legacy_signature():
     assert NativePdfTableExtractor()._finder_for_page(LegacyPage())() == "legacy-grid"
 
 
-def test_native_table_detection_supports_keyword_forwarding_wrapper():
+def test_native_table_detection_supports_keyword_forwarding_wrapper(monkeypatch):
+    monkeypatch.setattr(fitz.table, "find_tables", lambda page, *, use_layout=True: None)
     class WrappedPage:
         def find_tables(self, **kwargs):
             assert kwargs == {"use_layout": False}
             return "wrapped-grid"
 
     assert NativePdfTableExtractor()._finder_for_page(WrappedPage())() == "wrapped-grid"
+
+
+def test_legacy_keyword_wrapper_does_not_receive_unsupported_layout_flag(monkeypatch):
+    monkeypatch.setattr(fitz.table, "find_tables", lambda page: None)
+
+    class LegacyWrappedPage:
+        def find_tables(self, **kwargs):
+            assert kwargs == {}
+            return "legacy-wrapped-grid"
+
+    assert NativePdfTableExtractor()._finder_for_page(LegacyWrappedPage())() == "legacy-wrapped-grid"
 
 
 @pytest.mark.parametrize("amount", ["0.74", "-0.74", "1,234.56"])

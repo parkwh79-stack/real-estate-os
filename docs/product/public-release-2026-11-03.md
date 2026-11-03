@@ -184,3 +184,27 @@ retain stable failure codes without publishing exception text. Focused updated
 storage/failure-integrity tests: 46 passed; the broader overlapping Pod/API group:
 92 passed. All hosted checks must run again for
 the final follow-through commit.
+
+### Verified follow-through and release ancestry
+
+For `b57cca7`, CodeQL analyses 2083233742 (Python), 2083229924 (JavaScript/TypeScript)
+and 2083227326 (Actions) each report **zero findings**. No findings were dismissed.
+API: **3,081 passed, 46 skipped**; the separate live PostgreSQL CI lane:
+**60 passed**, with skips prohibited. Web quality, cleanup safety and secret scan
+passed. Vercel Preview `dpl_81zdLdQXWmhs9T3qyoiQm3eYmkxT` is READY and its root
+returned HTTP 200. This does not prove authenticated API/Worker operation.
+
+The branch was one main merge commit behind: main `2bd7bac` and its already
+included parent `1f766a7` have the identical tree `9b6bbc279ad3c6955a5e6f23a7dd731b44f49c1f`.
+Integrate that ancestry into the feature branch without replacing existing code;
+do not merge the feature into main or promote production while hosting is absent.
+Also version the corrected native PDF module and adapter as **2.0.1** so new
+provenance differs from existing 2.0.0 artifacts. Historical records stay intact.
+Cross-version testing found that 1.27.2.3 also uses a keyword-forwarding wrapper:
+inspect the actual delegated `fitz.table.find_tables` signature before passing
+`use_layout`. Legacy runtime PDF tests: **17 passed**. Isolated 2.1 PDF/storage/
+failure-integrity regression: **63 passed**. This prevents the compatibility fix
+from disabling table extraction in an existing development virtual environment.
+Re-run all checks for this integrated head. The temporary PyMuPDF 2.1 dependency
+target used for local reproduction was removed; the regular virtual environment,
+original uploads and runtime databases were left untouched.

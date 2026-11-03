@@ -40,7 +40,7 @@ _DEFAULT_PAGE_TABLE_FINDER = object()
 
 PDF_NATIVE_TABLE_MANIFEST = ParserModuleManifest(
     module_id="pdf_native_table_extraction",
-    version="2.0.0",
+    version="2.0.1",
     capabilities=("document.pdf_table_structure",),
     document_taxonomy_version=DOCUMENT_TAXONOMY_VERSION,
     document_type_scope=DOCUMENT_TYPE_SCOPE_ALL,
@@ -97,7 +97,7 @@ class NativePdfTableExtractor:
     """
 
     adapter_id = "pdf_native_table_structure"
-    adapter_version = "2.0.0"
+    adapter_version = "2.0.1"
     manifest = PDF_NATIVE_TABLE_MANIFEST
 
     def __init__(
@@ -263,10 +263,15 @@ class NativePdfTableExtractor:
             # tables that the layout classifier can reject. Preserve that
             # contract on both old and new supported library signatures.
             parameters = inspect.signature(native).parameters
-            if "use_layout" in parameters or any(
+            if any(
                 parameter.kind is inspect.Parameter.VAR_KEYWORD
                 for parameter in parameters.values()
             ):
+                # Both 1.27 and 2.x expose **kwargs on Page. Check the actual
+                # delegated implementation, not the wrapper's acceptance alone.
+                implementation = getattr(getattr(fitz, "table", None), "find_tables", None)
+                parameters = inspect.signature(implementation).parameters if callable(implementation) else {}
+            if "use_layout" in parameters:
                 return lambda: native(use_layout=False)
             return native
         configured = self._page_table_finder
