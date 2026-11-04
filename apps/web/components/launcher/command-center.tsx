@@ -413,10 +413,12 @@ export function CommandCenter() {
   return (
     <main className="relative flex min-h-screen flex-col items-center overflow-hidden bg-slate-950 px-4 py-10 text-white sm:px-6 sm:py-12">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgba(56,189,248,0.12),transparent),radial-gradient(50%_40%_at_80%_100%,rgba(99,102,241,0.12),transparent)]" />
-      <Link href="/dashboard" className="absolute left-4 top-4 z-20 inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 text-xs font-semibold text-slate-200 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 sm:left-5 sm:top-5">
-        <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
-        대시보드 보기
-      </Link>
+      {phase === "idle" && projectId === null && files.length === 0 ? (
+        <Link href="/dashboard" className="absolute left-4 top-4 z-20 inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 text-xs font-semibold text-slate-200 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 sm:left-5 sm:top-5">
+          <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
+          대시보드 보기
+        </Link>
+      ) : null}
       <button
         type="button"
         data-testid="switch-account-button"

@@ -439,6 +439,7 @@ test("shows exact missing project:write permission and allows the same file to b
   });
   await page.goto("/start");
 
+  await expect(page.getByRole("link", { name: "대시보드 보기", exact: true })).toBeVisible();
   const fileInput = page.locator('input[type="file"]');
   const file = {
     name: "pilot-plan.json",
@@ -449,7 +450,36 @@ test("shows exact missing project:write permission and allows the same file to b
 
   await expect(page.getByText(/현재 역할 'reviewer'에는 'project:write' 권한이 없습니다/)).toBeVisible();
   await expect.poll(() => createAttempts).toBe(1);
+  await expect(page.getByRole("link", { name: "대시보드 보기", exact: true })).toHaveCount(0);
 
   await fileInput.setInputFiles(file);
   await expect.poll(() => createAttempts).toBe(2);
+});
+
+test("dashboard shortcut stays hidden after selecting files through pending intake, resume and classification", async ({ page }) => {
+  await page.route("**/api/backend/**", (route) => route.fulfill({ status: 404, json: { detail: "not_mocked" } }));
+  await mockAuthenticatedStart(page, { body: { items: [] } });
+  let releaseContinuation!: () => void;
+  const continuation = new Promise<void>((resolve) => { releaseContinuation = resolve; });
+  await page.route("**/api/backend/projects/intake/continuation-check", async (route) => {
+    await continuation;
+    await route.fulfill({ json: { matches: [{ projectId: "existing-project", projectName: "기존 자료 프로젝트", matchedFiles: [{ fileName: "retained.json" }] }] } });
+  });
+  await page.route("**/api/backend/projects/", (route) => route.fulfill({ json: { id: "created-project" } }));
+  await page.route("**/api/backend/projects/created-project/intake/classify", (route) => route.fulfill({ json: { files: [] } }));
+  await page.goto("/start");
+  const shortcut = page.getByRole("link", { name: "대시보드 보기", exact: true });
+  await expect(shortcut).toBeVisible();
+  await page.locator('input[type="file"]').setInputFiles({ name: "retained.json", mimeType: "application/json", buffer: Buffer.from('{"project":"retained"}') });
+  try {
+    await expect(page.getByText("이전에 검토한 자료인지 확인하고 있습니다", { exact: true })).toBeVisible();
+    await expect(shortcut).toHaveCount(0);
+  } finally {
+    releaseContinuation();
+  }
+  await expect(page.getByRole("heading", { name: "같은 자료로 진행한 심사가 있습니다." })).toBeVisible();
+  await expect(shortcut).toHaveCount(0);
+  await page.getByRole("button", { name: "새 프로젝트로 분석 시작", exact: true }).click();
+  await expect(page.getByText("심사 공간 생성됨", { exact: true })).toBeVisible();
+  await expect(shortcut).toHaveCount(0);
 });
