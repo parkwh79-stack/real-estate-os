@@ -375,6 +375,28 @@ function toOption(p: RawProjectSummary): ProjectOption | null {
   };
 }
 
+/** Reject unavailable collections instead of presenting zero projects. */
+export function projectOptionsFromResponse(data: unknown): ProjectOption[] {
+  if (!Array.isArray(data)) throw new Error("프로젝트 목록 응답 형식이 올바르지 않습니다.");
+  return data.map((value) => {
+    const row = record(value);
+    if (!row || (row.project != null && !record(row.project)) || (row.land != null && !record(row.land))) {
+      throw new Error("프로젝트 정보를 확인할 수 없습니다.");
+    }
+    const project = record(row.project);
+    const land = record(row.land);
+    const id = project?.id ?? row.id;
+    if (!(typeof id === "string" || (typeof id === "number" && Number.isFinite(id)))
+      || [project?.name, project?.projectName, land?.address, land?.pnu, project?.type, project?.status]
+        .some((field) => field != null && typeof field !== "string")) {
+      throw new Error("프로젝트 목록의 필드 형식을 확인할 수 없습니다.");
+    }
+    const option = toOption(value as RawProjectSummary);
+    if (!option || !option.id.trim()) throw new Error("프로젝트 식별자를 확인할 수 없습니다.");
+    return option;
+  });
+}
+
 /** Fetch the session-scoped project list as light options for selectors. */
 export async function fetchProjectOptions(): Promise<ProjectOption[]> {
   const res = await fetch(`${apiBase}/projects/`, {
@@ -382,8 +404,7 @@ export async function fetchProjectOptions(): Promise<ProjectOption[]> {
     headers: authHeaders("web"),
   });
   if (!res.ok) throw new Error(`프로젝트 목록을 불러오지 못했습니다. (${res.status})`);
-  const data = (await res.json()) as RawProjectSummary[];
-  return (Array.isArray(data) ? data : []).map(toOption).filter((o): o is ProjectOption => o !== null);
+  return projectOptionsFromResponse(await res.json());
 }
 
 /** Fetch a single project's full record. */

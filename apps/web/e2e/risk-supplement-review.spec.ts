@@ -222,9 +222,10 @@ test("a late response after a client project change cannot replace the other pro
   try {
     await editor.getByRole("button", { name: "보완요청 저장", exact: true }).click();
     await expect.poll(() => calls.length).toBe(1);
-    const search = page.getByPlaceholder("주소, PNU, 프로젝트 검색", { exact: true });
+    const search = page.getByRole("combobox", { name: "프로젝트 검색", exact: true });
     await search.fill("보완 검토 B");
     await search.press("Enter");
+    await page.getByRole("option", { name: /보완 검토 B/ }).click();
     await expect(page).toHaveURL(`/project/${PROJECT_B}`, { timeout: 30_000 });
     await page.locator(`a[href='/project/${PROJECT_B}/risk']`).first().click();
     await expect(page).toHaveURL(`/project/${PROJECT_B}/risk`, { timeout: 30_000 });

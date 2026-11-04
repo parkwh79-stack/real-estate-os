@@ -399,7 +399,7 @@ test("disables dashboard deal creation for reviewer while keeping assigned work 
   await expect(page.getByTestId("review-only-notice")).toBeVisible();
   await expect(page.getByTestId("dashboard-new-deal-disabled")).toBeDisabled();
   await expect(page.getByTestId("dashboard-intake-read-only")).toContainText(
-    "project:write",
+    "새 프로젝트 생성과 자료 업로드는 사용할 수 없습니다",
   );
   await expect(
     page.locator('a[href="/project/deal-dashboard"]:visible'),

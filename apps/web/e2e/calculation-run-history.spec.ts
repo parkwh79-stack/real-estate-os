@@ -125,10 +125,11 @@ test("a late lookup from the previous project cannot populate the new project's 
   try {
     await history.getByRole("button", { name: "새로고침", exact: true }).click();
     await expect.poll(() => state.calls).toBeGreaterThan(initialCalls);
-    const search = page.getByPlaceholder("주소, PNU, 프로젝트 검색", { exact: true });
+    const search = page.getByRole("combobox", { name: "프로젝트 검색", exact: true });
     await search.fill("계산 이력 B");
     await search.press("Enter");
-    await expect(page).toHaveURL("/project/history-b");
+    await page.getByRole("option", { name: /계산 이력 B/ }).click();
+    await expect(page).toHaveURL("/project/history-b", { timeout: 15_000 });
     await page.locator("a[href='/project/history-b/risk']").first().click();
     await expect(history).toContainText("저장된 계산 실행이 없습니다");
   } finally { release(); }

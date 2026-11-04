@@ -1,52 +1,30 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowDown, UploadCloud } from "lucide-react";
+import { FolderOpen, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAuth } from "../../components/auth/auth-context";
-import { ReviewOnlyNotice } from "../../components/auth/review-only-notice";
-import {
-  WorkInbox,
-  type DashboardDataError,
-} from "../../components/dashboard/work-inbox";
-import { DashboardIntake } from "../../components/intake/dashboard-intake";
+import { WorkInbox, type DashboardDataError } from "../../components/dashboard/work-inbox";
+import { NewProjectDialog } from "../../components/intake/new-project-dialog";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { hasPermission, PROJECT_WRITE_PERMISSION } from "../../lib/authorization";
-import type { RecentWorkItem } from "../../lib/project-client";
+import { fetchRecentWorkFeed, projectOptionsFromResponse, type ProjectOption, type RecentWorkItem } from "../../lib/project-client";
 
-interface RecentWorkResponse {
-  items?: RecentWorkItem[];
-}
-
-async function loadProjectCount(signal: AbortSignal) {
+async function loadProjects(signal: AbortSignal) {
   const response = await fetch(`${apiBase}/projects`, {
     cache: "no-store",
     headers: authHeaders("web"),
-    signal,
+    signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
   });
-  if (!response.ok) throw new Error(`프로젝트 목록 요청 실패 (${response.status})`);
-  const body: unknown = await response.json();
-  if (!Array.isArray(body)) throw new Error("프로젝트 목록 응답 형식이 올바르지 않습니다.");
-  return body.length;
-}
-
-async function loadRecentWork(signal: AbortSignal) {
-  const response = await fetch(`${apiBase}/projects/recent-work?limit=20`, {
-    cache: "no-store",
-    headers: authHeaders("web"),
-    signal,
-  });
-  if (!response.ok) throw new Error(`최근 작업 요청 실패 (${response.status})`);
-  const body = (await response.json()) as RecentWorkResponse;
-  if (!Array.isArray(body.items)) throw new Error("최근 작업 응답 형식이 올바르지 않습니다.");
-  return body.items;
+  if (!response.ok) throw new Error(`프로젝트 목록을 불러오지 못했습니다. (${response.status})`);
+  return projectOptionsFromResponse(await response.json());
 }
 
 export default function DashboardPage() {
   const { status, user, permissions } = useAuth();
   const canWriteProjects = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
   const [items, setItems] = useState<RecentWorkItem[] | null>(null);
-  const [totalProjectCount, setTotalProjectCount] = useState<number | null>(null);
+  const [projects, setProjects] = useState<ProjectOption[] | null>(null);
   const [errors, setErrors] = useState<DashboardDataError[]>([]);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
@@ -57,128 +35,136 @@ export default function DashboardPage() {
     let active = true;
     setLoading(true);
     setErrors([]);
+    setProjects(null);
+    setItems(null);
+    Promise.allSettled([loadProjects(controller.signal), fetchRecentWorkFeed(20, controller.signal)])
+      .then(([projectsResult, recentResult]) => {
+        if (!active) return;
+        const nextErrors: DashboardDataError[] = [];
+        if (projectsResult.status === "fulfilled") setProjects(projectsResult.value);
+        else nextErrors.push({ source: "projects", message: "프로젝트 목록을 불러오지 못했습니다. 다시 확인해 주세요." });
+        if (recentResult.status === "fulfilled") {
+          setItems(recentResult.value.items);
+          nextErrors.push(...recentResult.value.warnings.map((message) => ({ source: "recent-work" as const, message })));
+        } else nextErrors.push({ source: "recent-work", message: "최근 작업을 불러오지 못했습니다. 다시 확인해 주세요." });
+        setErrors(nextErrors);
+        setLoading(false);
+      });
+    return () => { active = false; controller.abort(); };
+  }, [status, user?.userId, user?.tenantId, reloadKey]);
 
-    Promise.allSettled([
-      loadProjectCount(controller.signal),
-      loadRecentWork(controller.signal),
-    ]).then(([projectsResult, recentWorkResult]) => {
-      if (!active) return;
-      const nextErrors: DashboardDataError[] = [];
-      if (projectsResult.status === "fulfilled") {
-        setTotalProjectCount(projectsResult.value);
-      } else {
-        setTotalProjectCount(null);
-        nextErrors.push({
-          source: "projects",
-          message:
-            projectsResult.reason instanceof Error
-              ? projectsResult.reason.message
-              : "프로젝트 목록을 불러오지 못했습니다.",
-        });
-      }
-      if (recentWorkResult.status === "fulfilled") {
-        setItems(recentWorkResult.value);
-      } else {
-        setItems(null);
-        nextErrors.push({
-          source: "recent-work",
-          message:
-            recentWorkResult.reason instanceof Error
-              ? recentWorkResult.reason.message
-              : "최근 작업을 불러오지 못했습니다.",
-        });
-      }
-      setErrors(nextErrors);
-      setLoading(false);
-    });
-
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [status, reloadKey]);
-
-  const role = user?.role ? user.role.replaceAll("_", " ") : undefined;
+  const firstProject = !loading && errors.length === 0 && projects?.length === 0 && items?.length === 0;
 
   return (
-    <div className="space-y-8 pb-10">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div className="mx-auto max-w-7xl space-y-6 pb-8">
+      <header className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-re-muted">
-            <span>REALYTICS DEAL OPERATIONS</span>
-            {role ? (
-              <span className="rounded-re-control border border-re-border bg-re-subtle px-2 py-1 text-re-secondary">
-                역할 {role}
-              </span>
-            ) : null}
-          </div>
-          <h1 className="mt-2 text-3xl font-black tracking-tight text-re-text">
-            {user?.displayName ? `${user.displayName}님의 검토 업무함` : "검토 업무함"}
-          </h1>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-re-secondary">
-            현재 Tenant에서 접근 가능한 실제 프로젝트의 실행 상태와 승인 상태를 분리해 보여줍니다.
-            수치가 없는 영역에는 추정값을 채우지 않습니다.
+          <h1 className="text-2xl font-semibold tracking-tight text-re-text">대시보드</h1>
+          <p className="mt-1 text-sm text-re-secondary">
+            {firstProject && canWriteProjects ? "보유한 자료로 첫 프로젝트를 시작하세요." : "진행하던 프로젝트를 이어서 검토하세요."}
           </p>
         </div>
         {canWriteProjects ? (
-          <Link
-            href="#new-deal-intake"
-            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-re-control bg-re-brand px-4 text-sm font-bold text-white hover:opacity-90"
-          >
-            <UploadCloud className="h-4 w-4" aria-hidden="true" />
-            새 딜 시작
-            <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
-          </Link>
+          <NewProjectDialog key={`${user?.tenantId}:${user?.userId}`} firstProject={firstProject} onProjectCreated={() => setReloadKey((value) => value + 1)} />
         ) : (
-          <button
-            type="button"
-            disabled
-            title={`필요 권한: ${PROJECT_WRITE_PERMISSION}`}
-            data-testid="dashboard-new-deal-disabled"
-            className="inline-flex h-10 shrink-0 cursor-not-allowed items-center justify-center gap-2 rounded-re-control border border-re-border bg-re-subtle px-4 text-sm font-bold text-re-muted"
-          >
-            <UploadCloud className="h-4 w-4" aria-hidden="true" />
-            심사 전용 · 새 딜 생성 불가
+          <button type="button" disabled data-testid="dashboard-new-deal-disabled"
+            className="min-h-11 rounded-re-control border border-re-border px-4 text-sm text-re-muted disabled:cursor-not-allowed">
+            새 프로젝트 · 조회 전용
           </button>
         )}
       </header>
 
-      {!canWriteProjects ? <ReviewOnlyNotice role={user?.role} tone="light" /> : null}
-
-      <WorkInbox
-        items={items}
-        totalProjectCount={totalProjectCount}
-        loading={loading}
-        errors={errors}
-        onRetry={() => setReloadKey((value) => value + 1)}
-      />
-
-      <section id="new-deal-intake" aria-labelledby="new-deal-title" className="scroll-mt-24 space-y-3">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.14em] text-re-muted">New deal intake</p>
-          <h2 id="new-deal-title" className="mt-1 text-xl font-black tracking-tight text-re-text">
-            문서 업로드로 새 딜 시작
-          </h2>
-          <p className="mt-1 text-sm text-re-secondary">
-            기존 업로드·프로젝트 생성 흐름을 유지합니다. 생성된 프로젝트는 처리 후 위 업무함에 반영됩니다.
-          </p>
+      {!canWriteProjects ? (
+        <div data-testid="review-only-notice" role="status" className="rounded-re-control bg-re-subtle px-4 py-3 text-sm text-re-secondary">
+          <p data-testid="dashboard-intake-read-only">현재 계정에서는 기존 프로젝트를 검토할 수 있으며, 새 프로젝트 생성과 자료 업로드는 사용할 수 없습니다.</p>
         </div>
-        {canWriteProjects ? (
-          <DashboardIntake onProjectCreated={() => setReloadKey((value) => value + 1)} />
-        ) : (
-          <div
-            data-testid="dashboard-intake-read-only"
-            className="rounded-2xl border border-dashed border-re-border bg-re-subtle px-6 py-10 text-center"
-          >
-            <UploadCloud className="mx-auto h-9 w-9 text-re-muted" aria-hidden="true" />
-            <p className="mt-3 text-sm font-black text-re-text">심사 전용 역할에서는 새 자료를 업로드할 수 없습니다.</p>
-            <p className="mt-1 text-xs leading-5 text-re-secondary">
-              위 업무함에서 배정된 프로젝트를 선택해 심사·검토를 계속하세요. 새 딜 생성에는
-              {" "}<span className="font-mono font-bold">{PROJECT_WRITE_PERMISSION}</span> 권한이 필요합니다.
+      ) : null}
+
+      <div id="projects" className="scroll-mt-24">
+        {firstProject ? (
+          <section aria-labelledby="first-project-title" className="rounded-re-panel border border-re-border bg-re-surface px-6 py-10 sm:px-8">
+            <FolderOpen className="mb-4 h-8 w-8 text-re-action" aria-hidden="true" />
+            <h2 id="first-project-title" className="text-lg font-semibold text-re-text">
+              {canWriteProjects ? "자료를 올리고 검토를 시작하세요" : "아직 표시할 프로젝트가 없습니다"}
+            </h2>
+            <p className="mt-2 max-w-xl text-sm leading-6 text-re-secondary">
+              {canWriteProjects
+                ? "사업계획서·사업수지·토지자료를 한 번에 올릴 수 있습니다. 확인된 자료와 분석 가정을 검토하고 결과를 저장해 이어서 작업하세요."
+                : "접근 가능한 프로젝트가 등록되면 이곳에서 확인할 수 있습니다."}
             </p>
-          </div>
+          </section>
+        ) : (
+          <WorkInbox items={items} totalProjectCount={projects?.length ?? null} loading={loading} errors={errors}
+            onRetry={() => setReloadKey((value) => value + 1)} />
         )}
-      </section>
+      </div>
+
+      <AllProjects key={`${user?.tenantId}:${user?.userId}`} projects={projects} loading={loading} onRetry={() => setReloadKey((value) => value + 1)} />
     </div>
+  );
+}
+
+function AllProjects({ projects, loading, onRetry }: { projects: ProjectOption[] | null; loading: boolean; onRetry: () => void }) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  useEffect(() => {
+    const openFromHash = () => {
+      const details = document.getElementById("all-projects");
+      if (window.location.hash === "#all-projects" && details instanceof HTMLDetailsElement) details.open = true;
+    };
+    openFromHash();
+    window.addEventListener("hashchange", openFromHash);
+    window.addEventListener("popstate", openFromHash);
+    return () => {
+      window.removeEventListener("hashchange", openFromHash);
+      window.removeEventListener("popstate", openFromHash);
+    };
+  }, []);
+  const matched = (projects ?? []).filter((project) => [project.name, project.address, project.pnu, project.id]
+    .some((value) => value?.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
+  const lastPage = Math.max(0, Math.ceil(matched.length / 12) - 1);
+  const currentPage = Math.min(page, lastPage);
+  return (
+    <details id="all-projects" className="scroll-mt-24 rounded-re-panel border border-re-border bg-re-surface">
+      <summary className="cursor-pointer px-4 py-4 text-sm font-semibold text-re-text">
+        전체 프로젝트 <span className="ml-1 font-normal text-re-secondary">{loading ? "불러오는 중" : projects ? `${projects.length.toLocaleString("ko-KR")}개` : "확인 불가"}</span>
+      </summary>
+      <div className="space-y-4 border-t border-re-border p-4">
+        {loading ? <p role="status" className="text-sm text-re-secondary">프로젝트를 불러오는 중입니다.</p> : projects === null ? (
+          <div role="status" className="text-sm text-re-secondary">
+            <p>프로젝트 목록을 확인할 수 없습니다.</p>
+            <button type="button" onClick={onRetry} className="mt-2 min-h-10 rounded-re-control border border-re-border px-3 font-medium">다시 불러오기</button>
+          </div>
+        ) : (
+          <>
+            <label className="flex min-h-11 max-w-lg items-center gap-2 rounded-re-control border border-re-border px-3">
+              <Search className="h-4 w-4 shrink-0 text-re-muted" aria-hidden="true" />
+              <span className="sr-only">전체 프로젝트 검색</span>
+              <input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }}
+                placeholder="프로젝트명·주소 검색" className="min-w-0 flex-1 bg-transparent py-2 text-base text-re-text sm:text-sm" />
+            </label>
+            <p className="text-xs text-re-secondary" role="status">현재 접근 가능한 전체 프로젝트 중 {matched.length.toLocaleString("ko-KR")}개</p>
+            <ul className="divide-y divide-re-border">
+              {matched.slice(currentPage * 12, currentPage * 12 + 12).map((project) => (
+                <li key={project.id}>
+                  <Link href={`/project/${encodeURIComponent(project.id)}`} prefetch={false} className="block rounded-re-control px-2 py-3 hover:bg-re-subtle">
+                    <span className="break-words text-sm font-medium text-re-text">{project.name}</span>
+                    {project.address ? <span className="mt-1 block break-words text-xs text-re-secondary">{project.address}</span> : null}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+            {matched.length === 0 ? <p className="text-sm text-re-secondary">{projects.length ? "검색 결과가 없습니다." : "등록된 프로젝트가 없습니다."}</p> : null}
+            {lastPage > 0 ? (
+              <div className="flex items-center justify-end gap-3 text-sm">
+                <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage === 0} className="min-h-10 rounded-re-control border border-re-border px-3 disabled:opacity-40">이전</button>
+                <span>{currentPage + 1} / {lastPage + 1}</span>
+                <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage === lastPage} className="min-h-10 rounded-re-control border border-re-border px-3 disabled:opacity-40">다음</button>
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
+    </details>
   );
 }

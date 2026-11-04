@@ -11,7 +11,7 @@
   --re-border-strong: #aab7c7;
   --re-text-primary: #0b172a;
   --re-text-secondary: #475569;
-  --re-text-muted: #718096;
+  --re-text-muted: #596a80;
   --re-brand-900: #08213f;
   --re-brand-700: #123f73;
   --re-action-600: #1d5fd1;
@@ -60,6 +60,7 @@
 
 html {
   min-width: 320px;
+  scroll-padding-top: 5rem;
 }
 
 body {
@@ -84,6 +85,17 @@ body {
 
 .re-sr-status::before {
   content: attr(data-status-label) ": ";
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 button,

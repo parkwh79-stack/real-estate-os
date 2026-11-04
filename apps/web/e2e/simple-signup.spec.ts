@@ -94,7 +94,8 @@ test("email signup reaches the real dashboard with one server-chosen workspace a
     expect(state.onboardingReads).toBe(0);
   } finally { release(); }
   await expect(page).toHaveURL(/\/dashboard$/);
-  await expect(page.getByRole("heading", { name: "가입 검증자님의 검토 업무함" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "대시보드", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "첫 프로젝트 시작", exact: true })).toBeVisible();
   await expect.poll(() => state.projectReads).toBeGreaterThan(0);
   expect(state.prepareBodies).toEqual([{}]);
   expect(state.prepareHeaders.every((headers) => !headers.authorization && headers["x-realytics-bff"] === "same-origin")).toBe(true);

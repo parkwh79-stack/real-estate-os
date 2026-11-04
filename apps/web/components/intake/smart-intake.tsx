@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, FileQuestion, Loader2, PlayCircle, Sparkles, UploadCloud } from "lucide-react";
+import { CheckCircle2, FileQuestion, Loader2, PlayCircle, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
 import { intakeProcessingFailure } from "../../lib/intake-processing-status";
@@ -20,6 +20,11 @@ type Classified = {
 type IntakeResult = { files: Classified[] };
 type RowStatus = "idle" | "processing" | "done" | "skipped" | "error";
 type Row = { id: string; file: File; c: Classified; type: string; status: RowStatus; note?: string };
+
+export interface IntakeWorkStatus {
+  busy: boolean;
+  pending: boolean;
+}
 
 const TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "business_plan", label: "사업계획서 / IM" },
@@ -59,6 +64,22 @@ const STATUS_TONE: Record<RowStatus, string> = {
   error: "text-rose-600 dark:text-rose-300",
 };
 
+async function readIntakeResponse(response: Response): Promise<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error("자료 처리 응답을 읽지 못했습니다. 파일을 유지했으니 다시 시도해 주세요.");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length === 0) {
+    throw new Error("자료 처리 결과를 확인하지 못했습니다. 파일을 유지했으니 다시 시도해 주세요.");
+  }
+  const body = value as Record<string, unknown>;
+  const failure = intakeProcessingFailure(body);
+  if (failure) throw new Error(failure);
+  return body;
+}
+
 function summarizeResult(type: string, body: Record<string, unknown>): string | undefined {
   try {
     if (type === "land_ledger") {
@@ -81,7 +102,7 @@ function summarizeResult(type: string, body: Record<string, unknown>): string | 
 
 async function enrichLandLedgerAfterAnalyze(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (!body.landLedger) return body;
-  const enrichRes = await fetch(`${apiBase}/projects/${projectId}/land-ledger/enrich`, {
+  const enrichRes = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/land-ledger/enrich`, {
     method: "POST",
     headers: { ...authHeaders("web"), "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -100,7 +121,7 @@ async function enrichLandLedgerAfterAnalyze(projectId: string, body: Record<stri
       await backendErrorMessageForResponse(enrichRes, { action: "토지자료 PNU·증빙 보강" }),
     );
   }
-  return (await enrichRes.json().catch(() => body)) as Record<string, unknown>;
+  return readIntakeResponse(enrichRes);
 }
 
 function confidenceTone(confidence: number): string {
@@ -118,28 +139,41 @@ export function SmartIntake({
   onProcessed,
   initialFiles,
   onClassified,
+  onStatusChange,
 }: {
   projectId: string;
   onProcessed?: () => void;
   initialFiles?: File[];
   onClassified?: (files: Classified[], result: IntakeResult) => void;
+  onStatusChange?: (status: IntakeWorkStatus) => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const workInFlight = useRef(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [initialPending, setInitialPending] = useState(Boolean(initialFiles?.length));
+  const [failedFiles, setFailedFiles] = useState<File[]>([]);
+  const busy = loading || processing;
+  const pending = initialPending || busy || failedFiles.length > 0 || rows.some((row) => row.status !== "done");
+  const canPickFiles = !busy && failedFiles.length === 0;
+
+  useEffect(() => {
+    onStatusChange?.({ busy, pending });
+  }, [busy, pending, onStatusChange]);
 
   const uploadFiles = useCallback(
     async (arr: File[]) => {
-      if (!arr.length) return;
+      if (!arr.length || workInFlight.current) return;
+      workInFlight.current = true;
       setLoading(true);
       setError(null);
       try {
         const fd = new FormData();
         arr.forEach((file) => fd.append("files", file));
-        const res = await fetch(`${apiBase}/projects/${projectId}/intake/classify`, {
+        const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/intake/classify`, {
           method: "POST",
           headers: authHeaders("web"),
           body: fd,
@@ -150,6 +184,9 @@ export function SmartIntake({
           );
         }
         const data = (await res.json()) as IntakeResult;
+        if (!Array.isArray(data.files) || data.files.length !== arr.length) {
+          throw new Error("선택한 파일 수와 분류 결과가 일치하지 않습니다. 파일을 유지했으니 다시 시도해 주세요.");
+        }
         onClassified?.(data.files, data);
         const newRows: Row[] = data.files.map((c, index) => ({
           id: `${Date.now()}-${index}`,
@@ -159,9 +196,13 @@ export function SmartIntake({
           status: "idle",
         }));
         setRows((prev) => [...newRows, ...prev]);
+        setFailedFiles([]);
       } catch (err) {
+        setFailedFiles(arr);
         setError(err instanceof Error ? err.message : "업로드 또는 분류 중 오류가 발생했습니다.");
       } finally {
+        workInFlight.current = false;
+        setInitialPending(false);
         setLoading(false);
       }
     },
@@ -180,6 +221,8 @@ export function SmartIntake({
   }, [initialFiles, uploadFiles]);
 
   const processAll = useCallback(async () => {
+    if (workInFlight.current) return;
+    workInFlight.current = true;
     setProcessing(true);
     setError(null);
     for (const row of rows) {
@@ -195,7 +238,7 @@ export function SmartIntake({
         if (route.kind === "file") {
           const fd = new FormData();
           fd.append("file", row.file);
-          res = await fetch(`${apiBase}/projects/${projectId}/${route.path}`, {
+          res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/${route.path}`, {
             method: "POST",
             headers: authHeaders("web"),
             body: fd,
@@ -204,7 +247,7 @@ export function SmartIntake({
           const text = await row.file.text();
           const parsed = JSON.parse(text);
           const payload = Array.isArray(parsed) ? { records: parsed } : parsed;
-          res = await fetch(`${apiBase}/projects/${projectId}/${route.path}`, {
+          res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/${route.path}`, {
             method: "POST",
             headers: { ...authHeaders("web"), "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -215,11 +258,9 @@ export function SmartIntake({
             await backendErrorMessageForResponse(res, { action: `${TYPE_LABEL[row.type] ?? "자료"} 처리` }),
           );
         }
-        let body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-        const processingFailure = intakeProcessingFailure(body);
-        if (processingFailure) throw new Error(processingFailure);
+        let body = await readIntakeResponse(res);
         if (row.type === "feasibility_workbook" && body.feasibilityStudyV2Draft) {
-          const candidateRes = await fetch(`${apiBase}/projects/${projectId}/feasibility-workbook/import-candidate`, {
+          const candidateRes = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/feasibility-workbook/import-candidate`, {
             method: "POST",
             headers: { ...authHeaders("web"), "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -233,7 +274,7 @@ export function SmartIntake({
               await backendErrorMessageForResponse(candidateRes, { action: "사업수지 원장 반영" }),
             );
           }
-          body = { ...body, candidateImport: await candidateRes.json().catch(() => ({})) };
+          body = { ...body, candidateImport: await readIntakeResponse(candidateRes) };
         }
         if (row.type === "land_ledger") {
           body = await enrichLandLedgerAfterAnalyze(projectId, body);
@@ -244,6 +285,7 @@ export function SmartIntake({
         setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "error", note } : r)));
       }
     }
+    workInFlight.current = false;
     setProcessing(false);
     onProcessed?.();
   }, [rows, projectId, onProcessed]);
@@ -251,49 +293,48 @@ export function SmartIntake({
   const routable = rows.filter((row) => ROUTES[row.type] && row.status !== "done").length;
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <div className="flex items-center gap-2">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 text-white">
-          <Sparkles className="h-5 w-5" />
-        </div>
-        <div>
-          <h2 className="font-black text-slate-950 dark:text-white">스마트 업로드 (AI 자동 분류)</h2>
-          <p className="text-xs font-semibold text-slate-500">
-            자료를 종류 구분 없이 올리면 Parser Agent가 자동 분류하고, 분류된 경로에 맞춰 각 Agent에 전달합니다.
-          </p>
-        </div>
+    <section className="space-y-4" aria-label="자료 분류와 처리">
+      <div>
+        <h3 className="text-base font-semibold text-re-text">자료 분류·처리</h3>
+        <p className="mt-1 text-sm text-re-secondary">문서 유형을 확인하거나 수정한 뒤 자료를 처리하세요.</p>
       </div>
 
       <div
         role="button"
         tabIndex={0}
-        onClick={() => inputRef.current?.click()}
+        aria-label="추가 자료 파일 선택"
+        aria-disabled={!canPickFiles}
+        onClick={() => canPickFiles && inputRef.current?.click()}
         onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") inputRef.current?.click();
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            if (canPickFiles) inputRef.current?.click();
+          }
         }}
         onDragOver={(event) => {
           event.preventDefault();
-          setDragOver(true);
+          if (canPickFiles) setDragOver(true);
         }}
         onDragLeave={() => setDragOver(false)}
         onDrop={(event) => {
           event.preventDefault();
           setDragOver(false);
-          if (event.dataTransfer.files) void upload(event.dataTransfer.files);
+          if (canPickFiles && event.dataTransfer.files) void upload(event.dataTransfer.files);
         }}
-        className={`mt-4 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
+        className={`flex flex-col items-center justify-center gap-2 rounded-re-panel border border-dashed px-5 py-5 text-center ${canPickFiles ? "cursor-pointer" : "cursor-not-allowed"} ${
           dragOver
-            ? "border-indigo-400 bg-indigo-50 dark:border-indigo-500 dark:bg-indigo-950/30"
-            : "border-slate-300 hover:border-indigo-300 dark:border-slate-700"
+            ? "border-re-action bg-re-subtle"
+            : "border-re-border"
         }`}
       >
-        {loading ? <Loader2 className="h-8 w-8 animate-spin text-indigo-600" /> : <UploadCloud className="h-8 w-8 text-slate-400" />}
-        <p className="text-sm font-bold text-slate-700 dark:text-slate-200">파일을 끌어다 놓거나 클릭해서 선택하세요. 여러 개도 가능합니다.</p>
-        <p className="text-xs text-slate-400">PDF · XLS/XLSX · DOCX · JSON · CSV</p>
+        {loading ? <Loader2 className="h-6 w-6 animate-spin text-re-action" aria-hidden="true" /> : <UploadCloud className="h-6 w-6 text-re-secondary" aria-hidden="true" />}
+        <p className="text-sm text-re-text">{loading ? "자료를 분류하고 있습니다…" : failedFiles.length ? "분류하지 못한 파일을 먼저 확인해 주세요." : "추가 자료를 끌어다 놓거나 선택하세요."}</p>
+        <p className="text-xs text-re-secondary">PDF · XLS/XLSX · DOCX · JSON · CSV</p>
         <input
           ref={inputRef}
           type="file"
           multiple
+          disabled={!canPickFiles}
           className="hidden"
           onChange={(event) => {
             if (event.target.files) void upload(event.target.files);
@@ -302,7 +343,19 @@ export function SmartIntake({
         />
       </div>
 
-      {error ? <p className="mt-3 text-sm font-bold text-rose-600 dark:text-rose-300">{error}</p> : null}
+      {error ? <p className="text-sm text-re-danger" role="alert">{error}</p> : null}
+      {failedFiles.length ? (
+        <div className="flex flex-wrap items-center gap-3 text-sm text-re-secondary">
+          <span>분류 대기 파일 {failedFiles.length}개 보관 중</span>
+          <button type="button" disabled={busy} onClick={() => void uploadFiles(failedFiles)} className="min-h-10 rounded-re-control border border-re-border px-3 text-re-action disabled:opacity-50">분류 다시 시도</button>
+          <button type="button" disabled={busy} onClick={() => {
+            if (window.confirm("분류하지 못한 파일의 선택을 취소할까요? 이미 저장된 자료는 유지됩니다.")) {
+              setFailedFiles([]);
+              setError(null);
+            }
+          }} className="min-h-10 rounded-re-control px-3 disabled:opacity-50">파일 선택 취소</button>
+        </div>
+      ) : null}
 
       {rows.length ? (
         <div className="mt-4">
@@ -313,7 +366,7 @@ export function SmartIntake({
             <button
               type="button"
               onClick={() => void processAll()}
-              disabled={processing || routable === 0}
+              disabled={busy || routable === 0}
               className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 text-xs font-bold text-white disabled:opacity-40"
             >
               {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}
@@ -356,6 +409,7 @@ export function SmartIntake({
                     <td className="px-3 py-2">
                       <select
                         value={row.type}
+                        disabled={busy}
                         onChange={(event) => setRows((prev) => prev.map((item) => (item.id === row.id ? { ...item, type: event.target.value } : item)))}
                         className="rounded-md border border-slate-300 px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900"
                       >

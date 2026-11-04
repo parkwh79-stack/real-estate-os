@@ -1,178 +1,199 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
+import {
+  Activity, BarChart3, BookMarked, BookOpen, ChevronDown, FileCheck,
+  FolderKanban, GitBranch, LayoutDashboard, Layers, LibraryBig, Map,
+  Menu, Settings, Wallet, X, type LucideIcon,
+} from "lucide-react";
 import { getStoredSelectedProjectId } from "../project/project-picker";
 import { withProjectContext } from "../../lib/project-navigation";
-import {
-  Activity,
-  BarChart3,
-  BookMarked,
-  BookOpen,
-  BrainCircuit,
-  Building2,
-  FileCheck,
-  FolderKanban,
-  GitBranch,
-  Landmark,
-  LayoutDashboard,
-  Layers,
-  LibraryBig,
-  Map,
-  Settings,
-  Wallet,
-} from "lucide-react";
 import { getStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
 
 const BLOG_URL = "https://blog.naver.com/babo7910/224295847211";
 
-const navItems = [
-  { key: "start", href: "/", label: "OS 시작", icon: LayoutDashboard },
-  { key: "projects", href: "/dashboard", label: "프로젝트 관리", icon: FolderKanban },
-  { key: "deal-room", href: "/dashboard", label: "AI 딜룸", icon: GitBranch },
-  { key: "templates", href: "/templates", label: "업무 템플릿", icon: LibraryBig },
-  { key: "glossary", href: "/glossary", label: "표준 용어", icon: BookOpen },
-  { key: "analysis", href: "/analysis", label: "토지·거래 분석", icon: Map },
-  { key: "feasibility", href: "/feasibility", label: "사업성 분석", icon: BarChart3 },
-  { key: "cashflow", href: "/cashflow-detail", label: "CF 대시보드", icon: Wallet },
-  { key: "finance", href: "/finance", label: "금융구조", icon: Layers },
-  { key: "report", href: "/report", label: "PF 심사보고서", icon: FileCheck },
-  { key: "monitoring", href: "/monitoring", label: "실시간 모니터링", icon: Activity },
-  { key: "term-review", href: "/glossary/candidates", label: "용어 검토", icon: BookMarked },
-  { key: "settings", href: "/settings", label: "AI 설정", icon: Settings },
+const ANALYSIS_TOOLS = [
+  { href: "/analysis", label: "토지·거래 분석", icon: Map },
+  { href: "/feasibility", label: "사업성 분석", icon: BarChart3 },
+  { href: "/cashflow-detail", label: "현금흐름", icon: Wallet },
+  { href: "/finance", label: "금융구조", icon: Layers },
+  { href: "/report", label: "PF 심사보고서", icon: FileCheck },
+  { href: "/monitoring", label: "실시간 모니터링", icon: Activity },
 ];
 
-const TRACK_MENU_KEYS: Record<WorkflowTrack, string[]> = {
-  development: ["start", "projects", "deal-room", "analysis", "feasibility", "cashflow", "report", "glossary", "settings"],
-  pf: ["start", "projects", "deal-room", "finance", "cashflow", "report", "monitoring", "term-review", "settings"],
-  finance: ["start", "projects", "deal-room", "finance", "cashflow", "report", "monitoring", "glossary", "settings"],
-  real_asset_finance: ["start", "projects", "deal-room", "analysis", "finance", "report", "monitoring", "glossary", "settings"],
-  reit: ["start", "projects", "deal-room", "analysis", "finance", "report", "monitoring", "term-review", "settings"],
-  fund: ["start", "projects", "deal-room", "templates", "finance", "cashflow", "report", "monitoring", "settings"],
-};
+const RESOURCES = [
+  { href: "/templates", label: "업무 템플릿", icon: LibraryBig },
+  { href: "/glossary", label: "표준 용어", icon: BookOpen },
+  { href: "/glossary/candidates", label: "용어 검토", icon: BookMarked },
+];
 
-const TRACK_DESCRIPTIONS: Record<WorkflowTrack, string> = {
-  development: "토지, 인허가, 상품기획, 사업수지, 현금흐름 중심",
-  pf: "사업수지, Tranche, 상환재원, 리스크, 심사보고서 중심",
-  finance: "담보, 리파이낸싱, 대출구조, 회수 가능성 중심",
-  real_asset_finance: "자산 실사, 임대/시장 증빙, 등기·권리관계, 인수 리스크 중심",
-  reit: "편입자산, 배당재원, 감정가, 운용구조와 공시 리스크 중심",
-  fund: "펀드 설정, 투자대상, 대출/에쿼티 구조, 운용·회수 리스크 중심",
-};
-
-const TRACK_ICONS: Record<WorkflowTrack, typeof Building2> = {
-  development: Building2,
-  pf: Landmark,
-  finance: Wallet,
-  real_asset_finance: BarChart3,
-  reit: Layers,
-  fund: Wallet,
-};
-
-export function Sidebar() {
+function NavigationContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const [track, setTrack] = useState<WorkflowTrack | null>(null);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+
   useEffect(() => {
-    const sync = () => setCurrentProjectId(getStoredSelectedProjectId());
+    const sync = () => {
+      setCurrentProjectId(getStoredSelectedProjectId());
+      setTrack(getStoredWorkflowTrack());
+    };
     sync();
     window.addEventListener("popstate", sync);
+    window.addEventListener("storage", sync);
     window.addEventListener("realytics-project-changed", sync);
+    window.addEventListener("realytics-workflow-track-changed", sync);
     return () => {
       window.removeEventListener("popstate", sync);
+      window.removeEventListener("storage", sync);
       window.removeEventListener("realytics-project-changed", sync);
+      window.removeEventListener("realytics-workflow-track-changed", sync);
     };
   }, [pathname]);
 
-  useEffect(() => {
-    const read = () => setTrack(getStoredWorkflowTrack());
-    read();
-    window.addEventListener("storage", read);
-    window.addEventListener("realytics-workflow-track-changed", read);
-    return () => {
-      window.removeEventListener("storage", read);
-      window.removeEventListener("realytics-workflow-track-changed", read);
-    };
-  }, []);
-
-  const visibleItems = useMemo(() => {
-    const base = track ? navItems.filter((item) => TRACK_MENU_KEYS[track].includes(item.key)) : navItems;
-    return currentProjectId ? base : base.filter((item) => item.key !== "deal-room");
-  }, [track, currentProjectId]);
-
-  const TrackIcon = track ? TRACK_ICONS[track] : BrainCircuit;
+  const isActive = (href: string) => {
+    if (href.includes("#")) return false;
+    if (href === "/glossary" || /^\/project\/[^/]+$/.test(href)) return pathname === href;
+    return pathname === href || pathname.startsWith(`${href}/`);
+  };
+  const renderLink = (href: string, label: string, Icon: LucideIcon, contextual = false) => {
+    const target = contextual ? withProjectContext(href, currentProjectId) : href;
+    return (
+      <Link
+        key={href}
+        href={target}
+        onClick={() => {
+          if (href === "/dashboard#all-projects") {
+            const projects = document.getElementById("all-projects");
+            if (projects instanceof HTMLDetailsElement) projects.open = true;
+          }
+          onNavigate?.();
+        }}
+        aria-current={isActive(href) ? "page" : undefined}
+        className={`flex min-h-11 items-center gap-3 rounded-re-control px-3 py-2.5 text-sm font-medium transition-colors ${isActive(href)
+          ? "bg-re-subtle text-re-action"
+          : "text-re-secondary hover:bg-re-subtle hover:text-re-text"}`}
+      >
+        <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+        {label}
+      </Link>
+    );
+  };
 
   return (
-    <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 border-r border-slate-200 bg-white lg:flex lg:flex-col dark:border-slate-800 dark:bg-slate-950">
-      <div className="border-b border-slate-200 px-5 py-5 dark:border-slate-800">
-        <Link href="/" className="block">
-          <span className="text-2xl font-black tracking-tight text-slate-950 dark:text-white">
-            REAL<span className="text-indigo-600">YTICS</span>
-          </span>
-          <p className="mt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-            REALYTICS x PLATFORM9 · powered by WAN2
-          </p>
-        </Link>
-      </div>
-
-      <nav className="flex-1 space-y-1 px-3 py-4">
-        {track ? (
-          <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-3 dark:border-indigo-900/60 dark:bg-indigo-950/30">
-            <div className="flex items-center gap-2">
-              <TrackIcon className="h-4 w-4 text-indigo-700 dark:text-indigo-300" />
-              <p className="text-xs font-black text-indigo-700 dark:text-indigo-300">
-                선택 트랙: {TRACK_LABELS[track]}
-              </p>
-            </div>
-            <p className="mt-2 text-[11px] font-semibold leading-4 text-indigo-600/80 dark:text-indigo-300/80">
-              {TRACK_DESCRIPTIONS[track]}
-            </p>
+    <>
+      <nav aria-label="주 메뉴" className="flex-1 space-y-1 px-3 py-4">
+        {renderLink("/dashboard", "대시보드", LayoutDashboard)}
+        {renderLink("/dashboard#all-projects", "내 프로젝트", FolderKanban)}
+        {currentProjectId ? (
+          <div className="my-4 border-y border-re-border py-3">
+            <p className="px-3 pb-1 text-xs text-re-muted">선택한 프로젝트</p>
+            {renderLink(`/project/${encodeURIComponent(currentProjectId)}`, "프로젝트 개요", FolderKanban)}
+            {renderLink(`/project/${encodeURIComponent(currentProjectId)}/chief-orchestration`, "AI 딜룸", GitBranch)}
           </div>
         ) : null}
-
-        {visibleItems.map((item) => {
-          const Icon = item.icon;
-          const href =
-            item.key === "deal-room" && currentProjectId
-              ? `/project/${encodeURIComponent(currentProjectId)}/chief-orchestration`
-              : withProjectContext(item.href, currentProjectId);
-          const isActive =
-            item.key === "deal-room"
-              ? Boolean(currentProjectId && pathname.startsWith(`/project/${currentProjectId}/chief-orchestration`))
-              : item.href === "/"
-                ? pathname === "/"
-                : pathname.startsWith(item.href);
-          return (
-            <Link
-              key={item.key}
-              href={href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") ? href : "/dashboard"}
-              className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition-colors ${
-                isActive
-                  ? "bg-slate-950 text-white dark:bg-white dark:text-slate-950"
-                  : "text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-900 dark:hover:text-white"
-              }`}
-            >
-              <Icon className="h-4 w-4" />
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
+        <details className="group" open={ANALYSIS_TOOLS.some((item) => isActive(item.href))}>
+          <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-re-control px-3 py-2.5 text-sm font-medium text-re-secondary hover:bg-re-subtle [&::-webkit-details-marker]:hidden">
+            <BarChart3 className="h-4 w-4" aria-hidden="true" />
+            분석 도구
+            <ChevronDown className="ml-auto h-4 w-4 transition-transform group-open:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="ml-3 border-l border-re-border pl-2">
+            {ANALYSIS_TOOLS.map((item) => renderLink(item.href, item.label, item.icon, true))}
+          </div>
+        </details>
+        <details className="group" open={RESOURCES.some((item) => isActive(item.href))}>
+          <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-re-control px-3 py-2.5 text-sm font-medium text-re-secondary hover:bg-re-subtle [&::-webkit-details-marker]:hidden">
+            <LibraryBig className="h-4 w-4" aria-hidden="true" />
+            자료실
+            <ChevronDown className="ml-auto h-4 w-4 transition-transform group-open:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="ml-3 border-l border-re-border pl-2">
+            {RESOURCES.map((item) => renderLink(item.href, item.label, item.icon))}
+            <a href={BLOG_URL} target="_blank" rel="noopener noreferrer" onClick={onNavigate}
+              className="flex min-h-11 items-center gap-3 rounded-re-control px-3 py-2.5 text-sm text-re-secondary hover:bg-re-subtle hover:text-re-text">
+              <BookOpen className="h-4 w-4" aria-hidden="true" />
+              REALYTICS 블로그<span className="sr-only"> (새 창)</span>
+            </a>
+          </div>
+        </details>
       </nav>
-
-      <div className="border-t border-slate-200 p-4 text-xs text-slate-500 dark:border-slate-800">
-        <a
-          href={BLOG_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 font-bold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-        >
-          <BookOpen className="h-4 w-4" />
-          REALYTICS 블로그
-        </a>
-        <p className="mt-3 font-semibold text-slate-700 dark:text-slate-300">AI Deal Room</p>
-        <p className="mt-1">트랙별 Agent Pod와 사용자 LLM 설정을 기준으로 실행합니다.</p>
+      <div className="border-t border-re-border px-3 py-3">
+        {renderLink("/start", track ? `업무 선택 · ${TRACK_LABELS[track]}` : "업무 선택", Layers)}
+        {renderLink("/settings", "설정", Settings)}
       </div>
+    </>
+  );
+}
+
+export function Sidebar() {
+  return (
+    <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col overflow-y-auto border-r border-re-border bg-re-surface lg:flex">
+      <Link href="/dashboard" className="px-6 py-6 text-xl font-bold tracking-tight text-re-text" aria-label="REALYTICS 대시보드">
+        REAL<span className="text-re-action">YTICS</span>
+      </Link>
+      <NavigationContent />
     </aside>
+  );
+}
+
+export function MobileNavigation() {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [open, setOpen] = useState(false);
+  const dialogId = useId();
+  const titleId = useId();
+  const close = () => dialogRef.current?.close();
+
+  useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const desktop = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = () => { if (desktop.matches) dialogRef.current?.close(); };
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      desktop.removeEventListener("change", closeOnDesktop);
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button type="button" aria-label="메뉴 열기" aria-haspopup="dialog" aria-expanded={open} aria-controls={dialogId}
+        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-re-control text-re-secondary hover:bg-re-subtle lg:hidden"
+        onClick={() => { dialogRef.current?.showModal(); setOpen(true); }}>
+        <Menu className="h-5 w-5" aria-hidden="true" />
+      </button>
+      <dialog ref={dialogRef} id={dialogId} aria-labelledby={titleId} onClose={() => setOpen(false)}
+        onClick={(event) => { if (event.target === event.currentTarget) close(); }}
+        onKeyDown={(event) => {
+          if (event.key !== "Tab") return;
+          const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+            "a[href], button:not([disabled]), summary, [tabindex]",
+          )).filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0);
+          const first = controls[0];
+          const last = controls[controls.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last?.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first?.focus();
+          }
+        }}
+        className="fixed inset-y-0 left-0 m-0 h-dvh max-h-none w-80 max-w-[85vw] border-0 bg-re-surface p-0 text-re-text shadow-xl backdrop:bg-black/40">
+        <div className="flex min-h-full flex-col">
+          <div className="flex items-center justify-between border-b border-re-border px-4 py-3">
+            <h2 id={titleId} className="text-base font-semibold">REALYTICS 메뉴</h2>
+            <button type="button" onClick={close} aria-label="메뉴 닫기" autoFocus
+              className="flex h-11 w-11 items-center justify-center rounded-re-control text-re-secondary hover:bg-re-subtle">
+              <X className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </div>
+          {open ? <NavigationContent onNavigate={close} /> : null}
+        </div>
+      </dialog>
+    </>
   );
 }
