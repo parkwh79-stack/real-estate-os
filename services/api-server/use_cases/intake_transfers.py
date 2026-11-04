@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from db.object_storage import LocalObjectStorage, ObjectStorage
 from db.repositories.upload_archive_repository import UploadArchiveRepository
+from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION
 
 PART_SIZE_BYTES = 3 * 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -34,7 +35,23 @@ def processing_succeeded(result: dict) -> bool:
     def record(value):
         return value if isinstance(value, dict) else {}
     project = record(result.get("project"))
-    statuses = [result.get("status"), record(result.get("validation")).get("status"),
+    validation = record(result.get("validation"))
+    validation_status = validation.get("status")
+    upload = record(result.get("upload"))
+    archive_id = upload.get("archiveId")
+    draft = record(result.get("feasibilityStudyV2Draft"))
+    # Source formula failures still allow a separate, unapproved review draft.
+    # Cache the validation output so candidate-save retries reuse the same read.
+    if (
+        validation_status == "failed"
+        and draft.get("version") == FEASIBILITY_STUDY_SCHEMA_VERSION
+        and upload.get("archiveStored") is True
+        and isinstance(archive_id, str)
+        and re.fullmatch(r"[0-9a-f]{64}", archive_id)
+        and validation.get("sourceDocumentHash") == archive_id
+    ):
+        validation_status = None
+    statuses = [result.get("status"), validation_status,
                 record(result.get("_meta")).get("parsing_source"),
                 record(project.get("_meta")).get("parsing_source"),
                 record(record(result.get("upload")).get("_meta")).get("parsing_source")]

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 from typing import Any
+import pytest
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -47,6 +49,7 @@ def test_activity_append_uses_resolved_identity_and_one_append_only_insert() -> 
     event_id = repository.append_api_request(
         {
             "eventId": "evt-1",
+            "eventType": "forged_event_type",
             "tenantId": "forged-tenant",
             "userId": "raw-oauth-sub",
             "projectId": "project-1",
@@ -65,10 +68,49 @@ def test_activity_append_uses_resolved_identity_and_one_append_only_insert() -> 
     assert "statement_timestamp()" in sql
     assert "ON CONFLICT (event_id) DO NOTHING" in sql
     assert params[0] == "evt-1"
-    assert params[1] == "issuer::subject"
+    assert params[1] == "api_request"
+    assert params[2] == "issuer::subject"
     assert params[-1] == "tenant-1"
     assert "forged-tenant" not in params
     assert "raw-oauth-sub" not in params
+    assert "forged_event_type" not in params
+
+
+def test_project_event_preserves_type_metadata_and_verified_scope():
+    connection = _Connection(("evt-2",))
+
+    @contextmanager
+    def transaction(tenant_id):
+        assert tenant_id == "tenant-1"
+        yield connection
+
+    repository = PostgresActivityLogRepository(
+        tenant_id="tenant-1", user_id="reviewer-1", transaction_factory=transaction,
+    )
+    assert repository.append_project_event("feasibility_input_applied", {
+        "eventId": "evt-2", "eventType": "api_request", "projectId": "p",
+        "tenantId": "other-tenant", "userId": "forged-user", "createdAt": "2099-01-01",
+        "metadata": {"appliedFields": ["total_revenue"]},
+    }) == "evt-2"
+    sql, params = connection.calls[0]
+    assert len(connection.calls) == 1
+    assert "statement_timestamp()" in sql and "ON CONFLICT (event_id) DO NOTHING" in sql
+    assert "DO UPDATE" not in sql and "CREATE TABLE" not in sql
+    assert params[1:4] == ("feasibility_input_applied", "reviewer-1", "p")
+    assert params[-1] == "tenant-1"
+    assert json.loads(params[-2]) == {"appliedFields": ["total_revenue"]}
+    assert not {"other-tenant", "forged-user", "2099-01-01", "api_request"}.intersection(params)
+
+
+@pytest.mark.parametrize(("event_type", "project_id"), [("", "p"), ("api_request", "p"), ("input_saved", "")])
+def test_project_event_rejects_missing_scope_or_request_event_type(event_type, project_id):
+    def forbidden_transaction(_tenant):
+        pytest.fail("Invalid project events must not enter a transaction")
+    repository = PostgresActivityLogRepository(
+        tenant_id="tenant-1", user_id="reviewer-1", transaction_factory=forbidden_transaction,
+    )
+    with pytest.raises(ValueError):
+        repository.append_project_event(event_type, {"projectId": project_id})
 
 
 def test_activity_middleware_appends_with_membership_resolved_user(

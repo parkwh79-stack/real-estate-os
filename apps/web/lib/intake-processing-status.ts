@@ -1,6 +1,24 @@
 type Data = Record<string, unknown>;
 const record = (value: unknown): Data => value && typeof value === "object" && !Array.isArray(value) ? value as Data : {};
 
+/** A server-produced archived draft may be sent for candidate validation only;
+ * this does not approve its formulas or promote values into calculation inputs. */
+export function hasArchivedFeasibilityReviewDraft(body: Data): boolean {
+  const draft = record(body.feasibilityStudyV2Draft);
+  const upload = record(body.upload);
+  const validation = record(body.validation);
+  const archiveId = upload.archiveId;
+  return draft.version === "realytics-feasibility-study-v2"
+    && typeof draft.project_id === "string" && draft.project_id.length > 0
+    && body.project_id === draft.project_id
+    && upload.documentType === "feasibility_workbook" && upload.archiveStored === true
+    && typeof archiveId === "string" && /^[a-f0-9]{64}$/i.test(archiveId)
+    && upload.originalFileHash === archiveId && validation.sourceDocumentHash === archiveId
+    && typeof upload.feasibilityStudyV2DraftHash === "string" && /^[a-f0-9]{64}$/i.test(upload.feasibilityStudyV2DraftHash)
+    && ((Array.isArray(draft.monthly_cash_flow) && draft.monthly_cash_flow.length > 0)
+      || Object.keys(record(draft.metrics)).length > 0);
+}
+
 /** HTTP 200 acknowledges transport, not successful extraction. */
 export function intakeProcessingFailure(body: Data): string | null {
   const project = record(body.project);
@@ -8,7 +26,9 @@ export function intakeProcessingFailure(body: Data): string | null {
   if (reanalysis.triggered === true && (reanalysis.status === "failed" || reanalysis.cascadeComplete === false)) {
     return "자료는 저장됐지만 후속 재분석이 완료되지 않았습니다. 딜룸에서 실패·검토 대기 단계를 확인하고 재분석하세요.";
   }
-  const statuses = [body.status, record(body.validation).status,
+  const validationStatus = record(body.validation).status;
+  const reviewableValidationFailure = validationStatus === "failed" && hasArchivedFeasibilityReviewDraft(body);
+  const statuses = [body.status, ...(reviewableValidationFailure ? [] : [validationStatus]),
     record(body._meta).parsing_source, record(project._meta).parsing_source,
     record(record(body.upload)._meta).parsing_source];
   if (statuses.includes("host_llm_required")) {

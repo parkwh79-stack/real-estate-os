@@ -209,6 +209,27 @@ def test_review_preserves_assumption_and_rejects_stale_browser():
     assert repo.project["feasibility_input"]["finance_cost"] == 123456789
 
 
+def test_opening_workspace_does_not_invalidate_the_current_review():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = TestClient(app)
+    project_id = client.post("/projects/", json={"project": {"name": "Workspace read regression"}}).json()["id"]
+    root = f"/projects/{project_id}"
+    review_before = client.get(root + "/feasibility-workbook/review").json()
+    context = client.get(root + "/workspace/context?page=input_package")
+    assert context.status_code == 200
+    assert context.json()["dealStateGraph"]["updatedBy"] == "workspace_context"
+    response = client.post(root + "/feasibility-workbook/apply-input", json={
+        "feasibility_input": {"total_revenue": 123},
+        "expectedReviewHash": review_before["reviewHash"],
+        "fieldReviews": {"total_revenue": {"origin": "user_assumption", "reason": "Fixture budget"}},
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["reviewState"]["values"]["total_revenue"] == 123
+    assert client.get(root + "/feasibility-workbook/review").json()["reviewHash"] != review_before["reviewHash"]
+
+
 def test_review_preserves_zero_and_negative_document_profit():
     repo = _FakeRepo({"feasibility_input": {"total_revenue": 100}, "expected_results": {"development_profit": 10, "profit_margin": 0.1}})
     result = apply_feasibility_input_use_case(repo, "585", {"total_revenue": 0, "development_profit": -10}, applied_by="reviewer")

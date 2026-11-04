@@ -100,10 +100,11 @@ def triage_intake_documents(
     *,
     ai_context: Dict[str, Any] | None = None,
     ai: AIConnection | None = None,
+    deterministic_only: bool = False,
 ) -> Dict[str, Any]:
     normalized = [_normalize_file(item) for item in files]
     deterministic = _deterministic_triage(normalized)
-    ai_result = _try_ai_triage(normalized, ai_context=ai_context, ai=ai)
+    ai_result = {} if deterministic_only else _try_ai_triage(normalized, ai_context=ai_context, ai=ai)
 
     recommended = deterministic["recommendedTrack"]
     recommendation_source = "deterministic"

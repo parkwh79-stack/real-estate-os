@@ -89,6 +89,7 @@ from db.repositories.report_repository import (
     ReportRepository,
 )
 from db.repositories.source_document_repository import SourceDocumentRepository
+from db.repositories.activity_log_repository import PostgresActivityLogRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository, UploadRejectedError
 from db.repositories.legal_intelligence_repository import (
     LegalReviewDecisionConflict,
@@ -806,19 +807,33 @@ def record_sensitive_project_event(
     run_id: str | None = None,
     metadata: Dict[str, Any] | None = None,
 ) -> None:
+    event = {
+        "eventType": event_type,
+        "projectId": project_id,
+        "runId": run_id,
+        "method": request.method,
+        "path": request.url.path,
+        "clientHost": request.client.host if request.client else None,
+        "userAgent": request.headers.get("user-agent"),
+        "requestId": request.headers.get("x-request-id"),
+        "metadata": metadata or {},
+    }
+    if storage_backend() in {"postgres", "postgresql"}:
+        context = identity_context_from_request(request)
+        user = context.get("user") or {}
+        tenant_id = str(user.get("tenantId") or "").strip()
+        user_id = str(user.get("userId") or "").strip()
+        scope = current_project_scope()
+        if context.get("authenticated") is not True or not tenant_id or not user_id or scope is None:
+            raise ValueError("Verified project scope, tenant and user are required for audit")
+        if scope.tenant_id != tenant_id or scope.get(project_id) is None:
+            raise ValueError("Project audit does not match the verified request scope")
+        PostgresActivityLogRepository(
+            tenant_id=tenant_id, user_id=user_id,
+        ).append_project_event(event_type, event)
+        return
     record_user_activity_log(
-        {
-            "eventType": event_type,
-            "userId": user_id_from_request(request),
-            "projectId": project_id,
-            "runId": run_id,
-            "method": request.method,
-            "path": request.url.path,
-            "clientHost": request.client.host if request.client else None,
-            "userAgent": request.headers.get("user-agent"),
-            "requestId": request.headers.get("x-request-id"),
-            "metadata": metadata or {},
-        }
+        {**event, "userId": user_id_from_request(request)}
     )
 
 def land_evidence_records_from_ledger(land_ledger: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -2415,19 +2430,31 @@ def smart_intake_triage(project_id: str, request: Request, input_data: Dict[str,
     """
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    project = dict(_project_store()[project_id])
+    enforce_project_tenant_scope(request, project)
     payload = input_data or {}
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    override = payload.get("aiContext")
+    # Ordinary hosted intake must be usable without a compatibility BYOK
+    # profile or an external model. Explicit provider selection retains its
+    # existing validation and authorization path.
+    deterministic_only = storage_backend() in {"postgres", "postgresql"} and not override
+    ai_context = None
+    if not deterministic_only:
+        ai_context = {
+            **ai_context_from_request(request, payload_ai_context=override),
+            "project_id": project_id,
+            "agent_id": "IntakeTriageAgent",
+        }
     result = {
         "projectId": project_id,
         "persisted": True,
         "confidenceBasis": "문서유형별 업무트랙 가중치 × 자동분류 신뢰도 + 파일명 신호를 기준으로 산정합니다. 승인 가능성은 별도 Approval Readiness Gate에서 판단합니다.",
         **triage_intake_documents(
             files,
-            ai_context={
-                **ai_context_from_request(request, payload_ai_context=payload.get("aiContext")),
-                "project_id": project_id,
-                "agent_id": "IntakeTriageAgent",
-            },
+            ai_context=ai_context,
+            deterministic_only=deterministic_only,
         ),
     }
     history_item = {
@@ -2442,31 +2469,28 @@ def smart_intake_triage(project_id: str, request: Request, input_data: Dict[str,
         "tracks": result.get("tracks") or [],
         "limitations": result.get("limitations") or [],
     }
-    project = dict(_project_store()[project_id])
     history = list(project.get("intakeTriageHistory") or [])
     history.append(history_item)
     project["intakeTriageHistory"] = history[-20:]
     project["latestIntakeTriage"] = history_item
     _project_store()[project_id] = project
     persist_project(project_id)
-    record_user_activity_log(
-        {
-            "eventType": "intake_triage_completed",
-            "userId": "web",
-            "projectId": project_id,
-            "metadata": {
-                "recommendedTrack": result.get("recommendedTrack"),
-                "recommendationSource": result.get("recommendationSource"),
-                "aiAssisted": result.get("aiAssisted"),
-                "fileCount": len(files),
-            },
-        }
+    record_sensitive_project_event(
+        request,
+        event_type="intake_triage_completed",
+        project_id=project_id,
+        metadata={
+            "recommendedTrack": result.get("recommendedTrack"),
+            "recommendationSource": result.get("recommendationSource"),
+            "aiAssisted": result.get("aiAssisted"),
+            "fileCount": len(files),
+        },
     )
     return result
 
 
 @router.post("/{project_id}/intake/finalize")
-def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = None):
+def finalize_smart_intake(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """After classify+parse: promote identity, resolve address->PNU, and return
     a step-by-step readiness plan.
 
@@ -2476,6 +2500,8 @@ def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = N
     """
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
+    authorize_request(request, "project:write")
+    enforce_project_tenant_scope(request, _project_store()[project_id])
     payload = input_data or {}
     track = str(payload.get("track") or "")
     run = payload.get("run", False)
@@ -2494,7 +2520,12 @@ def finalize_smart_intake(project_id: str, input_data: Dict[str, Any] | None = N
             "workflow": run_result.get("workflow"),
         }
 
-    return {**finalize, "track": track, "analysisRun": analysis_run}
+    return {
+        **finalize,
+        "track": track,
+        "analysisRun": analysis_run,
+        **({"nextStage": "input_review"} if analysis_run is None and storage_backend() in {"postgres", "postgresql"} else {}),
+    }
 
 
 @router.put("/{project_id}/land-cost-review")
@@ -2553,6 +2584,7 @@ async def analyze_land_ledger_upload(
         "landLedger": ledger,
         "persisted": True,
         "autoReanalysis": auto,
+        **({"landEvidenceEnrichment": "deferred"} if storage_backend() in {"postgres", "postgresql"} else {}),
         "note": "필지가 프로젝트에 저장되었습니다. /land/parcels/resolve로 지번별 PNU·공시지가를 일괄 해석할 수 있습니다.",
     }
 
@@ -3501,10 +3533,11 @@ def review_project_deal_state_record(
         "reviewHistory": [*(record.get("reviewHistory") or []), audit_entry],
     }
     saved = upsert_deal_state_record(project_id, updated)
-    record_user_activity_log(
-        {
-            "eventType": "deal_state_record_reviewed",
-            "projectId": project_id,
+    record_sensitive_project_event(
+        request,
+        event_type="deal_state_record_reviewed",
+        project_id=project_id,
+        metadata={
             "recordId": record_id,
             "recordType": saved.get("recordType"),
             "reviewStatus": review_status,

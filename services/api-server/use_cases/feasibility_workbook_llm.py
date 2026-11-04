@@ -285,8 +285,21 @@ def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
     # Include the complete working input, including product/collection and cost
     # sources used by reviewed scenarios. Archival document metadata and unrelated
     # audit/selection history do not change financial input freshness.
+    calculation_inputs = {
+        key: value for key, value in project.items()
+        if key not in {"_meta", "source_documents", "sharedDealStateGraph"}
+    }
+    chief_state = calculation_inputs.get("chief_orchestration_state")
+    if isinstance(chief_state, dict):
+        # The workspace view can refresh both copies of this derived graph
+        # without touching any reviewed input. Preserve other Chief state.
+        working_state = {key: value for key, value in chief_state.items() if key != "sharedDealStateGraph"}
+        if working_state:
+            calculation_inputs["chief_orchestration_state"] = working_state
+        else:
+            calculation_inputs.pop("chief_orchestration_state", None)
     review_hash = _stable_json({**state,
-        "calculationInputs": {key: value for key, value in project.items() if key not in {"_meta", "source_documents"}},
+        "calculationInputs": calculation_inputs,
         "parsingSource": (project.get("_meta") or {}).get("parsing_source")})
     source_study = next((project[key] for key in ("feasibilityStudyV2Draft", "canonicalFeasibilityStudyV2", "feasibilityStudyV2")
                          if isinstance(project.get(key), dict)), {})

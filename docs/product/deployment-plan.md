@@ -4,6 +4,25 @@ Updated: 2026-11-04
 
 Status: **Controlled implementation; not production-ready**
 
+### Sample intake and review continuity (2026-11-04)
+
+Hosted intake stores the deterministic track recommendation without reading the
+compatibility AI profile. Verified project events use the existing normalized
+activity table. Workbook formula failures keep the original validation result
+and permit a source-bound candidate. Successful intake opens the input review
+page in normalized mode. Failed processing and final connection each retain a
+retry path.
+
+The local isolated sample test preserved the workbook and ledger hashes.
+It saved and reopened a source-cell review, compared two budget calculation
+runs, and matched the stored report with its JSON download. Related API tests
+passed 75 cases. The follow-up group on review freshness and monthly inputs
+passed 76 cases. The browser sample retained the source-cell review after API
+restart and page reload. Final desktop/mobile regressions passed 70 cases.
+Cloud Build `50b676f9-2729-4a08-87e0-cd6ea326b144` succeeded with 425 reviewed
+inputs and all 26 migrations. Rollout evidence is recorded in
+[PR #2](https://github.com/parkwh79-stack/real-estate-os/pull/2).
+
 ### Workspace context recovery (2026-11-04)
 
 Cloud Run returned 500 for the workspace context because the land evidence

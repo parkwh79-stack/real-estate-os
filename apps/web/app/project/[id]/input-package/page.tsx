@@ -533,7 +533,11 @@ export default function InputPackagePage() {
                           {displayText(doc.originalFileName ?? doc.fileName, "파일명 미확인")}
                         </td>
                         <td className="px-3 py-3 text-slate-500">{formatBytes(doc.fileSizeBytes)}</td>
-                        <td className="px-3 py-3 text-slate-500">{displayText(doc.validationStatus, "-")}</td>
+                        <td className="px-3 py-3 text-slate-500">
+                          {doc.documentType === "feasibility_workbook" && doc.validationStatus === "failed"
+                            ? <span className="font-semibold text-amber-800 dark:text-amber-200">검증 항목 확인 필요</span>
+                            : displayText(doc.validationStatus, "-")}
+                        </td>
                         <td className="px-3 py-3 text-slate-500">{displayText(doc.archiveIntegrityStatus, "-")}</td>
                         <td className="px-3 py-3 text-slate-500">{formatDate(doc.uploadedAt)}</td>
                       </tr>

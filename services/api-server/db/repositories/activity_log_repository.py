@@ -40,6 +40,17 @@ class PostgresActivityLogRepository:
         supplying a forged client timestamp.
         """
 
+        return self._append("api_request", event)
+
+    def append_project_event(self, event_type: str, event: Mapping[str, Any]) -> str:
+        """Append a server-owned project event without changing recent-feed ranking."""
+        normalized_type = self._required_text(event_type, "event_type")
+        if normalized_type == "api_request":
+            raise ValueError("Use append_api_request for observed HTTP activity")
+        self._required_text(event.get("projectId"), "project_id")
+        return self._append(normalized_type, event)
+
+    def _append(self, event_type: str, event: Mapping[str, Any]) -> str:
         event_id = self._optional_text(event.get("eventId")) or str(uuid4())
         metadata = event.get("metadata")
         metadata_json = json.dumps(
@@ -68,7 +79,7 @@ class PostgresActivityLogRepository:
                 tenant_id
             )
             VALUES (
-                %s, 'api_request', statement_timestamp(), %s, %s, %s, %s,
+                %s, %s, statement_timestamp(), %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s::jsonb, %s
             )
             ON CONFLICT (event_id) DO NOTHING
@@ -76,6 +87,7 @@ class PostgresActivityLogRepository:
         """
         params = (
             event_id,
+            event_type,
             self.user_id,
             self._optional_text(event.get("projectId")),
             self._optional_text(event.get("runId")),

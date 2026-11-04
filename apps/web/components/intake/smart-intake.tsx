@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, FileQuestion, Loader2, PlayCircle, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
-import { intakeProcessingFailure } from "../../lib/intake-processing-status";
+import { hasArchivedFeasibilityReviewDraft, intakeProcessingFailure } from "../../lib/intake-processing-status";
 import { classifyIntakeFiles, processTransferredIntakeFile, type IntakeClassifiedFile } from "../../lib/intake-upload-client";
 
 type Classified = IntakeClassifiedFile;
@@ -40,11 +40,19 @@ const ROUTES: Record<string, { path: string; kind: "file" | "json" }> = {
   land_evidence: { path: "land-evidence", kind: "json" },
 };
 
+function isArchivedWithoutProcessingRoute(type: string, classified: Classified) {
+  return classified.archiveStored === true && !ROUTES[type];
+}
+
+function isTerminalRow(row: Row) {
+  return row.status === "done" || (row.status === "skipped" && isArchivedWithoutProcessingRoute(row.type, row.c));
+}
+
 const STATUS_LABEL: Record<RowStatus, string> = {
   idle: "보류",
   processing: "처리 중",
   done: "처리 완료",
-  skipped: "보강 필요",
+  skipped: "원본 저장 · 자동 처리 경로 없음",
   error: "실패",
 };
 
@@ -76,10 +84,14 @@ function summarizeResult(type: string, body: Record<string, unknown>): string | 
   try {
     if (type === "land_ledger") {
       const n = (((body.landLedger as Record<string, unknown>)?.summary as Record<string, unknown>)?.parcelCount) as number | undefined;
+      if (body.landEvidenceEnrichment === "deferred") return `${typeof n === "number" ? `${n}필지 저장` : "필지 저장"} · PNU 증빙 보강 대기`;
       return typeof n === "number" ? `${n}필지` : "토지조서 분석 완료";
     }
     if (type === "feasibility_workbook" || type === "risk_report_workbook") {
       const status = ((body.validation as Record<string, unknown>)?.status) as string | undefined;
+      if (type === "feasibility_workbook" && status === "failed" && (body.candidateImport as Record<string, unknown>)?.status === "candidate") {
+        return "검토 후보 저장 · 수식 오류 확인 필요";
+      }
       return status ? `검증 ${status}` : "검증 완료";
     }
     if (type === "land_evidence") return "증빙 저장";
@@ -93,7 +105,7 @@ function summarizeResult(type: string, body: Record<string, unknown>): string | 
 }
 
 async function enrichLandLedgerAfterAnalyze(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (!body.landLedger) return body;
+  if (!body.landLedger || body.landEvidenceEnrichment === "deferred") return body;
   const enrichRes = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/land-ledger/enrich`, {
     method: "POST",
     headers: { ...authHeaders("web"), "Content-Type": "application/json" },
@@ -132,12 +144,14 @@ export function SmartIntake({
   initialFiles,
   onClassified,
   onStatusChange,
+  disabled = false,
 }: {
   projectId: string;
   onProcessed?: () => void;
   initialFiles?: File[];
   onClassified?: (files: Classified[], result: IntakeResult) => void;
   onStatusChange?: (status: IntakeWorkStatus) => void;
+  disabled?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const workInFlight = useRef(false);
@@ -149,8 +163,8 @@ export function SmartIntake({
   const [dragOver, setDragOver] = useState(false);
   const [initialPending, setInitialPending] = useState(Boolean(initialFiles?.length));
   const [failedFiles, setFailedFiles] = useState<File[]>([]);
-  const busy = loading || processing;
-  const pending = initialPending || busy || failedFiles.length > 0 || rows.some((row) => row.status !== "done");
+  const busy = loading || processing || disabled;
+  const pending = initialPending || busy || failedFiles.length > 0 || rows.some((row) => !isTerminalRow(row));
   const canPickFiles = !busy && failedFiles.length === 0;
 
   useEffect(() => {
@@ -159,7 +173,7 @@ export function SmartIntake({
 
   const uploadFiles = useCallback(
     async (arr: File[]) => {
-      if (!arr.length || workInFlight.current) return;
+      if (!arr.length || workInFlight.current || disabled) return;
       workInFlight.current = true;
       setLoading(true);
       setError(null);
@@ -174,7 +188,7 @@ export function SmartIntake({
           file: arr[index] as File,
           c,
           type: c.documentType,
-          status: "idle",
+          status: isArchivedWithoutProcessingRoute(c.documentType, c) ? "skipped" : "idle",
         }));
         setRows((prev) => [...newRows, ...prev]);
         setFailedFiles([]);
@@ -188,7 +202,7 @@ export function SmartIntake({
         setLoading(false);
       }
     },
-    [projectId, onClassified],
+    [projectId, onClassified, disabled],
   );
 
   const upload = useCallback((fileList: FileList) => uploadFiles(Array.from(fileList)), [uploadFiles]);
@@ -203,15 +217,21 @@ export function SmartIntake({
   }, [initialFiles, uploadFiles]);
 
   const processAll = useCallback(async () => {
-    if (workInFlight.current) return;
+    if (workInFlight.current || disabled) return;
     workInFlight.current = true;
     setProcessing(true);
     setError(null);
+    let allProcessed = rows.length > 0 && failedFiles.length === 0;
     for (const row of rows) {
-      if (row.status === "done") continue;
+      if (isTerminalRow(row)) continue;
       const route = ROUTES[row.type];
       if (!route) {
-        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "skipped", note: "자동 처리 경로 없음" } : r)));
+        if (isArchivedWithoutProcessingRoute(row.type, row.c)) {
+          setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "skipped", note: undefined } : r)));
+        } else {
+          allProcessed = false;
+          setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "error", note: "원본 저장을 확인하지 못했고 자동 처리 경로가 없습니다. 문서 유형과 원본 저장을 확인해 주세요." } : r)));
+        }
         continue;
       }
       setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "processing" } : r)));
@@ -243,6 +263,9 @@ export function SmartIntake({
           );
         }
         let body = await readIntakeResponse(res);
+        if (row.type === "feasibility_workbook" && hasArchivedFeasibilityReviewDraft(body) && body.project_id !== projectId) {
+          throw new Error("사업수지 후보의 프로젝트가 현재 자료와 일치하지 않습니다.");
+        }
         if (row.type === "feasibility_workbook" && body.feasibilityStudyV2Draft) {
           const candidateRes = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/feasibility-workbook/import-candidate`, {
             method: "POST",
@@ -258,21 +281,28 @@ export function SmartIntake({
               await backendErrorMessageForResponse(candidateRes, { action: "사업수지 원장 반영" }),
             );
           }
-          body = { ...body, candidateImport: await readIntakeResponse(candidateRes) };
+          const candidateImport = await readIntakeResponse(candidateRes);
+          if (hasArchivedFeasibilityReviewDraft(body)
+            && (candidateImport.status !== "candidate" || candidateImport.projectId !== projectId || candidateImport.authoritative !== false)) {
+            throw new Error("사업수지 검토 후보의 저장 결과를 확인하지 못했습니다. 원본과 처리 결과를 유지했으니 다시 확인해 주세요.");
+          }
+          body = { ...body, candidateImport };
         }
         if (row.type === "land_ledger") {
           body = await enrichLandLedgerAfterAnalyze(projectId, body);
         }
         setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "done", note: summarizeResult(row.type, body) } : r)));
       } catch (err) {
+        allProcessed = false;
         const note = err instanceof Error ? err.message : "오류";
         setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "error", note } : r)));
       }
     }
     workInFlight.current = false;
     setProcessing(false);
-    onProcessed?.();
-  }, [rows, projectId, onProcessed]);
+    if (allProcessed) onProcessed?.();
+    else setError("처리하지 못한 자료가 남아 있습니다. 파일별 안내와 문서 유형을 확인한 뒤 다시 시도해 주세요. 완료된 자료는 다시 처리하지 않습니다.");
+  }, [rows, projectId, onProcessed, disabled, failedFiles.length]);
 
   const routable = rows.filter((row) => ROUTES[row.type] && row.status !== "done").length;
 
@@ -395,7 +425,13 @@ export function SmartIntake({
                       <select
                         value={row.type}
                         disabled={busy}
-                        onChange={(event) => setRows((prev) => prev.map((item) => (item.id === row.id ? { ...item, type: event.target.value } : item)))}
+                        onChange={(event) => {
+                          const type = event.target.value;
+                          setError(null);
+                          setRows((prev) => prev.map((item) => item.id === row.id ? {
+                            ...item, type, status: isArchivedWithoutProcessingRoute(type, item.c) ? "skipped" : "idle", note: undefined,
+                          } : item));
+                        }}
                         className="rounded-md border border-slate-300 px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900"
                       >
                         {TYPE_OPTIONS.map((option) => (

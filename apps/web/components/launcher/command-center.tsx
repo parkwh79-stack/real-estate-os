@@ -29,7 +29,8 @@ import { validateIntakeFiles } from "../../lib/intake-upload-client";
 import { getTrackWorkflowDefinition, setStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
 import { useAuth } from "../auth/auth-context";
 import { ReviewOnlyNotice } from "../auth/review-only-notice";
-import { SmartIntake } from "../intake/smart-intake";
+import { SmartIntake, type IntakeWorkStatus } from "../intake/smart-intake";
+import { intakeProcessingFailure } from "../../lib/intake-processing-status";
 import { RecentWorkPanel } from "./recent-work-panel";
 
 type Phase = "idle" | "creating" | "resume" | "ready" | "error";
@@ -259,6 +260,9 @@ export function CommandCenter() {
   const [triageError, setTriageError] = useState<string | null>(null);
   const [selectedTrack, setSelectedTrack] = useState<WorkflowTrack | null>(null);
   const [finalizing, setFinalizing] = useState(false);
+  const finalizingRef = useRef(false);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [intakeWork, setIntakeWork] = useState<IntakeWorkStatus>({ busy: false, pending: true });
   const [continuationMatches, setContinuationMatches] = useState<ContinuationMatch[]>([]);
   const [switchingAccount, setSwitchingAccount] = useState(false);
   const [switchAccountError, setSwitchAccountError] = useState<string | null>(null);
@@ -384,31 +388,42 @@ export function CommandCenter() {
     [projectId],
   );
 
-  const enterWorkspace = useCallback(() => {
-    if (!projectId || !selectedTrack) return;
-    setStoredWorkflowTrack(selectedTrack);
-    router.push(`/project/${projectId}/chief-orchestration?track=${selectedTrack}`);
-  }, [projectId, router, selectedTrack]);
-
   const finalizeAndEnter = useCallback(async () => {
-    if (!projectId) return;
+    if (!projectId || finalizingRef.current) return;
+    finalizingRef.current = true;
     const track = (selectedTrack ?? triage?.recommendedTrack ?? "development") as WorkflowTrack;
     setStoredWorkflowTrack(track);
     setFinalizing(true);
+    setFinalizeError(null);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/intake/finalize`, {
         method: "POST",
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ track, run: false }),
       });
-      await res.json().catch(() => ({}));
-      router.push(`/project/${projectId}/chief-orchestration?track=${track}`);
-    } catch {
-      router.push(`/project/${projectId}/chief-orchestration?track=${track}`);
+      if (!res.ok) throw new Error(await backendErrorMessageForResponse(res, { action: "자료 연결 및 보완 계획 확인" }));
+      const body: unknown = await res.json().catch(() => null);
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || (body as Record<string, unknown>).projectId !== projectId) {
+        throw new Error("현재 프로젝트의 자료 연결 결과를 확인하지 못했습니다.");
+      }
+      const result = body as Record<string, unknown>;
+      const failure = intakeProcessingFailure(result);
+      if (failure) throw new Error(failure);
+      const nextPage = result.nextStage === "input_review" ? "input-package" : "chief-orchestration";
+      router.push(`/project/${encodeURIComponent(projectId)}/${nextPage}?track=${track}`);
+    } catch (caught) {
+      setFinalizeError(caught instanceof Error ? caught.message : "자료 연결 및 보완 계획을 확인하지 못했습니다.");
     } finally {
+      finalizingRef.current = false;
       setFinalizing(false);
     }
   }, [projectId, router, selectedTrack, triage]);
+
+  const enterWorkspace = useCallback(() => {
+    if (!projectId || !selectedTrack || intakeWork.pending || finalizing || finalizeError) return;
+    void finalizeAndEnter();
+  }, [projectId, selectedTrack, intakeWork.pending, finalizing, finalizeError, finalizeAndEnter]);
 
   return (
     <main className="relative flex min-h-screen flex-col items-center overflow-hidden bg-slate-950 px-4 py-10 text-white sm:px-6 sm:py-12">
@@ -494,11 +509,23 @@ export function CommandCenter() {
               selectedTrack={selectedTrack}
               onSelect={setSelectedTrack}
               onEnter={enterWorkspace}
+              entryDisabled={intakeWork.pending || finalizing || Boolean(finalizeError)}
             />
             {finalizing ? (
               <div className="flex items-center gap-3 rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm font-bold text-sky-200">
                 <Loader2 className="h-5 w-5 animate-spin" />
                 자료를 연결하고 주소·PNU 보강 가능성을 확인 중입니다. 다음 화면에서 부족자료와 보강 순서를 안내합니다.
+              </div>
+            ) : null}
+            {finalizeError ? (
+              <div role="alert" className="rounded-2xl border border-amber-400/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+                <p className="font-bold">자료 처리는 완료됐지만 연결·보완 계획 확인을 마치지 못했습니다.</p>
+                <p className="mt-2 leading-6">{finalizeError}</p>
+                <p className="mt-2 text-xs leading-5">현재 프로젝트와 파일별 처리 결과를 유지했습니다. 다시 시도해도 완료된 파일을 재전송하지 않습니다.</p>
+                <button type="button" onClick={() => void finalizeAndEnter()} disabled={finalizing || intakeWork.pending}
+                  className="mt-3 min-h-10 rounded-lg border border-amber-300 px-3 font-bold disabled:opacity-50">
+                  자료 연결 다시 시도
+                </button>
               </div>
             ) : null}
             <div className="rounded-2xl bg-white p-1 text-slate-900 dark:bg-slate-900 dark:text-white">
@@ -507,6 +534,8 @@ export function CommandCenter() {
                 initialFiles={files}
                 onClassified={(classified) => void runTriage(classified)}
                 onProcessed={() => void finalizeAndEnter()}
+                onStatusChange={setIntakeWork}
+                disabled={finalizing}
               />
             </div>
           </div>
@@ -679,6 +708,7 @@ function TrackTriagePanel({
   selectedTrack,
   onSelect,
   onEnter,
+  entryDisabled,
 }: {
   triage: TriageResult | null;
   loading: boolean;
@@ -686,6 +716,7 @@ function TrackTriagePanel({
   selectedTrack: WorkflowTrack | null;
   onSelect: (track: WorkflowTrack) => void;
   onEnter: () => void;
+  entryDisabled: boolean;
 }) {
   const tracks = triage?.tracks ?? [];
   return (
@@ -783,7 +814,7 @@ function TrackTriagePanel({
             <button
               type="button"
               onClick={onEnter}
-              disabled={!selectedTrack}
+              disabled={!selectedTrack || entryDisabled}
               className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-white px-4 text-sm font-black text-slate-950 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
               선택 트랙 워크스페이스로 이동 <ArrowRight className="h-4 w-4" />

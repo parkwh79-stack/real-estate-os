@@ -23,7 +23,7 @@ spec:
       timeoutSeconds: 120
       containers:
         - name: api
-          image: asia-northeast1-docker.pkg.dev/realytics-api-pilot-20261103/pilot-api/api@sha256:05756f27d5a962d5b391c266bb4bb28b0f29a721f416e3fa4424b55e91a31dd5
+          image: asia-northeast1-docker.pkg.dev/realytics-api-pilot-20261103/pilot-api/api@sha256:21d2107fb8e10b8c6b37f6fbaf1b5662eaa2c09473b7ed85dc634bd576291cc6
           ports:
             - containerPort: 8000
           resources:

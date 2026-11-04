@@ -248,6 +248,27 @@ def test_downstream_reanalysis_failure_is_cached_without_reapplying_original(cli
     assert calls == [True]
 
 
+def test_reviewable_workbook_formula_failure_keeps_draft_and_validation_on_retry(client, store, monkeypatch):
+    transfer_id = stage(store, filename="review.xlsx")
+    digest = hashlib.sha256(b"test original bytes").hexdigest()
+    calls = []
+    draft = {
+        "validation": {"status": "failed", "sourceDocumentHash": digest},
+        "upload": {"archiveStored": True, "archiveId": digest},
+        "feasibilityStudyV2Draft": {"version": "realytics-feasibility-study-v2"},
+    }
+
+    async def validate(*_):
+        calls.append(True)
+        return draft
+
+    monkeypatch.setattr(projects, "validate_project_feasibility_workbook", validate)
+    path = f"/projects/p1/intake/transfers/{transfer_id}/process"
+    assert client.post(path, json={"documentType": "feasibility_workbook"}).json() == draft
+    assert client.post(path, json={"documentType": "feasibility_workbook"}).json() == draft
+    assert calls == [True]
+
+
 def test_long_local_root_and_uuid_scope_can_upload(tmp_path):
     store = IntakeTransferStore(LocalObjectStorage(tmp_path / ("long-local-root-" * 7)))
     scope = {"projectId": "a" * 36, "tenantId": "b" * 36, "principalId": "c" * 36}
