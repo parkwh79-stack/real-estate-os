@@ -49,7 +49,7 @@ def test_permit_review_requires_approved_source_located_parser_evidence():
         "project": {"id": project_id, "type": "mixed_use"},
         "land": {},
         "regulation": {},
-        "schedule": {},
+        "schedule": [{"key": "permit_approval", "planned_date": "2026-10"}],
     }
 
     missing = run_legal_pod_use_case(
@@ -61,6 +61,8 @@ def test_permit_review_requires_approved_source_located_parser_evidence():
     assert missing["parserStatus"] == "not_available"
     assert missing["verifiedEvidenceCount"] == 0
     assert missing["sourceLocators"] == []
+    assert missing["permitRouteReview"]["plannedDate"] == "2026-10"
+    assert missing["permitRouteReview"]["approvalEvidenceStatus"] == "missing"
 
     verified = run_legal_pod_use_case(
         project_id,
@@ -95,6 +97,36 @@ def test_permit_review_requires_approved_source_located_parser_evidence():
     assert verified["sourceLocators"][0]["sourceDocumentId"] == (
         "permit-document-1"
     )
+    assert verified["permitRouteReview"]["approvalEvidenceStatus"] == "source_review_required"
+    assert verified["permitRouteReview"]["approvalDocumentLocators"][0]["route"] == "building_permit"
+
+
+def test_officetel_approval_candidates_require_matching_document_type_and_source():
+    def document(kind, page=1, status="approved"):
+        return {
+            "documentType": kind,
+            "verificationStatus": status,
+            "sourceLocator": {"sourceDocumentId": kind, "pageNumber": page},
+        }
+
+    result = run_legal_pod_use_case(
+        "officetel-permit-review",
+        {"project": {"type": "오피스텔"}, "schedule": {"permit_approval": "2026-10"}},
+        {
+            "autoEnrichLand": False,
+            "parsedDocuments": [
+                document("building_permit_application"),
+                document("housing_business_plan_approval"),
+                document("building_permit", page=None),
+                document("building_permit", status="candidate"),
+            ],
+        },
+    )
+    review = result["permitReview"]["permitRouteReview"]
+    assert review["useClassification"] == "officetel"
+    assert [route["code"] for route in review["routes"]] == ["building_permit"]
+    assert review["approvalEvidenceStatus"] == "missing"
+    assert review["approvalDocumentLocators"] == []
 
 
 def test_legal_pod_persists_law_evidence_and_lifecycle_coverage(monkeypatch):
@@ -206,7 +238,7 @@ def test_law_reference_monitor_detects_effective_date_change():
     assert report["changed"][0]["changes"][0]["field"] == "effectiveDate"
 
 
-def test_legal_pod_inherits_representative_pnu_legal_dong_code_for_parcels():
+def test_legal_pod_does_not_infer_parcel_pnus_from_a_representative_pnu():
     result = run_legal_pod_use_case(
         "legal-pnu-fallback-test",
         {
@@ -224,7 +256,102 @@ def test_legal_pod_inherits_representative_pnu_legal_dong_code_for_parcels():
         {"lawContext": {"connected": True, "references": []}},
     )
     parcel_pnus = [row["pnu"] for row in result["legalReview"]["parcelLegalReviews"]]
-    assert parcel_pnus == ["5115034022100060000", "5115034022100090001"]
+    assert parcel_pnus == ["", ""]
+    diagnostics = result["legalReview"]["landEnrichment"]["diagnostics"]
+    assert [row["status"] for row in diagnostics] == ["skipped_missing_pnu", "skipped_missing_pnu"]
+
+
+def test_legal_pod_keeps_unmatched_parcel_separate_from_existing_pnu(monkeypatch):
+    pnu = "4146310300100130000"
+
+    def fetch(self, parcels, **kwargs):
+        assert [row["pnu"] for row in parcels] == [pnu]
+        return {"pnuResolutions": [{"pnu": pnu}], "status": "completed"}
+
+    monkeypatch.setattr(LandDataConnectorRouter, "fetch_records_for_parcels", fetch)
+    result = run_legal_pod_use_case("legal-pnu-lineage", {
+        "land_acquisition": [],
+        "land_ledger": {"parcels": [
+            {"parcelKey": "matched", "resolvedPnu": pnu},
+            {"parcelKey": "unmatched", "lotNumber": "13"},
+        ]},
+    })
+    rows = result["legalReview"]["parcelLegalReviews"]
+    assert [(row["parcelKey"], row["pnu"]) for row in rows] == [("matched", pnu), ("unmatched", "")]
+
+
+def test_land_rights_checks_ownership_share_per_parcel():
+    result = run_legal_pod_use_case("legal-ownership-lineage", {
+        "landLedger": {"parcels": [
+            {"parcelKey": "p1", "knownShareSum": 0.6},
+            {"parcelKey": "p2", "knownShareSum": 0.6},
+        ]},
+    }, {"autoEnrichLand": False})
+    rights = next(row for row in result["legalReview"]["checks"] if row["key"] == "land_rights")
+    assert rights["severity"] == "blocking"
+
+
+def test_legal_pod_preview_resolves_and_reviews_detached_parcel_without_writes(monkeypatch):
+    from copy import deepcopy
+    from integrations import vworld
+    from use_cases import legal_pod
+
+    pnu = "4146310300100130000"
+    project = {
+        "project": {"type": "officetel"},
+        "land": {"address": "경기도 용인시 기흥구 상갈동 13", "area_sqm": 1000},
+        "landLedger": {"parcels": [{
+            "lotNumber": "13",
+            "areaSqm": 1000,
+            "legalFar": 700,
+            "landUsePlanning": {"legalBcr": 85},
+        }]},
+    }
+    original = deepcopy(project)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Preview tried to retain a result")
+
+    for name in (
+        "upsert_deal_state_record", "upsert_legal_review_record",
+        "upsert_permit_review_record", "upsert_land_evidence_record",
+    ):
+        monkeypatch.setattr(legal_pod, name, forbidden)
+    monkeypatch.setattr(legal_pod, "vworld_configured", lambda: True)
+    monkeypatch.setattr(vworld, "resolve_legal_dong_code", lambda _address: pnu[:10])
+    monkeypatch.setattr(vworld, "fetch_parcel_by_pnu", lambda value: (
+        {"pnu": value, "jibun": "13"}, {"status": "resolved"},
+    ))
+
+    def land_lookup(_self, parcels, **_kwargs):
+        assert [parcel["pnu"] for parcel in parcels] == [pnu]
+        return {
+            "status": "completed",
+            "landUsePlanningRecords": [{
+                "pnu": pnu,
+                "zoning": "제2종일반주거지역",
+                "sourceUrlOrEvidenceId": "https://example.test/zoning",
+            }],
+            "regionLandPriceTrends": [{"regionCode": pnu[:10]}],
+        }
+
+    def law_lookup(_project, *, caller_context, preview):
+        assert preview is True
+        return {
+            "lawContext": {"references": [], "connected": False},
+            "legalIntelligence": {"references": []},
+        }
+
+    monkeypatch.setattr(LandDataConnectorRouter, "fetch_records_for_parcels", land_lookup)
+    monkeypatch.setattr(legal_pod, "resolve_project_legal_context", law_lookup)
+    result = run_legal_pod_use_case("legal-preview", project, persist=False)
+    assert result["previewOnly"] is True
+    assert result["legalReview"]["parcelLegalReviews"][0]["pnu"] == pnu
+    assert result["legalReview"]["developabilityAnalysis"]["zoning"] == "제2종일반주거지역"
+    rows = result["legalReview"]["developabilityAnalysis"]["areaLawTable"]
+    assert all(row["value"] is None for row in rows if row["field"] in {"법정 용적률", "법정 건폐율"})
+    assert result["legalReview"]["landEnrichment"]["previewParcelResolution"]["resolvedCount"] == 1
+    assert project == original
 
 
 def test_legal_pod_reads_legacy_land_ledger_container_and_preserves_all_rows():
@@ -502,3 +629,42 @@ def test_public_pnu_reuse_requires_verified_source_and_untampered_payload_hash()
     upsert_land_evidence_record("invalid-public-cache-source", tampered)
 
     assert list_reusable_public_land_evidence_records([unverified_pnu, tampered_pnu]) == []
+
+
+def test_legal_pod_distinguishes_planned_height_from_parcel_designation_clues():
+    project_id = "parcel-height-review"
+    pnu = "2729011700100040000"
+    upsert_land_evidence_record(project_id, {
+        "recordKey": f"land_use_planning:{pnu}",
+        "evidenceType": "land_use_planning",
+        "pnu": pnu,
+        "zoning": "제3종일반주거지역",
+        "landUseZones": ["지구단위계획구역", "고도지구"],
+        "landUsePlanItems": [
+            {"designationName": "지구단위계획구역", "conflictName": "접함"},
+        ],
+    })
+    project = {
+        "landLedger": {"parcels": [{
+            "pnu": pnu,
+            "lotNumber": "4",
+            "landUsePlanning": {"districtUnitPlan": "수기 계획 명칭"},
+        }]},
+        "regulation": {"plannedHeightM": 36, "maxHeightM": 30, "heightLimitVerified": True},
+    }
+
+    result = run_legal_pod_use_case(project_id, project, {"autoEnrichLand": False})
+
+    analysis = result["legalReview"]["developabilityAnalysis"]
+    height = analysis["heightReview"]
+    assert height["status"] == "needs_evidence"
+    assert height["jurisdictionCandidate"] == "대구광역시"
+    assert height["districtPlanNames"] == ["지구단위계획구역"]
+    assert height["parcelReviews"][0]["designationEvidence"][0]["relation"] == "접함"
+    assert height["parcelReviews"][0]["zoning"] == "제3종일반주거지역"
+    assert height["parcelReviews"][0]["sourceLocator"]["apiRowId"] == pnu
+    assert height["plannedHeightM"] == 36
+    assert height["candidateLimitM"] == 30
+    assert height["confirmedLimitM"] is None
+    assert not analysis["breaches"]
+    assert project["landLedger"]["parcels"][0]["landUsePlanning"] == {"districtUnitPlan": "수기 계획 명칭"}

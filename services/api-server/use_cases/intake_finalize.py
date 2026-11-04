@@ -92,6 +92,7 @@ def resolve_address_to_parcel(address: str, *, environ: Optional[Dict[str, str]]
         "lotNumber": props.get("jibun"),
         "landCategory": props.get("jimok") or props.get("dgm_nm"),
         "areaSqm": _to_float(props.get("parea") or props.get("area") or props.get("lndpcl_ar")),
+        "cadastralAddress": props.get("addr"),
         "addressFragment": props.get("addr") or props.get("jibun") or address,
         "geometry": geometry,
     }

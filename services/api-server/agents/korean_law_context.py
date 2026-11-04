@@ -5,6 +5,9 @@ from typing import Any, Dict, Iterator, List, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
+from agents.legal_height_review import ordinance_jurisdiction
+from agents.legal_permit_route import classify_permit_use
+
 
 REALYTICS_LAW_CONTEXT_VERSION = "realytics-law-context-v1"
 _SERVER_PROJECTION_TOKEN = object()
@@ -394,35 +397,64 @@ def normalize_law_context(
 
 
 def build_korean_law_mcp_query_plan(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    project = project_data.get("project", {})
-    regulation = project_data.get("regulation", {})
+    project = project_data.get("project")
+    project = project if isinstance(project, dict) else {}
+    regulation = project_data.get("regulation")
+    regulation = regulation if isinstance(regulation, dict) else {}
     project_type = str(project.get("type", "")).lower()
     zoning = regulation.get("zoning", "")
 
     queries = [
         {
             "tool": "search_law",
-            "query": "\uad6d\ud1a0\uc758 \uacc4\ud68d \ubc0f \uc774\uc6a9\uc5d0 \uad00\ud55c \ubc95\ub960 \uc6a9\ub3c4\uc9c0\uc5ed \uc6a9\uc801\ub960 \uac74\ud3d0\uc728",
-            "purpose": "Confirm zoning, FAR, and BCR statutory basis.",
+            "query": "국토의 계획 및 이용에 관한 법률",
+            "purpose": "용도지역·건폐율·용적률과 지구단위계획 제52조·제54조 검토",
         },
         {
-            "tool": "chain_procedure_detail",
-            # Project addresses and parcel identifiers are not needed to
-            # retrieve the generally applicable statutory procedure.
-            "query": "\uac74\ucd95\ubc95 \uac74\ucd95\ud5c8\uac00 \ucc29\uacf5 \uc0ac\uc6a9\uc2b9\uc778 \uc808\ucc28",
-            "purpose": "Confirm building permit, construction start, and use approval procedures.",
+            "tool": "search_law",
+            "query": "건축법",
+            "purpose": "제11조·제14조 인허가와 제60조·제61조 높이·일조 기준 검토",
         },
+    ]
+
+    use = classify_permit_use(project_data)
+    if use in {"housing", "mixed_use", "unknown"}:
+        queries.append({
+            "tool": "search_law",
+            "query": "주택법",
+            "purpose": "제15조 사업계획승인과 제19조 인허가 의제 검토",
+        })
+    if use in {"housing", "mixed_use", "officetel", "unknown"}:
+        queries.append({
+            "tool": "search_law",
+            "query": "주택법 시행령",
+            "purpose": "제4조 준주택 분류 검토" if use == "officetel" else "제27조 사업계획승인 규모와 예외 검토",
+        })
+    if jurisdiction := ordinance_jurisdiction(project_data):
+        queries.extend([
+            {
+                "tool": "search_ordinance",
+                "query": f"{jurisdiction} 도시계획 조례",
+                "purpose": "관할 용도지역·고도지구 등 적용 기준 후보 조회",
+            },
+            {
+                "tool": "search_ordinance",
+                "query": f"{jurisdiction} 건축 조례",
+                "purpose": "관할 가로구역 높이·일조 기준 후보 조회",
+            },
+        ])
+    queries.extend([
         {
             "tool": "search_law",
             "query": "\ubd80\ub3d9\uc0b0\uac1c\ubc1c\uc5c5\uc758 \uad00\ub9ac \ubc0f \uc721\uc131\uc5d0 \uad00\ud55c \ubc95\ub960 \uac1c\ubc1c\uc0ac\uc5c5",
             "purpose": "Confirm developer registration and project-level regulatory basis.",
         },
         {
-            "tool": "verify_citations",
-            "query": "\uad6d\ud1a0\uc758 \uacc4\ud68d \ubc0f \uc774\uc6a9\uc5d0 \uad00\ud55c \ubc95\ub960, \uac74\ucd95\ubc95, \uc2e0\ud0c1\ubc95, \ubd80\ub3d9\uc0b0\uac1c\ubc1c\uc5c5\uc758 \uad00\ub9ac \ubc0f \uc721\uc131\uc5d0 \uad00\ud55c \ubc95\ub960",
-            "purpose": "Verify statute names and citation availability before report issuance.",
+            "tool": "search_law",
+            "query": "신탁법",
+            "purpose": "Confirm real estate trust, beneficial interest, and security trust basis.",
         },
-    ]
+    ])
 
     if zoning:
         queries.append({
@@ -444,12 +476,6 @@ def build_korean_law_mcp_query_plan(project_data: Dict[str, Any]) -> List[Dict[s
                 "purpose": "Confirm sale notice and advertisement rules for non-housing saleable assets.",
             },
         ])
-
-    queries.append({
-        "tool": "search_law",
-        "query": "\uc2e0\ud0c1\ubc95 \ubd80\ub3d9\uc0b0\uc2e0\ud0c1 \uc6b0\uc120\uc218\uc775\uad8c \ub2f4\ubcf4\uc2e0\ud0c1",
-        "purpose": "Confirm real estate trust, beneficial interest, and security trust basis.",
-    })
 
     queries.append({
         "tool": "law_change_history",

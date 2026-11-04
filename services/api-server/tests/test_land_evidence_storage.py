@@ -114,7 +114,11 @@ def test_land_ledger_enrich_can_persist_land_evidence_records():
                 ]
             },
             "options": {
-                "legalDongCode": "2729011700",
+                "pnuResolutions": [{
+                    "pnu": "2729011700101230004",
+                    "sequence": 1,
+                    "matchConfidence": 0.95,
+                }],
                 "officialLandPrices": [
                     {
                         "pnu": "2729011700101230004",
@@ -147,7 +151,7 @@ def test_land_ledger_enrich_can_persist_land_evidence_records():
     assert any(record["evidenceType"] == "official_land_price" for record in listed.json()["records"])
 
 
-def test_land_ledger_enrich_derives_legal_dong_code_from_project_pnu():
+def test_land_ledger_enrich_does_not_promote_representative_dong_to_parcel_pnu():
     client = TestClient(app)
     created = client.post("/projects/", json={"project": {"name": "Auto PNU ledger test"}})
     assert created.status_code == 200
@@ -179,15 +183,16 @@ def test_land_ledger_enrich_derives_legal_dong_code_from_project_pnu():
                     }
                 ]
             },
-            "options": {"mode": "unit_test_auto_project_pnu"},
+            "options": {"mode": "unit_test_auto_project_pnu", "legalDongCode": "2729011700"},
         },
     )
 
     assert enriched.status_code == 200
     body = enriched.json()
     parcel = body["landLedger"]["parcels"][0]
-    assert parcel["pnu"] == "2729011700101230004"
-    assert body["persistedLandEvidenceCount"] >= 1
+    assert not parcel.get("pnu")
+    assert parcel["pnuCandidate"] == "2729011700101230004"
+    assert body["persistedLandEvidenceCount"] == 0
 
     listed = client.get(
         f"/projects/{project_id}/land-evidence",
@@ -195,7 +200,7 @@ def test_land_ledger_enrich_derives_legal_dong_code_from_project_pnu():
         params={"pnu": "2729011700101230004"},
     )
     assert listed.status_code == 200
-    assert any(record["evidenceType"] == "pnu_resolution" for record in listed.json()["records"])
+    assert listed.json()["records"] == []
 
 
 def test_land_ledger_enrich_resolves_pnu_from_vworld_address_lookup(monkeypatch):
@@ -330,7 +335,7 @@ def test_pf_review_run_consumes_persisted_land_evidence():
         json={
             "project": {"name": "Land Evidence Orchestration Test", "type": "mixed_use"},
             "land": {"address": "Daegu Bonri-dong", "area_sqm": 100},
-            "land_acquisition": [{"area_sqm": 100, "share": 1.0}],
+            "land_acquisition": [{"pnu": "2729011700101230004", "area_sqm": 100, "share": 1.0}],
             "feasibility_input": {"total_revenue": 200000000000, "total_cost": 150000000000},
             "pf_structure": [{"name": "Senior", "amount": 50000000000, "priority": 1}],
         },

@@ -26,7 +26,7 @@ from legal_intelligence.models import (
     build_attestation,
 )
 from legal_intelligence.orchestrator import LegalIntelligenceOrchestrator
-from legal_intelligence.search import InMemoryVerifiedSnapshotProvider
+from legal_intelligence.search import InMemoryVerifiedSnapshotProvider, LegalSnapshot
 from use_cases.legal_intelligence import (
     LegalIntelligenceService,
     UnavailableLegalProvider,
@@ -295,6 +295,56 @@ def test_project_resolution_blocks_direct_official_external_egress():
         intelligence["candidateReferences"][0]["contentHash"]
         .startswith("sha256:")
     )
+
+
+def test_project_ordinance_lookup_uses_exact_title_and_effective_date():
+    title = "대구광역시 건축 조례"
+    snapshots = tuple(
+        LegalSnapshot(
+            resource_kind=LegalResourceKind.LOCAL_ORDINANCE,
+            official_resource_id="ordinance:" + suffix,
+            official_version_id=suffix,
+            title=record_title,
+            content={
+                "resourceId": "legal-resource:ordinance:" + suffix,
+                "sourceFetchId": "legal-source-fetch:ordinance:" + suffix,
+                "normalizedContentSha256": "sha256:" + "a" * 64,
+                "officialText": "가로구역별 건축물 높이제한",
+            },
+            locator="https://www.law.go.kr/ordinInfoP.do?ordinSeq=" + suffix,
+            source_authority=SourceAuthority.LOCAL_GOVERNMENT,
+            effective_from=effective_from,
+            fetched_at=NOW,
+            verified_at=NOW,
+        )
+        for suffix, record_title, effective_from in (
+            ("current", title, date(2026, 7, 1)),
+            ("future", title, date(2026, 11, 12)),
+            ("other", "대구광역시 군위군 건축 조례", date(2026, 7, 1)),
+        )
+    )
+    local = InMemoryVerifiedSnapshotProvider(
+        snapshots, coverage_complete=False, fresh_until=None,
+    )
+    service = LegalIntelligenceService(
+        orchestrator=LegalIntelligenceOrchestrator(
+            local_provider=local,
+            official_provider=StaticProvider(
+                provider_id="official", transport=SourceTransport.LAW_GO_KR_DIRECT_API,
+            ),
+        ),
+        local_provider=local,
+    )
+    resolution = resolve_project_legal_context(
+        {"landLedger": {"parcels": [{"pnu": "2729011700100040000"}]}},
+        service=service,
+        as_of=date(2026, 11, 4),
+    )
+
+    references = resolution["legalIntelligence"]["references"]
+    assert [reference["lawId"] for reference in references] == ["ordinance:current"]
+    assert references[0]["claimContexts"][0]["tool"] == "search_ordinance"
+    assert references[0]["requestedAsOfDate"] == "2026-11-04"
 
 
 def test_search_serialization_matches_web_contract():

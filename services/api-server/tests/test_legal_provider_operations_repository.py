@@ -305,3 +305,34 @@ def test_runtime_does_not_construct_operations_sink_without_dedicated_dsn(
     )
 
     assert service.local_provider is provider
+
+
+def test_project_preview_reads_legal_corpus_without_durable_provider_operations(monkeypatch):
+    queries = []
+
+    class ReadOnlyProvider:
+        provider_id = "local"
+        transport = SourceTransport.LOCAL_VERIFIED_SNAPSHOT
+
+        def search(self, query):
+            queries.append(query)
+            return ProviderResult(
+                provider_id=self.provider_id,
+                status=ProviderStatus.NO_MATCH,
+                transport=self.transport,
+            )
+
+    def unexpected_repository():
+        raise AssertionError("a preview must use no durable legal operation repositories")
+
+    monkeypatch.setattr(legal_runtime, "postgres_configured", lambda: True)
+    monkeypatch.setattr(legal_runtime, "legal_operations_database_configured", lambda **_: True)
+    monkeypatch.setattr(legal_runtime, "PostgresLegalProviderOperationsSink", unexpected_repository)
+    monkeypatch.setattr(legal_runtime, "PostgresLegalQueryRunRepository", unexpected_repository)
+    monkeypatch.setattr(legal_runtime, "PostgresVerifiedLegalSnapshotProvider", ReadOnlyProvider)
+
+    result = legal_runtime.resolve_project_legal_context({}, max_queries=1, preview=True)
+
+    assert len(queries) == 1
+    assert queries[0].data_classification == DataClassification.PROJECT_CONFIDENTIAL
+    assert result["legalIntelligence"]["providerTrace"][0]["providerId"] == "local"

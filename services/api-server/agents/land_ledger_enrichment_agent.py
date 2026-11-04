@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from agents.land_ledger_agent import CURRENT_OFFICIAL_PRICE_BASE_YEAR, DEFAULT_PNU_CONFIDENCE_THRESHOLD
 from integrations.land_data_connectors import LandDataConnectorRouter
+from use_cases.parcel_pnu_resolution import parcel_pnu
 
 
 LAND_LEDGER_ENRICHMENT_AGENT_VERSION = "land-ledger-enrichment-agent-v1.0"
@@ -25,8 +26,7 @@ class LandLedgerEnrichmentAgent:
         parcels = analysis.get("parcels", [])
         if options.get("useLiveConnectors") or options.get("use_live_connectors"):
             live_connector_result = LandDataConnectorRouter().fetch_records_for_parcels(
-                parcels,
-                legal_dong_code=legal_dong_code,
+                [{**parcel, "pnu": pnu} for parcel in parcels if (pnu := parcel_pnu(parcel))],
                 base_year=options.get("baseYear") or options.get("base_year") or CURRENT_OFFICIAL_PRICE_BASE_YEAR,
                 timeout_seconds=float(options.get("connectorTimeoutSeconds") or options.get("connector_timeout_seconds") or 8.0),
             )
@@ -123,14 +123,16 @@ class LandLedgerEnrichmentAgent:
         }
 
         pnu_record = _lookup_record(pnu_records, parcel)
-        if pnu_record:
+        if pnu_record and pnu_record.get("matchMethod") != "legal_dong_code_and_normalized_lot":
             self._apply_pnu_record(parcel, pnu_record)
+            result["pnuResolved"] = True
+        elif parcel_pnu(parcel):
             result["pnuResolved"] = True
         elif legal_dong_code:
             generated = _generate_pnu(parcel, legal_dong_code)
             if generated:
-                self._apply_pnu_record(parcel, generated)
-                result["pnuResolved"] = True
+                parcel["pnuCandidate"] = generated["pnu"]
+                result["issues"].append(_issue("pnu_candidate_unverified", "blocking_for_enrichment", "A legal dong code and lot form a candidate PNU; verify the cadastral parcel before attaching evidence."))
             else:
                 result["issues"].append(_issue("pnu_generation_failed", "blocking_for_enrichment", "PNU could not be generated from legal dong and lot number."))
         elif not parcel.get("pnu"):
@@ -183,6 +185,7 @@ class LandLedgerEnrichmentAgent:
         confidence = record.get("matchConfidence") or record.get("confidence") or record.get("pnuResolveConfidence")
         parcel["pnu"] = pnu
         parcel["resolvedPnu"] = pnu
+        parcel.pop("pnuCandidate", None)
         parcel["resolvedLegalAddress"] = record.get("resolvedLegalAddress") or record.get("legalAddress") or parcel.get("addressFragment")
         parcel["pnuMatchMethod"] = record.get("matchMethod") or record.get("pnuMatchMethod") or "manual_or_legal_dong_lot_match"
         parcel["pnuCandidateCount"] = record.get("candidateCount") or record.get("pnuCandidateCount") or 1
@@ -231,6 +234,7 @@ class LandLedgerEnrichmentAgent:
         parcel.setdefault("evidence", []).append(_evidence("official_land_price", record, parcel))
 
     def _apply_land_use_record(self, parcel: Dict[str, Any], record: Dict[str, Any]) -> None:
+        evidence = _evidence("land_use_planning", record, parcel)
         parcel["landUsePlanning"] = {
             "pnu": record.get("pnu") or parcel.get("pnu"),
             "zoning": record.get("zoning"),
@@ -238,15 +242,21 @@ class LandLedgerEnrichmentAgent:
             "legalFar": record.get("legalFar"),
             "legalBcr": record.get("legalBcr"),
             "districtUnitPlan": record.get("districtUnitPlan"),
+            "landUsePlanItems": record.get("landUsePlanItems", []),
             "coverage": record.get("coverage"),
             "missingFields": record.get("missingFields", []),
             "sourceName": record.get("sourceName"),
             "sourceUrlOrEvidenceId": record.get("sourceUrlOrEvidenceId") or record.get("evidenceId"),
+            "sourceLocator": record.get("sourceLocator") or {
+                "sourceType": "land_use_planning_record",
+                "evidenceId": evidence["evidenceId"],
+                "apiRowId": record.get("pnu"),
+            },
             "baseDate": record.get("baseDate"),
             "fetchedAt": record.get("fetchedAt"),
             "recordedAt": _now(),
         }
-        parcel.setdefault("evidence", []).append(_evidence("land_use_planning", record, parcel))
+        parcel.setdefault("evidence", []).append(evidence)
 
     def _apply_building_use_record(self, parcel: Dict[str, Any], record: Dict[str, Any]) -> None:
         parcel.setdefault("buildingUseRecords", []).append({

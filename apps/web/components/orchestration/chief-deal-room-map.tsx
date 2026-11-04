@@ -27,6 +27,7 @@ import { apiBase, authHeaders } from "../../lib/auth-client";
 import { isNormalizedLegalEvidenceApprovalEligible } from "../../lib/legal-approval-readiness";
 import { LegalIntelligencePanel } from "../legal/legal-intelligence-panel";
 import { LegalGovernanceWorkspace } from "../legal/legal-governance-workspace";
+import { PermitHeightReview, type PermitHeightAnalysis } from "./permit-height-review";
 import {
   getStoredWorkflowTrack,
   getTrackWorkflowDefinition,
@@ -110,6 +111,7 @@ interface PodAIReview {
 }
 
 interface LegalPodRun {
+  previewOnly?: boolean;
   legalReview?: {
     reviewId?: string;
     status?: string;
@@ -138,7 +140,7 @@ interface LegalPodRun {
     checks?: Array<{ title?: string; severity?: string; findings?: string[] }>;
     parcelLegalReviews?: Array<{ status?: string; pnu?: string; encumbrancePresent?: boolean }>;
     pfHandoff?: { reviewStatus?: string; requiresHumanReview?: boolean };
-    developabilityAnalysis?: {
+    developabilityAnalysis?: PermitHeightAnalysis & {
       status?: string;
       zoning?: string;
       areaLawTable?: Array<{ field?: string; value?: unknown; unit?: string; legalBasis?: string }>;
@@ -658,21 +660,20 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const runLegalPod = useCallback(async () => {
     setLegalPodRunning(true);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/legal-pod/run`, {
+      const res = await fetch(`${apiBase}/projects/${projectId}/legal-pod/preview`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders("web") },
-        body: JSON.stringify({}),
+        cache: "no-store",
+        headers: authHeaders("web"),
       });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(cleanText(body?.detail, "Legal Pod 실행에 실패했습니다."));
+      if (!res.ok || body.previewOnly !== true) throw new Error(cleanText(body?.detail, "법무 미리보기에 실패했습니다."));
       setLegalPodRun(body);
-      await loadLegalPod();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Legal Pod 실행 중 오류가 발생했습니다.");
     } finally {
       setLegalPodRunning(false);
     }
-  }, [loadLegalPod, projectId]);
+  }, [projectId]);
 
   const loadPlan = useCallback(async () => {
     setLoading(true);
@@ -1040,7 +1041,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
                 <div>
                   <p className="text-sm font-black text-sky-950 dark:text-sky-100">오케스트레이터 전체 자동 실행</p>
                   <p className="mt-1 text-xs font-semibold leading-5 text-sky-800 dark:text-sky-200">
-                    트랙별 Task Graph 순서대로 Pod를 실행합니다. 막히는 Pod는 VWorld, 국토부 실거래가 등 합법적 소스에서 먼저 자동 보강을 시도하고, 그래도 부족한 항목만 blocker로 남깁니다.
+                    정식 심사에서 트랙별 Task Graph 순서대로 Pod를 실행하고 심사 이력을 기록합니다. 토지·인허가만 화면에서 확인하려면 법무 미리보기를 사용하세요.
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
@@ -1180,7 +1181,7 @@ function LegalPodPanel({
   onDecisionSaved: () => Promise<void>;
 }) {
   const review = run?.legalReview;
-  const reviewId = review?.reviewId;
+  const reviewId = run?.previewOnly ? undefined : review?.reviewId;
   const checks = review?.checks ?? [];
   const parcels = review?.parcelLegalReviews ?? [];
   const unresolvedParcels = parcels.filter((parcel) => parcel.status === "needs_review").length;
@@ -1337,11 +1338,11 @@ function LegalPodPanel({
         <div>
           <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-700 dark:text-violet-300">Legal Pod</p>
           <h2 className="mt-1 text-lg font-black text-slate-950 dark:text-white">법무·인허가 검토 및 PF handoff</h2>
-          <p className="mt-1 text-xs font-semibold text-slate-600 dark:text-slate-300">토지 증빙, 인허가, 법령·계약서 근거를 검토하고 PF-Credit Pod에 전달합니다.</p>
+          <p className="mt-1 text-xs font-semibold text-slate-600 dark:text-slate-300">토지 증빙과 인허가 경로를 화면에서 확인합니다. 선택 항목 보관은 <Link href={`/project/${projectId}/land`} className="underline">토지 화면</Link>에서 할 수 있습니다.</p>
         </div>
         <button type="button" onClick={onRun} disabled={running} className="inline-flex h-9 items-center gap-2 rounded-lg bg-violet-700 px-3 text-sm font-black text-white hover:bg-violet-800 disabled:opacity-50">
           {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scale className="h-4 w-4" />}
-          {running ? "법무 검토 실행 중" : "법무 Pod 실행"}
+          {running ? "법무 미리보기 실행 중" : "법무 미리보기"}
         </button>
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-2">
@@ -1512,7 +1513,7 @@ function LegalPodPanel({
         </div>
       ) : (
         <p className="mt-3 rounded-md border border-slate-200 bg-white/80 px-3 py-2 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-300">
-          Legal Pod 실행 후 review ID가 생성되면 담당자 결정을 기록할 수 있습니다.
+          {run?.previewOnly ? "화면 전용 예비 검토입니다. 새로고침하면 사라집니다." : "담당자 결정은 기존 정식 심사 기록에 남길 수 있습니다."}
         </p>
       )}
       {review?.mcp?.failureReason ? <p className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">검증 법률 근거 미확보 사유: {review.mcp.failureReason}</p> : null}
@@ -1534,8 +1535,9 @@ function LegalPodPanel({
         <div className="mt-2 overflow-x-auto"><table className="min-w-full text-left text-[11px]"><thead><tr className="border-b border-violet-100"><th className="px-2 py-1">항목</th><th className="px-2 py-1">값</th><th className="px-2 py-1">법적 기준</th></tr></thead><tbody>{(developability.areaLawTable ?? []).map((row) => <tr key={row.field} className="border-b border-violet-50 last:border-0"><td className="px-2 py-1 font-bold">{row.field}</td><td className="px-2 py-1">{row.value == null ? "미확인" : `${String(row.value)}${row.unit ?? ""}`}</td><td className="px-2 py-1 text-slate-500">{row.legalBasis}</td></tr>)}</tbody></table></div>
         {(developability.breaches?.length || developability.conditionalFindings?.length || developability.missingRequiredInputs?.length) ? <div className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-xs font-semibold text-amber-900">{[...(developability.breaches ?? []), ...(developability.conditionalFindings ?? []), ...(developability.missingRequiredInputs ?? [])].slice(0, 4).join(" / ")}</div> : null}
         <div className="mt-2 flex flex-wrap gap-1">{(developability.lawSources ?? []).slice(0, 5).map((source) => <a key={`${source.name}-${source.url}`} href={source.url ?? "#"} target="_blank" rel="noreferrer" className="rounded-full border border-violet-200 px-2 py-1 text-[10px] font-bold text-violet-800 hover:bg-violet-100">{source.name ?? "법령 출처"}</a>)}</div>
+        <div className="mt-3"><PermitHeightReview analysis={developability} /></div>
       </div> : null}
-      {review?.pfHandoff ? <p className="mt-3 text-xs font-black text-violet-800 dark:text-violet-200">PF-Credit handoff: {review.pfHandoff.reviewStatus ?? "pending"} · {review.pfHandoff.requiresHumanReview ? "사람 검토 필요" : "자동 전달 가능"}</p> : null}
+      {!run?.previewOnly && review?.pfHandoff ? <p className="mt-3 text-xs font-black text-violet-800 dark:text-violet-200">PF-Credit handoff: {review.pfHandoff.reviewStatus ?? "pending"} · {review.pfHandoff.requiresHumanReview ? "사람 검토 필요" : "자동 전달 가능"}</p> : null}
     </section>
   );
 }

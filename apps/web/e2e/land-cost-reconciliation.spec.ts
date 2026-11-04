@@ -2,11 +2,29 @@ import { expect, test, type Page } from "@playwright/test";
 
 const projectId = "synthetic-land-reconciliation";
 
-async function fixture(page: Page, options: { purchase?: number | null; legacy?: boolean; failure?: number; staleReview?: boolean } = {}) {
+async function fixture(page: Page, options: { purchase?: number | null; legacy?: boolean; failure?: number; staleReview?: boolean; legalReview?: boolean } = {}) {
   const purchase = options.purchase === undefined ? 42_000_000_000 : options.purchase;
   const source = (cell: string) => ({ source_document: "합성 수지.xlsx", sheet_name: "사업수지", cell });
   const writes: string[] = [];
   let review: Record<string, unknown> = options.staleReview ? { comment: "이전 계약 확인 메모", comparisonHash: "old-source" } : {};
+  let legalSummary: Record<string, unknown> | null = null;
+  const legalReview = {
+    reviewId: "synthetic-legal-review",
+    developabilityAnalysis: {
+      permitRouteReview: {
+        useClassification: "mixed_use",
+        plannedDate: "2028-06-01",
+        routes: [{ code: "housing", label: "주택건설사업계획승인" }, { code: "building", label: "건축허가·신고" }],
+        approvalEvidenceStatus: "missing",
+      },
+      heightReview: {
+        plannedHeightM: 81.5,
+        candidateLimitM: 100,
+        confirmedLimitM: null,
+        parcelReviews: [{ parcelIndex: 1, pnu: "1111010100100010000", districtUnitPlan: "합성 지구단위계획구역", sourceLocator: { apiRowId: "parcel-1" } }],
+      },
+    },
+  };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/\/$/, "");
@@ -18,6 +36,19 @@ async function fixture(page: Page, options: { purchase?: number | null; legacy?:
       permissions: ["project:read", "project:write", "project:review"],
     };
     else if (path.endsWith("/projects")) body = [{ project: { id: projectId, name: "합성 토지 대사" } }];
+    else if (path.endsWith("/legal-pod/preview") && options.legalReview) {
+      expect(request.method()).toBe("POST");
+      body = { legalReview, previewOnly: true, previewHash: "b".repeat(64) };
+    }
+    else if (path.endsWith("/legal-pod/preview-summary") && options.legalReview) {
+      if (request.method() === "POST") {
+        expect(request.postDataJSON()).toEqual({ sections: ["permit"], parcelIndexes: [], expectedPreviewHash: "b".repeat(64) });
+        legalSummary = { recordId: "synthetic-summary", summary: { permit: legalReview.developabilityAnalysis.permitRouteReview } };
+        body = legalSummary;
+      } else {
+        body = { items: legalSummary ? [legalSummary] : [] };
+      }
+    }
     else if (path.endsWith("/land-cost-review") && request.method() === "PUT") {
       if (options.failure) { await route.fulfill({ status: options.failure, json: { detail: "저장하지 못했습니다. 자료와 권한을 확인하세요." } }); return; }
       const submitted = request.postDataJSON() as { comment: string; expectedComparisonHash: string };
@@ -61,6 +92,36 @@ async function fixture(page: Page, options: { purchase?: number | null; legacy?:
   await expect(page.getByRole("heading", { name: "계약·수지 금액 대사" })).toBeVisible();
   return writes;
 }
+
+test("preview clears on reload and explicit selection saves only the permit summary", async ({ page }) => {
+  const writes = await fixture(page, { legalReview: true });
+  const launch = page.getByRole("button", { name: "토지·인허가 미리보기" });
+  const panel = page.locator("section").filter({ has: page.getByRole("heading", { name: "토지·인허가 검토", exact: true }) });
+  await launch.click();
+  await expect(panel.getByText("주택건설사업계획승인")).toBeVisible();
+  await expect(panel.getByText("건축허가·신고")).toBeVisible();
+  await expect(panel.getByText("발급된 승인·허가 문서 미확인")).toBeVisible();
+  await expect(panel.getByText("확인된 허용 높이").locator("..")).toContainText("미확인");
+  await expect(panel.getByText("검증 대기 높이 기준").locator("..")).toContainText("100m");
+  await expect(panel.getByText("계획 높이", { exact: true }).locator("..")).toContainText("약 82m");
+  await panel.getByText("필지별 지구단위계획 근거 1건").click();
+  await expect(panel.getByRole("cell", { name: "합성 지구단위계획구역" })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "선택 항목만 저장" })).toBeDisabled();
+  await page.reload();
+  await expect(panel.getByText("주택건설사업계획승인")).toHaveCount(0);
+  expect(writes.map((path) => path.split("/").at(-1))).toEqual(["preview"]);
+
+  await launch.click();
+  await panel.getByRole("checkbox", { name: "인허가 경로" }).check();
+  await panel.getByRole("button", { name: "선택 항목만 저장" }).click();
+  await expect(panel.getByText("저장한 예비 검토 1")).toBeVisible();
+  await page.reload();
+  await panel.getByRole("button", { name: "저장한 요약 보기" }).click();
+  await panel.getByText("저장한 예비 검토 1").click();
+  await expect(panel.getByText("주택건설사업계획승인")).toBeVisible();
+  await expect(panel.getByText("확인된 허용 높이")).toHaveCount(0);
+  expect(writes.map((path) => path.split("/").at(-1))).toEqual(["preview", "preview", "preview-summary"]);
+});
 
 test("reopen saved contract and budget scopes without allocating or approving values", async ({ page }) => {
   const writes = await fixture(page);

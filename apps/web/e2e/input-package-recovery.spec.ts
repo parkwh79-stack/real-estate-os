@@ -95,8 +95,9 @@ test("partial or omitted sections do not become zero issues or a reassuring empt
   await expect(issues.locator("dd")).toHaveText("미확인");
   await expect(inputPage.getByRole("region", { name: "자료 분류와 처리" })).toBeVisible();
   await expect(inputPage.getByRole("region", { name: "사업수지 입력 검토" })).toBeVisible();
-  for (const label of ["자료 보완 계획 생성", "PNU 일괄 해석", "Land-Legal Pod", "Market-Product Pod", "Feasibility-CF Pod"]) {
+  for (const label of ["자료 보완 계획 생성", "PNU 일괄 해석", "Market-Product Pod", "Feasibility-CF Pod"]) {
     await expect(inputPage.getByRole("button", { name: label, exact: true })).toBeDisabled();
   }
+  await expect(inputPage.getByRole("link", { name: "토지·인허가 미리보기", exact: true })).toBeVisible();
   await expect(inputPage.getByRole("button", { name: "추가 자료 파일 선택", exact: true })).toHaveAttribute("aria-disabled", "false");
 });

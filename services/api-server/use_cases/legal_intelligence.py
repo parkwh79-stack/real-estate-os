@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from agents.korean_law_context import (
@@ -169,11 +169,13 @@ def build_legal_intelligence_service(
     local_provider: ProviderProtocol | None = None,
     official_provider: ProviderProtocol | None = None,
     provider_operations_sink: LegalProviderOperationsSink | None = None,
+    retain_provider_operations: bool = True,
 ) -> LegalIntelligenceService:
     env = os.environ if environ is None else environ
-    operations_sink = provider_operations_sink
+    operations_sink = provider_operations_sink if retain_provider_operations else None
     if (
-        operations_sink is None
+        retain_provider_operations
+        and operations_sink is None
         and postgres_configured()
         and legal_operations_database_configured(environ=env)
     ):
@@ -312,7 +314,7 @@ def build_legal_intelligence_service(
         local_provider=local_provider,
         query_run_repository=(
             PostgresLegalQueryRunRepository()
-            if postgres_configured()
+            if retain_provider_operations and postgres_configured()
             else None
         ),
     )
@@ -650,10 +652,15 @@ def resolve_project_legal_context(
     as_of: date | None = None,
     service: LegalIntelligenceService | None = None,
     max_queries: int | None = None,
+    preview: bool = False,
 ) -> dict[str, Any]:
-    """Resolve a project query plan without trusting caller-supplied context."""
+    """Resolve project law sources, with a read-only runtime for previews."""
 
-    runtime = service or build_legal_intelligence_service()
+    if preview and service is not None:
+        raise ValueError("Preview requires the read-only legal intelligence runtime.")
+    runtime = service or build_legal_intelligence_service(
+        retain_provider_operations=not preview,
+    )
     query_plan = build_korean_law_mcp_query_plan(dict(project_data))
     unique_queries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -676,18 +683,34 @@ def resolve_project_legal_context(
         tuple[str, str | None, str],
         list[dict[str, str]],
     ] = {}
-    basis_date = as_of or date.today()
+    basis_date = as_of or datetime.now(timezone(timedelta(hours=9))).date()
     for index, plan_item in enumerate(unique_queries):
+        query = str(plan_item["query"])
+        resource_kind = (
+            LegalResourceKind.LOCAL_ORDINANCE
+            if plan_item.get("tool") == "search_ordinance"
+            else LegalResourceKind.STATUTE
+        )
         response = runtime.search(
-            query=str(plan_item["query"]),
-            resource_kinds=(LegalResourceKind.STATUTE,),
+            query=query,
+            resource_kinds=(resource_kind,),
             as_of=basis_date,
             limit=5,
             data_classification=DataClassification.PROJECT_CONFIDENTIAL,
             caller_context=caller_context if index == 0 else None,
         )
-        authoritative.extend(response.authoritative_hits)
+        candidates.extend(
+            hit for hit in response.candidate_hits
+            if resource_kind != LegalResourceKind.LOCAL_ORDINANCE
+            or _matches_project_ordinance_title(hit, query)
+        )
         for hit in response.authoritative_hits:
+            if resource_kind == LegalResourceKind.LOCAL_ORDINANCE and (
+                not _matches_project_ordinance_title(hit, query)
+                or hit.attestation.requested_as_of_date != basis_date
+            ):
+                continue
+            authoritative.append(hit)
             context = {
                 "tool": str(plan_item.get("tool") or "search_law"),
                 "query": str(plan_item.get("query") or ""),
@@ -699,7 +722,6 @@ def resolve_project_legal_context(
             contexts = claim_contexts.setdefault(_hit_identity(hit), [])
             if context not in contexts:
                 contexts.append(context)
-        candidates.extend(response.candidate_hits)
         traces.extend(response.provider_trace)
 
     authoritative = _dedupe_hits(authoritative)
@@ -1019,6 +1041,14 @@ def _provider_payload(result: ProviderResult) -> dict[str, Any]:
             for item in result.diagnostics
         ],
     }
+
+
+def _matches_project_ordinance_title(hit: SearchHit, title: str) -> bool:
+    # Broad search may include ordinances of another jurisdiction or subject.
+    return (
+        hit.attestation.resource_kind == LegalResourceKind.LOCAL_ORDINANCE
+        and "".join(hit.title.split()) == "".join(title.split())
+    )
 
 
 def _legacy_reference(hit: SearchHit) -> dict[str, Any]:

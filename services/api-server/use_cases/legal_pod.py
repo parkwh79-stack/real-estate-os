@@ -11,21 +11,26 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable
 from uuid import uuid4
 
+from agents.legal_permit_route import approval_document_route
 from agents.legal_review_agent import LegalReviewAgent
 # Deprecated compatibility symbol retained for integrations/tests that still
 # patch it. Legal Pod no longer trusts or invokes this function directly.
 from integrations.korean_law_mcp import run_korean_law_mcp  # noqa: F401
 from integrations.land_data_connectors import LandDataConnectorRouter
+from integrations.vworld import vworld_configured
 from domains.feasibility.regulatory import build_preliminary_buildable_envelope
 from use_cases.development_process import get_development_process
 from use_cases.legal_intelligence import resolve_project_legal_context
 from use_cases.legal_law_monitor import compare_law_references
+from use_cases.parcel_pnu_resolution import canonical_project_parcel_rows, parcel_pnu, resolve_parcel_rows
 from storage import (
     list_deal_state_records,
     list_land_evidence_records,
     list_reusable_public_land_evidence_records,
     public_land_evidence_payload_hash,
+    storage_backend,
     upsert_deal_state_record,
+    upsert_land_evidence_record,
     upsert_legal_review_record,
     upsert_permit_review_record,
 )
@@ -115,7 +120,9 @@ def _verified_permit_document_evidence(
                 "taxonomyKey",
             )
         )
-        if not any(token in classification for token in _PERMIT_DOCUMENT_TOKENS):
+        if not approval_document_route(document) and not any(
+            token in classification for token in _PERMIT_DOCUMENT_TOKENS
+        ):
             continue
         verification_status = str(
             document.get("verificationStatus")
@@ -210,28 +217,10 @@ def _reusable_public_record(item: Dict[str, Any], evidence_type: str) -> Dict[st
 
 
 def _parcel_source_rows(project_data: Dict[str, Any]) -> list[Dict[str, Any]]:
-    """Return the canonical parcel rows regardless of legacy container shape."""
-    land = project_data.get("land") if isinstance(project_data.get("land"), dict) else {}
-    candidates = (
-        project_data.get("land_acquisition"),
-        project_data.get("landLedger"),
-        land.get("parcels"),
-        land.get("landLedger"),
-    )
-    for candidate in candidates:
-        if isinstance(candidate, list):
-            return [item for item in candidate if isinstance(item, dict)]
-        if isinstance(candidate, dict):
-            for key in ("parcels", "rows", "landLedger", "items"):
-                rows = candidate.get(key)
-                if isinstance(rows, list):
-                    return [item for item in rows if isinstance(item, dict)]
-    return []
+    return canonical_project_parcel_rows(project_data)
 
 
-def _parcel_rows(project_id: str, project_data: Dict[str, Any]) -> list[Dict[str, Any]]:
-    parcels = _parcel_source_rows(project_data)
-    persisted = list_land_evidence_records(str(project_id))
+def _parcel_rows(parcels: list[Dict[str, Any]], persisted: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
     by_pnu: Dict[str, list[Dict[str, Any]]] = {}
     for item in persisted:
         if item.get("pnu"):
@@ -240,7 +229,7 @@ def _parcel_rows(project_id: str, project_data: Dict[str, Any]) -> list[Dict[str
     for index, parcel in enumerate(parcels):
         if not isinstance(parcel, dict):
             continue
-        pnu = str(parcel.get("pnu") or parcel.get("PNU") or parcel.get("parcelKey") or "")
+        pnu = parcel_pnu(parcel)
         evidence = [*by_pnu.get(pnu, []), *(parcel.get("evidence") or [])]
         registry = [item for item in evidence if str(item.get("evidenceType") or item.get("type") or "").lower() in {"registry_record", "registry", "등기부"}]
         source_locators = [_locator(item, fallback={"sourceType": "land_evidence", "evidenceId": item.get("evidenceId")}) for item in evidence]
@@ -254,6 +243,8 @@ def _parcel_rows(project_id: str, project_data: Dict[str, Any]) -> list[Dict[str
             "parcelIndex": index,
             "parcelKey": parcel.get("parcelKey") or pnu or f"parcel-{index + 1}",
             "pnu": pnu,
+            "pnuResolutionStatus": "matched" if pnu else "unresolved",
+            "pnuResolutionReason": (parcel.get("pnuResolution") or {}).get("reason") if isinstance(parcel.get("pnuResolution"), dict) else None,
             "status": status,
             "ownerMatchStatus": owner_status,
             "encumbrancePresent": encumbrance,
@@ -374,25 +365,31 @@ def _legal_lifecycle_assessment(project_data: Dict[str, Any], review: Dict[str, 
     }
 
 
-def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """Run, persist, and return a Land-Legal review suitable for PF handoff."""
+def run_legal_pod_use_case(
+    project_id: str,
+    project_data: Dict[str, Any],
+    input_data: Dict[str, Any] | None = None,
+    *,
+    persist: bool = True,
+) -> Dict[str, Any]:
+    """Run a Land-Legal review, optionally without any result persistence."""
     options = input_data or {}
+    normalized_storage = storage_backend() == "postgres"
     land_enrichment = {"status": "not_requested", "diagnostics": []}
+    live_preview_records = []
     if options.get("autoEnrichLand", True):
-        land = project_data.get("land") if isinstance(project_data.get("land"), dict) else {}
         parcels = _parcel_source_rows(project_data)
+        preview_resolution = None
+        if not persist and vworld_configured() and any(not parcel_pnu(parcel) for parcel in parcels):
+            project_data = deepcopy(project_data)
+            preview_resolution, _ = resolve_parcel_rows(project_data, str(project_id), limit=5)
+            parcels = _parcel_source_rows(project_data)
         if parcels:
-            supplied_pnu = str(land.get("pnu") or "")
-            fallback_legal_dong_code = supplied_pnu[:10] if len(supplied_pnu) == 19 and supplied_pnu[:10].isdigit() else None
-            known_pnus = [
-                str(parcel.get("pnu") or parcel.get("resolvedPnu") or "").strip()
-                for parcel in parcels
-                if str(parcel.get("pnu") or parcel.get("resolvedPnu") or "").strip()
-            ]
+            known_pnus = [pnu for parcel in parcels if (pnu := parcel_pnu(parcel))]
             cached_records = (
                 []
-                if options.get("forceRefreshLandEvidence") is True
-                else list_reusable_public_land_evidence_records(known_pnus)
+                if options.get("forceRefreshLandEvidence") is True or (not persist and not normalized_storage)
+                else list_reusable_public_land_evidence_records(known_pnus, project_id=str(project_id))
             )
             cached_types_by_pnu: Dict[str, set[str]] = {}
             for record in cached_records:
@@ -401,91 +398,80 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
                 )
             minimum_reuse_types = {"land_use_planning", "official_land_price"}
             parcels_to_fetch = [
-                parcel
+                {**parcel, "pnu": pnu}
                 for parcel in parcels
-                if not str(parcel.get("pnu") or parcel.get("resolvedPnu") or "").strip()
-                or not minimum_reuse_types.issubset(
-                    cached_types_by_pnu.get(
-                        str(parcel.get("pnu") or parcel.get("resolvedPnu") or "").strip(),
-                        set(),
-                    )
-                )
+                if (pnu := parcel_pnu(parcel))
+                and not minimum_reuse_types.issubset(cached_types_by_pnu.get(pnu, set()))
             ]
+            deferred_parcels = max(0, len(parcels_to_fetch) - 5) if not persist else 0
+            if not persist:
+                parcels_to_fetch = parcels_to_fetch[:5]
             cached_enrichment = _cached_land_enrichment(cached_records)
             if parcels_to_fetch:
                 live_enrichment = LandDataConnectorRouter().fetch_records_for_parcels(
                     parcels_to_fetch,
-                    legal_dong_code=options.get("legalDongCode") or land.get("legalDongCode") or fallback_legal_dong_code,
                     base_year=options.get("officialLandPriceBaseYear"),
+                    **({} if persist else {"timeout_seconds": 3.0}),
                 )
                 land_enrichment = _merge_land_enrichment(cached_enrichment, live_enrichment)
             else:
                 land_enrichment = cached_enrichment
+            if preview_resolution is not None:
+                land_enrichment["previewParcelResolution"] = preview_resolution
+            if deferred_parcels:
+                land_enrichment["status"] = "partial"
+                land_enrichment.setdefault("diagnostics", []).append({
+                    "connector": "land_use_planning",
+                    "status": "skipped_preview_limit",
+                    "message": f"한 번의 미리보기에서 조회할 필지 수를 제한해 {deferred_parcels}필지의 공공자료 확인이 남았습니다.",
+                })
+            missing_parcels = [parcel for parcel in parcels if not parcel_pnu(parcel)]
+            if missing_parcels:
+                land_enrichment["status"] = "partial"
+                land_enrichment.setdefault("diagnostics", []).extend({
+                    "connector": "pnu",
+                    "status": "skipped_missing_pnu",
+                    "message": "필지별 지번과 법정동을 확인한 뒤 PNU 조회를 실행하세요.",
+                    "parcelKey": parcel.get("parcelKey") or parcel.get("addressFragment") or parcel.get("lotNumber"),
+                } for parcel in missing_parcels)
             land_enrichment["publicEvidenceCache"] = {
                 "requestedPnuCount": len(set(known_pnus)),
                 "reusedRecordCount": len(cached_records),
                 "externalFetchParcelCount": len(parcels_to_fetch),
-                "reuseScope": "official_public_facts_only",
+                "reuseScope": "current_project_official_facts_only" if normalized_storage else "official_public_facts_only",
             }
-            for item in [
-                *land_enrichment.get("cadastralCharacteristics", []),
-                *land_enrichment.get("landUsePlanningRecords", []),
-                *land_enrichment.get("buildingUseRecords", []),
-                *land_enrichment.get("landCharacteristicsRecords", []),
-                *land_enrichment.get("officialLandPrices", []),
-            ]:
-                if item.get("pnu"):
-                    if item in land_enrichment.get("cadastralCharacteristics", []):
-                        evidence_type = "cadastral_characteristics"
-                    elif item in land_enrichment.get("landUsePlanningRecords", []):
-                        evidence_type = "land_use_planning"
-                    elif item in land_enrichment.get("buildingUseRecords", []):
-                        evidence_type = "building_use"
-                    elif item in land_enrichment.get("landCharacteristicsRecords", []):
-                        evidence_type = "land_characteristics"
+            for evidence_type, result_key in _PUBLIC_EVIDENCE_RESULT_KEYS.items():
+                for item in land_enrichment.get(result_key, []):
+                    if item.get("pnu") not in known_pnus:
+                        continue
+                    pnu = item["pnu"]
+                    record = {
+                        **item,
+                        "evidenceType": evidence_type,
+                        "recordKey": f"{evidence_type}:{pnu}",
+                        "sourceLocator": item.get("sourceLocator") or {
+                            "sourceType": "api_row",
+                            "sourceUrl": item.get("sourceUrlOrEvidenceId"),
+                            "apiRowId": pnu,
+                        },
+                    }
+                    if persist:
+                        upsert_land_evidence_record(str(project_id), _reusable_public_record(record, evidence_type))
                     else:
-                        evidence_type = "official_land_price"
-                    from storage import upsert_land_evidence_record
-                    reusable_record = _reusable_public_record(item, evidence_type)
+                        live_preview_records.append(record)
+            if persist:
+                for item in land_enrichment.get("regionLandPriceTrends", []):
+                    region_key = item.get("regionCode") or item.get("cityCountyCode") or "unknown"
                     upsert_land_evidence_record(str(project_id), {
-                        **reusable_record,
-                        "recordKey": f"{evidence_type}:{item['pnu']}",
+                        **item,
+                        "evidenceType": "land_price_trend",
+                        "recordKey": f"land_price_trend:{region_key}:{item.get('standardYear')}:{item.get('standardMonth') or 'annual'}",
                         "sourceLocator": {
                             "sourceType": "api_row",
                             "sourceUrl": item.get("sourceUrlOrEvidenceId"),
-                            "apiRowId": item.get("pnu"),
+                            "apiRowId": f"{region_key}:{item.get('standardYear')}:{item.get('standardMonth') or 'annual'}",
                         },
                     })
-            from storage import upsert_land_evidence_record
-            for item in land_enrichment.get("regionLandPriceTrends", []):
-                region_key = item.get("regionCode") or item.get("cityCountyCode") or "unknown"
-                upsert_land_evidence_record(str(project_id), {
-                    **item,
-                    "evidenceType": "land_price_trend",
-                    "recordKey": f"land_price_trend:{region_key}:{item.get('standardYear')}:{item.get('standardMonth') or 'annual'}",
-                    "sourceLocator": {
-                        "sourceType": "api_row",
-                        "sourceUrl": item.get("sourceUrlOrEvidenceId"),
-                        "apiRowId": f"{region_key}:{item.get('standardYear')}:{item.get('standardMonth') or 'annual'}",
-                    },
-                })
-    supplied_law_context = options.get("lawContext") or options.get("law_context")
-    legal_resolution = resolve_project_legal_context(
-        project_data,
-        caller_context=(
-            supplied_law_context
-            if isinstance(supplied_law_context, dict)
-            else None
-        ),
-    )
-    # This is the first trust boundary: caller-provided context and MCP output
-    # remain candidates.  The reviewer receives only official attestations or
-    # verified local snapshots as connected statutory evidence.
-    law_context = legal_resolution["lawContext"]
-    legal_intelligence = legal_resolution["legalIntelligence"]
-    # Uploaded feasibility workbooks commonly use a list for schedule rows,
-    # while the preliminary reviewer expects a keyed schedule object. Keep the
-    # source untouched and provide a safe review projection.
     # The review projection must not mutate canonical project dictionaries.
     # In particular, parcel API enrichment must never overwrite top-level
     # regulation state through a shallow copy.
@@ -493,25 +479,31 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
     for field in ("regulation", "covenants", "landEvidence"):
         if not isinstance(review_data.get(field), dict):
             review_data[field] = {}
-    persisted_land_records = list_land_evidence_records(str(project_id))
     review_parcels = _parcel_source_rows(review_data)
-    resolutions = list(land_enrichment.get("pnuResolutions") or [])
-    resolution_index = 0
-    if isinstance(review_parcels, list):
-        for parcel in review_parcels:
-            if not isinstance(parcel, dict) or parcel.get("pnu") or parcel.get("resolvedPnu"):
-                continue
-            if resolution_index >= len(resolutions):
-                break
-            resolved = resolutions[resolution_index].get("pnu")
-            if resolved:
-                parcel["pnu"] = resolved
-                parcel["resolvedPnu"] = resolved
-                parcel["pnuMatchMethod"] = resolutions[resolution_index].get("matchMethod")
-                parcel["pnuResolveConfidence"] = resolutions[resolution_index].get("matchConfidence")
-            resolution_index += 1
-    cadastral = [item for item in persisted_land_records if item.get("evidenceType") in {"cadastral_characteristics", "cadastral"}]
-    current_land_use = list(land_enrichment.get("landUsePlanningRecords") or [])
+    for parcel in review_parcels:
+        pnu = parcel_pnu(parcel)
+        if pnu:
+            parcel["pnu"] = pnu
+        else:
+            # Keep unresolved identifiers from becoming an FAR/BCR capacity
+            # input. The stored ledger and its original source remain intact.
+            for key in ("pnu", "resolvedPnu", "PNU"):
+                parcel.pop(key, None)
+    review_data["land_acquisition"] = review_parcels
+    parcel_pnus = {parcel_pnu(parcel) for parcel in review_parcels} - {""}
+    if not review_parcels and isinstance(review_data.get("land"), dict):
+        parcel_pnus.update({parcel_pnu(review_data["land"])} - {""})
+    persisted_land_records = [
+        record for record in list_land_evidence_records(str(project_id))
+        if not record.get("pnu") or record.get("pnu") in parcel_pnus
+    ]
+    review_data["landEvidence"]["records"] = persisted_land_records
+    review_land_records = [*live_preview_records, *persisted_land_records]
+    cadastral = [item for item in review_land_records if item.get("evidenceType") in {"cadastral_characteristics", "cadastral"}]
+    current_land_use = [
+        record for record in land_enrichment.get("landUsePlanningRecords") or []
+        if record.get("pnu") in parcel_pnus
+    ]
     persisted_land_use = [item for item in persisted_land_records if item.get("evidenceType") == "land_use_planning"]
     land_use_records = [*current_land_use, *persisted_land_use]
     land_use_by_pnu: Dict[str, Dict[str, Any]] = {}
@@ -520,24 +512,24 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
         if pnu:
             land_use_by_pnu[pnu] = item
     for parcel in review_parcels:
-        pnu = str(parcel.get("pnu") or parcel.get("resolvedPnu") or "").strip()
+        pnu = parcel_pnu(parcel)
         record = land_use_by_pnu.get(pnu)
         if not record:
             continue
-        parcel_land_use = dict(parcel.get("landUsePlanning") or parcel.get("land_use_planning") or {})
-        for source_key, target_key in (
-            ("legalFar", "legalFar"),
-            ("legalBcr", "legalBcr"),
-            ("districtUnitPlan", "districtUnitPlan"),
-        ):
-            if record.get(source_key) is not None:
-                parcel_land_use[target_key] = record[source_key]
+        # Project the matched evidence as one unit. A value from an older
+        # project input cannot inherit the new record's locator.
+        parcel_land_use = {
+            key: record.get(key)
+            for key in ("legalFar", "legalBcr", "zoning", "districtUnitPlan", "landUsePlanItems")
+        }
+        for key in ("legalFar", "legalBcr", "legal_far", "legal_bcr", "land_use_planning"):
+            parcel.pop(key, None)
         zones = record.get("landUseZones") or ([record.get("zoning")] if record.get("zoning") else [])
-        if zones:
-            parcel_land_use["landUseZones"] = list(dict.fromkeys(str(zone) for zone in zones if zone))
-        parcel_land_use["sourceLocator"] = {
-            "sourceType": "api_row",
+        parcel_land_use["landUseZones"] = list(dict.fromkeys(str(zone) for zone in zones if zone))
+        parcel_land_use["sourceLocator"] = record.get("sourceLocator") or {
+            "sourceType": "land_use_planning_record",
             "sourceUrl": record.get("sourceUrlOrEvidenceId"),
+            "evidenceId": record.get("evidenceId"),
             "apiRowId": pnu,
         }
         parcel["landUsePlanning"] = parcel_land_use
@@ -552,7 +544,9 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             review_data["regulation"]["landUseZones"] = zones
     if not isinstance(review_data.get("land"), dict):
         review_data["land"] = {}
-    land_ledger = review_data.get("landLedger") if isinstance(review_data.get("landLedger"), dict) else {}
+    land_ledger = review_data.get("landLedger") or review_data.get("land_ledger") or {}
+    land_ledger = land_ledger if isinstance(land_ledger, dict) else {}
+    review_data["landLedger"] = {**land_ledger, "parcels": review_parcels}
     land_summary = land_ledger.get("summary") if isinstance(land_ledger.get("summary"), dict) else {}
     acquisition_status = land_ledger.get("landAcquisitionStatus") if isinstance(land_ledger.get("landAcquisitionStatus"), dict) else {}
     if not review_data["land"].get("area_sqm"):
@@ -563,11 +557,10 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             review_data["land"]["sourceLocator"] = {"sourceType": "excel_cell", "artifactKey": "landLedger.summary.totalAreaSqm"}
     if acquisition_status:
         review_data["land"]["acquisitionAreaRatio"] = acquisition_status.get("acquisitionAreaRatio")
-    if not review_data["land"].get("area_sqm") and cadastral:
-        areas = [_number(item.get("areaSqm")) for item in cadastral]
-        total_area = sum(item for item in areas if item is not None)
-        if total_area:
-            review_data["land"]["area_sqm"] = total_area
+    if not review_data["land"].get("area_sqm") and cadastral and len(parcel_pnus) >= len(review_parcels):
+        area_by_pnu = {item.get("pnu"): _number(item.get("areaSqm")) for item in reversed(cadastral)}
+        if parcel_pnus and all((area_by_pnu.get(pnu) or 0) > 0 for pnu in parcel_pnus):
+            review_data["land"]["area_sqm"] = sum(area_by_pnu[pnu] for pnu in parcel_pnus)
     buildable_envelope = build_preliminary_buildable_envelope(
         review_data,
         declared_land_area_sqm=review_data["land"].get("area_sqm"),
@@ -585,10 +578,31 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             review_data["regulation"]["legal_bcr"] = effective_bcr
             review_data["regulation"]["legalBcr"] = effective_bcr
             review_data["regulation"]["legalBcrBasis"] = "parcel_weighted_envelope"
-    if not isinstance(review_data.get("schedule"), dict):
-        schedule_rows = review_data.get("schedule") if isinstance(review_data.get("schedule"), list) else []
-        review_data["schedule"] = {"rows": schedule_rows}
-    review = LegalReviewAgent().review(review_data, law_context)
+    verified_permit_documents, permit_locators = _verified_permit_document_evidence(
+        options.get("parsedDocuments")
+    )
+    supplied_law_context = options.get("lawContext") or options.get("law_context")
+    legal_resolution = resolve_project_legal_context(
+        review_data,
+        caller_context=supplied_law_context if isinstance(supplied_law_context, dict) else None,
+        **({} if persist else {"preview": True}),
+    )
+    # Caller-provided context and MCP search hits stay discovery candidates.
+    law_context = legal_resolution["lawContext"]
+    legal_intelligence = legal_resolution["legalIntelligence"]
+    approval_documents = []
+    for document, locator in zip(verified_permit_documents, permit_locators):
+        route = approval_document_route(document)
+        page = locator.get("pageNumber")
+        has_exact_location = (
+            type(page) is int and page > 0
+            or bool(locator.get("sheetName") and locator.get("cell"))
+        )
+        if route and locator.get("sourceDocumentId") and has_exact_location:
+            approval_documents.append({**locator, "route": route})
+    review = LegalReviewAgent().review(
+        review_data, law_context, approval_documents=approval_documents,
+    )
     # Preserve the source attestation fields that the legacy display
     # normalizer does not know about.
     review["lawReferences"] = list(legal_intelligence.get("references") or [])
@@ -602,7 +616,7 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
     ]
     law_change_report = compare_law_references(previous_law_records, review.get("lawReferences") or [])
     review_id = str(options.get("reviewId") or f"legal-review:{project_id}:{uuid4()}")
-    parcels = _parcel_rows(str(project_id), review_data)
+    parcels = _parcel_rows(review_parcels, review_land_records)
     parcel_blockers = [
         row for row in parcels
         if row["status"] == "needs_review"
@@ -660,9 +674,6 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
         for locator in legal_reference_locators
     )
 
-    verified_permit_documents, permit_locators = (
-        _verified_permit_document_evidence(options.get("parsedDocuments"))
-    )
     supplied_permit_documents = (
         options.get("parsedDocuments")
         if isinstance(options.get("parsedDocuments"), list)
@@ -834,6 +845,7 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
         ),
         "reviewLevel": "preliminary",
         "permitCheck": permit_check,
+        "permitRouteReview": review["developabilityAnalysis"]["permitRouteReview"],
         "sourceLocators": permit_locators,
         "parserStatus": permit_parser_status,
         "evidenceStatus": (
@@ -860,7 +872,8 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
         "reportEligible": False,
         "updatedAt": _now(),
     }
-    upsert_permit_review_record(str(project_id), permit_record)
+    if persist and not normalized_storage:
+        upsert_permit_review_record(str(project_id), permit_record)
     for index, reference in enumerate(review.get("lawReferences") or []):
         reference_id = str(reference.get("lawId") or reference.get("lawName") or reference.get("title") or f"reference-{index}")
         law_record = {
@@ -894,7 +907,8 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
         # Read-only compatibility alias for consumers predating the explicit
         # recordLocator/evidenceLocator contract.
         law_record["sourceLocator"] = law_record["evidenceLocator"]
-        upsert_deal_state_record(str(project_id), law_record)
+        if persist:
+            upsert_deal_state_record(str(project_id), law_record)
     reference_by_key = {
         str(
             reference.get("lawId")
@@ -939,9 +953,11 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
             change_record["sourceLocator"] = change_record[
                 "evidenceLocator"
             ]
-            upsert_deal_state_record(str(project_id), change_record)
-    for risk in risk_issues:
-        upsert_deal_state_record(str(project_id), risk)
+            if persist:
+                upsert_deal_state_record(str(project_id), change_record)
+    if persist:
+        for risk in risk_issues:
+            upsert_deal_state_record(str(project_id), risk)
     handoff = {
         "handoffId": f"handoff:legal-pod:pf-credit:{project_id}:{review_id}",
         "fromAgent": "LegalReviewAgent",
@@ -972,11 +988,14 @@ def run_legal_pod_use_case(project_id: str, project_data: Dict[str, Any], input_
     if locators:
         handoff_record["evidenceLocator"] = locators[0]
         handoff_record["sourceLocator"] = locators[0]
-    upsert_deal_state_record(str(project_id), handoff_record)
+    if persist:
+        upsert_deal_state_record(str(project_id), handoff_record)
     legal_record["pfHandoff"] = handoff
     legal_record["nextActions"] = review.get("requiredFollowUps", [])
-    upsert_legal_review_record(str(project_id), legal_record)
+    if persist and not normalized_storage:
+        upsert_legal_review_record(str(project_id), legal_record)
     return {
+        "previewOnly": not persist,
         "legalReview": legal_record,
         "permitReview": permit_record,
         "riskIssues": risk_issues,

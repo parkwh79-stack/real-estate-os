@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
+import { PermitHeightReview, type PermitHeightAnalysis } from "../../../../components/orchestration/permit-height-review";
+import { LandLegalSummaryActions } from "../../../../components/orchestration/land-legal-summary-actions";
 
 type Parcel = {
   sequence?: number;
@@ -120,12 +122,13 @@ export default function LandAnalysisPage() {
   const [error, setError] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
+  const [legalPreview, setLegalPreview] = useState<{ projectId: string; previewHash: string; legalReview: Record<string, unknown> } | null>(null);
   const activeProject = useRef(projectId);
   const reviewDirty = useRef(false);
 
   useEffect(() => {
     activeProject.current = projectId; reviewDirty.current = false;
-    setContext(null); setReviewComment(""); setReviewMessage(null); setRunning(null);
+    setContext(null); setReviewComment(""); setReviewMessage(null); setRunning(null); setLegalPreview(null);
   }, [projectId]);
 
   const load = useCallback(async () => {
@@ -151,6 +154,10 @@ export default function LandAnalysisPage() {
   const pageData = asRecord(context?.pageData);
   const land = asRecord(pageData.land);
   const landLedger = asRecord(pageData.landLedger);
+  const preview = legalPreview?.projectId === projectId ? legalPreview : null;
+  const legalReview = asRecord(preview?.legalReview);
+  const legalAnalysis = asRecord(legalReview.developabilityAnalysis) as PermitHeightAnalysis;
+  const legalIntelligence = asRecord(legalReview.legalIntelligence);
   const ledgerSummary = asRecord(pageData.landLedgerSummary);
   const ledgerInnerSummary = asRecord(landLedger.summary);
   const summary = { ...ledgerSummary, ...ledgerInnerSummary };
@@ -193,9 +200,10 @@ export default function LandAnalysisPage() {
   }
 
   const parcelCount = Number(summary.parcelCount ?? pnuValidation.parcelCount ?? parcels.length ?? 0);
-  const pnuCount = Number(summary.pnuCount ?? pnuValidation.pnuCount ?? parcels.filter((p) => p.pnu || p.resolvedPnu).length);
+  const pnuCount = Number(pnuValidation.pnuCount ?? summary.pnuCount ?? parcels.filter((p) => p.pnu || p.resolvedPnu).length);
   const missingPnuCount = Math.max(0, parcelCount - pnuCount);
   const evidenceCount = Number(landEvidenceSummary.count ?? evidenceRecords.length ?? 0);
+  const landEvidenceUnavailable = context?.unavailableSections?.includes("landEvidence");
   const hasOfficialLandPrice = Boolean(landEvidenceSummary.hasOfficialLandPrice);
   const hasRegistryEvidence = Boolean(landEvidenceSummary.hasRegistryEvidence);
   const hasPnuResolution = Boolean(landEvidenceSummary.hasPnuResolution) || pnuCount > 0;
@@ -205,11 +213,15 @@ export default function LandAnalysisPage() {
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
   const nextAction = missingPnuCount > 0
     ? "토지조서 지번을 기준으로 PNU 일괄 해석을 먼저 실행하세요."
-    : !hasOfficialLandPrice
-      ? "PNU는 확보되었으나 공시지가 증빙이 부족합니다."
-      : !hasRegistryEvidence
-        ? "등기부 및 제한물권 증빙을 추가해야 법무/PF 심사로 넘어갈 수 있습니다."
-        : "토지 증빙은 다음 심사 단계에 사용할 수 있는 상태입니다.";
+    : parcelCount === 0
+      ? "자료 입력에서 토지조서를 업로드하세요."
+      : landEvidenceUnavailable
+        ? "필지별 인허가 근거는 토지·인허가 검토에서 확인하세요."
+        : !hasOfficialLandPrice
+          ? "PNU는 확보되었으나 공시지가 증빙이 부족합니다."
+          : !hasRegistryEvidence
+            ? "등기부 및 제한물권 증빙을 추가해 법무·PF 검토에 연결하세요."
+            : "토지 증빙을 필지별로 확인하고 인허가 검토를 실행하세요.";
 
   async function runResolvePnu() {
     setRunning("pnu");
@@ -223,13 +235,16 @@ export default function LandAnalysisPage() {
       });
       if (!res.ok) throw new Error(`PNU 일괄 해석 실패 (${res.status})`);
       const body = await res.json();
+      if (activeProject.current !== projectId) return;
+      setLegalPreview(null);
       const resolved = body?.summary?.resolvedCount ?? body?.resolvedCount ?? 0;
-      setMessage(`PNU 일괄 해석을 실행했습니다. 해석 ${resolved}건`);
+      const unresolved = body?.summary?.unresolvedCount;
+      setMessage(`PNU 일괄 해석을 마쳤습니다. 새로 해석 ${resolved}건${typeof unresolved === "number" && unresolved > 0 ? ` · 재확인 ${unresolved}건` : ""}`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "PNU 일괄 해석에 실패했습니다.");
+      if (activeProject.current === projectId) setError(err instanceof Error ? err.message : "PNU 일괄 해석에 실패했습니다.");
     } finally {
-      setRunning(null);
+      if (activeProject.current === projectId) setRunning(null);
     }
   }
 
@@ -237,19 +252,22 @@ export default function LandAnalysisPage() {
     setRunning("pod");
     setError(null);
     setMessage(null);
+    setLegalPreview(null);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/run-pod`, {
+      const res = await fetch(`${apiBase}/projects/${projectId}/legal-pod/preview`, {
         method: "POST",
-        headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-        body: JSON.stringify({ podKey: "land_legal" }),
+        cache: "no-store",
+        headers: authHeaders("web"),
       });
-      if (!res.ok) throw new Error(`Land-Legal Pod 실행 실패 (${res.status})`);
-      setMessage("Land-Legal Pod를 실행했고 결과 artifact를 저장했습니다.");
-      await load();
+      if (!res.ok) throw new Error(`토지·인허가 검토 실패 (${res.status})`);
+      const result = await res.json();
+      if (activeProject.current !== projectId) return;
+      if (result.previewOnly !== true || typeof result.previewHash !== "string") throw new Error("미리보기 결과를 불러오지 못했습니다.");
+      setLegalPreview({ projectId, previewHash: result.previewHash, legalReview: asRecord(result.legalReview) });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Land-Legal Pod 실행에 실패했습니다.");
+      if (activeProject.current === projectId) setError(err instanceof Error ? err.message : "토지·인허가 검토에 실패했습니다.");
     } finally {
-      setRunning(null);
+      if (activeProject.current === projectId) setRunning(null);
     }
   }
 
@@ -284,7 +302,7 @@ export default function LandAnalysisPage() {
           </button>
           <button type="button" onClick={() => void runLandPod()} disabled={running !== null || loading} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
             {running === "pod" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            Land-Legal Pod 실행
+            토지·인허가 미리보기
           </button>
         </div>
       </header>
@@ -302,8 +320,8 @@ export default function LandAnalysisPage() {
           <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
             <StatusCard label="토지조서 필지" value={formatCount(parcelCount, "필지")} tone={parcelCount > 0 ? "good" : "warn"} icon={<FileSearch />} />
             <StatusCard label="PNU 확보" value={`${pnuCount}/${parcelCount || 0} (${pct(pnuCount, parcelCount)}%)`} tone={missingPnuCount === 0 && parcelCount > 0 ? "good" : "warn"} icon={<MapPin />} />
-            <StatusCard label="공시지가 증빙" value={hasOfficialLandPrice ? "확보" : "보강 필요"} tone={hasOfficialLandPrice ? "good" : "warn"} icon={<Database />} />
-            <StatusCard label="등기/제한물권 증빙" value={hasRegistryEvidence ? "확보" : "보강 필요"} tone={hasRegistryEvidence ? "good" : "warn"} icon={<ShieldCheck />} />
+            <StatusCard label="공시지가 증빙" value={landEvidenceUnavailable ? "조회 불가" : hasOfficialLandPrice ? "확보" : "보강 필요"} tone={hasOfficialLandPrice ? "good" : "warn"} icon={<Database />} />
+            <StatusCard label="등기/제한물권 증빙" value={landEvidenceUnavailable ? "조회 불가" : hasRegistryEvidence ? "확보" : "보강 필요"} tone={hasRegistryEvidence ? "good" : "warn"} icon={<ShieldCheck />} />
             <StatusCard label="등기 소유자 일치 필지" value={`${Math.round(acquisitionRatio * 100)}%`} tone={acquisitionRatio >= 0.8 ? "good" : "warn"} icon={<CheckCircle2 />} />
           </section>
 
@@ -325,12 +343,30 @@ export default function LandAnalysisPage() {
               <InfoRow label="토지 매입금액" value={formatKrw(summary.totalContractAmount)} />
             </Panel>
             <Panel title="저장된 증빙">
-              <InfoRow label="토지 증빙 레코드" value={formatCount(evidenceCount)} />
+              <InfoRow label="토지 증빙 레코드" value={landEvidenceUnavailable ? "조회 불가" : formatCount(evidenceCount)} />
               <InfoRow label="PNU 해석 증빙" value={hasPnuResolution ? "있음" : "없음"} />
-              <InfoRow label="공시지가 증빙" value={hasOfficialLandPrice ? "있음" : "없음"} />
-              <InfoRow label="등기/제한물권 증빙" value={hasRegistryEvidence ? "있음" : "없음"} />
+              <InfoRow label="공시지가 증빙" value={landEvidenceUnavailable ? "조회 불가" : hasOfficialLandPrice ? "있음" : "없음"} />
+              <InfoRow label="등기/제한물권 증빙" value={landEvidenceUnavailable ? "조회 불가" : hasRegistryEvidence ? "있음" : "없음"} />
             </Panel>
           </section>
+
+          <Panel title="토지·인허가 검토">
+            {preview ? (
+              <>
+                <p className="mb-3 text-sm text-slate-500">화면 전용 예비 검토입니다. 새로고침하면 사라집니다.</p>
+                {typeof legalIntelligence.verifiedReferenceCount === "number" ? (
+                  <p className="mb-3 text-sm font-semibold text-slate-600 dark:text-slate-300">
+                    {legalIntelligence.verifiedReferenceCount > 0 ? `검증된 법령·조례 근거 ${legalIntelligence.verifiedReferenceCount}건` : "검증된 법령·조례 원문 근거 미확보"}
+                  </p>
+                ) : null}
+                <PermitHeightReview analysis={legalAnalysis} />
+              </>
+            ) : (
+              <p className="text-sm text-slate-500">미리보기를 실행하면 계획 용도에 따른 인허가 경로와 필지별 높이 근거를 확인할 수 있습니다.</p>
+            )}
+            <LandLegalSummaryActions key={`${projectId}:${preview?.previewHash ?? ""}`} projectId={projectId} previewHash={preview?.previewHash} analysis={legalAnalysis} />
+            <Link href={`/project/${projectId}/input-package`} className="mt-3 inline-block text-sm font-semibold text-indigo-700 underline dark:text-indigo-300">토지이용계획·인허가 자료 입력</Link>
+          </Panel>
 
           <Panel title="계약·수지 금액 대사">
             <p className="mb-3 text-sm text-slate-500">저장된 원본 금액을 비교합니다. 차액의 원인은 별도 확인이 필요하며, 계산 입력이나 승인 상태는 변경되지 않습니다.</p>
@@ -411,7 +447,7 @@ export default function LandAnalysisPage() {
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {sampleParcels.map((parcel, index) => {
-                      const pnu = parcel.pnu || parcel.resolvedPnu;
+                      const pnu = parcel.pnuResolution?.status === "unresolved" ? undefined : parcel.pnu || parcel.resolvedPnu;
                       return (
                         <tr key={`${parcel.sequence ?? index}-${parcel.addressFragment ?? parcel.rawLotNumber ?? index}`}>
                           <td className="px-3 py-3 font-bold text-slate-950 dark:text-white">
@@ -441,6 +477,9 @@ export default function LandAnalysisPage() {
                               }
                               if (res?.status === "unresolved" && res.reason === "not_in_current_cadastre") {
                                 return <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300" title={`구성 PNU ${res.constructedPnu ?? "-"} — 현 지적도에 없는 지번(재개발 합병·재번지 추정). 옛 토지조서 지번일 수 있어 대사가 필요합니다`}>현 지적도에 없음</span>;
+                              }
+                              if (res?.reason === "conflicting_existing_pnu") {
+                                return <span className="rounded-md bg-rose-50 px-2 py-1 text-xs font-bold text-rose-700 dark:bg-rose-950/30 dark:text-rose-200">기존 PNU 충돌 · 지번 대사 필요</span>;
                               }
                               if (res?.status === "unresolved") {
                                 return <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-bold text-amber-700 dark:bg-amber-950/30 dark:text-amber-200" title={res.reason ?? undefined}>해석 실패</span>;

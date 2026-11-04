@@ -51,6 +51,27 @@ def test_invalid_legal_limit_cannot_establish_feasibility(invalid):
     assert "법정 용적률" in result["missingRequiredInputs"]
 
 
+def test_planned_approval_cannot_confirm_construction_prerequisites_for_mixed_use():
+    review = LegalReviewAgent().review({
+        "project": {"type": "apartment"},
+        "product_mix": [{"asset_type": "apartment"}, {"asset_type": "officetel"}],
+        "land": {"area_sqm": 100},
+        "regulation": {"zoning": "준주거지역", "legal_far": 200, "applied_far": 100, "legal_bcr": 60, "applied_bcr": 50},
+        "schedule": {"permit_approval": "2026-10-01", "construction_start": "2026-12-01"},
+    })
+
+    developability = review["developabilityAnalysis"]
+    assert developability["status"] == "conditional"
+    permit = developability["permitRouteReview"]
+    assert permit["status"] == "requires_review"
+    assert permit["useClassification"] == "mixed_use"
+    assert [item["code"] for item in permit["routes"]] == ["housing_business_plan_approval", "building_permit"]
+    assert any("300세대 미만" in item and "90% 미만" in item for item in permit["requiredChecks"])
+    assert permit["plannedDate"] == "2026-10-01"
+    assert permit["approvalEvidenceStatus"] == "missing"
+    assert next(check for check in review["checks"] if check["key"] == "permit")["severity"] == "caution"
+
+
 def _pdf(page_count):
     with fitz.open() as document:
         for index in range(page_count):

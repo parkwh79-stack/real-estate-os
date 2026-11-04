@@ -372,7 +372,7 @@ export default function InputPackagePage() {
               <div className="flex flex-wrap gap-2">
                 <ActionButton label="자료 보완 계획 생성" busy={running === "finalize"} disabled={running !== null || landEvidenceUnavailable} onClick={() => void finalizeIntake()} />
                 <ActionButton label="PNU 일괄 해석" busy={running === "pnu"} disabled={running !== null || landEvidenceUnavailable || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
-                <ActionButton label="Land-Legal Pod" busy={running === "land_legal"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("land_legal", "Land-Legal Pod")} />
+                <Link href={`/project/${projectId}/land`} className="inline-flex h-10 items-center rounded-lg border border-slate-300 px-4 text-sm font-bold dark:border-slate-700">토지·인허가 미리보기</Link>
                 <ActionButton label="Market-Product Pod" busy={running === "market_product"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("market_product", "Market-Product Pod")} />
                 <ActionButton label="Feasibility-CF Pod" busy={running === "feasibility_cashflow"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("feasibility_cashflow", "Feasibility-Cashflow Pod")} />
               </div>

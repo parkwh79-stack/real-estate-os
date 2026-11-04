@@ -12,6 +12,7 @@ from use_cases.report_calculation_basis import (
     CALCULATION_SLOTS, calculation_choice, freeze_cash_flow_basis, freeze_calculation_basis,
 )
 from use_cases.stored_permit_evidence import resolve_stored_permit_documents
+from use_cases.land_legal_preview import compact_land_legal_review, compact_review_hash
 from datetime import datetime, timezone
 import base64
 import tempfile
@@ -180,7 +181,14 @@ from use_cases.feasibility_workbook_llm import (
     extract_feasibility_fields_via_llm,
 )
 from use_cases.intake_finalize import finalize_project_intake_use_case
-from use_cases.parcel_pnu_resolution import resolve_project_parcels_use_case, resolve_address_to_parcel
+from use_cases.parcel_pnu_resolution import (
+    canonical_project_parcel_rows,
+    parcel_address_lookup_mismatch,
+    parcel_lookup_address,
+    parcel_pnu,
+    resolve_address_to_parcel,
+    resolve_project_parcels_use_case,
+)
 from use_cases.auto_evidence_supplement import auto_supplement_validation_gaps
 from use_cases.parsed_facts import parsed_fact_package, persist_parsed_facts
 from use_cases.parsed_fact_validation import validate_parsed_facts_for_pod
@@ -839,9 +847,17 @@ def record_sensitive_project_event(
 def land_evidence_records_from_ledger(land_ledger: Dict[str, Any]) -> list[Dict[str, Any]]:
     records: list[Dict[str, Any]] = []
     for parcel in land_ledger.get("parcels", []) or []:
-        pnu = parcel.get("pnu") or parcel.get("resolvedPnu")
+        pnu = parcel_pnu(parcel)
         parcel_key = parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence")
         if pnu:
+            resolution = parcel.get("pnuResolution") or {}
+            enrichment = (parcel.get("enrichmentEvidence") or {}).get("pnuResolution") or {}
+            verified_batch = (
+                resolution.get("status") == "resolved"
+                and resolution.get("lotVerification") == "verified"
+                and parcel.get("pnuMatchMethod") in {"pnu_construction", "address_geocode"}
+            )
+            confidence = parcel.get("pnuResolveConfidence")
             records.append({
                 "recordKey": f"pnu_resolution:{pnu}",
                 "evidenceId": f"pnu_resolution:{pnu}",
@@ -849,12 +865,15 @@ def land_evidence_records_from_ledger(land_ledger: Dict[str, Any]) -> list[Dict[
                 "pnu": pnu,
                 "parcelKey": parcel_key,
                 "addressFragment": parcel.get("addressFragment"),
-                "matchConfidence": parcel.get("pnuResolveConfidence"),
+                "matchConfidence": confidence,
                 "matchMethod": parcel.get("pnuMatchMethod"),
-                "sourceName": parcel.get("enrichmentEvidence", {}).get("pnuResolution", {}).get("sourceName", "LandLedgerEnrichmentAgent"),
-                "sourceType": parcel.get("enrichmentEvidence", {}).get("pnuResolution", {}).get("sourceType", "manual_or_configured_connector"),
-                "sourceUrlOrEvidenceId": parcel.get("enrichmentEvidence", {}).get("pnuResolution", {}).get("sourceUrlOrEvidenceId"),
-                "verificationStatus": "resolved" if (parcel.get("pnuResolveConfidence") or 0) >= 0.85 else "needs_review",
+                "sourceName": enrichment.get("sourceName") or resolution.get("source") or "LandLedgerEnrichmentAgent",
+                "sourceType": enrichment.get("sourceType") or ("public_api" if verified_batch else "manual_or_configured_connector"),
+                "sourceUrlOrEvidenceId": enrichment.get("sourceUrlOrEvidenceId"),
+                "sourceLocator": {"sourceType": "api_row", "apiRowId": pnu} if verified_batch else None,
+                "verificationStatus": "resolved" if verified_batch or (
+                    isinstance(confidence, (int, float)) and confidence >= 0.85
+                ) else "needs_review",
             })
         if parcel.get("cadastralCharacteristics"):
             cadastral = parcel["cadastralCharacteristics"]
@@ -939,28 +958,12 @@ def land_evidence_records_from_ledger(land_ledger: Dict[str, Any]) -> list[Dict[
     return records
 
 def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, Any], options: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """Build best-effort, source-backed enrichment options for an uploaded land ledger.
-
-    The function is intentionally conservative. It never fabricates PNU, price,
-    or registry evidence. It only adds:
-    - legalDongCode derived from an already stored project PNU; or
-    - pnuResolutions resolved through VWorld address -> parcel lookup.
-    Official land price/cadastral live adapters remain governed by
-    LandDataConnectorRouter config and explicit options.
-    """
+    """Add source-backed matches for individual ledger parcel addresses."""
     merged = dict(options or {})
     project = _project_store().get(project_id) or {}
-    project_pnu = str(((project.get("land") or {}).get("pnu") or "")).strip()
-    if not merged.get("legalDongCode") and len(project_pnu) >= 10 and project_pnu[:10].isdigit():
-        merged["legalDongCode"] = project_pnu[:10]
-        merged.setdefault("pnuResolverSource", "project_land_pnu_legal_dong_code")
 
     if "autoResolvePnuFromAddress" not in merged and "auto_resolve_pnu_from_address" not in merged:
-        # When a confirmed legal dong code is already available, deterministic
-        # legal-dong + lot-number PNU generation is safer and faster than a
-        # best-effort address geocode. Use VWorld address lookup by default
-        # only when we need to discover the legal dong/PNU from project address.
-        merged["autoResolvePnuFromAddress"] = not bool(merged.get("legalDongCode") or merged.get("legal_dong_code"))
+        merged["autoResolvePnuFromAddress"] = True
 
     if not (merged.get("autoResolvePnuFromAddress") or merged.get("auto_resolve_pnu_from_address")):
         return merged
@@ -979,9 +982,9 @@ def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, 
     }
 
     for parcel in parcels[:max_parcels]:
-        if parcel.get("pnu") or parcel.get("resolvedPnu"):
+        if parcel_pnu(parcel):
             continue
-        address = _parcel_lookup_address(parcel, project_base_address)
+        address = parcel_lookup_address(parcel, project_base_address or "")
         if not address:
             diagnostics.append({
                 "connector": "vworld_address_pnu",
@@ -991,13 +994,15 @@ def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, 
             continue
 
         resolved = resolve_address_to_parcel(address)
-        if resolved.get("status") == "resolved" and resolved.get("pnu"):
+        mismatch = parcel_address_lookup_mismatch(parcel, address, resolved)
+        if not mismatch:
             key = str(resolved["pnu"])
+            parcel_key = parcel.get("sequence") or parcel.get("addressFragment") or parcel.get("normalizedLotNumber")
             if key not in seen_keys:
                 pnu_resolutions.append({
-                    "parcelKey": parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"),
+                    "parcelKey": parcel_key,
                     "sequence": parcel.get("sequence"),
-                    "addressFragment": address,
+                    "addressFragment": parcel.get("addressFragment") or address,
                     "pnu": resolved["pnu"],
                     "resolvedPnu": resolved["pnu"],
                     "resolvedLegalAddress": resolved.get("addressFragment") or address,
@@ -1013,7 +1018,7 @@ def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, 
             if resolved.get("officialLandPricePerSqm"):
                 official_land_prices.append({
                     "pnu": resolved["pnu"],
-                    "parcelKey": parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"),
+                    "parcelKey": parcel_key,
                     "pricePerSqm": resolved.get("officialLandPricePerSqm"),
                     "baseYear": resolved.get("officialLandPriceBaseYear"),
                     "baseDate": resolved.get("officialLandPriceBaseDate"),
@@ -1025,7 +1030,7 @@ def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, 
                 })
             cadastral_records.append({
                 "pnu": resolved["pnu"],
-                "parcelKey": parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"),
+                "parcelKey": parcel_key,
                 "landCategory": resolved.get("landCategory"),
                 "areaSqm": resolved.get("areaSqm"),
                 "sourceName": "VWorld cadastral parcel",
@@ -1043,7 +1048,8 @@ def land_ledger_auto_enrichment_options(project_id: str, land_ledger: Dict[str, 
         else:
             diagnostics.append({
                 "connector": "vworld_address_pnu",
-                "status": resolved.get("status") or "unresolved",
+                "status": "unresolved",
+                "reason": mismatch,
                 "sequence": parcel.get("sequence"),
                 "addressFragment": address,
             })
@@ -1070,24 +1076,6 @@ def _legal_dong_base_address(address: Any) -> str | None:
     text = re.sub(r"\s+", " ", text).strip()
     return text or None
 
-
-def _parcel_lookup_address(parcel: Dict[str, Any], project_base_address: str | None) -> str | None:
-    raw = str(
-        parcel.get("addressFragment")
-        or parcel.get("normalizedLotNumber")
-        or parcel.get("rawLotNumber")
-        or ""
-    ).strip()
-    if not raw:
-        return None
-    if any("\uac00" <= char <= "\ud7a3" for char in raw):
-        return raw
-    lot = raw
-    if (parcel.get("isMountain") or parcel.get("is_mountain")) and not lot.startswith("산"):
-        lot = f"산 {lot}"
-    if project_base_address:
-        return f"{project_base_address} {lot}".strip()
-    return lot
 
 def persisted_land_evidence_package(project_id: str) -> Dict[str, Any]:
     records = list_land_evidence_records(project_id)
@@ -2592,9 +2580,11 @@ async def analyze_land_ledger_upload(
 @router.post("/{project_id}/land/parcels/resolve")
 def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """토지조서의 모든 필지에 대해 지번별 PNU·공시지가를 VWorld로 일괄 해석·저장."""
-    if project_id not in _project_store():
+    project = _project_store().get(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:analyze")
+    enforce_project_tenant_scope(request, project)
     payload = input_data or {}
     try:
         limit = max(1, min(500, int(payload.get("limit") or 150)))
@@ -2602,23 +2592,7 @@ def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: D
         limit = 150
     result = resolve_project_parcels_use_case(project_repository(), project_id, limit=limit)
     project_after = _project_store().get(project_id) or {}
-    parcels: list[Dict[str, Any]] = []
-    land_ledger = project_after.get("landLedger") or project_after.get("land_ledger")
-    if isinstance(land_ledger, dict) and isinstance(land_ledger.get("parcels"), list):
-        parcels.extend([parcel for parcel in land_ledger["parcels"] if isinstance(parcel, dict)])
-    if isinstance(project_after.get("land_acquisition"), list):
-        seen_keys = {
-            str(parcel.get("pnu") or parcel.get("resolvedPnu") or parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"))
-            for parcel in parcels
-        }
-        for parcel in project_after["land_acquisition"]:
-            if not isinstance(parcel, dict):
-                continue
-            key = str(parcel.get("pnu") or parcel.get("resolvedPnu") or parcel.get("normalizedLotNumber") or parcel.get("addressFragment") or parcel.get("sequence"))
-            if key in seen_keys:
-                continue
-            parcels.append(parcel)
-            seen_keys.add(key)
+    parcels = canonical_project_parcel_rows(project_after)
     persisted_evidence: list[Dict[str, Any]] = []
     if payload.get("persistEvidence", True):
         for record in land_evidence_records_from_ledger({"parcels": parcels}):
@@ -2653,7 +2627,10 @@ def resolve_project_parcel_pnus(project_id: str, request: Request, input_data: D
         "persistedLandEvidenceCount": len(persisted_evidence),
         "persistedLandEvidence": persisted_evidence,
         "vworld": vworld_status(),
-        "autoReanalysis": _maybe_auto_reanalyze(project_id, ["land_ledger"]),
+        "autoReanalysis": (
+            None if storage_backend() == "postgres"
+            else _maybe_auto_reanalyze(project_id, ["land_ledger"])
+        ),
     }
 
 @router.post("/{project_id}/feasibility-workbook/validate")
@@ -3033,7 +3010,7 @@ def enrich_project_land_ledger(project_id: str, input_data: Dict[str, Any] | Non
         "persistedLandEvidenceCount": len(persisted_evidence),
         "persistedLandEvidence": persisted_evidence,
         "vworld": vworld_status(),
-        "note": "PNU is resolved from VWorld address/parcel lookup when VWORLD_API_KEY is configured, or generated only from confirmed legalDongCode plus normalized lot fields. Official price/registry status is never fabricated without source evidence.",
+        "note": "PNU requires a matching VWorld cadastral parcel or a supplied parcel identifier. A supplied legal dong code only generates a lookup candidate.",
     }
 
 @router.post("/{project_id}/upload-and-run")
@@ -4455,6 +4432,87 @@ def review_legal_and_permits(
     return review_legal_and_permits_use_case(project, input_data)
 
 
+def _preview_land_legal(project_id: str, request: Request, response: Response, project: Dict[str, Any]) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "private, no-store"
+    enforce_project_tenant_scope(request, project)
+    options = _stored_chief_evidence_options(project_id, project, {})
+    return run_legal_pod_use_case(project_id, project, options, persist=False)
+
+
+@router.post("/{project_id}/legal-pod/preview")
+def preview_project_land_legal(project_id: str, request: Request, response: Response):
+    verified_actor_id(authorize_request(request, "project:analyze"))
+    project = authoritative_project(project_id, request)
+    result = _preview_land_legal(project_id, request, response, project)
+    return {**result, "previewHash": compact_review_hash(compact_land_legal_review(result["legalReview"]))}
+
+
+@router.post("/{project_id}/legal-pod/preview-summary")
+def save_project_land_legal_summary(project_id: str, request: Request, response: Response, input_data: Dict[str, Any]):
+    actor = verified_actor_id(authorize_request(request, "project:write"))
+    repository = project_repository(request)
+    project = repository.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    sections = input_data.get("sections")
+    parcel_indexes = input_data.get("parcelIndexes") or []
+    expected_hash = input_data.get("expectedPreviewHash")
+    if (
+        not isinstance(sections, list) or not 1 <= len(sections) <= 3
+        or any(section not in ("permit", "height", "parcels") for section in sections)
+        or not isinstance(parcel_indexes, list) or len(parcel_indexes) > 50
+        or any(type(index) is not int or index <= 0 for index in parcel_indexes)
+        or ("parcels" in sections) != bool(parcel_indexes)
+        or not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
+    ):
+        raise HTTPException(status_code=400, detail="저장할 항목과 필지를 선택한 뒤 검토를 다시 확인하세요.")
+    result = _preview_land_legal(project_id, request, response, project)
+    compact = compact_land_legal_review(result["legalReview"])
+    if expected_hash != compact_review_hash(compact):
+        raise HTTPException(status_code=409, detail="검토 근거가 바뀌었습니다. 화면 검토를 다시 실행한 뒤 저장하세요.")
+    selection = {section: compact[section] for section in sections}
+    if parcel_indexes:
+        selection["parcels"] = [parcel for parcel in compact["parcels"] if parcel.get("parcelIndex") in parcel_indexes]
+        if {parcel["parcelIndex"] for parcel in selection["parcels"]} != set(parcel_indexes):
+            raise HTTPException(status_code=400, detail="현재 검토에 있는 필지만 저장할 수 있습니다.")
+    record_id = "land_legal_preview:" + compact_review_hash({"actor": actor, "selection": selection})
+    existing = project.get("landLegalPreviewSummaries") or []
+    previous = next((item for item in existing if isinstance(item, dict) and item.get("recordId") == record_id), None)
+    if previous:
+        return previous
+    record = {
+        "recordId": record_id,
+        "analysisOnly": True,
+        "reportEligible": False,
+        "savedBy": actor,
+        "updatedAt": now_iso(),
+        "summary": selection,
+    }
+    # User notes stay outside the evidence, approval and report ledgers.
+    summaries = [record, *existing]
+    if len(json.dumps(summaries, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 32768:
+        raise HTTPException(status_code=413, detail="프로젝트의 요약 보관 한도에 도달했습니다. 선택 항목을 줄여 주세요.")
+    version = (project.get("_meta") or {}).get("stateVersion")
+    try:
+        update = {"landLegalPreviewSummaries": summaries}
+        if storage_backend() in {"postgres", "postgresql"}:
+            repository.update(project_id, update, expected_state_version=version)
+        else:
+            repository.update(project_id, update)
+    except ProjectVersionConflict as exc:
+        raise HTTPException(status_code=409, detail="프로젝트가 변경됐습니다. 미리보기를 다시 실행하세요.") from exc
+    return record
+
+
+@router.get("/{project_id}/legal-pod/preview-summary")
+def list_project_land_legal_summaries(project_id: str, request: Request, response: Response):
+    verified_actor_id(authorize_request(request, "project:read"))
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"items": project.get("landLegalPreviewSummaries") or []}
+
+
 @router.post("/{project_id}/legal-pod/run")
 def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Run the independent Legal Pod and persist its PF handoff/evidence ledger."""
@@ -4472,9 +4530,6 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
         )
     enforce_project_tenant_scope(request, project)
     project_data = dict(project)
-    project_data["landEvidence"] = {
-        "records": list_land_evidence_records(project_id),
-    }
     result = run_legal_pod_use_case(project_id, project_data, _stored_chief_evidence_options(project_id, project_data, input_data or {}))
     user = authorization.get("user") or {}
     metadata = (
@@ -4509,7 +4564,8 @@ def run_legal_pod(project_id: str, request: Request, input_data: Dict[str, Any] 
                 created_by=actor_id,
             )
             result["legalReview"] = sealed["legalReview"]
-            upsert_legal_review_record(project_id, result["legalReview"])
+            if storage_backend() != "postgres":
+                upsert_legal_review_record(project_id, result["legalReview"])
             snapshot_persistence = {
                 key: value
                 for key, value in sealed.items()
@@ -5374,7 +5430,7 @@ def _summarize_land_ledger(project_data: Dict[str, Any]) -> Dict[str, Any]:
     ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
     parcels = ledger.get("parcels") if isinstance(ledger, dict) else []
     parcels = parcels if isinstance(parcels, list) else []
-    pnu_count = sum(1 for parcel in parcels if isinstance(parcel, dict) and (parcel.get("pnu") or parcel.get("resolvedPnu")))
+    pnu_count = sum(1 for parcel in parcels if isinstance(parcel, dict) and parcel_pnu(parcel))
     return {
         "present": bool(parcels),
         "parcelCount": len(parcels),
@@ -5997,13 +6053,35 @@ def get_project_workspace_context(
         parsed_facts = persisted_parsed_fact_package(project_id)
         chief_artifacts = list_chief_pod_artifact_records(project_id)
         project_record = project.get("project") if isinstance(project.get("project"), dict) else {}
+        is_land_page = _normalize_workspace_page(page) == "land"
+        land_records = None
+        if is_land_page:
+            try:
+                land_records = list_land_evidence_records(project_id)
+            except Exception:
+                # A land-evidence read failure must remain distinct from an empty ledger.
+                pass
+        page_data = _workspace_page_data(
+            project_id=project_id,
+            page=page,
+            source_data=project,
+            plan=None,
+            source_documents=source_documents,
+            land_evidence_records=land_records,
+            parsed_fact_package_data=parsed_facts,
+            assumption_overrides=None,
+            chief_artifacts=chief_artifacts,
+        )
+        unavailable_sections = ["assumptionOverrides", "missingInputs"]
+        if land_records is None:
+            unavailable_sections.insert(0, "landEvidence")
         # The normalized runtime cannot hydrate the compatibility app_state
         # document. Do not infer missing evidence or persist a partial graph.
         # The request middleware records access through the normalized audit log.
         return {
             "schemaVersion": "realytics-workspace-page-context-v1",
             "contextCompleteness": "partial",
-            "unavailableSections": ["landEvidence", "assumptionOverrides", "missingInputs"],
+            "unavailableSections": unavailable_sections,
             "projectId": project_id,
             "page": page,
             "normalizedPage": _normalize_workspace_page(page),
@@ -6015,20 +6093,11 @@ def get_project_workspace_context(
                 "project": project_record,
                 "status": project_record.get("status") or project.get("status"),
                 "sourceDocumentCount": len(source_documents),
+                **({"landEvidenceCount": len(land_records)} if land_records is not None else {}),
                 "chiefArtifactCount": len(chief_artifacts),
                 "updatedAt": (project.get("_meta") or {}).get("updatedAt"),
             },
-            "pageData": _workspace_page_data(
-                project_id=project_id,
-                page=page,
-                source_data=project,
-                plan=None,
-                source_documents=source_documents,
-                land_evidence_records=None,
-                parsed_fact_package_data=parsed_facts,
-                assumption_overrides=None,
-                chief_artifacts=chief_artifacts,
-            ),
+            "pageData": page_data,
         }
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")

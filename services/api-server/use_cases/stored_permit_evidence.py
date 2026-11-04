@@ -1,13 +1,18 @@
 """Resolve permit evidence from stored source versions and reviewed Parser V2 selections."""
 from copy import deepcopy
 
+from agents.legal_permit_route import approval_document_route
+
 
 PERMIT_TOKENS = ("permit", "approval", "authorization", "regulation", "zoning", "land_use", "building_code", "인허가", "허가", "토지이용")
 
 
 def resolve_stored_permit_documents(project_id, project, store, tenant_id):
-    documents = [deepcopy(row) for row in project.get('source_documents') or []
-                 if any(token in str(row.get('documentType') or '').casefold() for token in PERMIT_TOKENS)]
+    documents = [
+        deepcopy(row) for row in project.get('source_documents') or []
+        if approval_document_route(row)
+        or any(token in str(row.get('documentType') or '').casefold() for token in PERMIT_TOKENS)
+    ]
     for document in documents:
         document['verificationStatus'] = 'candidate'
         document['evidenceStage'] = 'source_only'

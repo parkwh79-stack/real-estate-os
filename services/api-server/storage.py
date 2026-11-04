@@ -1649,6 +1649,18 @@ def upsert_land_evidence_record(project_id: str, record: Dict[str, Any]) -> Dict
         "createdAt": record.get("createdAt") or record.get("created_at") or now,
         "updatedAt": now,
     }
+    if storage_backend() == "postgres":
+        # The normalized runtime grants tenant-bound Deal State access. Keep
+        # private source evidence inside the project scope and retain its shape.
+        upsert_deal_state_record(project_id, {
+            "recordId": f"land_evidence:{normalized['recordKey']}",
+            "recordType": "land_evidence",
+            "key": normalized["recordKey"],
+            "sourceType": normalized["sourceType"],
+            "sourceLocator": normalized.get("sourceLocator"),
+            "landEvidenceRecord": normalized,
+        })
+        return normalized
     if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("land_evidence", {})
@@ -1707,7 +1719,13 @@ def list_land_evidence_records(
     pnu: str | None = None,
     evidence_type: str | None = None,
 ) -> list[Dict[str, Any]]:
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        records = [
+            record["landEvidenceRecord"]
+            for record in list_deal_state_records(project_id, record_type="land_evidence", limit=1000)
+            if isinstance(record.get("landEvidenceRecord"), dict)
+        ]
+    elif _use_document_store():
         state = _load_json_state() or default_state()
         records = list(state.get("land_evidence", {}).get(project_id, {}).values())
     else:
@@ -1783,6 +1801,7 @@ def list_reusable_public_land_evidence_records(
     pnus: list[str],
     *,
     as_of: datetime | None = None,
+    project_id: str | None = None,
 ) -> list[Dict[str, Any]]:
     """Return fresh public-API parcel facts reusable across projects.
 
@@ -1793,7 +1812,13 @@ def list_reusable_public_land_evidence_records(
     normalized_pnus = sorted({str(pnu).strip() for pnu in pnus if str(pnu).strip()})
     if not normalized_pnus:
         return []
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        # The serving role never scans other tenants' project evidence.
+        records = [
+            record for record in list_land_evidence_records(project_id)
+            if str(record.get("pnu") or "") in normalized_pnus
+        ] if project_id else []
+    elif _use_document_store():
         state = _load_json_state() or default_state()
         records = [
             record

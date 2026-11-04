@@ -188,7 +188,11 @@ def test_land_ledger_batch_enrichment_resolves_pnu_price_and_registry_evidence()
     enriched = agent.enrich_analysis(
         imported,
         {
-            "legalDongCode": "2729012300",
+            "pnuResolutions": [{
+                "pnu": "2729012300100010003",
+                "addressFragment": "Bonri 1-3",
+                "matchConfidence": 0.95,
+            }],
             "cadastralCharacteristics": [
                 {
                     "addressFragment": "Bonri 1-3",
