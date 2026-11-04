@@ -136,9 +136,17 @@ export function WorkInbox({ items, totalProjectCount, loading, errors, onRetry }
   return (
     <section aria-labelledby="work-inbox-title" className="space-y-5" data-testid="dashboard-work-inbox">
       <div className="grid grid-cols-3 gap-2 sm:gap-3" aria-label="프로젝트 현황">
-        <SummaryMetric label="전체 프로젝트" value={totalProjectCount} note={totalProjectCount === null ? "목록 확인 불가" : "접근 가능한 프로젝트"} />
-        <SummaryMetric label="확인 필요" value={items === null ? null : attention.length} note={scope} />
-        <SummaryMetric label="처리 중" value={items === null ? null : processing.length} note={scope} />
+        <SummaryMetric label="전체 프로젝트" value={totalProjectCount} note={totalProjectCount === null ? "목록 확인 불가" : "접근 가능한 프로젝트"}
+          actionLabel="전체 프로젝트 보기" href="#all-projects" onClick={() => {
+            const target = document.getElementById("all-projects");
+            if (target instanceof HTMLDetailsElement) target.open = true;
+          }} />
+        <SummaryMetric label="확인 필요" value={items === null ? null : attention.length} note={scope}
+          actionLabel="확인이 필요한 최근 작업 보기" active={filter === "attention"} disabled={items === null}
+          controls={ordered.length > 0 ? resultsId : undefined} onClick={() => { setFilter("attention"); setShowAll(false); }} />
+        <SummaryMetric label="처리 중" value={items === null ? null : processing.length} note={scope}
+          actionLabel="처리 중인 최근 작업 보기" active={filter === "processing"} disabled={items === null}
+          controls={ordered.length > 0 ? resultsId : undefined} onClick={() => { setFilter("processing"); setShowAll(false); }} />
       </div>
 
       <div className="flex items-start justify-between gap-3">
@@ -185,14 +193,9 @@ export function WorkInbox({ items, totalProjectCount, loading, errors, onRetry }
             {filtered.length === 0 ? (
               <p className="rounded-re-panel border border-dashed border-re-border px-5 py-8 text-center text-sm text-re-secondary">불러온 최근 작업에서 {filter === "processing" ? "처리 중인 항목" : "확인이 필요한 항목"}이 없습니다.</p>
             ) : (
-              <div className="overflow-hidden rounded-re-panel border border-re-border bg-re-surface">
-                <div className="hidden grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1.3fr)_6rem_8rem] gap-4 border-b border-re-border bg-re-subtle px-5 py-3 text-xs font-medium text-re-muted xl:grid" aria-hidden="true">
-                  <span>프로젝트</span><span>현재 작업</span><span>확인할 사항</span><span>마지막 작업</span><span className="text-right">이어하기</span>
-                </div>
-                <ul className="divide-y divide-re-border" aria-label="최근 프로젝트">
-                  {displayed.map((item) => <WorkInboxItem key={item.itemId ?? item.projectId} item={item} />)}
-                </ul>
-              </div>
+              <ul className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3" aria-label="최근 프로젝트">
+                {displayed.map((item) => <WorkInboxItem key={item.itemId ?? item.projectId} item={item} />)}
+              </ul>
             )}
           </div>
           {filtered.length > PREVIEW_COUNT ? (
@@ -206,12 +209,21 @@ export function WorkInbox({ items, totalProjectCount, loading, errors, onRetry }
   );
 }
 
-function SummaryMetric({ label, value, note }: { label: string; value: number | null; note: string }) {
+function SummaryMetric({ label, value, note, actionLabel, href, onClick, active, disabled, controls }: {
+  label: string; value: number | null; note: string; actionLabel: string;
+  href?: string; onClick: () => void; active?: boolean; disabled?: boolean; controls?: string;
+}) {
+  const descriptionId = useId();
+  const className = "block h-full w-full rounded-re-panel px-2 py-3 text-left transition-colors hover:bg-re-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-re-action disabled:cursor-default disabled:hover:bg-transparent motion-reduce:transition-none sm:p-4";
+  const content = <>
+    <span className="block whitespace-nowrap text-[11px] font-medium text-re-secondary sm:text-xs">{label}</span>
+    <span id={`${descriptionId}-value`} className="re-financial-number mt-2 block break-all text-xl font-bold text-re-text sm:text-2xl">{value === null ? "—" : `${value.toLocaleString("ko-KR")}개`}</span>
+    <span id={`${descriptionId}-scope`} className="mt-1 block break-keep text-balance text-[11px] leading-4 text-re-muted">{note}</span>
+  </>;
   return (
-    <div className="min-w-0 rounded-re-panel border border-re-border bg-re-surface px-2 py-3 sm:p-4" role="group" aria-label={label}>
-      <p className="whitespace-nowrap text-[11px] font-medium text-re-secondary sm:text-xs">{label}</p>
-      <p className="re-financial-number mt-2 break-all text-xl font-bold text-re-text sm:text-2xl">{value === null ? "—" : `${value.toLocaleString("ko-KR")}개`}</p>
-      <p className="mt-1 break-keep text-balance text-[11px] leading-4 text-re-muted">{note}</p>
+    <div className={`min-w-0 rounded-re-panel border ${active ? "border-re-action bg-re-subtle" : "border-re-border bg-re-surface"}`} role="group" aria-label={label}>
+      {href ? <a href={href} onClick={onClick} aria-label={actionLabel} aria-describedby={`${descriptionId}-value ${descriptionId}-scope`} className={className}>{content}</a>
+        : <button type="button" onClick={onClick} aria-label={actionLabel} aria-describedby={`${descriptionId}-value ${descriptionId}-scope`} aria-pressed={active} aria-controls={controls} disabled={disabled} className={className}>{content}</button>}
     </div>
   );
 }
@@ -226,20 +238,20 @@ function WorkInboxItem({ item }: { item: RecentWorkItem }) {
   const readiness = normalized(item.approvalReadinessStatus);
   const track = item.track ? TRACK_LABELS[item.track] ?? item.track : "";
   return (
-    <li className="px-4 py-4 sm:px-5" aria-label={`${item.projectName} 작업`}>
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1.3fr)_6rem_8rem] xl:items-start xl:gap-4">
+    <li className="flex min-w-0 flex-col rounded-re-panel border border-re-border bg-re-surface p-4 shadow-sm sm:p-5" aria-label={`${item.projectName} 작업`}>
+      <div className="flex min-h-60 flex-1 flex-col gap-3">
         <div className="min-w-0">
           <Link href={`/project/${encodeURIComponent(item.projectId)}`} className="break-words text-sm font-semibold text-re-text hover:text-re-action focus-visible:outline focus-visible:outline-2 focus-visible:outline-re-action">{item.projectName}</Link>
           {track ? <p className="mt-1 text-xs text-re-muted">{track}</p> : null}
         </div>
         <div><ExecutionStatusBadge status={execution.status} detail={execution.detail} className="max-w-full" /></div>
-        <div className="space-y-1 text-xs leading-5">
+        <div className="min-h-10 space-y-1 break-words text-xs leading-5">
           {primaryReasons.length ? primaryReasons.map((reason) => (
             <p key={reason.text} className={reason.severe ? "font-semibold text-re-danger" : "text-re-secondary"}>{reason.text}</p>
           )) : <p className="text-re-muted">{isProcessing(item) ? "처리 결과를 기다리고 있습니다." : "등록된 확인 항목 없음"}</p>}
         </div>
-        <time className="text-xs leading-5 text-re-muted" dateTime={item.lastWorkedAt}><span className="xl:sr-only">마지막 작업 </span>{formatTimestamp(item.lastWorkedAt)}</time>
-        <div className="flex flex-wrap items-center gap-2 xl:flex-col xl:items-end xl:gap-1">
+        <time className="mt-auto text-xs leading-5 text-re-muted" dateTime={item.lastWorkedAt}>마지막 작업 {formatTimestamp(item.lastWorkedAt)}</time>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-re-border pt-3">
           <Link href={actionHref(item)} aria-label={`${item.projectName} ${ACTION_LABELS[item.nextAction] ?? "작업 이어가기"}`} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-re-control border border-re-border px-3 text-xs font-semibold text-re-action hover:bg-re-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-re-action">
             {ACTION_LABELS[item.nextAction] ?? "작업 이어가기"}<ArrowRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           </Link>
@@ -250,7 +262,7 @@ function WorkInboxItem({ item }: { item: RecentWorkItem }) {
       </div>
       <div id={detailId} hidden={!expanded} className="mt-4 space-y-3 rounded-re-control bg-re-subtle p-4 text-xs leading-5">
         <p className="font-medium text-re-text">자료와 검토 기록</p>
-        <dl className="grid grid-cols-3 gap-3 text-re-secondary">
+        <dl className="grid grid-cols-3 gap-2 break-words text-re-secondary [&_dd]:break-all [&_div]:min-w-0">
           <div><dt>원본 문서</dt><dd className="font-semibold text-re-text">{item.sourceDocumentCount.toLocaleString("ko-KR")}건</dd></div>
           <div><dt>미해결 검토</dt><dd className="font-semibold text-re-text">{item.openReviewCount.toLocaleString("ko-KR")}건</dd></div>
           <div><dt>등록된 위험</dt><dd className="font-semibold text-re-text">{item.riskCount.toLocaleString("ko-KR")}건</dd></div>
@@ -271,7 +283,7 @@ function WorkInboxLoading() {
   return (
     <section aria-label="최근 프로젝트 로딩" aria-busy="true" className="space-y-5">
       <div className="grid grid-cols-3 gap-3">{Array.from({ length: 3 }).map((_, index) => <div key={index} className="h-24 animate-pulse rounded-re-panel border border-re-border bg-re-surface motion-reduce:animate-none" />)}</div>
-      <div className="space-y-3 rounded-re-panel border border-re-border bg-re-surface p-5">{Array.from({ length: 6 }).map((_, index) => <div key={index} className="h-16 animate-pulse rounded-re-control bg-re-subtle motion-reduce:animate-none" />)}</div>
+      <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{Array.from({ length: 6 }).map((_, index) => <div key={index} className="h-72 animate-pulse rounded-re-panel border border-re-border bg-re-surface motion-reduce:animate-none" />)}</div>
       <span className="sr-only">최근 프로젝트를 불러오는 중입니다.</span>
     </section>
   );

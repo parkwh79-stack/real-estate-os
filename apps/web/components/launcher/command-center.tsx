@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState, type RefObject } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -8,6 +9,7 @@ import {
   Building2,
   CheckCircle2,
   Landmark,
+  LayoutDashboard,
   Layers3,
   LogOut,
   Loader2,
@@ -23,6 +25,7 @@ import {
   projectWriteRestrictionMessage,
 } from "../../lib/authorization";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
+import { validateIntakeFiles } from "../../lib/intake-upload-client";
 import { getTrackWorkflowDefinition, setStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
 import { useAuth } from "../auth/auth-context";
 import { ReviewOnlyNotice } from "../auth/review-only-notice";
@@ -292,6 +295,7 @@ export function CommandCenter() {
     setTriage(null);
     setTriageError(null);
     try {
+      validateIntakeFiles(picked);
       // Browser File objects remain valid after the picker is reset. Reusing
       // them avoids reading every large PDF/XLSX twice before the first API
       // request, which previously made intake appear stalled.
@@ -409,6 +413,10 @@ export function CommandCenter() {
   return (
     <main className="relative flex min-h-screen flex-col items-center overflow-hidden bg-slate-950 px-4 py-10 text-white sm:px-6 sm:py-12">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgba(56,189,248,0.12),transparent),radial-gradient(50%_40%_at_80%_100%,rgba(99,102,241,0.12),transparent)]" />
+      <Link href="/dashboard" className="absolute left-4 top-4 z-20 inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 text-xs font-semibold text-slate-200 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 sm:left-5 sm:top-5">
+        <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
+        대시보드 보기
+      </Link>
       <button
         type="button"
         data-testid="switch-account-button"
@@ -641,7 +649,7 @@ function DropZone({
         <>
           <UploadCloud className="h-10 w-10 text-slate-500" />
           <p className="text-base font-bold">파일을 끌어다 놓거나 클릭해서 선택하세요. 여러 개도 가능합니다.</p>
-          <p className="text-xs text-slate-500">PDF · XLS/XLSX · DOCX · JSON · CSV</p>
+          <p className="text-xs text-slate-400">PDF · XLS/XLSX · DOCX · JSON · CSV · 파일당 최대 64MB</p>
         </>
       )}
       <input

@@ -9,12 +9,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# OCR is local and offline at runtime. Keep the language models out of source
+# control and verify their immutable upstream versions during the build.
+COPY parsing_platform/ocr_language_data.py ./parsing_platform/ocr_language_data.py
+COPY scripts/prepare_ocr_languages.py ./scripts/prepare_ocr_languages.py
+RUN python -m scripts.prepare_ocr_languages --directory /opt/realytics/tessdata
+ENV REALYTICS_OCR_TESSDATA_DIR=/opt/realytics/tessdata \
+    OMP_THREAD_LIMIT=1
+
 RUN addgroup --system realytics \
     && adduser --system --ingroup realytics --home /home/realytics realytics
 
 COPY --chown=realytics:realytics . .
 
 USER realytics
+
+# The release image must execute OCR, not merely contain language filenames.
+RUN python -m scripts.verify_ocr_runtime
 
 EXPOSE 8000
 

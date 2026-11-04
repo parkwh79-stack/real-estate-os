@@ -4,6 +4,23 @@ Updated: 2026-11-04
 
 Status: **Controlled implementation; not production-ready**
 
+### Selected PDF page reading pilot (2026-11-04)
+
+Cloud Build `29b0775e-2622-419d-a001-9f13f37d9bb8` used 425 audited API inputs,
+including all 26 migrations. Its Linux image smoke test read Korean, English,
+and a numeric value from a synthetic scan using the pinned OCR models.
+Cloud Run `realytics-api-00004-ldp` is Ready at 100% traffic with image
+`sha256:fa61aa6343fd4286fb192b1e3e1ecb7e49b8494b4acbb2e0e03877145cb936fb`.
+Live readiness reported both PostgreSQL pools healthy. The two reading routes
+are published and the anonymous page request returned 401.
+
+Bucket lifecycle read-back confirmed seven-day expiration eligibility for
+`realytics/derived/pdf-reading/`, alongside the existing age-one intake prefix
+and seven-day soft delete. The [page reading contract](smart-intake.md) describes
+the source checks and processing limits. Hosted authenticated upload and page
+reading remain acceptance checks. Web rollout and exact-commit CI are recorded
+in [PR #2](https://github.com/parkwh79-stack/real-estate-os/pull/2).
+
 ### Upload transport pilot follow-up (2026-11-04)
 
 The Vercel request-size incident is addressed by authenticated 3 MiB upload parts,

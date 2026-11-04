@@ -5,6 +5,7 @@ import { FolderOpen, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAuth } from "../../components/auth/auth-context";
 import { WorkInbox, type DashboardDataError } from "../../components/dashboard/work-inbox";
+import { DashboardAtmosphere } from "../../components/dashboard/dashboard-atmosphere";
 import { NewProjectDialog } from "../../components/intake/new-project-dialog";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { hasPermission, PROJECT_WRITE_PERMISSION } from "../../lib/authorization";
@@ -57,22 +58,25 @@ export default function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 pb-8">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-re-text">대시보드</h1>
-          <p className="mt-1 text-sm text-re-secondary">
-            {firstProject && canWriteProjects ? "보유한 자료로 첫 프로젝트를 시작하세요." : "진행하던 프로젝트를 이어서 검토하세요."}
-          </p>
-        </div>
-        {canWriteProjects ? (
-          <NewProjectDialog key={`${user?.tenantId}:${user?.userId}`} firstProject={firstProject} onProjectCreated={() => setReloadKey((value) => value + 1)} />
-        ) : (
-          <button type="button" disabled data-testid="dashboard-new-deal-disabled"
-            className="min-h-11 rounded-re-control border border-re-border px-4 text-sm text-re-muted disabled:cursor-not-allowed">
-            새 프로젝트 · 조회 전용
-          </button>
-        )}
-      </header>
+      <div className="re-dashboard-intro">
+        <DashboardAtmosphere />
+        <header className="re-dashboard-glass flex flex-wrap items-center justify-between gap-4 rounded-re-panel px-5 py-5 sm:px-6" data-testid="dashboard-glass-header">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-re-text sm:text-3xl">대시보드</h1>
+            <p className="mt-2 text-sm leading-6 text-re-secondary">
+              {firstProject && canWriteProjects ? "보유한 자료로 첫 프로젝트를 시작하세요." : "진행하던 프로젝트를 이어서 검토하세요."}
+            </p>
+          </div>
+          {canWriteProjects ? (
+            <NewProjectDialog key={`${user?.tenantId}:${user?.userId}`} firstProject={firstProject} onProjectCreated={() => setReloadKey((value) => value + 1)} />
+          ) : (
+            <button type="button" disabled data-testid="dashboard-new-deal-disabled"
+              className="min-h-11 rounded-re-control border border-re-border px-4 text-sm text-re-muted disabled:cursor-not-allowed">
+              새 프로젝트 · 조회 전용
+            </button>
+          )}
+        </header>
+      </div>
 
       {!canWriteProjects ? (
         <div data-testid="review-only-notice" role="status" className="rounded-re-control bg-re-subtle px-4 py-3 text-sm text-re-secondary">

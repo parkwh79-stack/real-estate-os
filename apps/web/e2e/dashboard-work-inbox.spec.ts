@@ -45,6 +45,7 @@ test("failed recent work remains unknown instead of green zero and recovers only
     await expect(summary(page, label)).toContainText("—");
     await expect(summary(page, label)).toContainText("최근 작업 확인 불가");
     await expect(summary(page, label)).not.toContainText("0개");
+    await expect(summary(page, label).getByRole("button")).toBeDisabled();
   }
   await expect(projects(page)).toHaveCount(0);
   await expect(page.getByText("최근 작업을 불러오지 못했습니다.", { exact: true })).toBeVisible();
@@ -141,4 +142,37 @@ test("unknown run state needs confirmation while a stored risk count alone does 
   await expect(projectRow(page, "프로젝트 unrecorded")).toContainText("최근 실행 상태 확인 필요");
   await page.getByRole("group", { name: "최근 작업 필터" }).getByRole("button", { name: /^확인 필요/ }).click();
   await expect(projectRow(page, "프로젝트 risk-history")).toHaveCount(0);
+});
+
+
+test("summary cards filter the loaded work and open the full project list with keyboard support", async ({ page }) => {
+  const state = await mockDashboard(page, [
+    workItem("normal"), workItem("attention", { latestRunStatus: "failed" }), workItem("processing", { latestRunStatus: "running" }),
+  ], { total: 35 });
+  const attention = summary(page, "확인 필요").getByRole("button", { name: "확인이 필요한 최근 작업 보기" });
+  await attention.click();
+  await expect(attention).toHaveAttribute("aria-pressed", "true");
+  await expect(projects(page).getByRole("listitem")).toHaveCount(1);
+  await expect(projectRow(page, "프로젝트 attention")).toBeVisible();
+  await expect(page.getByRole("group", { name: "최근 작업 필터" }).getByRole("button", { name: /^확인 필요/ })).toHaveAttribute("aria-pressed", "true");
+
+  const processing = summary(page, "처리 중").getByRole("button", { name: "처리 중인 최근 작업 보기" });
+  await processing.focus();
+  await page.keyboard.press("Enter");
+  await expect(processing).toHaveAttribute("aria-pressed", "true");
+  await expect(attention).toHaveAttribute("aria-pressed", "false");
+  await expect(projects(page).getByRole("listitem")).toHaveCount(1);
+  await expect(projectRow(page, "프로젝트 processing")).toBeVisible();
+
+  const allProjects = page.locator("#all-projects");
+  const allLink = summary(page, "전체 프로젝트").getByRole("link", { name: "전체 프로젝트 보기" });
+  await allLink.focus();
+  await page.keyboard.press("Enter");
+  await expect(allProjects).toHaveAttribute("open", "");
+  await expect(allProjects.getByRole("link", { name: "프로젝트 visible-0", exact: true })).toHaveAttribute("href", "/project/visible-0");
+  await allProjects.locator("summary").click();
+  await expect(allProjects).not.toHaveAttribute("open", "");
+  await allLink.click();
+  await expect(allProjects).toHaveAttribute("open", "");
+  expect(state.writes).toEqual([]);
 });

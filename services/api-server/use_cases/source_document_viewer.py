@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from io import BytesIO
+import math
 from typing import Any, Dict
+
+MAX_PDF_PREVIEW_BYTES = 3 * 1024 * 1024
+MAX_PDF_PREVIEW_RENDER_PIXELS = 3_000_000
 
 
 class UnsatisfiableByteRange(ValueError):
@@ -103,19 +107,28 @@ def render_pdf_page_preview(
                 or pixel_width * pixel_height > 25_000_000
             ):
                 raise ValueError("PDF page dimensions exceed the controlled preview limit")
-            pixmap = page.get_pixmap(
-                matrix=fitz.Matrix(scale, scale),
-                alpha=False,
-                colorspace=fitz.csRGB,
-            )
+            # Preview bytes also traverse the Vercel BFF. Keep a display image
+            # bounded independently of the full-resolution, internal OCR image.
+            pixel_scale = min(scale, math.sqrt(MAX_PDF_PREVIEW_RENDER_PIXELS / (page_rect.width * page_rect.height)))
+            for _ in range(4):
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(pixel_scale, pixel_scale),
+                    alpha=False, colorspace=fitz.csRGB)
+                image = pixmap.tobytes("png")
+                if len(image) <= MAX_PDF_PREVIEW_BYTES:
+                    break
+                pixel_scale *= math.sqrt(MAX_PDF_PREVIEW_BYTES / len(image)) * 0.95
+            else:
+                raise ValueError("PDF preview exceeds the response size limit")
             return {
-                "content": pixmap.tobytes("png"),
+                "content": image,
                 "pageNumber": page_number,
                 "pageCount": document.page_count,
                 "pageWidth": float(page_rect.width),
                 "pageHeight": float(page_rect.height),
                 "pixelWidth": int(pixmap.width),
                 "pixelHeight": int(pixmap.height),
+                "pixelScale": pixel_scale,
+                "previewAdjusted": pixel_scale < scale,
                 "coordinateSpace": "pdf_points_top_left",
             }
     except (IndexError, ValueError):

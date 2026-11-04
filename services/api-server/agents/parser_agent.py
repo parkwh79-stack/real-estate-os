@@ -36,6 +36,19 @@ _ENTITY_ARRAY_IDENTITY_KEYS: dict[str, tuple[str, ...]] = {
 
 
 class ParserAgent:
+    @staticmethod
+    def read_evidence_pages(document, *, page_numbers, tessdata_dir=None, timeout_seconds=20.0) -> dict:
+        """Read source-bound native/OCR text for review without promoting facts.
+
+        The caller resolves an authorized, integrity-checked original. Results
+        retain page locators and are inputs for review and subsequent extraction;
+        this method never calls a paid provider or applies financial values.
+        """
+        from parsing_platform.local_pdf_reading import read_pdf_pages
+
+        return read_pdf_pages(document, page_numbers=page_numbers,
+                              tessdata_dir=tessdata_dir, timeout_seconds=timeout_seconds)
+
     def __init__(self, ai_context: Dict[str, Any] | None = None):
         self.ai_context = resolve_ai_context(ai_context)
         self.ai = AIConnection()

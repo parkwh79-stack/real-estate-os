@@ -67,6 +67,7 @@ import {
   normalizeExecutionStatus,
   normalizeReviewStatus,
 } from "../ui/primitives";
+import { PdfPageReadingPanel } from "./pdf-page-reading-panel";
 
 type InspectorTab = "facts" | "evidence" | "issues" | "conflicts" | "glossary" | "review" | "changes" | "audit";
 
@@ -547,7 +548,7 @@ export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
   }, [facts, selectedDocument?.documentVersionId]);
 
   useEffect(() => {
-    const available = documentFacts.length ? documentFacts : facts;
+    const available = documentFacts;
     if (!available.length) {
       setSelectedFactKey(null);
       return;
@@ -555,9 +556,9 @@ export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
     if (!selectedFactKey || !available.some((item) => item.key === selectedFactKey)) {
       setSelectedFactKey(available.at(0)?.key ?? null);
     }
-  }, [documentFacts, facts, selectedFactKey]);
+  }, [documentFacts, selectedFactKey]);
 
-  const selectedFact = facts.find((item) => item.key === selectedFactKey) ?? documentFacts.at(0) ?? facts.at(0);
+  const selectedFact = documentFacts.find((item) => item.key === selectedFactKey) ?? documentFacts.at(0);
   const documentAnchors = useMemo(() => collectLocatorAnchors(documentFacts), [documentFacts]);
   const selectedEvidence = useMemo(() => {
     if (!selectedFact) return [];
@@ -1077,8 +1078,9 @@ function SourcePreview({
               title="locator와 선택 원본의 lineage가 일치하지 않습니다."
               body="file SHA-256, documentVersionId 또는 documentId가 다른 locator는 페이지나 셀 위에 표시하지 않습니다. Parser V2 원장을 다시 확인하세요."
             />
-          ) : document && locator && contentUrl && isPdf ? (
+          ) : document && contentUrl && isPdf ? (
             <PdfLocatorPreview
+              key={`${archiveId}:${locator?.pageNumber ?? locator?.page ?? "source"}`}
               projectId={projectId}
               archiveId={archiveId}
               locator={locator}
@@ -1167,15 +1169,17 @@ function PdfLocatorPreview({
 }: {
   projectId: string;
   archiveId: string;
-  locator: SourceLocatorRecord;
+  locator?: SourceLocatorRecord;
   contentUrl: string;
   onSelectSourceLocator: (locator: SourceLocatorRecord) => void;
 }) {
-  const parsedPageNumber = finiteNumber(locator.pageNumber ?? locator.page);
-  const pageNumber = parsedPageNumber && Number.isInteger(parsedPageNumber)
+  const parsedPageNumber = finiteNumber(locator?.pageNumber ?? locator?.page);
+  const evidencePageNumber = parsedPageNumber && Number.isInteger(parsedPageNumber) && parsedPageNumber > 0
     ? parsedPageNumber
     : undefined;
-  const bbox = locatorBbox(locator);
+  const [pageNumber, setPageNumber] = useState(evidencePageNumber ?? 1);
+  const activeLocator = pageNumber === evidencePageNumber ? locator : undefined;
+  const bbox = activeLocator ? locatorBbox(activeLocator) : null;
   const [preview, setPreview] = useState<{
     url: string;
     pageCount: number;
@@ -1187,11 +1191,6 @@ function PdfLocatorPreview({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!pageNumber || pageNumber < 1) {
-      setPreview(null);
-      setError(null);
-      return;
-    }
     let active = true;
     let objectUrl: string | null = null;
     setLoading(true);
@@ -1223,17 +1222,7 @@ function PdfLocatorPreview({
     };
   }, [archiveId, pageNumber, projectId]);
 
-  if (!pageNumber || pageNumber < 1) {
-    return (
-      <ControlledEmpty
-        icon={<LocateFixed className="h-7 w-7" />}
-        title="PDF page locator가 없습니다."
-        body="실제 pageNumber가 없는 근거에는 페이지 또는 BBox overlay를 그리지 않습니다. 원본 byte-range viewer에서 문서를 직접 확인하세요."
-      />
-    );
-  }
-
-  const overlay = preview ? pdfLocatorOverlay(locator, preview) : null;
+  const overlay = preview && activeLocator ? pdfLocatorOverlay(activeLocator, preview) : null;
   const bboxSupported = Boolean(overlay);
   const overlayStyle = overlay ? {
     left: `${overlay.leftPercent}%`,
@@ -1249,9 +1238,16 @@ function PdfLocatorPreview({
           <p className="text-xs font-black text-slate-950 dark:text-white">실제 PDF 페이지 · p.{pageNumber}</p>
           <p className="mt-0.5 text-[11px] text-slate-500">서버가 검증 원본에서 렌더링하며 locator geometry만 overlay합니다.</p>
         </div>
-        <a href={`${contentUrl}#page=${pageNumber}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-black text-indigo-600 hover:underline">
-          전체 PDF 열기 <ExternalLink className="h-3 w-3" />
-        </a>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2" aria-label="PDF 페이지 선택">
+            <button type="button" disabled={loading || pageNumber <= 1} onClick={() => setPageNumber((page) => page - 1)} className="min-h-9 rounded border border-slate-300 px-2 text-xs font-bold disabled:opacity-40 dark:border-slate-700" aria-label="이전 PDF 페이지">이전</button>
+            <span className="text-xs text-slate-600 dark:text-slate-300">{pageNumber}{preview ? ` / ${preview.pageCount}` : ""}</span>
+            <button type="button" disabled={loading || !preview || pageNumber >= preview.pageCount} onClick={() => setPageNumber((page) => page + 1)} className="min-h-9 rounded border border-slate-300 px-2 text-xs font-bold disabled:opacity-40 dark:border-slate-700" aria-label="다음 PDF 페이지">다음</button>
+          </div>
+          <a href={`${contentUrl}#page=${pageNumber}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-black text-indigo-600 hover:underline">
+            전체 PDF 열기 <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
       </div>
       {loading ? (
         <div className="flex min-h-72 items-center justify-center text-xs font-bold text-slate-500"><Loader2 className="mr-2 h-4 w-4 animate-spin" /> 원본 페이지 렌더링 중</div>
@@ -1265,7 +1261,7 @@ function PdfLocatorPreview({
             {bboxSupported && overlayStyle ? (
               <button
                 type="button"
-                onClick={() => onSelectSourceLocator(locator)}
+                onClick={() => { if (activeLocator) onSelectSourceLocator(activeLocator); }}
                 className="absolute cursor-pointer border-2 border-rose-600 bg-rose-400/20 shadow-[0_0_0_1px_rgba(255,255,255,0.9)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
                 style={overlayStyle}
                 aria-label={`근거 BBox ${overlay?.bbox.join(", ")}와 연결된 Fact 보기`}
@@ -1275,7 +1271,7 @@ function PdfLocatorPreview({
             ) : null}
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
-            <span>페이지 {pageNumber} / {preview.pageCount} · {preview.pageWidth.toFixed(1)} × {preview.pageHeight.toFixed(1)} pt</span>
+            <span>페이지 {pageNumber} / {preview.pageCount} · {Math.round(preview.pageWidth)} × {Math.round(preview.pageHeight)} pt</span>
             {bboxSupported ? (
               <span className="font-black text-emerald-700 dark:text-emerald-300">BBox overlay 적용</span>
             ) : bbox ? (
@@ -1286,6 +1282,7 @@ function PdfLocatorPreview({
           </div>
         </div>
       ) : null}
+      <PdfPageReadingPanel key={`${projectId}:${archiveId}:${pageNumber}`} projectId={projectId} archiveId={archiveId} pageNumber={pageNumber} />
     </section>
   );
 }

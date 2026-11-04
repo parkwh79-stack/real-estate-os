@@ -2,6 +2,36 @@
 
 Updated: 2026-11-04
 
+## PDF 페이지 글자 읽기 (2026-11-04)
+
+문서 검토의 PDF 원본 보기에서 페이지를 선택하고 ‘글자 읽기’를 누르면 기존
+ParserAgent가 보조 판독 결과를 만든다. 원본만 있는 PDF는 첫 페이지부터 열 수 있다.
+텍스트가 있는 페이지는 원문 텍스트를 읽고, 스캔이 필요한 페이지는 검증된
+한국어·영어 언어 데이터와 PyMuPDF의 로컬 OCR을 사용한다. [OCR 엔진](https://pymupdf.readthedocs.io/en/latest/ocr/index.html)
+
+기존 원본 읽기 권한과 보관 상태를 확인하고, 실제 객체 버전으로 원본을 읽어
+SHA-256을 검증한다. 판독 결과는 원본 버전과 페이지 번호, 좌표, 텍스트 해시에
+연결한다. 사용자는 원본 이미지 옆에서 판독 텍스트를 대조할 수 있다. OCR 값은
+검토 자료이며 숫자 입력과 보고서에 적용할 때는 기존 확인 절차를 따른다.
+
+`POST /projects/{id}/source-documents/{archiveId}/reading`은 선택한 최대 세 페이지를
+읽는다. UI는 현재 페이지 하나를 요청한다. `GET .../reading/pages/{pageNumber}`는
+현재 원본에 연결된 저장 결과를 조회한다. 300dpi·12MP와 페이지당 20초 제한을
+적용하고, 한 인스턴스에서 OCR 하나를 실행한다. 실패와 미처리 페이지는 개별적으로
+표시한다. 미리보기 PNG와 읽기 응답은 3 MiB 한도에서 제공한다. PNG의 크기 조정은
+화면 표시용이며 원본의 페이지 좌표와 OCR 해상도는 별도로 유지한다.
+
+완료 결과는 원본·엔진·언어 데이터 버전에 연결해 파생 결과로 저장한다. 운영 GCS의
+`realytics/derived/pdf-reading/`에는 7일 삭제 규칙이 있다. 프로젝트가 삭제되면
+접근 권한 확인에서 차단되며 물리 정리는 파생 객체의 수명과 기존 soft-delete 정책을
+따른다. 저장에 실패하면 읽은 텍스트와 저장 상태를 구분해 표시한다.
+
+운영 이미지는 빌드 시 [고정된 언어 데이터](https://github.com/tesseract-ocr/tessdata_fast/tree/87416418657359cb625c412a48b6e1d6d41c29bd)의
+해시를 확인하고 실제 OCR을 실행한다. 로컬 설치는 `python -m scripts.prepare_ocr_languages --directory <path>`로
+준비한 뒤 `REALYTICS_OCR_TESSDATA_DIR`를 지정한다. 검증은 스캔 이미지에서 한국어·영어·숫자
+인식, 권한과 원본 검증, 재열기와 응답 제한을 포함한다. 선택 페이지 읽기가 이번
+사용 범위이며 문서 전체의 일괄 판독과 Pod의 자동 활용은 후속 범위다.
+
 ## 대용량 전송 복구 (2026-11-04)
 
 Vercel Function의 요청 본문 한도는 약 4.5 MB다. 시간 제한이나 Next.js body-parser

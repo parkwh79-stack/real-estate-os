@@ -15,7 +15,13 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 
+from agents.parser_agent import ParserAgent
 from core.authz import authorize_request, enforce_project_tenant_scope
+from parsing_platform.adapters import MAX_SOURCE_BYTES
+from parsing_platform.local_pdf_reading import get_local_pdf_reading_fingerprint
+from use_cases.pdf_reading_cache import (
+    PdfReadingCache, PdfReadingCacheError, encoded_reading, selected_reading_pages,
+)
 from use_cases.source_documents import (
     get_source_document_download_use_case,
     get_source_document_view_metadata_use_case,
@@ -149,6 +155,123 @@ def build_project_source_documents_router(
                 detail="Source document hash changed during read",
             )
         return content
+
+    def require_pdf_reading_source(project_id: str, archive_id: str, request: Request):
+        authz, view, archive_repository = require_view(project_id, archive_id, request)
+        if not _is_pdf(view):
+            raise HTTPException(status_code=415, detail={"error": "pdf_reading_pdf_required"})
+        if int(view.get("fileSizeBytes") or 0) > MAX_SOURCE_BYTES:
+            raise HTTPException(status_code=413, detail={"error": "pdf_reading_source_size_limit"})
+        # Even cache hits revalidate the original through its pinned object
+        # generation and full SHA-256. Cached text never grants source access.
+        content = require_full_view_content(archive_repository, view)
+        try:
+            cache = PdfReadingCache(
+                archive_repository.object_storage, project_id=project_id, view=view,
+                reader_fingerprint=get_local_pdf_reading_fingerprint(),
+            )
+        except PdfReadingCacheError as exc:
+            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+        return authz, view, cache, content
+
+    def reading_response(result: Dict[str, Any]) -> Response:
+        try:
+            content = encoded_reading(result)
+        except PdfReadingCacheError as exc:
+            raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+        return Response(content=content, media_type="application/json", headers={
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+            "Cross-Origin-Resource-Policy": "same-origin",
+        })
+
+    @router.post("/{project_id}/source-documents/{archive_id}/reading")
+    def read_project_source_pdf_pages(
+        project_id: str, archive_id: str, request: Request, input_data: Dict[str, Any],
+    ):
+        # This creates a disposable reading aid, not a project update, approval,
+        # financial input, or new user role. The existing evidence permission is
+        # sufficient for reading the already-authorized original.
+        authz, view, cache, content = require_pdf_reading_source(project_id, archive_id, request)
+        try:
+            if set(input_data) != {"pageNumbers"}:
+                raise PdfReadingCacheError("pdf_reading_request_fields_invalid")
+            selected = selected_reading_pages(input_data.get("pageNumbers"))
+        except PdfReadingCacheError as exc:
+            raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+        readings = []
+        missing = []
+        cache_warnings = []
+        stored_pages = []
+        for number in selected:
+            try:
+                cached = cache.load(number)
+            except Exception:
+                cached = None
+                cache_warnings.append({"pageNumber": number, "errorCode": "PDF_READING_CACHE_UNAVAILABLE"})
+            if cached is None:
+                missing.append(number)
+            else:
+                readings.append(cached)
+                stored_pages.append(number)
+        if missing:
+            try:
+                result = ParserAgent.read_evidence_pages(cache.document(content), page_numbers=missing)
+                result = cache.normalize(result, missing)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+            readings.append(result)
+        combined = dict(readings[0])
+        combined["pages"] = [page for reading in readings for page in reading["pages"]]
+        try:
+            combined = cache.normalize(combined, selected)
+        except PdfReadingCacheError as exc:
+            raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+        for page in combined["pages"]:
+            number = page["pageNumber"]
+            if number in stored_pages or page["status"] not in {"completed", "empty"}:
+                continue
+            try:
+                cache.save(combined, number)
+                stored_pages.append(number)
+            except Exception:
+                cache_warnings.append({"pageNumber": number, "errorCode": "PDF_READING_CACHE_WRITE_FAILED"})
+        combined.update({"storedPages": sorted(stored_pages),
+                         "unstoredPages": sorted(set(selected) - set(stored_pages)),
+                         "cacheWarnings": cache_warnings})
+        audit_recorder(request, event_type="source_document_pdf_reading", project_id=project_id, metadata={
+            "archiveId": archive_id, "archiveVersionId": view.get("archiveVersionId"),
+            "archiveIntegrityStatus": "verified", "pageNumbers": selected,
+            "readerFingerprint": cache.binding["readerFingerprint"],
+            "completedOcrPages": combined["completedOcrPages"], "failedPages": combined["failedPages"],
+            "storedPages": sorted(stored_pages), "analysisOnly": True,
+            "authorization": authz.get("authorization"),
+        })
+        return reading_response(combined)
+
+    @router.get("/{project_id}/source-documents/{archive_id}/reading/pages/{page_number}")
+    def get_project_source_pdf_reading(
+        project_id: str, archive_id: str, page_number: int, request: Request,
+    ):
+        authz, view, cache, _content = require_pdf_reading_source(project_id, archive_id, request)
+        try:
+            selected_reading_pages([page_number])
+            result = cache.load(page_number)
+        except PdfReadingCacheError as exc:
+            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail={"error": "pdf_reading_cache_unavailable"}) from exc
+        if result is None:
+            result = cache.not_generated(page_number)
+        else:
+            result.update({"storedPages": [page_number], "unstoredPages": [], "cacheWarnings": []})
+        audit_recorder(request, event_type="source_document_pdf_reading_view", project_id=project_id, metadata={
+            "archiveId": archive_id, "archiveVersionId": view.get("archiveVersionId"),
+            "archiveIntegrityStatus": "verified", "pageNumber": page_number,
+            "readerFingerprint": cache.binding["readerFingerprint"],
+            "generated": result.get("status") != "not_generated", "analysisOnly": True,
+            "authorization": authz.get("authorization"),
+        })
+        return reading_response(result)
 
     @router.api_route(
         "/{project_id}/source-documents/{archive_id}/content",
@@ -326,6 +449,8 @@ def build_project_source_documents_router(
                 "X-REALYTICS-Page-Count": str(preview["pageCount"]),
                 "X-REALYTICS-Page-Height": str(preview["pageHeight"]),
                 "X-REALYTICS-Page-Width": str(preview["pageWidth"]),
+                "X-REALYTICS-Preview-Adjusted": "true" if preview.get("previewAdjusted") else "false",
+                "X-REALYTICS-Pixel-Scale": str(preview.get("pixelScale", scale)),
             },
         )
 

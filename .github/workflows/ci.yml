@@ -26,8 +26,12 @@ jobs:
           cache: pip
           cache-dependency-path: services/api-server/requirements.txt
       - run: pip install -r requirements.txt
+      - name: Prepare verified offline OCR languages
+        run: python -m scripts.prepare_ocr_languages --directory "${{ runner.temp }}/realytics-ocr-data"
       - run: python -m compileall -q .
       - run: python -m pytest -q
+        env:
+          OCR_TEST_TESSDATA_DIR: ${{ runner.temp }}/realytics-ocr-data
 
   postgres-migrations:
     runs-on: ubuntu-latest
