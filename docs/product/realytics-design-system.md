@@ -1,8 +1,23 @@
 # REALYTICS Design System
 
-Updated: 2026-09-28
+Updated: 2026-11-04
 Status: Approved design contract v1; token/state-axis foundation implemented, screen migration incomplete
 Primary users: Korean real-estate development, PF, credit, legal, and investment professionals
+
+The [approved screen migration plan](realytics-os-next-work-roadmap.md#전체-uiux-개편-2026-11-04-사용자-승인)
+sets the rollout order. Use one compact sticky bar for global search and account
+controls. The project menu belongs in the desktop sidebar and mobile drawer.
+Allow a local header or identifier to stay in view inside a scrollable data table.
+Keep project titles, page actions and status summaries in the normal page flow.
+
+Use the action fill with its matching foreground in light and dark mode.
+Interactive cards, buttons and table rows use a short color or border transition.
+Focus remains visible on the trigger and inside the open drawer. Use tabs to
+switch tasks, disclosures for supporting detail, and a drawer or split pane
+to inspect a selected record beside its source. When a modal drawer closes,
+return focus to its trigger. Dashboard introduction decoration can use glass
+and a parallax offset up to 18 px on desktop. Respect reduced motion and use
+static decoration on narrow screens.
 
 Implementation note (2026-07-22): `apps/web/app/globals.css` and the Tailwind
 theme expose the v1 semantic tokens. `@repo/ui` provides FinancialMetric and
@@ -109,11 +124,14 @@ than raw Tailwind color names.
 | `--re-brand-900` | `#08213F` | Navigation and institutional anchor |
 | `--re-brand-700` | `#123F73` | Strong brand action |
 | `--re-action-600` | `#1D5FD1` | Primary interactive action |
+| `--re-action-hover` | `#164BA8` | Primary action on hover |
+| `--re-on-action` | `#FFFFFF` | Label and icon on the primary action fill |
 | `--re-info-600` | `#2563EB` | Informational state |
 | `--re-success-600` | `#15803D` | Verified positive state |
 | `--re-warning-600` | `#B45309` | Attention/conditional state |
 | `--re-danger-600` | `#B42318` | Blocking/error/rejection state |
 | `--re-neutral-600` | `#526071` | Neutral or unavailable state |
+| `--re-focus-ring` | `#1D5FD1` | Visible keyboard focus on the light canvas |
 
 Rules:
 
@@ -122,9 +140,9 @@ Rules:
 - Green never means merely “completed”; it means the displayed semantic state
   is positively verified or approved.
 - Red is reserved for blocking, failed, rejected, overdue, or threshold breach.
-- Gradients are prohibited on business surfaces and status indicators. A
-  controlled brand illustration on the public login/marketing surface is the
-  only exception.
+- Use gradients only in controlled brand decoration on login, dashboard and
+  the start screen. Readable data surfaces and status indicators use solid
+  semantic colors.
 
 ### 3.2 Typography
 

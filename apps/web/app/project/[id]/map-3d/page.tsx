@@ -1,10 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Box } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import { ProjectWorkspaceLink } from "../../../../components/layout/project-workspace-link";
 const VWORLD_KEY = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
 const SEOUL: [number, number] = [126.9779, 37.5663];
 
@@ -42,12 +42,14 @@ export default function Project3DMapPage() {
   return (
     <div className="space-y-4">
       <header className="flex items-center gap-3">
-        <Link
-          href={`/project/${projectId}/marketability`}
+        <ProjectWorkspaceLink
+          projectId={projectId}
+          path="map"
+          aria-label="지도로 돌아가기"
           className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-300"
         >
-          <ArrowLeft className="h-4 w-4" />
-        </Link>
+          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+        </ProjectWorkspaceLink>
         <div className="flex items-center gap-2">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-950">
             <Box className="h-5 w-5" />

@@ -59,7 +59,7 @@ async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: 
     }
     await route.fulfill({ status: 200, json: body });
   });
-  await page.goto("/project/review-1/input-package", { waitUntil: "domcontentloaded" });
+  await page.goto("/project/review-1/input-package?view=review", { waitUntil: "domcontentloaded" });
   const panel = page.getByRole("region", { name: "사업수지 입력 검토" });
   await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("8539.51767703", { timeout: 60_000 });
   return { panel, saves, source };
@@ -174,7 +174,7 @@ for (const [destination, label] of [
     try {
       await panel.getByRole("button", { name: `저장하고 ${label}`, exact: true }).dblclick();
       await expect.poll(() => saves.length).toBe(1);
-      await expect(page).toHaveURL(/\/input-package$/);
+      await expect(page).toHaveURL(/\/input-package\?view=review$/);
       await expect(panel.getByRole("button", { name: "검토 입력 저장", exact: true })).toBeDisabled();
       await expect(panel.getByRole("button", { name: "저장하고 사업수지 분석으로 이동", exact: true })).toBeDisabled();
       await expect(panel.getByRole("button", { name: "저장하고 문서·출처 검토", exact: true })).toBeDisabled();
@@ -184,7 +184,7 @@ for (const [destination, label] of [
     } finally { releaseSave(); }
     await expect(page).toHaveURL(`/project/review-1/${destination}`, { timeout: 30_000 });
     expect(saves).toHaveLength(1);
-    await page.goto("/project/review-1/input-package");
+    await page.goto("/project/review-1/input-package?view=review");
     await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("8539.51767704");
     await expect(panel.getByLabel("금융비용 검토 이유")).toHaveValue("자료 수령 전 분석용 가정");
     await expect(panel.getByLabel("총매출 출처 셀")).toHaveValue("손익!I2");
@@ -196,7 +196,7 @@ for (const [destination, label] of [
     await panel.getByLabel("총매출 검토 이유").fill("저장 충돌 후에도 유지할 가정");
     await panel.getByRole("button", { name: `저장하고 ${label}`, exact: true }).click();
     await expect(panel.getByRole("alert")).toContainText("저장된 입력이 변경되었습니다");
-    await expect(page).toHaveURL(/\/input-package$/);
+    await expect(page).toHaveURL(/\/input-package\?view=review$/);
     await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("9000");
     await expect(panel.getByLabel("총매출 검토 이유")).toHaveValue("저장 충돌 후에도 유지할 가정");
     await expect(panel.getByRole("button", { name: `저장하고 ${label}`, exact: true })).toBeEnabled();
@@ -213,7 +213,7 @@ test("invalid or unexplained edits stay in the review before continuing", async 
   await panel.getByLabel("금융비용 검토 이유").fill("입력 검증용 가정");
   await next.click();
   await expect(panel.getByRole("alert")).toContainText("금액은 억원 단위 숫자로");
-  await expect(page).toHaveURL(/\/input-package$/);
+  await expect(page).toHaveURL(/\/input-package\?view=review$/);
   await expect(panel.getByLabel("금융비용 (억원)")).toHaveValue("NaN");
   expect(saves).toHaveLength(0);
 });
@@ -235,7 +235,7 @@ test("a late save cannot navigate back after leaving the review", async ({ page 
   try {
     await panel.getByRole("button", { name: "저장하고 사업수지 분석으로 이동", exact: true }).click();
     await expect.poll(() => saves.length).toBe(1);
-    await page.getByRole("link", { name: "프로젝트로 돌아가기", exact: true }).click();
+    await page.getByRole("region", { name: "프로젝트 정보" }).getByRole("link", { name: "R1 검토", exact: true }).click();
     await expect(page).toHaveURL("/project/review-1", { timeout: 30_000 });
     await expect(panel).toHaveCount(0);
   } finally { releaseSave(); }
@@ -318,7 +318,7 @@ test("invalid date or unexplained terms block the whole amount and terms save", 
   await panel.getByRole("button", { name: "검토 입력 저장", exact: true }).click();
   await expect(panel.getByRole("alert")).toContainText("실제 날짜");
   expect(saves).toHaveLength(0);
-  await expect(page).toHaveURL(/\/input-package$/);
+  await expect(page).toHaveURL(/\/input-package\?view=review$/);
   await expect(panel.getByLabel("금융비용 (억원)")).toHaveValue("1");
 });
 
@@ -351,7 +351,7 @@ test("only term edits also save before continuing and clear a stored date explic
   await expect(page).toHaveURL("/project/review-1/feasibility", { timeout: 30_000 });
   expect(saves[1]?.feasibility_input).toEqual({});
   expect(saves[1]?.terms).toEqual({ schedule: { construction_start: null } });
-  await page.goto("/project/review-1/input-package", { waitUntil: "domcontentloaded" });
+  await page.goto("/project/review-1/input-package?view=review", { waitUntil: "domcontentloaded" });
   await expect(panel.getByLabel("착공일", { exact: true })).toHaveValue("");
   await expect(panel.getByLabel("사업기간 검토 이유")).toHaveValue("일정 재검토로 미입력 전환");
 });

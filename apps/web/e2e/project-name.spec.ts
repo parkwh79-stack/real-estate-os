@@ -4,7 +4,7 @@ const originalFile = "original-source.csv";
 const file = { name: originalFile, mimeType: "text/csv", buffer: Buffer.from("item,value\noriginal,1") };
 
 async function projectFixture(page: Page, readOnly = false) {
-  const state = { name: "original-source", updates: [] as unknown[], updateStatus: 200, wrongProject: false, creates: [] as unknown[], uploadBodies: [] as string[] };
+  const state = { name: "original-source", updates: [] as unknown[], updateStatus: 200, wrongProject: false, partialOverview: false, creates: [] as unknown[], uploadBodies: [] as string[] };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/\/$/, "");
@@ -30,6 +30,11 @@ async function projectFixture(page: Page, readOnly = false) {
       if (!state.wrongProject) state.name = body.project.name;
       return reply({ project: { id: state.wrongProject ? "other-project" : "rename-project", name: body.project.name }, source_documents: [{ originalFileName: originalFile }] });
     }
+    if (path.endsWith("/workspace/context") && state.partialOverview) return reply({
+      projectId: "rename-project", contextCompleteness: "partial", unavailableSections: ["landEvidence", "missingInputs"],
+      projectMemory: { projectName: state.name, sourceDocumentCount: 0 },
+      pageData: { sourceDocumentSummary: { count: 0 }, landLedgerSummary: { parcelCount: 0, pnuCount: 0 } },
+    });
     if (path.endsWith("/workspace/context")) return reply({ projectId: "rename-project", contextCompleteness: "complete", unavailableSections: [],
       projectMemory: { projectName: state.name, sourceDocumentCount: 1 }, missingInputRegister: [], dealStateGraph: { graph: { conflicts: [] } },
       pageData: { sourceDocumentSummary: { count: 1 }, sourceDocuments: [{ originalFileName: originalFile }], parsedFacts: [] } });
@@ -43,12 +48,12 @@ async function projectFixture(page: Page, readOnly = false) {
   return state;
 }
 
-const projectHeader = (page: Page) => page.getByRole("region", { name: "프로젝트 컨텍스트와 업무 메뉴" });
+const projectHeader = (page: Page) => page.getByRole("region", { name: "프로젝트 정보", exact: true });
 const renameDialog = (page: Page) => page.getByRole("dialog", { name: "프로젝트 이름 변경", exact: true });
 
 test("project rename persists on reopen without changing original files or unsaved review values", async ({ page }) => {
   const state = await projectFixture(page);
-  await page.goto("/project/rename-project/input-package");
+  await page.goto("/project/rename-project/input-package?view=review");
   const review = page.getByRole("region", { name: "사업수지 입력 검토" });
   await expect(review.getByLabel("총매출 (억원)")).toHaveValue("1");
   await review.getByLabel("총매출 (억원)").fill("2");
@@ -58,15 +63,16 @@ test("project rename persists on reopen without changing original files or unsav
   await renameDialog(page).getByRole("button", { name: "이름 저장", exact: true }).click();
   await expect(renameDialog(page)).toBeHidden();
   await expect(projectHeader(page).getByRole("link", { name: "본리동 개발 검토", exact: true })).toBeVisible();
-  await expect(page.getByTestId("input-package-page").getByText("본리동 개발 검토", { exact: true })).toBeVisible();
   await expect(review.getByLabel("총매출 (억원)")).toHaveValue("2");
   expect(state.updates).toEqual([{ project: { name: "본리동 개발 검토" } }]);
+  await page.getByRole("tab", { name: "자료·원본", exact: true }).click();
   await expect(page.getByText(originalFile, { exact: true })).toBeVisible();
   await page.reload();
   await expect(projectHeader(page).getByRole("link", { name: "본리동 개발 검토", exact: true })).toBeVisible();
   await expect(page.getByText(originalFile, { exact: true })).toBeVisible();
   await projectHeader(page).getByRole("link", { name: "본리동 개발 검토", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "본리동 개발 검토", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "프로젝트 개요", exact: true })).toBeVisible();
+  await expect(projectHeader(page).getByRole("link", { name: "본리동 개발 검토", exact: true })).toBeVisible();
 });
 
 test("blank name and cancellation do not save; failed save retains draft and can retry", async ({ page }) => {
@@ -91,7 +97,7 @@ test("blank name and cancellation do not save; failed save retains draft and can
   state.updateStatus = 200;
   await renameDialog(page).getByRole("button", { name: "이름 저장", exact: true }).click();
   await expect(renameDialog(page)).toBeHidden();
-  await expect(page.getByRole("heading", { name: "재시도할 프로젝트", exact: true })).toBeVisible();
+  await expect(projectHeader(page).getByRole("link", { name: "재시도할 프로젝트", exact: true })).toBeVisible();
 });
 
 test("read-only account cannot edit the project name", async ({ page }) => {
@@ -100,6 +106,17 @@ test("read-only account cannot edit the project name", async ({ page }) => {
   await expect(projectHeader(page).getByRole("link", { name: "original-source", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "이름 변경", exact: true })).toHaveCount(0);
   expect(state.updates).toEqual([]);
+});
+
+test("project overview distinguishes an empty list from unavailable evidence and work items", async ({ page }) => {
+  const state = await projectFixture(page);
+  state.partialOverview = true;
+  await page.goto("/project/rename-project");
+  await expect(page.getByText("저장 자료", { exact: true }).locator("..")).toContainText("0건");
+  await expect(page.getByText("PNU 확보", { exact: true }).locator("..")).toContainText("산정 전");
+  await expect(page.getByText("토지 증빙", { exact: true }).locator("..")).toContainText("미확인");
+  await expect(page.getByText("보완 항목을 확인하지 못했습니다.", { exact: false })).toBeVisible();
+  await expect(page.getByText("현재 조회된 보완 항목은 없습니다.", { exact: true })).toHaveCount(0);
 });
 
 test("a different project in the save response cannot replace the displayed name", async ({ page }) => {

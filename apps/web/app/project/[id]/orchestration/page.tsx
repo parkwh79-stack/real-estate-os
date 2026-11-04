@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { useParams } from "next/navigation";
 import {
   AlertCircle,
+  ArrowLeft,
   ArrowRight,
   CheckCircle2,
   Clock3,
@@ -22,6 +23,7 @@ import {
 } from "lucide-react";
 import { apiBase, authHeaders, getStoredAuthSession } from "../../../../lib/auth-client";
 import { OrchestrationToolbar } from "../../../../components/orchestration/orchestration-toolbar";
+import { ProjectWorkspaceLink } from "../../../../components/layout/project-workspace-link";
 
 interface RunSummary {
   run_id: string;
@@ -1550,7 +1552,11 @@ export default function ProjectOrchestrationPage() {
     <div className="space-y-6 pb-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-sm font-semibold text-slate-500">Project #{projectId}</p>
+          <ProjectWorkspaceLink projectId={projectId} path="chief-orchestration"
+            className="inline-flex min-h-9 items-center gap-2 text-sm font-medium text-re-secondary hover:text-re-action">
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+            AI 딜룸으로 돌아가기
+          </ProjectWorkspaceLink>
           <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
             AI Orchestration
           </h2>

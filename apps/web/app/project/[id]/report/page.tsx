@@ -24,6 +24,7 @@ import {
   normalizeExecutionStatus,
 } from "../../../../components/ui/primitives";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import { ProjectWorkspaceLink } from "../../../../components/layout/project-workspace-link";
 import {
   fetchDealStateRecordGroups,
   hasSourceLocator,
@@ -451,13 +452,14 @@ export default function ReportPreviewPage() {
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             새로고침
           </button>
-          <Link
-            href={`/project/${projectId}/report-templates`}
+          <ProjectWorkspaceLink
+            projectId={projectId}
+            path="report-templates"
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
           >
             <Settings2 className="h-4 w-4" />
             템플릿 편집
-          </Link>
+          </ProjectWorkspaceLink>
         </div>
       </header>
 

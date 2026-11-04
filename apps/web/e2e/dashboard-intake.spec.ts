@@ -169,11 +169,11 @@ test("a malformed successful HTTP response cannot mark a file processed and can 
   await dialog.locator('input[type="file"]').setInputFiles(file);
   await expect(dialog.getByText("review.csv", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: /^분류대로 처리/ }).click();
-  await expect(dialog.getByRole("cell", { name: /실패/ })).toBeVisible();
+  await expect(dialog.getByRole("listitem").filter({ hasText: "실패" })).toBeVisible();
   await expect(dialog.getByText(/처리 완료/)).toHaveCount(0);
   state.malformedUpload = false;
   await dialog.getByRole("button", { name: /^분류대로 처리/ }).click();
-  await expect(dialog.getByRole("cell", { name: /처리 완료/ })).toBeVisible();
+  await expect(dialog.getByRole("listitem").filter({ hasText: "처리 완료" })).toBeVisible();
   expect(state.uploads).toBe(2);
   expect(state.creates).toBe(1);
 });

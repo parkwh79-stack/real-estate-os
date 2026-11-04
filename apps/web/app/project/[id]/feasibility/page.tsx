@@ -396,7 +396,7 @@ export default function FeasibilityPage() {
             type="button"
             onClick={() => void recalculateCashFlow()}
             disabled={loading || running}
-            className="inline-flex h-10 items-center gap-2 rounded-re-control bg-re-primary px-4 text-sm font-bold text-white disabled:opacity-50"
+            className="inline-flex h-10 items-center gap-2 rounded-re-control bg-re-action px-4 text-sm font-bold text-re-on-action transition-colors duration-150 hover:bg-re-action-hover disabled:opacity-50"
           >
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
             Cash Flow 재계산
@@ -727,7 +727,7 @@ function DecisionGatePanel({
         </p>
       ) : null}
 
-      <Link href={`/project/${projectId}/orchestration`} className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-re-control border border-re-border bg-re-subtle px-3 text-sm font-black text-re-text hover:bg-re-hover">
+      <Link href={`/project/${projectId}/orchestration`} className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-re-control border border-re-border bg-re-surface px-3 text-sm font-bold text-re-text transition-colors duration-150 hover:border-re-action hover:bg-re-subtle">
         Gate 상세와 보완 작업
         <ArrowRight className="h-4 w-4" />
       </Link>
@@ -796,13 +796,13 @@ function EmptyState({ icon, title, body, actionHref, actionLabel }: { icon: Reac
 
 function ActionLink({ href, icon, title, body }: { href: string; icon: ReactNode; title: string; body: string }) {
   return (
-    <Link href={href} className="group rounded-re-panel border border-re-border bg-re-surface p-4 shadow-sm transition hover:border-re-primary">
+    <Link href={href} className="group rounded-re-panel border border-re-border bg-re-surface p-4 shadow-re-panel transition-colors duration-150 hover:border-re-action hover:bg-re-subtle">
       <div className="flex items-center justify-between gap-3">
         <span className="flex items-center gap-2 text-sm font-black text-re-text">
           {icon}
           {title}
         </span>
-        <ArrowRight className="h-4 w-4 text-re-muted transition group-hover:translate-x-0.5 group-hover:text-re-primary" />
+        <ArrowRight className="h-4 w-4 text-re-muted transition-colors duration-150 group-hover:text-re-action" />
       </div>
       <p className="mt-2 text-xs leading-5 text-re-secondary">{body}</p>
     </Link>

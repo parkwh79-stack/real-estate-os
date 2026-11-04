@@ -2,7 +2,14 @@ import { expect, test, type Page } from "@playwright/test";
 
 const projectId = "synthetic-land-reconciliation";
 
-async function fixture(page: Page, options: { purchase?: number | null; legacy?: boolean; failure?: number; staleReview?: boolean; legalReview?: boolean } = {}) {
+async function fixture(page: Page, options: {
+  purchase?: number | null;
+  legacy?: boolean;
+  failure?: number;
+  staleReview?: boolean;
+  legalReview?: boolean;
+  ledgerState?: "empty" | "unavailable" | "ready";
+} = {}) {
   const purchase = options.purchase === undefined ? 42_000_000_000 : options.purchase;
   const source = (cell: string) => ({ source_document: "합성 수지.xlsx", sheet_name: "사업수지", cell });
   const writes: string[] = [];
@@ -59,8 +66,9 @@ async function fixture(page: Page, options: { purchase?: number | null; legacy?:
     }
     else if (path.endsWith("/workspace/context")) body = {
       projectId, projectMemory: { projectName: "합성 토지 대사" },
+      ...(options.ledgerState === "unavailable" ? { contextCompleteness: "partial", unavailableSections: ["landLedger", "landEvidence"] } : {}),
       pageData: {
-        landLedger: {
+        landLedger: options.ledgerState === "empty" ? {} : {
           summary: { parcelCount: 2, totalContractAmount: 41_374_000_000 },
           parcels: [1, 2].map((sequence) => ({ sequence, addressFragment: `합성동 ${sequence}`, contractGroupId: "joint", totalContractAmount: null,
             paymentReviewVersion: options.legacy ? undefined : "ledger-recorded-payments-v1",
@@ -68,6 +76,7 @@ async function fixture(page: Page, options: { purchase?: number | null; legacy?:
             paymentSummary: { knownRecordedPaidAmount: sequence === 1 ? 0 : null, recordedPaidMissingCount: sequence === 1 ? 0 : 1,
               knownScheduledAmount: 100_000_000, scheduledMissingCount: 0 },
             paymentSource: { sheet: "합성 토지조서", rows: [sequence + 4] },
+            ...(options.ledgerState === "ready" ? { pnu: `11110101001000${sequence}0000`, pnuResolution: { lotVerification: "verified" } } : {}),
           })),
           contractGroups: [{ contractGroupId: "joint", parcelSequences: [1, 2], totalContractAmount: 12_500_000_000,
             sourceLocator: { sourceName: "합성 토지조서.xlsx", sheet: "토지조서", range: "I7:I12" } }],
@@ -88,15 +97,38 @@ async function fixture(page: Page, options: { purchase?: number | null; legacy?:
     else if (path.endsWith(`/projects/${projectId}`)) body = { project: { id: projectId, name: "합성 토지 대사" } };
     await route.fulfill({ status: 200, json: body });
   });
-  await page.goto(`/project/${projectId}/land`, { waitUntil: "domcontentloaded" });
+  await page.goto(`/project/${projectId}/land${options.ledgerState === "empty" ? "?track=fund" : ""}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "계약·수지 금액 대사" })).toBeVisible();
   return writes;
 }
 
+test("empty land ledger prioritizes uploading within the selected track", async ({ page }) => {
+  const writes = await fixture(page, { ledgerState: "empty" });
+  const nextAction = page.getByRole("region", { name: "다음 조치" });
+  const upload = nextAction.getByRole("link", { name: "토지조서 추가" });
+  await expect(upload).toBeInViewport();
+  await expect(upload).toHaveAttribute("href", `/project/${projectId}/input-package?track=fund#intake-upload`);
+  await expect(nextAction.getByText("등록 자료 없음")).toBeVisible();
+  await expect(nextAction.getByText("— · 산정 전")).toBeVisible();
+  await expect(nextAction.getByRole("button", { name: "PNU 확인", exact: true })).toHaveCount(0);
+  await expect(nextAction.getByRole("button", { name: "토지·인허가 미리보기" })).toBeEnabled();
+  expect(writes).toEqual([]);
+});
+
+test("unavailable ledger does not look empty or offer an enrichment write", async ({ page }) => {
+  await fixture(page, { ledgerState: "unavailable" });
+  const nextAction = page.getByRole("region", { name: "다음 조치" });
+  await expect(nextAction.getByRole("button", { name: "토지 상태 다시 불러오기" })).toBeVisible();
+  await expect(nextAction.getByText("조회 불가", { exact: true })).toBeVisible();
+  await expect(nextAction.getByRole("link", { name: "토지조서 추가" })).toHaveCount(0);
+  await expect(nextAction.getByRole("button", { name: "PNU 확인", exact: true })).toHaveCount(0);
+});
+
 test("preview clears on reload and explicit selection saves only the permit summary", async ({ page }) => {
-  const writes = await fixture(page, { legalReview: true });
+  const writes = await fixture(page, { legalReview: true, ledgerState: "ready" });
   const launch = page.getByRole("button", { name: "토지·인허가 미리보기" });
   const panel = page.locator("section").filter({ has: page.getByRole("heading", { name: "토지·인허가 검토", exact: true }) });
+  await expect(page.getByRole("region", { name: "다음 조치" }).getByText("2/2필지")).toBeVisible();
   await launch.click();
   await expect(panel.getByText("주택건설사업계획승인")).toBeVisible();
   await expect(panel.getByText("건축허가·신고")).toBeVisible();
@@ -137,7 +169,8 @@ test("reopen saved contract and budget scopes without allocating or approving va
     await expect(panel.getByText(/수지 검토 초안의 원본값/)).toBeVisible();
     await expect(panel.getByText(/수지 원본의 수식·검증 오류/)).toBeVisible();
     await expect(page.getByText("공동계약 1: 125억원", { exact: true })).toBeVisible();
-    await expect(page.getByRole("cell", { name: "공동계약 · 필지별 미배분", exact: true })).toHaveCount(2);
+    const parcels = page.locator("section").filter({ has: page.getByRole("heading", { name: "필지별 검토" }) });
+    await expect(parcels.getByText("공동계약 · 필지별 미배분", { exact: true })).toHaveCount(2);
     if (attempt === 0) await page.reload();
   }
   expect(writes).toEqual([]);
@@ -160,20 +193,35 @@ test("real zero and negative difference remain visible", async ({ page }) => {
 test("older ledger parsing explicitly requests reimport", async ({ page }) => {
   await fixture(page, { legacy: true });
   await expect(page.getByText(/기존 토지조서는 공동계약 구분을 위해 다시 가져와야/)).toBeVisible();
-  await expect(page.getByText(/이전 지급 완료 표시는 사용하지 않습니다/)).toHaveCount(2);
-  await expect(page.getByText("조서상 전액 기지급", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("등기 소유자 일치 필지").locator("..")).toContainText("0%");
+  const parcel = page.getByRole("button", { name: /합성동 1.*상세 보기/ });
+  await parcel.click();
+  const drawer = page.getByRole("dialog", { name: "합성동 1" });
+  await expect(drawer.getByText(/이전 지급 완료 표시는 사용하지 않습니다/)).toBeVisible();
+  await expect(drawer.getByText("조서상 전액 기지급", { exact: true })).toHaveCount(0);
+  await drawer.getByRole("button", { name: "필지 상세 닫기" }).click();
+  await page.getByText("토지 기본 정보·저장된 증빙", { exact: true }).click();
+  await expect(page.getByText("등기 소유자 대조").locator("..")).toContainText("— · 대조 전");
 });
 
 test("reopened payment review keeps unknown and explicit zero apart from scheduled amounts", async ({ page }) => {
   await fixture(page);
+  await expect(page.getByRole("region", { name: "다음 조치" }).getByRole("button", { name: "PNU 확인", exact: true })).toBeVisible();
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const panel = page.locator("section").filter({ has: page.getByRole("heading", { name: "조서상 지급 내역" }) });
-    await expect(panel.getByText("0억원", { exact: true })).toHaveCount(1);
-    await expect(panel.getByText("미확인", { exact: true })).toHaveCount(1);
-    await expect(panel.getByText("1억원", { exact: true })).toHaveCount(2);
-    await expect(panel.getByText(/미기재: 기지급 1건/)).toBeVisible();
-    await expect(panel.getByText(/합성 토지조서 · 원본 행 5/)).toBeVisible();
+    for (const [parcel, amount] of [[1, "0억원"], [2, "미확인"]] as const) {
+      const row = page.getByRole("button", { name: new RegExp(`합성동 ${parcel}.*상세 보기`) });
+      await row.focus();
+      await page.keyboard.press("Enter");
+      const drawer = page.getByRole("dialog", { name: `합성동 ${parcel}` });
+      await expect(drawer.getByRole("button", { name: "필지 상세 닫기" })).toBeFocused();
+      const payment = drawer.locator("section").filter({ has: page.getByRole("heading", { name: "조서상 지급 내역" }) });
+      await expect(payment.getByText(amount, { exact: true })).toBeVisible();
+      await expect(payment.getByText("1억원", { exact: true })).toBeVisible();
+      await expect(payment.getByText(new RegExp(`합성 토지조서 · 원본 행 ${parcel + 4}`))).toBeVisible();
+      if (parcel === 2) await expect(payment.getByText(/미기재: 기지급 1건/)).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(drawer).toBeHidden();
+      await expect(row).toBeFocused();
+    }
     if (attempt === 0) await page.reload();
   }
 });

@@ -128,12 +128,6 @@ async function enrichLandLedgerAfterAnalyze(projectId: string, body: Record<stri
   return readIntakeResponse(enrichRes);
 }
 
-function confidenceTone(confidence: number): string {
-  if (confidence >= 0.75) return "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200";
-  if (confidence >= 0.55) return "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200";
-  return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200";
-}
-
 function confidenceBasis(row: Classified) {
   return row.reasons?.[0] || row.confidenceBasis || "파일명, 확장자, 문서 제목, 표 구조, 키워드 신호 기준";
 }
@@ -335,14 +329,17 @@ export function SmartIntake({
           setDragOver(false);
           if (canPickFiles && event.dataTransfer.files) void upload(event.dataTransfer.files);
         }}
-        className={`flex flex-col items-center justify-center gap-2 rounded-re-panel border border-dashed px-5 py-5 text-center ${canPickFiles ? "cursor-pointer" : "cursor-not-allowed"} ${
+        className={`flex flex-col items-center justify-center gap-2 rounded-re-panel border border-dashed px-4 py-4 text-center transition-colors ${canPickFiles ? "cursor-pointer hover:border-re-action hover:bg-re-subtle" : "cursor-not-allowed"} ${
           dragOver
             ? "border-re-action bg-re-subtle"
             : "border-re-border"
         }`}
       >
-        {loading ? <Loader2 className="h-6 w-6 animate-spin text-re-action" aria-hidden="true" /> : <UploadCloud className="h-6 w-6 text-re-secondary" aria-hidden="true" />}
-        <p className="text-sm text-re-text">{loading ? "자료를 분류하고 있습니다…" : failedFiles.length ? "분류하지 못한 파일을 먼저 확인해 주세요." : "추가 자료를 끌어다 놓거나 선택하세요."}</p>
+        <p className={`inline-flex min-h-11 items-center gap-2 rounded-re-control px-3 text-sm font-semibold ${canPickFiles ? "bg-re-action text-re-on-action" : "text-re-secondary"}`}>
+          {loading ? <Loader2 className="h-5 w-5 animate-spin text-re-action" aria-hidden="true" /> : <UploadCloud className="h-5 w-5" aria-hidden="true" />}
+          {loading ? "자료를 분류하고 있습니다…" : failedFiles.length ? "분류하지 못한 파일 확인" : "자료 추가"}
+        </p>
+        {canPickFiles ? <p className="text-xs text-re-secondary">누르거나 파일을 끌어다 놓으세요.</p> : null}
         <p className="text-xs text-re-secondary">PDF · XLS/XLSX · DOCX · JSON · CSV · 파일당 최대 64MB</p>
         {loading && uploadProgress ? <p className="text-xs text-re-secondary" role="status">{uploadProgress}</p> : null}
         <input
@@ -373,83 +370,68 @@ export function SmartIntake({
       ) : null}
 
       {rows.length ? (
-        <div className="mt-4">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <p className="text-xs font-bold text-slate-500">
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-re-secondary">
               AI 분류 결과 {rows.length}건 · 검토 필요 {rows.filter((row) => row.c.needsReview).length}건
             </p>
             <button
               type="button"
               onClick={() => void processAll()}
               disabled={busy || routable === 0}
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 text-xs font-bold text-white disabled:opacity-40"
+              className="inline-flex min-h-11 items-center gap-2 rounded-re-control bg-re-action px-3 text-sm font-semibold text-re-on-action transition-colors hover:bg-re-action-hover disabled:opacity-40"
             >
-              {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}
+              {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <PlayCircle className="h-4 w-4" aria-hidden="true" />}
               분류대로 처리 ({routable})
             </button>
           </div>
-          <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-            <table className="w-full min-w-[760px] text-sm">
-              <thead className="bg-slate-50 text-left text-xs font-bold text-slate-500 dark:bg-slate-950/40">
-                <tr>
-                  <th className="px-3 py-2">파일</th>
-                  <th className="px-3 py-2">AI 분류</th>
-                  <th className="px-3 py-2">신뢰도</th>
-                  <th className="px-3 py-2">유형 수정</th>
-                  <th className="px-3 py-2">상태</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {rows.map((row) => (
-                  <tr key={row.id} className="hover:bg-slate-50 dark:hover:bg-slate-950/40">
-                    <td className="px-3 py-2 font-semibold text-slate-900 dark:text-white">
-                      <span className="flex items-center gap-1.5">
-                        {row.c.needsReview ? (
-                          <FileQuestion className="h-4 w-4 shrink-0 text-amber-500" />
-                        ) : (
-                          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                        )}
-                        <span className="truncate">{row.c.filename}</span>
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{TYPE_LABEL[row.c.documentType] ?? row.c.label}</td>
-                    <td className="px-3 py-2">
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${confidenceTone(row.c.confidence)}`}>
-                        {Math.round(row.c.confidence * 100)}%
-                      </span>
-                      <p className="mt-1 max-w-[220px] text-[11px] leading-4 text-slate-400">
-                        {confidenceBasis(row.c).slice(0, 90)}
-                      </p>
-                    </td>
-                    <td className="px-3 py-2">
-                      <select
-                        value={row.type}
-                        disabled={busy}
-                        onChange={(event) => {
-                          const type = event.target.value;
-                          setError(null);
-                          setRows((prev) => prev.map((item) => item.id === row.id ? {
-                            ...item, type, status: isArchivedWithoutProcessingRoute(type, item.c) ? "skipped" : "idle", note: undefined,
-                          } : item));
-                        }}
-                        className="rounded-md border border-slate-300 px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900"
-                      >
-                        {TYPE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className={`px-3 py-2 text-xs font-semibold ${STATUS_TONE[row.status]}`}>
-                      {STATUS_LABEL[row.status]}
-                      {row.note ? ` (${row.note})` : ""}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ul className="divide-y divide-re-border rounded-re-panel border border-re-border">
+            {rows.map((row) => (
+              <li key={row.id} className="min-w-0 space-y-2 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="flex min-w-0 items-start gap-2 text-sm font-semibold text-re-text">
+                    {row.c.needsReview ? (
+                      <FileQuestion className="h-4 w-4 shrink-0 text-re-warning" aria-hidden="true" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-re-success" aria-hidden="true" />
+                    )}
+                    <span className="break-all">{row.c.filename}</span>
+                  </p>
+                  <p className={`break-words text-xs font-semibold ${STATUS_TONE[row.status]}`}>
+                    {STATUS_LABEL[row.status]}
+                    {row.note ? ` (${row.note})` : ""}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <p className="text-xs text-re-secondary">AI 분류 {TYPE_LABEL[row.c.documentType] ?? row.c.label}</p>
+                  <label className="flex max-w-full flex-wrap items-center gap-2 text-xs font-semibold text-re-secondary">
+                    문서 유형
+                    <select
+                      aria-label={`${row.c.filename} 문서 유형`}
+                      value={row.type}
+                      disabled={busy}
+                      onChange={(event) => {
+                        const type = event.target.value;
+                        setError(null);
+                        setRows((prev) => prev.map((item) => item.id === row.id ? {
+                          ...item, type, status: isArchivedWithoutProcessingRoute(type, item.c) ? "skipped" : "idle", note: undefined,
+                        } : item));
+                      }}
+                      className="min-h-11 max-w-full rounded-re-control border border-re-border bg-re-surface px-2 text-sm text-re-text disabled:opacity-50"
+                    >
+                      {TYPE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <details className="text-xs text-re-secondary">
+                  <summary className="cursor-pointer py-1 font-semibold hover:text-re-text">분류 근거 · {Math.round(row.c.confidence * 100)}%</summary>
+                  <p className="mt-1 break-words">{confidenceBasis(row.c)}</p>
+                </details>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
     </section>

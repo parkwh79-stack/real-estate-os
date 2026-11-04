@@ -29,6 +29,7 @@ import { validateIntakeFiles } from "../../lib/intake-upload-client";
 import { getTrackWorkflowDefinition, setStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
 import { useAuth } from "../auth/auth-context";
 import { ReviewOnlyNotice } from "../auth/review-only-notice";
+import { DashboardAtmosphere } from "../dashboard/dashboard-atmosphere";
 import { SmartIntake, type IntakeWorkStatus } from "../intake/smart-intake";
 import { intakeProcessingFailure } from "../../lib/intake-processing-status";
 import { RecentWorkPanel } from "./recent-work-panel";
@@ -464,12 +465,10 @@ export function CommandCenter() {
       ) : null}
 
       <div className="relative z-10 w-full max-w-6xl">
-        <div className="mb-8 flex flex-col items-center text-center">
+        <div className="re-dashboard-intro mb-8 flex flex-col items-center text-center">
+          <DashboardAtmosphere />
           <div className="inline-flex items-center gap-2 rounded-full border border-sky-400/30 bg-sky-500/10 px-3 py-1.5 text-xs font-bold tracking-[0.15em] text-sky-300">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-sky-500" />
-            </span>
+            <span aria-hidden="true" className="h-2 w-2 rounded-full bg-sky-400" />
             REALYTICS OS
           </div>
           <h1 className="mt-5 text-3xl font-black tracking-tight sm:text-4xl">

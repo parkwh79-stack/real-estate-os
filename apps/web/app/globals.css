@@ -15,12 +15,14 @@
   --re-brand-900: #08213f;
   --re-brand-700: #123f73;
   --re-action-600: #1d5fd1;
+  --re-action-hover: #164ba8;
+  --re-on-action: #ffffff;
   --re-info-600: #2563eb;
   --re-success-600: #15803d;
   --re-warning-600: #b45309;
   --re-danger-600: #b42318;
   --re-neutral-600: #526071;
-  --re-focus-ring: #60a5fa;
+  --re-focus-ring: #1d5fd1;
   --re-radius-control: 8px;
   --re-radius-panel: 12px;
   --re-shadow-panel: 0 1px 2px rgb(8 33 63 / 0.06);
@@ -42,6 +44,8 @@
     --re-brand-900: #07111f;
     --re-brand-700: #2c67a7;
     --re-action-600: #4a8df1;
+    --re-action-hover: #76adff;
+    --re-on-action: #07111f;
     --re-info-600: #60a5fa;
     --re-success-600: #4ade80;
     --re-warning-600: #fbbf24;
@@ -60,7 +64,7 @@
 
 html {
   min-width: 320px;
-  scroll-padding-top: 5rem;
+  scroll-padding-top: 4.5rem;
 }
 
 body {

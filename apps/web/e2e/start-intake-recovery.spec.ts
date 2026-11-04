@@ -84,7 +84,7 @@ async function fixture(page: Page, files: string[]) {
     buffer: Buffer.from('{"fixture":"retained source"}'),
   })));
   const intake = page.getByRole("region", { name: "자료 분류와 처리" });
-  await expect(intake.locator("tbody tr")).toHaveCount(files.length);
+  await expect(intake.getByRole("listitem")).toHaveCount(files.length);
   return { state, intake };
 }
 
@@ -99,8 +99,8 @@ for (const batch of ["mixed", "all failed"] as const) {
     await expect(intake.getByRole("alert")).toContainText("처리하지 못한 자료가 남아 있습니다.");
     await expect(page).toHaveURL(/\/start$/);
     await expect(enter).toBeDisabled();
-    await expect(intake.locator("tbody tr").filter({ hasText: "retry.json" })).toContainText("실패");
-    if (batch === "mixed") await expect(intake.locator("tbody tr").filter({ hasText: "completed.json" })).toContainText("처리 완료");
+    await expect(intake.getByRole("listitem").filter({ hasText: "retry.json" })).toContainText("실패");
+    if (batch === "mixed") await expect(intake.getByRole("listitem").filter({ hasText: "completed.json" })).toContainText("처리 완료");
     expect(state.finalizeCalls).toBe(0);
     expect(state.creates).toBe(1);
     state.failFiles.clear();
@@ -121,7 +121,7 @@ test("finalization failure preserves completed rows and retries connection witho
   const failure = page.getByRole("alert").filter({ hasText: "자료 처리는 완료됐지만 연결·보완 계획 확인을 마치지 못했습니다." });
   await expect(failure).toBeVisible();
   await expect(page).toHaveURL(/\/start$/);
-  await expect(intake.locator("tbody tr")).toContainText("처리 완료");
+  await expect(intake.getByRole("listitem")).toContainText("처리 완료");
   await expect(page.getByRole("button", { name: "선택 트랙 워크스페이스로 이동", exact: true })).toBeDisabled();
   const retry = failure.getByRole("button", { name: "자료 연결 다시 시도", exact: true });
   await expect(retry).toBeEnabled();
@@ -149,8 +149,8 @@ test("source formula errors stay review candidates and deferred land evidence do
   state.nextStage = "input_review";
   await intake.getByRole("button", { name: /^분류대로 처리/ }).click();
   await expect(intake.getByRole("alert")).toContainText("처리하지 못한 자료가 남아 있습니다.");
-  await expect(intake.locator("tbody tr").filter({ hasText: "bonri.xlsx" })).toContainText("검토 후보 저장 · 수식 오류 확인 필요");
-  await expect(intake.locator("tbody tr").filter({ hasText: "land.xlsx" })).toContainText("9필지 저장 · PNU 증빙 보강 대기");
+  await expect(intake.getByRole("listitem").filter({ hasText: "bonri.xlsx" })).toContainText("검토 후보 저장 · 수식 오류 확인 필요");
+  await expect(intake.getByRole("listitem").filter({ hasText: "land.xlsx" })).toContainText("9필지 저장 · PNU 증빙 보강 대기");
   expect(state.validationCalls).toBe(1);
   expect(state.candidateCalls).toBe(1);
   expect(state.landCalls).toBe(1);
@@ -185,7 +185,7 @@ test("only a source-bound feasibility candidate may pass validation-failed into 
 test("an archived unsupported document does not block the actionable files in a mixed batch", async ({ page }) => {
   const { state, intake } = await fixture(page, ["completed.json", "market.csv"]);
   state.nextStage = "input_review";
-  const archived = intake.locator("tbody tr").filter({ hasText: "market.csv" });
+  const archived = intake.getByRole("listitem").filter({ hasText: "market.csv" });
   await expect(archived).toContainText("원본 저장 · 자동 처리 경로 없음");
   await expect(page.getByRole("button", { name: "선택 트랙 워크스페이스로 이동", exact: true })).toBeDisabled();
   let release!: () => void;
@@ -205,7 +205,7 @@ test("an archived unsupported-only selection can be reclassified or explicitly c
   const { state, intake } = await fixture(page, ["market.csv"]);
   state.nextStage = "input_review";
   const enter = page.getByRole("button", { name: "선택 트랙 워크스페이스로 이동", exact: true });
-  await expect(intake.locator("tbody tr")).toContainText("원본 저장 · 자동 처리 경로 없음");
+  await expect(intake.getByRole("listitem")).toContainText("원본 저장 · 자동 처리 경로 없음");
   await expect(enter).toBeEnabled();
   await expect(intake.getByRole("button", { name: /^분류대로 처리/ })).toBeDisabled();
   await intake.getByRole("combobox").selectOption("business_plan");

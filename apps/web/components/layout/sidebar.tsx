@@ -1,25 +1,28 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useId, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { Suspense, useEffect, useId, useRef, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import {
   Activity, BarChart3, BookMarked, BookOpen, ChevronDown, FileCheck,
   FolderKanban, GitBranch, LayoutDashboard, Layers, LibraryBig, Map,
-  Menu, Settings, Wallet, X, type LucideIcon,
+  Menu, Settings, ShieldAlert, Wallet, X, type LucideIcon,
 } from "lucide-react";
 import { getStoredSelectedProjectId } from "../project/project-picker";
-import { withProjectContext } from "../../lib/project-navigation";
+import {
+  PROJECT_WORKSPACE_GROUPS, projectIdFromLocation, projectWorkspaceHref,
+  projectWorkspaceLocation, withProjectContext,
+} from "../../lib/project-navigation";
 import { getStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
 
 const BLOG_URL = "https://blog.naver.com/babo7910/224295847211";
 
 const ANALYSIS_TOOLS = [
-  { href: "/analysis", label: "토지·거래 분석", icon: Map },
-  { href: "/feasibility", label: "사업성 분석", icon: BarChart3 },
-  { href: "/cashflow-detail", label: "현금흐름", icon: Wallet },
-  { href: "/finance", label: "금융구조", icon: Layers },
-  { href: "/report", label: "PF 심사보고서", icon: FileCheck },
+  { href: "/analysis", label: "토지·거래 조회", icon: Map },
+  { href: "/feasibility", label: "간편 사업성 계산", icon: BarChart3 },
+  { href: "/cashflow-detail", label: "현금흐름 보기", icon: Wallet },
+  { href: "/finance", label: "금융구조 도구", icon: Layers },
+  { href: "/report", label: "PF 보고서 도구", icon: FileCheck },
   { href: "/monitoring", label: "실시간 모니터링", icon: Activity },
 ];
 
@@ -29,14 +32,73 @@ const RESOURCES = [
   { href: "/glossary/candidates", label: "용어 검토", icon: BookMarked },
 ];
 
+const PROJECT_GROUP_ICONS = {
+  overview: LayoutDashboard,
+  diligence: FolderKanban,
+  feasibility: BarChart3,
+  finance: Wallet,
+  risk: ShieldAlert,
+  report: FileCheck,
+};
+
+function ProjectWorkspaceNavigation({ projectId, pathname, onNavigate }: {
+  projectId: string;
+  pathname: string;
+  onNavigate?: () => void;
+}) {
+  const searchParams = useSearchParams();
+  const track = searchParams.get("track");
+  const location = projectWorkspaceLocation(pathname, projectId);
+
+  return (
+    <div role="group" aria-label="프로젝트 업무 영역" className="my-3 space-y-0.5 border-y border-re-border py-3">
+      <p className="px-3 pb-1 text-xs font-semibold text-re-muted">프로젝트 업무</p>
+      {PROJECT_WORKSPACE_GROUPS.map((group) => {
+        const activeGroup = group.key === location?.group.key;
+        const Icon = PROJECT_GROUP_ICONS[group.key];
+        return (
+          <details key={group.key} open={activeGroup} className="group/project">
+            <summary aria-current={activeGroup ? "location" : undefined}
+              className={`flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-re-control px-3 py-2 text-sm font-semibold transition-colors motion-reduce:transition-none [&::-webkit-details-marker]:hidden ${activeGroup
+                ? "bg-re-subtle text-re-action"
+                : "text-re-secondary hover:bg-re-subtle hover:text-re-text"}`}>
+              <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+              {group.label}
+              <ChevronDown className="ml-auto h-4 w-4 shrink-0 transition-transform group-open/project:rotate-180 motion-reduce:transition-none" aria-hidden="true" />
+            </summary>
+            <ul className="ml-5 mt-1 space-y-0.5 border-l border-re-border">
+              {group.routes.map((route) => {
+                const active = route.path === location?.route.path;
+                return (
+                  <li key={route.path}>
+                    <Link href={projectWorkspaceHref(projectId, route.path, track)} onClick={onNavigate}
+                      prefetch={false} aria-current={active ? "page" : undefined}
+                      className={`flex min-h-11 items-center rounded-r-re-control border-l-2 px-3 py-2 text-sm transition-colors motion-reduce:transition-none ${active
+                        ? "border-re-action bg-re-subtle font-semibold text-re-action"
+                        : "border-transparent text-re-secondary hover:bg-re-subtle hover:text-re-text"}`}>
+                      {route.label}
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 function NavigationContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const [track, setTrack] = useState<WorkflowTrack | null>(null);
-  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const routeProjectId = projectIdFromLocation(pathname, "");
+  const currentProjectId = routeProjectId ?? selectedProjectId;
 
   useEffect(() => {
     const sync = () => {
-      setCurrentProjectId(getStoredSelectedProjectId());
+      setSelectedProjectId(getStoredSelectedProjectId());
       setTrack(getStoredWorkflowTrack());
     };
     sync();
@@ -86,7 +148,11 @@ function NavigationContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav aria-label="주 메뉴" className="flex-1 space-y-1 px-3 py-4">
         {renderLink("/dashboard", "대시보드", LayoutDashboard)}
         {renderLink("/dashboard#all-projects", "내 프로젝트", FolderKanban)}
-        {currentProjectId ? (
+        {routeProjectId ? (
+          <Suspense fallback={null}>
+            <ProjectWorkspaceNavigation key={routeProjectId} projectId={routeProjectId} pathname={pathname} onNavigate={onNavigate} />
+          </Suspense>
+        ) : currentProjectId ? (
           <div className="my-4 border-y border-re-border py-3">
             <p className="px-3 pb-1 text-xs text-re-muted">선택한 프로젝트</p>
             {renderLink(`/project/${encodeURIComponent(currentProjectId)}`, "프로젝트 개요", FolderKanban)}
@@ -96,7 +162,7 @@ function NavigationContent({ onNavigate }: { onNavigate?: () => void }) {
         <details className="group" open={ANALYSIS_TOOLS.some((item) => isActive(item.href))}>
           <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-re-control px-3 py-2.5 text-sm font-medium text-re-secondary hover:bg-re-subtle [&::-webkit-details-marker]:hidden">
             <BarChart3 className="h-4 w-4" aria-hidden="true" />
-            분석 도구
+            간편 분석 도구
             <ChevronDown className="ml-auto h-4 w-4 transition-transform group-open:rotate-180" aria-hidden="true" />
           </summary>
           <div className="ml-3 border-l border-re-border pl-2">

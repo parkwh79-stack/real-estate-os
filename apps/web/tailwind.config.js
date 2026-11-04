@@ -23,6 +23,8 @@ export default {
           muted: "var(--re-text-muted)",
           brand: "var(--re-brand-700)",
           action: "var(--re-action-600)",
+          "action-hover": "var(--re-action-hover)",
+          "on-action": "var(--re-on-action)",
           info: "var(--re-info-600)",
           success: "var(--re-success-600)",
           warning: "var(--re-warning-600)",

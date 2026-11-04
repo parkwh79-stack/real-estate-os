@@ -45,16 +45,48 @@ test("navigation groups keep existing tools and the selected project reachable",
     : page.locator("aside").getByRole("navigation", { name: "주 메뉴", exact: true });
   await expect(navigation.getByRole("link", { name: "내 프로젝트", exact: true })).toHaveAttribute("href", "/dashboard#all-projects");
   await expect(navigation.getByRole("link", { name: "AI 딜룸", exact: true })).toHaveAttribute("href", "/project/chosen-project/chief-orchestration");
-  await expect(navigation.getByRole("link", { name: "사업성 분석", exact: true })).not.toBeVisible();
-  await navigation.getByText("분석 도구", { exact: true }).click();
-  await expect(navigation.getByRole("link", { name: "사업성 분석", exact: true })).toHaveAttribute("href", "/feasibility?projectId=chosen-project");
-  await expect(navigation.getByRole("link", { name: "현금흐름", exact: true })).toBeVisible();
+  await expect(navigation.getByRole("link", { name: "간편 사업성 계산", exact: true })).not.toBeVisible();
+  await navigation.getByText("간편 분석 도구", { exact: true }).click();
+  await expect(navigation.getByRole("link", { name: "간편 사업성 계산", exact: true })).toHaveAttribute("href", "/feasibility?projectId=chosen-project");
+  await expect(navigation.getByRole("link", { name: "현금흐름 보기", exact: true })).toBeVisible();
   await expect(navigation.getByRole("link", { name: "실시간 모니터링", exact: true })).toBeVisible();
   await navigation.getByText("자료실", { exact: true }).click();
   for (const name of ["업무 템플릿", "표준 용어", "용어 검토"]) await expect(navigation.getByRole("link", { name, exact: true })).toBeVisible();
   await expect(navigation.getByRole("link", { name: "REALYTICS 블로그 (새 창)", exact: true })).toHaveCount(1);
   await expect(page.getByText("VWorld · 실거래가 연동", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "알림", exact: true })).toHaveCount(0);
+});
+
+test("project navigation follows the current route, carries the explicit track and supports returning", async ({ page, viewport }) => {
+  await fixture(page);
+  const mobile = (viewport?.width ?? 1280) < 1024;
+  const menu = page.getByRole("button", { name: "메뉴 열기", exact: true });
+  const projectMenu = page.getByRole("group", { name: "프로젝트 업무 영역", exact: true });
+  const context = page.getByRole("region", { name: "프로젝트 정보" });
+
+  await page.goto("/project/bonri-a/report-templates?track=pf");
+  await expect(context.getByText(/보고서·감사 \/ 보고서 템플릿/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "심사보고서로 돌아가기", exact: true }))
+    .toHaveAttribute("href", "/project/bonri-a/report?track=pf");
+  if (mobile) await menu.click();
+  const template = projectMenu.getByRole("link", { name: "보고서 템플릿", exact: true });
+  await expect(template).toHaveAttribute("aria-current", "page");
+  await expect(template).toHaveAttribute("href", "/project/bonri-a/report-templates?track=pf");
+
+  await projectMenu.getByText("실사·근거", { exact: true }).click();
+  await projectMenu.getByRole("link", { name: "3D 지도", exact: true }).click();
+  await expect(page).toHaveURL(/\/project\/bonri-a\/map-3d\?track=pf$/);
+  await expect(context.getByText(/실사·근거 \/ 3D 지도/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "지도로 돌아가기", exact: true }))
+    .toHaveAttribute("href", "/project/bonri-a/map?track=pf");
+  if (mobile) await menu.click();
+  await expect(projectMenu.getByRole("link", { name: "3D 지도", exact: true })).toHaveAttribute("aria-current", "page");
+  if (mobile) await page.keyboard.press("Escape");
+
+  await page.goBack();
+  await expect(page).toHaveURL(/\/project\/bonri-a\/report-templates\?track=pf$/);
+  if (mobile) await menu.click();
+  await expect(template).toHaveAttribute("aria-current", "page");
 });
 
 test("mobile navigation contains keyboard focus, closes with Escape, and restores its trigger", async ({ page, viewport }) => {

@@ -212,7 +212,7 @@ test("a pending save accepts one request and prevents duplicate submission", asy
   expect(calls).toHaveLength(1);
 });
 
-test("a late response after a client project change cannot replace the other project's saved review", async ({ page }) => {
+test("a late response after a client project change cannot replace the other project's saved review", async ({ page, viewport }) => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const { calls, records } = await fixture(page, { gate });
@@ -227,7 +227,12 @@ test("a late response after a client project change cannot replace the other pro
     await search.press("Enter");
     await page.getByRole("option", { name: /보완 검토 B/ }).click();
     await expect(page).toHaveURL(`/project/${PROJECT_B}`, { timeout: 30_000 });
-    await page.locator(`a[href='/project/${PROJECT_B}/risk']`).first().click();
+    if ((viewport?.width ?? 1280) < 1024) {
+      await page.getByRole("button", { name: "메뉴 열기", exact: true }).click();
+    }
+    const navigation = page.getByRole("navigation", { name: "주 메뉴", exact: true });
+    await navigation.getByText("리스크·승인", { exact: true }).click();
+    await navigation.getByRole("link", { name: "위험 항목 검토", exact: true }).click();
     await expect(page).toHaveURL(`/project/${PROJECT_B}/risk`, { timeout: 30_000 });
     await expect(page.getByRole("row").filter({ hasText: "다른 사업 대지면적 확인" })).toBeVisible();
   } finally { release(); }
