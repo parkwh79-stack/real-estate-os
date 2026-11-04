@@ -7,6 +7,10 @@ import { backendErrorMessage, parseBackendErrorResponse } from "../../lib/backen
 import type { CashflowResult } from "../../lib/project-client";
 import { CashFlowPeriodBasisPanel } from "./cash-flow-period-basis";
 import { CashFlowComparisonCharts, type AlignedCashFlow } from "./cash-flow-comparison-charts";
+import {
+  CashFlowReserveForm, CashFlowReserveResult, reserveDraftFromInput, reserveInputFromDraft,
+  type ReserveInput, type ReserveResult,
+} from "./cash-flow-reserve-review";
 
 const MONTHLY_POLICY = {
   method: "reviewed_monthly_v1", interestBasis: "opening_balance", annualDayBasis: "monthly_12",
@@ -24,8 +28,10 @@ export type Comparison = {
   inputChanges: Array<{ path: string; label?: string; before: unknown; after: unknown }>;
   inputChangeCount?: number; inputChangesTruncated?: boolean;
   alignedCashFlow?: AlignedCashFlow;
+  reserveReview?: ReserveResult;
 };
-export type State = { comparisonHash: string; availableRuns: Run[]; selection: { baselineRunId: string; comparisonRunId: string; saved: boolean } | null;
+export type State = { comparisonHash: string; availableRuns: Run[];
+  selection: { baselineRunId: string; comparisonRunId: string; saved: boolean; reserveReview?: ReserveInput | null } | null;
   comparison: Comparison | null };
 const control = "min-w-0 w-full rounded-lg border border-slate-300 bg-white p-2 text-sm dark:border-slate-700 dark:bg-slate-900";
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
@@ -100,6 +106,8 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, recalculatedRunId
   const [changed, setChanged] = useState("");
   const [comparison, setComparison] = useState<Comparison | null>(null);
   const [selectionDirty, setSelectionDirty] = useState(false);
+  const [reserveDraft, setReserveDraft] = useState(() => reserveDraftFromInput());
+  const [reserveDirty, setReserveDirty] = useState(false);
   const [method, setMethod] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(true);
@@ -120,10 +128,13 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, recalculatedRunId
   const restore = (saved: State, hash: string) => {
     setState(saved); setReviewHash(hash); setBaseline(saved.selection?.baselineRunId ?? "");
     setChanged(saved.selection?.comparisonRunId ?? ""); setComparison(saved.comparison); setSelectionDirty(false);
+    setReserveDraft(reserveDraftFromInput(saved.selection?.reserveReview ?? saved.comparison?.reserveReview));
+    setReserveDirty(false);
   };
   useEffect(() => {
     activeEndpoint.current = endpoint; setBusy(true); setState(null); setReviewHash("");
     setBaseline(""); setChanged(""); setComparison(null); setSelectionDirty(false); setMethod(""); setReason("");
+    setReserveDraft(reserveDraftFromInput()); setReserveDirty(false);
     setError(null); setNotice(null);
     void load().then(({ saved, review }) => { if (activeEndpoint.current === endpoint) restore(saved, review.reviewHash); })
       .catch((caught) => { if (activeEndpoint.current === endpoint) setError(caught instanceof Error ? caught.message : "계산 목록을 불러오지 못했습니다."); })
@@ -177,6 +188,9 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, recalculatedRunId
     if (activeEndpoint.current !== endpoint) return;
     const base = baseline || state?.availableRuns[0]?.calculationRunId || "";
     setState(saved); setReviewHash(review.reviewHash); setBaseline(base); setChanged(result.calculationRunId);
+    if (reserveDraft.enabled && result.calculationRunId !== changed) {
+      setReserveDraft({ ...reserveDraft, comparisonIncluded: "" });
+    }
     if (recalculatedRunId && saved.availableRuns.some((run) => run.calculationRunId === recalculatedRunId)) {
       setRunRefresh({ runId: recalculatedRunId });
     }
@@ -192,17 +206,33 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, recalculatedRunId
   }
   async function save() {
     if (!baseline || !changed || !state?.comparisonHash) throw new Error("기준 계산과 변경 계산을 선택하고 최신 기록을 불러오세요.");
+    const reserveReview = reserveDraft.enabled || reserveDirty ? reserveInputFromDraft(reserveDraft) : undefined;
     const saved = await readState(await fetch(`${endpoint}/cash-flow/comparison`, { method: "POST",
       headers: { ...headers(), "Content-Type": "application/json" }, body: JSON.stringify({ baselineRunId: baseline,
-        comparisonRunId: changed, expectedComparisonHash: state.comparisonHash }) }), "비교 저장");
+        comparisonRunId: changed, expectedComparisonHash: state.comparisonHash, reserveReview }) }), "비교 저장");
     if (activeEndpoint.current !== endpoint) return;
-    restore(saved, reviewHash); setNotice("비교 선택을 저장했습니다. 같은 프로젝트를 다시 열어 이어볼 수 있습니다.");
+    restore(saved, reviewHash);
+    setNotice(reserveReview
+      ? "비교 선택과 예비비 검토를 저장했습니다. 같은 프로젝트를 다시 열어 이어볼 수 있습니다."
+      : "비교 선택을 저장했습니다. 같은 프로젝트를 다시 열어 이어볼 수 있습니다.");
+  }
+  function selectRun(side: "baseline" | "comparison", runId: string) {
+    if (side === "baseline") setBaseline(runId);
+    else setChanged(runId);
+    if (reserveDraft.enabled) {
+      const includedField = side === "baseline" ? "baselineIncluded" : "comparisonIncluded";
+      setReserveDraft({ ...reserveDraft, [includedField]: "" });
+      setReserveDirty(true);
+    }
+    setSelectionDirty(true);
+    setComparison(null);
+    setNotice(null);
   }
   const locked = disabled || busy || refreshingRuns;
   const canCompare = Boolean(baseline && changed && baseline !== changed && !runRefreshError
     && [baseline, changed].every((id) => state?.availableRuns.some((run) => run.calculationRunId === id)));
   const selectionSaved = state?.selection?.saved && state.selection.baselineRunId === baseline && state.selection.comparisonRunId === changed;
-  const unsavedSelection = selectionDirty || Boolean(baseline && changed && !selectionSaved);
+  const unsavedSelection = selectionDirty || reserveDirty || Boolean(baseline && changed && !selectionSaved);
   return <section aria-label="금융 검토안 계산과 비교" className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-900">
     <h2 className="font-black">금융 조건 변경안 계산·비교</h2>
     <p className="mt-2 text-sm text-slate-500">저장한 금액·사업기간·대출 조건으로 별도 검토안을 만듭니다. 원본과 승인된 기준안은 유지되며 결과는 분석용입니다.</p>
@@ -231,12 +261,14 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, recalculatedRunId
     </fieldset>
     <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-700">
       <h3 className="font-bold">저장된 기준안·변경안 비교{unsavedSelection ? " · 선택 저장 전" : selectionSaved ? " · 저장됨" : ""}</h3>
-      <div className="mt-3 grid gap-3 md:grid-cols-2">{([ ["기준 계산", baseline, setBaseline], ["변경 계산", changed, setChanged] ] as const).map(([label, value, setValue]) =>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">{([ ["기준 계산", baseline, "baseline"], ["변경 계산", changed, "comparison"] ] as const).map(([label, value, side]) =>
         <label key={label} className="grid gap-1 text-sm">{label}<select aria-label={label} disabled={locked} className={control} value={value}
-          onChange={(e) => { setValue(e.target.value); setSelectionDirty(true); setComparison(null); setNotice(null); }}>
+          onChange={(e) => selectRun(side, e.target.value)}>
           <option value="">저장된 계산 선택</option>{(state?.availableRuns ?? []).map((run) => <option key={run.calculationRunId} value={run.calculationRunId}>{runLabel(run)}</option>)}
         </select></label>)}</div>
       {state && state.availableRuns.length < 2 ? <p className="mt-2 text-sm text-slate-500">비교하려면 서로 다른 두 계산을 저장하세요. 기존 Cash Flow 재계산과 월별 금융 검토안 계산을 이용할 수 있습니다.</p> : null}
+      {baseline && changed && baseline !== changed ? <CashFlowReserveForm draft={reserveDraft} disabled={locked || !canCompare}
+        onChange={(draft) => { setReserveDraft(draft); setReserveDirty(true); setNotice(null); }} /> : null}
       <div className="mt-3 flex flex-wrap gap-2">
         <button type="button" className={button} disabled={locked || !canCompare} onClick={() => void perform(preview)}>차이 확인</button>
         <button type="button" className={button} disabled={locked || !canCompare || !unsavedSelection || comparison?.status === "incompatible"} onClick={() => void perform(save)}>비교 선택 저장</button>
@@ -279,6 +311,7 @@ export function CashFlowComparisonDetails({ comparison }: { comparison: Comparis
       {comparison.sourceChanged ? <p className="text-sm text-amber-700">두 계산의 원본·근거 기준도 변경되었습니다.</p> : null}
       <p className="text-xs text-slate-500">기준: {period(comparison.baseline)} / 변경: {period(comparison.comparison)}</p>
       <CashFlowComparisonCharts comparison={comparison} />
+      {comparison.reserveReview ? <CashFlowReserveResult review={comparison.reserveReview} /> : null}
       <div aria-label="계산 당시 입력 근거와 가정" className="space-y-3 text-sm">
         <p className="font-bold">입력 근거와 사용자 가정</p>
         <p className="text-xs text-slate-500">각 계산에 저장된 검토 기록입니다. 최종 승인 자료가 없어도 가능한 분석은 계속할 수 있으며, 원본 대조와 최종 승인은 구분합니다.</p>

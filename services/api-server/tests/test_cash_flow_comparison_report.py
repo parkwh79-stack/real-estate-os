@@ -1,7 +1,9 @@
 """Frozen comparison drafts use persisted calculations, never a mutable project forecast."""
 from copy import deepcopy
+from io import BytesIO
 import json
 from datetime import datetime, timezone
+from zipfile import ZipFile
 
 import pytest
 from fastapi import HTTPException
@@ -101,6 +103,45 @@ def test_draft_reopen_and_exports_survive_working_selection_and_original_run_cha
             assert data.content.startswith(b"%PDF-")
         if fmt == "docx":
             assert data.content.startswith(b"PK")
+
+
+def test_reserve_review_is_fixed_in_the_report_and_its_export(saved_comparison):
+    client, pid, _ = saved_comparison
+    url = f"/projects/{pid}/cash-flow/comparison"
+    current = client.get(url).json()
+    review = {"ratePercent": 2.5, "baselineIncludedReserveWon": 20,
+              "comparisonIncludedReserveWon": 114, "reason": "가상 비교 사업비 예비비 검토"}
+    pair = {"baselineRunId": "baseline", "comparisonRunId": "changed"}
+    saved = client.post(url, json={**pair, "expectedComparisonHash": current["comparisonHash"], "reserveReview": review})
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["comparison"]["reserveReview"]
+    assert result["absorbedWon"] == 6 and result["remainingWon"] == 9 and result["excessWon"] == 0
+    report_response = create_draft(client, pid)
+    assert report_response.status_code == 200, report_response.text
+    body = report_response.json()
+    report = body["report"]
+    frozen = report["cashFlowComparisonSnapshot"]
+    assert frozen["comparison"]["reserveReview"] == result and frozen["selection"]["reserveReview"] == review
+    assert report["cashFlowComparisonSnapshotHash"] == content_hash(frozen)
+    assert report["sections"]["comparisonSummary"]["사업비 예비비 검토"]["남은 예비비"] == "9원"
+    assert "- 남은 예비비 9원" in body["report_markdown"]
+    assert "- 적용 예비비율 250bp (100bp = 1%)" in body["report_markdown"]
+    assert review["reason"] in body["report_markdown"]
+    changed = client.post(url, json={**pair, "expectedComparisonHash": saved.json()["comparisonHash"], "reserveReview": None})
+    assert changed.status_code == 200, changed.text
+    report_url = f"/projects/{pid}/reports/{body['report_id']}"
+    assert client.get(report_url).json()["report"] == report
+    exported = client.post(f"{report_url}/exports", json={"format": "json"})
+    assert exported.status_code == 200, exported.text
+    downloaded = client.get(f"{report_url}/exports/{exported.json()['export_id']}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.json()["report"]["cashFlowComparisonSnapshot"]["comparison"]["reserveReview"] == result
+    word = client.post(f"{report_url}/exports", json={"format": "docx"})
+    assert word.status_code == 200, word.text
+    downloaded = client.get(f"{report_url}/exports/{word.json()['export_id']}/download")
+    with ZipFile(BytesIO(downloaded.content)) as document:
+        content = document.read("word/document.xml").decode()
+    assert "250bp (100bp = 1%)" in content and "남은 예비비: 9원" in content
 
 
 def test_draft_requires_current_state_and_saved_selection_without_writing(saved_comparison):

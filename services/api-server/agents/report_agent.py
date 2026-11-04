@@ -141,6 +141,31 @@ class ReportAgent:
             "sources": {"저장된 원본": sources, "고정 검증값(앞 16자리)": snapshot_hash[:16],
                 "보존 범위": "두 계산의 입력·결과·출처 원시 기록은 이 초안에 고정 보존했습니다. 이후 입력이나 선택 변경으로 이 초안의 수치는 바뀌지 않습니다."},
         }
+        reserve_lines = []
+        reserve = comparison.get("reserveReview")
+        if isinstance(reserve, dict):
+            basis_points = round(reserve["ratePercent"] * 100)
+            rate_label = f"{basis_points // 100}%" if basis_points % 100 == 0 else f"{basis_points}bp (100bp = 1%)"
+            reserve_values = {"적용 예비비율": rate_label}
+            for key, label in (
+                ("baselineIncludedReserveWon", "기준안에 이미 포함된 예비비"),
+                ("comparisonIncludedReserveWon", "변경안에 이미 포함된 예비비"),
+                ("baselineCostExcludingReserveWon", "기준안 예비비 제외 사업비"),
+                ("comparisonCostExcludingReserveWon", "변경안 예비비 제외 사업비"),
+                ("targetReserveWon", "검토 예비비"),
+                ("reviewBudgetWon", "예비비 반영 검토 예산"),
+                ("costIncreaseWon", "비교 사업비 증가액"),
+                ("absorbedWon", "예비비 충당 가능액"),
+                ("remainingWon", "남은 예비비"),
+                ("excessWon", "예비비 초과액"),
+            ):
+                reserve_values[label] = _amount_text(reserve[key])
+            sections["comparisonSummary"]["사업비 예비비 검토"] = reserve_values
+            sections["assumptions"]["예비비 검토 이유"] = reserve["reason"]
+            caveats.append("예비비는 비교 예산에만 적용한 사용자 가정입니다. 현금흐름과 승인 사업비는 각 저장 계산을 따릅니다.")
+            reserve_lines = ["### 사업비 예비비 검토", "",
+                             *[f"- {label} {value}" for label, value in reserve_values.items()],
+                             f"- 검토 이유 {' '.join(reserve['reason'].split())}", ""]
         input_reviews = [{"계산": side, "항목": row["label"], "구분": row["classification"],
                           "검토 이유": row["reason"], "원본 위치": " · ".join(str(part) for part in (row.get("sourceName"), row.get("sourceCell")) if part) or "원본 근거 미지정"}
                          for side, key in (("기준안", "baseline"), ("변경안", "comparison"))
@@ -156,7 +181,7 @@ class ReportAgent:
             "cashFlowComparisonSnapshot": deepcopy(snapshot), "cashFlowComparisonSnapshotHash": snapshot_hash}
         lines = ["# 현금흐름 비교 검토 초안", "", f"대상 사업: {project_name}", "", "> 검토용 초안 — 최종 승인·대출조건 확정용 보고서가 아닙니다.", "", ReportExportAgent.DISPLAY_NOTE, "",
             "## 1. 저장된 계산 비교", "", "금액은 원 단위이며 표시값은 반올림했습니다.", "",
-            "| 업무 지표 | 기준안 | 변경안 | 차이 |", "| --- | ---: | ---: | ---: |", *metric_lines, "",
+            "| 업무 지표 | 기준안 | 변경안 | 차이 |", "| --- | ---: | ---: | ---: |", *metric_lines, "", *reserve_lines,
             "## 2. 계산 방식과 변경 조건", "", f"기준안: {policy_text(comparison['baseline'])}", f"기준안 검토 이유: {review_reason(baseline)}",
             f"변경안: {policy_text(comparison['comparison'])}", f"변경안 검토 이유: {review_reason(changed)}", ""]
         lines.extend(f"- {row['확인 항목']}: {row['변경 전']} → {row['변경 후']}" for row in changes)

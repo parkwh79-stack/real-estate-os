@@ -13,7 +13,8 @@ from db.repositories.postgres_project_repository import ProjectVersionConflict
 from routers import projects
 from storage import list_calculation_run_records, storage_backend
 from use_cases.cash_flow_comparison import (
-    SELECTION_KEY, compare_cash_flow_runs, comparison_state_hash, run_issues, run_summary,
+    SELECTION_KEY, ReserveReviewInput, calculate_reserve_review, compare_cash_flow_runs,
+    comparison_state_hash, run_issues, run_summary,
 )
 from use_cases.report_generation import generate_and_save_cash_flow_comparison_report_use_case
 from db.repositories.report_repository import ReportPublicationConflict
@@ -27,6 +28,7 @@ class ComparisonSelection(BaseModel):
     baselineRunId: str = Field(min_length=1, max_length=256)
     comparisonRunId: str = Field(min_length=1, max_length=256)
     expectedComparisonHash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reserveReview: ReserveReviewInput | None = None
 
 
 class ComparisonReportDraft(BaseModel):
@@ -171,7 +173,25 @@ def save_cash_flow_comparison(project_id: str, request: Request, response: Respo
         for side in ("baseline", "comparison"):
             selection[side + "InputHash"] = comparison[side]["inputHash"]
             selection[side + "ResultHash"] = comparison[side]["resultHash"]
-        # Store references only. The existing repository keeps tenant/version authority.
+        previous = (project.get("_meta") or {}).get(SELECTION_KEY) or {}
+        reserve = input_data.reserveReview
+        try:
+            # Older callers may omit the option. Keep a review only when the
+            # same pair and all four exact snapshots are still selected.
+            if "reserveReview" not in input_data.model_fields_set and previous.get("reserveReview") is not None:
+                same_snapshot = all(previous.get(key) == value for key, value in selection.items()
+                                    if key not in {"savedAt", "savedBy"})
+                if same_snapshot:
+                    reserve = ReserveReviewInput.model_validate(previous["reserveReview"])
+            if reserve is not None:
+                calculate_reserve_review(comparison, reserve)
+                selection["reserveReview"] = reserve.stored_values()
+            elif "reserveReview" in previous:
+                selection["reserveReview"] = None
+        except ValueError as exc:
+            raise HTTPException(422, {"error": "invalid_reserve_review", "message": str(exc)}) from exc
+        # Persist references and the explicit budget assumption under the same
+        # tenant/version guard. Derived amounts stay tied to the frozen runs.
         try:
             updated = repository.update(project_id, {"_meta": {SELECTION_KEY: selection}})
         except ProjectVersionConflict as exc:
@@ -179,6 +199,7 @@ def save_cash_flow_comparison(project_id: str, request: Request, response: Respo
         if updated is None:
             raise HTTPException(404, "Project not found")
         projects.record_sensitive_project_event(request, event_type="cash_flow_comparison_saved",
-            project_id=project_id, metadata={**selection, "comparisonStatus": comparison["status"],
+            project_id=project_id, metadata={**{key: value for key, value in selection.items() if key != "reserveReview"},
+                "reserveReviewApplied": reserve is not None, "comparisonStatus": comparison["status"],
                 "reasons": comparison["reasons"]})
         return _state(project_id, updated, tenant)

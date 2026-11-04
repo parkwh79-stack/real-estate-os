@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { bindCashflowDependents, type CashflowResult, type CashFlowPeriodBasis } from "../lib/project-client";
+import type { ReserveInput } from "../components/feasibility/cash-flow-reserve-review";
 
 test.setTimeout(90_000);
 
@@ -61,6 +62,7 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
   let budgetRecalculated = false;
   let refreshFails = options.refreshFailsOnce ?? false;
   let saved = false;
+  let reserveReview: ReserveInput | null = null;
   let workingStart = "2026-01-01";
   const sourceSequence = options.periodBasis?.kind === "source_sequence";
   const frozenPeriod = sourceSequence ? { ...period, kind: "source_sequence", baseMonth: null } : period;
@@ -89,8 +91,12 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
     ] } : undefined });
   const state = (isPreview = false) => ({ comparisonHash: saved ? "saved-state" : "current-state",
     availableRuns: [...(budgetRecalculated ? [budgetRun] : []), ...(calculated ? [nextRun] : []), baseRun],
-    selection: saved || isPreview ? { baselineRunId: "base-run", comparisonRunId: "changed-run", saved: !isPreview } : null,
-    comparison: saved || isPreview ? preview() : null });
+    selection: saved || isPreview ? { baselineRunId: "base-run", comparisonRunId: "changed-run", saved: !isPreview, reserveReview } : null,
+    comparison: saved || isPreview ? { ...preview(), ...(!isPreview && reserveReview ? { reserveReview: {
+      ...reserveReview, baselineCostExcludingReserveWon: 195_000_000, comparisonCostExcludingReserveWon: 207_000_000,
+      targetReserveWon: 9_750_000, reviewBudgetWon: 204_750_000, costIncreaseWon: 12_000_000,
+      absorbedWon: 9_750_000, remainingWon: 0, excessWon: 2_250_000,
+    } } : {}) } : null });
   await page.route("**/api/backend/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -144,12 +150,14 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
         return;
       }
       if (route.request().method() === "POST") {
-        selections.push(route.request().postDataJSON());
+        const payload = route.request().postDataJSON();
+        selections.push(payload);
         await options.saveGate;
         if (options.saveConflict) {
           await route.fulfill({ status: 409, json: { detail: { error: "comparison_state_conflict", message: "프로젝트 또는 계산 기록이 변경되었습니다. 다시 불러온 뒤 저장해 주세요." } } }); return;
         }
         saved = true;
+        if ("reserveReview" in payload) reserveReview = payload.reserveReview;
       }
       body = state(url.searchParams.has("baselineRunId"));
     }
@@ -208,6 +216,48 @@ test("a legacy saved run shows missing period basis instead of deriving it from 
   await expect(savedBasis).toContainText("기간 기준이 미기록");
   await expect(savedBasis).not.toContainText("2099");
   await expect(savedBasis.getByRole("link", { name: "저장 입력·원본 자료 확인" })).toHaveAttribute("href", "/project/r2-1/input-package");
+});
+
+test("reserve review requires explicit included amounts, saves exact won and reopens with the original comparison", async ({ page }) => {
+  const { panel, selections } = await fixture(page, { initialTwo: true, periodBasis: calendarBasis });
+  const baseline = panel.getByLabel("기준 계산", { exact: true });
+  const changed = panel.getByLabel("변경 계산", { exact: true });
+  await baseline.selectOption("base-run");
+  await changed.selectOption("changed-run");
+  const enable = panel.getByRole("checkbox", { name: "예비비로 사업비 차이 검토" });
+  const rate = panel.getByLabel("예비비율 (%)", { exact: true });
+  const beforeReserve = panel.getByLabel("기준안에 포함된 예비비 (억원)", { exact: true });
+  const afterReserve = panel.getByLabel("변경안에 포함된 예비비 (억원)", { exact: true });
+  const save = panel.getByRole("button", { name: "비교 선택 저장", exact: true });
+  await enable.check();
+  await rate.fill("5");
+  await beforeReserve.fill("0.05");
+  await panel.getByLabel("예비비 검토 근거", { exact: true }).fill("가상 예산표의 두 예비비를 대조한 검토");
+  await save.click();
+  await expect(panel.getByRole("alert")).toContainText("두 계산에 이미 포함된 예비비를 입력하세요");
+  expect(selections).toHaveLength(0);
+  await afterReserve.fill("0.08");
+  await save.click();
+  const stored = panel.getByRole("region", { name: "저장된 사업비 예비비 검토", exact: true });
+  await expect(stored.getByText("예비비 초과", { exact: true })).toBeVisible();
+  await expect(stored).toContainText("2,250,000원");
+  await expect(panel.getByRole("region", { name: "주요 금액 차이" })).toContainText("+15,000,000원");
+  expect(selections[0]).toMatchObject({ baselineRunId: "base-run", comparisonRunId: "changed-run", reserveReview: {
+    ratePercent: 5, baselineIncludedReserveWon: 5_000_000, comparisonIncludedReserveWon: 8_000_000,
+    reason: "가상 예산표의 두 예비비를 대조한 검토",
+  } });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(rate).toHaveValue("5");
+  await expect(afterReserve).toHaveValue("0.08");
+  await expect(stored).toContainText("2,250,000원");
+  await changed.selectOption("base-run");
+  await changed.selectOption("changed-run");
+  await expect(beforeReserve).toHaveValue("0.05");
+  await expect(afterReserve).toHaveValue("");
+  await enable.uncheck();
+  await save.click();
+  await expect(stored).toHaveCount(0);
+  expect(selections[1]).toMatchObject({ reserveReview: null });
 });
 
 test("source events stay distinct from months across comparison, rejection and budget rerun", async ({ page }) => {

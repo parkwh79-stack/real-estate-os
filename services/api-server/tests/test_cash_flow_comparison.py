@@ -261,6 +261,82 @@ def test_stale_state_hash_cannot_overwrite_selection(project_client):
     assert "cashFlowComparison" not in get_project_record(pid).get("_meta", {})
 
 
+def test_reserve_review_replaces_included_allocation_and_reopens_exactly(project_client):
+    client, pid, _ = project_client
+    url = f"/projects/{pid}/cash-flow/comparison"
+    comparison_before = client.get(url, params={"baselineRunId": "baseline", "comparisonRunId": "changed"}).json()
+    runs_before = list_calculation_run_records(pid)
+    project_before = deepcopy(get_project_record(pid))
+    review = {"ratePercent": 2.5, "baselineIncludedReserveWon": 20,
+              "comparisonIncludedReserveWon": 30, "reason": "사업비 증가 흡수 범위 검토"}
+    selection = {"baselineRunId": "baseline", "comparisonRunId": "changed"}
+    payload = {**selection, "expectedComparisonHash": comparison_before["comparisonHash"], "reserveReview": review}
+    saved = client.post(url, json=payload)
+    assert saved.status_code == 200, saved.text
+    state = saved.json()
+    assert state["selection"]["reserveReview"] == review
+    assert state["comparison"]["metrics"] == comparison_before["comparison"]["metrics"]
+    assert state["comparison"]["reserveReview"] == {
+        **review, "baselineCostExcludingReserveWon": 580, "comparisonCostExcludingReserveWon": 670,
+        "targetReserveWon": 15, "reviewBudgetWon": 595, "costIncreaseWon": 90, "absorbedWon": 15,
+        "remainingWon": 0, "excessWon": 75,
+    }
+    assert state["comparison"]["reportEligible"] is False
+    assert client.get(url).json() == state
+    assert list_calculation_run_records(pid) == runs_before
+    project_after = get_project_record(pid)
+    assert project_after["_meta"]["cashFlowComparison"]["reserveReview"] == review
+    project_after = deepcopy(project_after)
+    project_after["_meta"].pop("cashFlowComparison")
+    project_after["_meta"]["updated_at"] = project_before["_meta"]["updated_at"]
+    assert project_after == project_before
+
+    assert client.post(url, json=payload).status_code == 409
+    same_pair = client.post(url, json={**selection, "expectedComparisonHash": state["comparisonHash"]})
+    assert same_pair.status_code == 200 and same_pair.json()["selection"]["reserveReview"] == review
+    latest = same_pair.json()["comparisonHash"]
+    cleared = client.post(url, json={**selection, "expectedComparisonHash": latest, "reserveReview": None})
+    assert cleared.status_code == 200 and cleared.json()["selection"].get("reserveReview") is None
+    assert "reserveReview" not in cleared.json()["comparison"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ratePercent", True), ("ratePercent", -1), ("ratePercent", 100.01), ("ratePercent", 0.331),
+    ("baselineIncludedReserveWon", 600), ("comparisonIncludedReserveWon", 701),
+    ("comparisonIncludedReserveWon", -1), ("comparisonIncludedReserveWon", 0.1), ("reason", "  "),
+])
+def test_rejects_invalid_reserve_review_without_persisting(project_client, field, value):
+    client, pid, _ = project_client
+    url = f"/projects/{pid}/cash-flow/comparison"
+    state = client.get(url).json()
+    review = {"ratePercent": 0, "baselineIncludedReserveWon": 0,
+              "comparisonIncludedReserveWon": 0, "reason": "예비비 검토", field: value}
+    response = client.post(url, json={"baselineRunId": "baseline", "comparisonRunId": "changed",
+        "expectedComparisonHash": state["comparisonHash"], "reserveReview": review})
+    assert response.status_code == 422, response.text
+    assert client.get(url).json() == state
+
+
+def test_zero_reserve_is_explicit_and_a_new_pair_does_not_inherit_it(project_client):
+    client, pid, _ = project_client
+    url = f"/projects/{pid}/cash-flow/comparison"
+    state = client.get(url).json()
+    saved = client.post(url, json={"baselineRunId": "baseline", "comparisonRunId": "changed",
+        "expectedComparisonHash": state["comparisonHash"], "reserveReview": {
+            "ratePercent": 0, "baselineIncludedReserveWon": 0,
+            "comparisonIncludedReserveWon": 0, "reason": "예비비 미배정 영향 검토",
+        }})
+    assert saved.status_code == 200, saved.text
+    review = saved.json()["comparison"]["reserveReview"]
+    assert review["targetReserveWon"] == review["absorbedWon"] == review["remainingWon"] == 0
+    assert review["excessWon"] == 100
+    switched = client.post(url, json={"baselineRunId": "changed", "comparisonRunId": "baseline",
+        "expectedComparisonHash": saved.json()["comparisonHash"]})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["selection"].get("reserveReview") is None
+    assert "reserveReview" not in switched.json()["comparison"]
+
+
 def test_new_calculation_invalidates_previous_selection_state_hash(project_client):
     client, pid, _ = project_client
     url = f"/projects/{pid}/cash-flow/comparison"

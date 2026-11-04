@@ -1,10 +1,13 @@
 """Read-only comparison of persisted, completed monthly cash-flow runs."""
 from copy import deepcopy
 from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
 import json
 import math
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from core.calculations import calculate_development_profit
 from core.financial_input_validation import FinancialInputError
@@ -14,6 +17,7 @@ from use_cases.cash_flow_dependencies import financial_input_hash
 
 
 SELECTION_KEY = "cashFlowComparison"
+MAX_SAFE_WON = 9_007_199_254_740_991
 _EXECUTION_KEYS = frozenset({
     "calculationRunId", "parentCalculationRunId", "runId", "requestId", "traceId",
     "scenarioSetId", "createdAt", "updatedAt", "generatedAt", "collectedAt",
@@ -52,6 +56,52 @@ def business_input(value: Any) -> Any:
 
 def _number(value: Any) -> int | float | None:
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+class ReserveReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    ratePercent: Decimal = Field(ge=0, le=100, decimal_places=2, allow_inf_nan=False)
+    baselineIncludedReserveWon: int = Field(strict=True, ge=0, le=MAX_SAFE_WON)
+    comparisonIncludedReserveWon: int = Field(strict=True, ge=0, le=MAX_SAFE_WON)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("ratePercent", mode="before")
+    @classmethod
+    def require_numeric_rate(cls, value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            raise ValueError("예비비율은 숫자로 입력해 주세요.")
+        return value
+
+    def stored_values(self) -> dict:
+        return {**self.model_dump(), "ratePercent": float(self.ratePercent)}
+
+
+def calculate_reserve_review(comparison: dict, review: ReserveReviewInput) -> dict:
+    """Allocate a comparison budget against two frozen costs without recasting cash flow."""
+    total = next((metric for metric in comparison["metrics"] if metric["key"] == "totalProjectCost"), {})
+    baseline_total = _number(total.get("baselineValue"))
+    changed_total = _number(total.get("comparisonValue"))
+    if baseline_total is None or changed_total is None:
+        raise ValueError("두 계산의 저장된 총사업비가 있어야 예비비를 검토할 수 있습니다.")
+    baseline_won = int(Decimal(str(baseline_total)).to_integral_value(rounding=ROUND_HALF_UP))
+    changed_won = int(Decimal(str(changed_total)).to_integral_value(rounding=ROUND_HALF_UP))
+    base_cost = baseline_won - review.baselineIncludedReserveWon
+    changed_cost = changed_won - review.comparisonIncludedReserveWon
+    if base_cost <= 0 or changed_cost < 0:
+        raise ValueError("이미 포함된 예비비를 각 저장 총사업비와 대조해 주세요. 기준안은 예비비를 제외한 사업비가 있어야 합니다.")
+    reserve = int((Decimal(base_cost) * review.ratePercent / 100).to_integral_value(rounding=ROUND_HALF_UP))
+    budget = base_cost + reserve
+    if max(baseline_won, changed_won, budget) > MAX_SAFE_WON:
+        raise ValueError("원 단위로 표시할 수 있는 예비비 검토 범위를 초과했습니다.")
+    increase = max(changed_cost - base_cost, 0)
+    absorbed = min(reserve, increase)
+    return {**review.stored_values(),
+            "baselineCostExcludingReserveWon": base_cost,
+            "comparisonCostExcludingReserveWon": changed_cost,
+            "targetReserveWon": reserve, "reviewBudgetWon": budget,
+            "costIncreaseWon": increase, "absorbedWon": absorbed,
+            "remainingWon": reserve - absorbed, "excessWon": increase - absorbed}
 
 
 def _source_hashes(value: Any) -> list[str]:
@@ -359,6 +409,13 @@ def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: di
             "delta": after - before if before is not None and after is not None else None,
             "status": "available" if before is not None and after is not None else "unavailable",
             "baselineDerived": key in left["derived"], "comparisonDerived": key in right["derived"]})
+    if saved_selection and saved_selection.get("reserveReview") is not None:
+        try:
+            review = ReserveReviewInput.model_validate(saved_selection["reserveReview"])
+            response["reserveReview"] = calculate_reserve_review(response, review)
+        except ValueError:
+            response["status"] = "incompatible"
+            response["reasons"].append("invalid_saved_reserve_review")
     changes = _changes(business_input(baseline["inputSnapshot"]), business_input(changed["inputSnapshot"]))
     for item in changes:
         item["label"] = _change_label(item["path"])
