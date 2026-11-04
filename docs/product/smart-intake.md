@@ -79,11 +79,19 @@ AI 판독에는 원본과 별도로 추출 텍스트와 필요한 페이지 이�
 
 `agents/document_classifier_agent.py` `classify_document(filename, content_type,
 size, sheet_names, json_keys, sample_text)`:
-- 신호: 파일명/확장자 prior + 스프레드시트 **시트명**(사업수지/현금흐름/토지조서…) +
-  **JSON 키**(officialLandPrice/registry…) + (선택) 본문 sample.
+- 먼저 실제 파일 형식과 사용 가능한 처리 경로를 확인한다. 그 범위 안에서
+  파일명, PDF 앞쪽의 읽을 수 있는 본문, 스프레드시트 시트명, JSON 키로 대표 유형을 고른다.
+- 투자심사위원회 부의안건 PDF는 **투자심의 메모**를 대표 유형으로 추천한다.
+  PDF의 수지·금융·토지·시장·리스크는 본문에서 확인된 주제로 표시한다.
+  PDF에 수지표가 있어도 Excel 검증 경로를 선택할 수 없다.
+- PDF 첫 3쪽의 텍스트를 최대 4,000자까지 확인한다. 표본 판독은 16MiB 이하에서
+  최대 4초간 별도 프로세스로 실행한다. 스캔본, 암호화 문서, 판독 제한에 걸린
+  문서는 파일명으로 추천할 수 있지만 확인이 필요하다. 분류 중 OCR·유료 AI 호출이나
+  본문 원문 별도 저장은 하지 않는다.
 - 출력: `documentType` + 한글 `label` + `confidence`(0–1) + `needsReview` +
-  `reasons`(설명가능) + `candidates`(랭킹).
-- 유형: business_plan / basic_architectural_plan / land_ledger /
+  `reasons`(설명가능) + `candidates`(랭킹). Smart Intake는 `detectedFormat`,
+  `processingTypes`, `topics`, 문서 검토에 해당하는 `processingMode`도 반환한다.
+- 유형: business_plan / basic_architectural_plan / investment_committee_memo / land_ledger /
   feasibility_workbook / risk_report_workbook / land_evidence / market_evidence /
   unknown. 각 유형은 `suggestedAction`(upload_and_parse / land_ledger_import /
   feasibility_workbook_validate / …)을 가진다.
@@ -100,7 +108,8 @@ files[]}` 반환. 비조작: 보관 실패해도 분류는 반환, 미지원 파
 ## 프론트엔드
 
 `components/intake/smart-intake.tsx` — 드래그앤드롭/다중 선택 업로드, AI 분류 결과
-표(파일 / AI 분류 / 신뢰도 / 유형 수정 select / 보관 여부). 입력패키지 페이지
+목록에 파일명, 대표 유형, 확인이 필요한 항목을 표시한다. 호환되는 다른 처리 경로가
+필요할 때만 유형 변경을 연다. 세부 근거와 분류 점수는 펼쳐 볼 수 있다. 입력패키지 페이지
 (`/project/[id]/input-package`) 상단 주력 섹션으로 배치하고, 기존 유형별 업로드는
 "개별 업로드(고급)"로 강등. 페이지 전체 국문화. `initialFiles?: File[]` prop을 주면
 마운트 시 해당 파일을 자동으로 분류한다(대시보드 진입점에서 전달).
@@ -115,16 +124,17 @@ files[]}` 반환. 비조작: 보관 실패해도 분류는 반환, 미지원 파
 
 전체 대시보드 범위와 최신 검증은 [제품 실행 계획](realytics-os-next-work-roadmap.md)을 따른다.
 
-## 분류대로 처리 (자동 라우팅) — Done 2026-06-25
+## 분류 후 처리
 
-스마트 업로드 표의 **"분류대로 처리"** 버튼이 각 파일을 (사용자가 수정 가능한)
-유형대로 기존 파서 엔드포인트에 자동 전송한다 — 백엔드 추가 없이 재사용:
-business_plan/기본설계→`/upload`, land_ledger→`/land-ledger/analyze`,
-feasibility_workbook→`/feasibility-workbook/validate`,
-risk_report_workbook→`/risk-report-workbook/validate`, land_evidence(JSON)→
-`/land-evidence`. market_evidence/unknown은 보관만. 행별 상태(처리중/완료/보관만/
-실패)를 표시하고, 완료 후 입력패키지 상태를 새로고침. 클라이언트가 원본 File을
-보관했다가 재전송하므로 분류→처리가 한 화면에서 끝난다.
+- 확실한 분류는 사용자가 다시 유형을 고르지 않고 한 번에 처리한다. 모호한 자료는
+  해당 행에서만 확인하거나 원본만 남길 수 있다. 먼저 끝난 자료는 재처리하지 않는다.
+- PDF·DOCX의 문서 검토는 저장된 원본 ID로 `/parsing-v2/runs`를 실행한다.
+  원본을 다시 전송하지 않으며 문서 구조와 원본 위치를 검토에 연결한다. 승인·계산 입력에는
+  자동 반영하지 않는다. 지원하는 XLS/XLSX와 JSON 증빙은 기존 전용 파서를 사용한다.
+- **문서 검토 열기**는 같은 프로젝트에서 권한이 확인된 해당 원본을 바로 연다.
+  읽을 수 있는 텍스트가 없는 PDF는 원본 보기의 기존 **글자 읽기**로 필요한 쪽을 확인한다.
+- 형식이 맞지 않으면 파일별로 이유를 표시한다. PDF를 Excel 검증기로 보내는 요청은
+  작은 파일과 분할 전송 모두 서버에서 차단한다.
 
 ## Next
 

@@ -17,6 +17,7 @@ from use_cases.intake_transfers import IntakeTransferStore, MAX_FILE_BYTES, PART
 
 
 SCOPE = {"projectId": "p1", "tenantId": "tenant-a", "principalId": "user-a"}
+PDF_BYTES = b"%PDF-1.7\ntest original bytes"
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def store(tmp_path):
     return IntakeTransferStore(LocalObjectStorage(tmp_path))
 
 
-def stage(store, content=b"test original bytes", *, filename="plan.pdf", digest=None):
+def stage(store, content=PDF_BYTES, *, filename="plan.pdf", digest=None):
     created = store.create(SCOPE, {
         "filename": filename, "contentType": "application/octet-stream",
         "sizeBytes": len(content), "sha256": digest or hashlib.sha256(content).hexdigest(),
@@ -147,7 +148,7 @@ def test_route_part_stream_limit_and_content_type(client, store):
 
 
 def test_classify_and_process_reuse_verified_bytes_and_cache_response(client, store, monkeypatch):
-    content = b"source bytes unchanged" * 300000
+    content = b"%PDF-1.7\n" + b"source bytes unchanged" * 300000
     transfer_id = stage(store, content)
     seen = []
 
@@ -187,8 +188,29 @@ def test_process_failure_preserves_parts_for_retry(client, store, monkeypatch):
     response = client.post(f"/projects/p1/intake/transfers/{transfer_id}/process", json={"documentType": "business_plan"})
     assert response.status_code == 503
     with store.assembled_file(SCOPE, transfer_id) as (_, content):
-        assert content.read() == b"test original bytes"
+        assert content.read() == PDF_BYTES
     assert store.read_result(SCOPE, transfer_id, "process") is None
+
+
+@pytest.mark.parametrize("filename", ["committee.pdf", "committee.xlsx"])
+def test_pdf_bytes_never_reach_a_workbook_parser(client, store, monkeypatch, filename):
+    content = b"%PDF-1.7\nexample"
+    transfer_id = stage(store, content, filename=filename)
+    monkeypatch.setattr(projects, "_project_store", lambda: {"p1": {}})
+
+    direct = client.post(
+        "/projects/p1/feasibility-workbook/validate",
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+    transferred = client.post(
+        f"/projects/p1/intake/transfers/{transfer_id}/process",
+        json={"documentType": "feasibility_workbook"},
+    )
+    for response in (direct, transferred):
+        assert response.status_code == 415
+        assert response.json()["detail"]["error"] == "intake_document_format_mismatch"
+    with store.assembled_file(SCOPE, transfer_id) as (_, source):
+        assert source.read() == content
 
 
 def test_receipt_storage_failure_blocks_reapplying_already_processed_source(client, store, monkeypatch):
@@ -229,7 +251,7 @@ def test_http_success_with_extraction_failure_retains_parts_and_allows_retry(cli
     assert client.post(path, json={"documentType": "business_plan"}).json() == result
     assert store.read_result(SCOPE, transfer_id, "process") is None
     with store.assembled_file(SCOPE, transfer_id) as (_, content):
-        assert content.read() == b"test original bytes"
+        assert content.read() == PDF_BYTES
 
 
 def test_downstream_reanalysis_failure_is_cached_without_reapplying_original(client, store, monkeypatch):
@@ -249,8 +271,9 @@ def test_downstream_reanalysis_failure_is_cached_without_reapplying_original(cli
 
 
 def test_reviewable_workbook_formula_failure_keeps_draft_and_validation_on_retry(client, store, monkeypatch):
-    transfer_id = stage(store, filename="review.xlsx")
-    digest = hashlib.sha256(b"test original bytes").hexdigest()
+    content = b"PK\x03\x04workbook validator fixture"
+    transfer_id = stage(store, content, filename="review.xlsx")
+    digest = hashlib.sha256(content).hexdigest()
     calls = []
     draft = {
         "validation": {"status": "failed", "sourceDocumentHash": digest},

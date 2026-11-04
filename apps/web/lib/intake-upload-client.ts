@@ -13,6 +13,11 @@ export type IntakeClassifiedFile = {
   confidenceBasis?: string;
   needsReview: boolean;
   archiveStored?: boolean;
+  archiveId?: string;
+  processingTypes?: string[];
+  processingMode?: "document_review";
+  formatIssue?: "extension_mismatch";
+  topics?: string[];
   reasons?: string[];
   transferId?: string;
 };
@@ -76,7 +81,9 @@ async function stageFile(projectId: string, file: File, progress?: (message: str
 function classificationFiles(body: Record<string, unknown>, expected: number): IntakeClassifiedFile[] {
   if (!Array.isArray(body.files) || body.files.length !== expected || body.files.some((file) =>
     !file || typeof file !== "object" || typeof file.filename !== "string" || typeof file.documentType !== "string"
-      || typeof file.label !== "string" || typeof file.confidence !== "number" || !Number.isFinite(file.confidence))) {
+      || typeof file.label !== "string" || typeof file.confidence !== "number" || !Number.isFinite(file.confidence)
+      || (file.processingTypes !== undefined && (!Array.isArray(file.processingTypes) || file.processingTypes.some((type: unknown) => typeof type !== "string")))
+      || (file.topics !== undefined && (!Array.isArray(file.topics) || file.topics.some((topic: unknown) => typeof topic !== "string"))))) {
     throw new Error("선택한 파일과 분류 결과가 일치하지 않습니다. 파일을 유지했으니 다시 시도해 주세요.");
   }
   return body.files as IntakeClassifiedFile[];
@@ -125,4 +132,17 @@ export async function processTransferredIntakeFile(projectId: string, file: File
   });
   if ([404, 410].includes(response.status)) transfers.get(file)?.delete(projectId);
   return response;
+}
+
+export async function releaseIntakeTransfer(projectId: string, file: File, transferId: string): Promise<void> {
+  const byProject = transfers.get(file);
+  if (byProject?.get(projectId)?.transferId !== transferId) return;
+  try {
+    const response = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/intake/transfers/${encodeURIComponent(transferId)}`, {
+      method: "DELETE", headers: authHeaders("web"), keepalive: true,
+    });
+    if (response.ok || [404, 410].includes(response.status)) byProject.delete(projectId);
+  } catch {
+    // The temporary transfer's lifecycle expiry remains the cleanup fallback.
+  }
 }

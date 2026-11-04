@@ -348,7 +348,7 @@ export default function InputPackagePage() {
 
       <div id="intake-panel-materials" role="tabpanel" aria-labelledby="intake-tab-materials" hidden={selectedView !== "materials"} className="min-w-0 space-y-4">
         <div id="intake-upload" className="min-w-0 rounded-re-panel border border-re-border bg-re-surface p-3 shadow-re-panel sm:p-5">
-          <SmartIntake key={projectId} projectId={projectId} onProcessed={context && !landEvidenceUnavailable ? finalizeIntake : () => void refresh()} />
+          <SmartIntake key={projectId} projectId={projectId} track={activeTrack} onProcessed={context && !landEvidenceUnavailable ? finalizeIntake : () => void refresh()} />
         </div>
 
         {context ? (

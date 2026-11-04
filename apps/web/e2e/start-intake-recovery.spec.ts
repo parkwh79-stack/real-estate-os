@@ -18,7 +18,7 @@ function workbookCandidateResponse() {
 async function fixture(page: Page, files: string[]) {
   const state = { failFiles: new Set<string>(), uploads: [] as string[], creates: 0, finalizeCalls: 0,
     finalizeStatus: 200, nextStage: undefined as string | undefined, finalizeGate: Promise.resolve(),
-    validationCalls: 0, candidateCalls: 0, landCalls: 0, enrichmentCalls: 0 };
+    validationCalls: 0, candidateCalls: 0, landCalls: 0, enrichmentCalls: 0, documentReviewCalls: 0 };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/\/$/, "");
@@ -32,9 +32,19 @@ async function fixture(page: Page, files: string[]) {
       state.creates += 1;
       return reply({ id: "start-recovery" });
     }
-    if (path.endsWith("/intake/classify")) return reply({ files: files.map((filename) => ({ filename,
-      documentType: filename === "bonri.xlsx" ? "feasibility_workbook" : filename === "land.xlsx" ? "land_ledger" : filename.endsWith("market.csv") ? "market_evidence" : "business_plan",
-      label: "검토 자료", confidence: 1, needsReview: false, archiveStored: filename !== "unarchived-market.csv" })) });
+    if (path.endsWith("/intake/classify")) return reply({ files: files.map((filename) => {
+      if (filename === "memo.pdf") return { filename, documentType: "investment_committee_memo", label: "투자심의 메모", confidence: 0.48,
+        needsReview: true, archiveStored: true, archiveId: "c".repeat(64), processingMode: "document_review",
+        processingTypes: ["business_plan", "basic_architectural_plan", "investment_committee_memo"], topics: ["투자심의"] };
+      if (filename === "unknown-type.xlsx") return { filename, documentType: "unrecognized_kind", label: "유형 미확인", confidence: 0.82,
+        needsReview: false, archiveStored: true, processingTypes: ["land_ledger"] };
+      if (filename === "mismatch.xlsx") return { filename, documentType: "feasibility_workbook", label: "사업수지", confidence: 0.98,
+        needsReview: true, archiveStored: true, processingTypes: [], formatIssue: "extension_mismatch" };
+      return { filename,
+        documentType: filename === "bonri.xlsx" ? "feasibility_workbook" : filename === "land.xlsx" ? "land_ledger"
+          : /market\.(csv|xlsx)$/.test(filename) ? "market_evidence" : "business_plan",
+        label: "검토 자료", confidence: 1, needsReview: false, archiveStored: filename !== "unarchived-market.csv" };
+    }) });
     if (path.endsWith("/intake/triage")) return reply({ recommendedTrack: "development", recommendationSource: "server_rules", aiAssisted: false, persisted: true,
       tracks: [{ track: "development", label: "부동산 개발", title: "부동산 개발", description: "저장 자료 검토", entryHref: "input-package",
         score: 1, confidence: 1, recommended: true, rationale: "분류된 원본 자료", reasons: [] }] });
@@ -43,6 +53,11 @@ async function fixture(page: Page, files: string[]) {
       state.uploads.push(filename);
       if (state.failFiles.has(filename)) return reply({ detail: "parse unavailable" }, 503);
       return reply({ project: { id: "start-recovery" }, status: "completed" });
+    }
+    if (path.endsWith("/parsing-v2/runs") && request.method() === "POST") {
+      state.documentReviewCalls += 1;
+      expect(request.postDataJSON()).toEqual({ archiveId: "c".repeat(64) });
+      return reply({ candidateOnly: true, authoritative: false, parsingRun: { parsingRunId: "synthetic-review", executionStatus: "completed" } }, 201);
     }
     if (path.endsWith("/feasibility-workbook/validate")) {
       state.validationCalls += 1;
@@ -80,7 +95,7 @@ async function fixture(page: Page, files: string[]) {
   });
   await page.goto("/start");
   await page.locator('input[type="file"]').setInputFiles(files.map((name) => ({
-    name, mimeType: name.endsWith(".xlsx") ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "application/json",
+    name, mimeType: name.endsWith(".xlsx") ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : name.endsWith(".pdf") ? "application/pdf" : "text/csv",
     buffer: Buffer.from('{"fixture":"retained source"}'),
   })));
   const intake = page.getByRole("region", { name: "자료 분류와 처리" });
@@ -90,34 +105,34 @@ async function fixture(page: Page, files: string[]) {
 
 for (const batch of ["mixed", "all failed"] as const) {
   test(`${batch} intake stays on the same project and retries only unfinished files before the legacy success route`, async ({ page }) => {
-    const files = batch === "mixed" ? ["completed.json", "retry.json"] : ["retry.json"];
+    const files = batch === "mixed" ? ["completed.pdf", "retry.pdf"] : ["retry.pdf"];
     const { state, intake } = await fixture(page, files);
-    state.failFiles.add("retry.json");
+    state.failFiles.add("retry.pdf");
     const enter = page.getByRole("button", { name: "선택 트랙 워크스페이스로 이동", exact: true });
     await expect(enter).toBeDisabled();
-    await intake.getByRole("button", { name: /^분류대로 처리/ }).click();
-    await expect(intake.getByRole("alert")).toContainText("처리하지 못한 자료가 남아 있습니다.");
+    await intake.getByRole("button", { name: /^자료 처리/ }).click();
+    await expect(intake.getByRole("alert")).toContainText("사업계획서 / IM 처리");
     await expect(page).toHaveURL(/\/start$/);
     await expect(enter).toBeDisabled();
-    await expect(intake.getByRole("listitem").filter({ hasText: "retry.json" })).toContainText("실패");
-    if (batch === "mixed") await expect(intake.getByRole("listitem").filter({ hasText: "completed.json" })).toContainText("처리 완료");
+    await expect(intake.getByRole("listitem").filter({ hasText: "retry.pdf" })).toContainText("실패");
+    if (batch === "mixed") await expect(intake.getByRole("listitem").filter({ hasText: "completed.pdf" })).toContainText("처리 완료");
     expect(state.finalizeCalls).toBe(0);
     expect(state.creates).toBe(1);
     state.failFiles.clear();
-    await intake.getByRole("button", { name: /^분류대로 처리/ }).click();
-    await expect(page).toHaveURL(/\/project\/start-recovery\/chief-orchestration\?track=development$/);
-    expect(state.uploads.filter((filename) => filename === "retry.json")).toHaveLength(2);
-    expect(state.uploads.filter((filename) => filename === "completed.json")).toHaveLength(batch === "mixed" ? 1 : 0);
+    await intake.getByRole("button", { name: /^자료 처리/ }).click();
+    await expect(page).toHaveURL(/\/project\/start-recovery\/chief-orchestration\?track=development$/, { timeout: 15_000 });
+    expect(state.uploads.filter((filename) => filename === "retry.pdf")).toHaveLength(2);
+    expect(state.uploads.filter((filename) => filename === "completed.pdf")).toHaveLength(batch === "mixed" ? 1 : 0);
     expect(state.creates).toBe(1);
     expect(state.finalizeCalls).toBe(1);
   });
 }
 
 test("finalization failure preserves completed rows and retries connection without reuploading, honoring normalized input review", async ({ page }) => {
-  const { state, intake } = await fixture(page, ["completed.json"]);
+  const { state, intake } = await fixture(page, ["completed.pdf"]);
   state.finalizeStatus = 503;
   state.nextStage = "input_review";
-  await intake.getByRole("button", { name: /^분류대로 처리/ }).click();
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
   const failure = page.getByRole("alert").filter({ hasText: "자료 처리는 완료됐지만 연결·보완 계획 확인을 마치지 못했습니다." });
   await expect(failure).toBeVisible();
   await expect(page).toHaveURL(/\/start$/);
@@ -132,23 +147,23 @@ test("finalization failure preserves completed rows and retries connection witho
   try {
     await expect.poll(() => state.finalizeCalls).toBe(2);
     await expect(intake.getByRole("button", { name: "추가 자료 파일 선택", exact: true })).toHaveAttribute("aria-disabled", "true");
-    expect(state.uploads).toEqual(["completed.json"]);
+    expect(state.uploads).toEqual(["completed.pdf"]);
   } finally {
     release();
   }
   await expect(page).toHaveURL(/\/project\/start-recovery\/input-package\?track=development$/);
-  expect(state.uploads).toEqual(["completed.json"]);
+  expect(state.uploads).toEqual(["completed.pdf"]);
   expect(state.creates).toBe(1);
   expect(state.finalizeCalls).toBe(2);
 });
 
 
 test("source formula errors stay review candidates and deferred land evidence does not repeat successful parsing on mixed retry", async ({ page }) => {
-  const { state, intake } = await fixture(page, ["bonri.xlsx", "land.xlsx", "retry.json"]);
-  state.failFiles.add("retry.json");
+  const { state, intake } = await fixture(page, ["bonri.xlsx", "land.xlsx", "retry.pdf"]);
+  state.failFiles.add("retry.pdf");
   state.nextStage = "input_review";
-  await intake.getByRole("button", { name: /^분류대로 처리/ }).click();
-  await expect(intake.getByRole("alert")).toContainText("처리하지 못한 자료가 남아 있습니다.");
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
+  await expect(intake.getByRole("alert")).toContainText("사업계획서 / IM 처리");
   await expect(intake.getByRole("listitem").filter({ hasText: "bonri.xlsx" })).toContainText("검토 후보 저장 · 수식 오류 확인 필요");
   await expect(intake.getByRole("listitem").filter({ hasText: "land.xlsx" })).toContainText("9필지 저장 · PNU 증빙 보강 대기");
   expect(state.validationCalls).toBe(1);
@@ -158,7 +173,7 @@ test("source formula errors stay review candidates and deferred land evidence do
   expect(state.finalizeCalls).toBe(0);
   await expect(page).toHaveURL(/\/start$/);
   state.failFiles.clear();
-  await intake.getByRole("button", { name: /^분류대로 처리/ }).click();
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
   await expect(page).toHaveURL(/\/project\/start-recovery\/input-package\?track=development$/);
   expect(state.validationCalls).toBe(1);
   expect(state.candidateCalls).toBe(1);
@@ -183,35 +198,36 @@ test("only a source-bound feasibility candidate may pass validation-failed into 
 
 
 test("an archived unsupported document does not block the actionable files in a mixed batch", async ({ page }) => {
-  const { state, intake } = await fixture(page, ["completed.json", "market.csv"]);
+  const { state, intake } = await fixture(page, ["completed.pdf", "market.csv"]);
   state.nextStage = "input_review";
   const archived = intake.getByRole("listitem").filter({ hasText: "market.csv" });
   await expect(archived).toContainText("원본 저장 · 자동 처리 경로 없음");
   await expect(page.getByRole("button", { name: "선택 트랙 워크스페이스로 이동", exact: true })).toBeDisabled();
   let release!: () => void;
   state.finalizeGate = new Promise<void>((resolve) => { release = resolve; });
-  await intake.getByRole("button", { name: /^분류대로 처리/ }).click();
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
   try {
     await expect.poll(() => state.finalizeCalls).toBe(1);
     await expect(intake.getByRole("alert")).toHaveCount(0);
     await expect(archived).toContainText("원본 저장 · 자동 처리 경로 없음");
-    expect(state.uploads).toEqual(["completed.json"]);
+    expect(state.uploads).toEqual(["completed.pdf"]);
   } finally { release(); }
   await expect(page).toHaveURL(/\/project\/start-recovery\/input-package\?track=development$/);
   expect(state.creates).toBe(1);
 });
 
 test("an archived unsupported-only selection can be reclassified or explicitly connected through the normalized next stage", async ({ page }) => {
-  const { state, intake } = await fixture(page, ["market.csv"]);
+  const { state, intake } = await fixture(page, ["market.xlsx"]);
   state.nextStage = "input_review";
   const enter = page.getByRole("button", { name: "선택 트랙 워크스페이스로 이동", exact: true });
-  await expect(intake.getByRole("listitem")).toContainText("원본 저장 · 자동 처리 경로 없음");
+  await expect(intake.getByRole("listitem")).toContainText("원본만 보관");
   await expect(enter).toBeEnabled();
-  await expect(intake.getByRole("button", { name: /^분류대로 처리/ })).toBeDisabled();
-  await intake.getByRole("combobox").selectOption("business_plan");
+  await expect(intake.getByRole("button", { name: /^자료 처리/ })).toBeDisabled();
+  await intake.getByText("유형 바꾸기", { exact: true }).click();
+  await intake.getByRole("combobox").selectOption("land_ledger");
   await expect(enter).toBeDisabled();
-  await expect(intake.getByRole("button", { name: /^분류대로 처리/ })).toBeEnabled();
-  await intake.getByRole("combobox").selectOption("market_evidence");
+  await expect(intake.getByRole("button", { name: /^자료 처리/ })).toBeEnabled();
+  await intake.getByRole("combobox").selectOption("archive_only");
   await expect(enter).toBeEnabled();
   expect(state.finalizeCalls).toBe(0);
   await enter.click();
@@ -226,4 +242,51 @@ test("unsupported documents without confirmed archival stay pending", async ({ p
   await expect(page.getByRole("button", { name: "선택 트랙 워크스페이스로 이동", exact: true })).toBeDisabled();
   expect(state.finalizeCalls).toBe(0);
   expect(state.uploads).toEqual([]);
+});
+
+test("a weak PDF recommendation requires confirmation and prepares review from the archived original", async ({ page }) => {
+  const { state, intake } = await fixture(page, ["memo.pdf"]);
+  state.nextStage = "input_review";
+  const row = intake.getByRole("listitem");
+  const process = intake.getByRole("button", { name: /^자료 처리/ });
+  await expect(row).toContainText("추천 · 투자심의 메모");
+  await expect(row).toContainText("유형 확인 필요");
+  await expect(row.getByRole("combobox")).toHaveCount(0);
+  await expect(process).toBeDisabled();
+  expect(state.documentReviewCalls).toBe(0);
+  await row.getByText(/분류 근거 · 48%/).click();
+  await expect(row.getByText("감지한 주제 · 투자심의")).toBeVisible();
+  await row.getByRole("button", { name: "이 자료 검토" }).click();
+  await expect(process).toBeEnabled();
+  let release!: () => void;
+  state.finalizeGate = new Promise<void>((resolve) => { release = resolve; });
+  await process.click();
+  try {
+    await expect(row).toContainText("문서 검토 준비");
+    await expect(row.getByRole("link", { name: "문서 검토 열기" })).toHaveAttribute("href", `/project/start-recovery/documents/review?track=development&archiveId=${"c".repeat(64)}`);
+    expect(state.documentReviewCalls).toBe(1);
+    expect(state.uploads).toEqual([]);
+    expect(state.validationCalls).toBe(0);
+  } finally { release(); }
+  await expect(page).toHaveURL(/\/project\/start-recovery\/input-package\?track=development$/);
+});
+
+test("an unsupported recommendation leaves a real placeholder and only allows compatible parsers", async ({ page }) => {
+  const { state, intake } = await fixture(page, ["unknown-type.xlsx", "mismatch.xlsx"]);
+  state.nextStage = "input_review";
+  const unknown = intake.getByRole("listitem").filter({ hasText: "unknown-type.xlsx" });
+  const mismatch = intake.getByRole("listitem").filter({ hasText: "mismatch.xlsx" });
+  const process = intake.getByRole("button", { name: /^자료 처리/ });
+  await expect(process).toBeDisabled();
+  await expect(mismatch).toContainText("파일 확장자와 실제 형식");
+  await expect(mismatch.getByRole("combobox")).toHaveCount(0);
+  await unknown.getByText("유형 선택", { exact: true }).click();
+  const type = unknown.getByRole("combobox");
+  await expect(type).toHaveValue("");
+  await expect(type.locator("option")).toHaveText(["처리 유형 선택", "토지대장 / 토지조서", "원본만 보관"]);
+  await type.selectOption("land_ledger");
+  await process.click();
+  await expect(page).toHaveURL(/\/project\/start-recovery\/input-package\?track=development$/);
+  expect(state.landCalls).toBe(1);
+  expect(state.validationCalls).toBe(0);
 });

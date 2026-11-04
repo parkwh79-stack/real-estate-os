@@ -32,7 +32,7 @@ async function dashboard(page: Page, options: { existing?: number; readOnly?: bo
       projectId: "created-project", normalizedPage: "input_package", workflowTrack: "development",
       projectMemory: { projectName: "review", sourceDocumentCount: state.uploads },
       pageData: { sourceDocumentSummary: { count: state.uploads }, sourceDocuments: state.uploads
-        ? [{ originalFileName: "review.csv", documentType: "business_plan" }] : [] },
+        ? [{ originalFileName: "review.pdf", documentType: "business_plan" }] : [] },
     });
     if (path.endsWith("/projects/created-project/feasibility-workbook/review")) return reply({
       values: {}, fieldReviews: {}, reviewHash: "empty-workbook-review", sourceDocuments: [],
@@ -42,7 +42,7 @@ async function dashboard(page: Page, options: { existing?: number; readOnly?: bo
       state.uploadBodies.push(request.postDataBuffer()?.toString("utf8") ?? "");
       await state.classifyGate;
       if (state.failClassify) return reply({ detail: "classification_unavailable" }, 503);
-      return reply({ files: [{ filename: "review.csv", documentType: "business_plan", label: "사업계획서", confidence: 1, needsReview: false, archiveStored: true }] });
+      return reply({ files: [{ filename: "review.pdf", documentType: "business_plan", label: "사업계획서", confidence: 1, needsReview: false, archiveStored: true }] });
     }
     if (path.endsWith("/upload")) {
       state.uploads += 1;
@@ -57,7 +57,7 @@ async function dashboard(page: Page, options: { existing?: number; readOnly?: bo
   return state;
 }
 
-const file = { name: "review.csv", mimeType: "text/csv", buffer: Buffer.from("source,evidence\nreview,original-file-bytes") };
+const file = { name: "review.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\noriginal-file-bytes") };
 
 test("first visit has one start action and no empty metrics or mounted upload form", async ({ page }) => {
   const state = await dashboard(page);
@@ -110,10 +110,10 @@ test("upload survives closing while creating and processing preserves exact file
   release();
   await expect.poll(() => state.classifications).toBe(1);
   await page.getByRole("button", { name: "자료 업로드 이어가기", exact: true }).click();
-  await expect(dialog.getByText("review.csv", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("review.pdf", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "자료 업로드 이어가기", exact: true }).click();
-  await dialog.getByRole("button", { name: /^분류대로 처리/ }).click();
+  await dialog.getByRole("button", { name: /^자료 처리/ }).click();
   await expect(dialog.getByText(/처리 완료/)).toBeVisible();
   expect(state.creates).toBe(1);
   expect(state.classifications).toBe(1);
@@ -123,7 +123,7 @@ test("upload survives closing while creating and processing preserves exact file
   await dialog.getByRole("link", { name: "프로젝트 자료 보기" }).click();
   await expect(page).toHaveURL(/\/project\/created-project\/input-package$/, { timeout: 15_000 });
   await expect(page.getByRole("heading", { name: "자료 입력 패키지", exact: true, level: 1 })).toBeVisible();
-  await expect(page.getByText("review.csv", { exact: true })).toBeVisible();
+  await expect(page.getByText("review.pdf", { exact: true })).toBeVisible();
 });
 
 test("classification failure retains files for explicit retry after reopening", async ({ page }) => {
@@ -137,7 +137,7 @@ test("classification failure retains files for explicit retry after reopening", 
   state.failClassify = false;
   await page.getByRole("button", { name: "자료 업로드 이어가기", exact: true }).click();
   await dialog.getByRole("button", { name: "분류 다시 시도", exact: true }).click();
-  await expect(dialog.getByText("review.csv", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("review.pdf", { exact: true })).toBeVisible();
   expect(state.creates).toBe(1);
   expect(state.classifications).toBe(2);
   expect(state.uploadBodies.every((body) => body.includes("original-file-bytes"))).toBe(true);
@@ -167,12 +167,12 @@ test("a malformed successful HTTP response cannot mark a file processed and can 
   await page.getByRole("button", { name: "첫 프로젝트 시작", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.locator('input[type="file"]').setInputFiles(file);
-  await expect(dialog.getByText("review.csv", { exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: /^분류대로 처리/ }).click();
+  await expect(dialog.getByText("review.pdf", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: /^자료 처리/ }).click();
   await expect(dialog.getByRole("listitem").filter({ hasText: "실패" })).toBeVisible();
   await expect(dialog.getByText(/처리 완료/)).toHaveCount(0);
   state.malformedUpload = false;
-  await dialog.getByRole("button", { name: /^분류대로 처리/ }).click();
+  await dialog.getByRole("button", { name: /^자료 처리/ }).click();
   await expect(dialog.getByRole("listitem").filter({ hasText: "처리 완료" })).toBeVisible();
   expect(state.uploads).toBe(2);
   expect(state.creates).toBe(1);
@@ -183,7 +183,7 @@ test("pending upload can cancel search navigation and remain available in the sa
   await page.getByRole("button", { name: "첫 프로젝트 시작", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.locator('input[type="file"]').setInputFiles(file);
-  await expect(dialog.getByText("review.csv", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("review.pdf", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   const search = page.getByRole("combobox", { name: "프로젝트 검색", exact: true });
   await search.fill("전체 프로젝트");
@@ -197,7 +197,7 @@ test("pending upload can cancel search navigation and remain available in the sa
   await expect(page).toHaveURL(/\/dashboard$/);
   await search.press("Escape");
   await page.getByRole("button", { name: "자료 업로드 이어가기", exact: true }).click();
-  await expect(dialog.getByText("review.csv", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("review.pdf", { exact: true })).toBeVisible();
   expect(state.creates).toBe(1);
 });
 
@@ -206,7 +206,7 @@ test("a workspace identity change discards the prior workspace's in-memory uploa
   await page.getByRole("button", { name: "첫 프로젝트 시작", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.locator('input[type="file"]').setInputFiles(file);
-  await expect(dialog.getByText("review.csv", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("review.pdf", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   state.tenantId = "other-tenant";
   state.count = 0;

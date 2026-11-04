@@ -6,7 +6,8 @@ const classified = (filename: string) => ({ filename, documentType: "business_pl
 
 async function fixture(page: Page) {
   const state = { parts: new Map<number, Buffer>(), partCalls: [] as number[], manifests: [] as Record<string, unknown>[],
-    classifyCalls: 0, processCalls: 0, smallBatches: [] as string[][], failPart: -1, expired: false };
+    classifyCalls: 0, processCalls: 0, reviewCalls: 0, cleanupCalls: 0, archivedReview: false,
+    smallBatches: [] as string[][], failPart: -1, expired: false };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/\/$/, "");
@@ -39,12 +40,23 @@ async function fixture(page: Page) {
       const manifest = state.manifests.at(-1)!;
       expect(source.length).toBe(manifest.sizeBytes);
       expect(createHash("sha256").update(source).digest("hex")).toBe(manifest.sha256);
-      return reply({ files: [classified(String(manifest.filename))] });
+      return reply({ files: [{ ...classified(String(manifest.filename)), ...(state.archivedReview ? {
+        archiveId: "d".repeat(64), processingMode: "document_review", processingTypes: ["business_plan"],
+      } : {}) }] });
     }
     if (path.endsWith("/transfers/transfer-1/process")) {
       state.processCalls += 1;
       expect(request.postDataJSON()).toEqual({ documentType: "business_plan" });
       return reply({ project: { id: "upload-project" } });
+    }
+    if (path.endsWith("/parsing-v2/runs")) {
+      state.reviewCalls += 1;
+      expect(request.postDataJSON()).toEqual({ archiveId: "d".repeat(64) });
+      return reply({ candidateOnly: true, authoritative: false, parsingRun: { parsingRunId: "large-review-run", executionStatus: "completed" } }, 201);
+    }
+    if (path.endsWith("/transfers/transfer-1") && request.method() === "DELETE") {
+      state.cleanupCalls += 1;
+      return reply({ detail: "temporary transfer cleanup unavailable" }, 503);
     }
     if (path.endsWith("/intake/classify")) {
       const names = [...(payload?.toString("utf8") ?? "").matchAll(/filename="([^"]+)"/g)].map((match) => match[1]!);
@@ -66,7 +78,7 @@ test("a document above the platform limit uses bounded parts, preserves bytes, a
   await expect(dialog.getByText("large-review.pdf", { exact: true })).toBeVisible();
   expect(state.partCalls).toEqual([0, 1, 2]);
   expect(state.smallBatches).toHaveLength(0);
-  await dialog.getByRole("button", { name: /^분류대로 처리/ }).click();
+  await dialog.getByRole("button", { name: /^자료 처리/ }).click();
   await expect(dialog.getByText(/처리 완료/)).toBeVisible();
   expect(state.processCalls).toBe(1);
   expect(state.partCalls).toEqual([0, 1, 2]);
@@ -80,8 +92,26 @@ test("several individually small documents are batched below the platform limit 
   await expect(dialog.getByText("third.pdf", { exact: true })).toBeVisible();
   expect(state.smallBatches).toEqual([["first.pdf"], ["second.pdf"], ["third.pdf"]]);
   expect(state.manifests).toHaveLength(0);
-  const tableNames = await dialog.locator("tbody tr td:first-child").allTextContents();
+  const tableNames = await dialog.getByRole("listitem").locator("p").filter({ hasText: /^(first|second|third)\.pdf$/ }).allTextContents();
   expect(tableNames.map((name) => name.trim())).toEqual(["first.pdf", "second.pdf", "third.pdf"]);
+});
+
+test("a chunked PDF prepares review from its archive and stays completed if transfer cleanup is unavailable", async ({ page }) => {
+  const { state, dialog } = await fixture(page);
+  state.archivedReview = true;
+  const bytes = Buffer.alloc(PART + 123, 97);
+  Buffer.from("%PDF-1.7 synthetic original evidence").copy(bytes);
+  await dialog.locator('input[type="file"]').setInputFiles({ name: "archive-review.pdf", mimeType: "application/pdf", buffer: bytes });
+  const row = dialog.getByRole("listitem").filter({ hasText: "archive-review.pdf" });
+  await expect(row).toContainText("처리 대기");
+  await expect(row.getByRole("combobox")).toHaveCount(0);
+  await dialog.getByRole("button", { name: /^자료 처리/ }).click();
+  await expect(row).toContainText("문서 검토 준비");
+  await expect.poll(() => state.cleanupCalls).toBe(1);
+  expect(state.reviewCalls).toBe(1);
+  expect(state.processCalls).toBe(0);
+  expect(state.partCalls).toEqual([0, 1]);
+  await expect(row.getByRole("alert")).toHaveCount(0);
 });
 
 test("an explicit retry keeps successful parts and resumes the failed part with the original bytes", async ({ page }) => {

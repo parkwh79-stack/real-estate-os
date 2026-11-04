@@ -534,6 +534,7 @@ export function CommandCenter() {
             <div className="rounded-2xl bg-white p-1 text-slate-900 dark:bg-slate-900 dark:text-white">
               <SmartIntake
                 projectId={projectId}
+                track={selectedTrack}
                 initialFiles={files}
                 onClassified={(classified) => void runTriage(classified)}
                 onProcessed={() => void finalizeAndEnter()}

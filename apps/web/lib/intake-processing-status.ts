@@ -20,7 +20,7 @@ export function hasArchivedFeasibilityReviewDraft(body: Data): boolean {
 }
 
 /** HTTP 200 acknowledges transport, not successful extraction. */
-export function intakeProcessingFailure(body: Data): string | null {
+export function intakeProcessingFailure(body: Data, documentType?: string): string | null {
   const project = record(body.project);
   const reanalysis = record(body.autoReanalysis ?? project.autoReanalysis);
   if (reanalysis.triggered === true && (reanalysis.status === "failed" || reanalysis.cascadeComplete === false)) {
@@ -35,6 +35,15 @@ export function intakeProcessingFailure(body: Data): string | null {
     return "원본은 접수됐지만 LLM 추출이 필요합니다. AI 연결을 확인한 뒤 다시 처리하세요.";
   }
   if (statuses.some(status => ["parse_failed", "extraction_unavailable", "failed", "error"].includes(String(status)))) {
+    if (documentType === "feasibility_workbook" || documentType === "risk_report_workbook") {
+      return "워크북 검증에 실패했습니다. Excel에서 파일이 열리는지, 선택한 유형의 시트와 수식이 있는지 확인해 주세요.";
+    }
+    if (documentType === "land_ledger") {
+      return "토지조서 파싱에 실패했습니다. Excel의 지번·면적 열과 제목 행을 확인해 주세요.";
+    }
+    if (documentType === "business_plan" || documentType === "basic_architectural_plan") {
+      return "문서 추출에 실패했습니다. PDF에서 텍스트를 선택할 수 있는지 확인해 주세요.";
+    }
     return "원본 접수와 별개로 파싱 또는 검증에 실패했습니다. 실패 단계를 확인한 뒤 다시 처리하세요.";
   }
   return null;

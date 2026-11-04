@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response, Query
 from fastapi.encoders import jsonable_encoder
 from starlette.datastructures import Headers
+from starlette.concurrency import run_in_threadpool
 from typing import Dict, Any
 from db.repositories.request_project_repository import current_project_scope
 from use_cases.cash_flow_dependencies import dependent_inputs, financial_input_hash
@@ -227,7 +228,10 @@ from use_cases.portfolio_monitoring import build_portfolio_monitoring
 from use_cases.map_intelligence import build_project_map_intelligence, project_map_parcels, resolve_and_attach_geometry
 from integrations.vworld import fetch_parcel_geometry_by_pnu, vworld_configured, vworld_status
 from integrations.market_data import MolitRtmsConnector
-from agents.document_classifier_agent import classify_document
+from agents.document_classifier_agent import (
+    classify_document, intake_processing_types, read_intake_pdf_sample, sniff_intake_format,
+)
+from parsing_platform.adapters import inspect_office_container_safety
 from agents.intake_triage_agent import triage_intake_documents
 from use_cases.market_comparables import (
     fetch_project_market_comparables,
@@ -1577,6 +1581,7 @@ async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[
                 "originalFileName": file.filename,
             },
         )
+    _require_workbook_format("land_ledger", file.filename, content[:1024])
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
@@ -1628,8 +1633,9 @@ async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[
 async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFile) -> Dict[str, Any]:
     suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
     uploaded_at = now_iso()
+    content = await file.read()
+    _require_workbook_format("feasibility_workbook", file.filename, content[:1024])
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
 
@@ -1693,8 +1699,9 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
 async def validate_uploaded_risk_report_workbook(project_id: str, file: UploadFile) -> Dict[str, Any]:
     suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
     uploaded_at = now_iso()
+    content = await file.read()
+    _require_workbook_format("risk_report_workbook", file.filename, content[:1024])
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
 
@@ -2195,6 +2202,35 @@ def _maybe_auto_reanalyze_on_upload(project_id: str, parsed_data: Dict[str, Any]
     doc_type = upload_meta.get("documentType") or meta.get("documentType") or "business_plan"
     return _maybe_auto_reanalyze(project_id, [str(doc_type)])
 
+_INTAKE_NARRATIVE_TYPES = {"business_plan", "basic_architectural_plan", "investment_committee_memo"}
+
+
+def _intake_type_mismatch(detected_format: str) -> HTTPException:
+    message = (
+        "PDF는 Excel 검증기로 처리할 수 없습니다. 원본을 문서 검토로 열어 주세요."
+        if detected_format == "pdf"
+        else "파일 형식이 선택한 처리 유형과 다릅니다. 문서 분류 결과에서 호환되는 처리 방법을 선택해 주세요."
+    )
+    return HTTPException(status_code=415, detail={
+        "error": "intake_document_format_mismatch", "message": message,
+    })
+
+
+def _require_workbook_format(document_type: str, filename: str | None, header: bytes) -> None:
+    """Reject known incompatible files before a workbook parser or archive write.
+
+    A corrupt file with the expected workbook extension still goes through the
+    existing validator so it can return its usual parse/repair guidance.
+    """
+    name = filename or ""
+    declared = intake_processing_types(name)
+    detected = sniff_intake_format(name, header)
+    if document_type not in declared or (
+        detected != "unknown" and document_type not in intake_processing_types(name, detected_format=detected)
+    ):
+        raise _intake_type_mismatch(detected)
+
+
 async def _classify_intake_file(
     project_id: str, file: UploadFile, *, require_archive: bool = False,
 ) -> Dict[str, Any]:
@@ -2214,10 +2250,18 @@ async def _classify_intake_file(
         if require_archive or isinstance(exc, UploadRejectedError):
             raise
         archive_error = type(exc).__name__
-    ext = os.path.splitext(name)[1].lower()
+    detected_format = sniff_intake_format(name, content[:1024])
     sheet_names = None
     json_keys = None
-    if ext in (".xlsx", ".xlsm"):
+    sample_text = None
+    if archive is not None and detected_format in {"xlsx", "xlsm", "docx"}:
+        try:
+            safe_container, _, _ = inspect_office_container_safety(content)
+        except Exception:
+            safe_container = False
+        if not safe_container:
+            detected_format = "unknown"
+    if archive is not None and detected_format in {"xlsx", "xlsm"}:
         try:
             import io
             import openpyxl  # type: ignore
@@ -2227,17 +2271,30 @@ async def _classify_intake_file(
             wb.close()
         except Exception:
             pass
-    elif ext == ".json":
+    elif archive is not None and detected_format == "json" and len(content) <= 2 * 1024 * 1024:
         try:
             data = json.loads(content.decode("utf-8"))
             if isinstance(data, dict):
                 json_keys = list(data.keys())
         except Exception:
             pass
+    elif archive is not None and detected_format == "pdf":
+        sample_text = await run_in_threadpool(read_intake_pdf_sample, content)
 
     classification = classify_document(
-        name, content_type=ctype, size=len(content), sheet_names=sheet_names, json_keys=json_keys
+        name, content_type=ctype, size=len(content), sheet_names=sheet_names, json_keys=json_keys,
+        sample_text=sample_text, detected_format=detected_format,
     )
+    if detected_format == "pdf" and os.path.splitext(name)[1].lower() != ".pdf":
+        classification["processingTypes"] = []
+        classification["formatIssue"] = "extension_mismatch"
+        classification["needsReview"] = True
+        classification["reasons"] = [
+            "파일 확장자와 실제 PDF 형식이 다릅니다. 원본의 파일 확장자를 확인해 주세요.",
+            *classification["reasons"][:5],
+        ]
+    elif _INTAKE_NARRATIVE_TYPES.intersection(classification.get("processingTypes", [])):
+        classification["processingMode"] = "document_review"
     try:
         if archive is None:
             classification["archiveStored"] = False
@@ -2361,7 +2418,7 @@ async def process_intake_transfer(
 ):
     scope = _intake_transfer_context(project_id, request)
     document_type = input_data.get("documentType")
-    supported = {"business_plan", "basic_architectural_plan", "land_ledger",
+    supported = {*_INTAKE_NARRATIVE_TYPES, "land_ledger",
                  "feasibility_workbook", "risk_report_workbook", "land_evidence"}
     if not isinstance(document_type, str) or document_type not in supported:
         raise HTTPException(status_code=422, detail={"error": "intake_transfer_document_type_unsupported"})
@@ -2378,6 +2435,17 @@ async def process_intake_transfer(
                 raise HTTPException(status_code=409, detail={"error": "intake_transfer_document_type_conflict"})
             return cached["result"]
         with store.assembled_file(scope, transfer_id) as (manifest, content):
+            detected = sniff_intake_format(manifest["filename"], content.read(1024))
+            content.seek(0)
+            if document_type not in intake_processing_types(manifest["filename"], detected_format=detected):
+                raise _intake_type_mismatch(detected)
+            if document_type == "investment_committee_memo" or (
+                detected == "docx" and document_type in _INTAKE_NARRATIVE_TYPES
+            ):
+                raise HTTPException(status_code=422, detail={
+                    "error": "intake_document_review_required",
+                    "message": "저장된 원본으로 문서 검토를 시작해 주세요.",
+                })
             file = UploadFile(file=content, filename=manifest["filename"],
                               headers=Headers({"content-type": manifest["contentType"]}))
             if document_type in {"business_plan", "basic_architectural_plan"}:

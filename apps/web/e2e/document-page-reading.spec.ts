@@ -14,9 +14,10 @@ const envelope = (pages: unknown[], extra: Record<string, unknown> = {}) => ({
   pageCount: 2, pendingOcrPages: [], completedOcrPages: [], failedPages: [], ...extra,
 });
 
-async function fixture(page: Page, withFactDocument = false) {
+async function fixture(page: Page, withFactDocument = false, query = "") {
   const state = {
     gets: [] as number[], posts: [] as unknown[], mutations: [] as string[],
+    archiveRequests: [] as string[],
     cached: new Map<number, unknown>(),
     postResult: (pageNumber: number): unknown => envelope([pageResult(pageNumber)]),
     postGate: Promise.resolve(),
@@ -24,6 +25,8 @@ async function fixture(page: Page, withFactDocument = false) {
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    const archive = path.match(/\/source-documents\/([^/]+)/)?.[1];
+    if (archive) state.archiveRequests.push(archive);
     const reply = (body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
     if (path.endsWith("/auth/me")) return reply({
       authenticated: true, user: { userId: "reading-user", tenantId: "reading-tenant", role: "viewer", displayName: "원본 검토자" },
@@ -72,10 +75,41 @@ async function fixture(page: Page, withFactDocument = false) {
     if (!["GET", "HEAD"].includes(request.method())) state.mutations.push(path);
     return reply({ detail: "not_mocked" }, 404);
   });
-  await page.goto("/project/reading-project/documents/review");
+  await page.goto(`/project/reading-project/documents/review${query}`);
   await expect(page.getByRole("img", { name: "PDF 1페이지", exact: true })).toBeVisible();
   return state;
 }
+
+test("archive links select only listed documents and preserve a manual choice on refresh", async ({ page }) => {
+  const linkedArchive = "c".repeat(64);
+  const unavailableArchive = "f".repeat(64);
+  const state = await fixture(page, true, `?archiveId=${linkedArchive.toUpperCase()}&track=pf`);
+  const navigator = page.getByRole("complementary", { name: "문서 및 위치 탐색", exact: true });
+  const defaultDocument = navigator.getByRole("button", { name: /검토 원본.pdf/ });
+  const linkedDocument = navigator.getByRole("button", { name: /다른 원본.pdf/ });
+  await expect(linkedDocument).toHaveAttribute("aria-pressed", "true");
+  expect(new Set(state.archiveRequests)).toEqual(new Set([linkedArchive]));
+  await expect(page.getByRole("link", { name: "자료 입력 패키지로 돌아가기" })).toHaveAttribute("href", "/project/reading-project/input-package?track=pf");
+
+  await defaultDocument.click();
+  const refresh = page.getByRole("button", { name: "최신 원장 새로고침" });
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/workspace/document-review")),
+    refresh.click(),
+  ]);
+  await expect(refresh).toBeEnabled();
+  await expect(defaultDocument).toHaveAttribute("aria-pressed", "true");
+
+  await page.goto(`/project/reading-project/documents/review?archiveId=${unavailableArchive}`);
+  await expect(page.getByText("이 프로젝트의 문서 목록에서 링크된 문서를 찾을 수 없습니다.")).toBeVisible();
+  await expect(defaultDocument).toHaveAttribute("aria-pressed", "true");
+  expect(state.archiveRequests).not.toContain(unavailableArchive);
+
+  await page.goto(`/project/reading-project/documents/review?archiveId=${linkedArchive}&archiveId=${unavailableArchive}`);
+  await expect(page.getByText("문서 링크 형식이 올바르지 않습니다. 목록에서 검토할 문서를 선택하세요.")).toBeVisible();
+  await expect(defaultDocument).toHaveAttribute("aria-pressed", "true");
+  expect(state.archiveRequests).not.toContain(unavailableArchive);
+});
 
 test("a source-only PDF reads the selected page on request without changing calculation or review data", async ({ page }) => {
   const state = await fixture(page);

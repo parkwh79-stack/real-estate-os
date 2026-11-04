@@ -67,6 +67,7 @@ import {
   normalizeExecutionStatus,
   normalizeReviewStatus,
 } from "../ui/primitives";
+import { ProjectWorkspaceLink } from "../layout/project-workspace-link";
 import { PdfPageReadingPanel } from "./pdf-page-reading-panel";
 
 type InspectorTab = "facts" | "evidence" | "issues" | "conflicts" | "glossary" | "review" | "changes" | "audit";
@@ -485,13 +486,19 @@ function statusLabel(status: string) {
   return labels[status] ?? status;
 }
 
-export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
+export function DocumentReviewWorkspace({
+  projectId,
+  requestedArchiveId,
+}: {
+  projectId: string;
+  requestedArchiveId?: string | null;
+}) {
   const [data, setData] = useState<DocumentReviewData | null>(null);
   const [context, setContext] = useState<WorkspacePageContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [selectedDocumentKey, setSelectedDocumentKey] = useState<string | null>(null);
+  const [documentSelection, setDocumentSelection] = useState<Pick<WorkspaceDocument, "key" | "archiveId"> | null>(null);
   const [selectedFactKey, setSelectedFactKey] = useState<string | null>(null);
   const [selectedLocatorKey, setSelectedLocatorKey] = useState<string | null>(null);
   const [sourceFactFilterKey, setSourceFactFilterKey] = useState<string | null>(null);
@@ -531,17 +538,14 @@ export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
   const facts = useMemo(() => (data ? collectWorkspaceFacts(data) : []), [data]);
   const conflicts = useMemo(() => (data ? dedupeConflicts(data) : []), [data]);
 
-  useEffect(() => {
-    if (!documents.length) {
-      setSelectedDocumentKey(null);
-      return;
-    }
-    if (!selectedDocumentKey || !documents.some((item) => item.key === selectedDocumentKey)) {
-      setSelectedDocumentKey(documents.at(0)?.key ?? null);
-    }
-  }, [documents, selectedDocumentKey]);
-
-  const selectedDocument = documents.find((item) => item.key === selectedDocumentKey) ?? documents.at(0);
+  const linkedDocument = requestedArchiveId
+    && data?.sourceDocuments.some((source) => archiveIdOf(source).toLowerCase() === requestedArchiveId)
+    ? documents.find((item) => item.archiveId?.toLowerCase() === requestedArchiveId)
+    : undefined;
+  const selectedDocument = documents.find((item) => item.key === documentSelection?.key)
+    ?? (documentSelection?.archiveId ? documents.find((item) => item.archiveId === documentSelection.archiveId) : undefined)
+    ?? linkedDocument
+    ?? documents.at(0);
   const documentFacts = useMemo(() => {
     if (!selectedDocument?.documentVersionId) return [];
     return facts.filter((fact) => fact.documentVersionId === selectedDocument.documentVersionId);
@@ -616,7 +620,7 @@ export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
   const selectFact = useCallback((fact: WorkspaceFact, locator?: SourceLocatorRecord, locatorIndex = 0) => {
     setSelectedFactKey(fact.key);
     const document = documents.find((item) => item.documentVersionId === fact.documentVersionId);
-    if (document) setSelectedDocumentKey(document.key);
+    if (document) setDocumentSelection({ key: document.key, archiveId: document.archiveId });
     const evidence = locator
       ? [locator]
       : fact.candidate.evidence?.length
@@ -769,13 +773,14 @@ export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
       <header className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm dark:border-slate-800 dark:bg-slate-950 md:px-5">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="flex min-w-0 items-start gap-3">
-            <Link
-              href={`/project/${encodeURIComponent(projectId)}/input-package`}
+            <ProjectWorkspaceLink
+              projectId={projectId}
+              path="input-package"
               className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-900"
               aria-label="자료 입력 패키지로 돌아가기"
             >
               <ArrowLeft className="h-4 w-4" />
-            </Link>
+            </ProjectWorkspaceLink>
             <div className="min-w-0">
               <p className="truncate text-xs font-bold text-slate-500">{projectName}</p>
               <h1 className="mt-1 flex items-center gap-2 text-2xl font-black tracking-tight text-slate-950 dark:text-white">
@@ -817,6 +822,11 @@ export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
       {error ? <Notice tone="bad">{error}</Notice> : null}
       {notice ? <Notice tone="good">{notice}</Notice> : null}
       {data?.warnings.map((warning) => <Notice key={warning} tone="warn">부분 로드: {warning}</Notice>)}
+      {requestedArchiveId === null ? (
+        <Notice tone="warn">문서 링크 형식이 올바르지 않습니다. 목록에서 검토할 문서를 선택하세요.</Notice>
+      ) : requestedArchiveId && data && !linkedDocument ? (
+        <Notice tone="warn">이 프로젝트의 문서 목록에서 링크된 문서를 찾을 수 없습니다.</Notice>
+      ) : null}
 
       {!documents.length && !facts.length ? (
         <ControlledEmpty
@@ -832,7 +842,7 @@ export function DocumentReviewWorkspace({ projectId }: { projectId: string }) {
             anchors={documentAnchors}
             selectedLocator={selectedLocator}
             onSelectDocument={(document) => {
-              setSelectedDocumentKey(document.key);
+              setDocumentSelection({ key: document.key, archiveId: document.archiveId });
               const firstFact = facts.find((fact) => fact.documentVersionId === document.documentVersionId);
               if (firstFact) selectFact(firstFact);
             }}
@@ -923,6 +933,7 @@ function DocumentNavigator({
             <button
               key={document.key}
               type="button"
+              aria-pressed={selected}
               onClick={() => onSelectDocument(document)}
               className={`mb-1 flex w-full items-start gap-2 rounded-lg border px-3 py-3 text-left transition ${
                 selected

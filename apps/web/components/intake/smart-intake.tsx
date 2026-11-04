@@ -1,17 +1,19 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, FileQuestion, Loader2, PlayCircle, UploadCloud } from "lucide-react";
+import { Loader2, PlayCircle, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
 import { hasArchivedFeasibilityReviewDraft, intakeProcessingFailure } from "../../lib/intake-processing-status";
-import { classifyIntakeFiles, processTransferredIntakeFile, type IntakeClassifiedFile } from "../../lib/intake-upload-client";
+import { classifyIntakeFiles, processTransferredIntakeFile, releaseIntakeTransfer, type IntakeClassifiedFile } from "../../lib/intake-upload-client";
+import { projectWorkspaceHref } from "../../lib/project-navigation";
 
 type Classified = IntakeClassifiedFile;
 
 type IntakeResult = { files: Classified[] };
-type RowStatus = "idle" | "processing" | "done" | "skipped" | "error";
-type Row = { id: string; file: File; c: Classified; type: string; status: RowStatus; note?: string };
+type RowStatus = "review" | "idle" | "processing" | "done" | "inspection" | "skipped" | "error";
+type Row = { id: string; file: File; c: Classified; options: string[]; reviewMode: boolean; type: string; status: RowStatus; note?: string };
 
 export interface IntakeWorkStatus {
   busy: boolean;
@@ -25,8 +27,6 @@ const TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "feasibility_workbook", label: "사업수지 / Cash Flow Excel" },
   { value: "risk_report_workbook", label: "리스크 보고서 Excel" },
   { value: "land_evidence", label: "토지 증빙" },
-  { value: "market_evidence", label: "시장·거래 증빙" },
-  { value: "unknown", label: "미분류" },
 ];
 
 const TYPE_LABEL = Object.fromEntries(TYPE_OPTIONS.map((item) => [item.value, item.label])) as Record<string, string>;
@@ -40,31 +40,80 @@ const ROUTES: Record<string, { path: string; kind: "file" | "json" }> = {
   land_evidence: { path: "land-evidence", kind: "json" },
 };
 
-function isArchivedWithoutProcessingRoute(type: string, classified: Classified) {
-  return classified.archiveStored === true && !ROUTES[type];
+const NARRATIVE_TYPES = ["business_plan", "basic_architectural_plan", "investment_committee_memo"];
+const WORKBOOK_TYPES = ["land_ledger", "feasibility_workbook", "risk_report_workbook"];
+const LEGACY_TYPES_BY_EXTENSION: Record<string, string[]> = {
+  pdf: ["business_plan", "basic_architectural_plan"],
+  xls: ["land_ledger"],
+  xlsx: WORKBOOK_TYPES,
+  xlsm: WORKBOOK_TYPES,
+  json: ["land_evidence"],
+};
+const ARCHIVE_ONLY = "archive_only";
+const DOCUMENT_REVIEW = "document_review";
+
+function archivedReviewId(classified: Classified): string | null {
+  return classified.archiveStored === true && typeof classified.archiveId === "string" && /^[a-f0-9]{64}$/i.test(classified.archiveId)
+    ? classified.archiveId.toLowerCase() : null;
+}
+
+function initialRow(id: string, file: File, c: Classified): Row {
+  const extension = /\.([^.]+)$/.exec(file.name.toLowerCase())?.[1] ?? "";
+  const archivedId = archivedReviewId(c);
+  const reviewMode = c.processingMode === DOCUMENT_REVIEW ||
+    (c.processingTypes === undefined && (extension === "pdf" || extension === "docx") && archivedId !== null);
+  const supported = c.processingTypes ?? (reviewMode ? NARRATIVE_TYPES : LEGACY_TYPES_BY_EXTENSION[extension]) ?? [];
+  const options = reviewMode
+    ? (supported.some((type) => NARRATIVE_TYPES.includes(type)) ? [DOCUMENT_REVIEW] : [])
+    : TYPE_OPTIONS.filter(({ value }) => supported.includes(value) && Object.hasOwn(ROUTES, value)).map(({ value }) => value);
+  const row = { id, file, c, options, reviewMode };
+  if (c.formatIssue === "extension_mismatch") {
+    return { ...row, options: [], type: c.archiveStored === true ? ARCHIVE_ONLY : "", status: c.archiveStored === true ? "skipped" : "error",
+      note: "파일 확장자와 실제 형식을 확인한 뒤 올바른 형식으로 다시 올려 주세요." };
+  }
+  if (reviewMode && !archivedId) {
+    return { ...row, options: [], type: "", status: "error", note: "문서 검토에 필요한 원본 저장을 확인하지 못했습니다. 파일을 다시 추가해 주세요." };
+  }
+  if (!options.length || c.documentType === "market_evidence") {
+    return c.archiveStored === true
+      ? { ...row, type: ARCHIVE_ONLY, status: "skipped" }
+      : { ...row, type: "", status: "error", note: "원본 저장을 확인하지 못했습니다. 지원되는 파일인지 확인하고 다시 추가해 주세요." };
+  }
+  const recommendationSupported = (reviewMode ? supported : options).includes(c.documentType);
+  return c.needsReview || c.confidence < 0.55 || !recommendationSupported
+    ? { ...row, type: "", status: "review" }
+    : { ...row, type: reviewMode ? DOCUMENT_REVIEW : c.documentType, status: "idle" };
 }
 
 function isTerminalRow(row: Row) {
-  return row.status === "done" || (row.status === "skipped" && isArchivedWithoutProcessingRoute(row.type, row.c));
+  return row.status === "done" || row.status === "skipped" || row.status === "inspection";
+}
+
+function canProcessRow(row: Row) {
+  return !isTerminalRow(row) && row.options.includes(row.type);
 }
 
 const STATUS_LABEL: Record<RowStatus, string> = {
-  idle: "보류",
+  review: "유형 확인 필요",
+  idle: "처리 대기",
   processing: "처리 중",
   done: "처리 완료",
+  inspection: "원본 저장 · 검토 필요",
   skipped: "원본 저장 · 자동 처리 경로 없음",
   error: "실패",
 };
 
 const STATUS_TONE: Record<RowStatus, string> = {
+  review: "text-re-warning",
   idle: "text-slate-500",
   processing: "text-sky-600",
   done: "text-emerald-600 dark:text-emerald-300",
+  inspection: "text-re-warning",
   skipped: "text-slate-400",
   error: "text-rose-600 dark:text-rose-300",
 };
 
-async function readIntakeResponse(response: Response): Promise<Record<string, unknown>> {
+async function readIntakeResponse(response: Response, documentType?: string): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
     value = await response.json();
@@ -75,9 +124,33 @@ async function readIntakeResponse(response: Response): Promise<Record<string, un
     throw new Error("자료 처리 결과를 확인하지 못했습니다. 파일을 유지했으니 다시 시도해 주세요.");
   }
   const body = value as Record<string, unknown>;
-  const failure = intakeProcessingFailure(body);
+  const failure = intakeProcessingFailure(body, documentType);
   if (failure) throw new Error(failure);
   return body;
+}
+
+async function prepareDocumentReview(projectId: string, row: Row): Promise<Pick<Row, "status" | "note">> {
+  const archiveId = archivedReviewId(row.c);
+  if (!archiveId) throw new Error("문서 검토에 필요한 원본 저장을 확인하지 못했습니다.");
+  const response = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/parsing-v2/runs`, {
+    method: "POST",
+    headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+    body: JSON.stringify({ archiveId }),
+  });
+  if (!response.ok) throw new Error(await backendErrorMessageForResponse(response, { action: "문서 검토 준비" }));
+  const result = await readIntakeResponse(response);
+  const run = result.parsingRun as Record<string, unknown> | undefined;
+  if (result.candidateOnly !== true || result.authoritative !== false || typeof run?.parsingRunId !== "string") {
+    throw new Error("문서 검토 준비 결과를 확인하지 못했습니다. 문서 검토에서 원본과 처리 상태를 확인해 주세요.");
+  }
+  if (run.executionStatus === "completed") return { status: "done", note: "문서 검토 준비" };
+  if (run.executionStatus === "completed_with_warnings") {
+    return { status: "inspection", note: "일부 내용은 문서 검토에서 확인해 주세요." };
+  }
+  if (run.executionStatus === "failed" || run.executionStatus === "cancelled") {
+    return { status: "inspection", note: "문서 읽기를 완료하지 못했습니다. 문서 검토에서 원본과 페이지를 확인해 주세요." };
+  }
+  throw new Error("문서 검토 상태를 확인하지 못했습니다. 문서 검토에서 진행 상태를 확인해 주세요.");
 }
 
 function summarizeResult(type: string, body: Record<string, unknown>): string | undefined {
@@ -134,6 +207,7 @@ function confidenceBasis(row: Classified) {
 
 export function SmartIntake({
   projectId,
+  track,
   onProcessed,
   initialFiles,
   onClassified,
@@ -141,6 +215,7 @@ export function SmartIntake({
   disabled = false,
 }: {
   projectId: string;
+  track?: string | null;
   onProcessed?: () => void;
   initialFiles?: File[];
   onClassified?: (files: Classified[], result: IntakeResult) => void;
@@ -173,17 +248,12 @@ export function SmartIntake({
       setError(null);
       try {
         const data = await classifyIntakeFiles(projectId, arr, setUploadProgress);
-        if (!Array.isArray(data.files) || data.files.length !== arr.length) {
+        if (data.files.length !== arr.length || data.files.some((file, index) => file.filename !== arr[index]?.name)) {
           throw new Error("선택한 파일 수와 분류 결과가 일치하지 않습니다. 파일을 유지했으니 다시 시도해 주세요.");
         }
         onClassified?.(data.files, data);
-        const newRows: Row[] = data.files.map((c, index) => ({
-          id: `${Date.now()}-${index}`,
-          file: arr[index] as File,
-          c,
-          type: c.documentType,
-          status: isArchivedWithoutProcessingRoute(c.documentType, c) ? "skipped" : "idle",
-        }));
+        const batchId = Date.now();
+        const newRows = data.files.map((c, index) => initialRow(`${batchId}-${index}`, arr[index] as File, c));
         setRows((prev) => [...newRows, ...prev]);
         setFailedFiles([]);
       } catch (err) {
@@ -214,22 +284,19 @@ export function SmartIntake({
     if (workInFlight.current || disabled) return;
     workInFlight.current = true;
     setProcessing(true);
-    setError(null);
-    let allProcessed = rows.length > 0 && failedFiles.length === 0;
+    let allProcessed = rows.length > 0 && failedFiles.length === 0 && rows.every((row) => isTerminalRow(row) || canProcessRow(row));
     for (const row of rows) {
-      if (isTerminalRow(row)) continue;
-      const route = ROUTES[row.type];
-      if (!route) {
-        if (isArchivedWithoutProcessingRoute(row.type, row.c)) {
-          setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "skipped", note: undefined } : r)));
-        } else {
-          allProcessed = false;
-          setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "error", note: "원본 저장을 확인하지 못했고 자동 처리 경로가 없습니다. 문서 유형과 원본 저장을 확인해 주세요." } : r)));
-        }
-        continue;
-      }
-      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "processing" } : r)));
+      if (!canProcessRow(row)) continue;
+      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "processing", note: undefined } : r)));
       try {
+        if (row.type === DOCUMENT_REVIEW) {
+          const outcome = await prepareDocumentReview(projectId, row);
+          setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, ...outcome } : r));
+          if (row.c.transferId) void releaseIntakeTransfer(projectId, row.file, row.c.transferId);
+          continue;
+        }
+        const route = ROUTES[row.type];
+        if (!route) throw new Error("선택한 유형의 처리 경로를 확인하지 못했습니다.");
         let res: Response;
         if (row.c.transferId) {
           res = await processTransferredIntakeFile(projectId, row.file, row.type);
@@ -256,7 +323,7 @@ export function SmartIntake({
             await backendErrorMessageForResponse(res, { action: `${TYPE_LABEL[row.type] ?? "자료"} 처리` }),
           );
         }
-        let body = await readIntakeResponse(res);
+        let body = await readIntakeResponse(res, row.type);
         if (row.type === "feasibility_workbook" && hasArchivedFeasibilityReviewDraft(body) && body.project_id !== projectId) {
           throw new Error("사업수지 후보의 프로젝트가 현재 자료와 일치하지 않습니다.");
         }
@@ -295,16 +362,27 @@ export function SmartIntake({
     workInFlight.current = false;
     setProcessing(false);
     if (allProcessed) onProcessed?.();
-    else setError("처리하지 못한 자료가 남아 있습니다. 파일별 안내와 문서 유형을 확인한 뒤 다시 시도해 주세요. 완료된 자료는 다시 처리하지 않습니다.");
   }, [rows, projectId, onProcessed, disabled, failedFiles.length]);
 
-  const routable = rows.filter((row) => ROUTES[row.type] && row.status !== "done").length;
+  function changeRowType(row: Row, type: string) {
+    if (busy || (type !== ARCHIVE_ONLY && !row.options.includes(type))) return;
+    if (type === ARCHIVE_ONLY && row.c.archiveStored !== true) return;
+    setRows((prev) => prev.map((item) => item.id === row.id ? {
+      ...item, type, status: type === ARCHIVE_ONLY ? "skipped" : "idle", note: undefined,
+    } : item));
+    if (type === ARCHIVE_ONLY && row.reviewMode && archivedReviewId(row.c) && row.c.transferId) {
+      void releaseIntakeTransfer(projectId, row.file, row.c.transferId);
+    }
+  }
+
+  const routable = rows.filter(canProcessRow).length;
+  const needsReview = rows.filter((row) => row.status === "review").length;
 
   return (
     <section className="space-y-4" aria-label="자료 분류와 처리">
       <div>
         <h3 className="text-base font-semibold text-re-text">자료 분류·처리</h3>
-        <p className="mt-1 text-sm text-re-secondary">문서 유형을 확인하거나 수정한 뒤 자료를 처리하세요.</p>
+        <p className="mt-1 text-sm text-re-secondary">분류된 자료를 한 번에 처리할 수 있습니다. 확인이 필요한 파일은 따로 표시합니다.</p>
       </div>
 
       <div
@@ -373,7 +451,7 @@ export function SmartIntake({
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm font-semibold text-re-secondary">
-              AI 분류 결과 {rows.length}건 · 검토 필요 {rows.filter((row) => row.c.needsReview).length}건
+              자료 {rows.length}건{needsReview > 0 ? ` · 유형 확인 필요 ${needsReview}건` : ""}
             </p>
             <button
               type="button"
@@ -382,55 +460,72 @@ export function SmartIntake({
               className="inline-flex min-h-11 items-center gap-2 rounded-re-control bg-re-action px-3 text-sm font-semibold text-re-on-action transition-colors hover:bg-re-action-hover disabled:opacity-40"
             >
               {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <PlayCircle className="h-4 w-4" aria-hidden="true" />}
-              분류대로 처리 ({routable})
+              자료 처리 ({routable})
             </button>
           </div>
           <ul className="divide-y divide-re-border rounded-re-panel border border-re-border">
-            {rows.map((row) => (
+            {rows.map((row) => {
+              const recommended = TYPE_LABEL[row.c.documentType] ?? row.c.label;
+              const reviewMode = row.reviewMode;
+              const mayEdit = row.options.length > 0 && row.status !== "done" && row.status !== "inspection";
+              const mayArchiveOnly = row.c.archiveStored === true && row.type !== ARCHIVE_ONLY;
+              const statusLabel = row.status === "skipped" && row.options.length ? "원본만 보관" : STATUS_LABEL[row.status];
+              const reviewArchiveId = reviewMode && (row.status === "done" || row.status === "inspection") ? archivedReviewId(row.c) : null;
+              const reviewHref = projectWorkspaceHref(projectId, "documents/review", track);
+              return (
               <li key={row.id} className="min-w-0 space-y-2 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="flex min-w-0 items-start gap-2 text-sm font-semibold text-re-text">
-                    {row.c.needsReview ? (
-                      <FileQuestion className="h-4 w-4 shrink-0 text-re-warning" aria-hidden="true" />
-                    ) : (
-                      <CheckCircle2 className="h-4 w-4 shrink-0 text-re-success" aria-hidden="true" />
-                    )}
-                    <span className="break-all">{row.c.filename}</span>
-                  </p>
+                  <p className="min-w-0 break-all text-sm font-semibold text-re-text">{row.c.filename}</p>
                   <p className={`break-words text-xs font-semibold ${STATUS_TONE[row.status]}`}>
-                    {STATUS_LABEL[row.status]}
-                    {row.note ? ` (${row.note})` : ""}
+                    {statusLabel}
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                  <p className="text-xs text-re-secondary">AI 분류 {TYPE_LABEL[row.c.documentType] ?? row.c.label}</p>
-                  <label className="flex max-w-full flex-wrap items-center gap-2 text-xs font-semibold text-re-secondary">
-                    문서 유형
-                    <select
-                      aria-label={`${row.c.filename} 문서 유형`}
-                      value={row.type}
-                      disabled={busy}
-                      onChange={(event) => {
-                        const type = event.target.value;
-                        setError(null);
-                        setRows((prev) => prev.map((item) => item.id === row.id ? {
-                          ...item, type, status: isArchivedWithoutProcessingRoute(type, item.c) ? "skipped" : "idle", note: undefined,
-                        } : item));
-                      }}
-                      className="min-h-11 max-w-full rounded-re-control border border-re-border bg-re-surface px-2 text-sm text-re-text disabled:opacity-50"
-                    >
-                      {TYPE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                  </label>
+                <div className="flex flex-wrap items-start gap-x-4 gap-y-1">
+                  <p className="py-1 text-sm text-re-secondary">{row.status === "review" ? `추천 · ${recommended}` : TYPE_LABEL[row.type] ?? recommended}</p>
+                  {mayEdit && reviewMode ? (
+                    <div className="flex flex-wrap gap-x-3">
+                      {row.type !== DOCUMENT_REVIEW ? (
+                        <button type="button" disabled={busy} onClick={() => changeRowType(row, DOCUMENT_REVIEW)}
+                          className="min-h-8 text-xs font-semibold text-re-action underline disabled:opacity-50">이 자료 검토</button>
+                      ) : null}
+                      {mayArchiveOnly && row.status === "review" ? (
+                        <button type="button" disabled={busy} onClick={() => changeRowType(row, ARCHIVE_ONLY)}
+                          className="min-h-8 text-xs text-re-secondary underline disabled:opacity-50">원본만 보관</button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {mayEdit && !reviewMode ? (
+                    <details className="max-w-full text-xs text-re-secondary">
+                      <summary className="cursor-pointer py-1 font-semibold text-re-action">{row.status === "review" ? "유형 선택" : "유형 바꾸기"}</summary>
+                      <select
+                        aria-label={`${row.c.filename} 처리 유형`}
+                        value={row.type}
+                        disabled={busy}
+                        onChange={(event) => changeRowType(row, event.target.value)}
+                        className="min-h-11 max-w-full rounded-re-control border border-re-border bg-re-surface px-2 text-sm text-re-text disabled:opacity-50"
+                      >
+                        <option value="" disabled>처리 유형 선택</option>
+                        {row.options.map((type) => <option key={type} value={type}>{TYPE_LABEL[type]}</option>)}
+                        {row.c.archiveStored === true ? <option value={ARCHIVE_ONLY}>원본만 보관</option> : null}
+                      </select>
+                    </details>
+                  ) : null}
                 </div>
+                {row.note ? <p role={row.status === "error" ? "alert" : undefined} className={`text-xs ${STATUS_TONE[row.status]}`}>{row.note}</p> : null}
+                {row.status === "error" && row.c.archiveStored === true ? <p className="text-xs text-re-secondary">원본은 저장되어 있습니다.</p> : null}
+                {reviewArchiveId ? (
+                  <Link href={`${reviewHref}${reviewHref.includes("?") ? "&" : "?"}archiveId=${reviewArchiveId}`}
+                    className="text-xs font-semibold text-re-action underline">문서 검토 열기</Link>
+                ) : null}
                 <details className="text-xs text-re-secondary">
                   <summary className="cursor-pointer py-1 font-semibold hover:text-re-text">분류 근거 · {Math.round(row.c.confidence * 100)}%</summary>
+                  {row.type && !reviewMode && row.type !== row.c.documentType ? <p>자동 분류 제안 · {recommended}</p> : null}
+                  {row.c.topics?.length ? <p>감지한 주제 · {row.c.topics.slice(0, 5).join(" · ")}</p> : null}
                   <p className="mt-1 break-words">{confidenceBasis(row.c)}</p>
                 </details>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       ) : null}
