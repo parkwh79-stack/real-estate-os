@@ -81,6 +81,18 @@ export function backendErrorMessage(
   error: StructuredBackendError,
   { action }: BackendErrorMessageOptions,
 ): string {
+  if (error.error === "intake_transfer_result_uncertain") {
+    return "자료가 반영되었을 수 있으나 완료 기록을 확인하지 못했습니다. 프로젝트 자료와 검토 결과를 먼저 확인해 주세요. 같은 자료를 자동으로 다시 적용하지 않았습니다.";
+  }
+  if (error.error === "intake_transfer_busy") {
+    return "이 파일의 다른 요청을 처리하고 있습니다. 잠시 후 다시 시도해 주세요.";
+  }
+  if (error.error === "intake_transfer_expired") {
+    return "파일 전송 대기 시간이 만료되었습니다. 다시 시도하면 현재 선택한 파일을 새로 전송합니다.";
+  }
+  if (error.status === 413 || error.message?.includes("FUNCTION_PAYLOAD_TOO_LARGE")) {
+    return `${action} 중 전송 크기 한도를 넘었습니다. 화면을 새로고침한 뒤 파일을 다시 선택해 주세요. 같은 오류가 계속되면 문서를 나누어 올려 주세요.`;
+  }
   if (error.status === 401) {
     return `로그인 세션이 만료되어 ${action}을 수행할 수 없습니다. 다시 로그인한 뒤 시도해 주세요.`;
   }

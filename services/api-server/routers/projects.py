@@ -1,7 +1,10 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response, Query
+from fastapi.encoders import jsonable_encoder
+from starlette.datastructures import Headers
 from typing import Dict, Any
 from db.repositories.request_project_repository import current_project_scope
 from use_cases.cash_flow_dependencies import dependent_inputs, financial_input_hash
+from use_cases.intake_transfers import IntakeTransferStore, processing_succeeded
 from core.cash_flow_periods import require_stress_calendar_period
 from core.financial_input_validation import FinancialInputError
 from schemas.report import ReportCashFlowBasis, ReportCalculationSelection
@@ -86,7 +89,7 @@ from db.repositories.report_repository import (
     ReportRepository,
 )
 from db.repositories.source_document_repository import SourceDocumentRepository
-from db.repositories.upload_archive_repository import UploadArchiveRepository
+from db.repositories.upload_archive_repository import UploadArchiveRepository, UploadRejectedError
 from db.repositories.legal_intelligence_repository import (
     LegalReviewDecisionConflict,
     PostgresLegalTenantOverlayRepository,
@@ -2171,11 +2174,25 @@ def _maybe_auto_reanalyze_on_upload(project_id: str, parsed_data: Dict[str, Any]
     doc_type = upload_meta.get("documentType") or meta.get("documentType") or "business_plan"
     return _maybe_auto_reanalyze(project_id, [str(doc_type)])
 
-async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, Any]:
+async def _classify_intake_file(
+    project_id: str, file: UploadFile, *, require_archive: bool = False,
+) -> Dict[str, Any]:
     """Sniff + classify one uploaded file, archive the original, return the plan."""
     content = await file.read()
     name = file.filename or "upload"
     ctype = file.content_type
+    archive = None
+    archive_error = None
+    # Scan the original before opening workbook/JSON content. Chunk transfers
+    # require successful archival; their temporary parts are not evidence.
+    try:
+        archive = upload_archive_repository().archive_upload(
+            project_id, content, name, ctype, tenant_id=_project_tenant_id(project_id),
+        )
+    except Exception as exc:
+        if require_archive or isinstance(exc, UploadRejectedError):
+            raise
+        archive_error = type(exc).__name__
     ext = os.path.splitext(name)[1].lower()
     sheet_names = None
     json_keys = None
@@ -2201,13 +2218,10 @@ async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, 
         name, content_type=ctype, size=len(content), sheet_names=sheet_names, json_keys=json_keys
     )
     try:
-        archive = upload_archive_repository().archive_upload(
-            project_id,
-            content,
-            name,
-            ctype,
-            tenant_id=_project_tenant_id(project_id),
-        )
+        if archive is None:
+            classification["archiveStored"] = False
+            classification["archiveError"] = archive_error
+            return classification
         save_source_document_metadata_use_case(
             source_document_repository(),
             project_id,
@@ -2225,6 +2239,8 @@ async def _classify_intake_file(project_id: str, file: UploadFile) -> Dict[str, 
         classification["downloadUrl"] = archive.get("downloadUrl")
         classification["archiveStored"] = True
     except Exception as exc:  # storing must not break classification
+        if require_archive:
+            raise
         classification["archiveStored"] = False
         classification["archiveError"] = type(exc).__name__
     return classification
@@ -2248,6 +2264,146 @@ async def smart_intake_classify(project_id: str, files: list[UploadFile] = File(
         "needsReviewCount": sum(1 for r in results if r.get("needsReview")),
         "files": results,
     }
+
+
+def intake_transfer_store() -> IntakeTransferStore:
+    return IntakeTransferStore(upload_archive_repository().object_storage)
+
+
+def _intake_transfer_context(project_id: str, request: Request) -> Dict[str, str]:
+    authorization = authorize_request(request, "project:write")
+    project = get_project_use_case(project_repository(request), project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    enforce_project_tenant_scope(request, project)
+    user = authorization.get("user") or {}
+    if not authorization.get("authenticated") or not user.get("userId"):
+        raise HTTPException(status_code=401, detail={"error": "authentication_required"})
+    metadata = project.get("_meta") or {}
+    tenant = metadata.get("tenantId") or metadata.get("tenant_id") or user.get("tenantId")
+    if not tenant:
+        raise HTTPException(status_code=403, detail={"error": "project_tenant_unassigned"})
+    return {"projectId": project_id, "tenantId": str(tenant), "principalId": str(user["userId"])}
+
+
+@router.post("/{project_id}/intake/transfers")
+def create_intake_transfer(project_id: str, request: Request, input_data: Dict[str, Any]):
+    scope = _intake_transfer_context(project_id, request)
+    return intake_transfer_store().create(scope, input_data)
+
+
+@router.put("/{project_id}/intake/transfers/{transfer_id}/parts/{index}")
+async def upload_intake_transfer_part(project_id: str, transfer_id: str, index: int, request: Request):
+    scope = _intake_transfer_context(project_id, request)
+    store = intake_transfer_store()
+    manifest = store.load(scope, transfer_id)
+    limit = store.expected_part_size(manifest, index)
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/octet-stream":
+        raise HTTPException(status_code=415, detail={"error": "intake_transfer_binary_part_required"})
+    content = bytearray()
+    async for chunk in request.stream():
+        if len(content) + len(chunk) > limit:
+            raise HTTPException(status_code=413, detail={"error": "intake_transfer_invalid_part_size"})
+        content.extend(chunk)
+    with store.operation(scope, transfer_id):
+        return store.put_part(scope, transfer_id, index, bytes(content))
+
+
+@router.post("/{project_id}/intake/transfers/{transfer_id}/classify")
+async def classify_intake_transfer(project_id: str, transfer_id: str, request: Request):
+    scope = _intake_transfer_context(project_id, request)
+    store = intake_transfer_store()
+    cached = store.read_result(scope, transfer_id, "classify")
+    if cached is not None:
+        return cached
+    with store.operation(scope, transfer_id):
+        cached = store.read_result(scope, transfer_id, "classify")
+        if cached is not None:
+            return cached
+        with store.assembled_file(scope, transfer_id) as (manifest, content):
+            file = UploadFile(file=content, filename=manifest["filename"],
+                              headers=Headers({"content-type": manifest["contentType"]}))
+            classified = await _classify_intake_file(project_id, file, require_archive=True)
+        classified["transferId"] = transfer_id
+        result = {
+            "schemaVersion": "realytics-smart-intake-v1", "projectId": project_id,
+            "count": 1, "byType": {classified["documentType"]: 1},
+            "needsReviewCount": int(bool(classified.get("needsReview"))), "files": [classified],
+        }
+        store.save_result(scope, transfer_id, "classify", jsonable_encoder(result))
+        return result
+
+
+@router.post("/{project_id}/intake/transfers/{transfer_id}/process")
+async def process_intake_transfer(
+    project_id: str, transfer_id: str, request: Request, input_data: Dict[str, Any],
+):
+    scope = _intake_transfer_context(project_id, request)
+    document_type = input_data.get("documentType")
+    supported = {"business_plan", "basic_architectural_plan", "land_ledger",
+                 "feasibility_workbook", "risk_report_workbook", "land_evidence"}
+    if not isinstance(document_type, str) or document_type not in supported:
+        raise HTTPException(status_code=422, detail={"error": "intake_transfer_document_type_unsupported"})
+    store = intake_transfer_store()
+    cached = store.read_result(scope, transfer_id, "process")
+    if cached is not None:
+        if cached["documentType"] != document_type:
+            raise HTTPException(status_code=409, detail={"error": "intake_transfer_document_type_conflict"})
+        return cached["result"]
+    with store.operation(scope, transfer_id) as lease:
+        cached = store.read_result(scope, transfer_id, "process")
+        if cached is not None:
+            if cached["documentType"] != document_type:
+                raise HTTPException(status_code=409, detail={"error": "intake_transfer_document_type_conflict"})
+            return cached["result"]
+        with store.assembled_file(scope, transfer_id) as (manifest, content):
+            file = UploadFile(file=content, filename=manifest["filename"],
+                              headers=Headers({"content-type": manifest["contentType"]}))
+            if document_type in {"business_plan", "basic_architectural_plan"}:
+                result = await upload_business_plan(project_id, request, file,
+                    request.headers.get("x-realytics-user-id"), request.headers.get("x-realytics-ai-provider"))
+            elif document_type == "land_ledger":
+                result = await analyze_land_ledger_upload(project_id, file)
+            elif document_type == "feasibility_workbook":
+                result = await validate_project_feasibility_workbook(project_id, file)
+            elif document_type == "risk_report_workbook":
+                result = await validate_project_risk_report_workbook(project_id, file)
+            else:
+                # Direct JSON processing also requires a verified archived
+                # original when a prior classify request was not completed.
+                await _classify_intake_file(project_id, file, require_archive=True)
+                content.seek(0)
+                try:
+                    evidence = json.load(content)
+                except (ValueError, UnicodeError) as exc:
+                    raise HTTPException(status_code=422, detail={"error": "intake_transfer_invalid_json"}) from exc
+                if isinstance(evidence, list):
+                    evidence = {"records": evidence}
+                if not isinstance(evidence, dict):
+                    raise HTTPException(status_code=422, detail={"error": "intake_transfer_invalid_json"})
+                result = upsert_project_land_evidence(project_id, request, evidence)
+        if processing_succeeded(result):
+            # The original may already have changed the project. If saving its
+            # response fails, preserve the lease instead of replaying that
+            # mutation. A persisted receipt remains readable before the lease.
+            lease["retainOnExit"] = True
+            try:
+                store.save_result(scope, transfer_id, "process", jsonable_encoder({
+                    "documentType": document_type, "result": result,
+                }))
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail={
+                    "error": "intake_transfer_result_uncertain",
+                    "message": "자료 처리 응답을 보관하지 못했습니다. 프로젝트의 저장 상태를 확인해 주세요.",
+                }) from exc
+            lease["retainOnExit"] = False
+        return result
+
+
+@router.delete("/{project_id}/intake/transfers/{transfer_id}")
+def cancel_intake_transfer(project_id: str, transfer_id: str, request: Request):
+    scope = _intake_transfer_context(project_id, request)
+    return intake_transfer_store().cancel(scope, transfer_id)
 
 
 @router.post("/{project_id}/intake/triage")

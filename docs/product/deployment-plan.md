@@ -1,8 +1,33 @@
 # Deployment Plan
 
-Updated: 2026-11-03
+Updated: 2026-11-04
 
 Status: **Controlled implementation; not production-ready**
+
+### Upload transport pilot follow-up (2026-11-04)
+
+The Vercel request-size incident is addressed by authenticated 3 MiB upload parts,
+not a body-parser or timeout increase. [Smart Intake](smart-intake.md) owns the
+64 MiB transport cap, one-hour expiry, integrity, actor/project scope and retry contract.
+Cloud Build `23780c5d-609f-46c1-8538-b5e5bf2db3e4` succeeded from 420 inputs with
+all 26 migrations and zero forbidden secret/runtime/test paths. Downloaded source
+archive hashes matched all 420 current API files. Cloud Run
+`realytics-api-00003-p85` is Ready at 100% traffic with API image
+`sha256:04648b517be2a897b4ce815946c0e6102694d96f343dc50f7c4e4773762e5a26`.
+The image-only update retained the existing secrets, scanner and min0/max1 settings.
+
+Bucket lifecycle read-back confirms age=1 deletion only for
+`realytics/intake-transfers/quarantine/`; no previous lifecycle rules existed.
+Active original paths, object-level three-day retention and seven-day soft delete
+were preserved. Lifecycle is asynchronous; the rule is not proof that any object
+has already been deleted. No DB migration or new IAM grant was applied.
+
+Local production-mode PC/mobile upload regression: 26 passed. API group 67,
+archive/scanner/container group 12 and final targeted 10 passed (overlapping groups).
+An 18,170,390-byte real sample PDF survived a local six-part cross-instance roundtrip
+with unchanged SHA-256, size and modification time. This is not a real-user hosted
+upload or live GCS/ClamAV/parser rehearsal. The web deployment and complete CI for
+the pushed commit are recorded in [PR #2](https://github.com/parkwh79-stack/real-estate-os/pull/2).
 
 Current execution scope (2026-09-28): build and validate the local user workflow
 in [the product execution plan](realytics-os-next-work-roadmap.md). This document

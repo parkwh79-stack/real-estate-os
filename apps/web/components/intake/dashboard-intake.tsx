@@ -6,6 +6,7 @@ import { ArrowRight, Loader2, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
 import { SmartIntake, type IntakeWorkStatus } from "./smart-intake";
+import { validateIntakeFiles } from "../../lib/intake-upload-client";
 
 type Phase = "idle" | "creating" | "ready" | "error";
 
@@ -67,6 +68,7 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
       setPhase("creating");
       setError(null);
       try {
+        validateIntakeFiles(picked);
         // Snapshot bytes immediately. The <input> that produced these File handles
         // is unmounted when we switch to the SmartIntake view; an input-backed File
         // can then read as 0 bytes. Buffer into in-memory Files so later uploads are safe.
@@ -190,7 +192,7 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
           <>
             <UploadCloud className="h-8 w-8 text-re-secondary" aria-hidden="true" />
             <p className="text-sm font-medium text-re-text">파일을 끌어다 놓거나 클릭해서 선택하세요.</p>
-            <p className="text-xs text-re-secondary">PDF · XLS/XLSX · DOCX · JSON · CSV · 여러 파일 선택 가능</p>
+            <p className="text-xs text-re-secondary">PDF · XLS/XLSX · DOCX · JSON · CSV · 파일당 최대 64MB · 여러 파일 선택 가능</p>
           </>
         )}
         <input

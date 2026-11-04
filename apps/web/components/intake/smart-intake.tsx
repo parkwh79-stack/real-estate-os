@@ -5,17 +5,9 @@ import { CheckCircle2, FileQuestion, Loader2, PlayCircle, UploadCloud } from "lu
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
 import { intakeProcessingFailure } from "../../lib/intake-processing-status";
+import { classifyIntakeFiles, processTransferredIntakeFile, type IntakeClassifiedFile } from "../../lib/intake-upload-client";
 
-type Classified = {
-  filename: string;
-  documentType: string;
-  label: string;
-  confidence: number;
-  confidenceBasis?: string;
-  needsReview: boolean;
-  archiveStored?: boolean;
-  reasons?: string[];
-};
+type Classified = IntakeClassifiedFile;
 
 type IntakeResult = { files: Classified[] };
 type RowStatus = "idle" | "processing" | "done" | "skipped" | "error";
@@ -153,6 +145,7 @@ export function SmartIntake({
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [initialPending, setInitialPending] = useState(Boolean(initialFiles?.length));
   const [failedFiles, setFailedFiles] = useState<File[]>([]);
@@ -171,19 +164,7 @@ export function SmartIntake({
       setLoading(true);
       setError(null);
       try {
-        const fd = new FormData();
-        arr.forEach((file) => fd.append("files", file));
-        const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/intake/classify`, {
-          method: "POST",
-          headers: authHeaders("web"),
-          body: fd,
-        });
-        if (!res.ok) {
-          throw new Error(
-            await backendErrorMessageForResponse(res, { action: "자료 업로드 및 문서 분류" }),
-          );
-        }
-        const data = (await res.json()) as IntakeResult;
+        const data = await classifyIntakeFiles(projectId, arr, setUploadProgress);
         if (!Array.isArray(data.files) || data.files.length !== arr.length) {
           throw new Error("선택한 파일 수와 분류 결과가 일치하지 않습니다. 파일을 유지했으니 다시 시도해 주세요.");
         }
@@ -202,6 +183,7 @@ export function SmartIntake({
         setError(err instanceof Error ? err.message : "업로드 또는 분류 중 오류가 발생했습니다.");
       } finally {
         workInFlight.current = false;
+        setUploadProgress("");
         setInitialPending(false);
         setLoading(false);
       }
@@ -235,7 +217,9 @@ export function SmartIntake({
       setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: "processing" } : r)));
       try {
         let res: Response;
-        if (route.kind === "file") {
+        if (row.c.transferId) {
+          res = await processTransferredIntakeFile(projectId, row.file, row.type);
+        } else if (route.kind === "file") {
           const fd = new FormData();
           fd.append("file", row.file);
           res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/${route.path}`, {
@@ -329,7 +313,8 @@ export function SmartIntake({
       >
         {loading ? <Loader2 className="h-6 w-6 animate-spin text-re-action" aria-hidden="true" /> : <UploadCloud className="h-6 w-6 text-re-secondary" aria-hidden="true" />}
         <p className="text-sm text-re-text">{loading ? "자료를 분류하고 있습니다…" : failedFiles.length ? "분류하지 못한 파일을 먼저 확인해 주세요." : "추가 자료를 끌어다 놓거나 선택하세요."}</p>
-        <p className="text-xs text-re-secondary">PDF · XLS/XLSX · DOCX · JSON · CSV</p>
+        <p className="text-xs text-re-secondary">PDF · XLS/XLSX · DOCX · JSON · CSV · 파일당 최대 64MB</p>
+        {loading && uploadProgress ? <p className="text-xs text-re-secondary" role="status">{uploadProgress}</p> : null}
         <input
           ref={inputRef}
           type="file"
