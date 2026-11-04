@@ -170,3 +170,83 @@ test("password recovery keeps account and delivery state undisclosed", async ({ 
   await expect(page.getByRole("status")).toContainText("계정 존재 여부와 실제 발송 여부");
   await expect(page.getByRole("button", { name: /다시 요청/ })).toBeDisabled();
 });
+
+for (const destinationAuthenticated of [true, false]) {
+  test(`password login navigates without an intermediate identity request and the destination ${destinationAuthenticated ? "verifies access" : "rejects a missing session"}`, async ({ page }) => {
+    let submitted = false;
+    let initialChecks = 0;
+    const identityRequestPages: string[] = [];
+    let releaseDestination!: () => void;
+    const destinationCheck = new Promise<void>((resolve) => { releaseDestination = resolve; });
+    await page.route("**/api/backend/**", (route) => route.fulfill({ status: 404, json: { error: "not_mocked" } }));
+    await page.route("**/api/auth/supabase/readiness", (route) => route.fulfill({ json: { providerUsable: {} } }));
+    await page.route("**/api/backend/projects/recent-work?*", (route) => route.fulfill({ json: { items: [] } }));
+    await page.route("**/api/backend/auth/me", async (route) => {
+      const requestedFrom = new URL(route.request().headers().referer ?? page.url()).pathname;
+      if (!submitted) {
+        initialChecks += 1;
+        return route.fulfill({ status: 401, json: { error: "unauthenticated" } });
+      }
+      identityRequestPages.push(requestedFrom);
+      if (requestedFrom === "/start") {
+        await destinationCheck;
+        if (destinationAuthenticated) return route.fulfill({ json: {
+          authenticated: true, authSource: "bearer_token",
+          user: { userId: "password-user", tenantId: "password-tenant", role: "analyst", status: "active" },
+          session: { userId: "password-user", tenantId: "password-tenant" }, permissions: ["project:read", "project:write"],
+        } });
+      }
+      return route.fulfill({ status: 401, json: { error: "unauthenticated" } });
+    });
+    await page.route("**/api/auth/supabase/password", async (route) => {
+      expect(route.request().postDataJSON()).toMatchObject({ mode: "login", email: "login@example.com" });
+      submitted = true;
+      await route.fulfill({ json: { authenticated: true, accessState: "member", next: "/start" } });
+    });
+    await page.goto("/login");
+    await expect.poll(() => initialChecks).toBeGreaterThan(0);
+    await page.getByLabel("이메일").fill("login@example.com");
+    await page.getByLabel("비밀번호", { exact: true }).fill("A-valid-login-password-7!");
+    await page.getByRole("button", { name: "이메일로 로그인", exact: true }).click();
+    try {
+      await expect(page).toHaveURL(/\/start$/);
+      await expect.poll(() => identityRequestPages).toEqual(["/start"]);
+      await expect(page.getByText("로그인·워크스페이스 확인 중", { exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "새 자료로 분석 시작" })).toHaveCount(0);
+    } finally {
+      releaseDestination();
+    }
+    if (destinationAuthenticated) {
+      await expect(page.getByRole("heading", { name: "새 자료로 분석 시작" })).toBeVisible();
+    } else {
+      await expect(page).toHaveURL(/\/login\?next=/);
+      await expect(page.getByTestId("login-heading")).toBeVisible();
+    }
+  });
+}
+
+test("password login retains the server's workspace-unavailable routing without a client membership lookup", async ({ page }) => {
+  let submitted = false;
+  let initialChecks = 0;
+  let checksAfterLogin = 0;
+  await page.route("**/api/backend/**", (route) => route.fulfill({ status: 404, json: { error: "not_mocked" } }));
+  await page.route("**/api/auth/supabase/readiness", (route) => route.fulfill({ json: { providerUsable: {} } }));
+  await page.route("**/api/backend/auth/me", async (route) => {
+    if (submitted) checksAfterLogin += 1;
+    else initialChecks += 1;
+    await route.fulfill({ status: 401, json: { error: "unauthenticated" } });
+  });
+  await page.route("**/api/auth/supabase/password", async (route) => {
+    submitted = true;
+    await route.fulfill({ json: { authenticated: true, accessState: "authority_unavailable", next: "/onboarding" } });
+  });
+  await page.route("**/onboarding", (route) => route.fulfill({ contentType: "text/html", body: "Workspace check boundary" }));
+  await page.goto("/login");
+  await expect.poll(() => initialChecks).toBeGreaterThan(0);
+  await page.getByLabel("이메일").fill("login@example.com");
+  await page.getByLabel("비밀번호", { exact: true }).fill("A-valid-login-password-7!");
+  await page.getByRole("button", { name: "이메일로 로그인", exact: true }).click();
+  await expect(page).toHaveURL(/\/onboarding$/);
+  await expect(page.getByText("Workspace check boundary", { exact: true })).toBeVisible();
+  expect(checksAfterLogin).toBe(0);
+});

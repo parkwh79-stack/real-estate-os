@@ -4,6 +4,27 @@ Updated: 2026-11-04
 
 Status: **Controlled implementation; not production-ready**
 
+### Authentication latency check (2026-11-04)
+
+The hosted login page responded in 0.93 seconds. Across 55 recent successful
+Cloud Run `/auth/me` requests, median service time was 42 ms and the maximum was
+43.73 seconds. A 43.70-second request on `realytics-api-00004-ldp` lined up with
+the same instance starting 15 ms after arrival and startup probes succeeding
+about 33 and 43 seconds later. These measurements cover separate endpoints.
+Full interactive login and account-switch durations still need measurement.
+
+Account switching waits for backend session cleanup and Supabase local
+sign-out. Eight observed credential-cleanup DELETEs took up to 0.46 seconds
+and returned errors. The timing sample cannot attribute a slow switch to
+those DELETEs. Keep the revocation and workspace checks while investigating
+startup with the existing scale-to-zero budget.
+
+The password client now goes directly to the server-selected destination.
+The destination independently verifies session and workspace access. The
+optimized web build and 66 browser cases passed. The 56 authentication BFF
+cases passed with the CI development-server configuration, which permits
+loopback HTTP for the canonical-origin fixtures.
+
 ### Selected PDF page reading pilot (2026-11-04)
 
 Cloud Build `29b0775e-2622-419d-a001-9f13f37d9bb8` used 425 audited API inputs,

@@ -447,7 +447,7 @@ export function authHeaders(fallbackUserId = "web"): Record<string, string> {
 export async function signInWithSupabasePassword(input: {
   email: string;
   password: string;
-}): Promise<SupabasePasswordAuthResult> {
+}): Promise<Omit<SupabasePasswordAuthResult, "stored">> {
   const response = await fetch("/api/auth/supabase/password", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -462,11 +462,10 @@ export async function signInWithSupabasePassword(input: {
     next?: string;
   };
   const accessState = result.accessState ?? "onboarding_required";
+  // The password BFF already checked membership. The caller immediately
+  // navigates; the destination's RequireAuth independently resolves identity.
   return {
     accessState,
-    stored: accessState === "member"
-      ? await requireResolvedIdentity("REALYTICS 멤버십을 확인하지 못했습니다.")
-      : null,
     requiresEmailConfirmation: false,
     next: result.next ?? (accessState === "member" ? "/start" : "/onboarding"),
   };

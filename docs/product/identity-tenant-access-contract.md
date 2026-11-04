@@ -1,8 +1,15 @@
 # Identity, Tenant, and Access Contract
 
-Updated: 2026-11-03
+Updated: 2026-11-04
 Status: Approved policy contract; email/password onboarding implemented; live onboarding/RLS rehearsal pending
 Production identity provider: Supabase Auth email/password, with Google and Kakao as optional linked identities
+
+## Password sign-in handoff (2026-11-04)
+
+The password route verifies the session and resolves access before returning
+the destination. The login form navigates from that response. The destination
+then checks the cookie-backed session and workspace permission before showing
+protected content. Account switching continues to wait for Supabase sign-out.
 
 ## Simple signup pilot (2026-11-03 owner direction)
 
