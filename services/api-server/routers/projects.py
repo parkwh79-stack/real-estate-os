@@ -3776,9 +3776,8 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
         raise HTTPException(status_code=404, detail="Project not found")
     project = _project_store()[project_id]
     reviewed_monthly = isinstance(input_data, dict) and "reviewedMonthlyFinancing" in input_data
-    if reviewed_monthly:
-        authorize_request(request, "assumption:override")
-        enforce_project_tenant_scope(request, project)
+    authorize_request(request, "assumption:override" if reviewed_monthly else "project:analyze")
+    enforce_project_tenant_scope(request, project)
     try:
         request_data = build_cash_flow_request_use_case(project, input_data or {})
         if request_data.get("monthlyFinancing") is not None and not reviewed_monthly:

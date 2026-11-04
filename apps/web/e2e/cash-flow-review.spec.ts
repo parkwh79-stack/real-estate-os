@@ -55,7 +55,7 @@ function result(monthly: boolean, missingMonthlyValues = false, periodBasis?: Ca
 
 async function fixture(page: Page, options: { runConflict?: boolean; saveConflict?: boolean; initialTwo?: boolean;
   saveGate?: Promise<void>; missingMonthlyValues?: boolean; periodBasis?: CashFlowPeriodBasis;
-  firstRowMaximum?: boolean; maximumRowValue?: unknown } = {}) {
+  firstRowMaximum?: boolean; maximumRowValue?: unknown; budgetError?: string | Record<string, unknown>; budgetPartial?: boolean } = {}) {
   let calculated = options.initialTwo ?? false;
   let saved = false;
   let workingStart = "2026-01-01";
@@ -66,6 +66,8 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
   const calculations: Record<string, unknown>[] = [];
   const selections: Record<string, unknown>[] = [];
   const budgetRuns: Record<string, unknown>[] = [];
+  const legacyPodRuns: Record<string, unknown>[] = [];
+  let calculationReads = 0;
   const storedResult = () => {
     const value = result(calculated && !sourceSequence, options.missingMonthlyValues, options.periodBasis, options.firstRowMaximum);
     return "maximumRowValue" in options ? { ...value, summary: { ...value.summary, maxMinusMonth: options.maximumRowValue } } : value;
@@ -91,6 +93,7 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
     else if (path.endsWith("/orchestrations")) body = [];
     else if (path.endsWith("/feasibility-workbook/review")) body = { reviewHash: "reviewed-input", terms: { schedule: { construction_start: workingStart } } };
     else if (path.endsWith("/calculation-runs")) {
+      calculationReads += 1;
       const engine = url.searchParams.get("engine_key");
       body = { records: engine === "cash_flow_engine" ? [{ calculationRunId: calculated ? "changed-run" : "base-run", engineKey: engine,
         inputSnapshot: { financialInputHash: calculated ? "new-hash" : "base-hash", ...(calculated && !sourceSequence ? { monthlyFinancing: policy } : {}) },
@@ -98,7 +101,16 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
         inputSnapshot: { parentCalculationRunId: "base-run", financialInputHash: "base-hash" },
         outputMetrics: [{ key: "waterfall.shortfall", value: 999999 }], resultSnapshot: { scenarios: [{ scenarioId: "이전 계산의 시나리오" }] } }] };
     } else if (path.endsWith("/cash-flow/run")) {
-      calculations.push(route.request().postDataJSON());
+      const requestBody = route.request().postDataJSON() as Record<string, unknown>;
+      if (Object.keys(requestBody).length === 0) {
+        budgetRuns.push(requestBody);
+        await route.fulfill(options.budgetError
+          ? { status: 422, json: { detail: options.budgetError } }
+          : { status: 200, json: { ...result(false, false, options.periodBasis), calculationRunId: "base-run",
+            dependentExecutionStatus: options.budgetPartial ? "partial" : "completed" } });
+        return;
+      }
+      calculations.push(requestBody);
       if (sourceSequence) {
         await route.fulfill({ status: 400, json: { detail: "원본 사건·기간 순서를 실제 달력과 대응하지 못했습니다. 착공·준공 및 사전 사건의 시간 대응을 확인한 뒤 월별 금융 검토를 계산하세요." } }); return;
       }
@@ -107,7 +119,9 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
       }
       calculated = true; body = { ...result(true, false, options.periodBasis), calculationRunId: "changed-run" };
     } else if (path.endsWith("/chief-orchestration/run-pod")) {
-      budgetRuns.push(route.request().postDataJSON());
+      const requestBody = route.request().postDataJSON();
+      budgetRuns.push(requestBody);
+      legacyPodRuns.push(requestBody);
       body = { status: "completed" };
     } else if (path.endsWith("/cash-flow/comparison")) {
       if (route.request().method() === "POST") {
@@ -127,7 +141,7 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
   await expect(panel.getByLabel("월별 금융 계산 방식")).toBeEnabled({ timeout: 60_000 });
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth))
     .toBeLessThanOrEqual(page.viewportSize()!.width);
-  return { panel, calculations, selections, budgetRuns, changeWorkingDates: () => { workingStart = "2099-12-01"; } };
+  return { panel, calculations, selections, budgetRuns, legacyPodRuns, calculationReads: () => calculationReads, changeWorkingDates: () => { workingStart = "2099-12-01"; } };
 }
 
 test("explicitly choose a monthly policy, calculate and reopen the saved comparison", async ({ page }) => {
@@ -176,7 +190,7 @@ test("a legacy saved run shows missing period basis instead of deriving it from 
 });
 
 test("source events stay distinct from months across comparison, rejection and budget rerun", async ({ page }) => {
-  const { panel, calculations, budgetRuns, changeWorkingDates } = await fixture(page, { periodBasis: sourceBasis, initialTwo: true });
+  const { panel, calculations, budgetRuns, legacyPodRuns, changeWorkingDates } = await fixture(page, { periodBasis: sourceBasis, initialTwo: true });
   const savedBasis = panel.getByRole("region", { name: "저장 계산의 기간·이자 기준", exact: true });
   await expect(savedBasis).toContainText("4개 · 사전 사건 2개");
   await expect(savedBasis).toContainText("실제 계산 행3개");
@@ -211,6 +225,9 @@ test("source events stay distinct from months across comparison, rejection and b
   await expect(cashTable.getByRole("cell", { name: "M0", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Cash Flow 재실행", exact: true }).click();
   await expect.poll(() => budgetRuns.length).toBe(1);
+  expect(budgetRuns[0]).toEqual({});
+  expect(legacyPodRuns).toHaveLength(0);
+  await expect(page.getByRole("status").filter({ hasText: "Cash Flow 계산을 저장했습니다" })).toBeVisible();
   await expect(page.getByRole("region", { name: "저장 계산의 기간·이자 기준", exact: true })).toContainText("원본 사건·기간 순서 기준");
 });
 
@@ -324,3 +341,31 @@ test("missing monthly repayment and account values remain unknown without legacy
   const firstMonth = cashTable.getByRole("row").filter({ has: page.getByRole("cell", { name: "M0", exact: true }) });
   await expect(firstMonth.getByRole("cell")).toHaveText(["M0", "102", "미확인", "미확인", "미확인"], { timeout: 30_000 });
 });
+
+
+test("Cash Flow recalculation saves through the deterministic route and reloads its records", async ({ page }) => {
+  const state = await fixture(page, { budgetPartial: true });
+  const readsBefore = state.calculationReads();
+  await page.getByRole("button", { name: "Cash Flow 재계산", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Cash Flow 계산을 저장했습니다" }))
+    .toContainText("일부 후속 시나리오는 완료되지 않았으므로");
+  expect(state.budgetRuns).toEqual([{}]);
+  expect(state.legacyPodRuns).toHaveLength(0);
+  expect(state.calculations).toHaveLength(0);
+  expect(state.calculationReads()).toBeGreaterThan(readsBefore);
+  await expect(page.getByRole("button", { name: "Cash Flow 재계산", exact: true })).toBeEnabled();
+});
+
+for (const detail of ["대출 금액이 미입력되었습니다.", { error: "invalid_financial_input", message: "대출 금액과 사업기간을 확인해 주세요." }]) {
+  test(`Cash Flow recalculation explains ${typeof detail} errors and retains saved results`, async ({ page }) => {
+    const state = await fixture(page, { budgetError: detail });
+    const readsBefore = state.calculationReads();
+    await page.getByRole("button", { name: "Cash Flow 재계산", exact: true }).click();
+    await expect(page.getByText(typeof detail === "string" ? detail : detail.message, { exact: false })).toBeVisible();
+    expect(state.budgetRuns).toEqual([{}]);
+    expect(state.legacyPodRuns).toHaveLength(0);
+    expect(state.calculationReads()).toBe(readsBefore);
+    await expect(page.getByRole("status").filter({ hasText: "Cash Flow 계산을 저장했습니다" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Cash Flow 재계산", exact: true })).toBeEnabled();
+  });
+}

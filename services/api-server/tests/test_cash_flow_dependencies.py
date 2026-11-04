@@ -71,7 +71,7 @@ def test_cf_endpoint_uses_request_and_exposes_dependent_failure(monkeypatch):
         records.append((engine_key, deepcopy(input_data)))
         return {'calculationRunId': f'run-{engine_key}'}
     monkeypatch.setattr(projects, '_persist_calculation_run', persist)
-    result = projects.run_project_cash_flow('p', Request({"type": "http"}), request_data())
+    result = projects.run_project_cash_flow('p', Request({"type": "http", "method": "POST", "path": "/projects/p/cash-flow/run", "headers": [], "query_string": b"", "server": ("testserver", 80), "scheme": "http"}), request_data())
     assert result['summary']['totalRevenue'] == 200
     assert result['dependentExecutionStatus'] == 'completed'
     assert len(records) == 5
@@ -79,7 +79,7 @@ def test_cf_endpoint_uses_request_and_exposes_dependent_failure(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError('private DSN')
     monkeypatch.setattr(projects, '_persist_scenario_calculation_runs', fail)
-    result = projects.run_project_cash_flow('p', Request({"type": "http"}), request_data())
+    result = projects.run_project_cash_flow('p', Request({"type": "http", "method": "POST", "path": "/projects/p/cash-flow/run", "headers": [], "query_string": b"", "server": ("testserver", 80), "scheme": "http"}), request_data())
     assert result['dependentExecutionStatus'] == 'partial'
     assert result['dependentFailures'][0]['reason'] == 'dependent_scenario_failed'
     assert 'private' not in str(result)

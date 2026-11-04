@@ -136,8 +136,12 @@ function formatDate(value?: string) {
 }
 
 async function responseError(response: Response) {
-  const body = (await response.json().catch(() => null)) as { detail?: string } | null;
-  return body?.detail || `요청을 처리하지 못했습니다. (${response.status})`;
+  const body = asRecord(await response.json().catch(() => null));
+  if (typeof body.detail === "string") return body.detail;
+  const detail = asRecord(body.detail);
+  if (typeof detail.message === "string") return detail.message;
+  if (response.status === 403) return "이 작업을 실행할 권한이 없습니다. 현재 계정의 분석 권한을 확인해 주세요.";
+  return `요청을 처리하지 못했습니다. (${response.status})`;
 }
 
 async function fetchLatestDecisionRun(projectId: string): Promise<DecisionRun | null> {
@@ -176,6 +180,7 @@ export default function FeasibilityPage() {
   const [decisionRun, setDecisionRun] = useState<DecisionRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [calculationNotice, setCalculationNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -204,25 +209,33 @@ export default function FeasibilityPage() {
     void load();
   }, [load]);
 
-  async function runFeasibilityPod() {
+  async function recalculateCashFlow() {
     setRunning(true);
     setError(null);
+    setCalculationNotice(null);
     try {
       const response = await fetch(
-        `${apiBase}/projects/${projectId}/chief-orchestration/run-pod`,
+        `${apiBase}/projects/${encodeURIComponent(projectId)}/cash-flow/run`,
         {
           method: "POST",
           headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-          body: JSON.stringify({ podKey: "feasibility_cashflow" }),
+          body: JSON.stringify({}),
         },
       );
       if (!response.ok) throw new Error(await responseError(response));
+      const result = asRecord(await response.json());
+      if (typeof result.calculationRunId !== "string" || !result.calculationRunId) {
+        throw new Error("계산 저장 결과를 확인하지 못했습니다. 새로고침하여 저장 상태를 확인해 주세요.");
+      }
       await load();
+      setCalculationNotice(result.dependentExecutionStatus === "partial"
+        ? "Cash Flow 계산을 저장했습니다. 일부 후속 시나리오는 완료되지 않았으므로 해당 결과를 따로 확인해 주세요."
+        : "Cash Flow 계산을 저장했습니다. 아래에는 저장된 계산 결과를 표시합니다.");
     } catch (caught) {
       setError(
         caught instanceof Error
           ? caught.message
-          : "Feasibility-Cashflow Pod 실행에 실패했습니다.",
+          : "Cash Flow 재계산에 실패했습니다.",
       );
     } finally {
       setRunning(false);
@@ -331,6 +344,7 @@ export default function FeasibilityPage() {
 
   return (
     <div className="space-y-5 pb-8">
+      {calculationNotice ? <p role="status" className="rounded-re-control border border-re-border bg-re-subtle px-4 py-3 text-sm text-re-secondary">{calculationNotice}</p> : null}
       <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <p className="text-sm font-semibold text-re-secondary">{projectName}</p>
@@ -355,7 +369,7 @@ export default function FeasibilityPage() {
           </button>
           <button
             type="button"
-            onClick={() => void runFeasibilityPod()}
+            onClick={() => void recalculateCashFlow()}
             disabled={loading || running}
             className="inline-flex h-10 items-center gap-2 rounded-re-control bg-re-primary px-4 text-sm font-bold text-white disabled:opacity-50"
           >

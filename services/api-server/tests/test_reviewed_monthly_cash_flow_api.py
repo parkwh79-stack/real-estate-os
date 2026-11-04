@@ -175,6 +175,8 @@ def test_both_reviewed_and_complete_direct_monthly_requests_require_assumption_p
     review = payload(project)
     direct = build_cash_flow_request_use_case(project, review)
     def deny(request, permission):
+        if permission == "project:analyze":
+            return {"authorization": {"permission": permission}}
         assert permission == "assumption:override"
         raise HTTPException(403, "가정 변경 권한이 없습니다.")
     monkeypatch.setattr(projects, "authorize_request", deny)

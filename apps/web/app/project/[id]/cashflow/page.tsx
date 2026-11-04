@@ -57,6 +57,7 @@ export default function ProjectCashflowPage() {
   const [scenarioRuns, setScenarioRuns] = useState<Record<string, CalculationRunRecord | null>>({});
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [calculationNotice, setCalculationNotice] = useState<string | null>(null);
   const [buildingFeas, setBuildingFeas] = useState(false);
   const [feasInfo, setFeasInfo] = useState<{ method?: string; needsReview?: boolean; missing?: string[]; hasRevenueAndCost?: boolean; applied?: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -85,20 +86,32 @@ export default function ProjectCashflowPage() {
 
   useEffect(() => { void load(); }, [load]);
 
-  const runPod = useCallback(async () => {
+  const recalculateCashFlow = useCallback(async () => {
     setRunning(true);
     setError(null);
+    setCalculationNotice(null);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/run-pod`, {
+      const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/cash-flow/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders("web") },
-        body: JSON.stringify({ podKey: "feasibility_cashflow", options: { forceTrigger: "max_minus_exceeds_pf_limit" } }),
+        body: JSON.stringify({}),
       });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(String(body.detail ?? "Feasibility-Cashflow Pod 실행에 실패했습니다."));
+      if (!res.ok) {
+        const detail = body?.detail;
+        throw new Error(typeof detail === "string" ? detail
+          : typeof detail?.message === "string" ? detail.message
+          : `Cash Flow 재계산을 처리하지 못했습니다. (${res.status})`);
+      }
+      if (typeof body?.calculationRunId !== "string" || !body.calculationRunId) {
+        throw new Error("계산 저장 결과를 확인하지 못했습니다. 새로고침하여 저장 상태를 확인해 주세요.");
+      }
       await load();
+      setCalculationNotice(body.dependentExecutionStatus === "partial"
+        ? "Cash Flow 계산을 저장했습니다. 일부 후속 시나리오는 완료되지 않았으므로 해당 결과를 따로 확인해 주세요."
+        : "Cash Flow 계산을 저장했습니다. 아래에는 저장된 계산 결과를 표시합니다.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Feasibility-Cashflow Pod 실행에 실패했습니다.");
+      setError(err instanceof Error ? err.message : "Cash Flow 재계산에 실패했습니다.");
     } finally {
       setRunning(false);
     }
@@ -117,7 +130,7 @@ export default function ProjectCashflowPage() {
       if (!res.ok) throw new Error(String(body.detail ?? "사업수지 구성에 실패했습니다."));
       setFeasInfo(body);
       if (body.hasRevenueAndCost) {
-        await runPod(); // feasibility_input이 채워졌으니 Cash Flow를 계산
+        await recalculateCashFlow(); // feasibility_input이 채워졌으니 Cash Flow를 계산
       } else {
         await load();
       }
@@ -126,7 +139,7 @@ export default function ProjectCashflowPage() {
     } finally {
       setBuildingFeas(false);
     }
-  }, [projectId, runPod, load]);
+  }, [projectId, recalculateCashFlow, load]);
 
   const rows = useMemo(() => cashflow?.monthly ?? [], [cashflow]);
   const summary = cashflow?.summary ?? {};
@@ -155,11 +168,12 @@ export default function ProjectCashflowPage() {
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => void load()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 disabled:opacity-40"><RefreshCw className="h-4 w-4" />새로고침</button>
           <button type="button" onClick={() => void buildFeasibilityInput()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-3 text-sm font-black text-indigo-700 disabled:opacity-40"><Calculator className="h-4 w-4" />{buildingFeas ? "사업수지 구성 중…" : "AI 사업수지 구성"}</button>
-          <button type="button" onClick={() => void runPod()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white disabled:opacity-40">{running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}{running ? "계산 중" : "Cash Flow 재실행"}</button>
+          <button type="button" onClick={() => void recalculateCashFlow()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white disabled:opacity-40">{running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}{running ? "계산 중" : "Cash Flow 재실행"}</button>
           <a href={`/api/projects/${encodeURIComponent(projectId)}/cashflow/export`} download className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-sm font-black text-indigo-700"><Download className="h-4 w-4" />수식 Excel 다운로드</a>
         </div>
       </header>
 
+      {calculationNotice ? <p role="status" className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">{calculationNotice}</p> : null}
       {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div> : null}
       {feasInfo ? (
         <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs font-semibold text-indigo-800">
@@ -168,7 +182,7 @@ export default function ProjectCashflowPage() {
             : `총수입·총사업비 근거를 찾지 못했습니다. 사업수지 Excel(또는 사업계획서)을 업로드하거나 상품구성·분양가를 입력하세요. (출처: ${FEAS_METHOD_LABEL[feasInfo.method ?? ""] ?? feasInfo.method})`}
         </div>
       ) : null}
-      {loading ? <EmptyState title="CalculationRun을 조회하는 중입니다." body="프로젝트 원장에서 최신 계산 결과와 근거를 읽고 있습니다." loading /> : !cashflow ? <EmptyState title="저장된 Cash Flow 계산 결과가 없습니다." body="파싱된 사업수지가 있으면 ‘AI 사업수지 구성’으로 total_revenue·total_cost를 채운 뒤 Cash Flow를 계산합니다. 없으면 사업수지 Excel/사업계획서를 먼저 업로드하세요." action={<div className="flex gap-2"><button type="button" onClick={() => void buildFeasibilityInput()} disabled={buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-4 text-sm font-black text-indigo-700 disabled:opacity-40"><Calculator className="h-4 w-4" />AI 사업수지 구성</button><button type="button" onClick={() => void runPod()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white"><PlayCircle className="h-4 w-4" />Pod 실행</button></div>} /> : (
+      {loading ? <EmptyState title="CalculationRun을 조회하는 중입니다." body="프로젝트 원장에서 최신 계산 결과와 근거를 읽고 있습니다." loading /> : !cashflow ? <EmptyState title="저장된 Cash Flow 계산 결과가 없습니다." body="파싱된 사업수지가 있으면 ‘AI 사업수지 구성’으로 total_revenue·total_cost를 채운 뒤 Cash Flow를 계산합니다. 없으면 사업수지 Excel/사업계획서를 먼저 업로드하세요." action={<div className="flex gap-2"><button type="button" onClick={() => void buildFeasibilityInput()} disabled={buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-4 text-sm font-black text-indigo-700 disabled:opacity-40"><Calculator className="h-4 w-4" />AI 사업수지 구성</button><button type="button" onClick={() => void recalculateCashFlow()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white"><PlayCircle className="h-4 w-4" />Cash Flow 계산</button></div>} /> : (
         <>
           <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             <KpiCard label="Max Minus" value={cashflow.maxMinusEok === null ? "미확인" : formatEok(Math.abs(cashflow.maxMinusEok))} sub={cashflow.maxMinusPeriodIndex === null ? "발생 위치 미확인" : `${cashFlowPeriodLabel(cashflow.periodBasis, cashflow.maxMinusPeriodIndex)} 발생`} icon={<TrendingDown className="h-5 w-5 text-rose-600" />} tone="text-rose-700" />
