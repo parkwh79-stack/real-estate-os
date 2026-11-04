@@ -8,7 +8,7 @@ from typing import Any
 
 from core.calculations import calculate_development_profit
 from core.financial_input_validation import FinancialInputError
-from core.cash_flow_periods import is_source_sequence
+from core.cash_flow_periods import is_source_sequence, require_monthly_financing_period
 from core.schedule import schedule_event_map, schedule_month_indices
 from use_cases.cash_flow_dependencies import financial_input_hash
 
@@ -293,6 +293,27 @@ def _metrics(run: dict) -> dict:
     return {"values": values, "derived": derived}
 
 
+def _aligned_cash_flow(baseline: dict, changed: dict, period: dict) -> dict | None:
+    # Calendar epochs and complete sequential indices have already been compared.
+    # Legacy workbook events can still invalidate a nominal monthly schedule.
+    try:
+        for run in (baseline, changed):
+            require_monthly_financing_period(run["inputSnapshot"])
+    except FinancialInputError:
+        return None
+    baseline_rows = baseline["resultSnapshot"]["monthlyCashFlow"]
+    changed_rows = changed["resultSnapshot"]["monthlyCashFlow"]
+    rows = [
+        {"monthIndex": before["monthIndex"],
+         "baselineValue": _number(before.get("cumulativeCashFlowBeforePfDraw")),
+         "comparisonValue": _number(after.get("cumulativeCashFlowBeforePfDraw"))}
+        for before, after in zip(baseline_rows, changed_rows, strict=True)
+    ]
+    if not any(row["baselineValue"] is not None and row["comparisonValue"] is not None for row in rows):
+        return None
+    return {"baseMonth": period["baseMonth"], "rows": rows}
+
+
 def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: dict | None = None) -> dict:
     reasons = sorted(set(run_issues(baseline) + run_issues(changed)))
     base, other = run_summary(baseline), run_summary(changed)
@@ -317,6 +338,10 @@ def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: di
     if base["period"] != other["period"]:
         response["status"] = "partial"
         response["reasons"].append("period_mismatch")
+    elif base["period"]["axis"] == "calendar":
+        aligned = _aligned_cash_flow(baseline, changed, base["period"])
+        if aligned is not None:
+            response["alignedCashFlow"] = aligned
     if any(info["period"]["basis"] == "source_sequence" for info in (base, other)):
         response["status"] = "partial"
         response["reasons"].append("source_period_duration_unconfirmed")

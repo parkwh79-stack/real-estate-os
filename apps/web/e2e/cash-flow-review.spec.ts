@@ -55,14 +55,18 @@ function result(monthly: boolean, missingMonthlyValues = false, periodBasis?: Ca
 
 async function fixture(page: Page, options: { runConflict?: boolean; saveConflict?: boolean; initialTwo?: boolean;
   saveGate?: Promise<void>; missingMonthlyValues?: boolean; periodBasis?: CashFlowPeriodBasis;
-  firstRowMaximum?: boolean; maximumRowValue?: unknown; budgetError?: string | Record<string, unknown>; budgetPartial?: boolean } = {}) {
+  firstRowMaximum?: boolean; maximumRowValue?: unknown; budgetError?: string | Record<string, unknown>;
+  budgetPartial?: boolean; budgetCreatesRun?: boolean; refreshFailsOnce?: boolean } = {}) {
   let calculated = options.initialTwo ?? false;
+  let budgetRecalculated = false;
+  let refreshFails = options.refreshFailsOnce ?? false;
   let saved = false;
   let workingStart = "2026-01-01";
   const sourceSequence = options.periodBasis?.kind === "source_sequence";
   const frozenPeriod = sourceSequence ? { ...period, kind: "source_sequence", baseMonth: null } : period;
   const baseRun = { ...baselineRun, period: frozenPeriod };
   const nextRun = { ...changedRun, period: frozenPeriod, ...(sourceSequence ? { policyMode: "budget_finance_allocation" } : {}) };
+  const budgetRun = { ...baseRun, calculationRunId: "budget-rerun", createdAt: "2026-10-14T01:02:00Z" };
   const calculations: Record<string, unknown>[] = [];
   const selections: Record<string, unknown>[] = [];
   const budgetRuns: Record<string, unknown>[] = [];
@@ -74,12 +78,17 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
   };
   const preview = () => ({ status: "partial", reasons: sourceSequence ? [] : ["financing_policy_mismatch"],
     baseline: baseRun, comparison: nextRun, sourceChanged: false,
-    metrics: [{ key: "financialCost", label: "금융비용", unit: "KRW", baselineValue: 900_000_000,
+    metrics: [{ key: "totalProjectCost", label: "총사업비", unit: "KRW", baselineValue: 200_000_000, comparisonValue: 215_000_000, delta: 15_000_000 },
+      { key: "financialCost", label: "금융비용", unit: "KRW", baselineValue: 900_000_000,
       comparisonValue: 405_020_000, delta: -494_980_000 },
       { key: "outstandingDebt", label: "잔여 대출", unit: "KRW", baselineValue: null, comparisonValue: 0, delta: null }],
-    inputChanges: [{ path: "monthlyFinancing", label: "금융 계산 방식", before: null, after: policy }], inputChangeCount: 1 });
+    inputChanges: [{ path: "monthlyFinancing", label: "금융 계산 방식", before: null, after: policy }], inputChangeCount: 1,
+    alignedCashFlow: options.periodBasis?.kind === "calendar_monthly" ? { baseMonth: "2026-01", rows: [
+      { monthIndex: 1, baselineValue: -100_000_000, comparisonValue: -90_000_000 },
+      { monthIndex: 2, baselineValue: 20_000_000, comparisonValue: 30_000_000 },
+    ] } : undefined });
   const state = (isPreview = false) => ({ comparisonHash: saved ? "saved-state" : "current-state",
-    availableRuns: calculated ? [nextRun, baseRun] : [baseRun],
+    availableRuns: [...(budgetRecalculated ? [budgetRun] : []), ...(calculated ? [nextRun] : []), baseRun],
     selection: saved || isPreview ? { baselineRunId: "base-run", comparisonRunId: "changed-run", saved: !isPreview } : null,
     comparison: saved || isPreview ? preview() : null });
   await page.route("**/api/backend/**", async (route) => {
@@ -93,9 +102,9 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
     else if (path.endsWith("/orchestrations")) body = [];
     else if (path.endsWith("/feasibility-workbook/review")) body = { reviewHash: "reviewed-input", terms: { schedule: { construction_start: workingStart } } };
     else if (path.endsWith("/calculation-runs")) {
-      calculationReads += 1;
       const engine = url.searchParams.get("engine_key");
-      body = { records: engine === "cash_flow_engine" ? [{ calculationRunId: calculated ? "changed-run" : "base-run", engineKey: engine,
+      if (engine === "cash_flow_engine") calculationReads += 1;
+      body = { records: engine === "cash_flow_engine" ? [{ calculationRunId: budgetRecalculated ? budgetRun.calculationRunId : calculated ? "changed-run" : "base-run", engineKey: engine,
         inputSnapshot: { financialInputHash: calculated ? "new-hash" : "base-hash", ...(calculated && !sourceSequence ? { monthlyFinancing: policy } : {}) },
         resultSnapshot: storedResult() }] : [{ calculationRunId: "stale-child", engineKey: engine,
         inputSnapshot: { parentCalculationRunId: "base-run", financialInputHash: "base-hash" },
@@ -104,10 +113,15 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
       const requestBody = route.request().postDataJSON() as Record<string, unknown>;
       if (Object.keys(requestBody).length === 0) {
         budgetRuns.push(requestBody);
+        budgetRecalculated = Boolean(!options.budgetError && options.budgetCreatesRun);
         await route.fulfill(options.budgetError
           ? { status: 422, json: { detail: options.budgetError } }
-          : { status: 200, json: { ...result(false, false, options.periodBasis), calculationRunId: "base-run",
-            dependentExecutionStatus: options.budgetPartial ? "partial" : "completed" } });
+          : { status: 200, json: { ...result(false, false, options.periodBasis), calculationRunId: budgetRecalculated ? budgetRun.calculationRunId : "base-run",
+            dependentExecutionStatus: options.budgetPartial ? "partial" : "completed",
+            dependentFailures: options.budgetPartial ? [
+              { engines: ["waterfall", "tranche_recovery", "unsold_ltv"], status: "needs_input", reason: "dependent_scenario_input_missing", missingFields: ["pfStructure"] },
+              { engines: ["discount_stress"], status: "failed", reason: "dependent_stress_failed" },
+            ] : [] } });
         return;
       }
       calculations.push(requestBody);
@@ -124,6 +138,11 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
       legacyPodRuns.push(requestBody);
       body = { status: "completed" };
     } else if (path.endsWith("/cash-flow/comparison")) {
+      if (budgetRecalculated && refreshFails && route.request().method() === "GET") {
+        refreshFails = false;
+        await route.fulfill({ status: 503, json: { detail: "비교 원장 일시 중단" } });
+        return;
+      }
       if (route.request().method() === "POST") {
         selections.push(route.request().postDataJSON());
         await options.saveGate;
@@ -158,6 +177,8 @@ test("explicitly choose a monthly policy, calculate and reopen the saved compari
   await expect(panel.getByLabel("기준 계산")).toHaveValue("base-run");
   await expect(panel.getByLabel("변경 계산")).toHaveValue("changed-run");
   await panel.getByRole("button", { name: "차이 확인", exact: true }).click();
+  await expect(panel.getByRole("region", { name: "주요 금액 차이", exact: true })).toContainText("+15,000,000원");
+  await expect(panel.getByRole("region", { name: "같은 월차의 누적 현금흐름 비교", exact: true })).toBeVisible();
   await expect(panel.getByText("금융비용", { exact: true })).toBeVisible();
   await expect(panel.getByText("금융비용 계산 방식이 다른 두 안입니다.", { exact: true })).toBeVisible();
   await expect(panel.getByText("미확인", { exact: true }).first()).toBeVisible();
@@ -207,6 +228,7 @@ test("source events stay distinct from months across comparison, rejection and b
   await panel.getByLabel("변경 계산").selectOption("changed-run");
   await panel.getByRole("button", { name: "차이 확인", exact: true }).click();
   await expect(panel).toContainText("원본 순서 1~3 · 달력·이자기간 미확인");
+  await expect(panel.getByRole("region", { name: "같은 월차의 누적 현금흐름 비교", exact: true })).toHaveCount(0);
   await panel.getByRole("button", { name: "비교 선택 저장", exact: true }).click();
   changeWorkingDates();
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -305,7 +327,8 @@ test("a pending comparison save blocks duplicate actions", async ({ page }) => {
 test("the cashflow screen never shows old one-shot scenarios beside a monthly review", async ({ page }) => {
   await fixture(page, { initialTwo: true });
   await page.goto("/project/r2-1/cashflow", { waitUntil: "domcontentloaded" });
-  await expect(page.getByText("월별 금융 검토안은 별도 상환 기준을 사용합니다.", { exact: false })).toBeVisible({ timeout: 30_000 });
+  const followups = page.getByRole("region", { name: "PF 후속 계산 상태", exact: true });
+  await expect(followups.getByText("미지원", { exact: true })).toHaveCount(4);
   await expect(page.getByText("이전 계산의 시나리오", { exact: true })).toHaveCount(0);
   const cashTable = page.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "지출 (원금상환 포함)", exact: true }) });
   await expect(cashTable.getByRole("columnheader", { name: "수입 (PF 포함)", exact: true })).toBeVisible();
@@ -344,17 +367,41 @@ test("missing monthly repayment and account values remain unknown without legacy
 
 
 test("Cash Flow recalculation saves through the deterministic route and reloads its records", async ({ page }) => {
-  const state = await fixture(page, { budgetPartial: true });
+  const state = await fixture(page, { budgetPartial: true, budgetCreatesRun: true });
   const readsBefore = state.calculationReads();
   await page.getByRole("button", { name: "Cash Flow 재계산", exact: true }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Cash Flow 계산을 저장했습니다" }))
-    .toContainText("일부 후속 시나리오는 완료되지 않았으므로");
+  await expect(page.getByRole("status").filter({ hasText: "Cash Flow 계산을 저장했습니다" })).toBeVisible();
+  const followups = page.getByRole("region", { name: "PF 후속 계산 상태", exact: true });
+  const waterfall = followups.getByRole("article", { name: "상환순서" });
+  await expect(waterfall).toContainText("자료 필요");
+  await expect(waterfall.getByRole("link", { name: "PF 대출 조건 확인" })).toHaveAttribute("href", "/project/r2-1/input-package#cash-flow-financing-review");
+  await expect(followups.getByRole("article", { name: "할인분양 스트레스" })).toContainText("오류");
   expect(state.budgetRuns).toEqual([{}]);
   expect(state.legacyPodRuns).toHaveLength(0);
   expect(state.calculations).toHaveLength(0);
   expect(state.calculationReads()).toBeGreaterThan(readsBefore);
   await expect(page.getByRole("button", { name: "Cash Flow 재계산", exact: true })).toBeEnabled();
 });
+
+for (const refreshFailsOnce of [false, true]) {
+  test(`recalculation makes the new run selectable and preserves draft fields (refresh recovery ${refreshFailsOnce})`, async ({ page }) => {
+    const { panel } = await fixture(page, { budgetCreatesRun: true, refreshFailsOnce });
+    const baseline = panel.getByLabel("기준 계산", { exact: true });
+    const changed = panel.getByLabel("변경 계산", { exact: true });
+    const reason = panel.getByLabel("월별 금융 검토 이유", { exact: true });
+    await baseline.selectOption("base-run");
+    await reason.fill("비교 목록 갱신 전에 입력한 검토 이유");
+    await page.getByRole("button", { name: "Cash Flow 재계산", exact: true }).click();
+    if (refreshFailsOnce) {
+      await expect(panel.getByRole("alert")).toContainText("계산을 저장했습니다.");
+      await panel.getByRole("button", { name: "입력·계산 목록 새로고침", exact: true }).click();
+    }
+    await changed.selectOption("budget-rerun");
+    await expect(baseline).toHaveValue("base-run");
+    await expect(reason).toHaveValue("비교 목록 갱신 전에 입력한 검토 이유");
+    await expect(panel.getByRole("button", { name: "차이 확인", exact: true })).toBeEnabled();
+  });
+}
 
 for (const detail of ["대출 금액이 미입력되었습니다.", { error: "invalid_financial_input", message: "대출 금액과 사업기간을 확인해 주세요." }]) {
   test(`Cash Flow recalculation explains ${typeof detail} errors and retains saved results`, async ({ page }) => {

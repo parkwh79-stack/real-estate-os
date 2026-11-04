@@ -57,6 +57,7 @@ def test_saved_comparison_creates_separate_four_section_draft_with_exact_frozen_
     snapshot = report["cashFlowComparisonSnapshot"]
     assert snapshot["baselineRun"] == rows[0]
     assert snapshot["comparisonRun"] == rows[1]
+    assert snapshot["comparison"]["alignedCashFlow"] == client.get(f"/projects/{pid}/cash-flow/comparison").json()["comparison"]["alignedCashFlow"]
     assert snapshot["projectId"] == pid and snapshot["tenantId"] == "legacy"
     assert report["cashFlowComparisonSnapshotHash"] == content_hash(snapshot)
     assert len(report["sectionOrder"]) == 4

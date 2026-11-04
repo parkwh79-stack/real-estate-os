@@ -3820,8 +3820,18 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
             {**scenario_input, **scenario_request.model_dump(mode="json")},
             strict=True,
         )
-    except Exception:
-        dependent_failures.append({"engines": ["waterfall", "tranche_recovery", "unsold_ltv"], "status": "failed", "reason": "dependent_scenario_failed"})
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) and exc.status_code == 422 else None
+        scenario_engines = ["waterfall", "tranche_recovery", "unsold_ltv"]
+        if isinstance(detail, dict) and detail.get("error") == "insufficient_input":
+            dependent_failures.append({
+                "engines": scenario_engines,
+                "status": "needs_input",
+                "reason": "dependent_scenario_input_missing",
+                "missingFields": detail.get("missingFields") or [],
+            })
+        else:
+            dependent_failures.append({"engines": scenario_engines, "status": "failed", "reason": "dependent_scenario_failed"})
         scenario_run_ids = {}
 
     try:

@@ -5,11 +5,12 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { useParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Calculator, Download, Loader2, PlayCircle, RefreshCw, ShieldCheck, TrendingDown, Wallet } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
-import { bindCashflowDependents, fetchLatestCalculationRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
+import { fetchCashFlowDependentRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
 import { trancheAmounts, amountInEok } from "../../../../lib/tranche-display";
 import { CashFlowPeriodBasisPanel, cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flow-period-basis";
-
-const SCENARIO_ENGINES = ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"];
+import { CashFlowPeriodChart } from "../../../../components/feasibility/cash-flow-period-chart";
+import { PfFollowupStatus } from "../../../../components/feasibility/pf-followup-status";
+import { readPfFollowupExecution } from "../../../../lib/pf-followup-status";
 
 const FEAS_METHOD_LABEL: Record<string, string> = {
   feasibility_workbook_v2: "사업수지 워크북(정본)",
@@ -45,16 +46,12 @@ function formatPercent(value: number): string {
   return `${Number.isInteger(percent) ? "" : "약 "}${formatValue(percent)}%`;
 }
 
-function metric(run: CalculationRunRecord | null, keys: string[]): unknown {
-  const found = (run?.outputMetrics ?? []).find((item) => keys.includes(String(item.key ?? item.metricKey ?? "")));
-  return found?.value;
-}
-
 export default function ProjectCashflowPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const [cashflow, setCashflow] = useState<CashflowResult | null>(null);
-  const [scenarioRuns, setScenarioRuns] = useState<Record<string, CalculationRunRecord | null>>({});
+  const [followupRegistry, setFollowupRegistry] = useState<Awaited<ReturnType<typeof fetchCashFlowDependentRuns>>>({ runs: {}, unavailable: [] });
+  const [followupExecution, setFollowupExecution] = useState<ReturnType<typeof readPfFollowupExecution>>();
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [calculationNotice, setCalculationNotice] = useState<string | null>(null);
@@ -69,14 +66,9 @@ export default function ProjectCashflowPage() {
       // Scenario registry is supplementary. A transient scenario/API failure
       // must not hide the primary persisted Cash Flow calculation.
       const cashflowResult = await fetchLatestCashflow(projectId);
-      let runs: Record<string, CalculationRunRecord | null> = {};
-      try {
-        runs = await fetchLatestCalculationRuns(projectId, SCENARIO_ENGINES);
-      } catch {
-        runs = {};
-      }
+      const followups = await fetchCashFlowDependentRuns(projectId, cashflowResult);
       setCashflow(cashflowResult);
-      setScenarioRuns(bindCashflowDependents(cashflowResult, runs));
+      setFollowupRegistry(followups);
     } catch (err) {
       setError(err instanceof Error ? err.message : "계산 결과를 불러오지 못했습니다.");
     } finally {
@@ -106,10 +98,9 @@ export default function ProjectCashflowPage() {
       if (typeof body?.calculationRunId !== "string" || !body.calculationRunId) {
         throw new Error("계산 저장 결과를 확인하지 못했습니다. 새로고침하여 저장 상태를 확인해 주세요.");
       }
+      setFollowupExecution(readPfFollowupExecution(body));
       await load();
-      setCalculationNotice(body.dependentExecutionStatus === "partial"
-        ? "Cash Flow 계산을 저장했습니다. 일부 후속 시나리오는 완료되지 않았으므로 해당 결과를 따로 확인해 주세요."
-        : "Cash Flow 계산을 저장했습니다. 아래에는 저장된 계산 결과를 표시합니다.");
+      setCalculationNotice("Cash Flow 계산을 저장했습니다.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Cash Flow 재계산에 실패했습니다.");
     } finally {
@@ -193,14 +184,11 @@ export default function ProjectCashflowPage() {
           </section>
 
           <CashFlowPeriodBasisPanel basis={cashflow.periodBasis} runId={runId} projectId={projectId} />
-
-          {!Object.values(scenarioRuns).some(Boolean) ? <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-            {cashflow.inputSnapshot?.monthlyFinancing
-              ? "월별 금융 검토안은 별도 상환 기준을 사용합니다. 기존 일괄 상환·스트레스 시나리오는 계산 기준을 연결하기 전까지 표시하지 않습니다."
-              : "현재 Cash Flow와 부모 계산·입력 기준이 일치하는 후속 시나리오가 없습니다. 같은 기준으로 다시 계산한 결과가 필요합니다."}
-          </p> : null}
-          <ScenarioRegistryPanel runs={scenarioRuns} />
-          <ScenarioDetailPanel runs={scenarioRuns} />
+          <CashFlowPeriodChart cashflow={cashflow} />
+          <PfFollowupStatus projectId={projectId} cashflow={cashflow} runs={followupRegistry.runs}
+            unavailableEngines={followupRegistry.unavailable} execution={followupExecution} />
+          {["waterfall", "tranche_recovery", "unsold_ltv"].some((key) => followupRegistry.runs[key])
+            ? <ScenarioDetailPanel runs={followupRegistry.runs} /> : null}
           <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-200 p-5"><div><h2 className="text-lg font-black text-slate-950">{sourceSequence ? "원본 순서별 Cash Flow" : "월별 Cash Flow"}</h2><p className="mt-1 text-xs font-semibold text-slate-500">{monthlyReview
@@ -214,16 +202,6 @@ export default function ProjectCashflowPage() {
       )}
     </div>
   );
-}
-
-function ScenarioRegistryPanel({ runs }: { runs: Record<string, CalculationRunRecord | null> }) {
-  const items = [
-    ["waterfall", "상환 Waterfall", ["waterfall.summary.shortfallFlagCount"]],
-    ["tranche_recovery", "Tranche별 회수율", ["tranche_recovery.senior"]],
-    ["unsold_ltv", "미분양 LTV", ["unsold_ltv.summary.maxUnsoldLtv"]],
-    ["discount_stress", "할인분양 Stress", ["discount_stress.discount10.exitSaleRate"]],
-  ] as const;
-  return <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{items.map(([key, title, keys]) => { const run = runs[key]; return <div key={key} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center justify-between"><p className="text-sm font-black text-slate-950">{title}</p><span className={`rounded-full px-2 py-1 text-[11px] font-black ${run ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{run ? "저장됨" : "미실행"}</span></div><p className="mt-3 text-xl font-black text-slate-900">{run ? formatValue(metric(run, [...keys])) : "-"}</p><p className="mt-1 break-all text-[11px] font-semibold text-slate-500">{run ? `${run.calculationRunId} · ${run.engineVersion ?? "-"}` : "해당 엔진을 실행하면 표시됩니다."}</p><p className="mt-2 break-all text-[10px] text-slate-400">{run?.sourceLocator ? JSON.stringify(run.sourceLocator) : "source locator 없음"}</p></div>; })}</section>;
 }
 
 function ScenarioDetailPanel({ runs }: { runs: Record<string, CalculationRunRecord | null> }) {
@@ -255,6 +233,7 @@ function ScenarioDetailPanel({ runs }: { runs: Record<string, CalculationRunReco
 }
 
 function DetailTable({ title, run, headers, rows }: { title: string; run: CalculationRunRecord | null | undefined; headers: string[]; rows: string[][] }) {
+  if (!run) return null;
   return <div className="overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center justify-between"><h3 className="text-sm font-black text-slate-950">{title}</h3><span className={`rounded-full px-2 py-1 text-[11px] font-black ${run ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{run ? "계산 완료" : "재실행 필요"}</span></div>{rows.length ? <div className="mt-3 max-h-64 overflow-auto"><table className="w-full min-w-[420px] text-right text-[11px]"><thead className="sticky top-0 bg-slate-50 text-slate-500"><tr>{headers.map((header) => <th key={header} className="p-2">{header}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, index) => <tr key={`${title}-${index}`}>{row.map((cell, cellIndex) => <td key={`${index}-${cellIndex}`} className="p-2 font-semibold">{cell}</td>)}</tr>)}</tbody></table></div> : <p className="mt-4 text-xs font-semibold text-slate-500">Cash Flow를 재실행하면 최신 CalculationRun 결과가 표시됩니다.</p>}</div>;
 }
 

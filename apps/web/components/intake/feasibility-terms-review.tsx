@@ -39,7 +39,7 @@ export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbo
     </div>;
   };
   return <div className="mt-5 space-y-4">
-    <fieldset disabled={disabled} className="min-w-0 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+    <fieldset id="cash-flow-schedule-review" disabled={disabled} className="min-w-0 scroll-mt-24 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
       <legend className="px-1 font-bold">사업기간{draft.scheduleDirty ? " · 저장 전" : ""}</legend>
       <p className="mb-3 text-xs text-slate-500">계획일을 YYYY-MM-DD로 입력하세요. 미입력 항목은 비워 두며, 입력을 지우면 미입력으로 저장합니다.</p>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{SCHEDULE_FIELDS.map(([key, label]) =>
@@ -53,7 +53,7 @@ export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbo
       </div>
       {reviewControls("schedule", "사업기간")}
     </fieldset>
-    <fieldset disabled={disabled} className="min-w-0 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+    <fieldset id="cash-flow-financing-review" disabled={disabled} className="min-w-0 scroll-mt-24 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
       <legend className="px-1 font-bold">대출 조건{draft.financingDirty ? " · 저장 전" : ""}</legend>
       {workbookFinancing?.terms?.length ? <details className="mb-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
         <summary className="cursor-pointer font-bold">원본에서 읽은 대출 조건</summary>

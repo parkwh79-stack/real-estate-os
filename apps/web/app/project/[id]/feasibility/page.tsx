@@ -30,9 +30,12 @@ import {
   resolveFinancialDecisionBinding,
   type FinancialDecisionBinding,
 } from "../../../../lib/financial-decision-package";
-import { fetchLatestCashflow, type CashflowResult } from "../../../../lib/project-client";
+import { fetchCashFlowDependentRuns, fetchLatestCashflow, type CashflowResult } from "../../../../lib/project-client";
 import { CashFlowReviewWorkspace } from "../../../../components/feasibility/cash-flow-review-workspace";
 import { cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flow-period-basis";
+import { CashFlowPeriodChart } from "../../../../components/feasibility/cash-flow-period-chart";
+import { PfFollowupStatus } from "../../../../components/feasibility/pf-followup-status";
+import { readPfFollowupExecution } from "../../../../lib/pf-followup-status";
 import {
   displayText,
   fetchWorkspaceContext,
@@ -182,6 +185,11 @@ export default function FeasibilityPage() {
   const [running, setRunning] = useState(false);
   const [calculationNotice, setCalculationNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [recalculation, setRecalculation] = useState<{ projectId: string; runId: string }>();
+  const [followupExecution, setFollowupExecution] = useState<ReturnType<typeof readPfFollowupExecution>>();
+  const [followupRegistry, setFollowupRegistry] = useState<{
+    projectId: string; cashflow: CashflowResult; data: Awaited<ReturnType<typeof fetchCashFlowDependentRuns>>;
+  }>();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -209,6 +217,21 @@ export default function FeasibilityPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!cashflow) return;
+    const controller = new AbortController();
+    void fetchCashFlowDependentRuns(projectId, cashflow, controller.signal).then((data) => {
+      if (!controller.signal.aborted) setFollowupRegistry({ projectId, cashflow, data });
+    });
+    return () => controller.abort();
+  }, [projectId, cashflow]);
+
+  const onMonthlyCalculated = useCallback(async (result: { calculationRunId: string }) => {
+    setFollowupExecution(readPfFollowupExecution(result));
+    setCalculationNotice(null);
+    await load();
+  }, [load]);
+
   async function recalculateCashFlow() {
     setRunning(true);
     setError(null);
@@ -227,10 +250,10 @@ export default function FeasibilityPage() {
       if (typeof result.calculationRunId !== "string" || !result.calculationRunId) {
         throw new Error("계산 저장 결과를 확인하지 못했습니다. 새로고침하여 저장 상태를 확인해 주세요.");
       }
+      setRecalculation({ projectId, runId: result.calculationRunId });
+      setFollowupExecution(readPfFollowupExecution(result));
       await load();
-      setCalculationNotice(result.dependentExecutionStatus === "partial"
-        ? "Cash Flow 계산을 저장했습니다. 일부 후속 시나리오는 완료되지 않았으므로 해당 결과를 따로 확인해 주세요."
-        : "Cash Flow 계산을 저장했습니다. 아래에는 저장된 계산 결과를 표시합니다.");
+      setCalculationNotice("Cash Flow 계산을 저장했습니다.");
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -244,6 +267,8 @@ export default function FeasibilityPage() {
 
   const cashflowSummary = cashflow?.summary ?? {};
   const sourceSequence = cashflow?.periodBasis?.kind === "source_sequence";
+  const currentFollowups = followupRegistry?.projectId === projectId && followupRegistry.cashflow === cashflow
+    ? followupRegistry.data : undefined;
   const inputSnapshot = asRecord(cashflow?.inputSnapshot);
   const sourceMetadata = asRecord(cashflow?.sourceMetadata);
   const projectName = displayText(
@@ -399,7 +424,9 @@ export default function FeasibilityPage() {
         </div>
       ) : null}
 
-      <CashFlowReviewWorkspace projectId={projectId} cashflow={cashflow} disabled={loading || running} onCalculated={load} onBusyChange={setRunning} />
+      <CashFlowReviewWorkspace key={projectId} projectId={projectId} cashflow={cashflow}
+        recalculatedRunId={recalculation?.projectId === projectId ? recalculation.runId : undefined}
+        disabled={loading || running} onCalculated={onMonthlyCalculated} onBusyChange={setRunning} />
 
       {loading ? (
         <div className="flex min-h-[260px] items-center justify-center rounded-re-panel border border-re-border bg-re-surface text-sm font-bold text-re-secondary">
@@ -502,6 +529,11 @@ export default function FeasibilityPage() {
             />
           </section>
 
+          {cashflow ? <CashFlowPeriodChart cashflow={cashflow} /> : null}
+          {cashflow && currentFollowups ? (
+            <PfFollowupStatus projectId={projectId} cashflow={cashflow} runs={currentFollowups.runs}
+              unavailableEngines={currentFollowups.unavailable} execution={followupExecution} />
+          ) : null}
           <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
             <Panel title={sourceSequence ? "원본 순서별 Cash Flow" : "월별 Cash Flow"} subtitle="최근 저장 결과의 최초 18개 계산 행 · 억원 · 정수 반올림 표시">
               {rows.length ? (

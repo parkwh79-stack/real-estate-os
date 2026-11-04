@@ -59,7 +59,35 @@ def test_compares_persisted_results_without_mutation_or_canonical_promotion():
     assert all(item["label"] for item in result["inputChanges"])
     assert result["businessInputsChanged"] is True and result["sourceChanged"] is False
     assert result["reportEligible"] is False and result["approvalStatus"] == "not_requested"
+    assert result["alignedCashFlow"] == {"baseMonth": "2026-01", "rows": [
+        {"monthIndex": before["monthIndex"],
+         "baselineValue": before["cumulativeCashFlowBeforePfDraw"],
+         "comparisonValue": after["cumulativeCashFlowBeforePfDraw"]}
+        for before, after in zip(base["resultSnapshot"]["monthlyCashFlow"], changed["resultSnapshot"]["monthlyCashFlow"], strict=True)
+    ]}
     assert (base, changed) == before
+
+
+def test_aligned_rows_preserve_gaps_and_require_paired_stored_values():
+    base, changed = record(), record("changed")
+    rows = changed["resultSnapshot"]["monthlyCashFlow"]
+    rows[1].pop("cumulativeCashFlowBeforePfDraw")
+    result = compare_cash_flow_runs(base, changed)
+    assert result["alignedCashFlow"]["rows"][1]["comparisonValue"] is None
+    for row in rows:
+        row.pop("cumulativeCashFlowBeforePfDraw", None)
+    result = compare_cash_flow_runs(base, changed)
+    assert result["metrics"] and "alignedCashFlow" not in result
+
+
+def test_matching_relative_month_indices_do_not_confirm_calendar_alignment():
+    base, changed = record(), record("changed")
+    for row in (base, changed):
+        row["inputSnapshot"]["schedule"] = {"construction_start": "M0", "completion": "M2"}
+        recalculate(row)
+    result = compare_cash_flow_runs(base, changed)
+    assert result["status"] == "ready" and result["baseline"]["period"]["axis"] == "relative"
+    assert result["metrics"] and "alignedCashFlow" not in result
 
 
 def test_execution_metadata_is_not_a_business_change_but_raw_hashes_are_preserved():
@@ -118,6 +146,7 @@ def test_changed_horizon_is_partial_and_keeps_whole_project_metrics():
     assert result["status"] == "partial" and result["reasons"] == ["period_mismatch"]
     assert result["metrics"] and result["baseline"]["period"]["rowCount"] == 3
     assert result["comparison"]["period"]["rowCount"] == 4
+    assert "alignedCashFlow" not in result
 
 
 def test_schedule_epoch_uses_shared_anchor_and_does_not_invent_dates():
@@ -136,7 +165,7 @@ def test_schedule_epoch_uses_shared_anchor_and_does_not_invent_dates():
     assert result["comparison"]["period"]["baseMonth"] == "2026-01"
     assert result["comparison"]["period"]["axis"] == "calendar"
     assert result["metrics"]  # Aggregate comparison only; no month-alignment result.
-    assert "monthlyComparison" not in result
+    assert "alignedCashFlow" not in result
 
 
 def test_budget_and_reviewed_monthly_policy_compare_actual_finance_totals_as_partial():
@@ -206,6 +235,7 @@ def test_save_and_reopen_selection_only_without_changing_calculation_runs(projec
     assert saved.status_code == 200, saved.text
     reopened = client.get(url)
     assert reopened.json() == saved.json()
+    assert reopened.json()["comparison"]["alignedCashFlow"] == preview.json()["comparison"]["alignedCashFlow"]
     assert reopened.headers["cache-control"] == "no-store"
     stored = get_project_record(pid)["_meta"]["cashFlowComparison"]
     assert stored["baselineRunId"] == "baseline" and stored["comparisonRunId"] == "changed"

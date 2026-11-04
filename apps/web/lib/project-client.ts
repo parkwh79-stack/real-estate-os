@@ -424,6 +424,8 @@ export interface CashflowMonth {
   cashOutEok: number | null;
   netCashFlowEok: number | null;
   cumulativeEok: number | null;
+  /** Max Minus uses this stored basis even when the table displays ending cash. */
+  prePfCumulativeEok?: number | null;
 }
 
 export type CashFlowPeriodBasis = {
@@ -480,6 +482,7 @@ interface RunListItem {
 export interface CalculationRunRecord {
   calculationRunId: string;
   engineKey: string;
+  status?: string;
   engineVersion?: string;
   inputEvidenceIds?: string[];
   assumptionIds?: string[];
@@ -493,44 +496,67 @@ export interface CalculationRunRecord {
   updatedAt?: string;
 }
 
+export const CASH_FLOW_DEPENDENT_ENGINES = ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"] as const;
+export type CashFlowDependentEngine = typeof CASH_FLOW_DEPENDENT_ENGINES[number];
+
+function matchesCashFlowDependent(
+  cashflow: CashflowResult | null,
+  engineKey: string,
+  run: CalculationRunRecord | null,
+): boolean {
+  if (!run || run.engineKey !== engineKey || !run.calculationRunId
+    || (run.status && run.status !== "completed")) return false;
+  const snapshot = run.inputSnapshot ?? {};
+  const source = run.sourceLocator ?? {};
+  const parent = snapshot.parentCalculationRunId ?? source.parentCalculationRunId;
+  const inputHash = snapshot.financialInputHash ?? source.financialInputHash;
+  const digest = cashflow?.inputSnapshot?.financialInputHash;
+  const monthlyReview = cashflow?.monthlyFinancing != null || cashflow?.inputSnapshot?.monthlyFinancing != null;
+  return !monthlyReview && typeof digest === "string" && digest.length > 0
+    && parent === cashflow?.runId && inputHash === digest;
+}
+
 /** Show dependent results only when both their parent and exact input agree. */
 export function bindCashflowDependents(
   cashflow: CashflowResult | null,
   runs: Record<string, CalculationRunRecord | null>,
 ): Record<string, CalculationRunRecord | null> {
-  const digest = cashflow?.inputSnapshot?.financialInputHash;
-  const monthlyReview = cashflow?.inputSnapshot?.monthlyFinancing != null;
-  return Object.fromEntries(Object.entries(runs).map(([key, run]) => {
-    const snapshot = run?.inputSnapshot ?? {};
-    const source = run?.sourceLocator ?? {};
-    const parent = snapshot.parentCalculationRunId ?? source.parentCalculationRunId;
-    const inputHash = snapshot.financialInputHash ?? source.financialInputHash;
-    const matches = !monthlyReview && typeof digest === "string" && digest.length > 0
-      && parent === cashflow?.runId && inputHash === digest;
-    return [key, matches ? run : null];
-  }));
+  return Object.fromEntries(Object.entries(runs).map(([key, run]) =>
+    [key, matchesCashFlowDependent(cashflow, key, run) ? run : null]));
 }
 
-export async function fetchLatestCalculationRuns(
+export async function fetchCashFlowDependentRuns(
   projectId: string,
-  engineKeys: string[],
-): Promise<Record<string, CalculationRunRecord | null>> {
-  const entries = await Promise.all(engineKeys.map(async (engineKey) => {
+  cashflow: CashflowResult | null,
+  signal?: AbortSignal,
+): Promise<{ runs: Record<string, CalculationRunRecord | null>; unavailable: CashFlowDependentEngine[] }> {
+  const digest = cashflow?.inputSnapshot?.financialInputHash;
+  if (!cashflow?.runId || typeof digest !== "string" || !digest
+    || cashflow.monthlyFinancing != null || cashflow.inputSnapshot?.monthlyFinancing != null) {
+    return { runs: {}, unavailable: [] };
+  }
+  const entries = await Promise.all(CASH_FLOW_DEPENDENT_ENGINES.map(async (engineKey) => {
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=${encodeURIComponent(engineKey)}&limit=1`, {
+      const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/calculation-runs?engine_key=${engineKey}&limit=10`, {
         cache: "no-store",
         headers: authHeaders("web"),
+        signal,
       });
-      if (!res.ok) return [engineKey, null] as const;
+      if (!res.ok) return { engineKey, run: null, unavailable: true };
       const body = await res.json();
-      const record = Array.isArray(body.records) ? body.records[0] : null;
-      return [engineKey, record ?? null] as const;
+      if (!Array.isArray(body?.records)) return { engineKey, run: null, unavailable: true };
+      const records = body.records as Array<CalculationRunRecord | null>;
+      const run = records.find((candidate) => matchesCashFlowDependent(cashflow, engineKey, candidate)) ?? null;
+      return { engineKey, run, unavailable: false };
     } catch {
       // A missing optional scenario must not hide the primary Cash Flow run.
-      return [engineKey, null] as const;
+      return { engineKey, run: null, unavailable: true };
     }
   }));
-  return Object.fromEntries(entries);
+  return {
+    runs: Object.fromEntries(entries.map(({ engineKey, run }) => [engineKey, run])),
+    unavailable: entries.filter(({ unavailable }) => unavailable).map(({ engineKey }) => engineKey),
+  };
 }
 
 const WON = 1e8;
@@ -585,6 +611,7 @@ function cashflowFromResult(
             r.cumulativeCashFlow ??
             r.cumulative_cashflow,
         ),
+        prePfCumulativeEok: wonToEokOrNull(r.cumulativeCashFlowBeforePfDraw),
       };
     }),
     maxMinusEok: wonToEokOrNull(summary.maxMinus),

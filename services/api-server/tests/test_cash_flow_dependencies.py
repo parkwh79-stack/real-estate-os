@@ -83,3 +83,32 @@ def test_cf_endpoint_uses_request_and_exposes_dependent_failure(monkeypatch):
     assert result['dependentExecutionStatus'] == 'partial'
     assert result['dependentFailures'][0]['reason'] == 'dependent_scenario_failed'
     assert 'private' not in str(result)
+
+
+def test_cf_endpoint_exposes_missing_tranches_without_losing_the_parent_run(monkeypatch):
+    monkeypatch.setattr(projects, "PROJECTS_DB", {"p": {"id": "p"}})
+    records = []
+
+    def persist(pid, *, engine_key, result, input_data, **kwargs):
+        records.append((engine_key, deepcopy(input_data), deepcopy(result)))
+        return {"calculationRunId": f"run-{engine_key}"}
+
+    monkeypatch.setattr(projects, "_persist_calculation_run", persist)
+    data = request_data()
+    data["pfStructure"] = []
+    request = Request({"type": "http", "method": "POST", "path": "/projects/p/cash-flow/run", "headers": [],
+                       "query_string": b"", "server": ("testserver", 80), "scheme": "http"})
+
+    response = projects.run_project_cash_flow("p", request, data)
+
+    assert response["calculationRunId"] == "run-cash_flow_engine"
+    assert response["dependentExecutionStatus"] == "partial"
+    assert response["dependentFailures"][0] == {
+        "engines": ["waterfall", "tranche_recovery", "unsold_ltv"],
+        "status": "needs_input",
+        "reason": "dependent_scenario_input_missing",
+        "missingFields": ["pfStructure"],
+    }
+    _, snapshot, outcome = records[0]
+    assert snapshot["pfStructure"] == []
+    assert "dependentFailures" not in outcome
