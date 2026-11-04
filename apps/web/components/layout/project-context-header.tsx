@@ -240,11 +240,13 @@ export function ProjectContextHeader({ projectId }: { projectId: string }) {
   );
   const gateValue = firstText(context?.decisionGate?.decision, context?.decisionGate?.status);
   const gateLabel = formatDecision(context);
-  const openMissingInputs = (context?.missingInputRegister ?? []).filter((item) => isOpenStatus(item.status)).length;
-  const openConflicts = (context?.dealStateGraph?.graph?.conflicts ?? []).filter((item) =>
-    isOpenStatus(item.status),
-  ).length;
-  const openIssueCount = openMissingInputs + openConflicts;
+  const missingInputs = context?.missingInputRegister;
+  const conflicts = context?.dealStateGraph?.graph?.conflicts;
+  const openIssueCount = !context?.unavailableSections?.includes("missingInputs")
+    && Array.isArray(missingInputs) && Array.isArray(conflicts)
+    ? missingInputs.filter((item) => isOpenStatus(item.status)).length
+      + conflicts.filter((item) => isOpenStatus(item.status)).length
+    : null;
   const documentCount = projectMemory?.sourceDocumentCount ?? context?.pageData?.sourceDocumentSummary?.count;
   const evidenceCount =
     context?.dealStateGraph?.summary?.evidenceCount ??
@@ -306,9 +308,9 @@ export function ProjectContextHeader({ projectId }: { projectId: string }) {
               ) : null}
               <ContextFact
                 label="열린 이슈"
-                value={String(openIssueCount)}
-                icon={openIssueCount > 0 ? AlertTriangle : CheckCircle2}
-                tone={openIssueCount > 0 ? "warn" : "good"}
+                value={openIssueCount === null ? "미확인" : String(openIssueCount)}
+                icon={openIssueCount === null ? CircleDot : openIssueCount > 0 ? AlertTriangle : CheckCircle2}
+                tone={openIssueCount === null ? "neutral" : openIssueCount > 0 ? "warn" : "good"}
               />
               {typeof documentCount === "number" ? (
                 <ContextFact label="문서" value={String(documentCount)} icon={FileText} />

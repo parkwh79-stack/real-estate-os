@@ -37,6 +37,8 @@ export interface WorkspaceSummary {
 
 export interface WorkspacePageContext {
   schemaVersion?: string;
+  contextCompleteness?: "complete" | "partial";
+  unavailableSections?: string[];
   projectId: string;
   page?: string;
   normalizedPage?: string;

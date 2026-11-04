@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -91,6 +91,14 @@ function asArray<T = unknown>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+function confirmedCount(...values: unknown[]): number | null {
+  return values.find((value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0) ?? null;
+}
+
+function countLabel(value: number | null, unit = "건") {
+  return value === null ? "미확인" : `${value.toLocaleString("ko-KR")}${unit}`;
+}
+
 function formatBytes(value?: number) {
   if (!value) return "-";
   if (value < 1024) return `${value} B`;
@@ -115,27 +123,38 @@ export default function InputPackagePage() {
   }, [searchParams]);
   const workflow = useMemo(() => getTrackWorkflowDefinition(activeTrack), [activeTrack]);
 
-  const [context, setContext] = useState<WorkspacePageContext | null>(null);
+  const contextKey = `${projectId}:${activeTrack}`;
+  const requestVersion = useRef(0);
+  const [contextResult, setContextResult] = useState<{ key: string; value: WorkspacePageContext } | null>(null);
+  const context = contextResult?.key === contextKey ? contextResult.value : null;
+  const [contextError, setContextError] = useState<string | null>(null);
   const [intakePlan, setIntakePlan] = useState<IntakeReadinessPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    setError(null);
+  const refresh = useCallback(async () => {
+    const version = ++requestVersion.current;
+    setLoading(true);
+    setContextError(null);
+    setContextResult(null);
     try {
-      setContext(await fetchWorkspaceContext(projectId, "input_package", activeTrack));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "자료 입력 패키지 상태를 불러오지 못했습니다.");
+      const next = await fetchWorkspaceContext(projectId, "input_package", activeTrack);
+      if (!next || typeof next !== "object" || Array.isArray(next) || next.projectId !== projectId) {
+        throw new Error("Invalid workspace context");
+      }
+      if (version === requestVersion.current) setContextResult({ key: contextKey, value: next });
+    } catch {
+      if (version === requestVersion.current) setContextError("자료 입력 패키지 상태를 불러오지 못했습니다. 저장된 자료와 검토 건수는 아직 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
-      if (!silent) setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
-  }, [activeTrack, projectId]);
+  }, [activeTrack, contextKey, projectId]);
 
   useEffect(() => {
     void refresh();
+    return () => { requestVersion.current += 1; };
   }, [refresh]);
 
   const finalizeIntake = useCallback(async () => {
@@ -226,6 +245,12 @@ export default function InputPackagePage() {
   };
 
   const pageData = asRecord(context?.pageData);
+  const unavailableSections = new Set(context?.unavailableSections ?? []);
+  const hasParsedFacts = !unavailableSections.has("parsedFacts") && Array.isArray(pageData.parsedFacts);
+  const hasMissingInputs = !unavailableSections.has("missingInputs") && Array.isArray(context?.missingInputRegister);
+  const landEvidenceUnavailable = unavailableSections.has("landEvidence");
+  const cascadeDataUnavailable = ["landEvidence", "parsedFacts", "assumptionOverrides", "missingInputs"]
+    .some((section) => unavailableSections.has(section));
   const documents = asArray<SourceDocument>(pageData.sourceDocuments);
   const sourceSummary = asRecord(pageData.sourceDocumentSummary);
   const landLedgerSummary = asRecord(pageData.landLedgerSummary);
@@ -235,11 +260,15 @@ export default function InputPackagePage() {
   const recommendedActions = asArray<string>(pageData.recommendedActions);
   const missingInputs = asArray<Record<string, unknown>>(context?.missingInputRegister);
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
-  const docCount = Number(context?.projectMemory?.sourceDocumentCount ?? sourceSummary.count ?? documents.length ?? 0);
-  const evidenceCount = Number(context?.projectMemory?.landEvidenceCount ?? landEvidenceSummary.count ?? 0);
+  const docCount = confirmedCount(context?.projectMemory?.sourceDocumentCount, sourceSummary.count, Array.isArray(pageData.sourceDocuments) ? documents.length : undefined);
+  const evidenceCount = unavailableSections.has("landEvidence") ? null : confirmedCount(context?.projectMemory?.landEvidenceCount, landEvidenceSummary.count);
+  const parcelCount = confirmedCount(landLedgerSummary.parcelCount);
+  const pnuCount = confirmedCount(landLedgerSummary.pnuCount);
+  const parsedFactCount = unavailableSections.has("parsedFacts") ? null : confirmedCount(parsedFactSummary.recordCount, hasParsedFacts ? parsedFacts.length : undefined);
+  const missingInputCount = hasMissingInputs ? missingInputs.length : null;
 
   return (
-    <div className="space-y-6 pb-8">
+    <div className="space-y-6 pb-8" data-testid="input-package-page">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-start gap-3">
           <Link
@@ -272,22 +301,38 @@ export default function InputPackagePage() {
       </header>
 
       {loading ? (
-        <div className="flex min-h-[220px] items-center justify-center rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-500 dark:border-slate-800 dark:bg-slate-900">
-          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> 자료 입력 패키지를 불러오는 중입니다.
+        <div role="status" className="flex items-center justify-center rounded-lg border border-slate-200 bg-white p-5 text-sm font-bold text-slate-500 dark:border-slate-800 dark:bg-slate-900">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" aria-hidden="true" /> 자료 입력 패키지를 불러오는 중입니다.
         </div>
-      ) : (
-        <>
+      ) : contextError ? (
+        <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+          <p>{contextError}</p>
+          <button type="button" onClick={() => void refresh()} disabled={running !== null}
+            className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-lg border border-amber-300 px-3 font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:opacity-50">
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />자료 상태 다시 불러오기
+          </button>
+        </div>
+      ) : null}
+      {context?.contextCompleteness === "partial" ? (
+        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+          <p>일부 자료 상태만 확인했습니다. 확인하지 못한 자료와 검토 건수는 미확인으로 표시합니다. 업로드와 사업수지 입력 검토는 계속할 수 있습니다.</p>
+          <button type="button" onClick={() => void refresh()} disabled={loading || running !== null}
+            className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-lg border border-amber-300 px-3 font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:opacity-50">
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />자료 상태 다시 불러오기
+          </button>
+        </div>
+      ) : null}
           {error ? <Notice tone="bad">{error}</Notice> : null}
           {message ? <Notice tone="good">{message}</Notice> : null}
 
-          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-            <Kpi label="저장 문서" value={`${docCount.toLocaleString("ko-KR")}건`} icon={<FileArchive />} />
-            <Kpi label="토지조서 필지" value={`${Number(landLedgerSummary.parcelCount ?? 0).toLocaleString("ko-KR")}필지`} icon={<FileText />} />
-            <Kpi label="PNU 확보" value={`${Number(landLedgerSummary.pnuCount ?? 0)}/${Number(landLedgerSummary.parcelCount ?? 0)}`} icon={<Database />} />
-            <Kpi label="토지 증빙" value={`${evidenceCount.toLocaleString("ko-KR")}건`} icon={<Database />} />
-            <Kpi label="파싱 후보값" value={`${Number(parsedFactSummary.recordCount ?? parsedFacts.length ?? 0).toLocaleString("ko-KR")}건`} icon={<GitBranch />} />
-            <Kpi label="보완 필요" value={`${missingInputs.length.toLocaleString("ko-KR")}건`} icon={<GitBranch />} />
-          </section>
+          {context ? <section aria-label="저장 자료 현황" className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+            <Kpi label="저장 문서" value={countLabel(docCount)} icon={<FileArchive />} />
+            <Kpi label="토지조서 필지" value={countLabel(parcelCount, "필지")} icon={<FileText />} />
+            <Kpi label="PNU 확보" value={pnuCount === null || parcelCount === null ? "미확인" : `${pnuCount.toLocaleString("ko-KR")}/${parcelCount.toLocaleString("ko-KR")}`} icon={<Database />} />
+            <Kpi label="토지 증빙" value={countLabel(evidenceCount)} icon={<Database />} />
+            <Kpi label="파싱 후보값" value={countLabel(parsedFactCount)} icon={<GitBranch />} />
+            <Kpi label="보완 필요" value={countLabel(missingInputCount)} icon={<GitBranch />} />
+          </section> : null}
 
           <section className="rounded-lg border border-indigo-200 bg-white p-5 shadow-sm dark:border-indigo-900/60 dark:bg-slate-900">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -317,18 +362,22 @@ export default function InputPackagePage() {
             </div>
           </section>
 
-          <SmartIntake projectId={projectId} onProcessed={finalizeIntake} />
-          <FeasibilityExtractReview key={projectId} projectId={projectId} onApplied={() => void refresh(true)} />
+          <SmartIntake projectId={projectId} onProcessed={context && !landEvidenceUnavailable ? finalizeIntake : () => void refresh()} />
+          <FeasibilityExtractReview key={projectId} projectId={projectId} onApplied={() => void refresh()} />
 
+          {context ? <>
           <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
             <Panel title="다음 보완 작업">
               <div className="flex flex-wrap gap-2">
-                <ActionButton label="자료 보완 계획 생성" busy={running === "finalize"} disabled={running !== null} onClick={() => void finalizeIntake()} />
-                <ActionButton label="PNU 일괄 해석" busy={running === "pnu"} disabled={running !== null || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
-                <ActionButton label="Land-Legal Pod" busy={running === "land_legal"} disabled={running !== null} onClick={() => void runPod("land_legal", "Land-Legal Pod")} />
-                <ActionButton label="Market-Product Pod" busy={running === "market_product"} disabled={running !== null} onClick={() => void runPod("market_product", "Market-Product Pod")} />
-                <ActionButton label="Feasibility-CF Pod" busy={running === "feasibility_cashflow"} disabled={running !== null} onClick={() => void runPod("feasibility_cashflow", "Feasibility-Cashflow Pod")} />
+                <ActionButton label="자료 보완 계획 생성" busy={running === "finalize"} disabled={running !== null || landEvidenceUnavailable} onClick={() => void finalizeIntake()} />
+                <ActionButton label="PNU 일괄 해석" busy={running === "pnu"} disabled={running !== null || landEvidenceUnavailable || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
+                <ActionButton label="Land-Legal Pod" busy={running === "land_legal"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("land_legal", "Land-Legal Pod")} />
+                <ActionButton label="Market-Product Pod" busy={running === "market_product"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("market_product", "Market-Product Pod")} />
+                <ActionButton label="Feasibility-CF Pod" busy={running === "feasibility_cashflow"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("feasibility_cashflow", "Feasibility-Cashflow Pod")} />
               </div>
+              {landEvidenceUnavailable || cascadeDataUnavailable ? (
+                <p className="mt-3 text-xs leading-5 text-amber-800 dark:text-amber-200">확인하지 못한 자료에 의존하는 보완 계획·PNU 저장·연쇄 Pod 실행은 자료 상태를 다시 확인한 뒤 사용할 수 있습니다. 업로드와 사업수지 입력 검토는 계속할 수 있습니다.</p>
+              ) : null}
               <div className="mt-4 space-y-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
                 {intakePlan?.nextRecommendedAction || recommendedActions.length ? (
                   <>
@@ -346,7 +395,9 @@ export default function InputPackagePage() {
             </Panel>
 
             <Panel title="보완 필요 항목">
-              {missingInputs.length ? (
+              {missingInputCount === null ? (
+                <p className="text-sm text-slate-500">보완 필요 항목을 확인하지 못했습니다.</p>
+              ) : missingInputs.length ? (
                 <div className="space-y-2">
                   {missingInputs.slice(0, 8).map((item, index) => (
                     <div key={index} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
@@ -366,12 +417,14 @@ export default function InputPackagePage() {
           </section>
 
           <Panel title="AI 파싱 후보값 원장">
-            {parsedFacts.length ? (
+            {!hasParsedFacts ? (
+              <p className="text-sm text-slate-500">파싱 후보값 목록을 확인하지 못했습니다.</p>
+            ) : parsedFacts.length ? (
               <div className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-3">
-                  <MiniStat label="전체 후보값" value={`${Number(parsedFactSummary.recordCount ?? parsedFacts.length).toLocaleString("ko-KR")}건`} />
-                  <MiniStat label="근거 위치 부족" value={`${Number(parsedFactSummary.missingLocatorCount ?? 0).toLocaleString("ko-KR")}건`} />
-                  <MiniStat label="핵심 근거 위치 부족" value={`${Number(parsedFactSummary.criticalMissingLocatorCount ?? 0).toLocaleString("ko-KR")}건`} />
+                  <MiniStat label="전체 후보값" value={countLabel(parsedFactCount)} />
+                  <MiniStat label="근거 위치 부족" value={countLabel(confirmedCount(parsedFactSummary.missingLocatorCount))} />
+                  <MiniStat label="핵심 근거 위치 부족" value={countLabel(confirmedCount(parsedFactSummary.criticalMissingLocatorCount))} />
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[1160px] text-left text-sm">
@@ -455,7 +508,9 @@ export default function InputPackagePage() {
           </Panel>
 
           <Panel title="저장된 원본 문서">
-            {documents.length ? (
+            {!Array.isArray(pageData.sourceDocuments) ? (
+              <p className="text-sm text-slate-500">저장된 원본 문서 목록을 확인하지 못했습니다.</p>
+            ) : documents.length ? (
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[760px] text-left text-sm">
                   <thead className="border-b border-slate-200 text-xs text-slate-500 dark:border-slate-800">
@@ -492,15 +547,14 @@ export default function InputPackagePage() {
               </div>
             )}
           </Panel>
-        </>
-      )}
+          </> : null}
     </div>
   );
 }
 
 function Kpi({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <div role="group" aria-label={label} className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-center gap-2 text-xs font-bold text-slate-500">{icon}{label}</div>
       <p className="mt-2 text-xl font-black text-slate-950 dark:text-white">{value}</p>
     </div>

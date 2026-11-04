@@ -4,6 +4,21 @@ Updated: 2026-11-04
 
 Status: **Controlled implementation; not production-ready**
 
+### Workspace context recovery (2026-11-04)
+
+Cloud Run returned 500 for the workspace context because the land evidence
+hydrator attempted legacy `app_state` DDL with the restricted runtime role.
+The workspace view now reads the authorized project, source metadata, parsed
+facts and Chief artifacts through their normalized read paths. Request-level
+audit remains on the normalized middleware. Unavailable compatibility sections
+are explicit and a partial response does not save a derived graph.
+
+Related API and existing Pod/land regressions passed 49 cases. Cloud Build
+`841b51d6-4515-4c2d-9289-5ba6e85d5d70` succeeded using 425 reviewed inputs
+and all 26 migrations. Deployment evidence is recorded in
+[PR #2](https://github.com/parkwh79-stack/real-estate-os/pull/2).
+The Vercel preview feedback setting is disabled for the REALYTICS project.
+
 ### Authentication latency check (2026-11-04)
 
 The hosted login page responded in 0.93 seconds. Across 55 recent successful

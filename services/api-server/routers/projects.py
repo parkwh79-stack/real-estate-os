@@ -5660,55 +5660,65 @@ def _workspace_page_data(
     project_id: str,
     page: str,
     source_data: Dict[str, Any],
-    plan: Dict[str, Any],
+    plan: Dict[str, Any] | None,
     source_documents: list[Dict[str, Any]],
-    land_evidence_records: list[Dict[str, Any]],
+    land_evidence_records: list[Dict[str, Any]] | None,
     parsed_fact_package_data: Dict[str, Any],
-    assumption_overrides: list[Dict[str, Any]],
+    assumption_overrides: list[Dict[str, Any]] | None,
     chief_artifacts: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
     normalized_page = _normalize_workspace_page(page)
     land_ledger = source_data.get("landLedger") or source_data.get("land_ledger")
     common = {
         "sourceDocumentSummary": _summarize_source_documents(source_documents),
-        "landLedgerSummary": _summarize_land_ledger(source_data),
-        "landEvidenceSummary": _summarize_land_evidence(land_evidence_records),
         "parsedFactSummary": parsed_fact_package_data.get("summary") or {},
         "parsedFactCount": parsed_fact_package_data.get("recordCount") or 0,
-        "assumptionOverrideCount": len(assumption_overrides),
         "chiefArtifactSummary": _summarize_chief_artifacts(chief_artifacts),
     }
+    if plan is not None or (isinstance(land_ledger, dict) and isinstance(land_ledger.get("parcels"), list)):
+        common["landLedgerSummary"] = _summarize_land_ledger(source_data)
+    if land_evidence_records is not None:
+        common["landEvidenceSummary"] = _summarize_land_evidence(land_evidence_records)
+    if assumption_overrides is not None:
+        common["assumptionOverrideCount"] = len(assumption_overrides)
 
     if normalized_page == "input_package":
-        return {
+        data = {
             **common,
             "sourceDocuments": source_documents,
             "parsedFacts": parsed_fact_package_data.get("records") or [],
-            "landEvidenceRecords": land_evidence_records,
-            "assumptionOverrides": assumption_overrides,
-            "missingInputRegister": (plan.get("sharedDealStateGraph") or {}).get("missingInputRegister") or [],
             "recommendedActions": [
                 "업로드 문서를 자동분류한 뒤 프로젝트 DB에 원본과 메타데이터를 저장합니다.",
                 "토지조서가 있으면 PNU, 공시지가, 등기/제한물권 증빙 보강을 먼저 실행합니다.",
                 "시장·분양성 근거와 사업수지/CF가 준비된 뒤 PF-Credit Pod를 실행합니다.",
             ],
         }
+        if plan is not None:
+            data["missingInputRegister"] = (plan.get("sharedDealStateGraph") or {}).get("missingInputRegister") or []
+        if land_evidence_records is not None:
+            data["landEvidenceRecords"] = land_evidence_records
+        if assumption_overrides is not None:
+            data["assumptionOverrides"] = assumption_overrides
+        return data
 
     if normalized_page in {"land", "map"}:
-        return {
+        data = {
             **common,
             "land": source_data.get("land") or {},
             "landLedger": land_ledger or {},
-            "landCostReconciliation": reconcile_land_costs_use_case(source_data),
-            "landEvidenceRecords": land_evidence_records,
-            "pnuValidation": {
+            "mapDataEndpoint": f"/projects/{project_id}/map?resolve_geometry=true&geometry_limit=150",
+        }
+        if land_evidence_records is not None:
+            data["landCostReconciliation"] = reconcile_land_costs_use_case(source_data)
+            data["landEvidenceRecords"] = land_evidence_records
+        if "landLedgerSummary" in common:
+            data["pnuValidation"] = {
                 "required": True,
                 "ready": not common["landLedgerSummary"]["needsPnuEnrichment"],
                 "pnuCount": common["landLedgerSummary"]["pnuCount"],
                 "parcelCount": common["landLedgerSummary"]["parcelCount"],
-            },
-            "mapDataEndpoint": f"/projects/{project_id}/map?resolve_geometry=true&geometry_limit=150",
-        }
+            }
+        return data
 
     if normalized_page == "marketability":
         return {
@@ -5741,18 +5751,18 @@ def _workspace_page_data(
         return {
             **common,
             "sourceDocuments": source_documents,
-            "landEvidenceRecords": land_evidence_records,
+            **({"landEvidenceRecords": land_evidence_records} if land_evidence_records is not None else {}),
             "evidenceGraphEndpoint": f"/projects/{project_id}/evidence-graphs",
             "evidenceGraphDetailEndpointTemplate": f"/projects/{project_id}/orchestrations/{{run_id}}/evidence-graph",
         }
 
-    return {
-        **common,
-        "agentPods": plan.get("agentPods") or [],
-        "podRuns": plan.get("podRuns") or [],
-        "taskGraph": plan.get("taskGraph") or {},
-        "chiefArtifacts": chief_artifacts,
-    }
+    if plan is not None:
+        common.update({
+            "agentPods": plan.get("agentPods") or [],
+            "podRuns": plan.get("podRuns") or [],
+            "taskGraph": plan.get("taskGraph") or {},
+        })
+    return {**common, "chiefArtifacts": chief_artifacts}
 
 
 @router.get(
@@ -5933,6 +5943,49 @@ def get_project_workspace_context(
     the same hydrated project, Evidence Vault, Assumption Book, pod artifacts,
     and persisted Shared Deal State Graph.
     """
+    if storage_backend() in {"postgres", "postgresql"}:
+        authorize_request(request, "project:read")
+        project = authoritative_project(project_id, request)
+        enforce_project_tenant_scope(request, project)
+        source_documents = list_source_documents_use_case(
+            project_source_document_read_repository(project_id, project), project_id
+        )
+        parsed_facts = persisted_parsed_fact_package(project_id)
+        chief_artifacts = list_chief_pod_artifact_records(project_id)
+        project_record = project.get("project") if isinstance(project.get("project"), dict) else {}
+        # The normalized runtime cannot hydrate the compatibility app_state
+        # document. Do not infer missing evidence or persist a partial graph.
+        # The request middleware records access through the normalized audit log.
+        return {
+            "schemaVersion": "realytics-workspace-page-context-v1",
+            "contextCompleteness": "partial",
+            "unavailableSections": ["landEvidence", "assumptionOverrides", "missingInputs"],
+            "projectId": project_id,
+            "page": page,
+            "normalizedPage": _normalize_workspace_page(page),
+            "pageDataContract": _workspace_page_data_contract(page),
+            "workflowTrack": track or project.get("workflowTrack") or project.get("workflow_track"),
+            "projectMemory": {
+                "projectId": project_id,
+                "projectName": _project_display_name(project_id, project),
+                "project": project_record,
+                "status": project_record.get("status") or project.get("status"),
+                "sourceDocumentCount": len(source_documents),
+                "chiefArtifactCount": len(chief_artifacts),
+                "updatedAt": (project.get("_meta") or {}).get("updatedAt"),
+            },
+            "pageData": _workspace_page_data(
+                project_id=project_id,
+                page=page,
+                source_data=project,
+                plan=None,
+                source_documents=source_documents,
+                land_evidence_records=None,
+                parsed_fact_package_data=parsed_facts,
+                assumption_overrides=None,
+                chief_artifacts=chief_artifacts,
+            ),
+        }
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
