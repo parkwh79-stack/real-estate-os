@@ -10,6 +10,7 @@ import {
   FileSearch,
   Landmark,
   Loader2,
+  MapPin,
   Plus,
   RefreshCw,
   X,
@@ -25,7 +26,14 @@ type Parcel = {
   sequence?: number;
   addressFragment?: string;
   rawLotNumber?: string;
+  lotNumber?: string;
   normalizedLotNumber?: string;
+  mainLotNo?: string | number;
+  main_lot_no?: string | number;
+  subLotNo?: string | number;
+  sub_lot_no?: string | number;
+  isMountain?: boolean;
+  is_mountain?: boolean;
   landCategory?: string;
   areaSqm?: number;
   totalContractAmount?: number | null;
@@ -105,7 +113,17 @@ function parcelPnu(parcel: Parcel) {
   const candidates = new Set([parcel.pnu, parcel.resolvedPnu, parcel.PNU]
     .filter((value): value is string => typeof value === "string").map((value) => value.trim()).filter(Boolean));
   const pnu = candidates.values().next().value;
-  return candidates.size === 1 && pnu && /^[0-9]{10}[12][0-9]{8}$/.test(pnu) ? pnu : null;
+  if (candidates.size !== 1 || !pnu || !/^[0-9]{10}[12][0-9]{8}$/.test(pnu)) return null;
+  const mainLot = parcel.mainLotNo ?? parcel.main_lot_no;
+  const subLot = parcel.subLotNo ?? parcel.sub_lot_no;
+  const mountain = parcel.isMountain === true || parcel.is_mountain === true;
+  const lot = parcel.normalizedLotNumber || parcel.lotNumber || parcel.rawLotNumber ||
+    (mainLot == null || mainLot === "" ? "" : `${mountain ? "산" : ""}${mainLot}${subLot ? `-${subLot}` : ""}`);
+  const match = String(lot).match(/(산)?\s*([0-9]+)(?:-([0-9]+))?/);
+  if (match && (Boolean(match[1]) !== (pnu[10] === "2") ||
+    Number(match[2]) !== Number(pnu.slice(11, 15)) ||
+    Number(match[3] ?? 0) !== Number(pnu.slice(15)))) return null;
+  return pnu;
 }
 
 function parcelPnuStatus(parcel: Parcel, pnu: string | null) {
@@ -207,6 +225,7 @@ export default function LandAnalysisPage() {
   const pageData = asRecord(activeContext?.pageData);
   const activeTrack = explicitTrack ?? (isWorkflowTrack(activeContext?.workflowTrack) ? activeContext.workflowTrack : undefined);
   const intakeUrl = `${projectWorkspaceHref(projectId, "input-package", activeTrack)}#intake-upload`;
+  const mapUrl = projectWorkspaceHref(projectId, "map", activeTrack);
   const land = asRecord(pageData.land);
   const landLedger = asRecord(pageData.landLedger);
   const preview = legalPreview?.projectId === projectId ? legalPreview : null;
@@ -303,7 +322,9 @@ export default function LandAnalysisPage() {
       setLegalPreview(null);
       const resolved = body?.summary?.resolvedCount ?? body?.resolvedCount ?? 0;
       const unresolved = body?.summary?.unresolvedCount;
-      setMessage(`PNU 일괄 해석을 마쳤습니다. 새로 해석 ${resolved}건${typeof unresolved === "number" && unresolved > 0 ? ` · 재확인 ${unresolved}건` : ""}`);
+      setMessage(body?.vworld?.configured === false
+        ? "VWorld 연결이 필요해 새 PNU를 조회하지 못했습니다. 이미 확인된 PNU는 계속 볼 수 있습니다."
+        : `PNU 일괄 해석을 마쳤습니다. 새로 해석 ${resolved}건${typeof unresolved === "number" && unresolved > 0 ? ` · 재확인 ${unresolved}건` : ""}`);
       await load();
     } catch (err) {
       if (activeProject.current === projectId) setError(err instanceof Error ? err.message : "PNU 일괄 해석에 실패했습니다.");
@@ -540,6 +561,7 @@ export default function LandAnalysisPage() {
       <ParcelDetailDrawer
         parcel={selectedParcel?.parcel}
         name={selectedParcel?.name ?? ""}
+        mapUrl={mapUrl}
         evidenceRecords={landEvidenceUnavailable ? [] : evidenceRecords}
         evidenceUnavailable={landEvidenceUnavailable || !Array.isArray(pageData.landEvidenceRecords)}
         opener={parcelOpener}
@@ -594,9 +616,10 @@ function EvidenceRecordList({ records }: { records: LandEvidenceRecord[] }) {
   );
 }
 
-function ParcelDetailDrawer({ parcel, name, evidenceRecords, evidenceUnavailable, opener, onClose }: {
+function ParcelDetailDrawer({ parcel, name, mapUrl, evidenceRecords, evidenceUnavailable, opener, onClose }: {
   parcel?: Parcel;
   name: string;
+  mapUrl: string;
   evidenceRecords: LandEvidenceRecord[];
   evidenceUnavailable: boolean;
   opener: RefObject<HTMLButtonElement | null>;
@@ -689,6 +712,12 @@ function ParcelDetailDrawer({ parcel, name, evidenceRecords, evidenceUnavailable
                 <InfoRow label="공시지가" value={landPrice} />
                 <InfoRow label="등기 소유자 대조" value={ownerComparison(parcel)} />
               </dl>
+              {pnu ? (
+                <Link href={`${mapUrl}${mapUrl.includes("?") ? "&" : "?"}pnu=${pnu}`} className={`mt-3 ${actionClass(false)}`}>
+                  <MapPin className="h-4 w-4" aria-hidden="true" />
+                  지도에서 보기
+                </Link>
+              ) : null}
               {resolution?.attemptedAddress || resolution?.resolvedAddress || resolution?.constructedPnu ? (
                 <dl className="mt-2 rounded-re-control bg-re-subtle px-3">
                   {resolution.attemptedAddress ? <InfoRow label="해석 시도 주소" value={resolution.attemptedAddress} /> : null}

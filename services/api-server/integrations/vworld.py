@@ -82,9 +82,9 @@ def fetch_parcel_geometry_by_pnu(
     features = (
         (((payload.get("response") or {}).get("result") or {}).get("featureCollection") or {}).get("features")
     )
-    geometry = _first_geometry(features)
+    geometry = _matching_parcel_geometry(features, pnu)
     if geometry is None:
-        return None, _diag(pnu, "not_found", "no geometry in VWorld feature")
+        return None, _diag(pnu, "not_found", "no matching parcel boundary in VWorld response")
     return geometry, _diag(pnu, "resolved", "VWorld cadastral boundary")
 
 
@@ -333,14 +333,21 @@ def build_geocoder(environ: Optional[Dict[str, str]] = None):
     return geocode
 
 
-def _first_geometry(features: Any) -> Optional[Dict[str, Any]]:
+def _matching_parcel_geometry(features: Any, pnu: str) -> Optional[Dict[str, Any]]:
     if not isinstance(features, list):
         return None
     for feature in features:
         if not isinstance(feature, dict):
             continue
+        properties = feature.get("properties")
+        if not isinstance(properties, dict) or str(properties.get("pnu") or "").strip() != pnu:
+            continue
         geometry = feature.get("geometry")
-        if isinstance(geometry, dict) and geometry.get("type") and geometry.get("coordinates"):
+        if (
+            isinstance(geometry, dict)
+            and geometry.get("type") in ("Polygon", "MultiPolygon")
+            and geometry.get("coordinates")
+        ):
             return geometry
     return None
 

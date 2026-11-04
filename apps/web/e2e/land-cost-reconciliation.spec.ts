@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const projectId = "synthetic-land-reconciliation";
+const parcelPnu = (sequence: number) => `11110101001000${sequence}0000`;
 
 async function fixture(page: Page, options: {
   purchase?: number | null;
@@ -9,6 +10,9 @@ async function fixture(page: Page, options: {
   staleReview?: boolean;
   legalReview?: boolean;
   ledgerState?: "empty" | "unavailable" | "ready";
+  track?: string;
+  pnuLookupOffline?: boolean;
+  map?: boolean;
 } = {}) {
   const purchase = options.purchase === undefined ? 42_000_000_000 : options.purchase;
   const source = (cell: string) => ({ source_document: "합성 수지.xlsx", sheet_name: "사업수지", cell });
@@ -43,6 +47,21 @@ async function fixture(page: Page, options: {
       permissions: ["project:read", "project:write", "project:review"],
     };
     else if (path.endsWith("/projects")) body = [{ project: { id: projectId, name: "합성 토지 대사" } }];
+    else if (path.endsWith("/land/parcels/resolve") && options.pnuLookupOffline) {
+      body = { vworld: { configured: false }, summary: { resolvedCount: 0, unresolvedCount: 1 } };
+    }
+    else if (path.endsWith("/map") && options.map) {
+      body = {
+        center: { lng: 127, lat: 37 },
+        parcelGeoJson: { type: "FeatureCollection", features: [
+          { type: "Feature", id: parcelPnu(1), geometry: { type: "Polygon", coordinates: [[[127, 37], [127.001, 37], [127, 37.001], [127, 37]]] },
+            properties: { pnu: parcelPnu(1), addressFragment: "합성동 1" } },
+          { type: "Feature", id: parcelPnu(2), geometry: { type: "Point", coordinates: [128, 36] },
+            properties: { pnu: parcelPnu(2), addressFragment: "합성동 2" } },
+        ] },
+        geometryResolution: { status: "not_configured" },
+      };
+    }
     else if (path.endsWith("/legal-pod/preview") && options.legalReview) {
       expect(request.method()).toBe("POST");
       body = { legalReview, previewOnly: true, previewHash: "b".repeat(64) };
@@ -76,7 +95,11 @@ async function fixture(page: Page, options: {
             paymentSummary: { knownRecordedPaidAmount: sequence === 1 ? 0 : null, recordedPaidMissingCount: sequence === 1 ? 0 : 1,
               knownScheduledAmount: 100_000_000, scheduledMissingCount: 0 },
             paymentSource: { sheet: "합성 토지조서", rows: [sequence + 4] },
-            ...(options.ledgerState === "ready" ? { pnu: `11110101001000${sequence}0000`, pnuResolution: { lotVerification: "verified" } } : {}),
+            ...(options.ledgerState === "ready" || options.pnuLookupOffline ? {
+              pnu: parcelPnu(sequence),
+              normalizedLotNumber: String(options.pnuLookupOffline && sequence === 2 ? 20 : sequence),
+              pnuResolution: { lotVerification: "verified" },
+            } : {}),
           })),
           contractGroups: [{ contractGroupId: "joint", parcelSequences: [1, 2], totalContractAmount: 12_500_000_000,
             sourceLocator: { sourceName: "합성 토지조서.xlsx", sheet: "토지조서", range: "I7:I12" } }],
@@ -97,7 +120,8 @@ async function fixture(page: Page, options: {
     else if (path.endsWith(`/projects/${projectId}`)) body = { project: { id: projectId, name: "합성 토지 대사" } };
     await route.fulfill({ status: 200, json: body });
   });
-  await page.goto(`/project/${projectId}/land${options.ledgerState === "empty" ? "?track=fund" : ""}`, { waitUntil: "domcontentloaded" });
+  const track = options.track ?? (options.ledgerState === "empty" ? "fund" : undefined);
+  await page.goto(`/project/${projectId}/land${track ? `?track=${track}` : ""}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "계약·수지 금액 대사" })).toBeVisible();
   return writes;
 }
@@ -198,9 +222,61 @@ test("older ledger parsing explicitly requests reimport", async ({ page }) => {
   const drawer = page.getByRole("dialog", { name: "합성동 1" });
   await expect(drawer.getByText(/이전 지급 완료 표시는 사용하지 않습니다/)).toBeVisible();
   await expect(drawer.getByText("조서상 전액 기지급", { exact: true })).toHaveCount(0);
+  await expect(drawer.getByRole("link", { name: "지도에서 보기" })).toHaveCount(0);
   await drawer.getByRole("button", { name: "필지 상세 닫기" }).click();
   await page.getByText("토지 기본 정보·저장된 증빙", { exact: true }).click();
   await expect(page.getByText("등기 소유자 대조").locator("..")).toContainText("— · 대조 전");
+});
+
+test("parcel drawer opens only the selected PNU on the map and can clear the selection", async ({ page }) => {
+  await fixture(page, { ledgerState: "ready", track: "fund", map: true });
+  await page.getByRole("button", { name: /합성동 2.*상세 보기/ }).click();
+  const mapLink = page.getByRole("dialog", { name: "합성동 2" }).getByRole("link", { name: "지도에서 보기" });
+  await expect(mapLink).toHaveAttribute("href", `/project/${projectId}/map?track=fund&pnu=${parcelPnu(2)}`);
+  const [request] = await Promise.all([
+    page.waitForRequest((request) => new URL(request.url()).pathname.endsWith(`/projects/${projectId}/map`)),
+    mapLink.click(),
+  ]);
+  const params = new URL(request.url()).searchParams;
+  expect(params.get("focus_pnu")).toBe(parcelPnu(2));
+  expect(params.get("geometry_limit")).toBe("1");
+  await expect(page.getByRole("link", { name: "토지 검토로 돌아가기" })).toHaveAttribute("href", `/project/${projectId}/land?track=fund`);
+  await expect(page.getByRole("status").filter({ hasText: /합성동 2.*참고 위치 · 경계 미확인/ })).toBeVisible();
+  await expect(page.getByText("지도 경계 확인", { exact: true }).locator("..")).toContainText("1/2");
+  await expect(page.getByText("VWorld 조회", { exact: true }).locator("..")).toContainText("운영 연결 필요");
+  const parcelOne = page.getByRole("checkbox", { name: /합성동 1/ });
+  const parcelTwo = page.getByRole("checkbox", { name: /합성동 2/ });
+  await expect(parcelOne).not.toBeChecked();
+  await expect(parcelTwo).toBeChecked();
+  await page.getByRole("button", { name: "전체 해제" }).click();
+  await expect(parcelOne).not.toBeChecked();
+  await expect(parcelTwo).not.toBeChecked();
+  await expect(page.getByRole("button", { name: "선택 필지 보기" })).toBeDisabled();
+  await page.getByRole("button", { name: "경계 있는 필지만" }).click();
+  await expect(parcelOne).toBeChecked();
+  await expect(parcelTwo).not.toBeChecked();
+  await parcelOne.uncheck();
+  await expect(page.getByRole("button", { name: "선택 필지 보기" })).toBeDisabled();
+});
+
+test("an unavailable requested PNU does not select an unrelated parcel", async ({ page }) => {
+  await fixture(page, { map: true });
+  await page.goto(`/project/${projectId}/map?pnu=${parcelPnu(3)}`);
+  await expect(page.getByRole("status").filter({ hasText: "이 프로젝트에서 요청한 PNU를 확인할 수 없습니다." })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /합성동 1/ })).not.toBeChecked();
+  await expect(page.getByRole("checkbox", { name: /합성동 2/ })).not.toBeChecked();
+  await expect(page.getByRole("button", { name: "선택 필지 보기" })).toBeDisabled();
+});
+
+test("PNU lookup reports a disconnected provider and preserves usable PNU links", async ({ page }) => {
+  await fixture(page, { pnuLookupOffline: true });
+  await page.getByRole("region", { name: "다음 조치" }).getByRole("button", { name: "PNU 확인", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "VWorld 연결이 필요해 새 PNU를 조회하지 못했습니다." })).toBeVisible();
+  await page.getByRole("button", { name: /합성동 1.*상세 보기/ }).click();
+  await expect(page.getByRole("dialog").getByRole("link", { name: "지도에서 보기" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: /합성동 2.*상세 보기/ }).click();
+  await expect(page.getByRole("dialog").getByRole("link", { name: "지도에서 보기" })).toHaveCount(0);
 });
 
 test("reopened payment review keeps unknown and explicit zero apart from scheduled amounts", async ({ page }) => {

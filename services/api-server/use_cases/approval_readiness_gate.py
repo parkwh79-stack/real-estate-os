@@ -142,7 +142,7 @@ def build_deal_state_approval_readiness(
                 tenant_id=scoped_tenant,
                 transaction_factory=_readiness_transaction_factory(scoped_tenant),
             ).latest_runs_by_engine(str(project_id))
-            active_overrides = _active_normalized_assumption_overrides(
+            active_overrides = load_active_normalized_assumption_overrides(
                 str(project_id), tenant_id=scoped_tenant,
             )
         else:
@@ -668,7 +668,7 @@ def _readiness_transaction_factory(tenant_id: str):
     return scope.transaction_factory or api_tenant_transaction
 
 
-def _active_normalized_assumption_overrides(project_id: str, *, tenant_id: str) -> list[dict[str, Any]]:
+def load_active_normalized_assumption_overrides(project_id: str, *, tenant_id: str) -> list[dict[str, Any]]:
     """Read persisted override authority; the app_state document is not a fallback."""
     with _readiness_transaction_factory(tenant_id)(tenant_id) as connection:
         rows = connection.execute(

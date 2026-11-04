@@ -2318,7 +2318,9 @@ def _evidence_vault(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _assumption_book(project_data: Dict[str, Any]) -> List[DealStateValue]:
     rows: List[DealStateValue] = []
-    overrides = project_data.get("assumption_overrides") or project_data.get("assumptionOverrides") or []
+    overrides = project_data.get("approvedAssumptionOverrides")
+    if not isinstance(overrides, list):
+        overrides = project_data.get("assumption_overrides") or project_data.get("assumptionOverrides") or []
     for idx, override in enumerate(overrides if isinstance(overrides, list) else []):
         if not isinstance(override, dict):
             continue

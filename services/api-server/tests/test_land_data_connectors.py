@@ -30,7 +30,7 @@ def test_live_connector_router_skips_missing_configuration_without_fabricating_r
     assert "skipped_missing_config" in statuses
 
 
-def test_land_ledger_enrichment_live_connector_mode_records_diagnostics():
+def test_land_ledger_enrichment_keeps_unverified_candidate_out_of_live_lookup():
     analysis = {
         "parcels": [
             {
@@ -53,10 +53,14 @@ def test_land_ledger_enrichment_live_connector_mode_records_diagnostics():
     )
 
     parcel = result["parcels"][0]
-    assert parcel["pnu"] == "2729011700101230004"
-    assert result["enrichmentRun"]["liveConnectorResult"]["mode"] == "live_connector_router"
-    assert result["enrichmentRun"]["liveConnectorResult"]["diagnostics"]
-    assert result["enrichmentRun"]["status"] == "partial_success"
+    assert parcel["pnuCandidate"] == "2729011700101230004"
+    assert "pnu" not in parcel
+    run = result["enrichmentRun"]
+    assert run["parcelResults"][0]["pnuResolved"] is False
+    assert any(issue["code"] == "pnu_candidate_unverified" for issue in run["parcelResults"][0]["issues"])
+    assert run["liveConnectorResult"]["mode"] == "live_connector_router"
+    assert run["liveConnectorResult"]["diagnostics"] == []
+    assert run["status"] == "partial_success"
 
 
 def test_land_characteristics_are_attached_to_parcel_and_supply_price_fallback():

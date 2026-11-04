@@ -1,6 +1,7 @@
 # Chief Pod Runtime Integrity
 
-Updated: 2026-07-14  
+Updated: 2026-11-04
+
 Status: Controlled Implementation
 
 ## Purpose
@@ -8,6 +9,20 @@ Status: Controlled Implementation
 This contract turns the Chief Deal Room task graph into an enforceable runtime.
 It prevents a downstream Pod from presenting stale or fabricated deal-review
 results when an upstream Pod has not completed.
+
+## 운영 AI 딜룸 진입
+
+2026-11-04 운영 로그에서 딜룸 계획과 지도가 동일한 구형 `app_state` 조회에서
+`InsufficientPrivilege`로 실패했다. 딜룸의 계획은 프로젝트 범위의 승인 가정을
+기존 정규화 저장소에서 읽는다. 지도는 계획이나 승인 가정을 읽지 않는다.
+이를 위해 운영 DB 역할이나 RLS 정책을 넓히지 않는다.
+
+딜룸은 진입 시 계획과 저장된 결과를 불러온다. 6개 Chief Pod의 업무를 시작하려면
+**전체 자동 실행** 또는 해당 Pod 실행을 선택한다. 계획 조회와 실행 실패를
+구분하여, 실행을 시작할 수 없어도 계획과 보완할 자료는 화면에 남는다.
+운영 실행은 프로젝트와 실행 이벤트를 정규화 저장소에 기록한다. 자료가 없는
+프로젝트에서도 부족한 자료와 차단 상태를 반환한다. PostgreSQL 요청 검증은
+계획과 자료 부족 상태를, 별도 합성 프로젝트 검증은 실행·저장·재열기를 확인했다.
 
 ## Runtime Guarantees
 

@@ -19,6 +19,7 @@ def build_user_ai_context(
     session_id: str | None = None,
     host: str = "api",
     override: Dict[str, Any] | None = None,
+    use_legacy_profile: bool = True,
 ) -> Dict[str, Any]:
     """Resolve the AI brain for a logged-in user.
 
@@ -46,7 +47,7 @@ def build_user_ai_context(
             host=host,
         )
 
-    profile = get_user_ai_profile(str(user_id or ""), include_secret=True) if user_id else None
+    profile = get_user_ai_profile(str(user_id), include_secret=True) if user_id and use_legacy_profile else None
     if profile and profile.get("status") == "active":
         credential_ref = profile.get("credentialRef")
         if credential_ref:

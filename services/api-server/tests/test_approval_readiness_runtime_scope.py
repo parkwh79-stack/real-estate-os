@@ -90,7 +90,7 @@ def test_normalized_override_read_is_tenant_scoped_and_excludes_expired_payload(
         assert tenant == "tenant-a"
         yield connection
     with project_request_scope(lambda: SimpleNamespace(tenant_id="tenant-a"), transaction_factory=transaction):
-        records = gate._active_normalized_assumption_overrides("p1", tenant_id="tenant-a")
+        records = gate.load_active_normalized_assumption_overrides("p1", tenant_id="tenant-a")
     assert [record["overrideId"] for record in records] == ["approved-1"]
     assert records[0]["status"] == "active"
     assert connection.queries[0][1] == ("tenant-a", "p1")
@@ -104,4 +104,4 @@ def test_normalized_override_row_cannot_supply_another_tenants_payload():
         yield connection
     with project_request_scope(lambda: SimpleNamespace(tenant_id="tenant-a"), transaction_factory=transaction):
         with pytest.raises(ValueError, match="tenant mismatch"):
-            gate._active_normalized_assumption_overrides("p1", tenant_id="tenant-a")
+            gate.load_active_normalized_assumption_overrides("p1", tenant_id="tenant-a")

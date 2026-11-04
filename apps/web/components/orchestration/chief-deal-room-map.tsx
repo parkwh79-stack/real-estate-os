@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -610,7 +610,6 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [cureSubmitting, setCureSubmitting] = useState(false);
   const [legalPodRun, setLegalPodRun] = useState<LegalPodRun | null>(null);
   const [legalPodRunning, setLegalPodRunning] = useState(false);
-  const autoRunStartedRef = useRef(false);
 
   const loadRecalculationEvents = useCallback(async () => {
     try {
@@ -789,6 +788,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   }, [projectId, track, loadRecalculationEvents, loadPodAiReviews]);
 
   const runAllPods = useCallback(async () => {
+    setError(null);
     setExecutingAll(true);
     setExecutionProgress(8);
     const interval = window.setInterval(() => {
@@ -851,21 +851,6 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   useEffect(() => {
     void loadPlan();
   }, [loadPlan]);
-
-  // A newly created deal should not stop at a visual plan. Once the shared
-  // graph is loaded, let the Chief Orchestrator execute the selected track's
-  // dependency order automatically. Existing runs are left untouched so a
-  // refresh never duplicates a completed analysis.
-  useEffect(() => {
-    if (!plan || loading || executingAll || autoRunStartedRef.current) return;
-    const hasRunHistory = (plan.podRuns ?? []).some((run) =>
-      ["completed", "running", "blocked", "failed", "needs_recalculation"].includes(run.status),
-    );
-    const hasRunSummary = Boolean((plan as ChiefDealOrchestrationPlan & { runAllSummary?: unknown }).runAllSummary);
-    if (hasRunHistory || hasRunSummary) return;
-    autoRunStartedRef.current = true;
-    void runAllPods();
-  }, [executingAll, loading, plan, runAllPods]);
 
   const runsByPod = useMemo(() => {
     const map = new Map<PodKey, AgentPodRun>();
@@ -952,10 +937,22 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     );
   }
 
+  const runAllButton = (
+    <button
+      type="button"
+      onClick={() => void runAllPods()}
+      disabled={executingAll || executingPodKey !== null || reanalyzing}
+      className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg bg-sky-700 px-3 text-sm font-black text-white transition-colors hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {executingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+      {executingAll ? `전체 실행 중 ${executionProgress}%` : "전체 자동 실행"}
+    </button>
+  );
+
   return (
     <div className="space-y-5">
       {error ? (
-        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-100">
+        <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-100">
           {error}
         </div>
       ) : null}
@@ -963,7 +960,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       {supplements ? <AutoSupplementBanner supplements={supplements} /> : null}
 
       {!analyzed ? (
-        <PreAnalysisNotice parsingConfirmations={parsingConfirmations} missingCount={missing.length} />
+        <PreAnalysisNotice parsingConfirmations={parsingConfirmations} missingCount={missing.length}>
+          {runAllButton}
+        </PreAnalysisNotice>
       ) : null}
 
       <ApprovalReadinessPanel
@@ -1037,15 +1036,15 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
 
           <div className="space-y-4">
             <FlowRail title="Task Planner & Event Bus" icon={<GitBranch className="h-5 w-5" />}>
-              <div className="mb-4 flex flex-col gap-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 dark:border-sky-900 dark:bg-sky-950/30 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-sm font-black text-sky-950 dark:text-sky-100">오케스트레이터 전체 자동 실행</p>
-                  <p className="mt-1 text-xs font-semibold leading-5 text-sky-800 dark:text-sky-200">
-                    정식 심사에서 트랙별 Task Graph 순서대로 Pod를 실행하고 심사 이력을 기록합니다. 토지·인허가만 화면에서 확인하려면 법무 미리보기를 사용하세요.
-                  </p>
-                </div>
-                <div className="flex shrink-0 flex-wrap gap-2">
-                  {analyzed ? (
+              {analyzed ? (
+                <div className="mb-4 flex flex-col gap-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 dark:border-sky-900 dark:bg-sky-950/30 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-black text-sky-950 dark:text-sky-100">오케스트레이터 전체 자동 실행</p>
+                    <p className="mt-1 text-xs font-semibold leading-5 text-sky-800 dark:text-sky-200">
+                      정식 심사에서 트랙별 Task Graph 순서대로 Pod를 실행하고 심사 이력을 기록합니다. 토지·인허가만 화면에서 확인하려면 법무 미리보기를 사용하세요.
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => void reanalyzeOnEvidence()}
@@ -1055,18 +1054,10 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
                       {reanalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                       {reanalyzing ? "새 자료 반영 재분석 중…" : "새 자료 반영 재분석"}
                     </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    onClick={() => void runAllPods()}
-                    disabled={executingAll || executingPodKey !== null || reanalyzing}
-                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-sky-700 px-3 text-sm font-black text-white transition-colors hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {executingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                    {executingAll ? `전체 실행 중 ${executionProgress}%` : "전체 자동 실행"}
-                  </button>
+                    {runAllButton}
+                  </div>
                 </div>
-              </div>
+              ) : null}
               {reanalyzing ? (
                 <div className="mb-3 flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-bold text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-200">
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -1700,24 +1691,22 @@ function Kpi({ label, value, tone = "neutral" }: { label: string; value: string;
   );
 }
 
-function PreAnalysisNotice({ parsingConfirmations, missingCount }: { parsingConfirmations: number; missingCount: number }) {
+function PreAnalysisNotice({ parsingConfirmations, missingCount, children }: { parsingConfirmations: number; missingCount: number; children: ReactNode }) {
   return (
-    <section className="rounded-lg border border-sky-200 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950/30">
+    <section className="flex flex-col items-start gap-3 rounded-lg border border-sky-200 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950/30 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex items-start gap-2.5">
         <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-sky-600 dark:text-sky-300" />
         <div>
-          <p className="text-sm font-black text-sky-950 dark:text-sky-100">아직 분석 전 단계입니다 — Pod를 실행하세요</p>
+          <p className="text-sm font-black text-sky-950 dark:text-sky-100">분석 계획을 확인했습니다</p>
           <p className="mt-1 text-xs font-semibold leading-5 text-sky-800 dark:text-sky-200">
-            업로드한 자료는 접수됐지만 아직 Agent Pod를 실행하지 않았습니다. 아래 <strong>전체 자동 실행</strong>을 누르면
-            파싱된 후보값이 검증·확정되고 실제 심사 판단(계산·리스크·승인 게이트)이 생성됩니다.
+            전체 자동 실행을 누르면 선택 트랙의 Pod가 현재 자료를 순서대로 검토하고 실행 이력을 저장합니다.
           </p>
           <p className="mt-1.5 text-xs leading-5 text-sky-700/90 dark:text-sky-300/80">
-            지금 보이는 {parsingConfirmations > 0 ? <><strong>자료 확정 대기 {parsingConfirmations}건</strong>과 </> : null}
-            보강 필요 {missingCount}건 · Decision Gate HOLD · 위원회 보류는{" "}
-            <strong>딜의 결함이 아니라 “아직 분석·확정 전”</strong>이라는 신호입니다. (예: 문서에서 값이 여러 번 다르게 나오거나, 값의 정확한 페이지·셀 위치가 아직 안 잡힌 상태)
+            분석 전 · 보강 필요 {missingCount}건{parsingConfirmations > 0 ? ` · 자료 확정 대기 ${parsingConfirmations}건` : ""}
           </p>
         </div>
       </div>
+      {children}
     </section>
   );
 }

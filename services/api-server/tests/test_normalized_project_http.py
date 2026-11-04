@@ -162,6 +162,80 @@ def test_workspace_context_reads_normalized_data_without_compatibility_state(mon
     assert "landEvidence" in degraded.json()["unavailableSections"]
 
 
+def test_normalized_map_reads_parcels_without_legacy_state_or_lookup_writes(monkeypatch):
+    authority = Authority("tenant-a")
+    first, second = "1111010100100010000", "1111010100100020000"
+    point = {"type": "Point", "coordinates": [126.97, 37.56]}
+    boundary = {"type": "Polygon", "coordinates": [[
+        [126.97, 37.56], [126.98, 37.56], [126.97, 37.57], [126.97, 37.56],
+    ]]}
+    authority.row["land_ledger"] = {"parcels": [
+        {"lotNumber": "1", "pnu": first},
+        {"lotNumber": "2", "pnu": second, "geometry": point},
+    ]}
+    saved = deepcopy(authority.row)
+    for module in (main, projects, storage):
+        monkeypatch.setattr(module, "storage_backend", lambda: "postgres")
+    monkeypatch.setattr(projects, "PROJECTS_DB", {})
+    monkeypatch.setattr(projects, "PostgresProjectRepository", lambda **_: authority)
+    monkeypatch.setattr(main, "enforce_project_tenant_scope", lambda *_: None)
+    identity = {"authenticated": True, "user": {"tenantId": "tenant-a", "userId": "reviewer"}}
+    for module in (main, projects):
+        monkeypatch.setattr(module, "identity_context_from_request", lambda *_args, **_kwargs: identity)
+
+    class DealState:
+        def __init__(self, *, tenant_id, **_kw):
+            assert tenant_id == "tenant-a"
+
+        def list_records(self, project_id, *, record_type, **_kw):
+            assert (project_id, record_type) == ("p", "land_evidence")
+            return []
+
+    class Activity:
+        def append_api_request(self, event):
+            return event["eventId"]
+
+    def forbid_legacy(*_args, **_kw):
+        raise AssertionError("Map reads must not touch legacy state or write project data")
+
+    monkeypatch.setattr(storage, "_load_json_state", forbid_legacy)
+    monkeypatch.setattr(projects, "attach_active_restructuring_cures", forbid_legacy)
+    monkeypatch.setattr(authority, "update", forbid_legacy)
+    monkeypatch.setattr(deal_state_repository, "PostgresDealStateRepository", DealState)
+    monkeypatch.setattr(main, "normalized_activity_repository", lambda **_kw: Activity())
+    monkeypatch.setattr(projects, "vworld_configured", lambda: False)
+    looked_up = []
+
+    def fetch(pnu, *, timeout):
+        assert 0 < timeout <= 4.0
+        looked_up.append(pnu)
+        return boundary, {"status": "resolved"}
+
+    monkeypatch.setattr(projects, "fetch_parcel_geometry_by_pnu", fetch)
+    client = TestClient(main.app)
+    route = "/projects/p/map?resolve_geometry=true&geometry_limit=1"
+    response = client.get(route)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["geometryResolution"]["status"] == "not_configured"
+    assert payload["summary"]["boundaryParcelCount"] == 0
+    assert payload["summary"]["pointParcelCount"] == 1
+    assert looked_up == []
+
+    monkeypatch.setattr(projects, "vworld_configured", lambda: True)
+    assert client.get(f"{route}&focus_pnu=1111010100100030000").json()["geometryResolution"]["attemptedCount"] == 0
+    assert client.get("/projects/outside/map").status_code == 404
+    response = client.get(f"{route}&focus_pnu={second}")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert looked_up == [second]
+    assert payload["geometryResolution"]["status"] == "resolved"
+    assert payload["summary"]["boundaryParcelCount"] == 1
+    assert payload["summary"]["pointParcelCount"] == 0
+    assert [row["geometry"] for row in payload["parcelGeoJson"]["features"]] == [None, boundary]
+    assert authority.row == saved
+
+
 def test_normalized_parcel_resolution_and_legal_run_keep_same_tenant_evidence(monkeypatch):
     from integrations import vworld
     from use_cases import legal_pod

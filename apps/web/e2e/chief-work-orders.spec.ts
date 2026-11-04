@@ -2,6 +2,84 @@ import { expect, test } from "@playwright/test";
 
 test.setTimeout(90_000);
 
+test("opening the deal room loads its plan and execution starts only after a click", async ({ page }) => {
+  const plan = {
+    projectId: "explicit-run",
+    sharedDealStateGraph: {},
+    agentPods: [],
+    podRuns: [{ podKey: "market_product", status: "planned", progressPercent: 0 }],
+    taskGraph: { workflowTrack: "pf" },
+  };
+  const savedPlan = {
+    ...plan,
+    podRuns: [{ podKey: "market_product", status: "completed", progressPercent: 100 }],
+  };
+  const executedPlan = {
+    ...savedPlan,
+    runAllSummary: {
+      workflowTrack: "pf",
+      requestedPodCount: 1,
+      completedCount: 1,
+      blockedCount: 0,
+      rows: [],
+    },
+  };
+  const runRequests: unknown[] = [];
+  let saved = false;
+
+  await page.route("**/api/backend/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    let body: unknown = {};
+    let status = 200;
+    if (path.endsWith("/auth/me")) {
+      body = {
+        authenticated: true,
+        user: { userId: "u", role: "admin", status: "active", tenantId: "test" },
+        permissions: ["project:read", "project:analyze"],
+      };
+    } else if (path.endsWith("/chief-orchestration/plan")) {
+      body = saved ? savedPlan : plan;
+    } else if (path.endsWith("/chief-orchestration/run-all-pods")) {
+      runRequests.push(route.request().postDataJSON());
+      if (runRequests.length === 1) {
+        status = 500;
+        body = { detail: "전체 Pod 실행에 실패했습니다." };
+      } else {
+        saved = true;
+        body = executedPlan;
+      }
+    } else if (path.endsWith("/workspace/context")) {
+      body = { projectId: "explicit-run", projectMemory: {}, pageData: {} };
+    } else if (path.endsWith("/projects/explicit-run")) {
+      body = { project: { name: "합성 명시적 실행 검증" } };
+    }
+    await route.fulfill({ status, json: body });
+  });
+
+  await page.goto("/project/explicit-run/chief-orchestration?track=pf", { waitUntil: "domcontentloaded" });
+  const runButton = page.getByRole("button", { name: "전체 자동 실행", exact: true });
+  await expect(runButton).toBeInViewport({ timeout: 60_000 });
+  await expect(page.getByText("분석 계획을 확인했습니다", { exact: true })).toBeVisible();
+  expect(runRequests).toEqual([]);
+
+  await runButton.click();
+  await expect(page.getByRole("alert").filter({ hasText: "전체 Pod 실행에 실패했습니다." })).toBeVisible();
+  await expect(page.getByText("분석 계획을 확인했습니다", { exact: true })).toBeVisible();
+  await expect(runButton).toBeEnabled();
+  expect(runRequests).toEqual([{ workflowTrack: "pf", options: {} }]);
+
+  await runButton.click();
+  const summary = page.getByText("전체 실행 완료", { exact: true });
+  await expect(summary).toBeVisible();
+  await expect(page.getByText("전체 Pod 실행에 실패했습니다.", { exact: true })).toHaveCount(0);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("button", { name: "새 자료 반영 재분석", exact: true })).toBeVisible();
+  expect(runRequests).toEqual([
+    { workflowTrack: "pf", options: {} },
+    { workflowTrack: "pf", options: {} },
+  ]);
+});
+
 test("saved agent assignments, material requests and execution evidence survive reload", async ({ page }) => {
   const plan = {
     projectId: "work-orders", sharedDealStateGraph: {}, agentPods: [],

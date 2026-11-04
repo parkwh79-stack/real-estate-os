@@ -20,6 +20,7 @@ import os
 import re
 from urllib.parse import quote
 from uuid import uuid4
+from time import monotonic
 from agents.ai_connection import resolve_ai_context
 from agents.feasibility_workbook_importer import import_feasibility_study_from_workbook
 from agents.feasibility_workbook_validator import validate_feasibility_workbook
@@ -223,9 +224,8 @@ from use_cases.covenant_monitoring import (
     set_monitoring_thresholds_use_case,
 )
 from use_cases.portfolio_monitoring import build_portfolio_monitoring
-from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
-from integrations.vworld import build_pnu_geometry_resolver, vworld_configured, vworld_status
-from db.parcel_geometry_cache import build_parcel_geometry_cache, build_caching_resolver
+from use_cases.map_intelligence import build_project_map_intelligence, project_map_parcels, resolve_and_attach_geometry
+from integrations.vworld import fetch_parcel_geometry_by_pnu, vworld_configured, vworld_status
 from integrations.market_data import MolitRtmsConnector
 from agents.document_classifier_agent import classify_document
 from agents.intake_triage_agent import triage_intake_documents
@@ -692,6 +692,7 @@ def ai_context_from_request(
         session_id=(credential_session or {}).get("sessionId"),
         host="api",
         override=override,
+        use_legacy_profile=storage_backend() not in {"postgres", "postgresql"},
     )
 
 def stamp_project_identity(project_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
@@ -1184,6 +1185,23 @@ def attach_persisted_parsed_facts(project_id: str, project_data: Dict[str, Any])
 
 
 def attach_approved_assumption_overrides(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    if storage_backend() in {"postgres", "postgresql"}:
+        from use_cases.approval_readiness_gate import load_active_normalized_assumption_overrides
+
+        scope = current_project_scope()
+        if scope is None:
+            raise RuntimeError("A verified project scope is required for assumption overrides")
+        overrides = load_active_normalized_assumption_overrides(project_id, tenant_id=scope.tenant_id)
+        enriched_project = dict(project_data)
+        enriched_project.pop("approved_assumption_overrides", None)
+        enriched_project["approvedAssumptionOverrides"] = overrides
+        metadata = project_data.get("sourceMetadata")
+        enriched_project["sourceMetadata"] = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "approvedAssumptionOverrideCount": len(overrides),
+        }
+        return enriched_project
+
     overrides = list_assumption_override_records(project_id, status="active")
     if not overrides:
         return project_data
@@ -5268,6 +5286,8 @@ def _hydrated_project_source(
     project_id: str,
     input_data: Dict[str, Any],
     authoritative_source: Dict[str, Any] | None = None,
+    *,
+    include_active_cures: bool = True,
 ) -> Dict[str, Any]:
     base = authoritative_source or _project_store().get(project_id)
     if base is None:
@@ -5276,7 +5296,8 @@ def _hydrated_project_source(
     source_data = attach_persisted_land_evidence(project_id, source_data)
     source_data = attach_persisted_parsed_facts(project_id, source_data)
     source_data = attach_approved_assumption_overrides(project_id, source_data)
-    source_data = attach_active_restructuring_cures(project_id, source_data)
+    if include_active_cures:
+        source_data = attach_active_restructuring_cures(project_id, source_data)
     return source_data
 
 
@@ -6218,7 +6239,11 @@ def plan_chief_deal_orchestration(project_id: str, request: Request, input_data:
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     payload = input_data or {}
-    source_data = _hydrated_project_source(project_id, payload)
+    # The plan describes saved analyses and does not apply new cures. The
+    # normalized project already carries any saved cure projection.
+    source_data = _hydrated_project_source(
+        project_id, payload, include_active_cures=storage_backend() not in {"postgres", "postgresql"},
+    )
     workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
     if workflow_track:
         source_data["workflowTrack"] = workflow_track
@@ -6243,22 +6268,27 @@ def plan_chief_deal_orchestration(project_id: str, request: Request, input_data:
     return plan
 
 
-def _persist_chief_recalculation_event(project_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+def _persist_chief_recalculation_event(
+    project_id: str, event: Dict[str, Any], *, request: Request | None = None,
+) -> Dict[str, Any]:
     persisted = upsert_recalculation_event_record(project_id, event)
-    record_user_activity_log(
-        {
-            "eventType": "chief_recalculation_triggered",
-            "projectId": project_id,
-            "runId": persisted.get("runId"),
-            "metadata": {
-                "eventId": persisted.get("eventId"),
-                "trigger": persisted.get("trigger"),
-                "sourcePod": persisted.get("sourcePod"),
-                "targetPods": persisted.get("targetPods"),
-                "status": persisted.get("status"),
-            },
-        }
-    )
+    metadata = {
+        "eventId": persisted.get("eventId"),
+        "trigger": persisted.get("trigger"),
+        "sourcePod": persisted.get("sourcePod"),
+        "targetPods": persisted.get("targetPods"),
+        "status": persisted.get("status"),
+    }
+    if request is not None:
+        record_sensitive_project_event(
+            request, event_type="chief_recalculation_triggered", project_id=project_id,
+            run_id=persisted.get("runId"), metadata=metadata,
+        )
+    elif storage_backend() not in {"postgres", "postgresql"}:
+        record_user_activity_log({
+            "eventType": "chief_recalculation_triggered", "projectId": project_id,
+            "runId": persisted.get("runId"), "metadata": metadata,
+        })
     return persisted
 
 
@@ -6314,7 +6344,7 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
             options,
             artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
             review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
-            event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+            event_sink=lambda event: _persist_chief_recalculation_event(project_id, event, request=request),
             calculation_sink=lambda record: upsert_calculation_run_record(project_id, record),
             handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
         )
@@ -6340,7 +6370,6 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
         actor=actor,
     )
     _persist_shared_deal_state_graph(project_id, plan, source=f"chief_pod:{pod_key}")
-    upsert_project_record(project_id, project_data)
 
     record_sensitive_project_event(
         request,
@@ -6384,7 +6413,7 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         _stored_chief_evidence_options(project_id, project_data, options),
         artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
         review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
-        event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+        event_sink=lambda event: _persist_chief_recalculation_event(project_id, event, request=request),
         calculation_sink=lambda record: upsert_calculation_run_record(project_id, record),
         handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
     )
@@ -6416,7 +6445,6 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         },
     }
     _persist_shared_deal_state_graph(project_id, plan, source="chief_pod:run_all")
-    upsert_project_record(project_id, project_data)
 
     run_all_summary = plan.get("runAllSummary") or {}
     record_sensitive_project_event(
@@ -6446,7 +6474,10 @@ def _completed_pod_keys(project_id: str) -> set:
     return keys
 
 
-def _reanalyze_after_evidence(project_id: str, *, changed_document_types: list[str] | None, options: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _reanalyze_after_evidence(
+    project_id: str, *, changed_document_types: list[str] | None,
+    options: Dict[str, Any] | None = None, request: Request | None = None,
+) -> Dict[str, Any]:
     """Re-run still-open + document-affected pods with the standard persistence sinks."""
     project_data = _project_store()[project_id]
     def validated_runner(pid, pod_key, data, runner_options, **sinks):
@@ -6467,7 +6498,7 @@ def _reanalyze_after_evidence(project_id: str, *, changed_document_types: list[s
         options=_stored_chief_evidence_options(project_id, project_data, options or {}),
         artifact_sink=lambda record: upsert_chief_pod_artifact_record(project_id, record),
         review_sink=lambda record: upsert_pod_ai_review_record(project_id, record),
-        event_sink=lambda event: _persist_chief_recalculation_event(project_id, event),
+        event_sink=lambda event: _persist_chief_recalculation_event(project_id, event, request=request),
         calculation_sink=lambda record: upsert_calculation_run_record(project_id, record),
         handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
     )
@@ -6489,7 +6520,7 @@ def reanalyze_chief_deal(project_id: str, request: Request, input_data: Dict[str
     doc_types = payload.get("changedDocumentTypes")
     doc_types = doc_types if isinstance(doc_types, list) else None
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
-    summary = _reanalyze_after_evidence(project_id, changed_document_types=doc_types, options=options)
+    summary = _reanalyze_after_evidence(project_id, changed_document_types=doc_types, options=options, request=request)
     record_sensitive_project_event(
         request,
         event_type="chief_orchestration_reanalyzed_on_evidence",
@@ -6841,6 +6872,7 @@ def get_project_map_intelligence(
     project_id: str,
     resolve_geometry: bool = False,
     geometry_limit: int = Query(30, ge=0, le=300),
+    focus_pnu: str | None = Query(None, pattern=r"^[0-9]{10}[12][0-9]{8}$"),
 ):
     """Map Intelligence: parcel GeoJSON + the deck's 6-layer spatial availability.
 
@@ -6849,23 +6881,49 @@ def get_project_map_intelligence(
     `resolve_geometry=true` and a configured VWorld key, parcel boundaries are
     fetched live from the VWorld cadastral layer by PNU (capped, best-effort).
     """
-    if project_id not in _project_store():
+    project = _project_store().get(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    source_data = _hydrated_project_source(project_id, {})
-    geometry_resolution: Dict[str, Any] | None = None
-    if resolve_geometry and vworld_configured():
-        cache = build_parcel_geometry_cache()
-        resolver = build_caching_resolver(cache, build_pnu_geometry_resolver(), project_id=project_id)
-        resolved = resolve_and_attach_geometry(source_data, resolver, limit=geometry_limit)
+    source_data = attach_persisted_land_evidence(project_id, project)
+    parcels = project_map_parcels(source_data)
+    geometry_resolution = None
+    if resolve_geometry:
+        configured = vworld_configured()
+        attempted = 0
+        deadline = monotonic() + 12
+        deferred = False
+
+        def resolve(pnu: str) -> Dict[str, Any] | None:
+            nonlocal attempted, deferred
+            remaining = deadline - monotonic()
+            if remaining < 0.5:
+                deferred = True
+                return None
+            attempted += 1
+            geometry, _ = fetch_parcel_geometry_by_pnu(pnu, timeout=min(4.0, remaining))
+            return geometry
+
+        resolved = (
+            resolve_and_attach_geometry(parcels, resolve, limit=geometry_limit, focus_pnu=focus_pnu)
+            if configured else 0
+        )
+        if not configured:
+            status = "not_configured"
+        elif not attempted:
+            status = "no_eligible_parcels"
+        elif resolved < attempted or deferred:
+            status = "partial" if resolved else "unresolved"
+        else:
+            status = "resolved"
         geometry_resolution = {
             "source": "vworld_cadastral",
-            "cacheBackend": cache.backend,
+            "status": status,
             "requestedLimit": geometry_limit,
+            "attemptedCount": attempted,
             "resolvedCount": resolved,
-            "cacheHits": resolver.stats["cacheHits"],
-            "fetchedFromVworld": resolver.stats["fetched"],
+            "fetchedFromVworld": resolved,
         }
-    payload = build_project_map_intelligence(source_data)
+    payload = build_project_map_intelligence(source_data, parcels=parcels)
     if geometry_resolution is not None:
         payload["geometryResolution"] = geometry_resolution
     return payload
