@@ -20,6 +20,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../lib/workspace-context";
+import { useProjectName } from "../../../components/project/project-name-editor";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -77,7 +78,7 @@ export default function ProjectDetailPage() {
   const pods = asArray<Record<string, unknown>>(context?.agentPods);
   const podRuns = asArray<Record<string, unknown>>(context?.podRuns);
   const runByPod = useMemo(() => new Map(podRuns.map((run) => [String(run.podKey ?? run.pod_key), run])), [podRuns]);
-  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
+  const projectName = useProjectName(projectId, displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`));
   const workflowTrack = displayText(context?.workflowTrack, "트랙 미선택");
   const decision = context?.decisionGate?.decision || context?.decisionGate?.status || "검토 전";
 

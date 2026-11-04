@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "../../components/auth/auth-context";
 import { WorkInbox, type DashboardDataError } from "../../components/dashboard/work-inbox";
 import { DashboardAtmosphere } from "../../components/dashboard/dashboard-atmosphere";
+import { DashboardMarket } from "../../components/dashboard/dashboard-market";
 import { NewProjectDialog } from "../../components/intake/new-project-dialog";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { hasPermission, PROJECT_WRITE_PERMISSION } from "../../lib/authorization";
@@ -102,6 +103,8 @@ export default function DashboardPage() {
             onRetry={() => setReloadKey((value) => value + 1)} />
         )}
       </div>
+
+      {status === "authenticated" ? <DashboardMarket key={`market:${user?.tenantId}:${user?.userId}`} /> : null}
 
       <AllProjects key={`${user?.tenantId}:${user?.userId}`} projects={projects} loading={loading} onRetry={() => setReloadKey((value) => value + 1)} />
     </div>

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { SmartIntake } from "../../../../components/intake/smart-intake";
+import { useProjectName } from "../../../../components/project/project-name-editor";
 import { FeasibilityExtractReview } from "../../../../components/intake/feasibility-extract-review";
 import {
   displayText,
@@ -259,7 +260,7 @@ export default function InputPackagePage() {
   const parsedFactSummary = asRecord(pageData.parsedFactSummary);
   const recommendedActions = asArray<string>(pageData.recommendedActions);
   const missingInputs = asArray<Record<string, unknown>>(context?.missingInputRegister);
-  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
+  const projectName = useProjectName(projectId, displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`));
   const docCount = confirmedCount(context?.projectMemory?.sourceDocumentCount, sourceSummary.count, Array.isArray(pageData.sourceDocuments) ? documents.length : undefined);
   const evidenceCount = unavailableSections.has("landEvidence") ? null : confirmedCount(context?.projectMemory?.landEvidenceCount, landEvidenceSummary.count);
   const parcelCount = confirmedCount(landLedgerSummary.parcelCount);

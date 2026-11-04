@@ -188,7 +188,7 @@ test("pending upload can cancel search navigation and remain available in the sa
   const search = page.getByRole("combobox", { name: "프로젝트 검색", exact: true });
   await search.fill("전체 프로젝트");
   await search.press("Enter");
-  await expect(page.getByRole("option")).toBeVisible();
+  await expect(page.getByRole("listbox", { name: "프로젝트 검색 결과" }).getByRole("option")).toBeVisible();
   let confirmations = 0;
   page.once("dialog", async (confirmation) => { confirmations += 1; await confirmation.dismiss(); });
   await search.press("ArrowDown");

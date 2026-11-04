@@ -2749,7 +2749,9 @@ def apply_project_feasibility_input(project_id: str, request: Request, input_dat
     """Save reviewed analysis inputs without promoting them to approved evidence."""
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
-    authz = authorize_request(request, "assumption:override")
+    # Working inputs remain needsReview/not_requested; formal workbook approval
+    # below still requires assumption:override and its independent source gate.
+    authz = authorize_request(request, "project:analyze")
     enforce_project_tenant_scope(request, _project_store()[project_id])
     source_document = input_data.get("sourceDocument") or {}
     if not isinstance(source_document, dict):

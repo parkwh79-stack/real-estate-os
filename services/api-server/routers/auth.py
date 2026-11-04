@@ -47,6 +47,11 @@ from db.repositories.default_workspace_repository import (
     DefaultWorkspaceUnavailable,
     PostgresDefaultWorkspaceRepository,
 )
+from db.repositories.account_profile_repository import (
+    AccountProfileNotActive,
+    AccountProfileUnavailable,
+    PostgresAccountProfileRepository,
+)
 from db.repositories.onboarding_repository import (
     OnboardingLifecycleError,
     OnboardingRepositoryUnavailable,
@@ -79,6 +84,7 @@ from schemas.identity_access import (
     TenantInvitationView,
     TenantMembershipView,
 )
+from schemas.account_profile import UpdateAccountProfileInput
 from schemas.onboarding import (
     CreateTenantAccessRequestInput,
     DecideTenantAccessRequestInput,
@@ -119,6 +125,10 @@ def onboarding_repository() -> PostgresOnboardingRepository:
     """Injectable composition point for normalized onboarding tests."""
 
     return PostgresOnboardingRepository()
+
+
+def account_profile_repository() -> PostgresAccountProfileRepository:
+    return PostgresAccountProfileRepository()
 
 
 def _verified_onboarding_principal(request: Request):
@@ -303,6 +313,29 @@ def create_session(payload: Dict[str, Any]):
         "session": session,
         "user": user,
     }
+
+
+@router.put("/profile")
+def update_account_profile(request: Request, payload: UpdateAccountProfileInput):
+    context = identity_context_from_request(request)
+    user = context.get("user") or {}
+    if not context.get("authenticated") or user.get("status") != "active":
+        raise HTTPException(status_code=401, detail={"error": "authentication_required"})
+    tenant_id, issuer, subject = _normalized_membership_actor(context)
+    if (user.get("metadata") or {}).get("principalType") != "human":
+        raise HTTPException(status_code=403, detail={"error": "verified_human_principal_required"})
+    if payload.displayName in {user.get("userId"), subject, f"{issuer}::{subject}"}:
+        raise HTTPException(status_code=422, detail={"error": "invalid_display_name"})
+    try:
+        name = account_profile_repository().update_display_name(
+            tenant_id=tenant_id, issuer=issuer, subject=subject,
+            display_name=payload.displayName,
+        )
+    except AccountProfileNotActive as exc:
+        raise HTTPException(status_code=403, detail={"error": "account_membership_not_active"}) from exc
+    except AccountProfileUnavailable as exc:
+        raise HTTPException(status_code=503, detail={"error": "account_profile_authority_unavailable"}) from exc
+    return {"schemaVersion": "realytics-account-profile-v1", "displayName": name}
 
 
 @router.get("/me")

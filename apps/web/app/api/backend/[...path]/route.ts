@@ -164,6 +164,8 @@ async function proxy(request: NextRequest) {
     request.body,
     signal,
   );
+  // Display-only transaction lookups must bypass the server fetch cache too.
+  if (backendPath === "/api/market/transactions") init.cache = "no-store";
 
   try {
     const response = await fetch(target, init);

@@ -44,6 +44,8 @@ import {
 } from "../../lib/auth-client";
 import { localPilotAuthEnabled } from "../../lib/auth-policy";
 import { useAuth } from "../../components/auth/auth-context";
+import { AccountProfileEditor } from "../../components/auth/account-profile-editor";
+import { accountDisplayName } from "../../lib/account-profile";
 import { TenantMembershipManagement } from "../../components/auth/tenant-membership-management";
 import { OnboardingAccessRequestManagement } from "../../components/auth/onboarding-access-request-management";
 
@@ -641,7 +643,8 @@ export default function SettingsPage() {
         <Panel title="현재 사용자" icon={<CheckCircle2 className="h-5 w-5 text-emerald-600" />}>
           {user && session ? (
             <div className="space-y-3">
-              <InfoRow label="사용자" value={`${user.displayName ?? user.userId} (${user.userId})`} />
+              <InfoRow label="사용자" value={accountDisplayName(user)} />
+              <AccountProfileEditor key={user.userId} />
               <InfoRow label="Tenant" value={user.tenantId ?? session.tenantId ?? "-"} />
               <InfoRow label="역할" value={user.role ?? "-"} />
               <InfoRow label="인증 공급자" value={session.provider ?? "verified-cookie"} />

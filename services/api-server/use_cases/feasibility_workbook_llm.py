@@ -309,7 +309,7 @@ def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
     workbook_review = workbook_review if isinstance(workbook_review, dict) else {}
     workbook_review = ({**deepcopy(workbook_review), "sourceDocument": deepcopy(raw_import.get("sourceDocument") or {})}
                        if workbook_review.get("schemaVersion") == "bonri-workbook-financing-review-v1" else None)
-    return {**state, "reviewHash": review_hash, "analysisOnly": True,
+    return {**state, "reviewHash": review_hash, "analysisOnly": True, "reportEligible": False,
             "workbookFinancingReview": workbook_review,
             "canonicalStudyPresent": bool(project.get("canonicalFeasibilityStudyV2") or project.get("feasibilityStudyV2"))}
 
@@ -465,4 +465,5 @@ def apply_feasibility_input_use_case(
         "reviewState": feasibility_review_state(updated),
         "requiresRecalculation": True,
         "analysisOnly": True,
+        "reportEligible": False,
     }

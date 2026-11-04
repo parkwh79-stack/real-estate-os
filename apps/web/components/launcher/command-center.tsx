@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, type RefObject } from "react";
+import { useCallback, useId, useRef, useState, type RefObject } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -32,6 +32,7 @@ import { ReviewOnlyNotice } from "../auth/review-only-notice";
 import { SmartIntake, type IntakeWorkStatus } from "../intake/smart-intake";
 import { intakeProcessingFailure } from "../../lib/intake-processing-status";
 import { RecentWorkPanel } from "./recent-work-panel";
+import { ProjectNameEditor, PROJECT_NAME_MAX_LENGTH } from "../project/project-name-editor";
 
 type Phase = "idle" | "creating" | "resume" | "ready" | "error";
 type IntakeStage = "preparing" | "checking-history" | "creating-workspace";
@@ -248,6 +249,8 @@ export function CommandCenter() {
   const { logout, permissions, user } = useAuth();
   const canWriteProjects = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const nameInputId = useId();
+  const [requestedName, setRequestedName] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [intakeStage, setIntakeStage] = useState<IntakeStage>("preparing");
   const [dragOver, setDragOver] = useState(false);
@@ -291,7 +294,7 @@ export function CommandCenter() {
       setPhase("error");
       return;
     }
-    const name = deriveProjectName(picked);
+    const name = requestedName.trim() || deriveProjectName(picked);
     setProjectName(name);
     setPhase("creating");
     setIntakeStage("preparing");
@@ -358,7 +361,7 @@ export function CommandCenter() {
       );
       setPhase("error");
     }
-  }, [canWriteProjects, user?.role]);
+  }, [canWriteProjects, user?.role, requestedName]);
 
   const runTriage = useCallback(
     async (classified: Classified[]) => {
@@ -497,6 +500,7 @@ export function CommandCenter() {
               <div className="min-w-0">
                 <p className="text-xs font-bold uppercase tracking-wide text-sky-300">심사 공간 생성됨</p>
                 <p className="truncate text-sm font-black">{projectName}</p>
+                <div className="mt-2"><ProjectNameEditor key={projectId} projectId={projectId} currentName={projectName} onSaved={setProjectName} /></div>
               </div>
               <div className="text-xs font-semibold text-slate-400">
                 {triageLoading ? "AI가 업무 트랙을 추론 중입니다." : triage ? "진행 트랙을 선택하세요." : "자료 분류 후 트랙을 추천합니다."}
@@ -554,6 +558,12 @@ export function CommandCenter() {
                   : "심사 전용 역할에서는 기존 작업을 열람할 수 있으며 새 심사 생성과 업로드는 비활성화됩니다."}
               </p>
               <div className="mt-4">
+                <label htmlFor={nameInputId} className="block text-sm font-semibold text-slate-200">프로젝트 이름 (선택)</label>
+                <input id={nameInputId} value={requestedName} onChange={(event) => setRequestedName(event.target.value)}
+                  maxLength={PROJECT_NAME_MAX_LENGTH} disabled={!canWriteProjects || phase === "creating"}
+                  placeholder="비워 두면 첫 번째 파일 이름을 사용합니다"
+                  className="mb-1 mt-2 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60" />
+                <p className="mb-4 text-xs text-slate-400">생성 후에도 이름을 바꿀 수 있습니다.</p>
                 <DropZone
                   phase={phase}
                   stage={intakeStage}

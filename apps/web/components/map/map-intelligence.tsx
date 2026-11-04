@@ -176,7 +176,7 @@ function fitFeatures(map: MlMap, features: ParcelFeature[]) {
   return true;
 }
 
-export function MapIntelligence({ data, transactions = [] }: { data: MapIntelligenceData; transactions?: TxMarker[] }) {
+export function MapIntelligence({ data, transactions = [], compact = false }: { data: MapIntelligenceData; transactions?: TxMarker[]; compact?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
   const markersRef = useRef<MlMarker[]>([]);
@@ -378,7 +378,15 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
       const element = document.createElement("div");
       const bg = tx.tone === "rent" ? "#0ea5e9" : tierColor(tx.value);
       element.style.cssText = `display:inline-flex;flex-direction:column;align-items:center;padding:3px 7px;border-radius:8px;background:${bg};color:#fff;font-size:11px;font-weight:800;white-space:nowrap;box-shadow:0 6px 14px rgba(15,23,42,.28);`;
-      element.innerHTML = `<span>${tx.label}</span>${tx.sublabel ? `<span style="font-size:9px;font-weight:600;opacity:.9">${tx.sublabel}</span>` : ""}`;
+      const label = document.createElement("span");
+      label.textContent = tx.label;
+      element.append(label);
+      if (tx.sublabel) {
+        const sublabel = document.createElement("span");
+        sublabel.textContent = tx.sublabel;
+        sublabel.style.cssText = "font-size:9px;font-weight:600;opacity:.9";
+        element.append(sublabel);
+      }
       const marker = new maplibregl.Marker({ element, anchor: "bottom" }).setLngLat([tx.lng, tx.lat]).addTo(map);
       markersRef.current.push(marker);
     }
@@ -390,10 +398,12 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
           [Math.min(...lngs), Math.min(...lats)],
           [Math.max(...lngs), Math.max(...lats)],
         ],
-        { padding: 64, maxZoom: 15, duration: 600 },
+        { padding: 64, maxZoom: 15, duration: compact ? 0 : 600 },
       );
+    } else if (compact && !data.center) {
+      map.jumpTo({ center: KOREA_CENTER, zoom: 6 });
     }
-  }, [transactions, ready, data.center]);
+  }, [transactions, ready, data.center, compact]);
 
   const fitSelected = () => {
     const map = mapRef.current;
@@ -414,8 +424,8 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
   const layers = data.layers ?? [];
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[1.55fr_0.85fr]">
-      <div className="relative h-[620px] overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+    <div className={compact ? "min-w-0" : "grid gap-4 xl:grid-cols-[1.55fr_0.85fr]"}>
+      <div className={`relative overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800 ${compact ? "h-80 sm:h-[360px]" : "h-[620px]"}`}>
         <div ref={containerRef} className="h-full w-full" />
         {mapError ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-rose-50/95 p-4 text-center text-sm font-semibold text-rose-700 dark:bg-rose-950/80 dark:text-rose-200">
@@ -424,10 +434,10 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
         ) : null}
         {!vworldKey ? (
           <div className="absolute left-3 top-3 z-10 rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
-            OSM 기본지도 · VWorld 키가 있으면 지적도/용도지역 레이어가 활성화됩니다.
+            {compact ? "OpenStreetMap · 배경지도" : "OSM 기본지도 · VWorld 키가 있으면 지적도/용도지역 레이어가 활성화됩니다."}
           </div>
         ) : null}
-        <div className="absolute bottom-3 left-3 z-10 rounded-md bg-white/90 px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
+        {!compact ? <div className="absolute bottom-3 left-3 z-10 rounded-md bg-white/90 px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
           <p className="mb-1 font-bold">공시지가 색상</p>
           <div className="flex flex-wrap items-center gap-1.5">
             {PRICE_TIERS.map((tier) => (
@@ -437,10 +447,10 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
               </span>
             ))}
           </div>
-        </div>
+        </div> : null}
       </div>
 
-      <aside className="space-y-4">
+      {!compact ? <aside className="space-y-4">
         <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -535,7 +545,7 @@ export function MapIntelligence({ data, transactions = [] }: { data: MapIntellig
             </ul>
           </section>
         ) : null}
-      </aside>
+      </aside> : null}
     </div>
   );
 }

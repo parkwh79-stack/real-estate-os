@@ -1,12 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Loader2, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
 import { SmartIntake, type IntakeWorkStatus } from "./smart-intake";
 import { validateIntakeFiles } from "../../lib/intake-upload-client";
+import { ProjectNameEditor, PROJECT_NAME_MAX_LENGTH } from "../project/project-name-editor";
+import { useAuth } from "../auth/auth-context";
+import { hasPermission, PROJECT_WRITE_PERMISSION, projectWriteRestrictionMessage } from "../../lib/authorization";
 
 type Phase = "idle" | "creating" | "ready" | "error";
 
@@ -32,6 +35,10 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
   onSessionChange?: (session: DashboardIntakeSession) => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const nameInputId = useId();
+  const { permissions, user } = useAuth();
+  const canWrite = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
+  const [requestedName, setRequestedName] = useState("");
   const creatingRef = useRef(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [dragOver, setDragOver] = useState(false);
@@ -62,8 +69,9 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
   const start = useCallback(
     async (picked: File[]) => {
       if (!picked.length || creatingRef.current) return;
+      if (!canWrite) { setError(projectWriteRestrictionMessage(user?.role)); return; }
       creatingRef.current = true;
-      const name = deriveProjectName(picked);
+      const name = requestedName.trim() || deriveProjectName(picked);
       setProjectName(name);
       setPhase("creating");
       setError(null);
@@ -102,7 +110,7 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
         if (inputRef.current) inputRef.current.value = "";
       }
     },
-    [onProjectCreated],
+    [onProjectCreated, requestedName, canWrite, user?.role],
   );
 
   const reset = useCallback(() => {
@@ -110,6 +118,7 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
     setPhase("idle");
     setProjectId(null);
     setProjectName("");
+    setRequestedName("");
     setFiles([]);
     setError(null);
     setIntakeStatus({ busy: false, pending: true });
@@ -124,6 +133,7 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
             <p className="break-words text-sm font-semibold text-re-text">{projectName}</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <ProjectNameEditor key={projectId} projectId={projectId} currentName={projectName} onSaved={(name) => { setProjectName(name); onProjectCreated?.(); }} />
             <Link
               href={`/project/${encodeURIComponent(projectId)}/input-package`}
               aria-disabled={busy}
@@ -152,6 +162,15 @@ export function DashboardIntake({ onProjectCreated, onSessionChange }: {
   return (
     <section className="space-y-4" aria-label="프로젝트 자료 업로드">
       <p className="text-sm leading-6 text-re-secondary">사업계획서·토지조서·사업수지 등 보유 자료를 올려 주세요. 자료를 분류한 뒤 처리할 내용을 확인할 수 있습니다.</p>
+
+      <div>
+        <label htmlFor={nameInputId} className="block text-sm font-semibold text-re-text">프로젝트 이름 (선택)</label>
+        <input id={nameInputId} value={requestedName} onChange={(event) => setRequestedName(event.target.value)}
+          maxLength={PROJECT_NAME_MAX_LENGTH} disabled={phase === "creating" || !canWrite}
+          placeholder="비워 두면 첫 번째 파일 이름을 사용합니다"
+          className="mt-2 min-h-11 w-full rounded-re-control border border-re-border bg-re-surface px-3 text-sm text-re-text focus:outline-none focus:ring-2 focus:ring-re-action disabled:opacity-60" />
+        <p className="mt-1 text-xs text-re-secondary">생성 후에도 이름을 바꿀 수 있습니다.</p>
+      </div>
 
       <div
         role="button"

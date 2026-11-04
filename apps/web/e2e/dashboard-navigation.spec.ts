@@ -87,7 +87,7 @@ test("search presents similar projects without navigating and supports keyboard 
   const search = page.getByRole("combobox", { name: "프로젝트 검색", exact: true });
   await search.fill("본리동");
   await search.press("Enter");
-  await expect(page.getByRole("option")).toHaveCount(2);
+  await expect(page.getByRole("listbox", { name: "프로젝트 검색 결과" }).getByRole("option")).toHaveCount(2);
   await expect(page).toHaveURL(/\/dashboard$/);
   await search.press("ArrowDown");
   await search.press("ArrowDown");
@@ -110,7 +110,7 @@ test("editing the query discards a delayed search response and no-match results 
   state.searchGate = Promise.resolve();
   await search.press("Enter");
   await expect(page.getByText("일치하는 프로젝트가 없습니다.", { exact: true })).toBeVisible();
-  await expect(page.getByRole("option")).toHaveCount(0);
+  await expect(page.getByRole("listbox", { name: "프로젝트 검색 결과" }).getByRole("option")).toHaveCount(0);
   await expect(page).toHaveURL(/\/dashboard$/);
   await search.press("Escape");
   await expect(search).toHaveAttribute("aria-expanded", "false");
@@ -129,7 +129,7 @@ test("malformed search fields show a safe failure without crashing and valid par
     await search.fill("본리동");
     await search.press("Enter");
     await expect(page.getByRole("alert").filter({ hasText: "프로젝트를 검색하지 못했습니다" })).toBeVisible();
-    await expect(page.getByRole("option")).toHaveCount(0);
+    await expect(page.getByRole("listbox", { name: "프로젝트 검색 결과" }).getByRole("option")).toHaveCount(0);
     await expect(page).toHaveURL(/\/dashboard$/);
   }
   state.searchResponse = [{ ...PROJECTS[0], land_acquisition: [null, { pnu: {} }, { pnu: "2729010100100010001" }] }];

@@ -22,6 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ProjectNameEditor, useProjectName } from "../project/project-name-editor";
 import {
   displayText,
   fetchWorkspaceContext,
@@ -219,7 +220,7 @@ export function ProjectContextHeader({ projectId }: { projectId: string }) {
     ) ?? PROJECT_NAVIGATION[0]!;
   const projectMemory = context?.projectMemory;
   const projectRecord = projectMemory?.project;
-  const projectName = displayText(projectMemory?.projectName, `프로젝트 #${projectId}`);
+  const projectName = useProjectName(projectId, displayText(context?.projectId === projectId ? projectMemory?.projectName : undefined, `프로젝트 #${projectId}`));
   const workflowTrack = firstText(context?.workflowTrack, requestedTrack);
   const trackLabel = workflowTrack ? TRACK_LABELS[workflowTrack.toLowerCase()] ?? workflowTrack : undefined;
   const projectStage = firstText(
@@ -264,7 +265,7 @@ export function ProjectContextHeader({ projectId }: { projectId: string }) {
             {trackLabel ? <ContextMeta label="트랙" value={trackLabel} /> : null}
             {projectStage ? <ContextMeta label="상태" value={projectStage} /> : null}
           </div>
-          <div className="mt-1 flex min-w-0 items-center gap-2">
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
             <Link
               href={projectUrl(projectId, "")}
               className="truncate text-base font-black tracking-tight text-re-text hover:text-re-action sm:text-lg"
@@ -272,7 +273,8 @@ export function ProjectContextHeader({ projectId }: { projectId: string }) {
             >
               {projectName}
             </Link>
-            <span className="shrink-0 rounded-re-control border border-re-border bg-re-subtle px-1.5 py-0.5 font-mono text-[10px] font-bold text-re-muted">
+            {!loading && !error && context?.projectId === projectId ? <ProjectNameEditor key={projectId} projectId={projectId} currentName={projectName} /> : null}
+            <span title={`프로젝트 #${projectId}`} className="max-w-full truncate rounded-re-control border border-re-border bg-re-subtle px-1.5 py-0.5 font-mono text-[10px] font-bold text-re-muted">
               #{projectId}
             </span>
           </div>
