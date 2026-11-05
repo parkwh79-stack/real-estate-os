@@ -87,6 +87,8 @@ export function LegalGovernanceWorkspace({
         if (!signal.aborted) setWorkspace(result);
       } catch (nextError) {
         if (signal.aborted) return;
+        setWorkspace(null);
+        setCitatorCount(null);
         setError(
           nextError instanceof Error
             ? nextError.message
@@ -110,38 +112,39 @@ export function LegalGovernanceWorkspace({
       matters:
         workspace?.matters.filter(
           (item) => !["closed", "resolved", "superseded"].includes(item.status),
-        ).length ?? 0,
+        ).length ?? "—",
       evidence: workspace?.annotations.filter((item) => item.status === "active")
-        .length ?? 0,
+        .length ?? "—",
       analysis:
         workspace?.analysisVersions.filter(
           (item) => item.humanReviewStatus === "pending",
-        ).length ?? 0,
+        ).length ?? "—",
       opinions:
         workspace?.counselOpinions.filter(
           (item) => !["approved", "withdrawn", "superseded"].includes(item.status),
-        ).length ?? 0,
+        ).length ?? "—",
       waivers:
         workspace?.waivers.filter((item) =>
           ["proposed", "approved"].includes(item.status),
-        ).length ?? 0,
+        ).length ?? "—",
       delegations:
         workspace?.approvalDelegations.filter(
           (item) =>
             item.status === "active" &&
             new Date(item.validUntil) >= new Date(),
-        ).length ?? 0,
+        ).length ?? "—",
       claim_sets:
         workspace?.requiredClaimSets.filter((item) => item.status === "draft")
-          .length ?? 0,
+          .length ?? "—",
       citator: citatorCount ?? "—",
       glossary:
         workspace?.tenantTermAliases.filter(
           (item) => item.status === "candidate",
-        ).length ?? 0,
+        ).length ?? "—",
     }),
     [citatorCount, workspace],
   );
+  const readOnly = workspace !== null && workspace.reviewWriteAvailable !== true;
 
   return (
     <section
@@ -209,6 +212,12 @@ export function LegalGovernanceWorkspace({
           </div>
         ) : null}
 
+        {readOnly ? (
+          <p role="status" className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+            저장된 법률 기록을 조회할 수 있습니다. 현재 서버에서는 법률 검토 결과를 저장하거나 승인할 수 없습니다.
+          </p>
+        ) : null}
+
         <div
           role="tablist"
           aria-label="법률 거버넌스 기록 유형"
@@ -244,8 +253,8 @@ export function LegalGovernanceWorkspace({
             <ListSkeleton />
           ) : !workspace ? (
             <EmptyState
-              title="정규화된 법률 기록을 확인할 수 없습니다"
-              body="이 화면은 legacy JSON을 권위 데이터로 대체하지 않습니다. PostgreSQL 연결과 프로젝트 권한을 확인해 주세요."
+              title="법률 기록을 확인할 수 없습니다"
+              body="새로고침을 눌러 서버의 법률 기록을 다시 불러올 수 있습니다."
               icon={<Scale className="h-7 w-7" />}
             />
           ) : activeTab === "matters" ? (
@@ -264,17 +273,20 @@ export function LegalGovernanceWorkspace({
             <RequiredClaimSetPanel
               projectId={projectId}
               items={workspace.requiredClaimSets}
+              readOnly={readOnly}
               onChanged={() => setReloadKey((value) => value + 1)}
             />
           ) : activeTab === "citator" ? (
             <LegalCitatorReviewPanel
               projectId={projectId}
+              readOnly={readOnly}
               onCountChanged={setCitatorCount}
             />
           ) : (
             <GlossaryAliasPanel
               projectId={projectId}
               items={workspace.tenantTermAliases}
+              readOnly={readOnly}
               onChanged={() => setReloadKey((value) => value + 1)}
             />
           )}
@@ -287,10 +299,12 @@ export function LegalGovernanceWorkspace({
 function RequiredClaimSetPanel({
   projectId,
   items,
+  readOnly,
   onChanged,
 }: {
   projectId: string;
   items: LegalRequiredClaimSet[];
+  readOnly: boolean;
   onChanged: () => void;
 }) {
   const [claimSetKey, setClaimSetKey] = useState("approval-gate");
@@ -303,6 +317,7 @@ function RequiredClaimSetPanel({
   const [success, setSuccess] = useState<string | null>(null);
 
   const propose = async () => {
+    if (readOnly) return;
     setError(null);
     setSuccess(null);
     const version = Number(claimSetVersion);
@@ -363,6 +378,7 @@ function RequiredClaimSetPanel({
   };
 
   const approve = async (claimSetId: string) => {
+    if (readOnly) return;
     setSubmitting(claimSetId);
     setError(null);
     setSuccess(null);
@@ -435,7 +451,7 @@ function RequiredClaimSetPanel({
         <button
           type="button"
           onClick={() => void propose()}
-          disabled={submitting !== null}
+          disabled={readOnly || submitting !== null}
           className="mt-2 inline-flex h-9 items-center gap-2 rounded-md bg-indigo-700 px-3 text-xs font-black text-white disabled:opacity-50"
         >
           {submitting === "proposal" ? (
@@ -490,7 +506,7 @@ function RequiredClaimSetPanel({
                   <button
                     type="button"
                     onClick={() => void approve(item.claimSetId)}
-                    disabled={submitting !== null}
+                    disabled={readOnly || submitting !== null}
                     className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-700 px-2.5 text-xs font-black text-white disabled:opacity-50"
                   >
                     {submitting === item.claimSetId ? (
@@ -872,10 +888,12 @@ function DelegationList({ items }: { items: LegalApprovalDelegation[] }) {
 function GlossaryAliasPanel({
   projectId,
   items,
+  readOnly,
   onChanged,
 }: {
   projectId: string;
   items: TenantLegalTermAlias[];
+  readOnly: boolean;
   onChanged: () => void;
 }) {
   const [reasons, setReasons] = useState<Record<string, string>>({});
@@ -896,6 +914,7 @@ function GlossaryAliasPanel({
     item: TenantLegalTermAlias,
     reviewStatus: "approved" | "rejected" | "needs_revision",
   ) => {
+    if (readOnly) return;
     const reason = (reasons[item.aliasId] ?? "").trim();
     if (!reason) {
       setError("용어 alias 검토 사유를 입력해 주세요.");
@@ -1026,7 +1045,7 @@ function GlossaryAliasPanel({
                   <button
                     type="button"
                     onClick={() => void review(item, "approved")}
-                    disabled={submitting !== null}
+                    disabled={readOnly || submitting !== null}
                     className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-700 px-2.5 text-xs font-black text-white disabled:opacity-50"
                   >
                     {submitting === item.aliasId ? (
@@ -1039,7 +1058,7 @@ function GlossaryAliasPanel({
                   <button
                     type="button"
                     onClick={() => void review(item, "needs_revision")}
-                    disabled={submitting !== null}
+                    disabled={readOnly || submitting !== null}
                     className="h-8 rounded-md bg-amber-600 px-2.5 text-xs font-black text-white disabled:opacity-50"
                   >
                     수정 요청
@@ -1047,7 +1066,7 @@ function GlossaryAliasPanel({
                   <button
                     type="button"
                     onClick={() => void review(item, "rejected")}
-                    disabled={submitting !== null}
+                    disabled={readOnly || submitting !== null}
                     className="h-8 rounded-md bg-rose-700 px-2.5 text-xs font-black text-white disabled:opacity-50"
                   >
                     기각

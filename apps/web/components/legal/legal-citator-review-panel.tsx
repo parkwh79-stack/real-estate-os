@@ -38,10 +38,12 @@ const EMPTY_DRAFT: ReviewDraft = {
 
 export function LegalCitatorReviewPanel({
   projectId,
+  readOnly = false,
   onCountChanged,
 }: {
   projectId: string;
-  onCountChanged?: (count: number) => void;
+  readOnly?: boolean;
+  onCountChanged?: (count: number | null) => void;
 }) {
   const [queue, setQueue] = useState<LegalCitatorReviewQueue | null>(null);
   const [drafts, setDrafts] = useState<Record<string, ReviewDraft>>({});
@@ -66,6 +68,8 @@ export function LegalCitatorReviewPanel({
         }
       } catch (nextError) {
         if (signal.aborted) return;
+        setQueue(null);
+        onCountChanged?.(null);
         setError(
           nextError instanceof Error
             ? nextError.message
@@ -107,6 +111,7 @@ export function LegalCitatorReviewPanel({
     item: LegalCitatorQueueItem,
     reviewStatus: LegalCitatorReviewStatus,
   ) => {
+    if (readOnly) return;
     const draft = drafts[item.recordId] ?? EMPTY_DRAFT;
     setSubmitting(item.recordId);
     setError(null);
@@ -198,7 +203,7 @@ export function LegalCitatorReviewPanel({
         </p>
       ) : null}
 
-      {!items.length ? (
+      {!queue ? null : !items.length ? (
         <EmptyState
           title="프로젝트 Citator 검토 대기 항목이 없습니다"
           body="현재 프로젝트 evidence snapshot lineage에 연결된 citation 또는 relation 후보가 없습니다."
@@ -357,7 +362,7 @@ export function LegalCitatorReviewPanel({
                     tone="good"
                     busy={submitting === item.recordId}
                     disabled={
-                      submitting !== null ||
+                      readOnly || submitting !== null ||
                       (item.recordKind === "relation" &&
                         !draft.objectEvidenceItemId.trim())
                     }
@@ -368,7 +373,7 @@ export function LegalCitatorReviewPanel({
                     icon={<RotateCcw className="h-3.5 w-3.5" />}
                     tone="warn"
                     busy={submitting === item.recordId}
-                    disabled={submitting !== null}
+                    disabled={readOnly || submitting !== null}
                     onClick={() => void review(item, "needs_revision")}
                   />
                   <ReviewButton
@@ -376,7 +381,7 @@ export function LegalCitatorReviewPanel({
                     icon={<XCircle className="h-3.5 w-3.5" />}
                     tone="bad"
                     busy={submitting === item.recordId}
-                    disabled={submitting !== null}
+                    disabled={readOnly || submitting !== null}
                     onClick={() => void review(item, "rejected")}
                   />
                 </div>

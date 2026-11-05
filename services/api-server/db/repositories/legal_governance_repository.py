@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -2223,38 +2224,17 @@ class PostgresLegalGovernanceRepository:
                 values.append(json.loads(value))
         return values
 
-    class _CursorContext:
-        def __init__(self, repository: "PostgresLegalGovernanceRepository"):
-            self.repository = repository
-            self.connection: Any = None
-            self.cursor: Any = None
-
-        def __enter__(self) -> Any:
-            self.connection = self.repository._connect()
-            self.connection.__enter__()
-            self.cursor = self.connection.cursor()
-            self.cursor.__enter__()
-            self.cursor.execute(
-                f'SET LOCAL search_path TO "{self.repository._schema}", '
-                "pg_catalog"
+    @contextmanager
+    def _cursor(self) -> Iterator[Any]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                f'SET LOCAL search_path TO "{self._schema}", pg_catalog'
             )
-            self.cursor.execute(
+            cursor.execute(
                 "SELECT set_config('realytics.tenant_id', %s, true)",
-                (self.repository.tenant_id,),
+                (self.tenant_id,),
             )
-            return self.cursor
-
-        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
-            suppress = self.cursor.__exit__(exc_type, exc, traceback)
-            connection_suppress = self.connection.__exit__(
-                exc_type,
-                exc,
-                traceback,
-            )
-            return bool(suppress or connection_suppress)
-
-    def _cursor(self) -> "_CursorContext":
-        return self._CursorContext(self)
+            yield cursor
 
     def _actor(self, actor_id: str) -> str:
         actor = str(actor_id or "").strip()

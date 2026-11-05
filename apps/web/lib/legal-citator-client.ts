@@ -372,6 +372,13 @@ async function readOrThrow(
 ): Promise<unknown> {
   const body = await response.json().catch(() => ({}));
   if (response.ok) return body;
+  if (response.status === 401) throw new Error("로그인한 뒤 다시 시도해 주세요.");
+  if (response.status === 403 || response.status === 404) {
+    throw new Error("이 프로젝트의 법률 인용 검토 권한을 확인해 주세요.");
+  }
+  if (response.status >= 500) {
+    throw new Error("현재 서버에서 법률 인용 검토 기록을 확인하거나 저장할 수 없습니다.");
+  }
   const source =
     body !== null && typeof body === "object" ? (body as JsonRecord) : {};
   const detail =

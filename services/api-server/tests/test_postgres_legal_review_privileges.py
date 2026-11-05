@@ -112,9 +112,10 @@ def test_legal_review_role_identifier_fails_closed(value):
 
 
 class _AuditCursor:
-    def __init__(self, grants, *, memberships=()):
+    def __init__(self, grants, *, memberships=(), login=False):
         self.grants = list(grants)
         self.memberships = list(memberships)
+        self.login = login
         self.statement = ""
 
     def execute(self, statement, _params=None):
@@ -122,7 +123,7 @@ class _AuditCursor:
 
     def fetchone(self):
         if "FROM pg_roles WHERE rolname" in self.statement:
-            return (False, False, False, False, False, False, False)
+            return (self.login, False, False, False, False, False, False)
         if "has_schema_privilege" in self.statement:
             return (True, False)
         if "has_function_privilege" in self.statement:
@@ -162,3 +163,22 @@ def test_legal_review_role_audit_detects_extra_grant_and_membership():
     assert (
         "role:realytics_legal_review:member_of:postgres" in forbidden
     )
+
+
+def test_legal_review_audit_distinguishes_provisioned_role_and_dsn_login():
+    expected = [
+        (table, privilege)
+        for table, privileges in {
+            **LEGAL_REVIEW_READ_PRIVILEGES,
+            **LEGAL_REVIEW_WRITE_PRIVILEGES,
+        }.items()
+        for privilege in privileges
+    ]
+    scope = {"role_name": "realytics_legal_review", "schema_name": "realytics"}
+    assert audit_legal_review_role(_AuditCursor(expected), **scope) == ([], [])
+    assert audit_legal_review_role(
+        _AuditCursor(expected, login=True), require_login=True, **scope
+    ) == ([], [])
+    assert audit_legal_review_role(
+        _AuditCursor(expected), require_login=True, **scope
+    ) == (["role:realytics_legal_review:LOGIN"], [])

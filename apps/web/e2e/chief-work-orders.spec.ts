@@ -9,6 +9,7 @@ test("opening the deal room loads its plan and execution starts only after a cli
     agentPods: [],
     podRuns: [{ podKey: "market_product", status: "planned", progressPercent: 0 }],
     taskGraph: { workflowTrack: "pf" },
+    approvalReadinessGate: { pass: true, status: "ready" },
   };
   const savedPlan = {
     ...plan,
@@ -26,6 +27,9 @@ test("opening the deal room loads its plan and execution starts only after a cli
   };
   const runRequests: unknown[] = [];
   let saved = false;
+  let readinessAvailable = false;
+  let readinessAssessed = false;
+  let legalWorkspaceAvailable = false;
 
   await page.route("**/api/backend/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -39,6 +43,31 @@ test("opening the deal room loads its plan and execution starts only after a cli
       };
     } else if (path.endsWith("/chief-orchestration/plan")) {
       body = saved ? savedPlan : plan;
+    } else if (path.endsWith("/chief-orchestration/approval-readiness")) {
+      status = readinessAvailable ? 200 : 503;
+      body = readinessAvailable
+        ? {
+          schemaVersion: "realytics-deal-state-approval-readiness-v1",
+          projectId: "explicit-run", readable: true,
+          assessmentStatus: readinessAssessed ? "assessed" : "unassessed",
+          cureWriteAvailable: false,
+          legalEvidenceSource: "normalized_postgres", legalEvidenceNormalizedReadable: true,
+          legalReviewWriteAvailable: false, blockingIssueCount: 0, warningCount: 0,
+        }
+        : { detail: { message: "Dedicated legal-review DSN is unavailable." } };
+    } else if (path.endsWith("/legal/workspace")) {
+      status = legalWorkspaceAvailable ? 200 : 503;
+      body = legalWorkspaceAvailable
+        ? {
+          schemaVersion: "realytics-legal-governance-workspace-v1",
+          projectId: "explicit-run", source: "normalized_postgres", reviewWriteAvailable: false,
+          matters: [], waivers: [], counselOpinions: [], analysisVersions: [],
+          annotations: [], approvalDelegations: [], requiredClaimSets: [], tenantTermAliases: [],
+        }
+        : { detail: { error: "normalized_legal_store_unavailable", message: "Dedicated legal-review DSN is unavailable." } };
+    } else if (path.endsWith("/legal/citator/review-queue")) {
+      status = 503;
+      body = { detail: { message: "Dedicated legal-review DSN is unavailable." } };
     } else if (path.endsWith("/chief-orchestration/run-all-pods")) {
       runRequests.push(route.request().postDataJSON());
       if (runRequests.length === 1) {
@@ -60,6 +89,27 @@ test("opening the deal room loads its plan and execution starts only after a cli
   const runButton = page.getByRole("button", { name: "전체 자동 실행", exact: true });
   await expect(runButton).toBeInViewport({ timeout: 60_000 });
   await expect(page.getByText("분석 계획을 확인했습니다", { exact: true })).toBeVisible();
+  const readiness = page.getByRole("region", { name: "승인 준비도를 불러올 수 없습니다" });
+  await expect(readiness).toBeVisible();
+  await expect(readiness.getByRole("button", { name: "증빙 저장·재계산" })).toBeDisabled();
+  await expect(page.getByText("승인 가능성 검토 통과", { exact: true })).toHaveCount(0);
+  const governance = page.getByRole("region", { name: "프로젝트 법률 거버넌스 워크스페이스" });
+  const mattersTab = governance.getByRole("tab", { name: /^법률 이슈/ });
+  await expect(governance.getByRole("alert")).toContainText("법률 기록 서버에 연결할 수 없습니다.");
+  await expect(mattersTab).toContainText("—");
+  await expect(page.getByText("Dedicated legal-review DSN", { exact: false })).toHaveCount(0);
+  readinessAvailable = true;
+  legalWorkspaceAvailable = true;
+  await readiness.getByRole("button", { name: "승인 준비도 다시 조회" }).click();
+  await expect(page.getByRole("heading", { name: "승인 준비도 평가 전입니다" })).toBeVisible();
+  await expect(page.getByText("차단 리스크 0", { exact: false })).toHaveCount(0);
+  await governance.getByRole("button", { name: "새로고침" }).click();
+  await expect(mattersTab).toContainText("0");
+  await governance.getByRole("tab", { name: /^필수 쟁점 정책/ }).click();
+  await expect(governance.getByRole("button", { name: "정책 초안 제안" })).toBeDisabled();
+  await governance.getByRole("tab", { name: /^Citator 검토/ }).click();
+  await expect(governance.getByRole("alert")).toContainText("현재 서버에서 법률 인용 검토 기록을 확인하거나 저장할 수 없습니다.");
+  await expect(governance.getByText("프로젝트 Citator 검토 대기 항목이 없습니다")).toHaveCount(0);
   expect(runRequests).toEqual([]);
 
   await runButton.click();
@@ -68,9 +118,13 @@ test("opening the deal room loads its plan and execution starts only after a cli
   await expect(runButton).toBeEnabled();
   expect(runRequests).toEqual([{ workflowTrack: "pf", options: {} }]);
 
+  readinessAssessed = true;
   await runButton.click();
   const summary = page.getByText("전체 실행 완료", { exact: true });
   await expect(summary).toBeVisible();
+  const assessed = page.getByRole("region", { name: "승인 전 보완이 필요합니다" });
+  await expect(assessed.getByRole("status")).toContainText("현재 서버에서는 PF 보완 증빙을 저장하고 재계산할 수 없습니다.");
+  await expect(assessed.getByRole("button", { name: "증빙 저장·재계산" })).toBeDisabled();
   await expect(page.getByText("전체 Pod 실행에 실패했습니다.", { exact: true })).toHaveCount(0);
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("button", { name: "새 자료 반영 재분석", exact: true })).toBeVisible();
@@ -81,6 +135,8 @@ test("opening the deal room loads its plan and execution starts only after a cli
 });
 
 test("saved agent assignments, material requests and execution evidence survive reload", async ({ page }) => {
+  const requestedTracks: unknown[] = [];
+  await page.addInitScript(() => localStorage.setItem("realytics.workflow.track.v1", "pf"));
   const plan = {
     projectId: "work-orders", sharedDealStateGraph: {}, agentPods: [],
     podRuns: [{ podKey: "market_product", status: "completed", progressPercent: 100 }],
@@ -99,7 +155,10 @@ test("saved agent assignments, material requests and execution evidence survive 
     const path = new URL(route.request().url()).pathname;
     let body: unknown = {};
     if (path.endsWith("/auth/me")) body = { authenticated: true, user: { userId: "u", role: "admin", status: "active", tenantId: "test" }, permissions: ["project:read"] };
-    else if (path.endsWith("/chief-orchestration/plan")) body = plan;
+    else if (path.endsWith("/chief-orchestration/plan")) {
+      requestedTracks.push(route.request().postDataJSON().workflowTrack);
+      body = plan;
+    }
     else if (path.includes("/pod-ai-reviews") || path.includes("/recalculation-events")) body = { records: [] };
     else if (path.includes("/legal-reviews") || path.includes("/permit-reviews")) body = { items: [] };
     else if (path.endsWith("/workspace/context")) body = { projectId: "work-orders", projectMemory: {}, pageData: {} };
@@ -109,6 +168,8 @@ test("saved agent assignments, material requests and execution evidence survive 
   await page.goto("/project/work-orders/chief-orchestration", { waitUntil: "domcontentloaded" });
   const panel = page.getByRole("region", { name: "추가 업무 배정" });
   await expect(panel).toBeVisible({ timeout: 60_000 });
+  expect(requestedTracks.length).toBeGreaterThan(0);
+  expect(requestedTracks.every((requestedTrack) => requestedTrack === null)).toBe(true);
   await panel.locator("summary").filter({ hasText: "재검토 실행 완료" }).click();
   await expect(panel).toContainText("LLM 검토 제안 → MarketEvidenceAgent");
   await expect(panel).toContainText("saved-result-1");

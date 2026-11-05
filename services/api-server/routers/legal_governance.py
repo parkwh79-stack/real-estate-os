@@ -14,11 +14,16 @@ from core.authz import (
     enforce_project_tenant_scope,
     is_explicit_human_principal,
 )
-from db.legal_review_database import legal_review_database_configured
+from db.legal_review_database import (
+    LegalReviewDatabaseConfigurationError,
+    legal_review_database_configured,
+)
 from db.postgres import postgres_configured
+from db.postgres_runtime_pool import api_tenant_transaction
 from db.repositories.legal_governance_repository import (
     PostgresLegalGovernanceRepository,
 )
+from db.repositories.request_project_repository import current_project_scope
 from legal_intelligence.governance_models import (
     CounselOpinionVersionInput,
     LegalAnalysisReviewInput,
@@ -33,7 +38,7 @@ from legal_intelligence.governance_models import (
     TenantLegalTermAliasInput,
     TenantLegalTermAliasReviewInput,
 )
-from storage import get_project_record
+from storage import get_project_record, storage_backend
 
 
 router = APIRouter(
@@ -112,11 +117,24 @@ def read_legal_workspace(
         project_id,
         request,
         permission="project:read",
+        read_only=True,
     )
+    try:
+        workspace = repository.list_workspace(limit=limit)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "normalized_legal_store_unavailable",
+                "message": "서버에서 프로젝트 법률 기록을 불러오지 못했습니다. 다시 시도해 주세요.",
+            },
+        ) from exc
     return {
         "schemaVersion": "realytics-legal-governance-workspace-v1",
         "projectId": project_id,
-        **repository.list_workspace(limit=limit),
+        "source": "normalized_postgres",
+        "reviewWriteAvailable": legal_review_database_configured(),
+        **workspace,
     }
 
 
@@ -438,10 +456,8 @@ def _repository(
     *,
     permission: str,
     step_up_action: str | None = None,
+    read_only: bool = False,
 ) -> tuple[PostgresLegalGovernanceRepository, str, str]:
-    project = get_project_record(project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
     authorization = authorize_request(request, permission)
     if not authorization.get("authenticated"):
         raise HTTPException(
@@ -453,6 +469,21 @@ def _repository(
             authorization,
             action=step_up_action,
         )
+    if storage_backend() != "postgres" or not postgres_configured():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    "normalized_legal_store_unavailable"
+                    if read_only
+                    else "normalized_legal_store_required"
+                ),
+                "message": "프로젝트 법률 기록에 필요한 서버 데이터베이스가 연결되어 있지 않습니다.",
+            },
+        )
+    project = get_project_record(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
     enforce_project_tenant_scope(request, project)
     user = authorization.get("user") or {}
     metadata = (
@@ -481,16 +512,29 @@ def _repository(
             status_code=403,
             detail={"error": "tenant_bound_human_principal_required"},
         )
-    if not postgres_configured() or not legal_review_database_configured():
+    if read_only:
+        scope = current_project_scope()
+        if scope is None or scope.tenant_id != tenant_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "tenant_bound_human_principal_required"},
+            )
+        transaction_factory = scope.transaction_factory or api_tenant_transaction
+        return (
+            PostgresLegalGovernanceRepository(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                connection_factory=lambda: transaction_factory(tenant_id),
+            ),
+            actor,
+            role,
+        )
+    if not legal_review_database_configured():
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "normalized_legal_store_required",
-                "message": (
-                    "Legal governance writes require normalized PostgreSQL "
-                    "and the dedicated legal-review DSN; runtime and legacy "
-                    "JSON stores are not authority fallbacks."
-                ),
+                "message": "법률 기록 저장과 승인에 필요한 전용 서버 연결이 준비되지 않았습니다.",
             },
         )
     return (
@@ -509,6 +553,14 @@ def _created(
 ) -> dict[str, Any]:
     try:
         value = writer()
+    except LegalReviewDatabaseConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "normalized_legal_store_unavailable",
+                "message": "법률 기록 저장에 필요한 전용 서버 역할을 확인하지 못했습니다.",
+            },
+        ) from exc
     except PermissionError as exc:
         raise HTTPException(
             status_code=403,

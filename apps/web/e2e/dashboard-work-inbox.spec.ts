@@ -135,12 +135,16 @@ test("unknown run state needs confirmation while a stored risk count alone does 
   await mockDashboard(page, [
     workItem("unknown", { latestRunStatus: "future_status" }),
     workItem("unrecorded", { latestRunStatus: undefined }),
+    workItem("new", { latestRunId: undefined, latestRunStatus: "not_started", nextAction: "run_initial_analysis" }),
     workItem("risk-history", { riskCount: 8 }),
   ]);
   await expect(summary(page, "확인 필요")).toContainText("2개");
   await expect(projectRow(page, "프로젝트 unknown")).toContainText("최근 실행 상태 확인 필요");
   await expect(projectRow(page, "프로젝트 unrecorded")).toContainText("최근 실행 상태 확인 필요");
+  await expect(projectRow(page, "프로젝트 new")).toContainText("미실행");
+  await expect(projectRow(page, "프로젝트 new").getByRole("link", { name: /분석 시작/ })).toBeVisible();
   await page.getByRole("group", { name: "최근 작업 필터" }).getByRole("button", { name: /^확인 필요/ }).click();
+  await expect(projectRow(page, "프로젝트 new")).toHaveCount(0);
   await expect(projectRow(page, "프로젝트 risk-history")).toHaveCount(0);
 });
 

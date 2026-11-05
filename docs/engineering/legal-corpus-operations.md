@@ -293,10 +293,25 @@ runtime/sync 스크립트는 비밀번호가 없는 `NOLOGIN` 역할과 권한�
 review/operations는 현재 각각
 `db/postgres_legal_review_privileges.py`와
 `db/postgres_legal_operations_privileges.py`의 provision/audit helper만
-있고 전용 provisioning CLI는 없다. 운영 자동화 또는 전용 CLI에 이 helper를
-연결하고 audit 결과가 빈 목록임을 증거로 남기기 전에는 해당 principal을
-배포 완료로 판정하지 않는다. 운영자가 승인된 IAM/secret-manager 절차로
-`LOGIN`과 credential을 활성화한다.
+있다. 법률 워크스페이스의 기록 조회는 운영 API 계정과 프로젝트·테넌트 범위의
+PostgreSQL 트랜잭션으로 수행한다. 읽기가 가능해도 `reviewWriteAvailable`이
+`false`이면 법률 기록 저장과 승인에 필요한 전용 연결을 준비해야 한다.
+
+법률 검토 쓰기 연결은 다음 순서로 준비한다.
+
+1. 대상 서버에서 `0008_legal_intelligence_core`, `0009_legal_governance_and_tenant_overlay`,
+   `20260915005540_legal_governance_trigger_record_dispatch`,
+   `20260915060531_runtime_role_privilege_alignment` 적용 이력과 테이블의 RLS를 확인한다.
+2. 승인된 관리 연결에서 `provision_legal_review_role`로 `realytics_legal_review`를
+   생성한다. helper는 `NOLOGIN` 역할과 지정된 테이블의 SELECT·INSERT 권한을
+   설정한다. `audit_legal_review_role`의 누락과 금지 권한 목록이 모두 비어야 한다.
+3. 승인된 비밀 관리 절차로 전용 역할의 LOGIN을 활성화하고 DSN을 Secret Manager에
+   보관한다. `audit_legal_review_role(..., require_login=True)`로 다시 확인한다.
+   DSN의 `current_user`와 `session_user`는 모두 전용 역할과 일치해야 한다.
+4. Cloud Run에 `REALYTICS_LEGAL_REVIEW_DATABASE_URL`과
+   `REALYTICS_LEGAL_REVIEW_DATABASE_ROLE`을 연결한다. 검증용 프로젝트의
+   조회, 권한 있는 검토 기록 저장, 다른 테넌트의 접근 차단을 각각 확인한 뒤
+   쓰기 연결을 운영에 반영한다.
 
 legal-sync role의 필수 속성:
 

@@ -171,6 +171,7 @@ export interface LegalGovernanceAnnotation {
 export interface LegalGovernanceWorkspace {
   schemaVersion: "realytics-legal-governance-workspace-v1" | string;
   projectId: string;
+  reviewWriteAvailable?: boolean;
   matters: LegalGovernanceMatter[];
   waivers: LegalGovernanceWaiver[];
   counselOpinions: CounselOpinionMetadata[];

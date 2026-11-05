@@ -167,8 +167,9 @@ def audit_legal_review_role(
     *,
     role_name: str,
     schema_name: str,
+    require_login: bool = False,
 ) -> tuple[list[str], list[str]]:
-    """Return missing and forbidden grants/role memberships."""
+    """Audit the provisioned NOLOGIN role or the approved DSN login."""
 
     role = validate_identifier(role_name, label="legal review role")
     schema = validate_identifier(schema_name, label="database schema")
@@ -188,7 +189,9 @@ def audit_legal_review_role(
     flags = cursor.fetchone()
     if flags is None:
         return [f"role:{role}"], []
-    if any(bool(value) for value in flags):
+    if require_login and not flags[0]:
+        missing.append(f"role:{role}:LOGIN")
+    if any(bool(value) for value in flags[1:]) or (flags[0] and not require_login):
         forbidden.append(f"role:{role}:elevated_attribute")
 
     cursor.execute(

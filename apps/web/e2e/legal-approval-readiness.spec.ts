@@ -78,6 +78,12 @@ test("rejects superseded or incomplete normalized snapshots", () => {
       legalInvalidWaiverCount: 1,
     }),
   ).toBe(false);
+  expect(
+    isNormalizedLegalEvidenceApprovalEligible({
+      ...completeNormalizedReadiness,
+      legalEvidenceOpenConflictCount: undefined,
+    }),
+  ).toBe(false);
 });
 
 test("allows a new human decision when legal state is valid but the old decision is stale", () => {

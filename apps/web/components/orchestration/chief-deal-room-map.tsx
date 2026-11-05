@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -29,10 +29,8 @@ import { LegalIntelligencePanel } from "../legal/legal-intelligence-panel";
 import { LegalGovernanceWorkspace } from "../legal/legal-governance-workspace";
 import { PermitHeightReview, type PermitHeightAnalysis } from "./permit-height-review";
 import {
-  getStoredWorkflowTrack,
   getTrackWorkflowDefinition,
   isWorkflowTrack,
-  setStoredWorkflowTrack,
   TRACK_LABELS,
   type WorkflowTrack,
 } from "../../lib/workflow-track";
@@ -275,6 +273,11 @@ interface ChiefDealOrchestrationPlan {
     humanReviewRequired?: boolean;
   };
   approvalReadinessGate?: {
+    schemaVersion?: string;
+    projectId?: string;
+    readable?: boolean;
+    assessmentStatus?: "assessed" | "unassessed";
+    cureWriteAvailable?: boolean;
     pass?: boolean;
     status?: string;
     blockingIssueCount?: number;
@@ -302,7 +305,7 @@ interface ChiefDealOrchestrationPlan {
     legalEvidenceSource?: string;
     legalEvidenceNormalizedRequired?: boolean;
     legalEvidenceNormalizedReadable?: boolean;
-    legalEvidenceNormalizedReason?: string;
+    legalReviewWriteAvailable?: boolean;
     legalEvidenceLatestDecisionId?: string;
     legalEvidenceLatestDecisionVersion?: number | string;
     legalEvidenceLatestDecisionSupersedesId?: string;
@@ -483,14 +486,15 @@ const TRIGGER_LABEL: Record<string, string> = {
   finance_cost_changed: "금융비용 변경",
 };
 
-function pickTrackFromClient(): WorkflowTrack | null {
+type ApprovalGate = NonNullable<ChiefDealOrchestrationPlan["approvalReadinessGate"]>;
+type ApprovalReadiness =
+  | { state: "loading" | "unavailable" }
+  | { state: "loaded"; gate: ApprovalGate };
+
+function pickTrackFromUrl(): WorkflowTrack | null {
   if (typeof window === "undefined") return null;
   const fromQuery = new URLSearchParams(window.location.search).get("track");
-  if (isWorkflowTrack(fromQuery)) {
-    setStoredWorkflowTrack(fromQuery);
-    return fromQuery;
-  }
-  return getStoredWorkflowTrack();
+  return isWorkflowTrack(fromQuery) ? fromQuery : null;
 }
 
 function hasBrokenText(value: string) {
@@ -602,7 +606,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [supplements, setSupplements] = useState<AutoSupplementAttempt[] | null>(null);
   const [recalculationEvents, setRecalculationEvents] = useState<RecalculationEvent[]>([]);
   const [podAiReviews, setPodAiReviews] = useState<PodAIReview[]>([]);
-  const [approvalGate, setApprovalGate] = useState<ChiefDealOrchestrationPlan["approvalReadinessGate"] | null>(null);
+  const [readiness, setReadiness] = useState<ApprovalReadiness>({ state: "loading" });
+  const readinessRequest = useRef<AbortController | null>(null);
+  const approvalGate = readiness.state === "loaded" ? readiness.gate : null;
   const [cureType, setCureType] = useState("additional_collateral");
   const [cureAmount, setCureAmount] = useState("");
   const [cureEvidenceId, setCureEvidenceId] = useState("");
@@ -610,6 +616,31 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [cureSubmitting, setCureSubmitting] = useState(false);
   const [legalPodRun, setLegalPodRun] = useState<LegalPodRun | null>(null);
   const [legalPodRunning, setLegalPodRunning] = useState(false);
+
+  const loadApprovalReadiness = useCallback(async () => {
+    readinessRequest.current?.abort();
+    const controller = new AbortController();
+    readinessRequest.current = controller;
+    setReadiness({ state: "loading" });
+    try {
+      const response = await fetch(
+        `${apiBase}/projects/${encodeURIComponent(projectId)}/chief-orchestration/approval-readiness`,
+        { cache: "no-store", headers: authHeaders("web"), signal: controller.signal },
+      );
+      if (!response.ok) throw new Error("Approval readiness request failed");
+      const gate = (await response.json()) as ApprovalGate | null;
+      if (
+        gate?.schemaVersion !== "realytics-deal-state-approval-readiness-v1"
+        || gate.projectId !== projectId
+        || gate.readable !== true
+      ) {
+        throw new Error("Approval readiness data is unavailable");
+      }
+      if (!controller.signal.aborted) setReadiness({ state: "loaded", gate });
+    } catch {
+      if (!controller.signal.aborted) setReadiness({ state: "unavailable" });
+    }
+  }, [projectId]);
 
   const loadRecalculationEvents = useCallback(async () => {
     try {
@@ -644,12 +675,18 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const loadLegalPod = useCallback(async () => {
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/legal-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web") });
-      if (!res.ok) return;
+      if (!res.ok) {
+        setLegalPodRun(null);
+        return;
+      }
       const body = await res.json().catch(() => ({}));
       const item = Array.isArray(body.items) ? body.items[0] : null;
-      if (!item) return;
+      if (!item) {
+        setLegalPodRun(null);
+        return;
+      }
       const permitRes = await fetch(`${apiBase}/projects/${projectId}/permit-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web") });
-      const permitBody = await permitRes.json().catch(() => ({}));
+      const permitBody = permitRes.ok ? await permitRes.json().catch(() => ({})) : {};
       setLegalPodRun({ legalReview: item, permitReview: Array.isArray(permitBody.items) ? permitBody.items[0] : undefined });
     } catch {
       setLegalPodRun(null);
@@ -677,7 +714,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const loadPlan = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const selectedTrack = pickTrackFromClient();
+    const selectedTrack = pickTrackFromUrl();
     setTrack(selectedTrack);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/plan`, {
@@ -695,8 +732,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       if (!res.ok) throw new Error(`Chief Deal Room 계획을 불러오지 못했습니다. (${res.status})`);
       const nextPlan = (await res.json()) as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
-      setApprovalGate(nextPlan.approvalReadinessGate ?? null);
-      await Promise.all([loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
+      await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Chief Deal Room 계획을 불러오지 못했습니다.");
@@ -704,7 +740,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [projectId, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
+  }, [projectId, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
 
   const applyCureAndRerun = useCallback(async () => {
     const amount = Number(cureAmount.replaceAll(",", ""));
@@ -727,24 +763,18 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
           },
         }),
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(cleanText(body?.detail, "Cure 재계산에 실패했습니다."));
-      if (body.run?.artifacts?.approvalReadinessGate) {
-        setApprovalGate(body.run.artifacts.approvalReadinessGate);
-      } else if (body.approvalReadinessGate) {
-        setApprovalGate(body.approvalReadinessGate);
-      }
+      if (!res.ok) throw new Error("증빙을 저장하거나 PF를 재계산하지 못했습니다.");
       setCureAmount("");
       setCureEvidenceId("");
       setCureEvidenceNote("");
       setError(null);
-      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
+      await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Cure 재계산 중 오류가 발생했습니다.");
     } finally {
       setCureSubmitting(false);
     }
-  }, [cureAmount, cureEvidenceId, cureEvidenceNote, cureType, loadPodAiReviews, loadRecalculationEvents, projectId]);
+  }, [cureAmount, cureEvidenceId, cureEvidenceNote, cureType, loadApprovalReadiness, loadPodAiReviews, loadRecalculationEvents, projectId]);
 
   const runPod = useCallback(async (podKey: PodKey, forceTrigger?: string): Promise<boolean> => {
     setExecutingPodKey(podKey);
@@ -762,7 +792,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         },
         body: JSON.stringify({
           podKey,
-          workflowTrack: track ?? getStoredWorkflowTrack(),
+          workflowTrack: plan?.taskGraph?.workflowTrack ?? track,
           options: { ...(forceTrigger ? { forceTrigger } : {}), autoCascade: true },
         }),
       });
@@ -773,8 +803,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
-      setApprovalGate(nextPlan.approvalReadinessGate ?? null);
-      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
+      await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
       setError(null);
       return true;
     } catch (err) {
@@ -785,7 +814,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setExecutingPodKey(null);
       setExecutionProgress(0);
     }
-  }, [projectId, track, loadRecalculationEvents, loadPodAiReviews]);
+  }, [projectId, track, plan?.taskGraph?.workflowTrack, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
 
   const runAllPods = useCallback(async () => {
     setError(null);
@@ -803,7 +832,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
           ...authHeaders("web"),
         },
         body: JSON.stringify({
-          workflowTrack: track ?? getStoredWorkflowTrack(),
+          workflowTrack: plan?.taskGraph?.workflowTrack ?? track,
           options: {},
         }),
       });
@@ -814,8 +843,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
-      setApprovalGate(nextPlan.approvalReadinessGate ?? null);
-      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
+      await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "전체 Pod 실행 중 오류가 발생했습니다.");
@@ -824,7 +852,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setExecutingAll(false);
       setExecutionProgress(0);
     }
-  }, [projectId, track, loadRecalculationEvents, loadPodAiReviews]);
+  }, [projectId, track, plan?.taskGraph?.workflowTrack, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
 
   const reanalyzeOnEvidence = useCallback(async () => {
     setReanalyzing(true);
@@ -850,6 +878,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     void loadPlan();
+    return () => readinessRequest.current?.abort();
   }, [loadPlan]);
 
   const runsByPod = useMemo(() => {
@@ -889,7 +918,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     return latestReviewByPod.get(podKey);
   }, [latestReviewByPod, podAiReviewsById]);
 
-  const currentTrack = track ?? plan?.taskGraph?.workflowTrack ?? "development";
+  const currentTrack = plan?.taskGraph?.workflowTrack ?? track ?? "development";
   const workflow = getTrackWorkflowDefinition(currentTrack);
   const missing = plan?.sharedDealStateGraph.missingInputRegister ?? [];
   const conflicts = plan?.sharedDealStateGraph.conflicts ?? [];
@@ -966,7 +995,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       ) : null}
 
       <ApprovalReadinessPanel
-        gate={approvalGate}
+        readiness={readiness}
         cureType={cureType}
         cureAmount={cureAmount}
         cureEvidenceId={cureEvidenceId}
@@ -977,6 +1006,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         onEvidenceIdChange={setCureEvidenceId}
         onEvidenceNoteChange={setCureEvidenceNote}
         onSubmit={() => void applyCureAndRerun()}
+        onRefresh={() => void loadApprovalReadiness()}
       />
 
       <LegalPodPanel
@@ -985,7 +1015,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         approvalGate={approvalGate}
         running={legalPodRunning}
         onRun={() => void runLegalPod()}
-        onDecisionSaved={loadLegalPod}
+        onDecisionSaved={async () => {
+          await Promise.all([loadLegalPod(), loadApprovalReadiness()]);
+        }}
       />
 
       <LegalGovernanceWorkspace projectId={projectId} />
@@ -1190,24 +1222,12 @@ function LegalPodPanel({
     && approvalGate?.legalEvidenceNormalizedReadable === true
   );
   const evidenceStatus = String(
-    approvalGate?.legalEvidenceStatus ?? "missing",
+    approvalGate?.legalEvidenceStatus ?? "미확인",
   ).toLowerCase();
-  const verifiedReferenceCount = Math.max(
-    0,
-    Number(approvalGate?.legalEvidenceVerifiedReferenceCount ?? 0) || 0,
-  );
-  const verifiedCitationCount = Math.max(
-    0,
-    Number(approvalGate?.legalEvidenceVerifiedCitationCount ?? 0) || 0,
-  );
-  const requiredClaimCount = Math.max(
-    0,
-    Number(approvalGate?.legalEvidenceRequiredClaimCount ?? 0) || 0,
-  );
-  const verifiedClaimCount = Math.max(
-    0,
-    Number(approvalGate?.legalEvidenceVerifiedClaimCount ?? 0) || 0,
-  );
+  const verifiedReferenceCount = approvalGate?.legalEvidenceVerifiedReferenceCount;
+  const verifiedCitationCount = approvalGate?.legalEvidenceVerifiedCitationCount;
+  const requiredClaimCount = approvalGate?.legalEvidenceRequiredClaimCount;
+  const verifiedClaimCount = approvalGate?.legalEvidenceVerifiedClaimCount;
   const evidenceSnapshotId =
     approvalGate?.legalEvidenceSnapshotId?.trim() ?? "";
   const snapshotVersion = Math.max(
@@ -1220,12 +1240,10 @@ function LegalPodPanel({
     approvalGate?.legalEvidenceSnapshotSuperseded !== false;
   const evidenceStale = approvalGate?.legalEvidenceStale !== false;
   const lineageValid = approvalGate?.legalEvidenceLineageValid === true;
-  const openConflictCount = Math.max(
-    0,
-    Number(approvalGate?.legalEvidenceOpenConflictCount ?? 0) || 0,
-  );
-  const canApprove =
-    isNormalizedLegalEvidenceApprovalEligible(approvalGate);
+  const openConflictCount = approvalGate?.legalEvidenceOpenConflictCount;
+  const evidenceEligible = isNormalizedLegalEvidenceApprovalEligible(approvalGate);
+  const canWriteDecision = normalizedReadinessReadable && approvalGate?.legalReviewWriteAvailable === true;
+  const canApprove = canWriteDecision && evidenceEligible;
   const [comment, setComment] = useState("");
   const [waiverReason, setWaiverReason] = useState("");
   const [waiverValidUntil, setWaiverValidUntil] = useState("");
@@ -1245,7 +1263,7 @@ function LegalPodPanel({
   }, [reviewId]);
 
   const submitDecision = async (decisionStatus: "approved" | "needs_revision" | "rejected" | "waived") => {
-    if (!reviewId || decisionSubmitting) return;
+    if (!reviewId || !canWriteDecision || decisionSubmitting) return;
     if (decisionStatus === "approved" && !canApprove) {
       setDecisionError("승인은 정확한 인용이 포함된 gate-eligible 봉인 스냅샷이 있고, 근거가 최신이며, 미해결 충돌이 없을 때만 가능합니다.");
       return;
@@ -1299,12 +1317,11 @@ function LegalPodPanel({
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const detail = typeof body?.detail === "string"
-          ? body.detail
-          : typeof body?.detail?.message === "string"
-            ? body.detail.message
-            : "법무 검토 결정을 저장하지 못했습니다.";
-        throw new Error(detail);
+        throw new Error(
+          res.status === 409
+            ? "서버의 법무 검토 기록이 변경되었습니다. 최신 기록을 확인한 뒤 다시 시도해 주세요."
+            : "법무 검토 결정을 저장하지 못했습니다. 연결 상태와 검토 권한을 확인해 주세요.",
+        );
       }
       const savedStatus = body?.legalReview?.humanReviewStatus ?? body?.decision?.decisionStatus ?? decisionStatus;
       setSavedHumanReviewStatus(String(savedStatus));
@@ -1337,58 +1354,52 @@ function LegalPodPanel({
         </button>
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-2">
-        <LegalMetric label="PNU 검증" value={`${resolvedPnuCount}/${parcels.length}`} />
-        <LegalMetric label="권리·등기 검토 완료" value={`${parcels.length - unresolvedParcels}/${parcels.length}`} />
+        <LegalMetric label="PNU 검증" value={review ? `${resolvedPnuCount}/${parcels.length}` : "—"} />
+        <LegalMetric label="권리·등기 검토 완료" value={review ? `${parcels.length - unresolvedParcels}/${parcels.length}` : "—"} />
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-5">
         <LegalMetric label="법무 상태" value={review?.status ?? "미실행"} />
-        <LegalMetric label="필지 검토" value={`${parcels.length - unresolvedParcels}/${parcels.length}`} />
+        <LegalMetric label="필지 검토" value={review ? `${parcels.length - unresolvedParcels}/${parcels.length}` : "—"} />
         <LegalMetric label="인허가 검토" value={run?.permitReview?.status ?? "미실행"} />
         <LegalMetric
           label="MCP 도구 연결"
           value={mcpStatus === "connected" ? "연결됨 · 승인 근거 아님" : "미연결"}
         />
-        <LegalMetric label="토지이용계획" value={`${landEnrichment?.landUsePlanningRecords?.length ?? 0}건`} />
+        <LegalMetric label="토지이용계획" value={landEnrichment ? `${landEnrichment.landUsePlanningRecords?.length ?? 0}건` : "—"} />
       </div>
       <div className="mt-3 rounded-md border border-violet-200 bg-white/80 p-3 dark:border-violet-800 dark:bg-slate-950/50">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <p className="text-sm font-black text-slate-950 dark:text-white">Legal Intelligence 증거 준비도</p>
             <p className="mt-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-              normalized PostgreSQL의 스냅샷·lineage·필수 쟁점·충돌을 다시
-              읽어 모두 충족한 경우에만 승인 버튼이 활성화됩니다. Legal Pod의
-              legacy boolean은 승인 판정에 사용하지 않습니다.
+              서버에 저장된 검토본의 출처와 최신성, 필수 쟁점 및 미해결 충돌을 확인합니다.
             </p>
           </div>
-          <span className={`rounded-full border px-2 py-1 text-[10px] font-black ${canApprove ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200" : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"}`}>
-            {canApprove ? "승인 증거 충족" : "승인 증거 미충족"}
+          <span className={`rounded-full border px-2 py-1 text-[10px] font-black ${evidenceEligible ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200" : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"}`}>
+            {!normalizedReadinessReadable ? "승인 근거 미확인" : evidenceEligible ? "승인 근거 충족" : "승인 근거 보완 필요"}
           </span>
         </div>
         <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
           <LegalMetric
-            label="권위 Readiness"
-            value={
-              normalizedReadinessReadable
-                ? "normalized PostgreSQL"
-                : `읽기 실패 · ${approvalGate?.legalEvidenceNormalizedReason ?? "미평가"}`
-            }
+            label="법률 기록"
+            value={normalizedReadinessReadable ? "서버 조회 완료" : "서버 조회 미확인"}
           />
-          <LegalMetric label="증거 상태" value={evidenceStatus} />
-          <LegalMetric label="검증된 근거" value={`${verifiedReferenceCount}건`} />
-          <LegalMetric label="정확 인용" value={`${verifiedCitationCount}건`} />
-          <LegalMetric label="필수 쟁점 커버" value={`${verifiedClaimCount}/${requiredClaimCount}`} />
+          <LegalMetric label="증거 상태" value={normalizedReadinessReadable ? evidenceStatus : "—"} />
+          <LegalMetric label="검증된 근거" value={normalizedReadinessReadable && verifiedReferenceCount != null ? `${verifiedReferenceCount}건` : "—"} />
+          <LegalMetric label="정확 인용" value={normalizedReadinessReadable && verifiedCitationCount != null ? `${verifiedCitationCount}건` : "—"} />
+          <LegalMetric label="필수 쟁점 커버" value={normalizedReadinessReadable && verifiedClaimCount != null && requiredClaimCount != null ? `${verifiedClaimCount}/${requiredClaimCount}` : "—"} />
           <LegalMetric
             label="봉인 스냅샷"
             value={
-              snapshotGateEligible && evidenceSnapshotId && !snapshotSuperseded
+              !normalizedReadinessReadable ? "—" : snapshotGateEligible && evidenceSnapshotId && !snapshotSuperseded
                 ? `v${snapshotVersion} · Gate 가능`
                 : "미봉인/폐기/차단"
             }
           />
-          <LegalMetric label="최신성" value={evidenceStale ? "오래됨/미확인" : "최신"} />
-          <LegalMetric label="Corpus lineage" value={lineageValid ? "유효" : "무효/미확인"} />
-          <LegalMetric label="열린 충돌" value={`${openConflictCount}건`} />
-          <LegalMetric label="Human Review" value={legalDecisionLabel(humanReviewStatus)} />
+          <LegalMetric label="최신성" value={!normalizedReadinessReadable ? "—" : evidenceStale ? "오래됨/미확인" : "최신"} />
+          <LegalMetric label="근거 출처 연결" value={!normalizedReadinessReadable ? "—" : lineageValid ? "유효" : "무효/미확인"} />
+          <LegalMetric label="열린 충돌" value={normalizedReadinessReadable && openConflictCount != null ? `${openConflictCount}건` : "—"} />
+          <LegalMetric label="담당자 검토" value={normalizedReadinessReadable ? legalDecisionLabel(humanReviewStatus) : "—"} />
         </div>
       </div>
       {reviewId ? (
@@ -1401,9 +1412,12 @@ function LegalPodPanel({
               </p>
             </div>
             <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-              현재: {legalDecisionLabel(humanReviewStatus)}
+              현재 {normalizedReadinessReadable ? legalDecisionLabel(humanReviewStatus) : "미확인"}
             </span>
           </div>
+          {!canWriteDecision ? (
+            <p className="mt-2 text-xs font-semibold text-amber-800 dark:text-amber-200">현재 서버에서 법무 검토 결정을 저장할 수 없습니다.</p>
+          ) : null}
           <label className="mt-3 block text-xs font-black text-slate-700 dark:text-slate-200">
             검토 의견
             <textarea
@@ -1462,7 +1476,7 @@ function LegalPodPanel({
             <button
               type="button"
               onClick={() => void submitDecision("needs_revision")}
-              disabled={decisionSubmitting !== null}
+              disabled={!canWriteDecision || decisionSubmitting !== null}
               className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 text-xs font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
             >
               {decisionSubmitting === "needs_revision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -1471,7 +1485,7 @@ function LegalPodPanel({
             <button
               type="button"
               onClick={() => void submitDecision("rejected")}
-              disabled={decisionSubmitting !== null}
+              disabled={!canWriteDecision || decisionSubmitting !== null}
               className="inline-flex h-9 items-center gap-2 rounded-md border border-rose-300 bg-rose-50 px-3 text-xs font-black text-rose-800 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200"
             >
               {decisionSubmitting === "rejected" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldAlert className="h-4 w-4" />}
@@ -1481,7 +1495,8 @@ function LegalPodPanel({
               type="button"
               onClick={() => void submitDecision("waived")}
               disabled={
-                !waiverReason.trim()
+                !canWriteDecision
+                || !waiverReason.trim()
                 || !waiverValidUntil
                 || !waiverConditionsText.trim()
                 || decisionSubmitting !== null
@@ -1549,7 +1564,7 @@ function legalDecisionLabel(status?: string) {
 }
 
 function ApprovalReadinessPanel({
-  gate,
+  readiness,
   cureType,
   cureAmount,
   cureEvidenceId,
@@ -1560,8 +1575,9 @@ function ApprovalReadinessPanel({
   onEvidenceIdChange,
   onEvidenceNoteChange,
   onSubmit,
+  onRefresh,
 }: {
-  gate: ChiefDealOrchestrationPlan["approvalReadinessGate"] | null;
+  readiness: ApprovalReadiness;
   cureType: string;
   cureAmount: string;
   cureEvidenceId: string;
@@ -1572,29 +1588,57 @@ function ApprovalReadinessPanel({
   onEvidenceIdChange: (value: string) => void;
   onEvidenceNoteChange: (value: string) => void;
   onSubmit: () => void;
+  onRefresh: () => void;
 }) {
+  const gate = readiness.state === "loaded" ? readiness.gate : null;
+  const assessed = gate?.assessmentStatus === "assessed";
+  const cureAvailable = gate?.cureWriteAvailable !== false;
   const blockers = gate?.blockers ?? [];
   const normalizedLegalReadable = (
     gate?.legalEvidenceSource === "normalized_postgres"
     && gate?.legalEvidenceNormalizedReadable === true
   );
+  const passed = assessed && gate?.pass === true && isNormalizedLegalEvidenceApprovalEligible(gate);
+  const heading = readiness.state === "loading"
+    ? "승인 준비도를 불러오는 중입니다"
+    : readiness.state === "unavailable"
+      ? "승인 준비도를 불러올 수 없습니다"
+      : !assessed
+        ? "승인 준비도 평가 전입니다"
+        : passed ? "승인 가능성 검토 통과" : "승인 전 보완이 필요합니다";
+  const badge = readiness.state === "loading"
+    ? "조회 중"
+    : readiness.state === "unavailable"
+      ? "조회 불가"
+      : !assessed ? "평가 전" : passed ? "검토 통과" : "보완 필요";
   return (
-    <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/20">
+    <section aria-labelledby="chief-approval-readiness-title" className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/20">
       <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p className="text-xs font-black uppercase tracking-wide text-amber-700 dark:text-amber-300">Approval Readiness Gate v2</p>
-          <h2 className="mt-1 text-xl font-black text-slate-950 dark:text-white">
-            {gate?.pass ? "승인 가능성 검토 통과" : "승인 전 보완이 필요합니다"}
+          <h2 id="chief-approval-readiness-title" className="mt-1 text-xl font-black text-slate-950 dark:text-white">
+            {heading}
           </h2>
           <p className="mt-1 text-xs leading-5 text-amber-900 dark:text-amber-100">
-            차단 리스크 {gate?.blockingIssueCount ?? blockers.length}건 · 경고 {gate?.warningCount ?? 0}건 · cure 선택 후 증빙을 연결하면 PF 재계산과 Gate 재평가가 실행됩니다.
+            {assessed
+              ? `차단 리스크 ${gate.blockingIssueCount ?? "—"} · 경고 ${gate.warningCount ?? "—"}`
+              : readiness.state === "loaded"
+                ? "PF 계산 결과가 저장되면 차단 리스크와 경고를 확인할 수 있습니다."
+                : "서버에서 저장된 평가를 확인하면 차단 리스크와 경고를 표시합니다."}
           </p>
         </div>
-        <span className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-black text-amber-800 dark:border-amber-700 dark:bg-slate-950 dark:text-amber-200">
-          {gate?.status ?? "not_ready"}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-black text-amber-800 dark:border-amber-700 dark:bg-slate-950 dark:text-amber-200">
+            {badge}
+          </span>
+          {readiness.state === "unavailable" ? (
+            <button type="button" onClick={onRefresh} className="rounded border border-amber-300 bg-white px-3 py-1 text-xs font-bold text-amber-900 dark:border-amber-700 dark:bg-slate-950 dark:text-amber-100">
+              승인 준비도 다시 조회
+            </button>
+          ) : null}
+        </div>
       </div>
-      {blockers.length ? (
+      {assessed && blockers.length ? (
         <div className="mt-3 flex flex-wrap gap-2">
           {blockers.slice(0, 5).map((item, index) => (
             <span key={`${item.code ?? "blocker"}-${index}`} className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-800 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">
@@ -1610,12 +1654,21 @@ function ApprovalReadinessPanel({
             : "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200"
         }`}
       >
-        법률 Gate 권위 데이터:{" "}
+        법률 근거 확인 상태{" · "}
         {normalizedLegalReadable
-          ? `normalized PostgreSQL · snapshot ${gate?.legalEvidenceSnapshotVersion ?? "미확인"} · latest decision ${gate?.legalEvidenceLatestDecisionType ?? "없음"} · active blocker ${gate?.legalActiveBlockingMatterCount ?? "미확인"} · invalid waiver ${gate?.legalInvalidWaiverCount ?? "미확인"} · governance ${gate?.legalMatterWaiverGovernanceValid === true ? "current" : "stale"}`
-          : `사용 불가 · ${gate?.legalEvidenceNormalizedReason ?? "normalized readiness 미평가"}`}
+          ? `서버 조회 완료 · 검토본 ${gate?.legalEvidenceSnapshotVersion ?? "—"} · 최신 결정 ${legalDecisionLabel(gate?.legalEvidenceLatestDecisionType)} · 차단 쟁점 ${gate?.legalActiveBlockingMatterCount ?? "—"} · 만료·무효 면제 ${gate?.legalInvalidWaiverCount ?? "—"}`
+          : readiness.state === "loading"
+            ? "조회 중"
+            : readiness.state === "unavailable" || gate?.legalEvidenceNormalizedReadable === false
+              ? "서버의 법률 근거를 확인할 수 없습니다."
+              : "평가 전"}
       </div>
-      <div className="mt-4 grid gap-2 md:grid-cols-[1.1fr_0.8fr_1.2fr_1.4fr_auto]">
+      {!cureAvailable ? (
+        <p role="status" className="mt-3 text-xs font-semibold text-amber-800 dark:text-amber-200">
+          현재 서버에서는 PF 보완 증빙을 저장하고 재계산할 수 없습니다.
+        </p>
+      ) : null}
+      <fieldset disabled={submitting || !assessed || !cureAvailable} aria-label="PF 보완 증빙" className="mt-4 grid min-w-0 gap-2 md:grid-cols-[1.1fr_0.8fr_1.2fr_1.4fr_auto]">
         <select value={cureType} onChange={(event) => onCureTypeChange(event.target.value)} className="h-10 rounded border border-amber-200 bg-white px-2 text-sm font-semibold text-slate-800 dark:border-amber-800 dark:bg-slate-950 dark:text-slate-100">
           <option value="additional_collateral">추가 담보</option>
           <option value="pf_reduction">선순위/PF 감액</option>
@@ -1627,11 +1680,11 @@ function ApprovalReadinessPanel({
         <input value={cureAmount} onChange={(event) => onAmountChange(event.target.value)} inputMode="numeric" placeholder="금액(원)" className="h-10 rounded border border-amber-200 bg-white px-3 text-sm font-semibold dark:border-amber-800 dark:bg-slate-950 dark:text-white" />
         <input value={cureEvidenceId} onChange={(event) => onEvidenceIdChange(event.target.value)} placeholder="증빙 ID 또는 출처 URL" className="h-10 rounded border border-amber-200 bg-white px-3 text-sm font-semibold dark:border-amber-800 dark:bg-slate-950 dark:text-white" />
         <input value={cureEvidenceNote} onChange={(event) => onEvidenceNoteChange(event.target.value)} placeholder="증빙 설명·페이지·셀 위치" className="h-10 rounded border border-amber-200 bg-white px-3 text-sm font-semibold dark:border-amber-800 dark:bg-slate-950 dark:text-white" />
-        <button type="button" onClick={onSubmit} disabled={submitting} className="inline-flex h-10 items-center justify-center gap-2 rounded bg-slate-950 px-3 text-sm font-black text-white disabled:opacity-50 dark:bg-white dark:text-slate-950">
+        <button type="button" onClick={onSubmit} className="inline-flex h-10 items-center justify-center gap-2 rounded bg-slate-950 px-3 text-sm font-black text-white disabled:opacity-50 dark:bg-white dark:text-slate-950">
           {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
           {submitting ? "재계산 중" : "증빙 저장·재계산"}
         </button>
-      </div>
+      </fieldset>
       <p className="mt-2 text-[11px] font-semibold text-amber-800 dark:text-amber-200">현재 증빙 첨부는 원본 파일 자체가 아니라 Evidence ID/출처 locator를 연결합니다. 원본 파일은 자료 업로드 화면에서 먼저 보관해야 합니다.</p>
     </section>
   );

@@ -18,6 +18,9 @@ from db.postgres import postgres_configured
 from db.repositories.legal_intelligence_repository import (
     PostgresLegalTenantOverlayRepository,
 )
+from db.repositories.legal_review_projection_repository import (
+    PostgresLegalReviewProjectionRepository,
+)
 from db.repositories.calculation_run_repository import (
     PostgresCalculationRunRepository,
 )
@@ -130,9 +133,10 @@ def build_deal_state_approval_readiness(
     - source locator completeness.
     """
     context = _empty_context(project_id)
+    normalized_storage = storage_backend() in {"postgres", "postgresql"}
     try:
         records = list_deal_state_records(str(project_id), limit=1000)
-        if storage_backend() in {"postgres", "postgresql"}:
+        if normalized_storage:
             scoped_tenant = str(tenant_id or "").strip()
             if not scoped_tenant:
                 raise RuntimeError(
@@ -238,20 +242,41 @@ def build_deal_state_approval_readiness(
         and str(finding.get("category") or "").lower() not in ADVISORY_REVIEW_CATEGORIES
     ]
 
-    try:
-        legal_reviews = list_legal_review_records(str(project_id), limit=20)
-        permit_reviews = list_permit_review_records(str(project_id), limit=20)
-    except Exception:
-        legal_reviews, permit_reviews = [], []
+    legal_review_readable = permit_review_readable = True
+    if normalized_storage:
+        projection = PostgresLegalReviewProjectionRepository(
+            tenant_id=scoped_tenant,
+            project_id=str(project_id),
+            connection_factory=lambda: _readiness_transaction_factory(scoped_tenant)(scoped_tenant),
+        )
+        try:
+            legal_reviews = projection.list_legal_reviews(limit=1)
+        except Exception:
+            legal_reviews, legal_review_readable = [], False
+        try:
+            permit_reviews = projection.list_permit_reviews(limit=1)
+        except Exception:
+            permit_reviews, permit_review_readable = [], False
+    else:
+        try:
+            legal_reviews = list_legal_review_records(str(project_id), limit=20)
+            permit_reviews = list_permit_review_records(str(project_id), limit=20)
+        except Exception:
+            legal_reviews, permit_reviews = [], []
+            legal_review_readable = permit_review_readable = False
     latest_legal = legal_reviews[0] if legal_reviews else None
     latest_permit = permit_reviews[0] if permit_reviews else None
-    legal_status = str((latest_legal or {}).get("status") or "not_run").lower()
-    permit_status = str((latest_permit or {}).get("status") or "not_run").lower()
+    legal_status = str(
+        (latest_legal or {}).get("status") or ("not_run" if legal_review_readable else "unavailable")
+    ).lower()
+    permit_status = str(
+        (latest_permit or {}).get("status") or ("not_run" if permit_review_readable else "unavailable")
+    ).lower()
     permit_parser_status = str(
-        (latest_permit or {}).get("parserStatus") or "not_available"
+        (latest_permit or {}).get("parserStatus") or ("not_available" if permit_review_readable else "unavailable")
     ).lower()
     permit_evidence_status = str(
-        (latest_permit or {}).get("evidenceStatus") or "missing"
+        (latest_permit or {}).get("evidenceStatus") or ("missing" if permit_review_readable else "unavailable")
     ).lower()
     permit_verified_evidence_count = _non_negative_int(
         (latest_permit or {}).get("verifiedEvidenceCount")
@@ -280,7 +305,8 @@ def build_deal_state_approval_readiness(
     )
     legal_human_review_complete = legal_human_status in {"approved", "counsel_approved"}
     legal_pod_review_complete = (
-        bool(normalized_legal)
+        legal_review_readable
+        and bool(normalized_legal)
         and bool(normalized_legal.get("pass"))
         and legal_human_review_complete
         if normalized_legal_required
@@ -329,6 +355,7 @@ def build_deal_state_approval_readiness(
             for b in pod_ai_review_blockers[:8]
         ],
         "legalReviewStatus": legal_status,
+        "legalReviewRecordReadable": legal_review_readable,
         "legalHumanReviewStatus": legal_human_status,
         "legalEvidenceStatus": legal_evidence["evidenceStatus"],
         "legalEvidenceVerifiedReferenceCount": legal_evidence["verifiedReferenceCount"],
@@ -459,6 +486,7 @@ def build_deal_state_approval_readiness(
             "latestWaiverGovernanceAt"
         ),
         "permitReviewStatus": permit_status,
+        "permitReviewRecordReadable": permit_review_readable,
         "permitParserStatus": permit_parser_status,
         "permitEvidenceStatus": permit_evidence_status,
         "permitVerifiedEvidenceCount": permit_verified_evidence_count,
@@ -554,9 +582,13 @@ def build_deal_state_approval_readiness(
             and permit_verified_evidence_count > 0
             and bool(permit_source_locators),
             (
-                "Permit/regulation review requires approved parser output, "
-                "at least one verified source-located evidence item, and a "
-                "non-blocking review status."
+                "Permit review records could not be read. Retry before approval."
+                if not permit_review_readable
+                else (
+                    "Permit/regulation review requires approved parser output, "
+                    "at least one verified source-located evidence item, and a "
+                    "non-blocking review status."
+                )
             ),
             "blocking",
         ),

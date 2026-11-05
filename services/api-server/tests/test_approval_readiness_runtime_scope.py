@@ -33,29 +33,47 @@ class Connection:
         return None
 
 
-def test_worker_readiness_reads_calculation_override_and_legal_through_worker_pool(monkeypatch):
+@pytest.mark.parametrize("permit_read_fails", [False, True])
+def test_worker_readiness_reads_calculation_override_and_legal_through_worker_pool(
+    monkeypatch, permit_read_fails,
+):
     calls = []
-    connection = Connection()
+    class ReadinessConnection(Connection):
+        def execute(self, query, params=None):
+            result = super().execute(query, params)
+            if permit_read_fails and "FROM project_permit_review_versions" in query:
+                raise RuntimeError("permit query failed")
+            return result
+
+    connection = ReadinessConnection()
     @contextmanager
     def worker_transaction(tenant):
         calls.append(tenant)
         yield connection
     monkeypatch.setattr(gate, "storage_backend", lambda: "postgres")
     monkeypatch.setattr(gate, "api_tenant_transaction", lambda *_: pytest.fail("Worker used API pool"))
-    for name in ("list_deal_state_records", "list_pod_ai_review_records", "list_legal_review_records", "list_permit_review_records"):
+    for name in ("list_deal_state_records", "list_pod_ai_review_records"):
         monkeypatch.setattr(gate, name, lambda *_, **__: [])
-    monkeypatch.setattr(gate, "list_assumption_override_records", lambda *_, **__: pytest.fail("Legacy app_state read"))
+    for name in ("list_assumption_override_records", "list_legal_review_records", "list_permit_review_records"):
+        monkeypatch.setattr(gate, name, lambda *_, **__: pytest.fail("Legacy app_state read"))
     with project_request_scope(
         lambda: SimpleNamespace(tenant_id="tenant-a"),
         transaction_factory=worker_transaction, worker_id="worker-a",
     ):
         result = gate.build_deal_state_approval_readiness("p1", tenant_id="tenant-a")
-    assert calls == ["tenant-a", "tenant-a", "tenant-a"]
+    assert calls == ["tenant-a"] * 5
     sql_text = "\n".join(query for query, _ in connection.queries)
     assert "realytics.calculation_runs" in sql_text
     assert "realytics.assumption_overrides" in sql_text
+    assert "FROM project_legal_review_versions" in sql_text
+    assert "FROM project_permit_review_versions" in sql_text
     assert "legal_evidence_snapshots" in sql_text
     assert result["legalEvidenceNormalizedReason"] == "normalized_snapshot_missing"
+    assert result["legalReviewRecordReadable"] is True
+    assert result["legalReviewStatus"] == "not_run"
+    assert result["permitReviewRecordReadable"] is not permit_read_fails
+    assert result["permitReviewStatus"] == ("unavailable" if permit_read_fails else "not_run")
+    assert result["pass"] is False
 
 
 def test_worker_readiness_tenant_mismatch_fails_before_any_pool_checkout(monkeypatch):

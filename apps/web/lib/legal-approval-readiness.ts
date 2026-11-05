@@ -81,6 +81,7 @@ export function isNormalizedLegalEvidenceApprovalEligible(
 }
 
 function nonNegative(value: number | string | undefined): number {
-  const parsed = Number(value ?? 0);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+  if (value === undefined || String(value).trim() === "") return -1;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : -1;
 }

@@ -257,7 +257,12 @@ def test_remote_coding_executor_sends_only_the_isolated_job_contract(monkeypatch
     assert '"credentialsIncluded": false' in captured["payload"]
 
 
-def test_default_tool_registry_reads_real_ledger_and_audits_idempotently():
+def test_default_tool_registry_reads_real_ledger_and_audits_idempotently(monkeypatch):
+    from fastapi import HTTPException
+    from psycopg.errors import InsufficientPrivilege
+    from starlette.requests import Request
+    from routers import agent_platform
+
     upsert_calculation_run_record("project-tool", {
         "tenantId": "tenant-1",
         "calculationRunId": "calc-tool-1",
@@ -288,6 +293,34 @@ def test_default_tool_registry_reads_real_ledger_and_audits_idempotently():
     second = executor.execute(request.model_copy(update={"tool_call_id": "tool-call-retry"}))
     assert first.output and first.output["records"][0]["calculationRunId"] == "calc-tool-1"
     assert second.tool_call_id == first.tool_call_id
+
+    monkeypatch.setattr(agent_platform, "authorize_request", lambda *_: {
+        "user": {"tenantId": "tenant-1", "userId": "verified-user"}, "role": "analyst",
+    })
+    actual_execute = executor.execute
+
+    def check_identity(command):
+        assert command.user_id == "verified-user"
+        assert command.actor_roles == ["analyst"]
+        return actual_execute(command)
+
+    monkeypatch.setattr(executor, "execute", check_identity)
+    monkeypatch.setattr(agent_platform, "tool_executor", executor)
+    result = agent_platform.execute_tool(request.model_copy(update={
+        "tool_call_id": "tool-call-via-api", "idempotency_key": "api-idem",
+        "user_id": "client-supplied-user", "actor_roles": ["admin"],
+    }), Request({"type": "http"}))
+    assert result["output"]["records"][0]["calculationRunId"] == "calc-tool-1"
+
+    def audit_unavailable(_command):
+        raise InsufficientPrivilege("private database diagnostic")
+
+    monkeypatch.setattr(executor, "execute", audit_unavailable)
+    with pytest.raises(HTTPException) as unavailable:
+        agent_platform.execute_tool(request, Request({"type": "http"}))
+    assert unavailable.value.status_code == 503
+    assert unavailable.value.detail["error"] == "tool_authority_unavailable"
+    assert "private database diagnostic" not in unavailable.value.detail["message"]
 
 
 def test_outbox_failure_retries_and_then_dead_letters():

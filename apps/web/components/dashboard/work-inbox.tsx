@@ -87,7 +87,6 @@ function reviewReasons(item: RecentWorkItem): WorkReason[] {
   if (["not_ready_for_approval", "needs_review"].includes(readiness)) {
     reasons.push({ text: APPROVAL_READINESS_LABELS[readiness] ?? "승인 전 확인 필요" });
   }
-  if (!reasons.length && !isProcessing(item) && item.nextAction === "run_initial_analysis") reasons.push({ text: "첫 분석 실행 전" });
   return reasons;
 }
 

@@ -1400,6 +1400,9 @@ def _persist_scenario_calculation_runs(
 
 
 def attach_active_restructuring_cures(project_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
+    if storage_backend() in {"postgres", "postgresql"}:
+        # The normalized project already carries any saved cure projection.
+        return project_data
     cures = list_restructuring_cure_records(project_id, status="active")
     if not cures:
         return project_data
@@ -4401,6 +4404,14 @@ def upsert_project_assumption_override(project_id: str, request: Request, input_
         "records": records,
     }
 
+def _require_restructuring_cure_authority() -> None:
+    if storage_backend() in {"postgres", "postgresql"}:
+        raise HTTPException(status_code=503, detail={
+            "error": "restructuring_cure_authority_unavailable",
+            "message": "증빙 보완 기록을 사용하려면 운영 서버의 보완 기록 저장소 연결이 필요합니다.",
+        })
+
+
 @router.get("/{project_id}/restructuring-cures")
 def list_project_restructuring_cures(
     project_id: str,
@@ -4411,6 +4422,7 @@ def list_project_restructuring_cures(
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
+    _require_restructuring_cure_authority()
     return {
         "schemaVersion": "realytics-restructuring-cure-list-v1",
         "projectId": project_id,
@@ -4422,6 +4434,7 @@ def upsert_project_restructuring_cure(project_id: str, request: Request, input_d
     if project_id not in _project_store():
         raise HTTPException(status_code=404, detail="Project not found")
     authz = authorize_request(request, "project:write")
+    _require_restructuring_cure_authority()
     raw_records = input_data.get("records") if isinstance(input_data.get("records"), list) else [input_data]
     try:
         records = [
@@ -5663,6 +5676,7 @@ def apply_unsold_ltv_cure_and_rerun(project_id: str, request: Request, input_dat
     # master data. Reviewers may submit it with risk:review; project:write
     # remains reserved for changing the canonical project input package.
     authz = authorize_request(request, "risk:review")
+    _require_restructuring_cure_authority()
     payload = input_data or {}
     cure_type = str(payload.get("cureType") or payload.get("cure_type") or "").strip()
     amount = float(payload.get("amount") or 0)
@@ -6294,6 +6308,34 @@ def plan_orchestration(project_id: str, request: Request, input_data: Dict[str, 
     return plan
 
 
+@router.get("/{project_id}/chief-orchestration/approval-readiness")
+def get_chief_deal_approval_readiness(project_id: str, request: Request):
+    """Assess approval from the same server records used by report policy."""
+    from db.legal_review_database import legal_review_database_configured
+    from use_cases.approval_readiness_gate import build_deal_state_approval_readiness
+
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    readiness = build_deal_state_approval_readiness(
+        project_id,
+        tenant_id=tenant_id_from_request(request),
+    )
+    if readiness.get("readable") is False:
+        raise HTTPException(status_code=503, detail={
+            "error": "approval_readiness_authority_unavailable",
+            "message": "승인 준비에 필요한 서버 기록을 확인하지 못했습니다.",
+        })
+    return {
+        **readiness,
+        "assessmentStatus": "assessed" if readiness.get("latestCalculationRunCount") else "unassessed",
+        "cureWriteAvailable": storage_backend() not in {"postgres", "postgresql"},
+        "legalReviewWriteAvailable": (
+            storage_backend() in {"postgres", "postgresql"} and legal_review_database_configured()
+        ),
+    }
+
+
 @router.post("/{project_id}/chief-orchestration/plan")
 def plan_chief_deal_orchestration(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Chief Deal Orchestrator: build the AI Deal Room plan.
@@ -6307,10 +6349,11 @@ def plan_chief_deal_orchestration(project_id: str, request: Request, input_data:
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:read")
     payload = input_data or {}
+    normalized = storage_backend() in {"postgres", "postgresql"}
     # The plan describes saved analyses and does not apply new cures. The
     # normalized project already carries any saved cure projection.
     source_data = _hydrated_project_source(
-        project_id, payload, include_active_cures=storage_backend() not in {"postgres", "postgresql"},
+        project_id, {} if normalized else payload, include_active_cures=not normalized,
     )
     workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
     if workflow_track:
@@ -6373,6 +6416,24 @@ def _stored_chief_evidence_options(project_id: str, project: Dict[str, Any], opt
         return {**options, "parsedDocuments": documents, "permitEvidenceStatus": "authority_unavailable"}
 
 
+def _chief_request_options(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    options = dict(payload["options"]) if isinstance(payload.get("options"), dict) else {}
+    track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
+    if track:
+        options["workflowTrack"] = track
+    snake_ai_override = options.pop("ai_context", None)
+    camel_ai_override = options.pop("aiContext", None)
+    ai_override = snake_ai_override or camel_ai_override or payload.get("ai_context") or payload.get("aiContext")
+    options["ai_context"] = ai_context_from_request(request, payload_ai_context=ai_override)
+    if storage_backend() in {"postgres", "postgresql"}:
+        for identity_key in ("tenantId", "tenant_id", "userId", "user_id", "actorRoles"):
+            options.pop(identity_key, None)
+        user = identity_context_from_request(request).get("user") or {}
+        role = user.get("role")
+        options["actorRoles"] = [str(role)] if role else []
+    return options
+
+
 @router.post("/{project_id}/chief-orchestration/run-pod")
 def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
     """Chief Deal Orchestrator: execute a single agent pod and trigger downstream events."""
@@ -6383,20 +6444,7 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
     pod_key = payload.get("podKey")
     if not pod_key:
         raise HTTPException(status_code=400, detail="podKey is required")
-    options = payload.get("options") or {}
-    workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
-    if workflow_track:
-        options = {**options, "workflowTrack": workflow_track}
-    payload_ai_context = (
-        options.get("ai_context")
-        or options.get("aiContext")
-        or payload.get("ai_context")
-        or payload.get("aiContext")
-    )
-    options = {
-        **options,
-        "ai_context": ai_context_from_request(request, payload_ai_context=payload_ai_context),
-    }
+    options = _chief_request_options(request, payload)
 
     project_data = _project_store()[project_id]
     pending_work_ids = {row.get("workOrderId") for row in
@@ -6420,7 +6468,7 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
         failed_work = [row for row in (project_data.get("chief_orchestration_state") or {}).get("workOrders") or []
                        if row.get("workOrderId") in pending_work_ids and row.get("status") in {"failed", "needs_material"}]
         if failed_work:
-            upsert_project_record(project_id, project_data)
+            persist_project(project_id)
             record_sensitive_project_event(request, event_type="chief_pod_work_order_failed", project_id=project_id,
                 metadata={"podKey": pod_key, "workOrderIds": [row["workOrderId"] for row in failed_work]})
         if isinstance(e, ValueError):
@@ -6429,7 +6477,7 @@ def run_chief_deal_pod(project_id: str, request: Request, input_data: Dict[str, 
             raise HTTPException(status_code=502, detail="Pod 추가 업무 실행에 실패했습니다. 저장된 업무 상태를 확인하세요.") from e
         raise
 
-    actor = str(identity_context_from_request(request).get("userId") or "chief_deal_orchestrator")
+    actor = str(options["ai_context"].get("user_id") or "chief_deal_orchestrator")
     plan["parsedFactValidation"] = _validate_supplement_and_revalidate_parsed_facts(
         project_id,
         str(pod_key),
@@ -6459,20 +6507,7 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
         raise HTTPException(status_code=404, detail="Project not found")
     authorize_request(request, "project:analyze")
     payload = input_data or {}
-    options = payload.get("options") or {}
-    workflow_track = payload.get("workflowTrack") or payload.get("workflow_track") or payload.get("track")
-    if workflow_track:
-        options = {**options, "workflowTrack": workflow_track}
-    payload_ai_context = (
-        options.get("ai_context")
-        or options.get("aiContext")
-        or payload.get("ai_context")
-        or payload.get("aiContext")
-    )
-    options = {
-        **options,
-        "ai_context": ai_context_from_request(request, payload_ai_context=payload_ai_context),
-    }
+    options = _chief_request_options(request, payload)
 
     project_data = _project_store()[project_id]
     plan = run_chief_deal_all_pods_use_case(
@@ -6487,7 +6522,7 @@ def run_chief_deal_all_pods(project_id: str, request: Request, input_data: Dict[
     )
 
     completed_artifact_keys = _completed_pod_artifact_keys_from_plan(plan)
-    actor = str(identity_context_from_request(request).get("userId") or "chief_deal_orchestrator")
+    actor = str(options["ai_context"].get("user_id") or "chief_deal_orchestrator")
     validation_results = [
         _validate_supplement_and_revalidate_parsed_facts(
             project_id,
@@ -6571,7 +6606,7 @@ def _reanalyze_after_evidence(
         handoff_sink=lambda record: upsert_agent_handoff_record(project_id, record),
     )
     if summary.get("triggered"):
-        upsert_project_record(project_id, _project_store()[project_id])
+        persist_project(project_id)
     return summary
 
 
@@ -6587,7 +6622,7 @@ def reanalyze_chief_deal(project_id: str, request: Request, input_data: Dict[str
     payload = input_data or {}
     doc_types = payload.get("changedDocumentTypes")
     doc_types = doc_types if isinstance(doc_types, list) else None
-    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    options = _chief_request_options(request, payload)
     summary = _reanalyze_after_evidence(project_id, changed_document_types=doc_types, options=options, request=request)
     record_sensitive_project_event(
         request,

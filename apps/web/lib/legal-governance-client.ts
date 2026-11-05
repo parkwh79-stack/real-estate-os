@@ -52,9 +52,18 @@ export async function getLegalGovernanceWorkspace(
       signal: options.signal,
     },
   );
-  return normalizeLegalGovernanceWorkspace(
-    await readOrThrow(response, "법률 거버넌스 워크스페이스를 불러오지 못했습니다."),
+  const payload = record(
+    await readOrThrow(response, "법률 기록을 불러오지 못했습니다."),
   );
+  const workspace = normalizeLegalGovernanceWorkspace(payload);
+  if (
+    workspace.projectId !== projectId
+    || (payload.source !== undefined && payload.source !== "normalized_postgres")
+    || !Array.isArray(payload.matters)
+  ) {
+    throw new Error("서버에서 이 프로젝트의 법률 기록을 확인하지 못했습니다.");
+  }
+  return workspace;
 }
 
 export async function grantLegalApprovalDelegation(
@@ -223,6 +232,8 @@ export function normalizeLegalGovernanceWorkspace(
       text(source, "schemaVersion", "schema_version") ??
       "realytics-legal-governance-workspace-v1",
     projectId: text(source, "projectId", "project_id") ?? "",
+    reviewWriteAvailable:
+      typeof source.reviewWriteAvailable === "boolean" ? source.reviewWriteAvailable : undefined,
     matters: array(source.matters).map(normalizeMatter),
     waivers: array(source.waivers).map(normalizeWaiver),
     counselOpinions: array(
@@ -634,14 +645,18 @@ async function readOrThrow(response: Response, fallback: string): Promise<unknow
   const body = await response.json().catch(() => ({}));
   if (response.ok) return body;
   const source = record(body);
-  const detail = source.detail;
-  const detailRecord = record(detail);
-  const message =
-    (typeof detail === "string" ? detail : undefined) ??
-    text(detailRecord, "message", "error", "reason") ??
-    text(source, "message", "error") ??
-    `${fallback} (${response.status})`;
-  throw new Error(message);
+  const code = text(record(source.detail), "error") ?? text(source, "error");
+  if (code === "normalized_legal_store_required") {
+    throw new Error("현재 서버에서 법률 기록을 저장할 수 없습니다.");
+  }
+  if (response.status === 401) throw new Error("로그인한 뒤 다시 시도해 주세요.");
+  if (response.status === 403 || response.status === 404) {
+    throw new Error("이 프로젝트의 법률 기록을 확인하거나 변경할 권한을 확인해 주세요.");
+  }
+  if (response.status >= 500) {
+    throw new Error("법률 기록 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.");
+  }
+  throw new Error(`${fallback} (${response.status})`);
 }
 
 function governanceBase(projectId: string): string {

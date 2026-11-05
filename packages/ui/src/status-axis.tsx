@@ -27,8 +27,8 @@ export type ParserExecutionStatus =
   | "failed"
   | "cancelled";
 
-/** Also covers the backend AgentProgress terminal states. */
-export type ExecutionStatus = ParserExecutionStatus | "blocked" | "skipped";
+/** Covers the dashboard's initial state and the backend AgentProgress states. */
+export type ExecutionStatus = ParserExecutionStatus | "not_started" | "blocked" | "skipped";
 
 /** Mirrors parsing_platform.contracts.ReviewStatus. */
 export type ReviewStatus =
@@ -143,6 +143,7 @@ export type ReportEligibilityPresentation =
 export type ValueNaturePresentation = ValueNature | UnknownStatus;
 
 const EXECUTION = {
+  not_started: { label: "미실행", className: TONES.neutral },
   pending: { label: "실행 대기", className: TONES.neutral },
   running: { label: "실행 중", className: TONES.info },
   completed: { label: "실행 완료", className: TONES.success },

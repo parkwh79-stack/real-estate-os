@@ -1,4 +1,5 @@
 import fitz
+import pytest
 
 from db.repositories.upload_archive_repository import UploadArchiveRepository
 from use_cases.address_mining import mine_addresses_from_text, mine_project_address
@@ -123,3 +124,45 @@ def test_mine_project_address_reads_remote_object_storage(tmp_path, monkeypatch)
     assert mined is not None
     assert mined["address"] == "경기도 용인시 기흥구 상갈동 13"
     assert mined["provenance"]["documentFileName"] == "원본사업계획서.pdf"
+
+
+def test_normalized_address_mining_reads_only_verified_tenant_archive(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from db.repositories.request_project_repository import project_request_scope
+    import use_cases.address_mining as mod
+
+    local_project = tmp_path / "p"
+    local_project.mkdir()
+    (local_project / "untracked.pdf").write_bytes(b"should not be read")
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "postgres")
+    monkeypatch.setattr(mod, "_pdf_text", lambda path: pytest.fail(f"Local archive accessed: {path}"))
+    monkeypatch.setattr(mod, "_pdf_text_bytes", lambda content: "위치: 경기도용인시기흥구상갈동13번지일대")
+    sources_seen = []
+
+    class Archive:
+        def resolve_download_metadata(self, project_id, document):
+            assert project_id == "p"
+            sources_seen.append(document["archiveId"])
+            if document["archiveId"] == "missing":
+                return None
+            return {
+                "archiveTenantId": "tenant-a",
+                "archiveBackend": "gcs",
+                "archiveIntegrityStatus": "verified",
+                "content": b"verified remote PDF",
+            }
+
+    def document(archive_id, tenant):
+        return {"archiveId": archive_id, "archiveTenantId": tenant, "originalFileName": f"{archive_id}.pdf"}
+
+    archive = Archive()
+    with project_request_scope(lambda: SimpleNamespace(tenant_id="tenant-a")):
+        project = {"source_documents": [document("foreign", "tenant-b"), document("missing", "tenant-a")]}
+        assert mine_project_address("p", project, archive_root=tmp_path, upload_archive_repository=archive) is None
+        project["source_documents"].append(document("remote", "tenant-a"))
+        mined = mine_project_address("p", project, archive_root=tmp_path, upload_archive_repository=archive)
+
+    assert sources_seen == ["missing", "missing", "remote"]
+    assert mined["address"] == "경기도 용인시 기흥구 상갈동 13"
+    assert mined["provenance"]["documentFileName"] == "remote.pdf"

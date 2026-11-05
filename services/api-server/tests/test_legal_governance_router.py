@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -450,3 +452,76 @@ def test_governance_routes_have_no_legacy_json_authority_fallback(
         )
     assert error.value.status_code == 503
     assert error.value.detail["error"] == "normalized_legal_store_required"
+
+
+def test_workspace_reads_scoped_postgres_without_legal_write_dsn(monkeypatch):
+    queries = []
+    transactions = []
+
+    class Cursor:
+        def execute(self, query, args=()):
+            queries.append((query.strip(), args))
+
+        def fetchall(self):
+            return []
+
+    @contextmanager
+    def cursor():
+        yield Cursor()
+
+    @contextmanager
+    def transaction(tenant_id):
+        transactions.append(("begin", tenant_id))
+        try:
+            yield SimpleNamespace(cursor=cursor)
+        finally:
+            transactions.append(("end", tenant_id))
+
+    monkeypatch.setattr(legal_governance, "storage_backend", lambda: "postgres")
+    monkeypatch.setattr(legal_governance, "postgres_configured", lambda: True)
+    monkeypatch.setattr(legal_governance, "legal_review_database_configured", lambda: False)
+    monkeypatch.setattr(
+        legal_governance,
+        "get_project_record",
+        lambda project_id: {"project": {"id": project_id}, "_meta": {"tenantId": "tenant-1"}},
+    )
+    monkeypatch.setattr(
+        legal_governance,
+        "authorize_request",
+        lambda *_args: {
+            "authenticated": True,
+            "role": "legal_reviewer",
+            "user": {
+                "userId": "reviewer-1",
+                "tenantId": "tenant-1",
+                "metadata": {"principalType": "human"},
+            },
+        },
+    )
+    monkeypatch.setattr(legal_governance, "enforce_project_tenant_scope", lambda *_: None)
+    scope = SimpleNamespace(tenant_id="tenant-1", transaction_factory=transaction)
+    monkeypatch.setattr(legal_governance, "current_project_scope", lambda: scope)
+
+    workspace = legal_governance.read_legal_workspace("project-1", _request(), 20)
+    assert workspace["source"] == "normalized_postgres"
+    assert workspace["reviewWriteAvailable"] is False
+    assert workspace["matters"] == []
+    assert transactions == [("begin", "tenant-1"), ("end", "tenant-1")]
+    assert len(queries[2:]) == 8
+    assert all(query.startswith("SELECT") for query, _ in queries[2:])
+    assert all(
+        args == ("tenant-1", "project-1", 20)
+        for query, args in queries[2:]
+        if "FROM tenant_legal_term_aliases" not in query
+    )
+
+    with pytest.raises(HTTPException) as write_error:
+        legal_governance._repository("project-1", _request(), permission="legal:review")
+    assert write_error.value.status_code == 503
+    assert write_error.value.detail["error"] == "normalized_legal_store_required"
+
+    scope.tenant_id = "another-tenant"
+    with pytest.raises(HTTPException) as scope_error:
+        legal_governance.read_legal_workspace("project-1", _request(), 20)
+    assert scope_error.value.status_code == 403
+    assert transactions == [("begin", "tenant-1"), ("end", "tenant-1")]

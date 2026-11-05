@@ -349,9 +349,15 @@ def test_run_all_pods_executes_track_order_and_reports_summary():
 
     summary = plan["runAllSummary"]
     assert summary["requestedPodCount"] == 6
-    assert summary["completedCount"] >= 5
+    assert summary["completedCount"] == 6
     assert summary["workflowTrack"] == "pf"
-    assert artifacts
     runs = {run["podKey"]: run for run in plan["podRuns"]}
-    assert runs["land_legal"]["status"] == "completed"
-    assert runs["pf_credit"]["artifactKeys"]
+    assert set(runs) == {
+        "land_legal", "market_product", "cost_schedule", "feasibility_cashflow", "pf_credit", "public_policy",
+    }
+    for pod_key, run in runs.items():
+        assert run["status"] == "completed"
+        artifact = artifacts[run["artifactKeys"][-1]]
+        assert artifact["podKey"] == pod_key
+        assert artifact["domainAgentRuntime"]["agentRunId"]
+        assert artifact["result"]["agentRuntimeExecutions"]
