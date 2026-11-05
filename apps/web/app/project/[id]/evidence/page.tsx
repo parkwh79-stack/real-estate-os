@@ -5,6 +5,9 @@ import { useParams, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, ArrowLeft, CheckCircle2, Database, FileSearch, GitBranch, Loader2, RefreshCw, Search, XCircle } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import { useAuth } from "../../../../components/auth/auth-context";
+import { ArchiveExtractionAction } from "../../../../components/document-review/archive-extraction-action";
+import { backendErrorMessage, parseBackendErrorResponse } from "../../../../lib/backend-error";
 import {
   fetchDealStateRecordGroups,
   formatRecordValue,
@@ -42,6 +45,9 @@ type SourceLocatorAuditResult = {
   missingLocatorCount?: number;
   weakTraceCount?: number;
   weakParagraphCount?: number;
+  persisted?: boolean;
+  hasReviewableRecords?: boolean;
+  checkedReportCount?: number;
 };
 
 type Read<T> = { status: "loading" } | { status: "failed" } | { status: "ready"; data: T };
@@ -88,6 +94,9 @@ export default function EvidenceGraphAuditorPage() {
 }
 
 function EvidenceWorkspace({ projectId, track }: { projectId: string; track: string | null }) {
+  const { permissions } = useAuth();
+  const canRead = permissions.includes("project:read");
+  const canReview = permissions.includes("project:review");
   const [context, setContext] = useState<WorkspacePageContext | null>(null);
   const [originals, setOriginals] = useState<Read<DocumentReviewData>>({ status: "loading" });
   const [recordGroups, setRecordGroups] = useState<Read<Awaited<ReturnType<typeof fetchDealStateRecordGroups>>>>({ status: "loading" });
@@ -108,7 +117,7 @@ function EvidenceWorkspace({ projectId, track }: { projectId: string; track: str
     const controller = new AbortController();
     readRequest.current = controller;
     const { signal } = controller;
-    setOriginals({ status: "loading" });
+    setOriginals((previous) => previous.status === "ready" ? previous : { status: "loading" });
     setRecordGroups({ status: "loading" });
     setGraphList({ status: "loading" });
     setGraphDetail({ status: "loading" });
@@ -171,19 +180,28 @@ function EvidenceWorkspace({ projectId, track }: { projectId: string; track: str
     ];
   }, [recordGroups]);
 
+  const candidateCount = useMemo(() => {
+    if (originals.status !== "ready") return null;
+    return new Set(originals.data.packages.flatMap((entry) => (entry.candidates ?? []).filter((candidate) =>
+      !["approved", "rejected", "superseded"].includes(String(candidate.reviewStatus ?? "pending")),
+    ).map((candidate) => candidate.candidateId).filter(Boolean))).size;
+  }, [originals]);
+
   const graph = graphDetail.status === "ready" && activeRunId ? graphDetail.data : null;
 
-  async function runSourceLocatorAudit() {
+  async function runSourceLocatorAudit(persist = false) {
+    if (!canRead || (persist && !canReview)) return;
     setAuditRunning(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/deal-state-records/source-locator-audit`, {
-        method: "POST",
+      const res = await fetch(`${apiBase}/projects/${encodedProjectId}/deal-state-records/source-locator-audit`, {
+        method: persist ? "POST" : "GET",
+        cache: "no-store",
         headers: authHeaders("source-locator-auditor"),
       });
-      if (!res.ok) throw new Error(`Source Locator audit failed (${res.status})`);
+      if (!res.ok) throw new Error(backendErrorMessage(await parseBackendErrorResponse(res), { action: "근거 위치 확인" }));
       setAuditResult((await res.json()) as SourceLocatorAuditResult);
-      await load();
+      if (persist) await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "근거 위치 감사 실행에 실패했습니다.");
     } finally {
@@ -192,7 +210,7 @@ function EvidenceWorkspace({ projectId, track }: { projectId: string; track: str
   }
 
   async function reviewRecord(record: DealStateRecord, reviewStatus: ReviewStatus) {
-    if (!record.recordId) return;
+    if (!record.recordId || !canReview) return;
     setReviewingId(record.recordId);
     setError(null);
     try {
@@ -255,9 +273,9 @@ function EvidenceWorkspace({ projectId, track }: { projectId: string; track: str
           </Link>
           <div>
             <p className="text-sm font-semibold text-slate-500">{projectName}</p>
-            <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">근거 원장 / Evidence & Assumption Review</h1>
+            <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">근거·가정 검토</h1>
             <p className="mt-1 text-sm text-slate-500">
-              문서, 엑셀 셀, API row, Agent artifact, 계산 run, AI 자동 보강 후보를 하나의 Deal State 원장에서 검토합니다.
+              보관 원본에서 추출한 값과 출처를 확인하고, 검토가 필요한 항목을 정리합니다.
             </p>
           </div>
         </div>
@@ -273,12 +291,16 @@ function EvidenceWorkspace({ projectId, track }: { projectId: string; track: str
           <button
             type="button"
             onClick={() => void runSourceLocatorAudit()}
-            disabled={auditRunning}
+            disabled={auditRunning || !canRead}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
           >
             {auditRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
-            근거 위치 감사
+            근거 위치 확인
           </button>
+          {canReview && auditResult?.persisted === false && auditResult.hasReviewableRecords ? (
+            <button type="button" disabled={auditRunning} onClick={() => void runSourceLocatorAudit(true)}
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-re-border px-4 text-sm font-semibold disabled:opacity-60">감사 결과 저장</button>
+          ) : null}
           <Link href={projectWorkspaceHref(projectId, "chief-orchestration", track)} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950">
             <GitBranch className="h-4 w-4" />
             AI 딜룸으로 이동
@@ -290,18 +312,29 @@ function EvidenceWorkspace({ projectId, track }: { projectId: string; track: str
 
       {auditResult ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-          Source Locator 감사 완료: 누락 {auditResult.missingLocatorCount ?? 0}건, 약한 추적 {auditResult.weakTraceCount ?? 0}건,
-          문단 근거 보강 필요 {auditResult.weakParagraphCount ?? 0}건을 확인했습니다.
-          결과는 Risk 원장에 SOURCE_LOCATOR_MISSING / EVIDENCE_TRACE_WEAK로 저장됩니다.
+          {auditResult.hasReviewableRecords === false ? "확인할 정식 근거와 보고서가 아직 없습니다. 원본에서 값을 추출한 뒤 출처를 연결해 주세요." : <>
+            근거 위치 확인 완료 · 위치 누락 {auditResult.missingLocatorCount ?? 0}건 · 출처 연결 확인 필요 {auditResult.weakTraceCount ?? 0}건 · 보고서 문단 확인 필요 {auditResult.weakParagraphCount ?? 0}건
+          </>}
+          {auditResult.persisted ? <p className="mt-1">감사 결과를 리스크 원장에 저장했습니다.</p> : null}
         </div>
       ) : null}
 
       <ArchivedDocuments originals={originals} projectId={projectId} track={track} />
 
+      {originals.status === "ready" && originals.data.sourceDocuments.length > 0 ? <>
+        <section aria-label="원본에서 추출한 검토 후보" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-re-border bg-re-surface px-5 py-4">
+          <div><h2 className="font-bold text-re-text">검토 대기 추출값 · {candidateCount ?? 0}건</h2>
+            <p className="mt-1 text-sm text-re-secondary">문서 보관과 구조 확인 후 값을 추출합니다. 아래의 정식 근거와 가정은 검토·연결 상태에 따라 집계됩니다.</p></div>
+          <Link className="text-sm font-semibold text-re-action underline" href={projectWorkspaceHref(projectId, "documents/review", track)}>추출값 검토하기</Link>
+        </section>
+        <ArchiveExtractionAction projectId={projectId} originals={originals.data} onComplete={() => void load()} />
+      </> : null}
+
+
       <section aria-label="정식 근거 집계" className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <Kpi label="증빙" value={recordCount(counts.evidence, "evidence")} />
         <Kpi label="가정 후보" value={recordCount(counts.assumptions, "assumption")} />
-        <Kpi label="파싱값" value={recordCount(counts.parsedFacts, "parsed_fact")} />
+        <Kpi label="입력에 연결된 파싱값" value={recordCount(counts.parsedFacts, "parsed_fact")} />
         <Kpi label="AI 자동 보강" value={recordCount(counts.autoSupplement)} tone={counts.autoSupplement ? "warn" : undefined} />
         <Kpi label="검토 필요" value={recordCount(counts.reviewNeeded)} tone={counts.reviewNeeded ? "warn" : undefined} />
         <Kpi label="근거 위치 부족" value={recordCount(counts.weakLocators)} tone={counts.weakLocators ? "warn" : undefined} />
@@ -376,10 +409,10 @@ function EvidenceWorkspace({ projectId, track }: { projectId: string; track: str
                       <td className="px-3 py-3 text-slate-500">{displayText(record.calculationRunId ?? record.evidenceGraphRunId ?? record.riskRegisterRunId, "-")}</td>
                       <td className="px-3 py-3">
                         <div className="flex flex-wrap gap-1">
-                          <ActionButton label="승인" disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "approved")} />
-                          <ActionButton label="Resolved" disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "resolved")} />
-                          <ActionButton label="Waive" disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "waived")} />
-                          <ActionButton label="보완요청" danger disabled={!record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "needs_revision")} />
+                          <ActionButton label="승인" disabled={!canReview || !record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "approved")} />
+                          <ActionButton label="해결 확인" disabled={!canReview || !record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "resolved")} />
+                          <ActionButton label="면제 검토" disabled={!canReview || !record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "waived")} />
+                          <ActionButton label="보완요청" danger disabled={!canReview || !record.recordId || reviewingId === record.recordId} onClick={() => void reviewRecord(record, "needs_revision")} />
                         </div>
                       </td>
                     </tr>

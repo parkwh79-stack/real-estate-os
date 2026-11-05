@@ -1645,10 +1645,6 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
     uploaded_at = now_iso()
     content = await file.read()
     _require_workbook_format("feasibility_workbook", file.filename, content[:1024])
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
     archive_meta = archive_source_document_use_case(
         upload_archive_repository(),
         project_id,
@@ -1668,29 +1664,33 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
         **archive_meta,
     }
 
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
     try:
         feasibility_study_v2_draft = None
+        validation: Dict[str, Any] = {}
         try:
             validation = validate_feasibility_workbook(tmp_path)
             validation["sourceDocumentHash"] = upload_meta["originalFileHash"]
             upload_meta["validationStatus"] = validation.get("status")
             upload_meta["validation"] = validation
-            feasibility_study_v2_draft = import_feasibility_study_from_workbook(
-                tmp_path,
-                project_id=project_id,
-                source_document=upload_meta,
-            )
-            upload_meta["feasibilityStudyV2DraftHash"] = feasibility_study_draft_hash(
-                feasibility_study_v2_draft
-            )
+            if (validation.get("templateSupport") or {}).get("status") != "unsupported_layout":
+                feasibility_study_v2_draft = import_feasibility_study_from_workbook(
+                    tmp_path,
+                    project_id=project_id,
+                    source_document=upload_meta,
+                )
+                upload_meta["feasibilityStudyV2DraftHash"] = feasibility_study_draft_hash(
+                    feasibility_study_v2_draft
+                )
         except Exception as exc:
+            # Retain any completed checks. A read/import error is not permission
+            # to call a corrupt, quarantined or unsupported source successful.
             validation = {
-                "status": "parse_failed",
-                "fileName": file.filename,
-                "error": str(exc),
-                "recommendations": [
-                    "Upload an .xlsx workbook compatible with the realytics-fs-xlsx-v1 contract or legacy Bonri workbook profile."
-                ],
+                **validation,
+                "status": "parse_failed", "fileName": file.filename,
+                "error": str(exc), "errorCode": "workbook_read_or_import_failed",
             }
         validation["sourceDocumentHash"] = upload_meta["originalFileHash"]
         upload_meta["validationStatus"] = validation.get("status")
@@ -1700,6 +1700,13 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
             "upload": upload_meta,
             "validation": validation,
             "feasibilityStudyV2Draft": feasibility_study_v2_draft,
+            **({"sourceReview": {
+                "reason": "unsupported_workbook_layout", "candidateOnly": True, "authoritative": False,
+                "projectId": project_id, "archiveId": upload_meta["archiveId"],
+                "sourceDocumentHash": upload_meta["originalFileHash"],
+                "profileId": "realytics.source_review_candidates", "profileVersion": "1.0.0",
+            }} if validation.get("status") == "needs_mapping" and
+                (validation.get("templateSupport") or {}).get("status") == "unsupported_layout" else {}),
             "note": "Workbook validation is read-only; a FeasibilityStudyV2 draft is returned for reviewer comparison before persisted import.",
         }
     finally:
@@ -2277,8 +2284,16 @@ async def _classify_intake_file(
             import openpyxl  # type: ignore
 
             wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
-            sheet_names = list(wb.sheetnames)
-            wb.close()
+            try:
+                sheet_names = list(wb.sheetnames)
+                # Only bounded literal headers, never formulas or inferred facts.
+                sample_text = "\n".join(
+                    str(value)[:200] for sheet in wb.worksheets[:2]
+                    for row in sheet.iter_rows(min_row=1, max_row=12, max_col=12, values_only=True)
+                    for value in row if isinstance(value, str) and not value.startswith("=")
+                )[:4000]
+            finally:
+                wb.close()
         except Exception:
             pass
     elif archive is not None and detected_format == "json" and len(content) <= 2 * 1024 * 1024:
@@ -2654,6 +2669,16 @@ async def analyze_land_ledger_upload(
     upload_meta = ledger.get("upload")
     if isinstance(upload_meta, dict):
         save_source_document_metadata_use_case(source_document_repository(), project_id, upload_meta)
+
+    if not ledger.get("parcels"):
+        # Original archival is retained, but an unmatched workbook must never
+        # erase the previous project ledger or claim a completed land import.
+        raise HTTPException(status_code=422, detail={
+            "error": "land_ledger_no_parcels", "status": "needs_mapping", "persisted": False,
+            "message": "토지조서의 지번·면적 행을 찾지 못했습니다. 기존 토지조서는 유지했습니다. 문서 검토에서 원본 유형과 열 매핑을 확인해 주세요.",
+            "projectId": project_id, "archiveId": (upload_meta or {}).get("archiveId"),
+            "validation": ledger.get("validation"),
+        })
 
     # Persist the parsed ledger onto the project so parcels are actually usable
     # downstream (batch PNU resolution, land pod, map) — previously the analysis
@@ -3640,6 +3665,30 @@ def review_project_deal_state_record(
     }
 
 
+def _source_locator_report_records(project_id: str, request: Request) -> list[Dict[str, Any]]:
+    reports = report_repository(request)
+    records = []
+    for metadata in reports.list_metadata(project_id):
+        record = reports.get(project_id, metadata["report_id"])
+        if record is None:
+            raise HTTPException(status_code=409, detail="보고서 목록이 변경됐습니다. 다시 감사하세요.")
+        records.append(record)
+    return records
+
+
+@router.get("/{project_id}/deal-state-records/source-locator-audit")
+def inspect_project_source_locator_completeness(project_id: str, request: Request, response: Response):
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "project:read")
+    enforce_project_tenant_scope(request, project)
+    actor = verified_actor_id(authorization)
+    response.headers["Cache-Control"] = "private, no-store"
+    return run_source_locator_completeness_audit_use_case(
+        project_id, report_records=_source_locator_report_records(project_id, request),
+        actor=actor, persist=False,
+    )
+
+
 @router.post("/{project_id}/deal-state-records/source-locator-audit")
 def audit_project_source_locator_completeness(
     project_id: str,
@@ -3649,13 +3698,8 @@ def audit_project_source_locator_completeness(
     authorization = authorize_request(request, "project:review")
     enforce_project_tenant_scope(request, project)
     actor = verified_actor_id(authorization)
-    reports = report_repository(request)
-    report_records = []
-    for metadata in reports.list_metadata(project_id):
-        record = reports.get(project_id, metadata["report_id"])
-        if record is None:
-            raise HTTPException(status_code=409, detail="보고서 목록이 변경됐습니다. 다시 감사하세요.")
-        report_records.append(record)
+    report_records = _source_locator_report_records(project_id, request)
+
     result = run_source_locator_completeness_audit_use_case(
         project_id, report_records=report_records, actor=actor,
     )
@@ -6470,6 +6514,11 @@ def plan_chief_deal_orchestration(project_id: str, request: Request, input_data:
         "workflowTrack": workflow_track,
     }
     plan = plan_chief_deal_orchestration_use_case(project_id, source_data, options)
+    from use_cases.chief_preflight_review import source_revision
+
+    plan["preflightInputRevision"] = source_revision(
+        source_data, (plan.get("taskGraph") or {}).get("workflowTrack"),
+    )
     _persist_shared_deal_state_graph(project_id, plan, source="chief_orchestration_plan")
     record_sensitive_project_event(
         request,
@@ -6490,21 +6539,52 @@ def plan_chief_deal_orchestration(project_id: str, request: Request, input_data:
 def preflight_chief_deal_orchestration(
     project_id: str, request: Request, input_data: Dict[str, Any] | None = None,
 ):
-    """Review scoped saved inputs and public facts without saving a Pod run."""
+    """Review inputs transiently; retain only a hash receipt for browser-held progress."""
     from fastapi.responses import JSONResponse
-    from use_cases.chief_pod_preflight import run_chief_pod_preflight
+    from use_cases.chief_deal_orchestration import _workflow_track
+    from use_cases.chief_preflight_review import RUNNER_VERSION, run_chief_preflight_review, source_revision
+    from use_cases.chief_preflight_receipts import (
+        PreflightReceiptError, issue_review_receipt, verify_previous_review, pack_review_state,
+    )
 
-    authorize_request(request, "project:analyze")
+    authorization = authorize_request(request, "project:analyze")
+    actor = verified_actor_id(authorization)
+    tenant = str((authorization.get("user") or {}).get("tenantId") or "").strip()
+    if not tenant:
+        raise HTTPException(status_code=401, detail="검토를 시작하려면 다시 로그인하세요.")
     project = authoritative_project(project_id, request)
     enforce_project_tenant_scope(request, project)
     payload = input_data or {}
     track = payload.get("workflowTrack")
     if track is not None and not isinstance(track, str):
         raise HTTPException(status_code=422, detail="검토할 업무 유형을 확인해 주세요.")
+    retry_failed = payload.get("retryFailed", False)
+    if type(retry_failed) is not bool:
+        raise HTTPException(status_code=400, detail="다시 시도할 검토 상태를 확인해 주세요.")
     source = _hydrated_project_source(project_id, {}, authoritative_source=project, include_active_cures=False)
-    result = run_chief_pod_preflight(project_id, source, workflow_track=track)
-    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
-
+    track = _workflow_track(source, {"workflowTrack": track})
+    revision = source_revision(source, track)
+    context = {
+        "project_id": project_id, "tenant_id": tenant, "actor_id": actor,
+        "workflow_track": track, "engine_version": RUNNER_VERSION, "input_revision": revision,
+    }
+    try:
+        previous = verify_previous_review(payload.get("previousReview"), **context)
+        result = run_chief_preflight_review(
+            project_id, source, workflow_track=track, previous_state=previous, retry_failed=retry_failed,
+        )
+        latest = authoritative_project(project_id, request)
+        enforce_project_tenant_scope(request, latest)
+        current_source = _hydrated_project_source(project_id, {}, authoritative_source=latest, include_active_cures=False)
+        if source_revision(current_source, track) != revision:
+            raise HTTPException(status_code=409, detail="검토 중 자료가 변경됐습니다. 최신 자료로 새 검토를 시작하세요.")
+        if result.get("inputRevision") != revision:
+            raise HTTPException(status_code=503, detail="검토의 입력 기준을 확인하지 못했습니다. 다시 시도하세요.")
+        result["resumeState"] = pack_review_state(result.get("resumeState"))
+        receipt_id = issue_review_receipt(result["resumeState"], **context)
+    except PreflightReceiptError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return JSONResponse(content={**result, "receiptId": receipt_id}, headers={"Cache-Control": "no-store"})
 
 def _persist_chief_recalculation_event(
     project_id: str, event: Dict[str, Any], *, request: Request | None = None,
@@ -7507,6 +7587,44 @@ def get_project_orchestration_risk_register(project_id: str, run_id: str, reques
         raise HTTPException(status_code=404, detail="Risk register not found")
     return record
 
+def _stored_project_evidence_graphs(project_id: str, run_id: str | None = None) -> list[Dict[str, Any]]:
+    if storage_backend() not in {"postgres", "postgresql"}:
+        if run_id is None:
+            return list_evidence_graph_records(project_id)
+        record = get_evidence_graph_record(project_id, run_id)
+        return [record] if record else []
+    from db.postgres_runtime_pool import api_tenant_transaction
+
+    scope = current_project_scope()
+    if scope is None:
+        raise RuntimeError("Verified project scope is required for evidence graphs")
+    query = """
+        SELECT tenant_id, project_id, run_id, payload_json FROM realytics.evidence_graphs
+        WHERE tenant_id = %s AND project_id = %s
+    """
+    params = [scope.tenant_id, project_id]
+    if run_id is not None:
+        query += " AND run_id = %s"
+        params.append(run_id)
+    query += " ORDER BY updated_at DESC, run_id"
+    try:
+        with (scope.transaction_factory or api_tenant_transaction)(scope.tenant_id) as connection:
+            rows = connection.execute(query, params).fetchall()
+        graphs = []
+        for tenant, stored_project, stored_run, payload in rows:
+            graph = json.loads(payload) if isinstance(payload, str) else payload
+            if (
+                tenant != scope.tenant_id or stored_project != project_id or not isinstance(graph, dict)
+                or graph.get("projectId") != project_id or graph.get("runId") != stored_run
+                or graph.get("tenantId") not in (None, scope.tenant_id)
+            ):
+                raise ValueError("Stored evidence graph lineage does not match")
+            graphs.append(graph)
+        return graphs
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="저장된 근거 그래프를 불러오지 못했습니다. 다시 시도하세요.") from exc
+
+
 @router.get("/{project_id}/evidence-graphs")
 def list_project_evidence_graphs(project_id: str, request: Request):
     project = authoritative_project(project_id, request)
@@ -7525,7 +7643,7 @@ def list_project_evidence_graphs(project_id: str, request: Request):
                 "sourceLocatorCount": record.get("sourceLocatorCount", (record.get("summary") or {}).get("sourceLocatorCount")),
                 "updatedAt": record.get("updatedAt"),
             }
-            for record in list_evidence_graph_records(project_id)
+            for record in _stored_project_evidence_graphs(project_id)
         ],
     }
 
@@ -7534,7 +7652,8 @@ def get_project_orchestration_evidence_graph(project_id: str, run_id: str, reque
     project = authoritative_project(project_id, request)
     authorize_request(request, "project:read")
     enforce_project_tenant_scope(request, project)
-    record = get_evidence_graph_record(project_id, run_id)
+    graphs = _stored_project_evidence_graphs(project_id, run_id)
+    record = graphs[0] if graphs else None
     if not record:
         run = orchestration_repository(request).get(project_id, run_id)
         record = (run or {}).get("artifacts", {}).get("evidenceGraph")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   ArrowRight, Building2, CheckCircle2, ChevronDown, ClipboardList, FileCheck2,
   FileText, Landmark, LineChart, Loader2, MapPin, RefreshCw, ShieldCheck, Sparkles, X,
@@ -9,22 +9,17 @@ import { DashboardAtmosphere } from "../dashboard/dashboard-atmosphere";
 import { ProjectWorkspaceLink } from "../layout/project-workspace-link";
 import { isNormalizedLegalEvidenceApprovalEligible } from "../../lib/legal-approval-readiness";
 import { apiBase, authHeaders } from "../../lib/auth-client";
+import { useAuth } from "../auth/auth-context";
+import {
+  clearChiefPreflightMemory, isChiefPreflightResult, readChiefPreflightMemory, rememberChiefPreflight,
+  type ChiefPreflightMemory, type ChiefPreflightMaterial,
+} from "../../lib/chief-deal-orchestration";
 import { TRACK_LABELS } from "../../lib/workflow-track";
 import type { ApprovalReadiness, ChiefDealOrchestrationPlan, PodKey } from "./chief-deal-room-map";
 import styles from "./chief-deal-room-workspace.module.css";
 
-type Plan = ChiefDealOrchestrationPlan;
-type MissingInput = NonNullable<Plan["sharedDealStateGraph"]["missingInputRegister"]>[number];
-type PreflightMaterial = MissingInput & { action?: "provide_material" | "review_document"; purpose?: string; podKeys?: PodKey[] };
-type PreflightCheck = { key: string; label: string; status: "available" | "missing" | "needs_review" };
-type PreflightResult = {
-  schemaVersion: "realytics-chief-pod-preflight-v1";
-  projectId: string;
-  analysisOnly: true;
-  pods: { podKey: PodKey; status: "checked" | "partial" | "needs_material"; checks: PreflightCheck[] }[];
-  materialRequests: PreflightMaterial[];
-  publicLookups: { key: string; label: string; status: "available" | "checked" | "unavailable" | "needs_input" | "failed"; message: string }[];
-};
+type Plan = ChiefDealOrchestrationPlan & { preflightInputRevision?: string };
+type PreflightMaterial = ChiefPreflightMaterial;
 
 type TaskGroup = { title: string; path: string; action: string; items: PreflightMaterial[] };
 
@@ -63,7 +58,7 @@ const inputActions: Record<string, keyof typeof nextActions> = {
 
 const preflightPodStatus = { checked: "확인 완료", partial: "일부 확인", needs_material: "자료 필요" };
 const preflightCheckStatus = { available: "확인", missing: "미확인", needs_review: "검토 필요" };
-const importance = { blocking: 0, high: 1, medium: 2, info: 3 };
+
 const stateLabels = {
   planned: "대기",
   running: "검토 중",
@@ -72,12 +67,6 @@ const stateLabels = {
   failed: "다시 확인 필요",
   needs_recalculation: "재검토 필요",
 } as const;
-
-function openInputs(plan: Plan) {
-  return (plan.sharedDealStateGraph.missingInputRegister ?? [])
-    .filter((item) => !["resolved", "waived", "closed", "completed"].includes(item.status ?? ""))
-    .sort((left, right) => importance[left.severity] - importance[right.severity]);
-}
 
 function taskGroups(items: PreflightMaterial[]) {
   const groups = new Map<string, TaskGroup>();
@@ -118,68 +107,127 @@ export function ChiefDealRoomWorkspace({
   const detailsTitleId = useId();
   const [selected, setSelected] = useState<PodKey | null>(null);
 
+  const { status: authStatus, user, session } = useAuth();
+  const actor = authStatus === "authenticated" && user?.userId && user.tenantId
+    ? JSON.stringify([user.metadata?.issuer, user.metadata?.subject, user.userId, user.tenantId, session?.sessionId, session?.createdAt])
+    : "";
+  const track = plan?.taskGraph?.workflowTrack;
+  const revision = plan?.preflightInputRevision;
+  const scope = actor && track ? JSON.stringify([actor, projectId, track]) : "";
+  const planReady = Boolean(plan) && !loading && !error;
+  const refreshRef = useRef(onRefresh);
+  refreshRef.current = onRefresh;
   const preflightRequest = useRef<AbortController | null>(null);
-  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [reviewState, setReviewState] = useState<{ scope: string; value: ChiefPreflightMemory } | null>(null);
   const [preflightBusy, setPreflightBusy] = useState(false);
-  const [preflightError, setPreflightError] = useState(false);
+  const currentReview = reviewState?.scope === scope ? reviewState.value : null;
+  const preflight = currentReview?.result && currentReview.result.inputRevision === revision ? currentReview.result : null;
+  const preflightError = currentReview?.error === true;
 
-  useEffect(() => () => preflightRequest.current?.abort(), []);
-
-  function resetPreflight() {
-    preflightRequest.current?.abort();
-    preflightRequest.current = null;
-    setPreflight(null);
-    setPreflightBusy(false);
-    setPreflightError(false);
-  }
-
-  async function startPreflight() {
-    if (preflightRequest.current || !plan || !canAnalyze) return;
+  const startPreflight = useCallback(async (retryFailed = false) => {
+    if (preflightRequest.current || !scope || !track || !revision || !canAnalyze || !planReady) return;
     const controller = new AbortController();
     preflightRequest.current = controller;
-    setPreflight(null);
+    const previous = readChiefPreflightMemory(actor, scope);
+    let result = previous?.result ?? null;
+    let value: ChiefPreflightMemory = { attemptedRevision: revision, result, settled: false, error: false };
+    function remember(next: ChiefPreflightMemory) {
+      const stored = rememberChiefPreflight(actor, scope, next);
+      setReviewState({ scope, value: stored });
+    }
+    remember(value);
     setPreflightBusy(true);
-    setPreflightError(false);
     try {
-      const response = await fetch(apiBase + "/projects/" + encodeURIComponent(projectId) + "/chief-orchestration/preflight", {
-        method: "POST",
-        cache: "no-store",
-        headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-        body: JSON.stringify({ workflowTrack: plan.taskGraph?.workflowTrack }),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error("Preflight unavailable");
-      const result = (await response.json()) as PreflightResult;
-      if (result.schemaVersion !== "realytics-chief-pod-preflight-v1" || result.projectId !== projectId || result.analysisOnly !== true
-        || !Array.isArray(result.pods) || !Array.isArray(result.materialRequests) || !Array.isArray(result.publicLookups)) {
-        throw new Error("Preflight contract mismatch");
+      for (let requestIndex = 0; requestIndex < 3; requestIndex += 1) {
+        const response = await fetch(apiBase + "/projects/" + encodeURIComponent(projectId) + "/chief-orchestration/preflight", {
+          method: "POST",
+          cache: "no-store",
+          headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workflowTrack: track,
+            ...(result ? { previousReview: { receiptId: result.receiptId, resumeState: result.resumeState } } : {}),
+            ...(retryFailed && requestIndex === 0 ? { retryFailed: true } : {}),
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          if (response.status === 409) result = null;
+          throw new Error("Preflight unavailable");
+        }
+        const body: unknown = await response.json();
+        if (!isChiefPreflightResult(body, projectId, track)) throw new Error("Preflight contract mismatch");
+        if (controller.signal.aborted) return;
+        result = body;
+        value = { attemptedRevision: result.inputRevision, result, settled: false, error: false };
+        remember(value);
+        if (result.reviewLoop.status !== "limit_reached" || !result.reviewLoop.canContinue) break;
       }
-      if (!controller.signal.aborted) setPreflight(result);
+      if (!controller.signal.aborted) {
+        remember({ ...value, settled: true });
+        if (result?.inputRevision !== revision) refreshRef.current();
+      }
     } catch {
-      if (!controller.signal.aborted) setPreflightError(true);
+      if (!controller.signal.aborted) remember({ attemptedRevision: revision, result, settled: true, error: true });
     } finally {
       if (preflightRequest.current === controller) {
         preflightRequest.current = null;
         setPreflightBusy(false);
       }
     }
-  }
+  }, [actor, scope, track, revision, canAnalyze, planReady, projectId]);
+
+  useEffect(() => {
+    const cancel = () => {
+      preflightRequest.current?.abort();
+      preflightRequest.current = null;
+      setPreflightBusy(false);
+    };
+    const onIdentityChange = () => {
+      cancel();
+      clearChiefPreflightMemory();
+      setReviewState(null);
+    };
+    window.addEventListener("realytics-auth-session-changed", onIdentityChange);
+    if (!actor) {
+      onIdentityChange();
+    } else if (scope && revision && planReady) {
+      const saved = readChiefPreflightMemory(actor, scope);
+      setReviewState(saved ? { scope, value: saved } : null);
+      if (saved && ((!saved.settled && !saved.error) || (saved.result?.inputRevision !== revision && saved.attemptedRevision !== revision))) {
+        void startPreflight();
+      }
+    }
+    return () => {
+      cancel();
+      window.removeEventListener("realytics-auth-session-changed", onIdentityChange);
+    };
+  }, [actor, scope, revision, planReady, startPreflight]);
+
+  useEffect(() => {
+    const expiresAt = currentReview?.expiresAt;
+    if (!expiresAt) return;
+    const timer = window.setTimeout(() => {
+      preflightRequest.current?.abort();
+      preflightRequest.current = null;
+      setPreflightBusy(false);
+      setReviewState(null);
+    }, Math.max(0, expiresAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [scope, currentReview?.expiresAt]);
 
   function refreshPlan() {
-    resetPreflight();
     onRefresh();
   }
 
   function startAnalysis() {
-    resetPreflight();
     onRun();
   }
 
-  const missing = preflight?.materialRequests ?? (plan ? openInputs(plan) : []);
+  const loopFinished = Boolean(preflight && !preflightError && !preflightBusy
+    && ["stable", "needs_material"].includes(preflight.reviewLoop.status));
+  const missing = loopFinished ? preflight?.materialRequests ?? [] : [];
   const groups = taskGroups(missing);
-  const publicLookups = new Set((plan?.taskGraph?.missingInputWorkPlan ?? [])
-    .filter((task) => task.action === "collect_public_evidence")
-    .map((task) => task.itemId));
+
   const pods = new Set<PodKey>();
   const order = plan?.taskGraph?.recommendedRunOrder;
   if (order?.length) {
@@ -204,6 +252,7 @@ export function ChiefDealRoomWorkspace({
     return {
       key,
       related,
+      prepared: preflight?.pods.find((pod) => pod.podKey === key),
       state: blocked && state === "planned" ? "blocked" as const : state,
     };
   });
@@ -213,24 +262,35 @@ export function ChiefDealRoomWorkspace({
   const activeRun = executing || phases.some((phase) => phase.state === "running");
   const next = groups[0];
   const hardGate = missing.some((item) => item.severity === "blocking" && item.requiredFor?.includes("all_pods"));
-  const canRun = Boolean(plan) && canAnalyze && !hardGate && !activeRun && !loading && !error && !preflightBusy && (Boolean(preflight) || preflightError);
+  const canRun = Boolean(plan) && canAnalyze && !hardGate && !activeRun && !loading && !error && !preflightBusy && loopFinished;
   const selectedPhase = phases.find(({ key }) => key === selected);
-  const track = plan?.taskGraph?.workflowTrack;
-
+  const needsRetry = preflight?.reviewLoop.status === "retry_needed";
+  const needsContinuation = preflight?.reviewLoop.status === "limit_reached" && preflight.reviewLoop.canContinue;
+  const limitReached = preflight?.reviewLoop.status === "limit_reached" && !preflight.reviewLoop.canContinue;
   const title = loading ? "프로젝트 상태 확인 중"
     : !plan ? "검토 상태를 불러올 수 없습니다"
-    : preflightBusy ? "분석에 쓸 근거를 확인하고 있습니다"
+    : preflightBusy ? "각 검토가 자료를 확인하고 있습니다"
     : activeRun ? "분석을 진행하고 있습니다"
-    : blockedCount > 0 || hardGate ? (completed ? "완료 결과와 보완 자료를 확인하세요" : "분석 전에 자료를 보완하세요")
+    : preflightError ? "자동 확인을 완료하지 못했습니다"
+    : needsRetry ? "다시 확인할 검토가 있습니다"
+    : needsContinuation ? "진행 중인 확인을 이어가세요"
+    : limitReached ? "자동 확인 범위에 도달했습니다"
+    : !loopFinished ? "저장된 자료부터 자동으로 확인하세요"
+    : blockedCount > 0 || hardGate ? (completed ? "완료 결과와 보완 자료를 확인하세요" : "남은 확인 자료를 검토하세요")
     : executionFailed ? "다시 확인할 검토가 있습니다"
     : completed ? "검토 결과를 확인하세요"
     : "사업 분석을 시작하세요";
 
   const description = loading ? "저장된 자료와 분석 이력을 확인하고 있습니다."
     : !plan ? "잠시 후 다시 확인하거나 프로젝트 자료를 먼저 열어보세요."
-    : preflightBusy ? "확인한 근거를 각 검토에 전달하고, 남은 자료 요청을 정리합니다."
+    : preflightBusy ? "각 영역의 에이전트가 자료를 검토하고 필요한 결과를 서로 전달합니다."
     : activeRun ? "결과가 도착하면 아래 검토 현황에 반영됩니다."
-    : next ? "아래에서 필요한 자료와 각 검토의 진행 상태를 확인할 수 있습니다."
+    : preflightError ? "요청 연결 상태를 확인한 뒤 자동 확인을 다시 실행해 주세요."
+    : needsRetry ? "확인 중 실패한 영역을 다시 시도할 수 있습니다."
+    : needsContinuation ? "확인한 결과를 유지하며 남은 영역을 이어서 검토합니다."
+    : limitReached ? "아래에서 확인한 범위와 아직 검토가 남은 영역을 확인해 주세요."
+    : !loopFinished ? "가능한 검토와 공개자료 조회를 마친 뒤 추가로 확인할 자료를 안내합니다."
+    : next ? "다음 할 일에서 검토 목적과 필요한 자료를 확인할 수 있습니다."
     : completed ? "완료한 검토와 승인 준비 상태를 확인할 수 있습니다."
     : "저장된 프로젝트 자료로 검토를 시작할 수 있습니다.";
 
@@ -253,8 +313,16 @@ export function ChiefDealRoomWorkspace({
                   <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" />
                   {loading ? "검토 상태 확인 중" : preflightBusy ? "사전 검토 중" : "분석 중"}
                 </span>
-              ) : plan && canAnalyze && !hardGate && !preflight && !preflightError && !completed ? (
-                <button type="button" onClick={() => void startPreflight()} className={primaryButton}>사전 검토 실행 <ArrowRight className="h-4 w-4" aria-hidden="true" /></button>
+              ) : plan && canAnalyze && (!loopFinished || preflightError) && !limitReached ? (
+                <button
+                  type="button"
+                  onClick={() => void startPreflight(needsRetry)}
+                  disabled={!scope || !revision || !planReady}
+                  className={primaryButton}
+                >
+                  {preflightError ? "사전 검토 다시 실행" : needsRetry ? "실패한 확인 다시 시도" : needsContinuation ? "자동 확인 계속" : "사전 검토 실행"}
+                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </button>
               ) : next ? (
                 <ProjectWorkspaceLink projectId={projectId} path={next.path} className={primaryButton}>
                   {next.action}<ArrowRight className="h-4 w-4" aria-hidden="true" />
@@ -271,8 +339,8 @@ export function ChiefDealRoomWorkspace({
           <div className={styles.glass} data-testid="deal-room-glass">
             <p className="text-xs font-semibold text-cyan-100">검토 요약</p>
             <dl className="mt-3 grid grid-cols-2 gap-3">
-              <div><dt className="text-xs text-slate-200">완료한 검토</dt><dd className="mt-1 text-2xl font-semibold text-white">{plan && phases.length ? completed + " / " + phases.length : "—"}</dd></div>
-              <div><dt className="text-xs text-slate-200">확인·보완 항목</dt><dd className="mt-1 text-2xl font-semibold text-white">{plan ? missing.length + "건" : "—"}</dd></div>
+              <div><dt className="text-xs text-slate-200">분석 완료 영역</dt><dd className="mt-1 text-2xl font-semibold text-white">{plan && phases.length ? completed + " / " + phases.length : "—"}</dd></div>
+              <div><dt className="text-xs text-slate-200">확인·보완 항목</dt><dd className="mt-1 text-2xl font-semibold text-white">{loopFinished ? missing.length + "건" : "확인 중"}</dd></div>
             </dl>
             <p className="mt-3 border-t border-white/20 pt-3 text-sm text-slate-100">승인 준비 <span className="ml-1 font-semibold">{approvalSummary(readiness)}</span></p>
           </div>
@@ -286,17 +354,20 @@ export function ChiefDealRoomWorkspace({
       {preflight ? (
         <details className={styles.panel}>
           <summary className="cursor-pointer px-4 py-4 text-sm font-bold text-re-text sm:px-5">
-            사전 검토 결과 · {preflight.pods.length}개 영역 · 제출·확인 항목 {preflight.materialRequests.length}건
+            사전 검토 결과 · {preflight.pods.length}개 영역 · {loopFinished ? "제출·확인 항목 " + preflight.materialRequests.length + "건" : "확인 진행 중"}
           </summary>
           <div className="border-t border-re-border px-4 py-4 sm:px-5">
-            <p className="mb-3 text-sm text-re-secondary">보관 자료와 조회 가능한 공개 근거를 확인했습니다. 정식 분석과 승인 준비는 아래 검토 현황에서 별도로 표시합니다.</p>
+            <p className="mb-3 text-sm text-re-secondary">{loopFinished ? "가능한 검토를 마쳤습니다. 남은 확인·제출 항목에서 사용 목적과 관련 자료를 볼 수 있습니다." : "영역별 확인 결과를 모으고 있습니다. 아직 마치지 못한 검토는 진행 상태로 표시합니다."}</p>
+            <p className="mb-3 text-xs text-re-secondary">이번 실행 {preflight.reviewLoop.executedCount}개 · 기존 결과 재사용 {preflight.reviewLoop.reusedCount}개</p>
             <ul className="grid gap-2 md:grid-cols-2">
               {preflight.pods.map((pod) => {
                 const meta = podLabels[pod.podKey];
                 if (!meta) return null;
                 return (
                   <li key={pod.podKey} className="rounded-xl border border-re-border bg-re-subtle px-3 py-2 text-sm">
-                    <p className="font-bold text-re-text">{meta.title} <span className="ml-1 font-medium text-re-secondary">{preflightPodStatus[pod.status]}</span></p>
+                    <p className="font-bold text-re-text">{meta.title} <span className="ml-1 font-medium text-re-secondary">{
+                      pod.executionStatus === "failed" ? "확인 실패" : pod.executionStatus === "pending" ? "확인 대기" : preflightPodStatus[pod.status]
+                    }</span></p>
                     <ul className="mt-1 space-y-1 text-xs text-re-secondary">
                       {pod.checks.map((check) => <li key={check.key}>{check.label} · {preflightCheckStatus[check.status]}</li>)}
                     </ul>
@@ -320,7 +391,7 @@ export function ChiefDealRoomWorkspace({
           <section className={styles.panel} aria-labelledby="deal-next-actions">
             <header className="border-b border-re-border px-4 py-4 sm:px-5">
               <div className="flex items-center gap-2 text-re-action"><ClipboardList className="h-5 w-5" aria-hidden="true" /><h2 id="deal-next-actions" className="text-lg font-bold text-re-text">다음 할 일</h2></div>
-              <p className="mt-1 text-sm text-re-secondary">{preflight ? "사전 검토 뒤 남은 확인·제출 항목입니다." : "현재 자료로 확인할 후보입니다. 사전 검토를 실행하면 남은 항목을 정리합니다."}</p>
+              <p className="mt-1 text-sm text-re-secondary">{loopFinished ? "사전 검토 뒤 남은 확인·제출 항목입니다." : "먼저 각 검토에서 확인할 수 있는 자료와 공개 근거를 검토합니다."}</p>
             </header>
             {groups.length ? (
               <ol className="divide-y divide-re-border">
@@ -341,7 +412,6 @@ export function ChiefDealRoomWorkspace({
                             <li key={item.itemId}>
                               <p>{item.description}</p>
                               {item.purpose ? <p className="mt-0.5 text-xs text-re-secondary">사용 목적 · {item.purpose}</p> : null}
-                              {!preflight && publicLookups.has(item.itemId) ? <p className="mt-0.5 text-xs font-semibold text-re-action">공개자료 확인 대상</p> : null}
                               {item.acceptableSources?.length ? <p className="mt-0.5 text-xs text-re-secondary">예시 자료 · {item.acceptableSources.join(" · ")}</p> : null}
                             </li>
                           ))}
@@ -353,14 +423,19 @@ export function ChiefDealRoomWorkspace({
               </ol>
             ) : (
               <p className="px-4 py-5 text-sm leading-6 text-re-secondary sm:px-5">
-                {blockedCount ? "중단된 검토가 있습니다. 각 검토에서 상태를 확인한 뒤 다시 시도하세요." : "현재 등록된 보완 자료 요청이 없습니다."}
+                {!loopFinished
+                  ? preflightError ? "자동 확인 요청을 완료하지 못했습니다. 다시 실행해 주세요."
+                    : needsRetry ? "실패한 확인을 다시 시도한 뒤 필요한 자료를 정리합니다."
+                      : limitReached ? "자동 확인 한도에 도달했습니다. 아래 검토 현황에서 남은 영역을 확인해 주세요."
+                        : "각 검토의 확인을 마친 뒤 필요한 자료를 안내합니다."
+                  : blockedCount ? "중단된 검토가 있습니다. 각 검토에서 상태를 확인한 뒤 다시 시도하세요." : "현재 등록된 보완 자료 요청이 없습니다."}
               </p>
             )}
             <footer className="flex flex-wrap gap-2 border-t border-re-border px-4 py-3 sm:px-5">
               <button type="button" onClick={refreshPlan} disabled={activeRun || preflightBusy} className={secondaryButton}><RefreshCw className="h-4 w-4" aria-hidden="true" />자료 반영 확인</button>
-              {canAnalyze && (hardGate || preflight || preflightError || completed > 0) ? (
-                <button type="button" onClick={() => void startPreflight()} disabled={activeRun || preflightBusy} className={secondaryButton}>
-                  <ClipboardList className="h-4 w-4" aria-hidden="true" />{preflight || preflightError ? "사전 검토 다시 실행" : "사전 검토 실행"}
+              {canAnalyze && loopFinished ? (
+                <button type="button" onClick={() => void startPreflight()} disabled={activeRun || preflightBusy || loading} className={secondaryButton}>
+                  <ClipboardList className="h-4 w-4" aria-hidden="true" />사전 검토 다시 실행
                 </button>
               ) : null}
               {canRun && (next || completed > 0 || executionFailed || blockedCount > 0) ? (
@@ -389,7 +464,13 @@ export function ChiefDealRoomWorkspace({
                         <Icon className="h-5 w-5 shrink-0 text-re-action" aria-hidden="true" />
                         <span className="min-w-0 flex-1">
                           <span className="block break-keep text-sm font-semibold text-re-text">{meta.title}</span>
-                          <span className={styles.reviewStatus}>{stateLabels[phase.state] ?? "상태 확인 필요"}</span>
+                          <span className={styles.reviewStatus}>{
+                            !phase.prepared ? "자동 확인 전"
+                              : phase.prepared.executionStatus === "failed" ? "자동 확인 실패"
+                                : phase.prepared.executionStatus === "pending" ? "자동 확인 대기"
+                                  : "사전 검토 · " + preflightPodStatus[phase.prepared.status]
+                          }</span>
+                          <span className="mt-1 block text-xs text-re-secondary">분석 · {stateLabels[phase.state] ?? "상태 확인 필요"}</span>
                         </span>
                         <ArrowRight className="h-4 w-4 shrink-0 text-re-muted" aria-hidden="true" />
                       </button>
@@ -414,7 +495,15 @@ export function ChiefDealRoomWorkspace({
                 <p className="mt-1 text-sm text-re-secondary">{podLabels[selectedPhase.key].description}</p></div>
               <form method="dialog"><button autoFocus type="submit" aria-label="검토 상세 닫기" className={secondaryButton}><X className="h-4 w-4" aria-hidden="true" /></button></form>
             </header>
-            <p className="mt-5 rounded-lg bg-re-subtle px-3 py-2 text-sm font-semibold text-re-text">{stateLabels[selectedPhase.state] ?? "상태 확인 필요"}</p>
+            {selectedPhase.prepared ? (
+              <div className="mt-5 space-y-2 rounded-lg bg-re-subtle px-3 py-3 text-sm text-re-text">
+                <p className="font-semibold">사전 검토 · {selectedPhase.prepared.executionStatus === "failed" ? "확인 실패" : selectedPhase.prepared.executionStatus === "pending" ? "확인 대기" : preflightPodStatus[selectedPhase.prepared.status]}</p>
+                <ul className="space-y-1 text-xs text-re-secondary">
+                  {selectedPhase.prepared.checks.map((check) => <li key={check.key}>{check.label} · {preflightCheckStatus[check.status]}</li>)}
+                </ul>
+              </div>
+            ) : null}
+            <p className="mt-5 rounded-lg bg-re-subtle px-3 py-2 text-sm font-semibold text-re-text">분석 · {stateLabels[selectedPhase.state] ?? "상태 확인 필요"}</p>
             {selectedPhase.related.length ? (
               <ul className="mt-4 list-disc space-y-2 pl-5 text-sm leading-6 text-re-text">
                 {selectedPhase.related.map((item) => <li key={item.itemId}>{item.description}</li>)}

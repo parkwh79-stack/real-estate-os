@@ -129,6 +129,12 @@ revision, not a new requirement to redo completed work.
   development constraint, not permission to bypass existing access controls.
 - Clean temporary artifacts created by your own verification after recording
   the result. Do not accumulate new audit scripts or full test logs in source.
+- For authorized changes, complete the relevant checks, commit and push the
+  existing working branch, then verify its Vercel deployment and any changed
+  Cloud Run API image. Investigate failed release checks and deployments in the
+  same task. Do not merge `main` or force-push. Supabase receives only necessary
+  changes; schema and privilege changes still require the user's review of the
+  concrete migration and validation. This is the user's 2026-11-05 delivery rule.
 
 ## 5. Progressive Stub / Placeholder / Mock Rule
 

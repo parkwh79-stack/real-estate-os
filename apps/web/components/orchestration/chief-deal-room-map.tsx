@@ -882,7 +882,7 @@ export function ChiefDealRoomMap({ projectId, view = "diagnostics" }: {
       if (diagnostics) {
         await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
       } else {
-        void loadApprovalReadiness();
+        if (!(await loadPlan())) return;
       }
       setError(null);
     } catch (err) {
@@ -892,7 +892,7 @@ export function ChiefDealRoomMap({ projectId, view = "diagnostics" }: {
       setExecutingAll(false);
       setExecutionProgress(0);
     }
-  }, [projectId, diagnostics, track, plan?.taskGraph?.workflowTrack, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
+  }, [projectId, diagnostics, track, plan?.taskGraph?.workflowTrack, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod, loadPlan]);
 
   const reanalyzeOnEvidence = useCallback(async () => {
     setReanalyzing(true);

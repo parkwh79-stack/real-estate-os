@@ -19,6 +19,23 @@ export function hasArchivedFeasibilityReviewDraft(body: Data): boolean {
       || Object.keys(record(draft.metrics)).length > 0);
 }
 
+/** A readable, unsupported workbook can request only exact original-value
+ * candidates from its verified archive. This is not a financial import. */
+export function hasArchivedWorkbookSourceReview(body: Data): boolean {
+  const upload = record(body.upload);
+  const validation = record(body.validation);
+  const review = record(body.sourceReview);
+  const hash = upload.archiveId;
+  return typeof body.project_id === "string" && body.project_id.length > 0
+    && body.feasibilityStudyV2Draft == null && upload.documentType === "feasibility_workbook"
+    && upload.archiveStored === true && typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash)
+    && upload.originalFileHash === hash && validation.sourceDocumentHash === hash
+    && validation.status === "needs_mapping" && record(validation.templateSupport).status === "unsupported_layout"
+    && review.reason === "unsupported_workbook_layout" && review.candidateOnly === true && review.authoritative === false
+    && review.archiveId === hash && review.sourceDocumentHash === hash && review.projectId === body.project_id
+    && review.profileId === "realytics.source_review_candidates" && review.profileVersion === "1.0.0";
+}
+
 /** HTTP 200 acknowledges transport, not successful extraction. */
 export function intakeProcessingFailure(body: Data, documentType?: string): string | null {
   const project = record(body.project);
@@ -26,7 +43,16 @@ export function intakeProcessingFailure(body: Data, documentType?: string): stri
   if (reanalysis.triggered === true && (reanalysis.status === "failed" || reanalysis.cascadeComplete === false)) {
     return "자료는 저장됐지만 후속 재분석이 완료되지 않았습니다. 딜룸에서 실패·검토 대기 단계를 확인하고 재분석하세요.";
   }
+  if (documentType === "land_ledger") {
+    const ledger = record(body.landLedger);
+    if (record(ledger.summary).parcelCount === 0 || (Array.isArray(ledger.parcels) && ledger.parcels.length === 0)) {
+      return "토지조서의 지번·면적 행을 찾지 못했습니다. 원본 유형과 열 매핑을 확인해 주세요.";
+    }
+  }
   const validationStatus = record(body.validation).status;
+  if (validationStatus === "needs_mapping" && !hasArchivedWorkbookSourceReview(body)) {
+    return "원본과 항목 매핑 상태를 확인하지 못했습니다. 문서 검토에서 저장 원본과 처리 결과를 확인해 주세요.";
+  }
   const reviewableValidationFailure = validationStatus === "failed" && hasArchivedFeasibilityReviewDraft(body);
   const statuses = [body.status, ...(reviewableValidationFailure ? [] : [validationStatus]),
     record(body._meta).parsing_source, record(project._meta).parsing_source,

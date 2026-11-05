@@ -25,6 +25,7 @@ from parsing_platform.field_registry import (
     validate_candidate_against_registry,
 )
 from parsing_platform.orchestrator import ParsingOrchestrationResult
+from parsing_platform.source_review_candidates import MODULE_ID as SOURCE_REVIEW_MODULE_ID
 from use_cases.parser_v2_records import ParserV2RecordStore
 from use_cases.parser_v2_records import validate_source_locator_attestations
 
@@ -44,6 +45,7 @@ class CandidateCollectionResult:
     unresolved_module_ids: tuple[str, ...] = ()
     reconciliation_source_candidate_ids: tuple[str, ...] = ()
     reconciliation_bound: bool = False
+    blocked_candidate_ids: tuple[str, ...] = ()
 
     @property
     def clean(self) -> bool:
@@ -82,7 +84,7 @@ class CandidateCollectionResult:
     def approval_eligible(self) -> bool:
         # This is a static collection-time signal only.  Resolved conflict
         # state is evaluated by the canonical-selection gate.
-        return self.review_eligible and self.clean
+        return self.review_eligible and self.clean and not self.blocked_candidate_ids
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +94,8 @@ class CandidateCollectionResult:
             "fieldRegistryVersion": FIELD_REGISTRY_VERSION,
             "candidateIds": list(self.candidate_ids),
             "candidateCount": len(self.candidate_ids),
+            "blockedCandidateIds": list(self.blocked_candidate_ids),
+            "blockedCandidateCount": len(self.blocked_candidate_ids),
             "conflictIds": list(self.conflict_ids),
             "conflictCount": len(self.conflict_ids),
             "sourceModuleIds": list(self.source_module_ids),
@@ -138,28 +142,28 @@ def collect_parser_module_candidates(
     reconciliation_candidate_count: int | None = None
     reconciliation_source_module_ids: tuple[str, ...] | None = None
     reconciliation_source_module_count: int | None = None
-    selected_feasibility_modules = tuple(
+    selected_candidate_modules = tuple(
         sorted(
             set(expected_module_ids or orchestration_result.results).intersection(
-                ALL_FEASIBILITY_MODULE_IDS
+                (*ALL_FEASIBILITY_MODULE_IDS, SOURCE_REVIEW_MODULE_ID)
             )
         )
     )
-    completed_feasibility_modules = tuple(
+    completed_candidate_modules = tuple(
         module_id
-        for module_id in selected_feasibility_modules
+        for module_id in selected_candidate_modules
         if module_id in orchestration_result.results
         and orchestration_result.results[module_id].execution_status
         == "completed"
     )
-    unresolved_feasibility_modules = tuple(
+    unresolved_candidate_modules = tuple(
         sorted(
-            set(selected_feasibility_modules).difference(
-                completed_feasibility_modules
+            set(selected_candidate_modules).difference(
+                completed_candidate_modules
             )
         )
     )
-    if unresolved_feasibility_modules:
+    if unresolved_candidate_modules:
         blocking_codes.append("DOMAIN_MODULE_COMPLETENESS_UNRESOLVED")
     document_record = record_store.get_document_version(
         tenant_id,
@@ -252,7 +256,7 @@ def collect_parser_module_candidates(
             )
         if output.get("outputKind") != "candidate_batch":
             continue
-        if module_id not in DOMAIN_MODULE_IDS:
+        if module_id not in (*DOMAIN_MODULE_IDS, SOURCE_REVIEW_MODULE_ID):
             raise ParserModuleCandidateCollectionError(
                 "an unregistered domain module attempted to emit candidates"
             )
@@ -307,7 +311,7 @@ def collect_parser_module_candidates(
             )
     reconciliation_bound = reconciliation_candidate_ids is not None
     if (
-        RECONCILIATION_MODULE_ID in selected_feasibility_modules
+        RECONCILIATION_MODULE_ID in selected_candidate_modules
         and not reconciliation_bound
     ):
         blocking_codes.append(
@@ -351,7 +355,10 @@ def collect_parser_module_candidates(
                 "collectedFromModuleVersion": module_version,
             },
         )
-        if record.get("validationStatus") != "passed":
+        review_basis_missing = module_id == SOURCE_REVIEW_MODULE_ID and set(record.get("validationCodes") or []) == {"FACT_BASIS_REQUIRED"}
+        # Missing monetary basis remains a candidate-level canonical-selection block.
+        # It must not prevent reviewing independently attested identity/area facts.
+        if record.get("validationStatus") != "passed" and not review_basis_missing:
             # This should be unreachable because validation happens immediately
             # before persistence.  Treat registry drift as a hard boundary.
             raise ParserModuleCandidateCollectionError(
@@ -372,13 +379,17 @@ def collect_parser_module_candidates(
         conflict_ids=tuple(sorted(conflict_ids)),
         source_module_ids=tuple(sorted(set(source_modules))),
         blocking_diagnostic_codes=tuple(sorted(set(blocking_codes))),
-        expected_module_ids=selected_feasibility_modules,
-        completed_module_ids=completed_feasibility_modules,
-        unresolved_module_ids=unresolved_feasibility_modules,
+        expected_module_ids=selected_candidate_modules,
+        completed_module_ids=completed_candidate_modules,
+        unresolved_module_ids=unresolved_candidate_modules,
         reconciliation_source_candidate_ids=(
             reconciliation_candidate_ids or ()
         ),
         reconciliation_bound=reconciliation_bound,
+        blocked_candidate_ids=tuple(sorted(
+            str(record["candidateId"]) for record in persisted
+            if record.get("validationStatus") == "blocked"
+        )),
     )
 
 
@@ -511,7 +522,8 @@ def _validate_candidate_scope(
         origin_type=candidate.origin_type.value,
         metadata=metadata,
     )
-    if any(item.blocking for item in issues):
+    blocking = [item for item in issues if item.blocking and not (module_id == SOURCE_REVIEW_MODULE_ID and item.code == "FACT_BASIS_REQUIRED")]
+    if blocking:
         codes = ", ".join(sorted({item.code for item in issues}))
         raise ParserModuleCandidateCollectionError(
             "candidate failed current registry validation: " + codes

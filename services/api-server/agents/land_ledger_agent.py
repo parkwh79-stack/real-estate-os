@@ -666,6 +666,9 @@ class LandLedgerAgent:
         source_totals: Dict[str, Any],
     ) -> Dict[str, Any]:
         issues = []
+        if not parcels:
+            issues.append(_issue("no_parcels_detected", "blocking", "parcels",
+                                 "No parcel rows matched the supported land-ledger columns; review the document type and column mapping."))
         import_consistency = self._validate_import_consistency(parcels, summary, source_totals)
         for check in import_consistency["failedChecks"]:
             issues.append(_issue(

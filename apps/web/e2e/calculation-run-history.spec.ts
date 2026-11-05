@@ -130,7 +130,11 @@ test("a late lookup from the previous project cannot populate the new project's 
     await search.press("Enter");
     await page.getByRole("option", { name: /계산 이력 B/ }).click();
     await expect(page).toHaveURL("/project/history-b", { timeout: 15_000 });
-    await page.locator("a[href='/project/history-b/risk']").first().click();
+    const mobileMenu = page.getByRole("button", { name: "메뉴 열기", exact: true });
+    if (await mobileMenu.isVisible()) await mobileMenu.click();
+    const navigation = page.locator('nav[aria-label="주 메뉴"]:visible');
+    await navigation.locator("summary").filter({ hasText: "리스크·승인" }).click();
+    await navigation.getByRole("link", { name: "위험 항목 검토", exact: true }).click();
     await expect(history).toContainText("저장된 계산 실행이 없습니다");
   } finally { release(); }
   await expect(history.getByRole("button", { name: "입력·결과 보기", exact: true })).toHaveCount(0);

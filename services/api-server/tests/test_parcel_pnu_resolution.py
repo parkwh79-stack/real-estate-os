@@ -337,3 +337,21 @@ def test_constructed_lookup_must_return_exact_pnu():
     )
     assert result["results"][0]["reason"] == "pnu_lookup_mismatch"
     assert "pnu" not in repo.project["landLedger"]["parcels"][0]
+
+
+def test_address_prefix_rejects_unbounded_tokens_without_backtracking():
+    assert _address_prefix("서울특별시 종로구 " + "0" * 100000 + "동 1") == ""
+    assert _address_prefix("서울특별시 종로구 " + "0" * 129 + "동 1") == ""
+    assert _address_prefix("서울특별시 종로구 청운동 산1-2번지") == "서울특별시 종로구 청운동"
+    assert _address_prefix("서울특별시 종로구 청운동 1-2") == "서울특별시 종로구 청운동"
+
+
+def test_lot_parsing_preserves_mountain_and_suffix_rules_with_linear_digit_scans():
+    from use_cases.parcel_pnu_resolution import _lot_key
+
+    for value, expected in (
+        ("13", (False, 13, 0)), ("13-2", (False, 13, 2)), ("산	13-2대", (True, 13, 2)),
+        ("13대", (False, 13, 0)), ("산B13-2", (False, 13, 2)), ("13- 2", (False, 13, 0)),
+    ):
+        assert _lot_key(value) == expected
+    assert _lot_key(" " * 100000) is None

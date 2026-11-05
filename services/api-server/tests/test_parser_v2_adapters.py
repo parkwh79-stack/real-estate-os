@@ -203,3 +203,116 @@ def test_artifact_binding_emits_parser_v2_exact_locators_for_pdf_xlsx_and_docx()
     assert docx.chunks[0].source_locator["paragraphIndex"] == 1
     assert docx.chunks[1].source_locator["tableId"] == "table-1"
     assert docx.chunks[1].source_locator["rowIndex"] == 1
+
+
+def test_xlsx_streams_sparse_formula_and_cached_rows_once_without_cell_seek(monkeypatch):
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "원본"
+    sheet["A1"] = "사업명"
+    sheet["B1"] = "검증 프로젝트"
+    sheet["C4"] = "희소 셀"
+    sheet["B9"] = "=SUM(2,3)"
+    stream = io.BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    cached = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(stream.getvalue())) as source, zipfile.ZipFile(cached, "w") as target:
+        for entry in source.infolist():
+            content = source.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                content = content.replace(b"<f>SUM(2,3)</f><v />", b"<f>SUM(2,3)</f><v>5</v>")
+            target.writestr(entry, content)
+    def no_repeated_cell_seek(*args):
+        raise AssertionError("Read-only structural extraction must stream rows rather than seek per cell")
+    monkeypatch.setattr(ReadOnlyWorksheet, "__getitem__", no_repeated_cell_seek)
+    artifact = XlsxStructureAdapter().extract(_document(cached.getvalue(), "sparse.xlsx"))
+    by_cell = {chunk.source_locator["cellReference"]: chunk.metadata["cells"][0] for chunk in artifact.chunks}
+    assert set(by_cell) == {"A1", "B1", "C4", "B9"}
+    assert by_cell["C4"]["value"] == "희소 셀"
+    assert by_cell["B9"]["formula"] == "=SUM(2,3)"
+    assert by_cell["B9"]["value"] == 5
+    assert by_cell["B9"]["calculationState"] == "cached_value_unverified"
+    assert by_cell["B9"]["approvalEligible"] is False
+    assert artifact.metadata["cachedFormulaValueCount"] == 1
+    assert artifact.metadata["visitedCellCount"] == 27
+
+
+def test_xlsx_configured_chunk_budget_is_honest_partial_coverage():
+    workbook = openpyxl.Workbook()
+    for row in range(1, 5):
+        workbook.active.cell(row, 1, "literal source " + str(row))
+    content = io.BytesIO()
+    workbook.save(content)
+    workbook.close()
+    artifact = XlsxStructureAdapter(max_chunks=2).extract(_document(content.getvalue(), "bounded.xlsx"))
+    assert [chunk.source_locator["cellReference"] for chunk in artifact.chunks] == ["A1", "A2"]
+    assert artifact.complete is False
+    assert artifact.metadata["coverage"] == "partial"
+    assert artifact.metadata["chunkLimit"] == 2
+    assert "ADAPTER_CHUNK_LIMIT_REACHED" in artifact.warnings
+
+
+def test_array_formula_is_json_safe_formula_never_approved_literal():
+    from openpyxl.worksheet.formula import ArrayFormula
+    from parsing_platform.orchestrator import _canonicalize
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = ArrayFormula(ref="A1:A2", text="=SUM(B1:B2)")
+    stream = io.BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    document = _document(stream.getvalue(), "array.xlsx")
+    artifact = bind_artifact_to_document_version(XlsxStructureAdapter().extract(document),
+        document=document, document_version_id="version:array")
+    cell = artifact.chunks[0].metadata["cells"][0]
+    assert cell["formula"] == "=SUM(B1:B2)"
+    assert cell["formulaKind"] == "ArrayFormula"
+    assert cell["formulaRange"] == "A1:A2"
+    assert cell["calculationState"] == "cached_value_missing"
+    assert cell["approvalEligible"] is False
+    assert cell["value"] is None
+    assert artifact.metadata["formulaCellCount"] == 1
+    __import__("json").dumps(_canonicalize(artifact.to_dict()), allow_nan=False)
+
+
+def test_excel_date_time_literals_keep_exact_cell_type_and_json_safe_value():
+    from datetime import datetime, time
+    from parsing_platform.orchestrator import _canonicalize
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = time(9, 30, 15)
+    workbook.active["A2"] = datetime(2026, 11, 5, 9, 30)
+    stream = io.BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    artifact = XlsxStructureAdapter().extract(_document(stream.getvalue(), "dates.xlsx"))
+    cells = [chunk.metadata["cells"][0] for chunk in artifact.chunks]
+    assert cells[0]["value"] == "09:30:15"
+    assert cells[0]["sourceValueType"] == "time"
+    assert cells[0]["cellReference"] == "A1"
+    assert cells[1]["value"] == "2026-11-05T09:30:00"
+    assert cells[1]["sourceValueType"] == "datetime"
+    assert cells[1]["cellReference"] == "A2"
+    assert all(cell["calculationState"] == "literal" for cell in cells)
+    assert all(cell["numberFormat"] for cell in cells)
+    __import__("json").dumps(_canonicalize(artifact.to_dict()), allow_nan=False)
+
+
+def test_data_table_formula_keeps_primitive_attributes_not_object_repr():
+    from openpyxl.worksheet.formula import DataTableFormula
+    from parsing_platform.orchestrator import _canonicalize
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = DataTableFormula(ref="A1:C3", dt2D=True, r1="D1", r2="E1")
+    stream = io.BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    artifact = XlsxStructureAdapter().extract(_document(stream.getvalue(), "table-formula.xlsx"))
+    cell = artifact.chunks[0].metadata["cells"][0]
+    assert cell["formulaKind"] == "DataTableFormula"
+    assert cell["formulaRange"] == "A1:C3"
+    assert cell["formulaAttributes"]["dt2D"] == "1"
+    assert cell["formulaAttributes"]["r1"] == "D1"
+    assert cell["formulaAttributes"]["r2"] == "E1"
+    assert cell["calculationState"] == "cached_value_missing"
+    assert cell["approvalEligible"] is False
+    assert "0x" not in __import__("json").dumps(_canonicalize(artifact.to_dict()))

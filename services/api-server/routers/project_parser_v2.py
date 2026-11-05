@@ -35,6 +35,7 @@ from parsing_platform.contracts import (
 from parsing_platform.default_modules import (
     intake_core_profile,
 )
+from parsing_platform.source_review_candidates import PROFILE_ID as SOURCE_REVIEW_PROFILE_ID, PROFILE_VERSION as SOURCE_REVIEW_PROFILE_VERSION, source_review_profile
 from parsing_platform.canonical_fields import canonical_field_key
 from parsing_platform.domain_standards import domain_standard_catalog
 from parsing_platform.document_taxonomy import (
@@ -607,7 +608,13 @@ def build_project_parser_v2_router(
                 object_version=object_version,
             )
             orchestrator = make_orchestrator()
-            if input_data.profile_id:
+            if input_data.profile_id == SOURCE_REVIEW_PROFILE_ID and input_data.profile_version == SOURCE_REVIEW_PROFILE_VERSION:
+                builtin = save_project_parsing_profile(
+                    project_id, tenant_id, actor_id, source_review_profile(project_id=project_id), orchestrator,
+                    **profile_write_kwargs(),
+                )
+                profile = ProjectParsingProfile.from_value(builtin["profile"])
+            elif input_data.profile_id:
                 profile = get_project_parsing_profile(
                     project_id,
                     tenant_id,

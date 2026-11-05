@@ -31,6 +31,7 @@ from parsing_platform.pdf_enrichment_modules import (
 )
 from parsing_platform.pdf_structure_enrichment import NativePdfTableExtractor
 from parsing_platform.registry import ParserModuleRegistry
+from parsing_platform.source_review_candidates import SourceReviewCandidateModule
 from parsing_platform.schema_contracts import SchemaContractRegistry
 
 
@@ -46,6 +47,7 @@ def build_parser_v2_runtime_module_registry(
         adapter_registry=adapter_registry
     )
     for module in (
+        SourceReviewCandidateModule(),
         CanonicalWorkbookFactMappingModule(),
         ProductMixParserModule(),
         CostParserModule(),

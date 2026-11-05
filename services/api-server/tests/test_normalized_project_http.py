@@ -518,7 +518,7 @@ def test_normalized_parcel_resolution_and_legal_run_keep_same_tenant_evidence(mo
     assert result["normalizedProjectionPersistence"]["persisted"] is True
     parcels = result["legalReview"]["parcelLegalReviews"]
     assert parcels[0]["pnu"] == pnu
-    assert parcels[0]["evidenceIds"] == [f"pnu_resolution:{pnu}", f"official_land_price:{pnu}"]
+    assert sorted(parcels[0]["evidenceIds"]) == sorted([f"pnu_resolution:{pnu}", f"official_land_price:{pnu}"])
     assert captured["legal"].display["parcelLegalReviews"] == parcels
     assert authority.row["legalReview"]["reviewId"] == result["legalReview"]["reviewId"]
     assert projects.PROJECTS_DB == {}

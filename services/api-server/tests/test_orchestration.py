@@ -441,6 +441,14 @@ def test_chief_deal_orchestration_plan_endpoint_returns_ai_deal_room_contract():
     assert res.status_code == 200
     plan = res.json()
     ChiefDealOrchestrationPlan.model_validate(plan)
+    revision = plan["preflightInputRevision"]
+    assert len(revision) == 64 and set(revision) <= set("0123456789abcdef")
+    from use_cases.chief_preflight_review import source_revision
+
+    assert revision == source_revision(
+        projects._hydrated_project_source(project_id, {}),
+        plan["taskGraph"]["workflowTrack"],
+    )
     assert plan["analysisPurpose"] == "pf_credit_review"
     assert len(plan["agentPods"]) == 6
     assert plan["taskGraph"]["nodes"]

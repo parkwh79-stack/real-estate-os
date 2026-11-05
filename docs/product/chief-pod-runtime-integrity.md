@@ -68,8 +68,8 @@ Vercel 서버 함수의 단일 리전은 API와 Supabase가 있는 도쿄로 설
 실행을 차단하는 항목부터 관련 화면별로 모으고, 보완 대상과 예시 자료는 펼쳐서 확인한다.
 각 검토 카드는 완료·대기·보완·실패·재검토를 구분한다. 완료 결과가 0건이면
 전체 실행 요청이 정상 응답해도 분석이 완료되었다고 표시하지 않는다.
-공통 원본 자료가 필요한 경우 자료 입력을 먼저 안내한다. 다른 조건을 확인하거나
-토지 미리보기를 여는 동작은 해당 화면의 권한과 입력 조건을 따른다.
+사전 검토 전에는 가능한 자료 확인을 먼저 안내한다. 검토가 정리되면 남은 확인·제출
+항목을 안내한다. 토지 미리보기는 해당 화면의 권한과 입력 조건을 따른다.
 
 패럴랙스는 소개 배경에만 적용하고, 유리 효과는 검토 요약에 적용한다.
 수치를 읽는 본문과 조작 요소는 고정된 불투명 표면에 표시한다. 모바일과
@@ -84,17 +84,49 @@ Vercel 서버 함수의 단일 리전은 API와 Supabase가 있는 도쿄로 설
 
 ## 6개 Pod 사전 검토
 
-사용자가 사전 검토를 실행하면 `POST /projects/{id}/chief-orchestration/preflight`가
-현재 저장 자료를 바탕으로 6개 Chief Pod의 준비 상태를 한 번씩 검토한다.
-확인된 입력과 조회 가능한 공개 근거는 기존 형식의 인계로 이어진다. 원본·후보값의
-검토 필요 상태와 사용자가 제출할 자료를 구분한다. 남은 요청은 항목별로 합치고,
-관련 Pod와 사용 목적을 AI 딜룸의 다음 할 일에 표시한다.
+사용자의 첫 행동은 저장 자료의 자동 확인이다.
+`POST /projects/{id}/chief-orchestration/preflight`가 부분 입력으로 지원되는
+실제 Agent를 실행하고, 확인한 결과를 `AgentHandoffEnvelope`로 전달한다.
+입력과 선행 결과의 변경에 영향을 받는 Pod를 다시 검토한 뒤 남은 사용자 확인·제출
+항목을 관련 화면과 사용 목적별로 모은다. 공통 원본 누락도 사전 검토의 시작을 막지
+않는다. 공개 조회의 연결 실패·미구성, 조회 결과 없음, 입력 확인 필요를 구분한다.
 
-검토는 현재 프로젝트 권한을 적용한다. 공개자료 확인 범위를 제한하고,
-필지 응답은 등록된 PNU와 대조한다. 시세 조회는 Agent에 허용된 연결이
-있고 지역과 유형이 확인된 경우에만 수행한다. 사전 검토는 정식 분석과 승인
-기록을 작성하지 않으며, 새 자료를 반영해 다시 실행할 수 있다.
+`reviewLoop`는 `stable`, `needs_material`, `retry_needed`,
+`limit_reached`와 실행·재사용 개수, 남은 Pod, 종료 이유를 반환한다.
+사용자 확인·제출 항목은 검토가 정리된 뒤 표시한다. 요청 실패는 분석 시작 조건을
+충족하지 않는다. 화면과 서랍에서는 사전 확인과 정식 분석 상태를 각각 읽을 수 있다.
 
+재개 요청은 `previousReview`의 `receiptId`와 `resumeState`를 함께 보낸다.
+서버는 인증된 사용자·테넌트·프로젝트·트랙, 실행기 버전, 원본 입력 개정값,
+상태 해시와 유효시간을 대조한다. 같은 입력과 선행 결과는 재사용하며,
+실패 항목은 명시적인 `retryFailed` 요청으로 재실행한다.
+서버의 `canContinue`가 참인 시간 예산 종료에서만 자동으로 이어간다.
+화면은 한 작업에서 최대 세 번 요청하고, 추가 이어가기는 사용자가 선택한다.
+동일 입력의 누적 실행·라운드 한도에 도달하면 정지한다.
+
+큰 재개 출력은 압축해 반환하고, 서버에는 인증 범위·상태 해시·만료 시각의 수신 확인
+기록을 저장한다. 원문·공개 조회 결과와 Agent 출력은 검토 출력 DB에 보관하지 않는다.
+전송 상태 512 KiB와 해제 상태 4 MiB 한도를 적용한다. 브라우저에서는 검증된
+사용자·세션·테넌트·프로젝트·트랙별 메모리에 최대 네 항목을 30분 동안 유지하고,
+인증 변경·만료 때 정리한다. SPA 이동 후 같은 상태를 사용할 수 있다.
+브라우저 전체 새로고침 후에는 새 사전 검토를 시작한다.
+
+현재 재개 실행기는 `realytics-chief-preflight-review-v2`다. 이전 버전의 상태는
+새 검토로 전환한다. 주소로 확인한 PNU는 원래의 필지 식별 근거를 유지하며,
+실제 요청 PNU와 일치하는 지적 속성 응답만 지적 근거로 전달한다. 주소 확인을
+지적·권리·용도지역의 확인 완료로 격상하지 않는다. 공공 연결 미설정은 제한으로
+표시하고 가능한 검토와 남은 자료 요청을 제공한다. 실제 조회 실패나 응답 PNU
+불일치는 실패·재시도 상태를 유지한다.
+
+정식 분석 시작 뒤에도 현재 입력과 일치하는 사전 검토를 유지하고 최신 계획을 다시
+읽는다. 원본 입력 개정값이 바뀌면 이전 수신 확인을 사용해 영향을 받는 검토를 수행한다.
+사전 검토는 정식 계산·심사·승인 기록과 별도 단계로 표시한다.
+
+2026-11-05 로컬 실제 본리동 자료 검증에서 9필지·64개 월차 입력으로 6개 Pod의
+실제 Agent 실행을 확인했다. 동일 입력 재개는 실행 0개·재사용 6개였으며,
+압축 전 재개 상태는 440,854바이트였다. 운영 배포와 원격 CI 결과는 해당 배포 기록에서
+별도로 확인한다. 공공성 Pod의 전용 정책 시뮬레이션·공공기여 최적화와 브라우저 전체
+새로고침을 넘는 사전 검토 재개는 후속 개발 범위다.
 ## Runtime Guarantees
 
 | Capability | Implementation | Status |
@@ -106,7 +138,7 @@ Vercel 서버 함수의 단일 리전은 API와 Supabase가 있는 도쿄로 설
 | Event lifecycle | Durable events move through `pending_recalculation`, `running`, `completed`, or `failed`. Storage failure is not silently ignored. | Implemented |
 | Deal-state materialization | Nested numeric metrics, risk issues, evidence references, and assumption references are materialized into `deal_state_records` with an exact artifact path. Writes are batched. | Implemented |
 | No fabricated PF fallback | Missing product mix or tranche structure produces `scenarioEngineReadiness.status=not_ready`; it no longer creates a synthetic 100-unit product or synthetic Senior tranche. | Implemented |
-| PostgreSQL typed persistence | Critical runtime stores dual-write to `app_state` and typed JSONB tables for artifacts, AI reviews, handoffs, events, calculation runs, and deal-state records. | Implemented; live DB verification requires `REALYTICS_TEST_DATABASE_URL` |
+| PostgreSQL typed persistence | Hosted requests use Tenant/project-scoped normalized repositories for artifacts, AI reviews, handoffs, events, calculations and deal state. Legacy full-state compatibility is not the hosted authority. | Implemented; isolated live DB verification uses `REALYTICS_TEST_DATABASE_URL` |
 
 ## Pod Execution Contract
 
@@ -169,12 +201,16 @@ handoff persistence sinks as direct Pod execution. Materialized metric keys omit
 the structural `metrics` container while retaining the exact `artifactPath` in
 the source locator. Web TypeScript and zero-warning ESLint checks also pass.
 
-The live PostgreSQL round trip remains intentionally unverified on this machine
+At the 2026-07-14 verification, the live PostgreSQL round trip remained unverified
 because neither `REALYTICS_TEST_DATABASE_URL` nor `REALYTICS_DATABASE_URL` is
 configured. The optional test skips instead of writing to a developer or pilot
 database.
 
-## Remaining Production Work
+## Historical follow-up list (2026-07-14)
+
+This list records the earlier runtime review. Current hosted authority, roles,
+worker activation and remaining changes are governed by the dated sections above
+and [the current architecture boundary](../architecture/architecture-boundary.md).
 
 1. Run the optional integration suite against a dedicated PostgreSQL CI service.
 2. Apply migrations through a versioned deployment pipeline instead of runtime `ensure_schema` calls.

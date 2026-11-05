@@ -3,14 +3,15 @@ import { expect, test, type Page } from "@playwright/test";
 const projectId = "evidence-archive-sample";
 const hashes = ["a", "b", "c", "d"].map((value) => value.repeat(64));
 
-async function mockEvidence(page: Page, options: { recordsFail?: boolean; originalFail?: boolean; graphFail?: boolean; empty?: boolean } = {}) {
+async function mockEvidence(page: Page, options: { recordsFail?: boolean; originalFail?: boolean; graphFail?: boolean; empty?: boolean; reviewer?: boolean } = {}) {
+  const auditMethods: string[] = [];
   await page.route("**/api/backend/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
     if (path.endsWith("/auth/me")) return route.fulfill({ json: {
       authenticated: true,
       user: { userId: "review-user", tenantId: "review-tenant", role: "analyst", status: "active" },
-      permissions: ["project:read", "project:write", "project:analyze"],
+      permissions: ["project:read", "project:write", "project:analyze", ...(options.reviewer ? ["project:review"] : [])],
     } });
     if (path.endsWith("/workspace/context")) return route.fulfill({ json: { projectId, projectMemory: { projectName: "합성 근거 자료" } } });
     if (path.endsWith("/workspace/document-review")) {
@@ -48,12 +49,20 @@ async function mockEvidence(page: Page, options: { recordsFail?: boolean; origin
           : [],
       } });
     }
+    if (path.endsWith("/deal-state-records/source-locator-audit")) {
+      auditMethods.push(route.request().method());
+      return route.fulfill({ json: {
+        analysisOnly: route.request().method() === "GET", persisted: route.request().method() === "POST",
+        hasReviewableRecords: true, missingLocatorCount: 2, weakTraceCount: 1, weakParagraphCount: 0,
+      } });
+    }
     if (path.endsWith("/evidence-graphs")) {
       if (options.graphFail) return route.fulfill({ status: 500, json: { detail: "unavailable" } });
       return route.fulfill({ json: { projectId, records: [] } });
     }
     return route.fulfill({ json: {} });
   });
+  return { auditMethods };
 }
 
 test("evidence shows archived originals and latest structure runs independently of formal facts", async ({ page }) => {
@@ -92,4 +101,21 @@ test("original lookup failure and confirmed empty original archive have distinct
   await page.getByRole("button", { name: "근거 새로고침", exact: true }).click();
   await expect(page.getByText("이 프로젝트에 보관된 문서가 없습니다.", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "자료 올리기", exact: true })).toHaveAttribute("href", "/project/" + projectId + "/input-package#intake-upload");
+});
+test("an analyst checks source positions without sending a reviewer mutation", async ({ page }) => {
+  const requests = await mockEvidence(page);
+  await page.goto("/project/" + projectId + "/evidence?track=pf", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "근거 위치 확인", exact: true }).click();
+  await expect(page.getByText(/근거 위치 확인 완료 · 위치 누락 2건/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "감사 결과 저장", exact: true })).toHaveCount(0);
+  expect(requests.auditMethods).toEqual(["GET"]);
+});
+
+test("a reviewer explicitly saves a completed source check", async ({ page }) => {
+  const requests = await mockEvidence(page, { reviewer: true });
+  await page.goto("/project/" + projectId + "/evidence?track=pf", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "근거 위치 확인", exact: true }).click();
+  await page.getByRole("button", { name: "감사 결과 저장", exact: true }).click();
+  await expect(page.getByText("감사 결과를 리스크 원장에 저장했습니다.")).toBeVisible();
+  expect(requests.auditMethods).toEqual(["GET", "POST"]);
 });

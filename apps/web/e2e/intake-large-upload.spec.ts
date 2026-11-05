@@ -51,7 +51,7 @@ async function fixture(page: Page) {
     }
     if (path.endsWith("/parsing-v2/runs")) {
       state.reviewCalls += 1;
-      expect(request.postDataJSON()).toEqual({ archiveId: "d".repeat(64) });
+      expect(request.postDataJSON()).toEqual({ archiveId: "d".repeat(64), profileId: "realytics.source_review_candidates", profileVersion: "1.0.0", idempotencyKey: "source-review-v1-" + "d".repeat(64) });
       return reply({ candidateOnly: true, authoritative: false, parsingRun: { parsingRunId: "large-review-run", executionStatus: "completed" } }, 201);
     }
     if (path.endsWith("/transfers/transfer-1") && request.method() === "DELETE") {

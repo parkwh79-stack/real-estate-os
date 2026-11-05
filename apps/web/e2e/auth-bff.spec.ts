@@ -239,7 +239,7 @@ test("browser auth state contains no persisted REALYTICS token or session id", a
     return await page.evaluate(() =>
       window.localStorage.getItem("realytics.auth.session.v1"));
   }).toBeNull();
-  expect(authRequestSeen).toBe(true);
+  await expect.poll(() => authRequestSeen).toBe(true);
   expect(browserAuthHeaders.authorization).toBeUndefined();
   expect(browserAuthHeaders["x-realytics-session-id"]).toBeUndefined();
   expect(browserAuthHeaders["x-realytics-user-id"]).toBeUndefined();

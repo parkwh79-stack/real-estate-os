@@ -29,6 +29,7 @@ MAX_OCR_PIXELS = 12_000_000
 MAX_PAGE_TEXT_CHARS = 100_000
 MAX_PAGE_BLOCKS = 5_000
 MAX_WORKER_RESPONSE_BYTES = 900_000
+MAX_WORKER_REQUEST_HEADER_BYTES = 16_384
 MAX_PAGE_TIMEOUT_SECONDS = 20.0
 _OCR_SLOTS = threading.BoundedSemaphore(1)
 
@@ -146,10 +147,13 @@ def _run_ocr_page(content: bytes, page_number: int, directory: Path, timeout_sec
 
 def _run_isolated_ocr(content: bytes, page_number: int, directory: Path, timeout_seconds: float) -> dict[str, Any]:
     """The native OCR call runs only in a disposable process with a hard timeout."""
-    command = [sys.executable, "-B", "-m", "parsing_platform.local_pdf_reading", "--ocr-worker", str(page_number), str(directory)]
+    command = [sys.executable, "-B", "-m", "parsing_platform.local_pdf_reading", "--ocr-worker"]
+    header = json.dumps({"pageNumber": page_number, "tessdataDir": str(directory)}, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(header) > MAX_WORKER_REQUEST_HEADER_BYTES:
+        raise _OcrFailure("OCR_REQUEST_INVALID")
     try:
         process = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False,
             cwd=Path(__file__).resolve().parents[1], close_fds=True,
             env={**os.environ, "OMP_THREAD_LIMIT": "1", "OMP_NUM_THREADS": "1"},
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -157,7 +161,7 @@ def _run_isolated_ocr(content: bytes, page_number: int, directory: Path, timeout
     except OSError as exc:
         raise _OcrFailure("OCR_EXECUTOR_UNAVAILABLE") from exc
     try:
-        output, _ = process.communicate(content, timeout=timeout_seconds)
+        output, _ = process.communicate(header + content, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         process.kill()
         process.communicate()
@@ -262,9 +266,19 @@ def _worker_main() -> int:
             import resource
             memory_limit = 512 * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
-        number = int(sys.argv[2])
+        header = sys.stdin.buffer.readline(MAX_WORKER_REQUEST_HEADER_BYTES + 1)
+        if not header.endswith(b"\n") or len(header) > MAX_WORKER_REQUEST_HEADER_BYTES:
+            raise _OcrFailure("OCR_REQUEST_INVALID")
+        request = json.loads(header)
+        if (
+            not isinstance(request, dict) or set(request) != {"pageNumber", "tessdataDir"}
+            or type(request["pageNumber"]) is not int or request["pageNumber"] < 1
+            or not isinstance(request["tessdataDir"], str) or not request["tessdataDir"]
+        ):
+            raise _OcrFailure("OCR_REQUEST_INVALID")
+        number = request["pageNumber"]
         try:
-            directory = verified_tessdata_dir(sys.argv[3])
+            directory = verified_tessdata_dir(request["tessdataDir"])
         except OcrLanguageDataUnavailable as exc:
             raise _OcrFailure(str(exc)) from exc
         content = sys.stdin.buffer.read(MAX_SOURCE_BYTES + 1)
@@ -290,6 +304,6 @@ def _worker_main() -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4 or sys.argv[1] != "--ocr-worker":
+    if len(sys.argv) != 2 or sys.argv[1] != "--ocr-worker":
         raise SystemExit(2)
     raise SystemExit(_worker_main())

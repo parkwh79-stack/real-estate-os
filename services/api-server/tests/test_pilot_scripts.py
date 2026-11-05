@@ -357,6 +357,19 @@ def test_land_evidence_template_and_attachment_workflow():
     ]
     analysis = LandLedgerAgent().analyze_rows(rows, sheet_name="ledger", source_file="ledger.xls")
     analysis = LandLedgerAgent().enrich_analysis(analysis, {"legalDongCode": "2729011700"})
+    parcel = analysis["parcels"][0]
+    assert not parcel.get("pnu")
+    assert parcel.get("pnuCandidate") == "2729011700100010004"
+    # A generated identifier must be confirmed against a source before the
+    # attachment workflow can associate public-price and registry evidence.
+    analysis = LandLedgerAgent().enrich_analysis(analysis, {"pnuResolutions": [{
+        "pnu": "2729011700100010004",
+        "addressFragment": parcel["addressFragment"],
+        "matchMethod": "pnu_construction",
+        "sourceName": "synthetic cadastral fixture",
+        "sourceUrlOrEvidenceId": "cadastral-fixture:2729011700100010004",
+        "matchConfidence": 1.0,
+    }]})
     payload = {
         "project": {"name": "Evidence workflow test"},
         "landLedger": analysis,

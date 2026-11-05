@@ -22,6 +22,7 @@ async function mockMemberlessOnboarding(
   let profile: Record<string, unknown> | null = initialProfile;
   let profilePayload: Record<string, unknown> | null = null;
   let requestPayload: Record<string, unknown> | null = null;
+  let pendingInvitationChecks = 0;
 
   await page.route("**/api/backend/auth/**", async (route) => {
     const request = route.request();
@@ -110,9 +111,22 @@ async function mockMemberlessOnboarding(
     });
   });
 
+  // This UI scenario has no HttpOnly invitation intent. Its BFF contract is
+  // covered separately by invitation-deferred-intent.spec.ts.
+  await page.route("**/api/auth/supabase/invitation/accept", async (route) => {
+    pendingInvitationChecks += 1;
+    expect(route.request().method()).toBe("POST");
+    await route.fulfill({
+      status: 409,
+      headers: { "Cache-Control": "no-store" },
+      json: { error: "invitation_intent_missing", invitation: "not_pending", next: "/onboarding" },
+    });
+  });
+
   return {
     getProfilePayload: () => profilePayload,
     getRequestPayload: () => requestPayload,
+    getPendingInvitationChecks: () => pendingInvitationChecks,
   };
 }
 
@@ -139,6 +153,7 @@ test("verified memberless user saves a versioned onboarding profile", async ({ p
     expectedProfileVersion: 0,
   });
   await expect(page.getByText("프로필과 현재 정책 동의를 안전하게 저장했습니다.")).toBeVisible();
+  expect(state.getPendingInvitationChecks()).toBe(1);
 });
 
 test("policy mismatch reloads authoritative versions and requires fresh consent", async ({ page }) => {

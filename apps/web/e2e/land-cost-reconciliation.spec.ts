@@ -14,6 +14,8 @@ async function fixture(page: Page, options: {
   pnuLookupOffline?: boolean;
   map?: boolean;
 } = {}) {
+  // Selection uses the fixture geometry and does not require external basemap tiles.
+  await page.route("https://tile.openstreetmap.org/**", (route) => route.abort());
   const purchase = options.purchase === undefined ? 42_000_000_000 : options.purchase;
   const source = (cell: string) => ({ source_document: "합성 수지.xlsx", sheet_name: "사업수지", cell });
   const writes: string[] = [];

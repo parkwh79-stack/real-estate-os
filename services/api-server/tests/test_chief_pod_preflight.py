@@ -153,6 +153,7 @@ def test_route_authorizes_scoped_latest_inputs_and_ignores_client_overlay(monkey
         if request.headers.get("x-test-allow") != "yes":
             raise HTTPException(status_code=403, detail="Denied")
         calls.append("authorized")
+        return {"authenticated": True, "user": {"userId": "reviewer", "tenantId": "tenant-a"}}
 
     def fetch(project_id, request):
         assert project_id == "deal"
@@ -180,6 +181,17 @@ def test_route_authorizes_scoped_latest_inputs_and_ignores_client_overlay(monkey
     monkeypatch.setattr(projects, "_persist_shared_deal_state_graph", forbid)
     monkeypatch.setattr(projects, "record_sensitive_project_event", forbid)
     monkeypatch.setattr(preflight, "vworld_configured", lambda: False)
+    from use_cases import chief_preflight_receipts
+
+    def save_receipt(project_id, record):
+        assert project_id == "deal"
+        assert set(record["payload"]) == {
+            "projectId", "tenantId", "actorId", "workflowTrack", "engineVersion",
+            "stateHash", "inputRevision", "createdAt", "expiresAt",
+        }
+        calls.append("receipt_saved")
+
+    monkeypatch.setattr(chief_preflight_receipts, "_insert_handoff", save_receipt)
 
     class Connector:
         def configured(self):
@@ -197,4 +209,4 @@ def test_route_authorizes_scoped_latest_inputs_and_ignores_client_overlay(monkey
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["workflowTrack"] == "pf"
     assert not any(item["itemId"] == "source_documents_missing" for item in response.json()["materialRequests"])
-    assert calls[-3:] == ["authorized", "scoped", "hydrated"]
+    assert calls[-6:] == ["authorized", "scoped", "hydrated", "scoped", "hydrated", "receipt_saved"]

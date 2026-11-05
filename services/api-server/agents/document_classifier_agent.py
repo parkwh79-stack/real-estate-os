@@ -285,6 +285,20 @@ def classify_document(
                 if any(cue in sample_norm for cue in cues)
             ],
         )
+    # Debt-status tables are not parcel registers or attested loan contracts.
+    # Require both a specific title and the actual table headers before choosing
+    # a source-review path; the presence of collateral alone proves nothing.
+    debt_title = any(cue in name_norm + sample_norm[:200] for cue in ("브릿지론현황", "브리지론현황", "대출현황"))
+    debt_headers = sum(cue in sample_norm for cue in ("대출금", "대주", "만기", "금리"))
+    if media_format in {"xlsx", "xlsm"} and debt_title and debt_headers >= 3:
+        result.update(documentType="unknown", label="금융현황 · 항목 매핑 필요", suggestedAction="manual_review",
+                      needsReview=True, confidence=0.0, candidates=[])
+        if detected_format is not None:
+            result.update(processingMode="document_review", processingTypes=[])
+        result["reasons"] = ["브릿지론·대출 현황 제목과 대출금·대주·만기·금리 열이 확인되어 원본 검토로 연결합니다.",
+                             "토지조서나 체결된 대출약정으로 확정하지 않습니다."]
+        if detected_format is not None:
+            result["topics"] = list(dict.fromkeys([*(result.get("topics") or []), "금융구조·대출"]))
     return result
 
 

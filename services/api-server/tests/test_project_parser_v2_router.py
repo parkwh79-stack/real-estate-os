@@ -393,6 +393,7 @@ def test_default_runtime_catalog_composes_optional_packs_but_default_run_stays_i
         "pdf_native_table_extraction",
         "semantic_section_indexing",
         "pdf_ocr_assessment_dispatch_plan",
+        "source_review_candidates",
     } == module_ids
     default_refs = [
         module_ref

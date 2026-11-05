@@ -1,6 +1,15 @@
 # Evidence Graph Agent
 
-Updated: 2026-07-02
+Updated: 2026-11-05
+
+## 운영 근거 조회와 위치 확인
+
+- `GET /projects/{projectId}/evidence-graphs`와 개별 그래프 조회는 검증된 Tenant·프로젝트 범위의 정규화 `realytics.evidence_graphs`만 읽는다. 운영 조회에서 구형 `app_state` 초기화나 DDL을 실행하지 않는다. 저장소 오류는 503으로, 실제 빈 목록은 200의 빈 목록으로 구분한다.
+- `GET /projects/{projectId}/deal-state-records/source-locator-audit`는 `project:read` 권한의 화면 검토다. 리스크·감사 기록을 저장하지 않는다. `POST`는 기존 `project:review` 권한과 명시적인 저장 동작을 유지한다.
+- 근거 화면은 보관 원본·구조 파싱·검토 대기 후보·정식 근거·입력에 연결된 파싱값을 각각 표시한다. 보관 파일이나 미검토 후보를 정식 증빙·승인값의 건수로 합산하지 않는다. 검토할 정식 기록이 없으면 감사 통과로 표시하지 않는다.
+- 기존 원본의 후보 추출은 [문서 처리 계약](smart-intake.md#보관-원본의-검토-후보-추출)을 따른다. 실제 페이지·BBox·셀을 보존하고 사용자가 검토해야 하며, 원본의 사업장 연결과 단위·금액 기준 부족은 별도 확인 대상이다.
+
+2026-11-05 운영 로그의 `permission denied for schema realytics`는 그래프 목록이 구형 `app_state` 생성 경로를 호출한 원인으로 확인했다. 수정 검증은 정규화 범위 조회, Tenant 불일치 차단, 저장소 장애·빈 목록 구분, 읽기 중 DDL 금지, 분석가의 무저장 위치 확인과 검토자의 명시 저장을 포함한다. 이 수정에 Supabase 스키마·권한 변경은 없다.
 
 ## Purpose
 

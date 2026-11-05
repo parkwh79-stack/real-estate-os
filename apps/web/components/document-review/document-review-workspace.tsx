@@ -65,6 +65,7 @@ import {
 } from "../ui/primitives";
 import { ProjectWorkspaceLink } from "../layout/project-workspace-link";
 import { PdfPageReadingPanel } from "./pdf-page-reading-panel";
+import { ArchiveExtractionAction } from "./archive-extraction-action";
 import { DashboardAtmosphere } from "../dashboard/dashboard-atmosphere";
 import heroStyles from "../orchestration/chief-deal-room-workspace.module.css";
 
@@ -823,6 +824,10 @@ export function DocumentReviewWorkspace({
         {error} {data ? "마지막으로 확인한 결과를 표시합니다." : "새로고침해서 원본과 파싱 상태를 다시 확인해 주세요."}
       </Notice></div> : null}
       {notice ? <Notice tone="good">{notice}</Notice> : null}
+      {data?.projectId === projectId && data.sourceDocuments.length > 0 ? (
+        <ArchiveExtractionAction compact projectId={projectId} originals={data}
+          disabled={loading || Boolean(error) || reviewBusy} onComplete={() => void load()} />
+      ) : null}
       {data && documents.some((item) => item.mediaType === "application/pdf" && item.latestRun?.executionStatus === "completed" && item.candidateCount === 0) ? (
         <p className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
           파싱이 완료되어도 검토 후보가 없는 PDF가 있습니다. 원본을 열고 필요한 페이지에서 글자 읽기를 사용할 수 있습니다.

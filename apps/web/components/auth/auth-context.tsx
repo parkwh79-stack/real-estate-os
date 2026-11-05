@@ -72,6 +72,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [nonce, setNonce] = useState(0);
   const verificationVersion = useRef(0);
   const lastVerificationStartedAt = useRef(0);
+  const pendingVerification = useRef<{
+    boundary: ReturnType<typeof authBoundary>;
+    version: number;
+    promise: ReturnType<typeof resolveCurrentIdentity>;
+  } | null>(null);
 
   const refresh = useCallback(() => {
     verificationVersion.current += 1;
@@ -113,6 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     purgeLegacyBrowserAuthStorage();
     if (boundary === "guest") {
+      pendingVerification.current = null;
       clearStoredAuthSession({ notify: false });
       setVerifiedBoundary(boundary);
       setStatus("unauthenticated");
@@ -126,7 +132,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const version = verificationVersion.current;
     const isActive = () => !cancelled && version === verificationVersion.current;
     lastVerificationStartedAt.current = Date.now();
-    resolveCurrentIdentity()
+    // Replayed effects share this verification. Refreshes and auth-boundary
+    // changes create a new version so an old identity cannot satisfy them.
+    if (!pendingVerification.current || pendingVerification.current.boundary !== boundary
+      || pendingVerification.current.version !== version) {
+      pendingVerification.current = { boundary, version, promise: resolveCurrentIdentity() };
+    }
+    pendingVerification.current.promise
       .then((identity) => {
         if (!isActive()) return;
         if (!identity.authenticated) {

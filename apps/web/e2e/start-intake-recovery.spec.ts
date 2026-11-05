@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { hasArchivedFeasibilityReviewDraft, intakeProcessingFailure } from "../lib/intake-processing-status";
+import { hasArchivedFeasibilityReviewDraft, hasArchivedWorkbookSourceReview, intakeProcessingFailure } from "../lib/intake-processing-status";
 
 function workbookCandidateResponse() {
   const hash = "a".repeat(64);
@@ -15,10 +15,22 @@ function workbookCandidateResponse() {
   };
 }
 
+function unmappedWorkbookResponse() {
+  const hash = "d".repeat(64);
+  return { project_id: "start-recovery", feasibilityStudyV2Draft: null,
+    upload: { archiveId: hash, originalFileHash: hash, archiveStored: true, documentType: "feasibility_workbook" },
+    validation: { status: "needs_mapping", sourceDocumentHash: hash, templateSupport: { status: "unsupported_layout" },
+      diagnostics: [{ code: "unsupported_workbook_layout" }], formulaIntegrity: { status: "not_evaluated" } },
+    sourceReview: { reason: "unsupported_workbook_layout", candidateOnly: true, authoritative: false,
+      projectId: "start-recovery", archiveId: hash, sourceDocumentHash: hash,
+      profileId: "realytics.source_review_candidates", profileVersion: "1.0.0" } };
+}
+
 async function fixture(page: Page, files: string[]) {
   const state = { failFiles: new Set<string>(), uploads: [] as string[], creates: 0, finalizeCalls: 0,
     finalizeStatus: 200, nextStage: undefined as string | undefined, finalizeGate: Promise.resolve(),
-    validationCalls: 0, candidateCalls: 0, landCalls: 0, enrichmentCalls: 0, documentReviewCalls: 0 };
+    validationCalls: 0, candidateCalls: 0, landCalls: 0, enrichmentCalls: 0, documentReviewCalls: 0,
+    parserFailures: 0, reviewCandidateCount: 1, zeroLand: false };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/\/$/, "");
@@ -33,6 +45,10 @@ async function fixture(page: Page, files: string[]) {
       return reply({ id: "start-recovery" });
     }
     if (path.endsWith("/intake/classify")) return reply({ files: files.map((filename) => {
+      if (filename === "unmapped.xlsx") return { filename, documentType: "feasibility_workbook", label: "사업수지", confidence: 0.98,
+        needsReview: false, archiveStored: true, archiveId: "d".repeat(64), processingTypes: ["feasibility_workbook", "land_ledger"] };
+      if (filename === "bridge.xlsx") return { filename, documentType: "unknown", label: "금융현황 · 항목 매핑 필요", confidence: 0,
+        needsReview: true, archiveStored: true, archiveId: "e".repeat(64), processingMode: "document_review", processingTypes: [] };
       if (filename === "memo.pdf") return { filename, documentType: "investment_committee_memo", label: "투자심의 메모", confidence: 0.48,
         needsReview: true, archiveStored: true, archiveId: "c".repeat(64), processingMode: "document_review",
         processingTypes: ["business_plan", "basic_architectural_plan", "investment_committee_memo"], topics: ["투자심의"] };
@@ -56,12 +72,16 @@ async function fixture(page: Page, files: string[]) {
     }
     if (path.endsWith("/parsing-v2/runs") && request.method() === "POST") {
       state.documentReviewCalls += 1;
-      expect(request.postDataJSON()).toEqual({ archiveId: "c".repeat(64) });
-      return reply({ candidateOnly: true, authoritative: false, parsingRun: { parsingRunId: "synthetic-review", executionStatus: "completed" } }, 201);
+      const submitted = request.postDataJSON();
+      expect(["c", "d", "e"].map((char) => char.repeat(64))).toContain(submitted.archiveId);
+      expect(submitted).toEqual({ archiveId: submitted.archiveId, profileId: "realytics.source_review_candidates", profileVersion: "1.0.0", idempotencyKey: "source-review-v1-" + submitted.archiveId });
+      if (state.parserFailures > 0) { state.parserFailures -= 1; return reply({ detail: "parser_connection_unavailable" }, 503); }
+      return reply({ candidateOnly: true, authoritative: false, candidateCollection: { candidateCount: state.reviewCandidateCount },
+        parsingRun: { parsingRunId: "synthetic-review", executionStatus: "completed" } }, 201);
     }
     if (path.endsWith("/feasibility-workbook/validate")) {
       state.validationCalls += 1;
-      return reply(workbookCandidateResponse());
+      return reply(files.includes("unmapped.xlsx") ? unmappedWorkbookResponse() : workbookCandidateResponse());
     }
     if (path.endsWith("/feasibility-workbook/import-candidate")) {
       state.candidateCalls += 1;
@@ -74,7 +94,7 @@ async function fixture(page: Page, files: string[]) {
     }
     if (path.endsWith("/land-ledger/analyze")) {
       state.landCalls += 1;
-      return reply({ project_id: "start-recovery", landLedger: { summary: { parcelCount: 9 } }, landEvidenceEnrichment: "deferred" });
+      return reply({ project_id: "start-recovery", landLedger: { summary: { parcelCount: state.zeroLand ? 0 : 9 } }, landEvidenceEnrichment: "deferred" });
     }
     if (path.endsWith("/land-ledger/enrich")) {
       state.enrichmentCalls += 1;
@@ -289,4 +309,57 @@ test("an unsupported recommendation leaves a real placeholder and only allows co
   await expect(page).toHaveURL(/\/project\/start-recovery\/input-package\?track=development$/);
   expect(state.landCalls).toBe(1);
   expect(state.validationCalls).toBe(0);
+});
+
+
+test("unsupported workbook keeps mapping guidance and retries source review from archive without financial import", async ({ page }) => {
+  const { state, intake } = await fixture(page, ["unmapped.xlsx", "retry.pdf"]);
+  state.failFiles.add("retry.pdf"); state.parserFailures = 1;
+  const row = intake.getByRole("listitem").filter({ hasText: "unmapped.xlsx" });
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
+  await expect(row).toContainText("실패");
+  expect(state.validationCalls).toBe(1); expect(state.documentReviewCalls).toBe(1); expect(state.candidateCalls).toBe(0);
+  state.reviewCandidateCount = 0;
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
+  await expect(row).toContainText("원본 저장 · 검토 필요");
+  await expect(row).toContainText("사업수지 양식 매핑 필요");
+  await expect(row).toContainText("원본 읽음 · 추출 항목 연결 필요");
+  await expect(row).not.toContainText("처리 완료");
+  await expect(row.getByRole("link", { name: /문서 검토/ })).toHaveAttribute("href", /documents\/review/);
+  expect(state.validationCalls).toBe(1); expect(state.documentReviewCalls).toBe(2); expect(state.candidateCalls).toBe(0);
+  expect(state.landCalls).toBe(0); expect(state.creates).toBe(1);
+});
+
+test("zero-parcel HTTP success never displays saved or done and never calls enrichment", async ({ page }) => {
+  const { state, intake } = await fixture(page, ["land.xlsx"]); state.zeroLand = true;
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
+  const row = intake.getByRole("listitem");
+  await expect(row).toContainText("실패"); await expect(row).toContainText("지번·면적 행을 찾지 못했습니다");
+  await expect(row).not.toContainText("0필지 저장"); await expect(row).not.toContainText("처리 완료");
+  expect(state.enrichmentCalls).toBe(0); expect(state.finalizeCalls).toBe(0);
+});
+
+test("debt-status workbook uses original review and zero candidates stay inspection", async ({ page }) => {
+  const { state, intake } = await fixture(page, ["bridge.xlsx", "retry.pdf"]);
+  state.failFiles.add("retry.pdf"); state.reviewCandidateCount = 0;
+  const row = intake.getByRole("listitem").filter({ hasText: "bridge.xlsx" });
+  await expect(row).toContainText("금융현황");
+  await row.getByRole("button", { name: "이 자료 검토", exact: true }).click();
+  await intake.getByRole("button", { name: /^자료 처리/ }).click();
+  await expect(row).toContainText("원본 저장 · 검토 필요"); await expect(row).toContainText("원본 읽음 · 추출 항목 연결 필요");
+  await expect(row).not.toContainText("처리 완료");
+  expect(state.validationCalls).toBe(0); expect(state.candidateCalls).toBe(0); expect(state.landCalls).toBe(0); expect(state.documentReviewCalls).toBe(1);
+});
+
+test("unsupported source review is bound to its project, original hash and mapping-only diagnostic", () => {
+  const body = unmappedWorkbookResponse();
+  expect(hasArchivedWorkbookSourceReview(body)).toBe(true); expect(intakeProcessingFailure(body, "feasibility_workbook")).toBeNull();
+  for (const invalid of [
+    { ...body, upload: { ...body.upload, archiveStored: false } },
+    { ...body, sourceReview: { ...body.sourceReview, projectId: "other" } },
+    { ...body, sourceReview: { ...body.sourceReview, authoritative: true } },
+    { ...body, validation: { ...body.validation, sourceDocumentHash: "f".repeat(64) } },
+    { ...body, validation: { ...body.validation, status: "parse_failed" } },
+    { ...body, status: "failed" },
+  ]) expect(intakeProcessingFailure(invalid, "feasibility_workbook")).not.toBeNull();
 });

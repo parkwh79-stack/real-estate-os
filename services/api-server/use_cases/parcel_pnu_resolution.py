@@ -18,35 +18,44 @@ from typing import Any, Callable, Dict, List, Optional
 # Re-exported for callers that treat this module as the parcel-resolution API.
 from use_cases.intake_finalize import resolve_address_to_parcel  # noqa: F401
 
-_LOCALITY_TOKEN_RE = re.compile(r"[가-힣0-9]+(?:동|읍|면|리|가)")
-_ADDRESS_LOT_TOKEN_RE = re.compile(r"산?[0-9]+(?:-[0-9]+)?(?:번지)?")
+MAX_ADDRESS_CHARS = 2048
+MAX_ADDRESS_TOKEN_CHARS = 128
 
 
 def _address_prefix(land_address: str) -> str:
-    tokens = (land_address or "").strip().split()
+    if not isinstance(land_address, str) or len(land_address) > MAX_ADDRESS_CHARS:
+        return ""
+    tokens = land_address.strip().split()
     locality_end = 0
     for index, token in enumerate(tokens):
-        if _ADDRESS_LOT_TOKEN_RE.fullmatch(token):
+        if len(token) > MAX_ADDRESS_TOKEN_CHARS:
+            return ""
+        lot = token.removesuffix("번지").removeprefix("산")
+        parts = lot.split("-", 1)
+        if all(part and part.isascii() and part.isdecimal() for part in parts):
             break
-        if _LOCALITY_TOKEN_RE.fullmatch(token):
+        if (
+            len(token) > 1 and token[-1] in "동읍면리가"
+            and all("가" <= char <= "힣" or "0" <= char <= "9" for char in token[:-1])
+        ):
             locality_end = index + 1
     return " ".join(tokens[:locality_end])
-
 
 def _dong_of(prefix: str) -> str:
     tokens = prefix.split()
     return tokens[-1] if tokens else ""
 
 
-_LOT_RE = re.compile(r"(산)?\s*(\d+)(?:-(\d+))?")
-
-
 def _lot_key(value: Any) -> tuple | None:
     """Normalize a 지번 ("13", "13-2", "산13", "13대") to (san, main, sub) for comparison."""
-    match = _LOT_RE.search(str(value or ""))
-    if not match:
+    text = str(value or "")
+    main = re.search(r"\d+", text)
+    if not main:
         return None
-    return (bool(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+    mountain = text[:main.start()].rstrip().endswith("산")
+    suffix = text[main.end():]
+    sub = re.match(r"\d+", suffix[1:]) if suffix.startswith("-") else None
+    return (mountain, int(main[0]), int(sub[0]) if sub else 0)
 
 
 def _resolved_lot_matches(requested: str, resolved_lot: Any) -> bool | None:

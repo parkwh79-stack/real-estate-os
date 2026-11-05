@@ -26,6 +26,10 @@ test("recovery session stays on the password reset form", async ({ page }) => {
 });
 
 test("unauthenticated users can reach the real login entry point", async ({ page }) => {
+  await page.route("**/api/backend/auth/me", (route) => route.fulfill({ status: 401, json: { error: "unauthenticated" } }));
+  await page.route("**/api/auth/supabase/readiness", (route) => route.fulfill({ json: {
+    providerUsable: { google: false, kakao: false, naver: false },
+  } }));
   await page.goto("/login");
 
   await expect(page).toHaveURL(/\/login/);
@@ -249,4 +253,41 @@ test("password login retains the server's workspace-unavailable routing without 
   await expect(page).toHaveURL(/\/onboarding$/);
   await expect(page.getByText("Workspace check boundary", { exact: true })).toBeVisible();
   expect(checksAfterLogin).toBe(0);
+});
+
+
+
+test("session change verifies identity again before showing protected content", async ({ page }) => {
+  let checks = 0;
+  let changed = false;
+  let release!: () => void;
+  const verification = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/backend/**", (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route("**/api/backend/projects/recent-work?*", (route) => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/auth/supabase/readiness", (route) => route.fulfill({ json: { providerUsable: {} } }));
+  await page.route("**/api/backend/auth/me", async (route) => {
+    checks += 1;
+    if (changed) {
+      await verification;
+      return route.fulfill({ status: 401, json: { error: "session_revoked" } });
+    }
+    return route.fulfill({ json: {
+      authenticated: true, authSource: "bearer_token",
+      user: { userId: "session-before", tenantId: "verified-tenant", role: "analyst", status: "active" },
+      session: { userId: "session-before", tenantId: "verified-tenant" }, permissions: ["project:read"],
+    } });
+  });
+  await page.goto("/start");
+  await expect(page.getByRole("heading", { name: "새 자료로 분석 시작" })).toBeVisible();
+  expect(checks).toBe(1);
+  changed = true;
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("realytics-auth-session-changed")));
+  try {
+    await expect(page.getByText("로그인·워크스페이스 확인 중", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "새 자료로 분석 시작" })).toHaveCount(0);
+    await expect.poll(() => checks).toBe(2);
+  } finally {
+    release();
+  }
+  await expect(page).toHaveURL(/\/login\?next=/);
 });

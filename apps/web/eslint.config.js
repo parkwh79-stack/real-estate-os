@@ -7,6 +7,7 @@ export default [
     ignores: [
       ".next/**",
       ".next-e2e/**",
+      ".next-e2e-production/**",
       ".pytest_cache/**",
       "coverage/**",
       "playwright-report/**",

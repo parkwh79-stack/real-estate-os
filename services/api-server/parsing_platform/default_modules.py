@@ -7,6 +7,7 @@ from agents.document_classifier_agent import classify_document
 from parsing_platform.adapters import (
     ArchivedDocument,
     DocumentAdapterRegistry,
+    XlsxStructureAdapter,
     bind_artifact_to_document_version,
     detect_document_instruction_text,
     inspect_archived_document,
@@ -103,6 +104,13 @@ class StructuralExtractionModule:
             adapter = self.adapter_registry.resolve(document)
         except LookupError as exc:
             raise UnsupportedDocumentAdapter(str(exc)) from exc
+        # This profile promises a bounded source preview, not full workbook
+        # mapping. Respect that budget before binding/serializing huge sheets.
+        if isinstance(adapter, XlsxStructureAdapter):
+            from parsing_platform.source_review_candidates import PROFILE_ID, PROFILE_VERSION, MAX_CHUNKS, MAX_WORKBOOK_CHUNKS
+            if context.get("profile_id") == PROFILE_ID and context.get("profile_version") == PROFILE_VERSION:
+                adapter = XlsxStructureAdapter(max_rows_per_sheet=adapter.max_rows_per_sheet,
+                                               max_cells=adapter.max_cells, max_chunks=min(MAX_CHUNKS, MAX_WORKBOOK_CHUNKS))
         artifact = adapter.extract(document)
         artifact = bind_artifact_to_document_version(
             artifact,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -188,3 +189,46 @@ def test_busy_ocr_slot_does_not_block_native_page_reading(tmp_path: Path) -> Non
         assert result["pages"][0]["status"] == "completed"
     finally:
         reading._OCR_SLOTS.release()
+
+
+def test_ocr_subprocess_uses_only_static_arguments_and_frames_data_on_stdin(monkeypatch):
+    requests = []
+
+    class Process:
+        returncode = 0
+
+        def communicate(self, request, timeout):
+            header, content = request.split(b"\n", 1)
+            requests.append((json.loads(header), content, timeout))
+            return b'{"pageNumber":2}', None
+
+    def launch(command, **kwargs):
+        assert command == [reading.sys.executable, "-B", "-m", "parsing_platform.local_pdf_reading", "--ocr-worker"]
+        assert kwargs["shell"] is False
+        return Process()
+
+    monkeypatch.setattr(reading.subprocess, "Popen", launch)
+    directory = Path("models with spaces; --untrusted-option")
+    content = b"%PDF-1.7\nunchanged source"
+    assert reading._run_isolated_ocr(content, 2, directory, 1.0) == {"pageNumber": 2}
+    assert requests == [({"pageNumber": 2, "tessdataDir": str(directory)}, content, 1.0)]
+
+
+def test_ocr_worker_rejects_unbounded_or_malformed_stdin_before_loading_models(monkeypatch):
+    import io
+    from types import SimpleNamespace
+
+    def reject_models(*_args):
+        pytest.fail("invalid worker request reached language data")
+
+    monkeypatch.setattr(reading, "verified_tessdata_dir", reject_models)
+    for request in (b"x" * (reading.MAX_WORKER_REQUEST_HEADER_BYTES + 1),
+                    b'{"pageNumber":"--eval","tessdataDir":"models"}\n%PDF'):
+        output = io.BytesIO()
+        monkeypatch.setattr(reading, "sys", SimpleNamespace(
+            platform="worker-contract-test",
+            stdin=SimpleNamespace(buffer=io.BytesIO(request)),
+            stdout=SimpleNamespace(buffer=output),
+        ))
+        assert reading._worker_main() == 0
+        assert json.loads(output.getvalue())["errorCode"] == "OCR_REQUEST_INVALID"

@@ -7,6 +7,7 @@ import json
 import re
 import zipfile
 from dataclasses import asdict, dataclass, field, replace
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 from xml.etree import ElementTree
@@ -404,9 +405,11 @@ class XlsxStructureAdapter:
     adapter_id = "xlsx_structure"
     adapter_version = "1.0.0"
 
-    def __init__(self, *, max_rows_per_sheet: int = 20_000, max_cells: int = 250_000):
+    def __init__(self, *, max_rows_per_sheet: int = 20_000, max_cells: int = 250_000,
+                 max_chunks: int = MAX_EXTRACTION_CHUNKS):
         self.max_rows_per_sheet = max_rows_per_sheet
         self.max_cells = max_cells
+        self.max_chunks = max(1, min(max_chunks, MAX_EXTRACTION_CHUNKS))
 
     def supports(self, document: ArchivedDocument) -> bool:
         return document.extension in {".xlsx", ".xlsm"}
@@ -437,20 +440,32 @@ class XlsxStructureAdapter:
             for sheet_name in formulas.sheetnames:
                 formula_sheet = formulas[sheet_name]
                 value_sheet = values[sheet_name]
-                for row_index, row in enumerate(formula_sheet.iter_rows(), start=1):
+                # A read-only cell lookup reparses the worksheet from its start.
+                # Stream the identical source rows together so cached values keep
+                # exact coordinates without quadratic work on real workbooks.
+                rows = zip(formula_sheet.iter_rows(), value_sheet.iter_rows(values_only=True), strict=True)
+                for row_index, (row, cached_row) in enumerate(rows, start=1):
                     if row_index > self.max_rows_per_sheet or visited_cells >= self.max_cells:
                         warnings.append(f"ADAPTER_LIMIT_REACHED:{sheet_name}")
                         break
-                    for cell in row:
+                    for cell, cached in zip(row, cached_row, strict=True):
                         if visited_cells >= self.max_cells:
                             warnings.append(f"ADAPTER_LIMIT_REACHED:{sheet_name}")
                             break
                         visited_cells += 1
-                        formula = cell.value
-                        cached = value_sheet[cell.coordinate].value
-                        if formula in (None, "") and cached in (None, ""):
+                        raw_value = cell.value
+                        if raw_value in (None, ""):
                             continue
-                        is_formula = isinstance(formula, str) and formula.startswith("=")
+                        # openpyxl 3.1 represents array/data-table formulas as
+                        # objects. Preserve their text/range, never expose the
+                        # object as an approved literal or an unstable repr.
+                        is_formula = cell.data_type == "f" or (isinstance(raw_value, str) and raw_value.startswith("="))
+                        formula = getattr(raw_value, "text", None) if is_formula and not isinstance(raw_value, str) else raw_value
+                        formula_metadata = ({"formulaKind": type(raw_value).__name__,
+                                             "formulaRange": getattr(raw_value, "ref", None),
+                                             "formulaAttributes": {key: value for key, value in vars(raw_value).items()
+                                                                   if value is None or isinstance(value, (str, int, float, bool))}}
+                                            if is_formula and not isinstance(raw_value, str) else {})
                         has_external_reference = bool(
                             is_formula
                             and re.search(r"\[[^\]]+\]", str(formula))
@@ -482,7 +497,13 @@ class XlsxStructureAdapter:
                             "calculationState": calculation_state,
                             "cachedValuePresent": bool(is_formula and cached is not None),
                             "approvalEligible": not is_formula,
+                            **formula_metadata,
                         }
+                        if isinstance(cell_data["value"], (date, datetime, time, timedelta)):
+                            source_value = cell_data["value"]
+                            cell_data["value"] = source_value.isoformat() if hasattr(source_value, "isoformat") else str(source_value)
+                            cell_data["sourceValueType"] = type(source_value).__name__
+                            cell_data["numberFormat"] = cell.number_format
                         chunks.append(
                             ExtractionChunk(
                                 chunk_id=(
@@ -500,12 +521,12 @@ class XlsxStructureAdapter:
                                 metadata={"cells": [cell_data]},
                             )
                         )
-                        if len(chunks) >= MAX_EXTRACTION_CHUNKS:
+                        if len(chunks) >= self.max_chunks:
                             warnings.append("ADAPTER_CHUNK_LIMIT_REACHED")
                             break
-                    if len(chunks) >= MAX_EXTRACTION_CHUNKS:
+                    if len(chunks) >= self.max_chunks:
                         break
-                if len(chunks) >= MAX_EXTRACTION_CHUNKS:
+                if len(chunks) >= self.max_chunks:
                     break
         finally:
             formulas.close()
@@ -531,6 +552,8 @@ class XlsxStructureAdapter:
                 "externalFormulaReferenceCount": external_formula_reference_count,
                 "calculationProperties": calculation_properties,
                 "visitedCellCount": visited_cells,
+                "chunkLimit": self.max_chunks,
+                "coverage": "partial" if any("LIMIT_REACHED" in warning for warning in warnings) else "complete",
             },
         )
 

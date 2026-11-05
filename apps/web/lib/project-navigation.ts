@@ -1,4 +1,4 @@
-import { TRACK_LABELS } from "./workflow-track";
+import { TRACK_LABELS } from "./workflow-track.ts";
 
 export const PROJECT_WORKSPACE_GROUPS = [
   {

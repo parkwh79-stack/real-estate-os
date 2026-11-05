@@ -31,6 +31,7 @@ apps/web/.auth/
 # Build Outputs
 .next/
 .next-e2e/
+.next-e2e-production/
 out/
 build
 dist

@@ -33,7 +33,7 @@ def test_runtime_registry_has_a_schema_contract_for_every_registered_module():
         for item in orchestrator.schema_registry.snapshot()
     }
 
-    assert len(orchestrator.registry.snapshot()) == 13
+    assert len(orchestrator.registry.snapshot()) == 14
     for manifest in orchestrator.registry.list_active():
         assert manifest.input_schema in schema_ids
         assert manifest.output_schema in schema_ids

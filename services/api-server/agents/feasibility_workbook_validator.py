@@ -112,9 +112,33 @@ def validate_feasibility_workbook(
     """
     workbook_path = Path(workbook_path)
 
+    # Unknown layouts have no licensed cell map. Inspect their structure without
+    # interpreting Bonri coordinates or reporting unperformed formula checks.
+    if profile is None:
+        probe = load_workbook(workbook_path, data_only=False, read_only=True)
+        try:
+            detected_profile = _detect_profile(probe)
+            if detected_profile is None:
+                return {
+                    "status": "needs_mapping", "profile": "unsupported-workbook-layout",
+                    "fileName": workbook_path.name, "sheetCount": len(probe.worksheets),
+                    "sheets": [{"sheetName": sheet.title, "maxRow": sheet.max_row,
+                                "maxColumn": sheet.max_column} for sheet in probe.worksheets],
+                    "templateSupport": {"status": "unsupported_layout", "reason": "no_supported_cell_map"},
+                    "diagnostics": [{"code": "unsupported_workbook_layout", "severity": "review_required",
+                                     "message": "읽을 수 있는 통합문서이지만 지원하는 사업수지 셀 매핑과 다릅니다."}],
+                    "formulaIntegrity": {"status": "not_evaluated"},
+                    "calculationEvidence": {"method": "not_evaluated", "recalculated": False},
+                    "schemaReadiness": {"directV2ImportReady": False, "requiresExplicitMapping": True},
+                    "recommendations": ["원본값을 문서 검토 후보로 확인하고 시트·셀·단위 매핑을 검토하세요. 수식 재계산과 사업수지 반영은 완료되지 않았습니다."],
+                }
+        finally:
+            probe.close()
+    else:
+        detected_profile = profile
     formula_wb = load_workbook(workbook_path, data_only=False, read_only=False)
     value_wb = load_workbook(workbook_path, data_only=True, read_only=False)
-    selected_profile = profile or _detect_profile(formula_wb)
+    selected_profile = detected_profile
 
     try:
         sheets = _sheet_profiles(formula_wb)
@@ -168,7 +192,7 @@ def validate_feasibility_workbook(
         value_wb.close()
 
 
-def _detect_profile(workbook: Any) -> Dict[str, Any]:
+def _detect_profile(workbook: Any) -> Dict[str, Any] | None:
     defined_names = set(workbook.defined_names.keys())
     sheet_names = set(workbook.sheetnames)
     if {"\uc190\uc775", "\uac1c\uc694\uc218\uc785", "cash", "\uc784\ub300\ub8cc"}.issubset(sheet_names):
@@ -180,7 +204,9 @@ def _detect_profile(workbook: Any) -> Dict[str, Any]:
         }
     if "realytics_fs_schema_version" in defined_names or "07_Import계약" in sheet_names:
         return REALYTICS_FORMULA_WORKBOOK_PROFILE
-    return LEGACY_BONRI_WORKBOOK_PROFILE
+    if "사업수지" in sheet_names and {"입력", "분양", "제경비"}.intersection(sheet_names):
+        return LEGACY_BONRI_WORKBOOK_PROFILE
+    return None
 
 
 def _formula_value(value: Any) -> Any:

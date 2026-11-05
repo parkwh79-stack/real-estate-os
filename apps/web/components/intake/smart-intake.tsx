@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, PlayCircle, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
-import { hasArchivedFeasibilityReviewDraft, intakeProcessingFailure } from "../../lib/intake-processing-status";
+import { hasArchivedFeasibilityReviewDraft, hasArchivedWorkbookSourceReview, intakeProcessingFailure } from "../../lib/intake-processing-status";
 import { classifyIntakeFiles, processTransferredIntakeFile, releaseIntakeTransfer, type IntakeClassifiedFile } from "../../lib/intake-upload-client";
 import { projectWorkspaceHref } from "../../lib/project-navigation";
 
@@ -13,7 +13,7 @@ type Classified = IntakeClassifiedFile;
 
 type IntakeResult = { files: Classified[] };
 type RowStatus = "review" | "idle" | "processing" | "done" | "inspection" | "skipped" | "error";
-type Row = { id: string; file: File; c: Classified; options: string[]; reviewMode: boolean; type: string; status: RowStatus; note?: string };
+type Row = { id: string; file: File; c: Classified; options: string[]; reviewMode: boolean; type: string; status: RowStatus; note?: string; reviewOnlyReason?: string };
 
 export interface IntakeWorkStatus {
   busy: boolean;
@@ -64,7 +64,7 @@ function initialRow(id: string, file: File, c: Classified): Row {
     (c.processingTypes === undefined && (extension === "pdf" || extension === "docx") && archivedId !== null);
   const supported = c.processingTypes ?? (reviewMode ? NARRATIVE_TYPES : LEGACY_TYPES_BY_EXTENSION[extension]) ?? [];
   const options = reviewMode
-    ? (supported.some((type) => NARRATIVE_TYPES.includes(type)) ? [DOCUMENT_REVIEW] : [])
+    ? [DOCUMENT_REVIEW]
     : TYPE_OPTIONS.filter(({ value }) => supported.includes(value) && Object.hasOwn(ROUTES, value)).map(({ value }) => value);
   const row = { id, file, c, options, reviewMode };
   if (c.formatIssue === "extension_mismatch") {
@@ -135,7 +135,13 @@ async function prepareDocumentReview(projectId: string, row: Row): Promise<Pick<
   const response = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/parsing-v2/runs`, {
     method: "POST",
     headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-    body: JSON.stringify({ archiveId }),
+    body: JSON.stringify({
+      archiveId,
+      ...(/\.(pdf|xlsx|xlsm)$/i.test(row.c.filename) ? {
+        profileId: "realytics.source_review_candidates", profileVersion: "1.0.0",
+        idempotencyKey: "source-review-v1-" + archiveId,
+      } : {}),
+    }),
   });
   if (!response.ok) throw new Error(await backendErrorMessageForResponse(response, { action: "문서 검토 준비" }));
   const result = await readIntakeResponse(response);
@@ -143,9 +149,18 @@ async function prepareDocumentReview(projectId: string, row: Row): Promise<Pick<
   if (result.candidateOnly !== true || result.authoritative !== false || typeof run?.parsingRunId !== "string") {
     throw new Error("문서 검토 준비 결과를 확인하지 못했습니다. 문서 검토에서 원본과 처리 상태를 확인해 주세요.");
   }
-  if (run.executionStatus === "completed") return { status: "done", note: "문서 검토 준비" };
+  if (run.executionStatus === "completed") {
+    const collection = (result.candidateCollection ?? (result.orchestration as Record<string, unknown> | undefined)?.candidateCollection
+      ?? (run.orchestrationArtifact as Record<string, unknown> | undefined)?.candidateCollection) as Record<string, unknown> | undefined;
+    if (collection?.candidateCount === 0) return { status: "inspection", note: row.reviewOnlyReason
+      ? `${row.reviewOnlyReason} 원본 읽음 · 추출 항목 연결 필요` : "원본 읽음 · 추출 항목 연결 필요. 문서 검토에서 페이지·셀을 확인해 주세요." };
+    return row.reviewOnlyReason ? { status: "inspection", note: row.reviewOnlyReason }
+      : { status: "done", note: "문서 검토 준비" };
+  }
   if (run.executionStatus === "completed_with_warnings") {
-    return { status: "inspection", note: "일부 내용은 문서 검토에서 확인해 주세요." };
+    return { status: "inspection", note: row.reviewOnlyReason
+      ? `${row.reviewOnlyReason} 자동으로 매핑하지 못한 항목은 문서 검토에서 확인해 주세요.`
+      : "일부 내용은 문서 검토에서 확인해 주세요." };
   }
   if (run.executionStatus === "failed" || run.executionStatus === "cancelled") {
     return { status: "inspection", note: "문서 읽기를 완료하지 못했습니다. 문서 검토에서 원본과 페이지를 확인해 주세요." };
@@ -324,6 +339,21 @@ export function SmartIntake({
           );
         }
         let body = await readIntakeResponse(res, row.type);
+        if (row.type === "feasibility_workbook" && hasArchivedWorkbookSourceReview(body)) {
+          const review = body.sourceReview as Record<string, unknown>;
+          if (body.project_id !== projectId || review.archiveId !== archivedReviewId(row.c)) {
+            throw new Error("항목 매핑 검토 원본이 현재 프로젝트·파일과 일치하지 않습니다.");
+          }
+          const reviewRow: Row = { ...row, type: DOCUMENT_REVIEW, reviewMode: true, options: [DOCUMENT_REVIEW],
+            reviewOnlyReason: "사업수지 양식 매핑 필요 · 원본값 검토 후보만 준비하며 수지·수식 반영은 하지 않습니다." };
+          // A failed parser connection retries this same archive, without
+          // repeating the upload, workbook validation or financial import.
+          setRows((prev) => prev.map((r) => r.id === row.id ? { ...reviewRow, status: "processing" } : r));
+          const outcome = await prepareDocumentReview(projectId, reviewRow);
+          setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, ...outcome } : r));
+          if (row.c.transferId) void releaseIntakeTransfer(projectId, row.file, row.c.transferId);
+          continue;
+        }
         if (row.type === "feasibility_workbook" && hasArchivedFeasibilityReviewDraft(body) && body.project_id !== projectId) {
           throw new Error("사업수지 후보의 프로젝트가 현재 자료와 일치하지 않습니다.");
         }

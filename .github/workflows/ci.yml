@@ -108,3 +108,5 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e --workspace=web
+        env:
+          REALYTICS_E2E_PRODUCTION: "1"

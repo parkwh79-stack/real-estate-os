@@ -7,7 +7,7 @@ from math import isfinite
 from typing import Any
 
 from integrations.market_data import MolitRtmsConnector, lawd_cd_from_pnu
-from integrations.vworld import fetch_parcel_by_pnu, vworld_configured
+from integrations.vworld import CADASTRAL_LAYER, fetch_parcel_by_pnu, vworld_configured
 from schemas.orchestration import AgentHandoffEnvelope, MissingInputRegisterItem
 from use_cases.cash_flow import build_cash_flow_request_use_case
 from use_cases.chief_deal_orchestration import _agent_pods, _missing_inputs, _workflow_track
@@ -118,8 +118,17 @@ def _public_status(key: str, label: str, status: str, message: str) -> dict[str,
     return {"key": key, "label": label, "status": status, "message": message}
 
 
+def _verified_pnu_record(row: dict[str, Any]) -> bool:
+    return row.get("sourcePnuVerified") is True or (
+        row.get("evidenceType") == "pnu_resolution"
+        and row.get("verificationStatus") == "resolved"
+        and row.get("matchMethod") in {"pnu_construction", "address_geocode"}
+    )
+
+
 def _confirmed_parcels(
     project_id: str, data: dict[str, Any], *, allow_live: bool,
+    cadastral_matches: list[dict[str, Any]] | None = None,
 ) -> tuple[set[str], dict[str, str]]:
     """Verify at most two registered parcel keys, never a nearby inferred site."""
     parcels = canonical_project_parcel_rows(data)
@@ -128,13 +137,7 @@ def _confirmed_parcels(
     evidence = _rows(_object(data.get("landEvidence") or data.get("land_evidence")).get("records"))
     stored = {
         str(row["pnu"]) for row in evidence
-        if row.get("pnu") and (
-            row.get("sourcePnuVerified") is True or (
-                row.get("evidenceType") == "pnu_resolution"
-                and row.get("verificationStatus") == "resolved"
-                and row.get("matchMethod") in {"pnu_construction", "address_geocode"}
-            )
-        )
+        if row.get("pnu") and _verified_pnu_record(row)
     }
 
     def existing_verified(row: dict[str, Any]) -> bool:
@@ -146,12 +149,12 @@ def _confirmed_parcels(
         )
 
     checked = {parcel_pnu(row) for row in candidates if parcel_pnu(row) and existing_verified(row)}
-    label = "VWorld 지적도"
+    label = "PNU·필지 확인"
     if not candidates:
         return checked, _public_status("parcels", label, "needs_input", "저장된 토지조서 또는 사업 대상 PNU가 필요합니다.")
     pending = [(index, row) for index, row in enumerate(candidates, start=1) if not parcel_pnu(row) or parcel_pnu(row) not in checked]
     if not pending:
-        return checked, _public_status("parcels", label, "available", "기존에 대조한 지적 근거를 사용했습니다.")
+        return checked, _public_status("parcels", label, "available", "기존에 확인한 PNU 근거를 사용했습니다.")
     if not allow_live or not vworld_configured():
         return checked, _public_status("parcels", label, "unavailable", "공공 지적도 연결이 설정되지 않았습니다.")
 
@@ -168,6 +171,19 @@ def _confirmed_parcels(
         if diagnostics.get("status") == "resolved" and _object(properties).get("pnu") == pnu:
             checked.add(pnu)
             new_matches.add(pnu)
+            if cadastral_matches is not None:
+                source_id = f"vworld:{pnu}:{CADASTRAL_LAYER}"
+                cadastral_matches.append({
+                    "pnu": properties["pnu"], "evidenceType": "cadastral",
+                    "sourcePnuVerified": True, "sourceName": "VWorld cadastral properties",
+                    "sourceUrlOrEvidenceId": source_id,
+                    "sourceLocator": {
+                        "sourceType": "api_row", "sourceName": "VWorld cadastral properties",
+                        "apiRowId": properties["pnu"], "reference": source_id,
+                    },
+                    **({"cadastralAddress": properties["addr"]} if properties.get("addr") else {}),
+                    **({"lotNumber": properties["jibun"]} if properties.get("jibun") else {}),
+                })
     if unresolved:
         resolve_parcel_rows(data, project_id, limit=MAX_LIVE_PARCELS, parcel_indexes=unresolved, timeout_seconds=2.0)
         for index, row in enumerate(canonical_project_parcel_rows(data), start=1):
@@ -182,6 +198,28 @@ def _confirmed_parcels(
         "검증된 PNU만 후속 검토에 사용했습니다. 전체 필지는 토지·인허가 미리보기에서 확인할 수 있습니다."
         if checked else "공공 지적도에서 대상 필지를 대조하지 못했습니다.",
     )
+
+
+def _pnu_source_locators(
+    data: dict[str, Any], confirmed: set[str], live_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    records = _rows(_object(data.get("landEvidence") or data.get("land_evidence")).get("records")) + live_records
+    site = _object(data.get("land"))
+    parcels = canonical_project_parcel_rows(data) or ([site] if parcel_pnu(site) else [])
+    locators = []
+    for pnu in sorted(confirmed):
+        sources = [record for record in records if record.get("pnu") == pnu and _verified_pnu_record(record)]
+        found = [locator for record in sources for locator in _locators(record.get("sourceLocator"), record)]
+        if not found:
+            parcel = next((row for row in parcels if parcel_pnu(row) == pnu), {})
+            resolution = _object(parcel.get("pnuResolution"))
+            found = [{
+                "sourceType": "pnu_resolution",
+                "sourceName": resolution.get("source") or "저장된 PNU 확인 정보",
+                "reference": pnu,
+            }]
+        locators.extend(locator for locator in found if locator not in locators)
+    return locators
 
 
 def _market_lookup(
@@ -291,13 +329,15 @@ def run_chief_pod_preflight(
         cost = _check("cost", _number_present((feasibility.get("total_cost"), feasibility.get("construction_cost"))))
         schedule = _check("schedule", data.get("schedule") or data.get("project_schedule"))
         if pod_key == "land_legal":
-            confirmed, lookup = _confirmed_parcels(project_id, data, allow_live=allow_public_lookups)
+            live_records = []
+            confirmed, lookup = _confirmed_parcels(
+                project_id, data, allow_live=allow_public_lookups, cadastral_matches=live_records,
+            )
             public_lookups.append(lookup)
             land = _object(data.get("land"))
             parcels = canonical_project_parcel_rows(data) or ([land] if parcel_pnu(land) else [])
-            locators = [
-                {"sourceType": "api_row", "sourceName": "VWorld 지적도", "apiRowId": pnu} for pnu in sorted(confirmed)
-            ]
+            locators = _pnu_source_locators(data, confirmed, live_records)
+
             parcel_check = _check(
                 "parcels", parcels, *locators, basis="verified_public" if confirmed else "working_input",
                 status="available" if confirmed and len(confirmed) == len(parcels) else "needs_review" if parcels else "missing",
