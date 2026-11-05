@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -47,6 +48,13 @@ export interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const FOCUS_REVALIDATION_MS = 60_000;
+
+function authBoundary(pathname: string | null) {
+  if (pathname?.startsWith("/guest")) return "guest";
+  if (pathname?.startsWith("/login") || pathname?.startsWith("/auth")) return "sign-in";
+  return pathname?.startsWith("/onboarding") ? "onboarding" : "workspace";
+}
 
 /**
  * Single source of truth for client-side authentication. The BFF reads the
@@ -54,15 +62,19 @@ const AuthContext = createContext<AuthContextValue | null>(null);
  * Components consume `useAuth()` instead of re-implementing the check.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
-  const [status, setStatus] = useState<AuthStatus>("loading");
+  const boundary = authBoundary(usePathname());
+  const [verifiedBoundary, setVerifiedBoundary] = useState<ReturnType<typeof authBoundary> | null>(null);
+  const [verifiedStatus, setStatus] = useState<AuthStatus>("loading");
   const [user, setUser] = useState<RealyticsUser | null>(null);
   const [session, setSession] = useState<RealyticsSession | null>(null);
   const [permissions, setPermissions] = useState<string[]>([]);
   const [authSource, setAuthSource] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const verificationVersion = useRef(0);
+  const lastVerificationStartedAt = useRef(0);
 
   const refresh = useCallback(() => {
+    verificationVersion.current += 1;
     setStatus((current) => current === "authority_unavailable" ? "loading" : current);
     setNonce((n) => n + 1);
   }, []);
@@ -87,6 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // boundary confirms logout so callers cannot claim a false switch.
       clearTransientAiSecrets();
       if (sessionRevoked) {
+        verificationVersion.current += 1;
         clearStoredAuthSession({ notify: false });
         setStatus("unauthenticated");
         setUser(null);
@@ -99,7 +112,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     purgeLegacyBrowserAuthStorage();
-    if (pathname?.startsWith("/guest")) {
+    if (boundary === "guest") {
+      clearStoredAuthSession({ notify: false });
+      setVerifiedBoundary(boundary);
       setStatus("unauthenticated");
       setUser(null);
       setSession(null);
@@ -108,9 +123,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     let cancelled = false;
+    const version = verificationVersion.current;
+    const isActive = () => !cancelled && version === verificationVersion.current;
+    lastVerificationStartedAt.current = Date.now();
     resolveCurrentIdentity()
       .then((identity) => {
-        if (cancelled) return;
+        if (!isActive()) return;
         if (!identity.authenticated) {
           clearStoredAuthSession({ notify: false });
           setStatus("unauthenticated");
@@ -128,7 +146,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStatus("authenticated");
       })
       .catch(async (error) => {
-        if (cancelled) return;
+        if (!isActive()) return;
         const boundaryStatus: AuthStatus | null =
           isOnboardingRequiredAuthError(error)
             ? "onboarding"
@@ -140,7 +158,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (boundaryStatus) {
           try {
             const profile = await loadSupabaseSecurityProfile();
-            if (cancelled) return;
+            if (!isActive()) return;
             const email = profile.identities.find((identity) => identity.email)?.email ?? undefined;
             const onboardingUser: RealyticsUser = {
               userId: profile.userId,
@@ -161,29 +179,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // A missing/invalid Supabase cookie is genuinely unauthenticated.
           }
         }
-        if (cancelled) return;
+        if (!isActive()) return;
         clearStoredAuthSession({ notify: false });
         setStatus("unauthenticated");
         setUser(null);
         setSession(null);
         setPermissions([]);
         setAuthSource(null);
+      })
+      .finally(() => {
+        if (isActive()) setVerifiedBoundary(boundary);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [nonce, pathname]);
+  }, [nonce, boundary]);
 
   useEffect(() => {
-    const onChange = () => refresh();
+    const onChange = () => {
+      if (boundary === "guest") return;
+      // Hide the previous workspace while the new identity is verified.
+      // Onboarding owns a separate session gate and its retry state.
+      if (boundary === "workspace") setStatus("loading");
+      refresh();
+    };
+    const revalidateOnFocus = () => {
+      if (boundary === "guest" || document.visibilityState !== "visible"
+        || Date.now() - lastVerificationStartedAt.current < FOCUS_REVALIDATION_MS) return;
+      lastVerificationStartedAt.current = Date.now();
+      refresh();
+    };
     window.addEventListener("realytics-auth-session-changed", onChange);
-    return () => window.removeEventListener("realytics-auth-session-changed", onChange);
-  }, [refresh]);
+    window.addEventListener("focus", revalidateOnFocus);
+    document.addEventListener("visibilitychange", revalidateOnFocus);
+    return () => {
+      window.removeEventListener("realytics-auth-session-changed", onChange);
+      window.removeEventListener("focus", revalidateOnFocus);
+      document.removeEventListener("visibilitychange", revalidateOnFocus);
+    };
+  }, [boundary, refresh]);
 
+  // Protected tab navigation keeps the verified identity. Crossing an auth
+  // boundary requires a new check before exposing protected workspace state.
+  const status = boundary === "guest" ? "unauthenticated" : verifiedBoundary === boundary ? verifiedStatus : "loading";
+  const canShowIdentity = status !== "loading" && status !== "unauthenticated";
   const value = useMemo<AuthContextValue>(
-    () => ({ status, user, session, permissions, refresh, logout }),
-    [status, user, session, permissions, refresh, logout],
+    () => ({
+      status, user: canShowIdentity ? user : null, session: canShowIdentity ? session : null,
+      permissions: canShowIdentity ? permissions : [], refresh, logout,
+    }),
+    [canShowIdentity, status, user, session, permissions, refresh, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

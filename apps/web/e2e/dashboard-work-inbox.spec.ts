@@ -10,22 +10,30 @@ function workItem(id: string, overrides: Partial<RecentWorkItem> = {}): RecentWo
   };
 }
 
-async function mockDashboard(page: Page, items: RecentWorkItem[], options: { recentStatus?: number; projectsStatus?: number; total?: number } = {}) {
-  const state = { recentStatus: options.recentStatus ?? 200, projectsStatus: options.projectsStatus ?? 200, writes: [] as string[] };
+async function mockDashboard(page: Page, items: RecentWorkItem[], options: {
+  recentStatus?: number; projectsStatus?: number; total?: number; projectsGate?: Promise<void>;
+} = {}) {
+  const state = { recentStatus: options.recentStatus ?? 200, projectsStatus: options.projectsStatus ?? 200, identityChecks: 0, writes: [] as string[] };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/\/$/, "");
     const reply = (body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
     if (request.method() !== "GET") state.writes.push(path);
-    if (path.endsWith("/auth/me")) return reply({ authenticated: true,
-      user: { userId: "dashboard-user", tenantId: "tenant-dashboard", role: "analyst", displayName: "대시보드 검토자" },
-      session: { userId: "dashboard-user", tenantId: "tenant-dashboard" }, permissions: ["project:read", "project:write"], authSource: "bearer_token" });
+    if (path.endsWith("/auth/me")) {
+      state.identityChecks += 1;
+      return reply({ authenticated: true,
+        user: { userId: "dashboard-user", tenantId: "tenant-dashboard", role: "analyst", displayName: "대시보드 검토자" },
+        session: { userId: "dashboard-user", tenantId: "tenant-dashboard" }, permissions: ["project:read", "project:write"], authSource: "bearer_token" });
+    }
     if (path.endsWith("/projects/recent-work")) return reply(state.recentStatus === 200
       ? { schemaVersion: "realytics-recent-work-v2", count: items.length, items }
       : { detail: { error: "recent_activity_authority_unavailable" } }, state.recentStatus);
-    if (path.endsWith("/projects")) return reply(state.projectsStatus === 200
-      ? Array.from({ length: options.total ?? items.length }, (_, index) => ({ id: `visible-${index}`, name: `전체 프로젝트 ${index + 1}` }))
-      : { detail: { error: "project_authority_unavailable" } }, state.projectsStatus);
+    if (path.endsWith("/projects")) {
+      if (options.projectsGate) await options.projectsGate;
+      return reply(state.projectsStatus === 200
+        ? Array.from({ length: options.total ?? items.length }, (_, index) => ({ id: `visible-${index}`, name: `전체 프로젝트 ${index + 1}` }))
+        : { detail: { error: "project_authority_unavailable" } }, state.projectsStatus);
+    }
     return reply({ detail: { error: "not_mocked" } }, 404);
   });
   await page.goto("/dashboard");
@@ -63,6 +71,26 @@ test("a failed total does not hide usable recent work or label it as the full wo
   await expect(summary(page, "확인 필요")).toContainText("최근 작업 1개 중");
   await expect(page.getByText(/최근 작업 1개 기준.*전체 현황과 다를 수 있습니다/)).toBeVisible();
   await expect(projectRow(page, "프로젝트 available").getByRole("link", { name: "프로젝트 available 검토 이어가기", exact: true })).toHaveAttribute("href", "/project/available/chief-orchestration");
+});
+
+test("recent work renders before the full project list and workspace navigation reuses verified identity", async ({ page }) => {
+  let releaseProjects = () => {};
+  const projectsGate = new Promise<void>((resolve) => { releaseProjects = resolve; });
+  try {
+    const state = await mockDashboard(page, [workItem("fast")], { total: 7, projectsGate });
+    await expect(projectRow(page, "프로젝트 fast")).toBeVisible();
+    await expect(summary(page, "전체 프로젝트")).toContainText("목록 확인 중");
+    const identityChecks = state.identityChecks;
+    releaseProjects();
+    await expect(summary(page, "전체 프로젝트")).toContainText("7개");
+
+    await projectRow(page, "프로젝트 fast").getByRole("link", { name: "프로젝트 fast", exact: true }).click();
+    await expect(page).toHaveURL(/\/project\/fast$/, { timeout: 15_000 });
+    await expect(page.getByText("프로젝트 현황을 불러오지 못했습니다.", { exact: true })).toBeVisible();
+    expect(state.identityChecks).toBe(identityChecks);
+  } finally {
+    releaseProjects();
+  }
 });
 
 test("scope stays at the loaded twenty while filters distinguish processing from action and show six recent rows", async ({ page }) => {

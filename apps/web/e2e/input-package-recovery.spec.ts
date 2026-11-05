@@ -18,7 +18,7 @@ const emptyContext: WorkspacePageContext = {
 };
 
 async function fixture(page: Page, status: number, body: WorkspacePageContext = partialContext, suffix = "") {
-  const state = { status, body, reviewCalls: 0, mutations: [] as string[] };
+  const state = { status, body, contextCalls: 0, reviewCalls: 0, mutations: [] as string[] };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -27,7 +27,10 @@ async function fixture(page: Page, status: number, body: WorkspacePageContext = 
     if (path.endsWith("/auth/me")) return reply({ authenticated: true, authSource: "bearer_token",
       user: { userId: "context-user", tenantId: "context-tenant", role: "analyst", status: "active" },
       session: { userId: "context-user", tenantId: "context-tenant" }, permissions: ["project:read", "project:write", "assumption:override"] });
-    if (path.endsWith("/workspace/context")) return reply(state.status === 200 ? state.body : { detail: "workspace_unavailable" }, state.status);
+    if (path.endsWith("/workspace/context")) {
+      state.contextCalls += 1;
+      return reply(state.status === 200 ? state.body : { detail: "workspace_unavailable" }, state.status);
+    }
     if (path.endsWith("/feasibility-workbook/review")) {
       state.reviewCalls += 1;
       return reply({ values: { total_revenue: 100_000_000 }, fieldReviews: {}, terms: { schedule: {}, financing: [] },
@@ -113,6 +116,20 @@ test("partial or omitted sections do not become zero issues or a reassuring empt
     await expect(inputPage.getByRole("button", { name: label, exact: true })).toBeDisabled();
   }
   await expect(inputPage.getByRole("link", { name: "토지·인허가 미리보기", exact: true })).toBeVisible();
+});
+
+test("the header and materials share one pending context read and refresh reads current data", async ({ page }) => {
+  const { state, inputPage } = await fixture(page, 200, emptyContext, "?track=pf");
+  const header = page.getByRole("region", { name: "프로젝트 정보" });
+  const metrics = inputPage.getByRole("region", { name: "저장 자료 현황" });
+  await expect(header.getByRole("link", { name: "빈 자료 확인", exact: true })).toBeVisible();
+  await expect(metrics.getByText("저장 문서", { exact: true }).locator("..")).toContainText("0건");
+  expect(state.contextCalls).toBe(1);
+
+  state.body = partialContext;
+  await inputPage.getByRole("button", { name: "자료 상태 다시 불러오기", exact: true }).click();
+  await expect(metrics.getByText("저장 문서", { exact: true }).locator("..")).toContainText("2건");
+  expect(state.contextCalls).toBe(2);
 });
 
 test("the materials action fits the initial mobile viewport even with a partial workspace", async ({ page }) => {

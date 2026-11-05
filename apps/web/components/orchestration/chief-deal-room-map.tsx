@@ -607,7 +607,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [recalculationEvents, setRecalculationEvents] = useState<RecalculationEvent[]>([]);
   const [podAiReviews, setPodAiReviews] = useState<PodAIReview[]>([]);
   const [readiness, setReadiness] = useState<ApprovalReadiness>({ state: "loading" });
+  const planRequest = useRef<AbortController | null>(null);
   const readinessRequest = useRef<AbortController | null>(null);
+  const legalRecordRequest = useRef<AbortController | null>(null);
   const approvalGate = readiness.state === "loaded" ? readiness.gate : null;
   const [cureType, setCureType] = useState("additional_collateral");
   const [cureAmount, setCureAmount] = useState("");
@@ -616,6 +618,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   const [cureSubmitting, setCureSubmitting] = useState(false);
   const [legalPodRun, setLegalPodRun] = useState<LegalPodRun | null>(null);
   const [legalPodRunning, setLegalPodRunning] = useState(false);
+  const [legalRecordLoading, setLegalRecordLoading] = useState(true);
 
   const loadApprovalReadiness = useCallback(async () => {
     readinessRequest.current?.abort();
@@ -642,58 +645,67 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     }
   }, [projectId]);
 
-  const loadRecalculationEvents = useCallback(async () => {
+  const loadRecalculationEvents = useCallback(async (signal?: AbortSignal) => {
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/recalculation-events?limit=50`, {
         cache: "no-store",
-        headers: authHeaders("web"),
+        headers: authHeaders("web"), signal,
       });
       if (!res.ok) return;
       const body = await res.json().catch(() => ({}));
       const records = Array.isArray(body.records) ? body.records : [];
-      setRecalculationEvents(records as RecalculationEvent[]);
+      if (!signal?.aborted) setRecalculationEvents(records as RecalculationEvent[]);
     } catch {
-      setRecalculationEvents([]);
+      if (!signal?.aborted) setRecalculationEvents([]);
     }
   }, [projectId]);
 
-  const loadPodAiReviews = useCallback(async () => {
+  const loadPodAiReviews = useCallback(async (signal?: AbortSignal) => {
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/pod-ai-reviews?limit=100`, {
         cache: "no-store",
-        headers: authHeaders("web"),
+        headers: authHeaders("web"), signal,
       });
       if (!res.ok) return;
       const body = await res.json().catch(() => ({}));
       const records = Array.isArray(body.records) ? body.records : [];
-      setPodAiReviews(records as PodAIReview[]);
+      if (!signal?.aborted) setPodAiReviews(records as PodAIReview[]);
     } catch {
-      setPodAiReviews([]);
+      if (!signal?.aborted) setPodAiReviews([]);
     }
   }, [projectId]);
 
   const loadLegalPod = useCallback(async () => {
+    legalRecordRequest.current?.abort();
+    const controller = new AbortController();
+    legalRecordRequest.current = controller;
+    const signal = controller.signal;
+    setLegalRecordLoading(true);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/legal-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web") });
+      const res = await fetch(`${apiBase}/projects/${projectId}/legal-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web"), signal });
       if (!res.ok) {
-        setLegalPodRun(null);
+        if (!signal.aborted) setLegalPodRun(null);
         return;
       }
       const body = await res.json().catch(() => ({}));
       const item = Array.isArray(body.items) ? body.items[0] : null;
       if (!item) {
-        setLegalPodRun(null);
+        if (!signal.aborted) setLegalPodRun(null);
         return;
       }
-      const permitRes = await fetch(`${apiBase}/projects/${projectId}/permit-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web") });
+      const permitRes = await fetch(`${apiBase}/projects/${projectId}/permit-reviews?limit=1`, { cache: "no-store", headers: authHeaders("web"), signal });
       const permitBody = permitRes.ok ? await permitRes.json().catch(() => ({})) : {};
-      setLegalPodRun({ legalReview: item, permitReview: Array.isArray(permitBody.items) ? permitBody.items[0] : undefined });
+      if (!signal.aborted) setLegalPodRun({ legalReview: item, permitReview: Array.isArray(permitBody.items) ? permitBody.items[0] : undefined });
     } catch {
-      setLegalPodRun(null);
+      if (!signal.aborted) setLegalPodRun(null);
+    } finally {
+      if (!signal.aborted) setLegalRecordLoading(false);
     }
   }, [projectId]);
 
   const runLegalPod = useCallback(async () => {
+    legalRecordRequest.current?.abort();
+    setLegalRecordLoading(false);
     setLegalPodRunning(true);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/legal-pod/preview`, {
@@ -712,6 +724,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   const loadPlan = useCallback(async () => {
+    planRequest.current?.abort();
+    const controller = new AbortController();
+    planRequest.current = controller;
     setLoading(true);
     setError(null);
     const selectedTrack = pickTrackFromUrl();
@@ -720,6 +735,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/plan`, {
         method: "POST",
         cache: "no-store",
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           ...authHeaders("web"),
@@ -731,14 +747,20 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       });
       if (!res.ok) throw new Error(`Chief Deal Room 계획을 불러오지 못했습니다. (${res.status})`);
       const nextPlan = (await res.json()) as ChiefDealOrchestrationPlan;
+      if (controller.signal.aborted) return false;
       setPlan(nextPlan);
-      await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
+      void loadApprovalReadiness();
+      void loadRecalculationEvents(controller.signal);
+      void loadPodAiReviews(controller.signal);
+      void loadLegalPod();
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Chief Deal Room 계획을 불러오지 못했습니다.");
+      if (!controller.signal.aborted) {
+        setError(err instanceof Error ? err.message : "Chief Deal Room 계획을 불러오지 못했습니다.");
+      }
       return false;
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [projectId, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
 
@@ -768,6 +790,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setCureEvidenceId("");
       setCureEvidenceNote("");
       setError(null);
+      planRequest.current?.abort();
       await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Cure 재계산 중 오류가 발생했습니다.");
@@ -803,6 +826,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
+      planRequest.current?.abort();
       await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
       setError(null);
       return true;
@@ -843,6 +867,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
+      planRequest.current?.abort();
       await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
       setError(null);
     } catch (err) {
@@ -867,18 +892,21 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       if (!res.ok) throw new Error(cleanText(body?.detail, "새 자료 반영 재분석에 실패했습니다."));
       setReanalyzeResult(body);
       if (!(await loadPlan())) return;
-      await Promise.all([loadRecalculationEvents(), loadPodAiReviews()]);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "새 자료 반영 재분석 중 오류가 발생했습니다.");
     } finally {
       setReanalyzing(false);
     }
-  }, [projectId, loadPlan, loadRecalculationEvents, loadPodAiReviews]);
+  }, [projectId, loadPlan]);
 
   useEffect(() => {
     void loadPlan();
-    return () => readinessRequest.current?.abort();
+    return () => {
+      planRequest.current?.abort();
+      readinessRequest.current?.abort();
+      legalRecordRequest.current?.abort();
+    };
   }, [loadPlan]);
 
   const runsByPod = useMemo(() => {
@@ -1014,6 +1042,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
         run={legalPodRun}
         approvalGate={approvalGate}
         running={legalPodRunning}
+        loading={legalRecordLoading}
         onRun={() => void runLegalPod()}
         onDecisionSaved={async () => {
           await Promise.all([loadLegalPod(), loadApprovalReadiness()]);
@@ -1193,6 +1222,7 @@ function LegalPodPanel({
   run,
   approvalGate,
   running,
+  loading,
   onRun,
   onDecisionSaved,
 }: {
@@ -1200,6 +1230,7 @@ function LegalPodPanel({
   run: LegalPodRun | null;
   approvalGate: ChiefDealOrchestrationPlan["approvalReadinessGate"] | null;
   running: boolean;
+  loading: boolean;
   onRun: () => void;
   onDecisionSaved: () => Promise<void>;
 }) {
@@ -1358,12 +1389,12 @@ function LegalPodPanel({
         <LegalMetric label="권리·등기 검토 완료" value={review ? `${parcels.length - unresolvedParcels}/${parcels.length}` : "—"} />
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-5">
-        <LegalMetric label="법무 상태" value={review?.status ?? "미실행"} />
+        <LegalMetric label="법무 상태" value={review?.status ?? (loading ? "조회 중" : "미실행")} />
         <LegalMetric label="필지 검토" value={review ? `${parcels.length - unresolvedParcels}/${parcels.length}` : "—"} />
-        <LegalMetric label="인허가 검토" value={run?.permitReview?.status ?? "미실행"} />
+        <LegalMetric label="인허가 검토" value={run?.permitReview?.status ?? (loading ? "조회 중" : "미실행")} />
         <LegalMetric
           label="MCP 도구 연결"
-          value={mcpStatus === "connected" ? "연결됨 · 승인 근거 아님" : "미연결"}
+          value={mcpStatus === "connected" ? "연결됨 · 승인 근거 아님" : loading ? "조회 중" : "미연결"}
         />
         <LegalMetric label="토지이용계획" value={landEnrichment ? `${landEnrichment.landUsePlanningRecords?.length ?? 0}건` : "—"} />
       </div>

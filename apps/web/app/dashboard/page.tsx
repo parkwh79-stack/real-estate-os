@@ -24,38 +24,55 @@ async function loadProjects(signal: AbortSignal) {
 
 export default function DashboardPage() {
   const { status, user, permissions } = useAuth();
+  if (status !== "authenticated") return null;
   const canWriteProjects = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
+
+  return <WorkspaceDashboard key={JSON.stringify([user?.tenantId, user?.userId])} canWriteProjects={canWriteProjects} />;
+}
+
+function WorkspaceDashboard({ canWriteProjects }: { canWriteProjects: boolean }) {
   const [items, setItems] = useState<RecentWorkItem[] | null>(null);
   const [projects, setProjects] = useState<ProjectOption[] | null>(null);
   const [errors, setErrors] = useState<DashboardDataError[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [recentLoading, setRecentLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
-    if (status !== "authenticated") return;
     const controller = new AbortController();
-    let active = true;
-    setLoading(true);
+    setProjectsLoading(true);
+    setRecentLoading(true);
     setErrors([]);
     setProjects(null);
     setItems(null);
-    Promise.allSettled([loadProjects(controller.signal), fetchRecentWorkFeed(20, controller.signal)])
-      .then(([projectsResult, recentResult]) => {
-        if (!active) return;
-        const nextErrors: DashboardDataError[] = [];
-        if (projectsResult.status === "fulfilled") setProjects(projectsResult.value);
-        else nextErrors.push({ source: "projects", message: "프로젝트 목록을 불러오지 못했습니다. 다시 확인해 주세요." });
-        if (recentResult.status === "fulfilled") {
-          setItems(recentResult.value.items);
-          nextErrors.push(...recentResult.value.warnings.map((message) => ({ source: "recent-work" as const, message })));
-        } else nextErrors.push({ source: "recent-work", message: "최근 작업을 불러오지 못했습니다. 다시 확인해 주세요." });
-        setErrors(nextErrors);
-        setLoading(false);
+    void loadProjects(controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setProjects(result);
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setErrors((current) => [...current, { source: "projects", message: "프로젝트 목록을 불러오지 못했습니다. 다시 확인해 주세요." }]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setProjectsLoading(false);
       });
-    return () => { active = false; controller.abort(); };
-  }, [status, user?.userId, user?.tenantId, reloadKey]);
+    void fetchRecentWorkFeed(20, controller.signal)
+      .then(({ items: recentItems, warnings }) => {
+        if (controller.signal.aborted) return;
+        setItems(recentItems);
+        setErrors((current) => [...current, ...warnings.map((message) => ({ source: "recent-work" as const, message }))]);
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setErrors((current) => [...current, { source: "recent-work", message: "최근 작업을 불러오지 못했습니다. 다시 확인해 주세요." }]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setRecentLoading(false);
+      });
+    return () => controller.abort();
+  }, [reloadKey]);
 
-  const firstProject = !loading && errors.length === 0 && projects?.length === 0 && items?.length === 0;
+  const firstProject = !projectsLoading && !recentLoading && errors.length === 0 && projects?.length === 0 && items?.length === 0;
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 pb-8">
@@ -69,7 +86,7 @@ export default function DashboardPage() {
             </p>
           </div>
           {canWriteProjects ? (
-            <NewProjectDialog key={`${user?.tenantId}:${user?.userId}`} firstProject={firstProject} onProjectCreated={() => setReloadKey((value) => value + 1)} />
+            <NewProjectDialog firstProject={firstProject} onProjectCreated={() => setReloadKey((value) => value + 1)} />
           ) : (
             <button type="button" disabled data-testid="dashboard-new-deal-disabled"
               className="min-h-11 rounded-re-control border border-re-border px-4 text-sm text-re-muted disabled:cursor-not-allowed">
@@ -99,14 +116,15 @@ export default function DashboardPage() {
             </p>
           </section>
         ) : (
-          <WorkInbox items={items} totalProjectCount={projects?.length ?? null} loading={loading} errors={errors}
+          <WorkInbox items={items} totalProjectCount={projects?.length ?? null}
+            loading={recentLoading} projectListLoading={projectsLoading} errors={errors}
             onRetry={() => setReloadKey((value) => value + 1)} />
         )}
       </div>
 
-      {status === "authenticated" ? <DashboardMarket key={`market:${user?.tenantId}:${user?.userId}`} /> : null}
+      <DashboardMarket />
 
-      <AllProjects key={`${user?.tenantId}:${user?.userId}`} projects={projects} loading={loading} onRetry={() => setReloadKey((value) => value + 1)} />
+      <AllProjects projects={projects} loading={projectsLoading} onRetry={() => setReloadKey((value) => value + 1)} />
     </div>
   );
 }

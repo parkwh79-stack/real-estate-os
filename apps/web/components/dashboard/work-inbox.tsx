@@ -22,6 +22,7 @@ interface WorkInboxProps {
   items: RecentWorkItem[] | null;
   totalProjectCount: number | null;
   loading: boolean;
+  projectListLoading: boolean;
   errors: DashboardDataError[];
   onRetry: () => void;
 }
@@ -114,7 +115,7 @@ function formatTimestamp(value: string | undefined) {
   return new Intl.DateTimeFormat("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(parsed);
 }
 
-export function WorkInbox({ items, totalProjectCount, loading, errors, onRetry }: WorkInboxProps) {
+export function WorkInbox({ items, totalProjectCount, loading, projectListLoading, errors, onRetry }: WorkInboxProps) {
   const [filter, setFilter] = useState<WorkFilter>("recent");
   const [showAll, setShowAll] = useState(false);
   const resultsId = useId();
@@ -135,7 +136,8 @@ export function WorkInbox({ items, totalProjectCount, loading, errors, onRetry }
   return (
     <section aria-labelledby="work-inbox-title" className="space-y-5" data-testid="dashboard-work-inbox">
       <div className="grid grid-cols-3 gap-2 sm:gap-3" aria-label="프로젝트 현황">
-        <SummaryMetric label="전체 프로젝트" value={totalProjectCount} note={totalProjectCount === null ? "목록 확인 불가" : "접근 가능한 프로젝트"}
+        <SummaryMetric label="전체 프로젝트" value={totalProjectCount}
+          note={projectListLoading ? "목록 확인 중" : totalProjectCount === null ? "목록 확인 불가" : "접근 가능한 프로젝트"}
           actionLabel="전체 프로젝트 보기" href="#all-projects" onClick={() => {
             const target = document.getElementById("all-projects");
             if (target instanceof HTMLDetailsElement) target.open = true;

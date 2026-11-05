@@ -1,4 +1,4 @@
-import { apiBase, authHeaders } from "./auth-client";
+import { apiBase, authHeaders, getStoredAuthSession } from "./auth-client";
 
 export interface WorkspaceProjectMemory {
   projectId?: string;
@@ -86,10 +86,28 @@ export interface WorkspacePageContext {
   };
 }
 
-export async function fetchWorkspaceContext(projectId: string, page = "overview", track?: string): Promise<WorkspacePageContext> {
-  const params = new URLSearchParams({ page });
-  if (track) params.set("track", track);
-  const res = await fetch(`${apiBase}/projects/${projectId}/workspace/context?${params.toString()}`, {
+const pendingWorkspaceReads = new Map<string, Promise<WorkspacePageContext>>();
+
+if (typeof window !== "undefined") {
+  window.addEventListener("realytics-auth-session-changed", () => pendingWorkspaceReads.clear());
+}
+
+function browserWorkspaceScope(): string | null {
+  if (typeof window === "undefined") return null;
+  const identity = getStoredAuthSession();
+  const tenantId = identity?.session.tenantId ?? identity?.user.tenantId;
+  if (!identity?.user.userId || !tenantId) return null;
+  return JSON.stringify([
+    identity.authProvider,
+    identity.user.userId,
+    tenantId,
+    identity.session.sessionId,
+    identity.user.role,
+  ]);
+}
+
+async function readWorkspaceContext(url: string): Promise<WorkspacePageContext> {
+  const res = await fetch(url, {
     cache: "no-store",
     headers: authHeaders("web"),
   });
@@ -97,6 +115,33 @@ export async function fetchWorkspaceContext(projectId: string, page = "overview"
     throw new Error(`Workspace context request failed (${res.status})`);
   }
   return (await res.json()) as WorkspacePageContext;
+}
+
+export function fetchWorkspaceContext(projectId: string, page = "overview", track?: string): Promise<WorkspacePageContext> {
+  const params = new URLSearchParams({ page });
+  if (track) params.set("track", track);
+  const url = `${apiBase}/projects/${projectId}/workspace/context?${params.toString()}`;
+  const scope = browserWorkspaceScope();
+  if (!scope) return readWorkspaceContext(url);
+
+  // Share only overlapping reads in this browser session. A completed read
+  // must not satisfy a later refresh or a read after editing project data.
+  const key = JSON.stringify([scope, url]);
+  const pending = pendingWorkspaceReads.get(key);
+  if (pending) return pending;
+
+  const request: Promise<WorkspacePageContext> = readWorkspaceContext(url)
+    .then((result) => {
+      if (browserWorkspaceScope() !== scope || pendingWorkspaceReads.get(key) !== request) {
+        throw new Error("Workspace session changed during request");
+      }
+      return result;
+    })
+    .finally(() => {
+      if (pendingWorkspaceReads.get(key) === request) pendingWorkspaceReads.delete(key);
+    });
+  pendingWorkspaceReads.set(key, request);
+  return request;
 }
 
 export function displayText(value: unknown, fallback = "-") {

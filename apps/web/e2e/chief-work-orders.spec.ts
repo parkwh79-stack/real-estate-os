@@ -27,6 +27,8 @@ test("opening the deal room loads its plan and execution starts only after a cli
   };
   const runRequests: unknown[] = [];
   let saved = false;
+  let releaseReadiness: () => void = () => {};
+  const firstReadiness = new Promise<void>((resolve) => { releaseReadiness = resolve; });
   let readinessAvailable = false;
   let readinessAssessed = false;
   let legalWorkspaceAvailable = false;
@@ -44,6 +46,7 @@ test("opening the deal room loads its plan and execution starts only after a cli
     } else if (path.endsWith("/chief-orchestration/plan")) {
       body = saved ? savedPlan : plan;
     } else if (path.endsWith("/chief-orchestration/approval-readiness")) {
+      await firstReadiness;
       status = readinessAvailable ? 200 : 503;
       body = readinessAvailable
         ? {
@@ -89,6 +92,10 @@ test("opening the deal room loads its plan and execution starts only after a cli
   const runButton = page.getByRole("button", { name: "전체 자동 실행", exact: true });
   await expect(runButton).toBeInViewport({ timeout: 60_000 });
   await expect(page.getByText("분석 계획을 확인했습니다", { exact: true })).toBeVisible();
+  const pendingReadiness = page.getByRole("region", { name: "승인 준비도를 불러오는 중입니다" });
+  await expect(pendingReadiness).toBeVisible();
+  await expect(pendingReadiness.getByRole("button", { name: "증빙 저장·재계산" })).toBeDisabled();
+  releaseReadiness();
   const readiness = page.getByRole("region", { name: "승인 준비도를 불러올 수 없습니다" });
   await expect(readiness).toBeVisible();
   await expect(readiness.getByRole("button", { name: "증빙 저장·재계산" })).toBeDisabled();
