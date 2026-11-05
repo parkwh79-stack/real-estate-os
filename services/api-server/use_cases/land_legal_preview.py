@@ -3,9 +3,12 @@
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import re
 from typing import Any
 
-from use_cases.parcel_pnu_resolution import canonical_project_parcel_rows
+from integrations.land_data_connectors import LandDataConnectorRouter
+from integrations.vworld import build_pnu, fetch_parcel_by_pnu
+from use_cases.parcel_pnu_resolution import canonical_project_parcel_rows, parcel_lookup_address
 
 
 PARCEL_BATCH_SIZE = 5
@@ -57,6 +60,66 @@ class ParcelPreviewBatch:
 
 class StaleParcelPreview(ValueError):
     """The project parcels changed since the caller began previewing."""
+
+
+def manual_pnu_preview_project(project_id: str, pnus: Any) -> dict[str, Any]:
+    """Create a disposable ledger from exact public cadastral matches."""
+    if (
+        not isinstance(pnus, list) or not 1 <= len(pnus) <= PARCEL_BATCH_SIZE
+        or any(not isinstance(pnu, str) or not re.fullmatch(r"[0-9]{10}[12][0-9]{8}", pnu) for pnu in pnus)
+        or len(set(pnus)) != len(pnus)
+    ):
+        raise ValueError("Invalid PNU list")
+    rows = [_manual_parcel_row(pnu) for pnu in pnus]
+    addresses = [row["addressFragment"] for row in rows if row.get("addressFragment")]
+    jurisdictions = {row["pnu"][:5] for row in rows if row.get("pnu")}
+    return {
+        "project": {"id": project_id},
+        "land": {"address": addresses[0]} if addresses and len(jurisdictions) == 1 else {},
+        "landLedger": {"parcels": rows},
+    }
+
+
+def _manual_parcel_row(pnu: str) -> dict[str, Any]:
+    parcel, diagnostic = fetch_parcel_by_pnu(pnu, timeout=2.0)
+    parcel = parcel or {}
+    address = str(parcel.get("addr") or parcel.get("cadastralAddress") or "").strip()
+    lot = str(parcel.get("jibun") or "").strip()
+    source = f"vworld:{pnu}:LP_PA_CBND_BUBUN"
+    if not address or not lot:
+        characteristics = LandDataConnectorRouter().lookup_parcel_address(pnu, timeout_seconds=2.0)
+        if characteristics and characteristics.get("pnu") == pnu:
+            dong = str(characteristics.get("legalDongName") or "").strip()
+            lot = str(characteristics.get("lotNumber") or "").strip()
+            address = f"{dong} {lot}" if dong and lot else ""
+            parcel = characteristics
+            source = characteristics.get("sourceUrlOrEvidenceId")
+    address_lot = re.search(r"(?:^|\s)((?:산\s*)?[0-9]+(?:\s*-\s*[0-9]+)?)$", address)
+    stated_lot = re.sub(r"\s+", "", address_lot[1]) if address_lot else ""
+    if address and lot and not stated_lot:
+        address = f"{address} {lot}"
+    row: dict[str, Any] = {"requestedPnu": pnu}
+    if str(parcel.get("pnu") or "").strip() != pnu:
+        reason = "manual_pnu_mismatch" if parcel else {
+            "pnu_mismatch": "manual_pnu_mismatch",
+            "not_found": "manual_pnu_not_found",
+            "skipped": "manual_pnu_source_unavailable",
+        }.get(diagnostic.get("status"), "manual_pnu_lookup_failed")
+    elif not address or not lot or not parcel_lookup_address({"addressFragment": address, "lotNumber": lot}, ""):
+        reason = "manual_pnu_address_unavailable"
+    elif build_pnu(pnu[:10], lot) != pnu or (stated_lot and build_pnu(pnu[:10], stated_lot) != pnu):
+        reason = "manual_pnu_address_mismatch"
+    else:
+        return {
+            **row,
+            "pnu": pnu,
+            "addressFragment": address,
+            "lotNumber": lot,
+            "pnuMatchMethod": "manual_pnu_exact",
+            "pnuResolution": {"status": "resolved", "lotVerification": "verified", "resolvedAddress": address},
+            "parcelSourceLocators": [{"sourceType": "api_row", "apiRowId": pnu, "sourceUrl": source}],
+        }
+    return {**row, "pnuResolution": {"status": "unresolved", "reason": reason}}
 
 
 def parcel_preview_batch(project_id: str, project: dict[str, Any], inputs: dict[str, Any]) -> ParcelPreviewBatch:

@@ -5,7 +5,7 @@ Adds, on top of the deterministic Marketability analysis:
 1. **자료 제공주체 분류** — every market document / comparable is labelled by who
    provided it: 시행사(developer) / 매각 주관사(sales agent) / 공공데이터(public) /
    제휴(partner) / AI 자동보강(auto-supplement). An explicit ``dataProvider`` field
-   wins; otherwise it is inferred from documentType/파일명.
+   wins; otherwise the source remains unattributed.
 2. **시행사 vs 매각 주관사 비교분석** — proposed 분양가/흡수 가정을 제공주체별로 나란히
    비교하고, 공공 실거래가 중위값을 앵커로 괴리를 계산한다.
 3. **상품유형별 분양성 Score** — 제안가 적정성 + 비교사례 충분성 기반 A~E.
@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from agents.ai_connection import AIConnection, resolve_ai_context, safe_ai_context
 
 MARKET_PRODUCT_DEPTH_SCHEMA_VERSION = "realytics-market-product-depth-v1"
+_MOLIT_SOURCES = {"molit", "molit_rtms", "국토부 실거래가", "국토교통부 실거래가"}
 
 PROVIDER_LABELS = {
     "developer": "시행사 제공 자료",
@@ -36,8 +37,6 @@ PROVIDER_LABELS = {
     "unspecified": "제공주체 미상",
 }
 
-_DEVELOPER_MARKERS = ("사업계획", "사업제안", "개발계획", "사업수지", "시행사", "infomemo", "information memorandum", " im", "im.", "im_", "ir")
-_SALES_AGENT_MARKERS = ("매각", "분양대행", "분양안내", "분양마케팅", "티저", "teaser", "주관사", "매각제안", "매각안내", "분양촉진")
 
 # Indicative monthly absorption benchmark (units/month share of total) by asset type.
 _ABSORPTION_BENCHMARK = {
@@ -80,15 +79,7 @@ def _norm_provider(raw: Any) -> Optional[str]:
 
 
 def _infer_document_provider(doc: Dict[str, Any]) -> str:
-    explicit = _norm_provider(doc.get("dataProvider") or doc.get("provider") or doc.get("제공주체") or doc.get("sourceParty"))
-    if explicit:
-        return explicit
-    hay = " ".join(str(doc.get(k) or "") for k in ("documentType", "document_type", "originalFileName", "fileName", "title")).lower()
-    if any(m in hay for m in _SALES_AGENT_MARKERS):
-        return "sales_agent"
-    if any(m in hay for m in _DEVELOPER_MARKERS):
-        return "developer"
-    return "unspecified"
+    return _norm_provider(doc.get("dataProvider") or doc.get("provider") or doc.get("제공주체") or doc.get("sourceParty")) or "unspecified"
 
 
 def _infer_comparable_provider(comp: Dict[str, Any]) -> str:
@@ -97,11 +88,10 @@ def _infer_comparable_provider(comp: Dict[str, Any]) -> str:
         return explicit
     if comp.get("factOrigin") == "auto_supplement" or comp.get("sourceAuthority") == "benchmark_proxy":
         return "auto_supplement"
-    source = str(comp.get("source") or "").lower()
-    source_type = str(comp.get("sourceType") or "").lower()
-    if "molit" in source or "rtms" in source or source_type == "public_api":
+    source = str(comp.get("source") or comp.get("sourceName") or "").lower()
+    if source.strip() in _MOLIT_SOURCES:
         return "public_data"
-    if "valuemap" in source or source_type == "partner_api":
+    if source.strip() == "valuemap":
         return "partner_api"
     return "unspecified"
 
@@ -117,14 +107,17 @@ class MarketProductDepthAgent:
         *,
         options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        marketability = marketability or project_data.get("marketabilityAnalysis") or project_data.get("marketability") or {}
+        if marketability is None:
+            marketability = project_data.get("marketabilityAnalysis") or project_data.get("marketability") or {}
         options = options or {}
 
         provenance = self._classify_sources(project_data, marketability)
         public_median = self._public_median(project_data, marketability)
         comparison = self._compare_providers(project_data, marketability, provenance, public_median)
         product_scores = self._product_scores(project_data, marketability, public_median)
-        absorption = self._absorption_model(project_data, marketability)
+        absorption = self._absorption_model(
+            project_data, marketability, allow_benchmark=options.get("allowPlanningBenchmark") is True,
+        )
         next_actions = self._recommend_next_actions(
             project_data, marketability, provenance, comparison, absorption, options,
         )
@@ -147,14 +140,21 @@ class MarketProductDepthAgent:
     def _classify_sources(self, project_data: Dict[str, Any], marketability: Dict[str, Any]) -> Dict[str, Any]:
         buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k in PROVIDER_LABELS}
         documents = project_data.get("source_documents") or project_data.get("sourceDocuments") or []
+        archives = set()
         for doc in documents:
             if not isinstance(doc, dict):
                 continue
+            archive_id = doc.get("archiveId") or doc.get("originalFileHash")
+            if archive_id:
+                if archive_id in archives:
+                    continue
+                archives.add(archive_id)
             provider = _infer_document_provider(doc)
             buckets[provider].append({
                 "kind": "document",
                 "name": doc.get("originalFileName") or doc.get("fileName") or doc.get("documentType") or "문서",
                 "documentType": doc.get("documentType") or doc.get("document_type"),
+                "archiveId": archive_id,
             })
         comparables = self._comparables(project_data, marketability)
         for comp in comparables:
@@ -162,7 +162,7 @@ class MarketProductDepthAgent:
             buckets[provider].append({
                 "kind": "comparable",
                 "name": comp.get("address") or comp.get("sourceName") or comp.get("source") or "비교사례",
-                "pricePerPy": _num(comp.get("pricePerPy")),
+                "pricePerPy": _num(comp.get("pricePerPy") or comp.get("rawPricePerPy")),
             })
         summary = {
             provider: {
@@ -175,6 +175,8 @@ class MarketProductDepthAgent:
         }
         return {
             "byProvider": summary,
+            "archivedDocumentCount": len(archives),
+            "partnerProvided": len(buckets["partner_api"]),
             "developerProvided": len(buckets["developer"]),
             "salesAgentProvided": len(buckets["sales_agent"]),
             "publicData": len(buckets["public_data"]),
@@ -229,29 +231,45 @@ class MarketProductDepthAgent:
         }
 
     def _provider_proposed_prices(self, project_data: Dict[str, Any]) -> Dict[str, Optional[float]]:
-        """Proposed 분양가(평당) per provider, from provider-tagged parsed facts when
-        available, else the aggregated document market facts attributed to 시행사."""
-        out: Dict[str, Optional[float]] = {"developer": None, "sales_agent": None}
-        # provider-tagged parsed facts (future orchestration tagging)
-        for fact in project_data.get("parsed_facts") or []:
-            if not isinstance(fact, dict):
+        """Attribute a price to an identified stored provider, with no last-value-wins."""
+        proposals: Dict[str, set[float]] = {"developer": set(), "sales_agent": set()}
+        documents = project_data.get("source_documents") or project_data.get("sourceDocuments") or []
+        by_archive = {
+            str(doc.get("archiveId") or doc.get("originalFileHash")): doc
+            for doc in documents if isinstance(doc, dict) and (doc.get("archiveId") or doc.get("originalFileHash"))
+        }
+
+        def add(provider: str | None, value: Any) -> None:
+            price = _num(value)
+            if provider in proposals and price is not None and price > 0:
+                proposals[provider].add(price)
+
+        for fact in project_data.get("parsedFacts") or project_data.get("parsed_facts") or []:
+            if not isinstance(fact, dict) or fact.get("validationStatus") not in {"pod_validated", "approved", "verified"}:
                 continue
-            field = str(fact.get("canonicalField") or fact.get("termId") or "").lower()
-            if "price" in field and ("py" in field or "분양" in field):
-                provider = _norm_provider(fact.get("dataProvider") or fact.get("제공주체"))
-                value = _num(fact.get("normalizedValue") or fact.get("value"))
-                if provider in out and value:
-                    out[provider] = value
-        # aggregated document market facts → attribute to developer (사업계획서 default)
-        if out["developer"] is None:
-            doc_facts = project_data.get("documentParsedMarketFacts") or {}
-            price = _num(doc_facts.get("proposedPricePerPy") or doc_facts.get("proposed_price_per_py"))
-            if price is None:
-                market = project_data.get("market") or {}
-                price = _num(market.get("proposedPricePerPy"))
-            if price:
-                out["developer"] = price
-        return out
+            if str(fact.get("canonicalField") or "").lower() != "market.proposedpriceperpy":
+                continue
+            source = fact.get("sourceDocument") or {}
+            locator = fact.get("sourceLocator") or {}
+            if not isinstance(source, dict) or not isinstance(locator, dict):
+                continue
+            document = by_archive.get(str(source.get("archiveId") or locator.get("documentId") or ""))
+            if document and fact.get("locatorStatus") == "located":
+                add(_infer_document_provider(document), fact.get("normalizedValue", fact.get("value")))
+
+        for key in ("document_market_evidence", "documentMarketEvidence", "market_evidence",
+                    "marketEvidence", "documentParsedMarketFacts", "market"):
+            values = project_data.get(key)
+            if not isinstance(values, dict):
+                continue
+            source = values.get("sourceDocument") or {}
+            archive = str(source.get("archiveId") or "") if isinstance(source, dict) else ""
+            if archive and archive not in by_archive:
+                continue
+            provider = _infer_document_provider(by_archive[archive]) if archive else _norm_provider(values.get("dataProvider"))
+            add(provider, values.get("proposedPricePerPy") or values.get("proposed_price_per_py"))
+
+        return {provider: next(iter(values)) if len(values) == 1 else None for provider, values in proposals.items()}
 
     @staticmethod
     def _price_assessment(delta: float) -> str:
@@ -283,14 +301,14 @@ class MarketProductDepthAgent:
             if price and public_median:
                 delta = (price - public_median) / public_median
                 price_pts = max(0.0, 1.0 - abs(delta))  # closer to public median → higher
-            data_pts = min(1.0, comp_count / 3.0)
+            data_pts = min(1.0, comp_count / 3.0) if comp_count else None
             components = [p for p in (price_pts, data_pts) if p is not None]
             score = round(sum(components) / len(components), 2) if components else None
             scores.append({
                 "productType": product_type,
                 "pricePerPy": price,
                 "priceAdequacy": None if price_pts is None else round(price_pts, 2),
-                "comparableSufficiency": round(data_pts, 2),
+                "comparableSufficiency": round(data_pts, 2) if data_pts is not None else None,
                 "score": score,
                 "grade": self._grade(score),
                 "basis": "public_transaction_anchor" if price_pts is not None else "comparable_sufficiency_only",
@@ -312,23 +330,34 @@ class MarketProductDepthAgent:
         return "E"
 
     # --- 4. absorption model ----------------------------------------------
-    def _absorption_model(self, project_data: Dict[str, Any], marketability: Dict[str, Any]) -> Dict[str, Any]:
+    def _absorption_model(
+        self, project_data: Dict[str, Any], marketability: Dict[str, Any], *, allow_benchmark: bool = False,
+    ) -> Dict[str, Any]:
         forecast = marketability.get("absorptionForecast") if isinstance(marketability, dict) else {}
         forecast = forecast if isinstance(forecast, dict) else {}
         total_units = _num(forecast.get("totalUnits")) or _num((project_data.get("architectural_plan") or {}).get("total_units"))
-        product_type = str((marketability or {}).get("productType") or (project_data.get("project") or {}).get("type") or "apartment").lower()
+        product_type = str((marketability or {}).get("productType") or (project_data.get("project") or {}).get("type") or "").lower()
         raw_rate = forecast.get("monthlyAbsorptionRate")
         rate = _num(raw_rate)
-        basis = "forecast"
+        basis = "working_assumption"
+        status = "planning_only"
         if raw_rate is not None and (rate is None or rate < 0 or rate > 1):
             return {"monthlyAbsorptionRate": None, "rateBasis": "invalid_forecast",
                     "status": "invalid_input", "totalUnits": total_units,
                     "estimatedMonthsToSellout": None, "curve": [],
                     "note": "월 흡수율은 0~1 범위의 유한한 비율이어야 합니다. 입력 근거를 확인하세요."}
         if raw_rate is None:
-            rate = _ABSORPTION_BENCHMARK.get(product_type, 0.05)
+            rate = _ABSORPTION_BENCHMARK.get(product_type) if allow_benchmark and total_units and total_units > 0 else None
+            if rate is None:
+                return {"monthlyAbsorptionRate": None, "rateBasis": "missing_forecast",
+                        "status": "insufficient_data", "totalUnits": total_units,
+                        "estimatedMonthsToSellout": None, "curve": [],
+                        "note": "월별 분양 실적이나 검토된 흡수율 입력이 필요합니다."}
             basis = "planning_benchmark"
-        months_to_sellout = math.ceil(1 / rate) if rate else None
+        elif forecast.get("sourceLocator") and forecast.get("rateBasis") in {"observed", "verified_forecast"}:
+            basis = "forecast"
+            status = "assessed"
+        months_to_sellout = math.ceil(1 / rate) if rate and total_units and total_units > 0 else None
         curve: List[Dict[str, Any]] = []
         if total_units and rate:
             cumulative = 0.0
@@ -341,6 +370,7 @@ class MarketProductDepthAgent:
         return {
             "monthlyAbsorptionRate": rate,
             "rateBasis": basis,
+            "status": status,
             "totalUnits": total_units,
             "estimatedMonthsToSellout": months_to_sellout,
             "curve": curve,
@@ -366,7 +396,7 @@ class MarketProductDepthAgent:
             actions.append({"priority": "high", "action": "시행사 사업계획서/IM의 분양가 산정근거 확보", "category": "evidence"})
         elif isinstance(dev_row.get("deltaVsPublicMedian"), (int, float)) and dev_row["deltaVsPublicMedian"] > 0.15:
             actions.append({"priority": "high", "action": "제안 분양가가 공공 실거래 대비 고평가 — 흡수율·할인분양 시나리오 스트레스 필요", "category": "analysis"})
-        if absorption.get("rateBasis") == "planning_benchmark":
+        if absorption.get("status") != "assessed":
             actions.append({"priority": "medium", "action": "흡수율을 실제 분양속도(청약경쟁률·인근 분양단지 실적)로 대체", "category": "data"})
         if not actions:
             actions.append({"priority": "low", "action": "현재 시장근거로 예비판단 가능 — 승인 전 심사자 최종 확인", "category": "review"})
@@ -425,24 +455,39 @@ class MarketProductDepthAgent:
 
     # --- helpers -----------------------------------------------------------
     def _comparables(self, project_data: Dict[str, Any], marketability: Dict[str, Any]) -> List[Dict[str, Any]]:
+        for key in ("normalizedComparables", "comparables"):
+            rows = marketability.get(key)
+            if isinstance(rows, list) and rows:
+                return [row for row in rows if isinstance(row, dict)]
         out: List[Dict[str, Any]] = []
-        market = project_data.get("market") or {}
-        for key in ("transactionComparables", "comparables", "listing_comparables", "manualComparables"):
-            val = market.get(key)
-            if isinstance(val, list):
-                out.extend(x for x in val if isinstance(x, dict))
-        if isinstance(marketability, dict):
-            for key in ("comparables", "normalizedComparables"):
-                val = marketability.get(key)
-                if isinstance(val, list):
-                    out.extend(x for x in val if isinstance(x, dict))
+        seen = set()
+        for key in ("market", "documentMarketEvidence", "document_market_evidence", "marketEvidence", "market_evidence"):
+            market = project_data.get(key)
+            if not isinstance(market, dict):
+                continue
+            for bucket in ("transactionComparables", "comparables", "listingComparables", "listing_comparables",
+                           "manualComparables", "presaleComparables", "presale_comparables"):
+                rows = market.get(bucket)
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    identity = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
+                    if identity not in seen:
+                        seen.add(identity)
+                        out.append(row)
         return out
 
     def _public_median(self, project_data: Dict[str, Any], marketability: Dict[str, Any]) -> Optional[float]:
-        prices = [
-            _num(c.get("pricePerPy"))
-            for c in self._comparables(project_data, marketability)
-            if _infer_comparable_provider(c) == "public_data" and _num(c.get("pricePerPy"))
-        ]
-        prices = [p for p in prices if p]
+        prices = []
+        for row in self._comparables(project_data, marketability):
+            source = str(row.get("source") or row.get("sourceName") or "").casefold()
+            if source.strip() not in _MOLIT_SOURCES:
+                continue
+            if row.get("dealKind") not in (None, "trade") or row.get("comparableCategory") not in (None, "transaction"):
+                continue
+            price = _num(row.get("pricePerPy") or row.get("rawPricePerPy"))
+            if price is not None and price > 0:
+                prices.append(price)
         return round(statistics.median(prices)) if prices else None

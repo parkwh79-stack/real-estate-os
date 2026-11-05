@@ -22,7 +22,7 @@ spec:
       timeoutSeconds: 120
       containers:
         - name: api
-          image: asia-northeast1-docker.pkg.dev/realytics-api-pilot-20261103/pilot-api/api@sha256:64a785555f8b78b60347049c42c818237679b39ee7cd4a2b635dd419b3faaaf4
+          image: asia-northeast1-docker.pkg.dev/realytics-api-pilot-20261103/pilot-api/api@sha256:e0201b013f73c839f5379e7453daf5d2a96bd0cbbae08a7a2ea7caa8236c6565
           ports:
             - containerPort: 8000
           resources:
@@ -78,7 +78,7 @@ spec:
                 secretKeyRef: {name: realytics-molit-rtms-key, key: '1'}
             - name: VWORLD_API_KEY
               valueFrom:
-                secretKeyRef: {name: realytics-vworld-key, key: '1'}
+                secretKeyRef: {name: realytics-vworld-key, key: '2'}
             - {name: VWORLD_DOMAIN, value: 'realytics-api-obozektnwa-an.a.run.app'}
             - {name: REALYTICS_ASYNC_JOB_MODE, value: external_worker}
             - {name: REALYTICS_SECRET_BACKEND, value: google_secret_manager}

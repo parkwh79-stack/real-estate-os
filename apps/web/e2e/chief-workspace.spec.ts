@@ -15,6 +15,7 @@ const basePlan = {
 
 async function mockDealRoom(page: Page, blocked: boolean) {
   let runRequests = 0;
+  let preflightRequests = 0;
   const requested: string[] = [];
   const plan = blocked ? {
     ...basePlan,
@@ -36,6 +37,19 @@ async function mockDealRoom(page: Page, blocked: boolean) {
     if (path.endsWith("/workspace/context")) body = { projectId: "deal-workspace", projectMemory: { projectName: "개발 사업 예시" }, pageData: {} };
     if (path.endsWith("/chief-orchestration/plan")) body = plan;
     if (path.endsWith("/chief-orchestration/approval-readiness")) body = { schemaVersion: "realytics-deal-state-approval-readiness-v1", projectId: "deal-workspace", readable: true, assessmentStatus: "unassessed" };
+    if (path.endsWith("/chief-orchestration/preflight")) {
+      preflightRequests += 1;
+      body = {
+        schemaVersion: "realytics-chief-pod-preflight-v1", projectId: "deal-workspace", analysisOnly: true,
+        pods: ["land_legal", "market_product", "cost_schedule", "feasibility_cashflow", "pf_credit", "public_policy"]
+          .map((podKey) => ({ podKey, status: "checked", checks: [] })),
+        publicLookups: [{ key: "land", label: "토지 공개 근거", status: "checked", message: "확인한 필지와 일치합니다." }],
+        materialRequests: blocked ? [{
+          itemId: "source_documents_missing", category: "intake", description: "원본 심사자료를 올려 주세요.", purpose: "사업의 원본 근거 확인",
+          severity: "blocking", requiredFor: ["all_pods"], acceptableSources: ["사업계획서"],
+        }] : [],
+      };
+    }
     if (path.endsWith("/chief-orchestration/run-all-pods")) {
       runRequests += 1;
       body = { ...plan, podRuns: basePlan.podRuns.map((row) => ({ ...row, status: "completed", progressPercent: 100 })) };
@@ -43,7 +57,7 @@ async function mockDealRoom(page: Page, blocked: boolean) {
     await route.fulfill({ status: 200, json: body });
   });
   await page.goto("/project/deal-workspace/chief-orchestration?track=development", { waitUntil: "domcontentloaded" });
-  return { runRequests: () => runRequests, requested };
+  return { runRequests: () => runRequests, preflightRequests: () => preflightRequests, requested };
 }
 
 test("the user sees next actions and opens a focused review without loading diagnostics", async ({ page }) => {
@@ -77,10 +91,20 @@ test("the user sees next actions and opens a focused review without loading diag
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
   expect(requests.runRequests()).toBe(0);
   expect(requests.requested.filter((path) => /recalculation-events|pod-ai-reviews|legal\/workspace/.test(path))).toEqual([]);
+  expect(requests.preflightRequests()).toBe(0);
+  await next.getByRole("button", { name: "사전 검토 실행", exact: true }).click();
+  await expect(page.getByText("사전 검토 결과 · 6개 영역 · 제출·확인 항목 1건")).toBeVisible();
+  await expect(next.getByText("필지와 토지 근거 확인")).toHaveCount(0);
+  const purpose = next.getByText("사용 목적 · 사업의 원본 근거 확인");
+  if (!(await purpose.isVisible())) await next.getByText("필요한 자료 1건", { exact: true }).click();
+  await expect(purpose).toBeVisible();
+  expect(requests.runRequests()).toBe(0);
 });
 
 test("eligible analysis executes after the user starts it", async ({ page }) => {
   const requests = await mockDealRoom(page, false);
+  await page.getByRole("button", { name: "사전 검토 실행", exact: true }).click({ timeout: 45_000 });
+  await expect(page.getByText("사전 검토 결과 · 6개 영역 · 제출·확인 항목 0건")).toBeVisible();
   const start = page.getByRole("button", { name: "분석 시작", exact: true });
   await expect(start).toBeVisible({ timeout: 45_000 });
   expect(requests.runRequests()).toBe(0);

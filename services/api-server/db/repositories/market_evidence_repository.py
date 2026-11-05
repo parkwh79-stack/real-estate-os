@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
+import json
 from typing import Any, Callable, Dict, Iterable, List
 
 
@@ -67,3 +69,85 @@ class MarketEvidenceRepository:
                 item.get("evidenceId") or "",
             ),
         )
+
+
+class MarketEvidenceConflict(RuntimeError):
+    """Another reviewer or run changed the selected market evidence."""
+
+
+class PostgresMarketEvidenceRepository(MarketEvidenceRepository):
+    """Read and review existing run evidence through the tenant's API pool."""
+
+    def __init__(self, *, tenant_id: str, transaction_factory=None):
+        from db.postgres_runtime_pool import api_tenant_transaction
+
+        self.tenant_id = str(tenant_id or "").strip()
+        if not self.tenant_id:
+            raise ValueError("tenant_id is required")
+        self._transaction = transaction_factory or api_tenant_transaction
+        self._expected_payloads: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _record(self, row, project_id: str) -> Dict[str, Any]:
+        record_key, payload = row
+        record = json.loads(payload) if isinstance(payload, str) else deepcopy(payload)
+        if (
+            not isinstance(record, dict)
+            or record.get("projectId") != project_id
+            or record.get("recordKey") != record_key
+            or record.get("tenantId") not in (None, self.tenant_id)
+        ):
+            raise ValueError("Stored market evidence lineage does not match")
+        return record
+
+    def values(self, project_id: str) -> Iterable[Dict[str, Any]]:
+        with self._transaction(self.tenant_id) as connection:
+            rows = connection.execute(
+                """
+                SELECT record_key, payload_json FROM realytics.market_evidence
+                WHERE tenant_id = %s AND project_id = %s
+                ORDER BY created_at, record_key
+                """,
+                (self.tenant_id, project_id),
+            ).fetchall()
+        return [self._record(row, project_id) for row in rows]
+
+    def get(self, project_id: str, record_key: str) -> Dict[str, Any] | None:
+        with self._transaction(self.tenant_id) as connection:
+            row = connection.execute(
+                """
+                SELECT record_key, payload_json FROM realytics.market_evidence
+                WHERE tenant_id = %s AND project_id = %s AND record_key = %s
+                """,
+                (self.tenant_id, project_id, record_key),
+            ).fetchone()
+        if row is None:
+            return None
+        record = self._record(row, project_id)
+        self._expected_payloads[(project_id, record_key)] = deepcopy(record)
+        return record
+
+    def save(self, project_id: str | None = None, record: Dict[str, Any] | None = None) -> None:
+        if not project_id or not isinstance(record, dict):
+            raise ValueError("An existing market evidence record is required")
+        record_key = record.get("recordKey")
+        expected = self._expected_payloads.get((project_id, record_key))
+        if expected is None:
+            raise ValueError("Read the market evidence before reviewing it")
+        self._record((record_key, record), project_id)
+        with self._transaction(self.tenant_id) as connection:
+            written = connection.execute(
+                """
+                UPDATE realytics.market_evidence SET payload_json = %s::jsonb
+                WHERE tenant_id = %s AND project_id = %s AND record_key = %s
+                    AND payload_json = %s::jsonb
+                RETURNING record_key
+                """,
+                (
+                    json.dumps(record, ensure_ascii=False),
+                    self.tenant_id, project_id, record_key,
+                    json.dumps(expected, ensure_ascii=False),
+                ),
+            ).fetchone()
+            if written is None:
+                raise MarketEvidenceConflict("Market evidence changed; reload before reviewing")
+        self._expected_payloads[(project_id, record_key)] = deepcopy(record)

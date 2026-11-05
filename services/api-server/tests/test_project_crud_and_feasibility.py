@@ -597,6 +597,7 @@ def test_source_locator_audit_persists_traceability_risks(tmp_path, monkeypatch)
         },
     )
 
+    upsert_user({"userId": "auditor", "tenantId": "pytest-tenant", "role": "reviewer", "status": "active"})
     res = client.post(
         f"/projects/{project_id}/deal-state-records/source-locator-audit",
         headers={"X-REALYTICS-USER-ID": "auditor"},

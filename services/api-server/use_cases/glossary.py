@@ -13,6 +13,7 @@ from agent_platform.learning import LearningLifecycleError, LearningLifecycleSer
 from agent_platform.operational import OperationalRepository
 
 from core.text_normalization import build_term_surface_record, normalize_match_text
+from db.repositories.glossary_repository import PostgresGlossaryRepository
 from storage import (
     get_glossary_term_candidate_record,
     get_glossary_term_record,
@@ -90,9 +91,11 @@ def list_glossary_terms_use_case(
     category: str | None = None,
     canonical_field: str | None = None,
     review_status: str | None = None,
+    repository: PostgresGlossaryRepository | None = None,
 ) -> Dict[str, Any]:
-    ensure_seed_glossary_terms()
-    terms = list_glossary_term_records(
+    if repository is None:
+        ensure_seed_glossary_terms()
+    terms = (repository.list_terms if repository is not None else list_glossary_term_records)(
         query=query,
         category=category,
         canonical_field=canonical_field,
@@ -111,7 +114,11 @@ def list_glossary_terms_use_case(
     }
 
 
-def get_glossary_term_use_case(term_id: str) -> Dict[str, Any] | None:
+def get_glossary_term_use_case(
+    term_id: str, *, repository: PostgresGlossaryRepository | None = None,
+) -> Dict[str, Any] | None:
+    if repository is not None:
+        return repository.get_term(term_id)
     ensure_seed_glossary_terms()
     return get_glossary_term_record(term_id)
 
@@ -123,11 +130,14 @@ def upsert_glossary_term_use_case(payload: Dict[str, Any], *, actor: str = "anon
     return upsert_glossary_term_record(normalized)
 
 
-def resolve_glossary_term_use_case(term: str, *, include_pending: bool = False) -> Dict[str, Any]:
-    ensure_seed_glossary_terms()
+def resolve_glossary_term_use_case(
+    term: str, *, include_pending: bool = False, repository: PostgresGlossaryRepository | None = None,
+) -> Dict[str, Any]:
+    if repository is None:
+        ensure_seed_glossary_terms()
     normalized = _normalize_match_text(term)
     candidates: list[Dict[str, Any]] = []
-    for item in list_glossary_term_records():
+    for item in repository.list_terms() if repository is not None else list_glossary_term_records():
         if item.get("reviewStatus") != "approved" and not include_pending:
             continue
         names = [
@@ -149,12 +159,13 @@ def resolve_glossary_term_use_case(term: str, *, include_pending: bool = False) 
     }
 
 
-def canonical_field_map_use_case() -> Dict[str, Any]:
-    ensure_seed_glossary_terms()
+def canonical_field_map_use_case(*, repository: PostgresGlossaryRepository | None = None) -> Dict[str, Any]:
+    if repository is None:
+        ensure_seed_glossary_terms()
     field_map: Dict[str, Dict[str, Any]] = {}
     category_counts: Dict[str, int] = {}
     term_count = 0
-    for term in list_glossary_term_records(review_status="approved"):
+    for term in (repository.list_terms if repository is not None else list_glossary_term_records)(review_status="approved"):
         term_count += 1
         category = term.get("category") or "uncategorized"
         category_counts[category] = category_counts.get(category, 0) + 1
@@ -317,8 +328,9 @@ def list_glossary_candidates_use_case(
     project_id: str | None = None,
     category: str | None = None,
     limit: int = 100,
+    repository: PostgresGlossaryRepository | None = None,
 ) -> Dict[str, Any]:
-    candidates = list_glossary_term_candidate_records(
+    candidates = (repository.list_candidates if repository is not None else list_glossary_term_candidate_records)(
         query=query,
         status=status,
         project_id=project_id,

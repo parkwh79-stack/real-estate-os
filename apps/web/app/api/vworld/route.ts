@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const upstream = await fetch(url, {
-      headers: { Referer: "http://localhost:3000/" },
+      headers: { Referer: req.nextUrl.origin + "/" },
       cache: "no-store",
       redirect: "error",
       signal: AbortSignal.timeout(8000),

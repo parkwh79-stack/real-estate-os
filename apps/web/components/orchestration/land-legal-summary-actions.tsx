@@ -17,6 +17,7 @@ type SummaryRecord = {
 
 type BatchSelection = {
   parcelRevision: string;
+  pnus?: string[];
   parcelOffset?: number;
   reviewedParcelIndexes?: number[];
   rows: Array<{ parcelIndex: number; parcelLabel?: string; address?: string }>;
@@ -45,6 +46,7 @@ export function LandLegalSummaryActions({ projectId, previewHash, analysis, batc
       const sections = [permit && "permit", height && "height", parcelIndexes.length > 0 && "parcels"].filter(Boolean);
       const replay = batch ? {
         parcelRevision: batch.parcelRevision,
+        ...(batch.pnus ? { pnus: batch.pnus } : {}),
         ...(batch.reviewedParcelIndexes ? { reviewedParcelIndexes: batch.reviewedParcelIndexes } : { parcelOffset: batch.parcelOffset }),
       } : {};
       const response = await fetch(endpoint, {

@@ -2,6 +2,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 from uuid import uuid4
 
@@ -40,6 +41,7 @@ from core.authz import enforce_project_tenant_scope, identity_context_from_reque
 from core.idp import verified_principal_from_request_state
 from core.runtime_profile import (
     cors_origins,
+    is_hardened_environment,
     raw_identity_headers_enabled,
     server_issued_sessions_enabled,
     validate_security_configuration,
@@ -320,10 +322,14 @@ _ENDPOINT_GROUPS = {
 def read_root(request: Request):
     """Human-friendly landing in a browser; JSON for API clients."""
     accept = request.headers.get("accept", "")
+    configured_web_app = os.environ.get("REALYTICS_WEB_BASE_URL", "").strip()
+    web_app = configured_web_app if configured_web_app.startswith("https://") else None
+    if not is_hardened_environment():
+        web_app = web_app or "http://localhost:3000"
     payload = {
         "message": "REALYTICS x PLATFORM9 API Server",
         "version": app.version,
-        "webApp": "http://localhost:3000",
+        "webApp": web_app,
         "docs": _API_LINKS,
         "endpointGroups": _ENDPOINT_GROUPS,
         "auth": "Send X-REALYTICS-SESSION-ID (pilot) or Authorization: Bearer <token> (OIDC/IdP).",
@@ -335,6 +341,7 @@ def read_root(request: Request):
 
     doc_links = "".join(f'<li><a href="{url}">{name}</a> <code>{url}</code></li>' for name, url in _API_LINKS.items())
     group_links = "".join(f'<li><a href="{url}">{name}</a> <code>{url}</code></li>' for name, url in _ENDPOINT_GROUPS.items())
+    web_link = f'<a href="{escape(web_app)}">REALYTICS 웹앱</a>' if web_app else "웹앱 주소 미설정"
     html = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"/>
 <title>REALYTICS x PLATFORM9 API</title>
 <style>
@@ -349,21 +356,15 @@ def read_root(request: Request):
 <h1>REALYTICS <span style="color:#6366f1">x</span> PLATFORM9 API</h1>
 <p class="v">Real Estate OS · v{app.version} · <span class="tag">API 서버</span></p>
 <div class="card">
- <b>여기는 API 서버입니다.</b> 실제 심사 화면(웹앱)은 <a href="http://localhost:3000">http://localhost:3000</a> 입니다.
+ <b>API 서버</b> · {web_link}
 </div>
 <div class="card"><b>문서 · 도구</b><ul>{doc_links}</ul></div>
 <div class="card"><b>엔드포인트 그룹</b><ul>{group_links}</ul></div>
 <div class="card"><b>API 연동 방법</b>
- <p>Base URL: <code>http://127.0.0.1:8000</code> · 인증 헤더: <code>X-REALYTICS-SESSION-ID</code>(파일럿) 또는 <code>Authorization: Bearer &lt;token&gt;</code>(OIDC).</p>
- <pre># PF 심사 실행
-curl -X POST http://127.0.0.1:8000/projects/{{PROJECT_ID}}/orchestrations/pf-review \\
-  -H "Content-Type: application/json" -d '{{}}'
-
-# 여신 문서(거래조건서·여신심사보고서) 조회
-curl http://127.0.0.1:8000/projects/{{PROJECT_ID}}/orchestrations/{{RUN_ID}}/credit-documents
-
-# 유사사례 RAG
-curl "http://127.0.0.1:8000/projects/{{PROJECT_ID}}/similar-cases/rag?q=대구+미분양"</pre>
+ <p>현재 서버 주소를 API 기준 주소로 사용합니다. 운영 요청에는 <code>Authorization: Bearer &lt;token&gt;</code>이 필요합니다.</p>
+ <pre>POST /projects/{{PROJECT_ID}}/orchestrations/pf-review
+GET /projects/{{PROJECT_ID}}/orchestrations/{{RUN_ID}}/credit-documents
+GET /projects/{{PROJECT_ID}}/similar-cases/rag</pre>
  <p>전체 스키마는 <a href="/docs">Swagger UI(/docs)</a> 에서 바로 호출·테스트할 수 있습니다.</p>
 </div>
 </body></html>"""

@@ -127,3 +127,11 @@ pricing judgement *and* that it was made against actual closed transactions.
   hydration so the Marketability Agent prices against live comparables automatically.
 - Geocode RTMS records (VWorld geocoder) to plot transaction markers on the map.
 - Finalize the Valuemap partner payload mapping once the API spec is provided.
+
+## 운영 시장성 연결 정리 (2026-11-05)
+
+운영 시장성 심화는 프로젝트 권한을 확인한 정규화 자료 조회를 사용한다. 보관 원본, 검토된 파싱값, 제공주체 미확인을 구분한다. 파일명이나 일반 비교사례 분류만으로 시행사·매각 주관사·제휴사로 추정하지 않는다. 원본은 파싱값의 출처와 연결하고, 가격 비교에는 확인된 값만 사용한다.
+
+분양속도 근거가 없으면 흡수율과 완판 예상 기간을 산정 전으로 표시한다. 계획용 가정이 있는 기존 결과는 접힌 참고 영역에서 근거 구분과 함께 표시한다. 금액·비율은 정수로 표시하고 계산값은 보존한다.
+
+공개 실거래는 사용자가 조회를 누르면 별도로 요청한다. 단일 확인 지역과 지원 상품유형이 필요하며 혼합용도·생활숙박시설을 아파트로 대체 조회하지 않는다. 운영 화면 조회 전용 연결로 최근 한 달 최대 30건을 읽고 요약을 반환한다. 거래 원문과 조회 요약은 저장하지 않는다. 자동 분석 근거용 키·플래그는 별도 설정이며 이 화면의 조회로 활성화하지 않는다. 누락 입력, 연결 불가, 조회 실패, 정상 0건을 구분한다.

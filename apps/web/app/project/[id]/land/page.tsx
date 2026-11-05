@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
@@ -21,6 +22,9 @@ import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from ".
 import { isWorkflowTrack } from "../../../../lib/workflow-track";
 import { PermitHeightReview, type PermitHeightAnalysis } from "../../../../components/orchestration/permit-height-review";
 import { LandLegalSummaryActions } from "../../../../components/orchestration/land-legal-summary-actions";
+import type { MapIntelligenceData } from "../../../../components/map/map-intelligence";
+
+const PreviewMap = dynamic(() => import("../../../../components/map/map-intelligence").then((module) => module.MapIntelligence), { ssr: false });
 
 type Parcel = {
   sequence?: number;
@@ -61,6 +65,7 @@ type Parcel = {
 
 type PreviewParcelRow = {
   parcelIndex: number;
+  requestedPnu?: string;
   parcelLabel?: string;
   address?: string;
   pnu?: string | null;
@@ -86,7 +91,7 @@ type PreviewParcelBatch = {
   }>;
 };
 
-type PreviewRequest = { parcelOffset?: number; parcelRevision?: string; parcelIndexes?: number[] };
+type PreviewRequest = { parcelOffset?: number; parcelRevision?: string; parcelIndexes?: number[]; pnus?: string[] };
 type PreviewBatchResult = {
   previewHash: string;
   legalReview: Record<string, unknown>;
@@ -248,6 +253,8 @@ export default function LandAnalysisPage() {
   const [reviewComment, setReviewComment] = useState("");
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
   const [legalPreview, setLegalPreview] = useState<PreviewSession | null>(null);
+  const [manualPnuText, setManualPnuText] = useState("");
+  const [manualPnuError, setManualPnuError] = useState<string | null>(null);
   const [visibleParcelLimit, setVisibleParcelLimit] = useState(120);
   const pendingPreview = useRef<AbortController | null>(null);
   const [selectedParcelKey, setSelectedParcelKey] = useState<string | null>(null);
@@ -379,7 +386,7 @@ export default function LandAnalysisPage() {
     ? "retry" : parcelCount === 0 ? "upload" : (missingPnuCount ?? 0) > 0 ? "pnu" : "preview";
   const nextAction = {
     retry: "저장된 필지와 PNU 상태를 다시 불러오세요.",
-    upload: "토지조서를 추가하면 필지별 지번과 증빙을 검토할 수 있습니다.",
+    upload: "토지조서를 추가하거나 PNU로 필지 검토를 시작하세요.",
     pnu: `PNU를 확인할 필지가 ${formatCount(missingPnuCount, "필지")} 있습니다.`,
     preview: "필지별 증빙을 확인하고 용도와 인허가 조건을 미리 검토하세요.",
   }[primaryAction];
@@ -460,6 +467,16 @@ export default function LandAnalysisPage() {
     }
   }
 
+  function submitManualPnus() {
+    const pnus = [...new Set(manualPnuText.trim().split(/[\s,]+/).filter(Boolean))];
+    if (!pnus.length || pnus.length > 5 || pnus.some((pnu) => !/^[0-9]{10}[12][0-9]{8}$/.test(pnu))) {
+      setManualPnuError("올바른 19자리 필지고유번호를 최대 5개 입력해 주세요.");
+      return;
+    }
+    setManualPnuError(null);
+    void runLandPod({ pnus }, false);
+  }
+
   function pauseLandPod() {
     pendingPreview.current?.abort();
     pendingPreview.current = null;
@@ -531,6 +548,30 @@ export default function LandAnalysisPage() {
             </dl>
           </section>
 
+          {activeContext && !loadError ? (
+            <details className="group rounded-re-panel border border-re-border bg-re-surface shadow-re-panel" open={parcelCount === 0 ? true : undefined}>
+              <summary className="flex min-h-12 cursor-pointer items-center gap-2 px-4 py-3 text-sm font-semibold text-re-text sm:px-5">
+                <MapPin className="h-4 w-4 text-re-action" aria-hidden="true" />PNU로 필지·인허가 확인
+              </summary>
+              <form onSubmit={(event) => { event.preventDefault(); submitManualPnus(); }}
+                className="space-y-3 border-t border-re-border px-4 py-4 sm:px-5">
+                <p className="text-sm text-re-secondary">
+                  필지고유번호로 주소와 지번을 확인하고 임시 토지조서를 만들어 인허가를 검토합니다. 한 번에 최대 5필지를 확인할 수 있습니다.
+                </p>
+                <label className="block text-sm font-semibold text-re-text" htmlFor="manual-land-pnu">필지고유번호(PNU)</label>
+                <textarea id="manual-land-pnu" rows={2} maxLength={160} value={manualPnuText}
+                  onChange={(event) => setManualPnuText(event.target.value)}
+                  disabled={running !== null}
+                  placeholder="19자리 번호를 한 줄에 하나씩 입력"
+                  className="block w-full max-w-xl rounded-re-control border border-re-border bg-re-surface px-3 py-2 text-sm text-re-text" />
+                {manualPnuError ? <p role="alert" className="text-sm text-re-danger">{manualPnuError}</p> : null}
+                <button type="submit" className={actionClass(true)} disabled={!manualPnuText.trim() || running !== null || loading}>
+                  <FileSearch className="h-4 w-4" aria-hidden="true" />입력한 PNU로 미리보기
+                </button>
+              </form>
+            </details>
+          ) : null}
+
           {visibleParcels.length ? (
             <Panel title="필지별 검토">
               <ul className="divide-y divide-re-border overflow-hidden rounded-re-control border border-re-border">
@@ -565,7 +606,11 @@ export default function LandAnalysisPage() {
           <Panel title="토지·인허가 검토" titleRef={previewHeading}>
             {preview ? (
               <>
-                <p className="mb-3 text-sm text-re-secondary">화면 전용 예비 검토입니다. 새로고침하면 사라집니다.</p>
+                <p className="mb-3 text-sm text-re-secondary">
+                  {preview.request.pnus
+                    ? "직접 입력한 PNU로 만든 임시 토지조서입니다. 계약금액과 등기 정보는 별도 근거가 필요합니다."
+                    : "화면 전용 예비 검토입니다. 새로고침하면 사라집니다."}
+                </p>
                 {typeof legalIntelligence.verifiedReferenceCount === "number" ? (
                   <p className="mb-3 text-sm font-medium text-re-secondary">
                     {legalIntelligence.verifiedReferenceCount > 0 ? `검증된 법령·조례 근거 ${legalIntelligence.verifiedReferenceCount}건` : "검증된 법령·조례 원문 근거 미확보"}
@@ -577,8 +622,9 @@ export default function LandAnalysisPage() {
               <p className="text-sm text-re-secondary">미리보기를 실행하면 계획 용도에 따른 인허가 경로와 필지별 높이 근거를 확인할 수 있습니다.</p>
             )}
             {previewSession && previewBatch ? (
-              <ParcelPreviewResults session={previewSession} batch={previewBatch} mapUrl={mapUrl}
+              <ParcelPreviewResults projectId={projectId} session={previewSession} batch={previewBatch} mapUrl={mapUrl}
                 storedPnus={new Set(parcels.map(parcelPnu).filter((pnu): pnu is string => Boolean(pnu)))}
+                manualPnus={preview?.request.pnus}
                 busy={running !== null || loading} onRequest={(request) => void runLandPod(request)}
                 onPause={running === "pod" ? pauseLandPod : undefined}
                 onRefreshBatch={supersededBatch && preview ? () => void runLandPod({ ...preview.request, parcelRevision: previewBatch.parcelRevision }, false) : undefined}
@@ -587,7 +633,8 @@ export default function LandAnalysisPage() {
             <LandLegalSummaryActions key={`${projectId}:${preview?.previewHash ?? ""}`} projectId={projectId} previewHash={preview?.previewHash} analysis={legalAnalysis} disabled={running !== null || loading || supersededBatch}
               batch={previewBatch ? {
                 parcelRevision: previewBatch.parcelRevision,
-                ...(preview?.request.parcelIndexes ? { reviewedParcelIndexes: preview.request.parcelIndexes } : { parcelOffset: preview?.request.parcelOffset ?? 0 }),
+                ...(preview?.request.pnus ? { pnus: preview.request.pnus }
+                  : preview?.request.parcelIndexes ? { reviewedParcelIndexes: preview.request.parcelIndexes } : { parcelOffset: preview?.request.parcelOffset ?? 0 }),
                 rows: previewBatch.rows.filter((row) => row.status === "confirmed" && row.pnu),
               } : undefined} />
             <Link href={intakeUrl} className="mt-3 inline-block text-sm font-semibold text-re-action underline">토지이용계획·인허가 자료 입력</Link>
@@ -739,17 +786,81 @@ function EvidenceRecordList({ records }: { records: LandEvidenceRecord[] }) {
   );
 }
 
-function ParcelPreviewResults({ session, batch, mapUrl, storedPnus, busy, onRequest, onPause, onSelectBatch, onRefreshBatch }: {
+
+function ParcelPreviewMap({ projectId, parcelRevision, parcelIndex, pnu, pnus, onClose }: {
+  projectId: string;
+  parcelRevision: string;
+  parcelIndex: number;
+  pnu: string;
+  pnus?: string[];
+  onClose: () => void;
+}) {
+  const [data, setData] = useState<MapIntelligenceData | null>(null);
+  const [message, setMessage] = useState("공식 지적도 경계를 확인하고 있습니다.");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const result = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/legal-pod/preview-map`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+          body: JSON.stringify({ parcelRevision, parcelIndex, pnu, ...(pnus ? { pnus } : {}) }),
+          signal: controller.signal,
+        });
+        if (!result.ok) {
+          throw new Error(result.status === 409
+            ? "필지 또는 PNU가 바뀌었습니다. 인허가 미리보기에서 다시 확인하세요."
+            : "지도 미리보기를 불러오지 못했습니다.");
+        }
+        const payload = await result.json() as MapIntelligenceData;
+        if (controller.signal.aborted) return;
+        const features = payload.parcelGeoJson?.features;
+        const feature = features?.[0];
+        if (features?.length === 1 && feature?.properties?.pnu === pnu
+          && (feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon")) {
+          setData(payload);
+        } else {
+          setMessage("이 필지의 공식 경계를 확인하지 못했습니다.");
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) setMessage(error instanceof Error ? error.message : "지도 미리보기를 불러오지 못했습니다.");
+      }
+    })();
+    return () => controller.abort();
+  }, [projectId, parcelRevision, parcelIndex, pnu, pnus]);
+
+  return (
+    <section aria-label="필지 지도 미리보기" className="space-y-3 rounded-re-control border border-re-border bg-re-surface p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h4 className="text-sm font-semibold text-re-text">필지 지도 미리보기</h4>
+          <p className="text-xs text-re-secondary">VWorld 지적도 · PNU {pnu} · 화면에서만 확인</p>
+        </div>
+        <button type="button" className={actionClass(false)} onClick={onClose}>지도 닫기</button>
+      </div>
+      {data ? <PreviewMap data={data} compact focusPnu={pnu} />
+        : <p role="status" className="text-sm text-re-secondary">{message}</p>}
+    </section>
+  );
+}
+
+function ParcelPreviewResults({ projectId, session, batch, mapUrl, storedPnus, manualPnus, busy, onRequest, onPause, onSelectBatch, onRefreshBatch }: {
+  projectId: string;
   session: PreviewSession;
   batch: PreviewParcelBatch;
   mapUrl: string;
   storedPnus: ReadonlySet<string>;
+  manualPnus?: string[];
   busy: boolean;
   onRequest: (request: PreviewRequest) => void;
   onPause?: () => void;
   onSelectBatch: (index: number) => void;
   onRefreshBatch?: () => void;
 }) {
+  const [mapSelection, setMapSelection] = useState<number | null>(null);
+  const mapRow = batch.rows.find((row) => row.parcelIndex === mapSelection && row.status === "confirmed" && row.pnu);
   const rows = Object.values(session.rows);
   const confirmed = rows.filter((row) => row.status === "confirmed").length;
   const ambiguous = rows.filter((row) => row.status === "ambiguous").length;
@@ -808,12 +919,19 @@ function ParcelPreviewResults({ session, batch, mapUrl, storedPnus, busy, onRequ
                   <Link href={`${mapUrl}${mapUrl.includes("?") ? "&" : "?"}pnu=${pnu}`} className={actionClass(false)}>
                     <MapPin className="h-4 w-4" aria-hidden="true" /> 지도에서 보기
                   </Link>
-                ) : <p className="self-center text-xs text-re-secondary">{pnu ? "미리보기 PNU · 저장된 지도에는 미반영" : "지도 표시용 PNU 미확인"}</p>}
+                ) : pnu ? (
+                  <button type="button" onClick={() => setMapSelection(row.parcelIndex)} className={actionClass(false)}>
+                    <MapPin className="h-4 w-4" aria-hidden="true" /> 지도 미리보기
+                  </button>
+                ) : <p className="self-center text-xs text-re-secondary">지도 표시용 PNU 미확인</p>}
               </li>
             );
           })}
         </ul>
       ) : null}
+      {mapRow?.pnu ? <ParcelPreviewMap key={batch.parcelRevision + ":" + mapRow.pnu + ":" + mapRow.parcelIndex}
+        projectId={projectId} parcelRevision={batch.parcelRevision} parcelIndex={mapRow.parcelIndex}
+        pnu={mapRow.pnu} pnus={manualPnus} onClose={() => setMapSelection(null)} /> : null}
       {batch.jurisdictions?.length ? (
         <details className="rounded-re-control border border-re-border bg-re-surface px-3 py-2 text-xs text-re-secondary">
           <summary className="min-h-9 cursor-pointer py-2 font-semibold text-re-text">이 묶음의 관할·용도지역 근거</summary>
@@ -858,8 +976,8 @@ function ParcelPreviewResults({ session, batch, mapUrl, storedPnus, busy, onRequ
         ) : null}
         {retryIndexes.length ? (
           <button type="button" className={actionClass(false)} disabled={busy}
-            onClick={() => onRequest({ parcelIndexes: retryIndexes, parcelRevision: batch.parcelRevision })}>
-            확인이 필요한 필지 다시 조회 ({retryIndexes.length})
+            onClick={() => onRequest(manualPnus ? { pnus: manualPnus } : { parcelIndexes: retryIndexes, parcelRevision: batch.parcelRevision })}>
+            {manualPnus ? "입력 PNU 다시 조회" : "확인이 필요한 필지 다시 조회 (" + retryIndexes.length + ")"}
           </button>
         ) : null}
       </div>

@@ -216,7 +216,9 @@ def _grouped_parcels(project: Dict[str, Any]) -> "List[List[Dict[str, Any]]]":
             rows.append((parcel, address_key, pnu))
     for parcel, address_key, pnu in rows:
         known_addresses = addresses_by_pnu.get(pnu, set())
-        if address_key:
+        if requested_pnu := parcel.get("requestedPnu"):
+            key = ("requested_pnu", requested_pnu)
+        elif address_key:
             key = address_key
         elif len(known_addresses) == 1:
             key = next(iter(known_addresses))

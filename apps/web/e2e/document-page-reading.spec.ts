@@ -254,3 +254,74 @@ for (const [mismatch, replacement] of [
     expect(state.mutations).toEqual([]);
   });
 }
+
+test("a failed review request does not show zero and refresh restores four archived PDF runs", async ({ page }) => {
+  const projectId = "recover-documents";
+  let available = false;
+  const sources = Array.from({ length: 4 }, (_, i) => {
+    const archive = String(i + 1).repeat(64);
+    return { archiveId: archive, originalFileName: "보관 문서 " + (i + 1) + ".pdf", contentType: "application/pdf",
+      archiveIntegrityStatus: "verified", downloadUrl: "/projects/" + projectId + "/source-documents/" + archive + "/download" };
+  });
+  const packages = sources.map((source, i) => ({
+    parsingRun: { parsingRunId: "run-" + i, documentVersionId: "version-" + i, executionStatus: "completed" },
+    documentVersion: { documentVersionId: "version-" + i, archiveId: source.archiveId, mediaType: "application/pdf" },
+    candidates: [], conflicts: [], reviewDecisions: [], canonicalSelections: [], approvedInputSnapshots: [],
+  }));
+
+  await page.route("**/api/backend/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/auth/me")) return route.fulfill({ json: {
+      authenticated: true, user: { userId: "recover", tenantId: "tenant-doc", role: "viewer" },
+      permissions: ["project:read", "evidence:read"],
+    } });
+    if (path.endsWith("/workspace/context")) return route.fulfill({ status: 500, json: {} });
+    if (path.endsWith("/workspace/document-review")) return available
+      ? route.fulfill({ json: {
+        schemaVersion: "realytics-document-review-workspace-v1", viewModelVersion: "document-review-workspace-test",
+        projectId, snapshotId: "review-recovery", snapshotHash: hash, sourceDocuments: sources,
+        runs: packages.map((entry) => entry.parsingRun), packages, warnings: ["DOCUMENT_GLOSSARY_UNAVAILABLE"],
+      } })
+      : route.fulfill({ status: 500, json: { detail: "internal" } });
+    return route.fulfill({ json: {} });
+  });
+
+  await page.goto("/project/recover-documents/documents/review", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("alert").filter({ hasText: "문서 목록과 파싱 결과를 불러오지 못했습니다." })).toBeVisible();
+  await expect(page.getByText("보관 문서", { exact: true }).locator("..")).toContainText("조회 불가");
+  await expect(page.getByText("검토할 문서와 Parser V2 후보값이 없습니다.")).toHaveCount(0);
+
+  available = true;
+  await page.getByRole("button", { name: "최신 원장 새로고침" }).click();
+  await expect(page.getByText("보관 문서", { exact: true }).locator("..")).toContainText("4건");
+  const list = page.getByRole("complementary", { name: "문서 및 위치 탐색" });
+  await expect(list.getByRole("button", { name: /보관 문서 [1-4]\.pdf/ })).toHaveCount(4);
+  await expect(list.getByRole("button", { name: /보관 문서 1\.pdf/ })).toContainText("완료");
+  await expect(list.getByRole("button", { name: /보관 문서 1\.pdf/ })).toContainText("후보 0건");
+  await expect(page.getByText("DOCUMENT_GLOSSARY_UNAVAILABLE")).toHaveCount(0);
+});
+
+
+
+test("source review shows two Korean tasks and only values from the selected document", async ({ page }) => {
+  const state = await fixture(page, true);
+  await expect(page.getByRole("heading", { name: "문서 검토", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "원본 확인하기", exact: true })).toBeVisible();
+  await expect(page.getByTestId("document-review-glass")).toBeVisible();
+  await expect(page.getByTestId("document-review-parallax")).toBeAttached();
+  await expect(page.getByRole("tab", { name: "파싱값", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "검토할 항목", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "검토 결정", exact: true })).toBeHidden();
+  await expect(page.getByText(/서버 Read Model/)).toBeHidden();
+  const review = page.getByRole("complementary", { name: "문서 검토 Inspector", exact: true });
+  await expect(review.getByText("feasibility.total_project_cost", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("선택할 근거 locator가 없습니다.", { exact: true })).toHaveCount(0);
+  await page.getByRole("complementary", { name: "문서 및 위치 탐색", exact: true }).getByRole("button", { name: /다른 원본.pdf/ }).click();
+  await expect(review.getByText("feasibility.total_project_cost", { exact: true })).toBeVisible();
+  await page.getByText("검토 더보기", { exact: true }).click();
+  await expect(page.getByRole("tab", { name: "검토 결정", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "검토 결정", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "검토 결정", exact: true })).toHaveAttribute("aria-selected", "true");
+  expect(state.mutations).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

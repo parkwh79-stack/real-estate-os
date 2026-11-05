@@ -27,6 +27,7 @@ def build_document_review_workspace_read_model(
     source_documents: Sequence[Mapping[str, Any]],
     run_packages: Sequence[Mapping[str, Any]],
     glossary_candidates: Sequence[Mapping[str, Any]],
+    warnings: Sequence[str] = (),
     observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Return one deterministic review payload without inventing authority."""
@@ -79,7 +80,7 @@ def build_document_review_workspace_read_model(
             "warningCodes": [] if as_of_date else ["SOURCE_AS_OF_DATE_UNKNOWN"],
         },
         "issueSummary": _issue_summary(review_queue),
-        "warnings": [],
+        "warnings": list(warnings),
         "authority": {
             "candidateOnly": True,
             "authoritativeProjectionMutated": False,

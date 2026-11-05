@@ -5,24 +5,26 @@ import { NextRequest } from "next/server";
 // document.write() to pull in Cesium etc., which the browser blocks for
 // asynchronously-loaded scripts. Loaded via <iframe> so the SDK script in <head>
 // runs during the iframe's own initial parse, where document.write works.
-const VWORLD_KEY = process.env.NEXT_PUBLIC_VWORLD_API_KEY || process.env.VWORLD_API_KEY || "";
+const browserKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY?.trim();
+const responseHeaders = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
 
-function num(v: string | null, fallback: number): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+function coordinate(value: string | null, limit: number): number | null {
+  const parsed = value?.trim() ? Number(value) : NaN;
+  return Number.isFinite(parsed) && Math.abs(parsed) <= limit ? parsed : null;
 }
 
 export async function GET(req: NextRequest) {
-  if (!VWORLD_KEY) {
-    return new Response("<p>VWorld key not configured</p>", {
-      status: 503,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
+  if (!browserKey) {
+    return new Response("<p>현재 3D 지도를 사용할 수 없습니다.</p>", { status: 503, headers: responseHeaders });
   }
   const sp = req.nextUrl.searchParams;
-  const lng = num(sp.get("lng"), 126.9779);
-  const lat = num(sp.get("lat"), 37.5663);
-  const height = num(sp.get("z"), 1800);
+  const lng = coordinate(sp.get("lng"), 180);
+  const lat = coordinate(sp.get("lat"), 90);
+  if (lng === null || lat === null) {
+    return new Response("<p>프로젝트 위치를 확인할 수 없습니다.</p>", { status: 400, headers: responseHeaders });
+  }
+  const requestedHeight = Number(sp.get("z"));
+  const height = Number.isFinite(requestedHeight) && requestedHeight > 0 ? requestedHeight : 1800;
 
   const html = `<!DOCTYPE html>
 <html lang="ko">
@@ -32,7 +34,7 @@ export async function GET(req: NextRequest) {
   <title>VWorld 3D</title>
   <style>html,body,#vmap{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#eef2f7}
   #vw-status{position:absolute;top:12px;left:12px;z-index:9;font:600 13px/1.4 system-ui,sans-serif;color:#475569;background:rgba(255,255,255,.9);padding:6px 10px;border-radius:8px}</style>
-  <script type="text/javascript" src="https://map.vworld.kr/js/webglMapInit.js.do?version=3.0&apiKey=${VWORLD_KEY}"></script>
+  <script type="text/javascript" src="https://map.vworld.kr/js/webglMapInit.js.do?version=3.0&amp;apiKey=${encodeURIComponent(browserKey)}"></script>
 </head>
 <body>
   <div id="vw-status">3D 엔진 로딩 중…</div>
@@ -40,10 +42,17 @@ export async function GET(req: NextRequest) {
   <script type="text/javascript">
     (function () {
       var tries = 0;
+      function notify(status) {
+        if (window.parent !== window) window.parent.postMessage("realytics:vworld-3d-" + status, window.location.origin);
+      }
+      function showUnavailable() {
+        document.getElementById("vw-status").textContent = "3D 지도를 불러오지 못했습니다.";
+        notify("unavailable");
+      }
       function boot() {
         tries += 1;
         if (typeof vw === "undefined" || !vw.Map) {
-          if (tries > 80) { document.getElementById("vw-status").textContent = "3D 엔진 로드 실패 (vw 미준비)"; return; }
+          if (tries > 80) return showUnavailable();
           return setTimeout(boot, 250);
         }
         try {
@@ -59,9 +68,10 @@ export async function GET(req: NextRequest) {
           });
           map.setMapId("vmap");
           map.start();
-          var s = document.getElementById("vw-status"); if (s) s.remove();
-        } catch (e) {
-          document.getElementById("vw-status").textContent = "3D 초기화 오류: " + (e && e.message ? e.message : e);
+          document.getElementById("vw-status").remove();
+          notify("ready");
+        } catch {
+          showUnavailable();
         }
       }
       boot();
@@ -72,6 +82,6 @@ export async function GET(req: NextRequest) {
 
   return new Response(html, {
     status: 200,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    headers: responseHeaders,
   });
 }

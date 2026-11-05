@@ -5,6 +5,7 @@ from agents.market_product_depth_agent import MarketProductDepthAgent
 from agents.pod_ai_reviewer_agent import _market_product_findings
 from main import app
 from routers import projects
+from use_cases import market_product_depth
 
 
 def _isolate(tmp_path, monkeypatch, name):
@@ -17,10 +18,10 @@ def _project_with_sources():
     return {
         "project": {"name": "시장성 QA", "type": "apartment"},
         "source_documents": [
-            {"documentType": "사업계획서", "originalFileName": "본리동_사업계획서.pdf"},
-            {"documentType": "매각제안서", "originalFileName": "매각주관사_분양대행_제안.pdf"},
+            {"documentType": "사업계획서", "originalFileName": "본리동_사업계획서.pdf", "dataProvider": "developer"},
+            {"documentType": "매각제안서", "originalFileName": "매각주관사_분양대행_제안.pdf", "dataProvider": "sales_agent"},
         ],
-        "documentParsedMarketFacts": {"proposedPricePerPy": 70_000_000},
+        "documentParsedMarketFacts": {"proposedPricePerPy": 70_000_000, "dataProvider": "developer"},
         "market": {
             "transactionComparables": [
                 {"source": "molit_rtms", "sourceType": "public_api", "pricePerPy": 60_000_000, "address": "인근 A"},
@@ -34,8 +35,8 @@ def _project_with_sources():
 def test_provider_classification_developer_and_sales_agent():
     depth = MarketProductDepthAgent().analyze(_project_with_sources(), {}, options={"podAiReviewMode": "deterministic"})
     prov = depth["sourceProvenance"]
-    assert prov["developerProvided"] >= 1  # 사업계획서 → 시행사
-    assert prov["salesAgentProvided"] >= 1  # 매각제안서 → 매각 주관사
+    assert prov["developerProvided"] == 1
+    assert prov["salesAgentProvided"] == 1
     assert prov["publicData"] >= 2  # 국토부 실거래가 2건
     assert "developer" in prov["byProvider"] and prov["byProvider"]["developer"]["label"] == "시행사 제공 자료"
 
@@ -53,10 +54,11 @@ def test_provider_comparison_anchors_on_public_median():
 def test_absorption_model_uses_benchmark_when_no_forecast():
     depth = MarketProductDepthAgent().analyze(
         {"project": {"type": "apartment"}, "architectural_plan": {"total_units": 100}}, {},
-        options={"podAiReviewMode": "deterministic"},
+        options={"podAiReviewMode": "deterministic", "allowPlanningBenchmark": True},
     )
     ab = depth["absorptionModel"]
     assert ab["rateBasis"] == "planning_benchmark"
+    assert ab["status"] == "planning_only"
     assert ab["monthlyAbsorptionRate"] == 0.06
     assert ab["estimatedMonthsToSellout"]
     assert ab["curve"] and ab["curve"][-1]["cumulativeRate"] <= 1.0
@@ -64,7 +66,7 @@ def test_absorption_model_uses_benchmark_when_no_forecast():
 
 def test_three_percent_absorption_reaches_sellout_in_month_34():
     result = MarketProductDepthAgent()._absorption_model(
-        {"project": {"type": "commercial"}, "architectural_plan": {"total_units": 100}}, {}
+        {"project": {"type": "commercial"}, "architectural_plan": {"total_units": 100}}, {}, allow_benchmark=True
     )
     assert result["estimatedMonthsToSellout"] == 34
     assert result["curve"][-1] == {"month": 34, "cumulativeRate": 1.0}
@@ -128,3 +130,123 @@ def test_market_product_depth_endpoint(tmp_path, monkeypatch):
     assert body["schemaVersion"] == "realytics-market-product-depth-v1"
     assert body["sourceProvenance"]["salesAgentProvided"] >= 1
     client.delete(f"/projects/{project_id}")
+
+
+
+def test_unattributed_archive_is_visible_without_fake_forecast_or_public_anchor():
+    depth = MarketProductDepthAgent().analyze(
+        {
+            "project": {"type": "apartment"},
+            "architectural_plan": {"total_units": 100},
+            "source_documents": [{"archiveId": "doc-1", "originalFileName": "매각주관사_제안서.pdf"}],
+            "documentParsedMarketFacts": {"proposedPricePerPy": 70_000_000},
+            "market": {"transactionComparables": [{"sourceType": "public_api", "pricePerPy": 62_000_000}]},
+            "marketabilityAnalysis": {"absorptionForecast": {"monthlyAbsorptionRate": 0.05}},
+        },
+        {},
+        options={"podAiReviewMode": "deterministic"},
+    )
+    provenance = depth["sourceProvenance"]
+    assert provenance["archivedDocumentCount"] == 1
+    assert provenance["byProvider"]["unspecified"]["items"][0]["archiveId"] == "doc-1"
+    assert provenance["salesAgentProvided"] == provenance["publicData"] == 0
+    assert depth["providerComparison"]["publicMedianPerPy"] is None
+    assert all(row["proposedPricePerPy"] is None for row in depth["providerComparison"]["rows"])
+    assert depth["absorptionModel"]["status"] == "insufficient_data"
+    assert depth["absorptionModel"]["monthlyAbsorptionRate"] is None
+    assert depth["absorptionModel"]["estimatedMonthsToSellout"] is None
+
+
+def test_price_requires_located_review_and_named_archived_provider():
+    proposed = {
+        "canonicalField": "market.proposedPricePerPy",
+        "normalizedValue": 70_000_000,
+        "sourceDocument": {"archiveId": "doc-1"},
+        "sourceLocator": {"page": 3},
+        "locatorStatus": "located",
+        "validationStatus": "pod_validated",
+    }
+    project = {
+        "source_documents": [{"archiveId": "doc-1", "dataProvider": "developer"}],
+        "parsedFacts": [
+            proposed,
+            {**proposed, "normalizedValue": 60_000_000, "validationStatus": "unverified"},
+            {**proposed, "normalizedValue": 50_000_000, "sourceDocument": {"archiveId": "other-project"}},
+        ],
+    }
+    agent = MarketProductDepthAgent()
+    assert agent._provider_proposed_prices(project) == {"developer": 70_000_000, "sales_agent": None}
+    project["parsedFacts"].append({**proposed, "normalizedValue": 80_000_000})
+    assert agent._provider_proposed_prices(project) == {"developer": None, "sales_agent": None}
+
+
+def test_display_lookup_requires_one_resolved_district_and_known_asset(monkeypatch):
+    class DisplayConnector:
+        def configured(self):
+            return True
+
+        def fetch(self, **options):
+            calls.append(options)
+            return [
+                {"dealKind": "trade", "pricePerPy": 60_000_000, "address": "test 1"},
+                {"dealKind": "trade", "pricePerPy": 64_000_000, "address": "test 2"},
+            ], {"status": "ok"}
+
+    calls = []
+    monkeypatch.setattr(market_product_depth, "molit_display_connector", DisplayConnector)
+    monkeypatch.setattr(market_product_depth, "recent_deal_yms", lambda n: ["202609"])
+    parcel = {"pnu": "1111010100100010000"}
+    project = {"project": {"type": "apartment"}, "land": parcel}
+    result = market_product_depth.project_market_public_lookup(project)
+    assert result == {
+        "status": "available", "count": 2, "sourceName": "국토교통부 실거래가",
+        "lawdCd": "11110", "assetType": "apartment", "month": "202609", "medianPerPy": 62_000_000,
+    }
+    assert calls == [{"lawd_cd": "11110", "deal_ym": "202609", "asset_type": "apartment", "deal_kind": "trade", "num_rows": 30}]
+
+    monkeypatch.setattr(market_product_depth, "canonical_project_parcel_rows", lambda source: [
+        parcel, {"pnu": "1114010100100010000"},
+    ])
+    assert market_product_depth.project_market_public_lookup(project)["status"] == "needs_input"
+    assert len(calls) == 1
+
+
+def test_marketability_live_lookup_remains_separate_and_rejects_save(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch, "market-display.sqlite3")
+    calls = []
+
+    def lookup(project):
+        calls.append(project["project"]["id"])
+        return {"status": "available", "count": 1, "sourceName": "official", "medianPerPy": 62_000_000}
+
+    monkeypatch.setattr(market_product_depth, "project_market_public_lookup", lookup)
+    client = TestClient(app)
+    created = client.post("/projects/", json={"project": {"name": "market read", "type": "apartment"}})
+    project_id = created.json()["project"]["id"]
+    path = f"/projects/{project_id}/marketability/analyze"
+    baseline = client.post(path, json={})
+    before = client.get(f"/projects/{project_id}").json()
+    live = client.post(path, params={"live_comparables": True}, json={})
+    assert live.status_code == 200
+    assert live.json()["publicLookup"]["medianPerPy"] == 62_000_000
+    assert {key: value for key, value in live.json().items() if key != "publicLookup"} == baseline.json()
+    rejected = client.post(path, params={"live_comparables": True}, json={"persist": True})
+    assert rejected.status_code == 400
+    assert client.get(f"/projects/{project_id}").json() == before
+    assert calls == [project_id]
+    client.delete(f"/projects/{project_id}")
+
+
+
+def test_bucket_type_does_not_identify_a_public_or_partner_provider():
+    depth = MarketProductDepthAgent().analyze(
+        {"market": {
+            "transactionComparables": [{"sourceType": "public_api", "pricePerPy": 50_000_000}],
+            "listingComparables": [{"sourceType": "partner_api", "pricePerPy": 55_000_000}],
+        }},
+        {},
+        options={"podAiReviewMode": "deterministic"},
+    )
+    assert depth["sourceProvenance"]["publicData"] == 0
+    assert depth["sourceProvenance"]["partnerProvided"] == 0
+    assert depth["sourceProvenance"]["unspecified"] == 2

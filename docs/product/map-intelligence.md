@@ -66,3 +66,9 @@ allowing parcel-by-parcel inspection.
 - Persist selected parcel groups as named review scopes.
 - Connect selected parcel groups to Risk Register and Evidence Graph.
 - Add radius-based market comparable search from selected parcel centroid.
+
+## 운영 3D와 2D 연결 (2026-11-05)
+
+3D WebGL은 배포 도메인에서 허용된 브라우저용 `NEXT_PUBLIC_VWORLD_API_KEY`로 시작한다. 서버 전용 `VWORLD_API_KEY`는 브라우저 HTML로 보내지 않는다. 브라우저 키가 없는 경우 같은 프로젝트·트랙·선택 PNU의 기존 2D 필지 지도를 표시한다. 사용자가 제공한 키를 Vercel 브라우저 환경과 Google Secret Manager의 서버 환경에 분리 연결한다. 공식 지오코더에서 공개 주소의 좌표 응답을 확인했다. 3D SDK 시작에 실패하거나 좌표가 없으면 제한 사유를 표시하고 같은 프로젝트의 2D 지도를 제공한다.
+
+VWorld 프록시의 Referer는 실제 요청의 서비스 주소를 사용한다. 운영 코드의 localhost 고정 헤더는 제거했다.

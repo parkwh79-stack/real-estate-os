@@ -498,8 +498,9 @@ async function responseError(response: Response, fallback: string) {
   return `${fallback} (${response.status})`;
 }
 
-async function fetchJson<T>(url: string, fallback: string): Promise<T> {
+async function fetchJson<T>(url: string, fallback: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
+    signal,
     cache: "no-store",
     headers: authHeaders("web-auditor"),
   });
@@ -507,11 +508,12 @@ async function fetchJson<T>(url: string, fallback: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function fetchDocumentReviewData(projectId: string): Promise<DocumentReviewData> {
+export async function fetchDocumentReviewData(projectId: string, signal?: AbortSignal): Promise<DocumentReviewData> {
   const projectPath = encodeURIComponent(projectId);
   const result = await fetchJson<DocumentReviewData>(
     `${apiBase}/projects/${projectPath}/workspace/document-review`,
-    "문서 검토 Read Model을 불러오지 못했습니다.",
+    "문서 검토 결과를 불러오지 못했습니다.",
+    signal,
   );
   if (
     result.schemaVersion !== "realytics-document-review-workspace-v1"

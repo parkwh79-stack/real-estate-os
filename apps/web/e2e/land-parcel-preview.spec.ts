@@ -8,6 +8,7 @@ test("land preview continues, retries unresolved parcels and saves only the sele
   let releaseSecondBatch: () => void = () => {};
   const secondBatch = new Promise<void>((resolve) => { releaseSecondBatch = resolve; });
   const saveBodies: unknown[] = [];
+  const mapBodies: unknown[] = [];
   const row = (parcelIndex: number, status: "confirmed" | "ambiguous" = "confirmed") => ({
     parcelIndex,
     address: `합성동 ${parcelIndex}`,
@@ -60,6 +61,10 @@ test("land preview continues, retries unresolved parcels and saves only the sele
         },
       } });
     }
+    if (path.endsWith("/legal-pod/preview-map")) {
+      mapBodies.push(route.request().postDataJSON());
+      return route.fulfill({ json: { parcelGeoJson: { type: "FeatureCollection", features: [] } } });
+    }
     if (path.endsWith("/legal-pod/preview-summary") && route.request().method() === "POST") {
       saveBodies.push(route.request().postDataJSON());
       return route.fulfill({ json: { recordId: "saved-preview-batch", summary: { parcels: [{ parcelIndex: 2, parcelLabel: "합성동 2", pnu: pnu(2) }] } } });
@@ -73,7 +78,7 @@ test("land preview continues, retries unresolved parcels and saves only the sele
   await expect(preview.getByRole("status")).toContainText("전체 6필지 중 5필지 상태 확인");
   await expect(preview.getByRole("status")).toContainText("후보 확인 1필지");
   await expect(preview.getByRole("link", { name: "지도에서 보기" })).toHaveAttribute("href", `/project/${projectId}/map?track=development&pnu=${pnu(1)}`);
-  await expect(preview.getByText("미리보기 PNU · 저장된 지도에는 미반영")).toHaveCount(3);
+  await expect(preview.getByRole("button", { name: "지도 미리보기" })).toHaveCount(3);
   await expect(preview.getByText(/출처 VWorld 토지이용계획/)).toHaveCount(4);
   await preview.getByText("이 묶음의 관할·용도지역 근거").click();
   await expect(preview.getByText(/합성구 · 제2종일반주거지역/)).toBeVisible();
@@ -83,6 +88,13 @@ test("land preview continues, retries unresolved parcels and saves only the sele
   releaseSecondBatch();
   await expect(preview.getByRole("status")).toContainText("전체 6필지 중 6필지 상태 확인");
   await expect(preview.getByRole("button", { name: "다음 필지 확인" })).toHaveCount(0);
+  await preview.getByRole("listitem").filter({ hasText: "합성동 6" }).getByRole("button", { name: "지도 미리보기" }).click();
+  const map = preview.getByRole("region", { name: "필지 지도 미리보기" });
+  await expect(map).toContainText("이 필지의 공식 경계를 확인하지 못했습니다.");
+  expect(mapBodies.length).toBeGreaterThan(0);
+  for (const body of mapBodies) expect(body).toEqual({ parcelIndex: 6, parcelRevision: revision, pnu: pnu(6) });
+  expect(saveBodies).toHaveLength(0);
+  await map.getByRole("button", { name: "지도 닫기" }).click();
   await preview.getByLabel("검토한 필지 묶음").selectOption("0");
   await preview.getByRole("button", { name: "확인이 필요한 필지 다시 조회 (1)" }).click();
   await expect(preview.getByRole("status")).toContainText("PNU 확인 6필지");
@@ -101,4 +113,61 @@ test("land preview continues, retries unresolved parcels and saves only the sele
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("button", { name: "토지·인허가 미리보기", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "필지별 조회 진행" })).toHaveCount(0);
+});
+
+test("manual PNU creates a temporary land ledger and saves only an explicit selection", async ({ page }) => {
+  const pnu = "1111010100100010000";
+  const revision = "1".repeat(64);
+  const hash = "2".repeat(64);
+  const previewRequests: unknown[] = [];
+  const saves: unknown[] = [];
+
+  await page.route("**/api/backend/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/auth/me")) return route.fulfill({ json: {
+      authenticated: true, user: { userId: "land-user", tenantId: "land-tenant", role: "analyst" },
+      permissions: ["project:read", "project:analyze", "project:write"],
+    } });
+    if (path.endsWith("/workspace/context")) return route.fulfill({ json: {
+      projectId: "manual-land", projectMemory: { projectName: "직접 PNU 검토" },
+      pageData: { landLedger: { parcels: [], summary: { parcelCount: 0, pnuCount: 0 } } },
+    } });
+    if (path.endsWith("/legal-pod/preview")) {
+      previewRequests.push(route.request().postDataJSON());
+      return route.fulfill({ json: {
+        previewOnly: true, previewHash: hash, legalReview: {},
+        parcelBatch: {
+          source: "manual_pnu", parcelRevision: revision, totalParcels: 1, nextOffset: null,
+          rows: [{ parcelIndex: 1, requestedPnu: pnu, pnu, status: "confirmed", address: "합성시 시험동 1",
+            landUseStatus: "confirmed", zoning: "제2종일반주거지역" }],
+          jurisdictions: [],
+        },
+      } });
+    }
+    if (path.endsWith("/legal-pod/preview-summary") && route.request().method() === "POST") {
+      saves.push(route.request().postDataJSON());
+      return route.fulfill({ json: { recordId: "explicit-save", summary: {} } });
+    }
+    return route.fulfill({ json: {} });
+  });
+
+  await page.goto("/project/manual-land/land?track=development", { waitUntil: "domcontentloaded" });
+  const input = page.getByLabel("필지고유번호(PNU)");
+  const submit = page.getByRole("button", { name: "입력한 PNU로 미리보기" });
+  await input.fill("123");
+  await submit.click();
+  await expect(page.getByText("올바른 19자리 필지고유번호를 최대 5개 입력해 주세요.")).toBeVisible();
+  expect(previewRequests).toEqual([]);
+
+  await input.fill(pnu);
+  await submit.click();
+  await expect(page.getByText(/직접 입력한 PNU로 만든 임시 토지조서입니다/)).toBeVisible();
+  await expect(page.getByRole("listitem").filter({ hasText: "합성시 시험동 1" })).toBeVisible();
+  expect(previewRequests).toEqual([{ pnus: [pnu] }]);
+  expect(saves).toEqual([]);
+
+  await page.getByRole("checkbox", { name: "인허가 경로", exact: true }).check();
+  await page.getByRole("button", { name: "선택 항목만 저장", exact: true }).click();
+  await expect(page.getByText("저장한 예비 검토 1")).toBeVisible();
+  expect(saves).toEqual([{ pnus: [pnu], parcelRevision: revision, sections: ["permit"], parcelIndexes: [], expectedPreviewHash: hash }]);
 });

@@ -421,7 +421,7 @@ def _parcel_batch_result(
             pnu in verified_pnus or pnu in land_use_by_pnu
             or (
                 isinstance(resolution, dict) and resolution.get("lotVerification") == "verified"
-                and parcel.get("pnuMatchMethod") in {"pnu_construction", "address_geocode"}
+                and parcel.get("pnuMatchMethod") in {"pnu_construction", "address_geocode", "manual_pnu_exact"}
             )
         )
         if confirmed:
@@ -461,7 +461,8 @@ def _parcel_batch_result(
             locators.append(planning_locator)
         row = {
             "parcelIndex": index,
-            "parcelLabel": parcel.get("normalizedLotNumber") or parcel.get("lotNumber") or parcel.get("addressFragment"),
+            **({"requestedPnu": parcel["requestedPnu"]} if parcel.get("requestedPnu") else {}),
+            "parcelLabel": parcel.get("normalizedLotNumber") or parcel.get("lotNumber") or parcel.get("addressFragment") or parcel.get("requestedPnu"),
             "address": parcel_lookup_address(parcel, address) or parcel.get("addressFragment"),
             "pnu": pnu if confirmed else None,
             "status": status,
@@ -512,6 +513,7 @@ def run_legal_pod_use_case(
     *,
     persist: bool = True,
     parcel_batch: ParcelPreviewBatch | None = None,
+    manual_pnu_preview: bool = False,
 ) -> Dict[str, Any]:
     """Run a Land-Legal review, optionally without any result persistence."""
     options = input_data or {}
@@ -522,7 +524,7 @@ def run_legal_pod_use_case(
         parcels = _parcel_source_rows(project_data)
         preview_resolution = None
         selected_indexes = set(parcel_batch.indexes) if parcel_batch else None
-        if not persist and vworld_configured() and any(
+        if not persist and not manual_pnu_preview and vworld_configured() and any(
             not parcel_pnu(parcel)
             for index, parcel in enumerate(parcels, start=1)
             if selected_indexes is None or index in selected_indexes
@@ -651,7 +653,7 @@ def run_legal_pod_use_case(
         parcel_pnus.update({parcel_pnu(review_data["land"])} - {""})
     persisted_land_records = [
         record for record in list_land_evidence_records(str(project_id))
-        if not record.get("pnu") or record.get("pnu") in parcel_pnus
+        if record.get("pnu") in parcel_pnus or (not manual_pnu_preview and not record.get("pnu"))
     ]
     if parcel_batch:
         persisted_land_records = [

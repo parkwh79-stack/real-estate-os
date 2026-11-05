@@ -162,6 +162,119 @@ def test_workspace_context_reads_normalized_data_without_compatibility_state(mon
     assert "landEvidence" in degraded.json()["unavailableSections"]
 
 
+def test_normalized_document_review_keeps_archives_and_runs_without_legacy_glossary(monkeypatch):
+    from core import authz
+    from use_cases.parser_v2_records import (
+        DOCUMENT_VERSION_RECORD_TYPE,
+        PARSED_FACT_CANDIDATE_RECORD_TYPE,
+        PARSING_RUN_RECORD_TYPE,
+    )
+
+    authority = Authority("tenant-a")
+    records = {kind: [] for kind in (
+        DOCUMENT_VERSION_RECORD_TYPE, PARSING_RUN_RECORD_TYPE, PARSED_FACT_CANDIDATE_RECORD_TYPE,
+    )}
+    source_documents = []
+    for index in range(1, 5):
+        archive_id = str(index) * 64
+        document_version_id = f"version-{index}"
+        run_id = f"run-{index}"
+        source_documents.append({
+            "archiveId": archive_id,
+            "originalFileName": f"plan-{index}.pdf",
+            "downloadUrl": f"/projects/p/source-documents/{archive_id}/download",
+        })
+        scope = {"projectId": "p", "tenantId": "tenant-a", "documentVersionId": document_version_id}
+        records[DOCUMENT_VERSION_RECORD_TYPE].append({
+            **scope, "recordType": DOCUMENT_VERSION_RECORD_TYPE, "archiveId": archive_id,
+        })
+        records[PARSING_RUN_RECORD_TYPE].append({
+            **scope, "recordType": PARSING_RUN_RECORD_TYPE,
+            "parsingRunId": run_id, "executionStatus": "completed",
+        })
+        records[PARSED_FACT_CANDIDATE_RECORD_TYPE].append({
+            **scope, "recordType": PARSED_FACT_CANDIDATE_RECORD_TYPE,
+            "parsingRunId": run_id, "candidateId": f"candidate-{index}",
+            "fieldKey": "cost.total_project_cost", "validationStatus": "passed",
+            "reviewStatus": "pending", "authority": "submitted_document",
+            "evidence": [{"evidenceId": f"evidence-{index}", "documentVersionId": document_version_id,
+                          "pageNumber": 1, "rawTextSha256": archive_id}],
+        })
+    authority.row["source_documents"] = source_documents
+    saved = deepcopy(authority.row)
+    for module in (main, projects, storage):
+        monkeypatch.setattr(module, "storage_backend", lambda: "postgres")
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+    monkeypatch.setattr(projects, "PROJECTS_DB", {})
+    monkeypatch.setattr(projects, "PostgresProjectRepository", lambda **_kw: authority)
+    monkeypatch.setattr(projects, "PARSER_V2_RUNTIME_DEPENDENCIES", {})
+
+    def identity(request):
+        return {
+            "authenticated": True,
+            "user": {"tenantId": request.headers.get("x-test-tenant", "tenant-a"), "userId": "reviewer"},
+            "permissions": [] if request.headers.get("x-test-deny") else ["evidence:read"],
+        }
+
+    for module in (authz, main, projects):
+        monkeypatch.setattr(module, "identity_context_from_request", identity)
+
+    def forbid_legacy(*_args, **_kw):
+        raise AssertionError("Normalized review tried to read legacy glossary state")
+
+    monkeypatch.setattr(storage, "_load_json_state", forbid_legacy)
+    monkeypatch.setattr(projects, "list_glossary_candidates_use_case", forbid_legacy)
+    calls = []
+    events = []
+
+    class DealState:
+        def __init__(self, *, tenant_id, **_kw):
+            assert tenant_id == "tenant-a"
+
+        def list_records(self, project_id, *, record_type, **_kw):
+            assert project_id == "p"
+            calls.append(record_type)
+            return records.get(record_type, [])
+
+    class Activity:
+        def append_api_request(self, event):
+            return event["eventId"]
+
+        def append_project_event(self, event_type, event):
+            events.append((event_type, event["metadata"]))
+
+    monkeypatch.setattr(deal_state_repository, "PostgresDealStateRepository", DealState)
+    monkeypatch.setattr(main, "normalized_activity_repository", lambda **_kw: Activity())
+    monkeypatch.setattr(projects, "PostgresActivityLogRepository", lambda **_kw: Activity())
+    client = TestClient(main.app)
+    route = "/projects/p/workspace/document-review"
+    assert client.get(route, headers={"x-test-deny": "true"}).status_code == 403
+    assert client.get(route, headers={"x-test-tenant": "tenant-b"}).status_code == 403
+    assert client.get("/projects/outside/workspace/document-review").status_code == 404
+    assert not calls
+    assert not events
+
+    response = client.get(route)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert len(result["sourceDocuments"]) == len(result["runs"]) == len(result["reviewQueue"]) == 4
+    archives = {row["archiveId"]: row for row in result["sourceDocuments"]}
+    for package in result["packages"]:
+        version = package["documentVersion"]
+        assert archives[version["archiveId"]]["downloadUrl"]
+        candidate, = package["candidates"]
+        assert candidate["documentVersionId"] == version["documentVersionId"]
+        assert candidate["evidence"][0]["documentVersionId"] == version["documentVersionId"]
+    assert result["glossaryCandidates"] == []
+    assert result["warnings"] == ["DOCUMENT_GLOSSARY_UNAVAILABLE"]
+    assert result["authority"]["approvalAuthority"] == "approved_input_snapshot_only"
+    assert len(events) == 1
+    assert events[0][0] == "document_review_workspace_loaded"
+    assert events[0][1]["sourceDocumentCount"] == 4
+    assert authority.row == saved
+
+
 def test_normalized_map_reads_parcels_without_legacy_state_or_lookup_writes(monkeypatch):
     authority = Authority("tenant-a")
     first, second = "1111010100100010000", "1111010100100020000"
@@ -278,8 +391,8 @@ def test_normalized_parcel_resolution_and_legal_run_keep_same_tenant_evidence(mo
     })
 
     pnu = "4146310300100130000"
-    monkeypatch.setattr(vworld, "resolve_legal_dong_code", lambda _addr: pnu[:10])
-    monkeypatch.setattr(vworld, "fetch_parcel_by_pnu", lambda value: (
+    monkeypatch.setattr(vworld, "resolve_legal_dong_code", lambda _addr, **_kwargs: pnu[:10])
+    monkeypatch.setattr(vworld, "fetch_parcel_by_pnu", lambda value, **_kwargs: (
         {"pnu": value, "jibun": "13", "jiga": "1500000"}, {"status": "resolved"},
     ))
     deal_rows = {}
@@ -322,6 +435,33 @@ def test_normalized_parcel_resolution_and_legal_run_keep_same_tenant_evidence(mo
     monkeypatch.setattr(main, "normalized_activity_repository", lambda **_kwargs: Activity())
     monkeypatch.setattr(projects, "PostgresLegalReviewProjectionRepository", Projection)
     client = TestClient(main.app)
+
+
+    revision = projects.parcel_preview_batch("p", authority.row, {}).revision
+    preview_map_payload = {"parcelIndex": 1, "parcelRevision": revision, "pnu": pnu}
+    map_calls = []
+    geometry = {"type": "Polygon", "coordinates": [[[127.1, 37.1], [127.2, 37.1], [127.1, 37.2], [127.1, 37.1]]]}
+    monkeypatch.setattr(projects, "vworld_configured", lambda: True)
+
+    def fetch_geometry(value, **_kwargs):
+        map_calls.append(value)
+        return geometry, {"status": "resolved"}
+
+    monkeypatch.setattr(projects, "fetch_parcel_geometry_by_pnu", fetch_geometry)
+    map_url = "/projects/p/legal-pod/preview-map"
+    before_map = deepcopy(authority.row)
+    assert client.post(map_url, json={**preview_map_payload, "parcelRevision": "a" * 64}).status_code == 409
+    assert client.post(map_url, json={**preview_map_payload, "pnu": "4146310300100140000"}).status_code == 409
+    assert not map_calls
+    mapped = client.post(map_url, json=preview_map_payload)
+    assert mapped.status_code == 200, mapped.text
+    assert mapped.headers["Cache-Control"] == "private, no-store"
+    features = mapped.json()["parcelGeoJson"]["features"]
+    assert len(features) == 1 and features[0]["properties"]["pnu"] == pnu
+    assert features[0]["geometry"] == geometry
+    assert map_calls == [pnu]
+    assert authority.row == before_map
+    assert not deal_rows
 
     resolved = client.post("/projects/p/land/parcels/resolve")
     assert resolved.status_code == 200, resolved.text
@@ -382,3 +522,70 @@ def test_normalized_parcel_resolution_and_legal_run_keep_same_tenant_evidence(mo
     assert captured["legal"].display["parcelLegalReviews"] == parcels
     assert authority.row["legalReview"]["reviewId"] == result["legalReview"]["reviewId"]
     assert projects.PROJECTS_DB == {}
+
+    # Manual codes are resolved independently of the project's uploaded ledger.
+    from use_cases import land_legal_preview
+
+    manual_pnu = "2717010400101230004"
+    unverified_pnu = "2717010400101240000"
+    mismatched_address_pnu = "2717010400101250000"
+    address = "대구광역시 서구 내당동 123-4"
+    manual_calls = []
+
+    def lookup_manual(value, **_kwargs):
+        manual_calls.append(value)
+        if value == manual_pnu:
+            return {"pnu": value, "addr": address, "jibun": "123-4"}, {"status": "resolved"}
+        if value == mismatched_address_pnu:
+            return {"pnu": value, "addr": address, "jibun": "125"}, {"status": "resolved"}
+        return {"pnu": manual_pnu, "addr": address, "jibun": "123-4"}, {"status": "resolved"}
+
+    monkeypatch.setattr(land_legal_preview, "fetch_parcel_by_pnu", lookup_manual)
+    monkeypatch.setattr(land_legal_preview.LandDataConnectorRouter, "lookup_parcel_address", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(legal_pod.LandDataConnectorRouter, "fetch_records_for_parcels", lambda *_args, **_kwargs: {})
+    manual_payload = {"pnus": [manual_pnu, unverified_pnu, mismatched_address_pnu]}
+    preview_url = "/projects/p/legal-pod/preview"
+    assert client.post(preview_url, json={"pnus": [manual_pnu, manual_pnu]}).status_code == 400
+    assert client.post(preview_url, json={**manual_payload, "parcelOffset": 0}).status_code == 400
+    assert not manual_calls
+
+    state_before_manual = deepcopy(authority.row)
+    deal_state_before_manual = deepcopy(deal_rows)
+    manual_preview = client.post(preview_url, json=manual_payload)
+    assert manual_preview.status_code == 200, manual_preview.text
+    assert manual_preview.headers["Cache-Control"] == "private, no-store"
+    assert manual_preview.json()["previewOnly"] is True
+    manual_batch = manual_preview.json()["parcelBatch"]
+    assert manual_batch["source"] == "manual_pnu"
+    assert manual_batch["totalParcels"] == 3 and manual_batch["nextOffset"] is None
+    good, rejected, bad_address = manual_batch["rows"]
+    assert good["requestedPnu"] == good["pnu"] == manual_pnu
+    assert good["status"] == "confirmed"
+    assert good["address"] == address and good["parcelLabel"] == "123-4"
+    assert good["sourceLocators"][0]["apiRowId"] == manual_pnu
+    assert rejected["requestedPnu"] == unverified_pnu and rejected["pnu"] is None
+    assert rejected["status"] == "failed" and rejected["reason"] == "manual_pnu_mismatch"
+    assert bad_address["status"] == "failed" and bad_address["reason"] == "manual_pnu_address_mismatch"
+    assert manual_batch["jurisdictions"][0]["jurisdictionName"] == "대구광역시"
+
+    manual_map = {**manual_payload, "pnu": manual_pnu, "parcelIndex": 1, "parcelRevision": manual_batch["parcelRevision"]}
+    assert client.post(map_url, json={**manual_map, "pnu": pnu}).status_code == 409
+    assert client.post(map_url, json={**manual_map, "pnu": unverified_pnu, "parcelIndex": 2}).status_code == 409
+    map_response = client.post(map_url, json=manual_map)
+    assert map_response.status_code == 200, map_response.text
+    assert map_response.json()["parcelGeoJson"]["features"][0]["properties"]["pnu"] == manual_pnu
+    assert authority.row == state_before_manual and deal_rows == deal_state_before_manual
+
+    save_manual = {
+        **manual_payload, "sections": ["parcels"], "parcelIndexes": [1],
+        "parcelRevision": manual_batch["parcelRevision"], "expectedPreviewHash": manual_preview.json()["previewHash"],
+    }
+    assert client.post(summary_url, json={**save_manual, "parcelIndexes": [2]}).status_code == 400
+    assert client.post(summary_url, json={**save_manual, "pnus": list(reversed(manual_payload["pnus"]))}).status_code == 409
+    manual_save_response = client.post(summary_url, json=save_manual)
+    assert manual_save_response.status_code == 200, manual_save_response.text
+    manual_saved = manual_save_response.json()
+    assert manual_saved["reportEligible"] is False
+    assert [item["pnu"] for item in manual_saved["summary"]["parcels"]] == [manual_pnu]
+    assert authority.row["land_ledger"] == state_before_manual["land_ledger"]
+    assert deal_rows == deal_state_before_manual

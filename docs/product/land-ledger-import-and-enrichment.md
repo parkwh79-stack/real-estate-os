@@ -36,6 +36,11 @@ CLI는 저장소에서 `python services/mcp-server/land_cli.py --help`로 확인
 현재 사용자 토큰을 실행 환경에 제공한다. 운영 API가 프로젝트 권한과 선택 저장을 검증한다.
 
 
+미리보기에서 새로 확인한 PNU는 '미리보기 지도'에서 해당 필지의 공식 경계를
+확인할 수 있다. 서버는 프로젝트의 현재 필지 개정값, 해당 행과 PNU 일치 여부를
+다시 확인한다. 결과는 이 화면에서만 열며 저장된 지도와 원장은 변경하지 않는다.
+경계를 확인할 수 없으면 해당 필지의 경계 조회 상태를 표시한다.
+
 ## Current contract and source comparison
 
 `POST /projects/{project_id}/land-ledger/analyze` archives the original and saves
@@ -447,3 +452,9 @@ P1:
 - Always preserve original imported file identity and parser version.
 - Always mask sensitive account numbers in user-facing responses, logs, and exports.
 - Flag public land, shared ownership, trust registration, seizure, mortgage, provisional registration, easement, or unresolved encumbrance as legal review issues.
+
+## PNU 직접 입력으로 임시 토지조서 검토 (2026-11-05)
+
+토지 화면에서 중복을 제거한 19자리 PNU를 한 번에 최대 5개 입력한다. 기존 미리보기·선택 저장·지도 API가 같은 입력을 재검증한다. 공식 응답의 PNU와 명시된 지번을 대조하며, 불일치·미조회 필지를 성공 행으로 승격하지 않는다. 공공 자료로 확인한 주소·지번을 임시 토지조서와 Legal Pod 인허가 미리보기에 전달한다. 계약금액·소유권은 별도 근거가 필요하다.
+
+직접 입력 결과는 화면 메모리에 유지한다. 사용자가 선택한 항목만 현재 원본과 미리보기 해시를 재검증해 요약으로 저장한다. 업로드 토지조서에 자동 합치지 않으며, 새로고침 뒤에는 보관한 요약과 원장을 구분해 다시 연다.

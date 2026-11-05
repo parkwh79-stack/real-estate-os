@@ -522,6 +522,13 @@ class LandDataConnectorRouter:
             "confidence": 0.95,
         }
 
+    def lookup_parcel_address(self, pnu: str, *, timeout_seconds: float) -> Dict[str, Any] | None:
+        """Read address fields from a land-characteristics response with an exact PNU."""
+        result = self._fetch_land_characteristics_record(
+            pnu, standard_year=None, parcel={"pnu": pnu}, timeout_seconds=timeout_seconds,
+        )
+        return result.get("record")
+
     def _fetch_land_characteristics_record(
         self,
         pnu: str,

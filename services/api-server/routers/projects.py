@@ -17,6 +17,7 @@ from use_cases.land_legal_preview import (
     StaleParcelPreview,
     compact_land_legal_preview,
     compact_review_hash,
+    manual_pnu_preview_project,
     parcel_preview_batch,
 )
 from datetime import datetime, timezone
@@ -68,7 +69,7 @@ from schemas.document_review_workspace import DocumentReviewWorkspaceViewModel
 from agents.cash_sweep_agent import CashSweepAgent
 from integrations.kakao import build_kakao_intake_plan_message, build_kakao_workflow_result_message
 from agents.restructuring_agent import RestructuringAgent
-from db.repositories.market_evidence_repository import MarketEvidenceRepository
+from db.repositories.market_evidence_repository import MarketEvidenceRepository, PostgresMarketEvidenceRepository, MarketEvidenceConflict
 from db.repositories.calculation_run_repository import (
     CalculationRunRepositoryError,
     PostgresCalculationRunRepository,
@@ -195,6 +196,7 @@ from use_cases.parcel_pnu_resolution import (
     parcel_lookup_address,
     parcel_pnu,
     resolve_address_to_parcel,
+    resolve_parcel_rows,
     resolve_project_parcels_use_case,
 )
 from use_cases.auto_evidence_supplement import auto_supplement_validation_gaps
@@ -233,17 +235,11 @@ from use_cases.covenant_monitoring import (
 from use_cases.portfolio_monitoring import build_portfolio_monitoring
 from use_cases.map_intelligence import build_project_map_intelligence, project_map_parcels, resolve_and_attach_geometry
 from integrations.vworld import fetch_parcel_geometry_by_pnu, vworld_configured, vworld_status
-from integrations.market_data import MolitRtmsConnector
 from agents.document_classifier_agent import (
     classify_document, intake_processing_types, read_intake_pdf_sample, sniff_intake_format,
 )
 from parsing_platform.adapters import inspect_office_container_safety
 from agents.intake_triage_agent import triage_intake_documents
-from use_cases.market_comparables import (
-    fetch_project_market_comparables,
-    inject_market_comparables,
-    recent_deal_yms,
-)
 from use_cases.developability_score import score_developability_use_case
 from use_cases.project_snapshots import (
     diff_project_snapshots_use_case,
@@ -541,6 +537,11 @@ def parser_v2_record_store() -> ParserV2RecordStore:
     return factory() if callable(factory) else ParserV2RecordStore()
 
 def market_evidence_repository() -> MarketEvidenceRepository:
+    if storage_backend() in {"postgres", "postgresql"}:
+        scope = current_project_scope()
+        if scope is None:
+            raise RuntimeError("A verified request scope is required for market evidence")
+        return PostgresMarketEvidenceRepository(tenant_id=scope.tenant_id)
     return MarketEvidenceRepository(MARKET_EVIDENCE_DB, persist_state, persist_market_evidence)
 
 def project_snapshot_repository(
@@ -2630,12 +2631,15 @@ def save_land_cost_review(project_id: str, payload: Dict[str, Any], request: Req
     entry = {"comparisonHash": comparison["comparisonHash"], "comment": comment.strip(),
              "reviewedBy": verified_actor_id(authorization), "reviewedAt": now_iso(),
              "comparison": {key: value for key, value in comparison.items() if key not in {"review", "reviewMatchesCurrentSources"}}}
-    review = {**entry, "reviewHistory": [*(previous.get("reviewHistory") or []), entry]}
-    if not project_repository(request).update(project_id, {"landCostReview": review}):
+    repeated = all(previous.get(key) == entry[key] for key in ("comparisonHash", "comment", "reviewedBy"))
+    review = previous if repeated else {**entry, "reviewHistory": [*(previous.get("reviewHistory") or []), entry]}
+    if not repeated and not project_repository().update(project_id, {"landCostReview": review}):
         raise HTTPException(status_code=404, detail="Project not found")
-    record_user_activity_log({"eventType": "land_cost_review_saved", "projectId": project_id,
-                              "reviewedBy": entry["reviewedBy"], "createdAt": entry["reviewedAt"],
-                              "comparisonHash": entry["comparisonHash"]})
+    record_sensitive_project_event(
+        request, event_type="land_cost_review_saved", project_id=project_id,
+        metadata={"reviewedBy": review["reviewedBy"], "reviewedAt": review["reviewedAt"],
+                  "comparisonHash": review["comparisonHash"]},
+    )
     return {"projectId": project_id, "review": review}
 
 
@@ -3641,27 +3645,31 @@ def audit_project_source_locator_completeness(
     project_id: str,
     request: Request,
 ):
-    if project_id not in _project_store():
-        raise HTTPException(status_code=404, detail="Project not found")
-    authorize_request(request, "project:review")
-    actor = identity_context_from_request(request).get("userId") or "source_locator_auditor"
+    project = authoritative_project(project_id, request)
+    authorization = authorize_request(request, "project:review")
+    enforce_project_tenant_scope(request, project)
+    actor = verified_actor_id(authorization)
+    reports = report_repository(request)
+    report_records = []
+    for metadata in reports.list_metadata(project_id):
+        record = reports.get(project_id, metadata["report_id"])
+        if record is None:
+            raise HTTPException(status_code=409, detail="보고서 목록이 변경됐습니다. 다시 감사하세요.")
+        report_records.append(record)
     result = run_source_locator_completeness_audit_use_case(
-        project_id,
-        report_records=REPORTS_DB.get(project_id, []),
-        actor=str(actor),
+        project_id, report_records=report_records, actor=actor,
     )
-    record_user_activity_log(
-        {
-            "eventType": "source_locator_completeness_audited",
-            "projectId": project_id,
+    record_sensitive_project_event(
+        request, event_type="source_locator_completeness_audited", project_id=project_id,
+        metadata={
             "auditId": result.get("auditId"),
             "checkedDealStateRecordCount": result.get("checkedDealStateRecordCount"),
+            "checkedReportCount": len(report_records),
             "missingLocatorCount": result.get("missingLocatorCount"),
             "weakTraceCount": result.get("weakTraceCount"),
             "weakParagraphCount": result.get("weakParagraphCount"),
             "createdAt": result.get("checkedAt"),
-            "userId": actor,
-        }
+        },
     )
     return result
 
@@ -3756,15 +3764,12 @@ def analyze_market_product_depth(
     request: Request,
     input_data: Dict[str, Any] | None = None,
 ):
-    """Market-Product depth: 제공주체(시행사/매각주관사/공공/AI) 분류·비교, 상품유형별
-    분양성 Score, 흡수율 모델, AI 추가필요작업 판단. Deterministic numbers; the LLM
-    only judges what additional evidence/analysis is needed (fallback deterministic)."""
-    if project_id not in _project_store():
-        raise HTTPException(status_code=404, detail="Project not found")
+    """Read the same scoped stored market inputs as the Market-Product Pod."""
     authorize_request(request, "project:read")
-    payload = input_data or {}
-    options = payload.get("options") if isinstance(payload.get("options"), dict) else None
-    return analyze_market_product_depth_use_case(_project_store()[project_id], options)
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    source = attach_persisted_parsed_facts(project_id, project)
+    return analyze_market_product_depth_use_case(source, {"podAiReviewMode": "deterministic"})
 
 
 @router.post("/{project_id}/feasibility/build-input")
@@ -4303,31 +4308,27 @@ def run_project_scenarios_restructuring(project_id: str, input_data: Dict[str, A
 @router.post("/{project_id}/marketability/analyze")
 def analyze_marketability(
     project_id: str,
+    request: Request,
     input_data: Dict[str, Any] | None = None,
     live_comparables: bool = False,
 ):
-    if project_id not in _project_store():
-        raise HTTPException(status_code=404, detail="Project not found")
-    source = _project_store()[project_id]
-    if live_comparables and MolitRtmsConnector().configured():
-        import copy
+    from use_cases.market_product_depth import project_market_public_lookup
 
-        source = copy.deepcopy(source)
-        try:
-            records, _diag = fetch_project_market_comparables(
-                source, connector=MolitRtmsConnector(), deal_yms=recent_deal_yms(3)
-            )
-            inject_market_comparables(source, records)
-        except Exception:
-            pass  # live data must never break the on-demand analysis
-    result = analyze_marketability_use_case(source, input_data)
-    if (input_data or {}).get("persist"):
-        project = dict(_project_store()[project_id])
-        project["marketability"] = result
-        project["marketabilityAnalysis"] = result
-        if live_comparables and isinstance(source, dict) and source.get("market"):
-            project["market"] = source.get("market")
-        updated = update_project_use_case(project_repository(), project_id, project)
+    payload = input_data or {}
+    persist = payload.get("persist") is True
+    if persist and live_comparables:
+        raise HTTPException(status_code=400, detail="공개 실거래 조회 결과는 저장할 수 없습니다.")
+    authorize_request(request, "project:write" if persist else "project:read")
+    source = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, source)
+    # The display connector cannot become an analysis, persistence, or AI input.
+    result = analyze_marketability_use_case(source, payload)
+    if live_comparables:
+        return {**result, "publicLookup": project_market_public_lookup(source)}
+    if persist:
+        updated = update_project_use_case(
+            project_repository(request), project_id, {"marketability": result, "marketabilityAnalysis": result},
+        )
         if not updated:
             raise HTTPException(status_code=404, detail="Project not found")
     return result
@@ -4518,6 +4519,8 @@ def review_project_market_evidence(
             now_iso(),
             project_id,
         )
+    except MarketEvidenceConflict as exc:
+        raise HTTPException(status_code=409, detail="시장 근거가 변경됐습니다. 다시 불러온 뒤 검토하세요.") from exc
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -4556,14 +4559,31 @@ def _preview_land_legal(
 ) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "private, no-store"
     enforce_project_tenant_scope(request, project)
+    manual = "pnus" in batch_inputs
+    if manual:
+        if "parcelOffset" in batch_inputs or "parcelIndexes" in batch_inputs:
+            raise HTTPException(status_code=400, detail="직접 입력한 PNU 목록 전체를 다시 확인하세요.")
+        project = _manual_pnu_project(project_id, batch_inputs["pnus"])
     try:
         batch = parcel_preview_batch(project_id, project, batch_inputs)
     except StaleParcelPreview as exc:
         raise HTTPException(status_code=409, detail="필지 목록이 바뀌었습니다. 첫 필지부터 다시 확인하세요.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="확인할 필지 범위가 올바르지 않습니다.") from exc
-    options = _stored_chief_evidence_options(project_id, project, {})
-    return run_legal_pod_use_case(project_id, project, options, persist=False, parcel_batch=batch)
+    options = {} if manual else _stored_chief_evidence_options(project_id, project, {})
+    result = run_legal_pod_use_case(
+        project_id, project, options, persist=False, parcel_batch=batch, manual_pnu_preview=manual,
+    )
+    if manual:
+        result["parcelBatch"]["source"] = "manual_pnu"
+    return result
+
+
+def _manual_pnu_project(project_id: str, pnus: Any) -> Dict[str, Any]:
+    try:
+        return manual_pnu_preview_project(project_id, pnus)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="서로 다른 19자리 PNU를 1개에서 5개까지 입력하세요.") from exc
 
 
 @router.post("/{project_id}/legal-pod/preview")
@@ -4577,6 +4597,49 @@ def preview_project_land_legal(
     project = authoritative_project(project_id, request)
     result = _preview_land_legal(project_id, request, response, project, input_data or {})
     return {**result, "previewHash": compact_review_hash(compact_land_legal_preview(result))}
+
+
+
+
+@router.post("/{project_id}/legal-pod/preview-map")
+def preview_project_parcel_map(project_id: str, request: Request, response: Response, input_data: Dict[str, Any]):
+    """Show one exact project parcel boundary without saving map or review data."""
+    verified_actor_id(authorize_request(request, "project:analyze"))
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    manual = "pnus" in input_data
+    if manual:
+        project = _manual_pnu_project(project_id, input_data["pnus"])
+    try:
+        batch = parcel_preview_batch(project_id, project, {
+            "parcelRevision": input_data.get("parcelRevision"),
+            "parcelIndexes": [input_data.get("parcelIndex")],
+        })
+    except StaleParcelPreview as exc:
+        raise HTTPException(status_code=409, detail="필지 목록이 바뀌었습니다. 미리보기를 다시 확인하세요.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="확인할 필지가 올바르지 않습니다.") from exc
+
+    index = batch.indexes[0]
+    row = canonical_project_parcel_rows(project)[index - 1]
+    pnu = parcel_pnu(row)
+    if not pnu and not manual and vworld_configured():
+        from copy import deepcopy
+
+        preview_project = deepcopy(project)
+        resolve_parcel_rows(preview_project, project_id, limit=1, parcel_indexes={index}, timeout_seconds=2.0)
+        row = canonical_project_parcel_rows(preview_project)[index - 1]
+        pnu = parcel_pnu(row)
+    if not pnu or pnu != input_data.get("pnu"):
+        raise HTTPException(status_code=409, detail="확인한 PNU가 현재 필지와 일치하지 않습니다.")
+
+    geometry, _ = fetch_parcel_geometry_by_pnu(pnu, timeout=4.0)
+    response.headers["Cache-Control"] = "private, no-store"
+    return build_project_map_intelligence({}, parcels=[{
+        "pnu": pnu,
+        "addressFragment": row.get("addressFragment") or row.get("normalizedLotNumber") or row.get("lotNumber"),
+        "geometry": geometry,
+    }])
 
 
 @router.post("/{project_id}/legal-pod/preview-summary")
@@ -4598,7 +4661,9 @@ def save_project_land_legal_summary(project_id: str, request: Request, response:
         or not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
     ):
         raise HTTPException(status_code=400, detail="저장할 항목과 필지를 선택한 뒤 검토를 다시 확인하세요.")
-    batch_inputs = {key: input_data[key] for key in ("parcelOffset", "parcelRevision") if key in input_data}
+    if "pnus" in input_data and not input_data.get("parcelRevision"):
+        raise HTTPException(status_code=400, detail="직접 입력한 필지의 미리보기를 다시 확인하세요.")
+    batch_inputs = {key: input_data[key] for key in ("parcelOffset", "parcelRevision", "pnus") if key in input_data}
     if "reviewedParcelIndexes" in input_data:
         batch_inputs["parcelIndexes"] = input_data["reviewedParcelIndexes"]
     result = _preview_land_legal(project_id, request, response, project, batch_inputs)
@@ -6143,15 +6208,21 @@ def get_project_document_review_workspace(
         project_source_document_read_repository(project_id, project),
         project_id,
     )
-    glossary = list_glossary_candidates_use_case(
-        project_id=project_id,
-        limit=500,
-    )
+    glossary_candidates = []
+    warnings = []
+    if storage_backend() in {"postgres", "postgresql"}:
+        # The runtime role has no authority for legacy glossary candidates.
+        # Original documents and Parser V2 review stay available independently.
+        warnings.append("DOCUMENT_GLOSSARY_UNAVAILABLE")
+    else:
+        glossary = list_glossary_candidates_use_case(project_id=project_id, limit=500)
+        glossary_candidates = glossary.get("candidates") or []
     result = build_document_review_workspace_read_model(
         project_id=project_id,
         source_documents=source_documents,
         run_packages=packages,
-        glossary_candidates=glossary.get("candidates") or [],
+        glossary_candidates=glossary_candidates,
+        warnings=warnings,
     )
     record_sensitive_project_event(
         request,
@@ -6413,6 +6484,26 @@ def plan_chief_deal_orchestration(project_id: str, request: Request, input_data:
         },
     )
     return plan
+
+
+@router.post("/{project_id}/chief-orchestration/preflight")
+def preflight_chief_deal_orchestration(
+    project_id: str, request: Request, input_data: Dict[str, Any] | None = None,
+):
+    """Review scoped saved inputs and public facts without saving a Pod run."""
+    from fastapi.responses import JSONResponse
+    from use_cases.chief_pod_preflight import run_chief_pod_preflight
+
+    authorize_request(request, "project:analyze")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    payload = input_data or {}
+    track = payload.get("workflowTrack")
+    if track is not None and not isinstance(track, str):
+        raise HTTPException(status_code=422, detail="검토할 업무 유형을 확인해 주세요.")
+    source = _hydrated_project_source(project_id, {}, authoritative_source=project, include_active_cures=False)
+    result = run_chief_pod_preflight(project_id, source, workflow_track=track)
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
 
 
 def _persist_chief_recalculation_event(
@@ -7148,27 +7239,24 @@ def annotate_project_terms(project_id: str, input_data: Dict[str, Any] | None = 
 
 
 @router.post("/{project_id}/kakao/intake-plan")
-def kakao_intake_plan(project_id: str, input_data: Dict[str, Any] | None = None):
-    """KakaoTalk intake → intent menu. Runs the Orchestration Planner and returns
-    both the plan and a KakaoTalk-safe message presenting the workflow choices."""
-    if project_id not in _project_store():
-        raise HTTPException(status_code=404, detail="Project not found")
-    source_data = _hydrated_project_source(project_id, input_data or {})
+def kakao_intake_plan(project_id: str, request: Request, input_data: Dict[str, Any] | None = None):
+    """Build a scoped Kakao-safe analysis plan preview from stored project inputs."""
+    project = authoritative_project(project_id, request)
+    authorize_request(request, "project:analyze")
+    enforce_project_tenant_scope(request, project)
+    source_data = _hydrated_project_source(project_id, input_data or {}, authoritative_source=project)
     plan = plan_orchestration_use_case(project_id, source_data)
     kakao_message = build_kakao_intake_plan_message(project_id, _project_name(project_id), plan)
-    record_user_activity_log({
-        "eventType": "kakao_message_preview",
-        "userId": "system",
-        "projectId": project_id,
-        "metadata": {
+    record_sensitive_project_event(
+        request, event_type="kakao_message_preview", project_id=project_id,
+        metadata={
             "eventType": "analysis_plan_ready",
             "readyToSend": kakao_message.get("readyToSend"),
             "recommendedWorkflow": plan.get("recommendedWorkflow"),
             "messageMode": "preview_only",
         },
-    })
+    )
     return {"plan": plan, "kakaoMessage": kakao_message}
-
 
 @router.post("/{project_id}/orchestration/run-workflow")
 def run_orchestration_workflow(

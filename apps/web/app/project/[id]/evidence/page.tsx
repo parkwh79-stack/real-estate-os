@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { AlertTriangle, ArrowLeft, CheckCircle2, Database, FileSearch, GitBranch, Loader2, Search, XCircle } from "lucide-react";
+import { useParams, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, Database, FileSearch, GitBranch, Loader2, RefreshCw, Search, XCircle } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import {
   fetchDealStateRecordGroups,
@@ -14,6 +14,8 @@ import {
   type DealStateRecordType,
 } from "../../../../lib/deal-state-records";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
+import { fetchDocumentReviewData, type DocumentReviewData, type ParserV2Run } from "../../../../lib/document-review-workspace";
+import { projectWorkspaceHref } from "../../../../lib/project-navigation";
 
 type EvidenceGraphSummary = {
   graphId?: string;
@@ -42,13 +44,20 @@ type SourceLocatorAuditResult = {
   weakParagraphCount?: number;
 };
 
-async function fetchJson<T>(url: string, fallback: T): Promise<T> {
+type Read<T> = { status: "loading" } | { status: "failed" } | { status: "ready"; data: T };
+
+async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T> {
+  const response = await fetch(url, { cache: "no-store", headers: authHeaders("web-auditor"), signal });
+  if (!response.ok) throw new Error("근거 그래프를 불러오지 못했습니다.");
+  return (await response.json()) as T;
+}
+
+async function read<T>(request: Promise<T>, signal: AbortSignal, setRead: (value: Read<T>) => void) {
   try {
-    const res = await fetch(url, { cache: "no-store", headers: authHeaders("web-auditor") });
-    if (!res.ok) return fallback;
-    return (await res.json()) as T;
+    const data = await request;
+    if (!signal.aborted) setRead({ status: "ready", data });
   } catch {
-    return fallback;
+    if (!signal.aborted) setRead({ status: "failed" });
   }
 }
 
@@ -74,73 +83,95 @@ function isAutoSupplement(record: DealStateRecord) {
 
 export default function EvidenceGraphAuditorPage() {
   const params = useParams<{ id: string }>();
-  const projectId = params.id;
+  const track = useSearchParams().get("track");
+  return <EvidenceWorkspace key={params.id} projectId={params.id} track={track} />;
+}
+
+function EvidenceWorkspace({ projectId, track }: { projectId: string; track: string | null }) {
   const [context, setContext] = useState<WorkspacePageContext | null>(null);
-  const [records, setRecords] = useState<DealStateRecord[]>([]);
-  const [graphs, setGraphs] = useState<EvidenceGraphSummary[]>([]);
+  const [originals, setOriginals] = useState<Read<DocumentReviewData>>({ status: "loading" });
+  const [recordGroups, setRecordGroups] = useState<Read<Awaited<ReturnType<typeof fetchDealStateRecordGroups>>>>({ status: "loading" });
+  const [graphList, setGraphList] = useState<Read<EvidenceGraphSummary[]>>({ status: "loading" });
   const [selectedRunId, setSelectedRunId] = useState("");
-  const [graph, setGraph] = useState<EvidenceGraph | null>(null);
+  const [graphDetail, setGraphDetail] = useState<Read<EvidenceGraph>>({ status: "loading" });
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(true);
   const [auditRunning, setAuditRunning] = useState(false);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [auditResult, setAuditResult] = useState<SourceLocatorAuditResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const readRequest = useRef<AbortController | null>(null);
+  const encodedProjectId = encodeURIComponent(projectId);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [ctx, groups, graphList] = await Promise.all([
-        fetchWorkspaceContext(projectId, "evidence").catch(() => null),
-        fetchDealStateRecordGroups(projectId, 900).catch(() => ({
-          metrics: [],
-          risks: [],
-          evidence: [],
-          assumptions: [],
-          parsedFacts: [],
-          parsedFactValidations: [],
-          autoSupplementAttempts: [],
-        })),
-        fetchJson<{ records?: EvidenceGraphSummary[] }>(`${apiBase}/projects/${projectId}/evidence-graphs`, { records: [] }),
-      ]);
-      setContext(ctx);
-      setRecords([
-        ...groups.evidence,
-        ...groups.assumptions,
-        ...groups.metrics,
-        ...groups.risks,
-        ...groups.parsedFacts,
-        ...groups.parsedFactValidations,
-        ...groups.autoSupplementAttempts,
-      ]);
-      const nextGraphs = graphList.records ?? [];
-      setGraphs(nextGraphs);
-      setSelectedRunId((current) => current || nextGraphs[0]?.runId || "");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "근거 원장을 불러오지 못했습니다.");
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId]);
-
-  const loadGraph = useCallback(async (runId: string) => {
-    if (!runId) {
-      setGraph(null);
-      return;
-    }
-    const nextGraph = await fetchJson<EvidenceGraph | null>(`${apiBase}/projects/${projectId}/orchestrations/${runId}/evidence-graph`, null);
-    setGraph(nextGraph);
-  }, [projectId]);
+    readRequest.current?.abort();
+    const controller = new AbortController();
+    readRequest.current = controller;
+    const { signal } = controller;
+    setOriginals({ status: "loading" });
+    setRecordGroups({ status: "loading" });
+    setGraphList({ status: "loading" });
+    setGraphDetail({ status: "loading" });
+    await Promise.all([
+      fetchWorkspaceContext(projectId, "evidence", track ?? undefined)
+        .then((value) => { if (!signal.aborted) setContext(value); })
+        .catch(() => {}),
+      read(fetchDocumentReviewData(projectId, signal).then((value) => {
+        if (value.projectId !== projectId || !Array.isArray(value.sourceDocuments) || !Array.isArray(value.packages)) {
+          throw new Error("프로젝트 문서 기록을 확인하지 못했습니다.");
+        }
+        return value;
+      }), signal, setOriginals),
+      read(fetchDealStateRecordGroups(projectId, 900, { trackFailures: true, signal }), signal, setRecordGroups),
+      read(fetchJson<{ projectId: string; records: EvidenceGraphSummary[] }>(
+        apiBase + "/projects/" + encodedProjectId + "/evidence-graphs", signal,
+      ).then((value) => {
+        if (value.projectId !== projectId || !Array.isArray(value.records) || value.records.some((item) => !item?.runId)) {
+          throw new Error("프로젝트 근거 그래프 목록을 확인하지 못했습니다.");
+        }
+        return value.records;
+      }), signal, setGraphList),
+    ]);
+  }, [encodedProjectId, projectId, track]);
 
   useEffect(() => {
     void load();
+    return () => readRequest.current?.abort();
   }, [load]);
 
+  const activeRunId = graphList.status === "ready"
+    ? (graphList.data.find((item) => item.runId === selectedRunId) ?? graphList.data[0])?.runId
+    : undefined;
+
   useEffect(() => {
-    void loadGraph(selectedRunId);
-  }, [loadGraph, selectedRunId]);
+    if (!activeRunId) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    setGraphDetail({ status: "loading" });
+    void read(fetchJson<EvidenceGraph>(
+      apiBase + "/projects/" + encodedProjectId + "/orchestrations/" + encodeURIComponent(activeRunId) + "/evidence-graph",
+      signal,
+    ).then((value) => {
+      if (!Array.isArray(value.nodes) || !Array.isArray(value.edges) || (value.runId && value.runId !== activeRunId)) {
+        throw new Error("근거 그래프의 실행 기록을 확인하지 못했습니다.");
+      }
+      return value;
+    }), signal, setGraphDetail);
+    return () => controller.abort();
+  }, [encodedProjectId, activeRunId]);
+
+  const loading = recordGroups.status === "loading";
+  const failedTypes = recordGroups.status === "ready" ? recordGroups.data.failedTypes : [];
+  const records = useMemo(() => {
+    if (recordGroups.status !== "ready") return [];
+    const groups = recordGroups.data;
+    return [
+      ...groups.evidence, ...groups.assumptions, ...groups.metrics, ...groups.risks,
+      ...groups.parsedFacts, ...groups.parsedFactValidations, ...groups.autoSupplementAttempts,
+    ];
+  }, [recordGroups]);
+
+  const graph = graphDetail.status === "ready" && activeRunId ? graphDetail.data : null;
 
   async function runSourceLocatorAudit() {
     setAuditRunning(true);
@@ -207,13 +238,19 @@ export default function EvidenceGraphAuditorPage() {
     return matchesFilter && (!query.trim() || haystack.includes(query.toLowerCase()));
   });
 
-  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
+  const projectName = displayText(context?.projectMemory?.projectName, "프로젝트 " + projectId);
+  function recordCount(count: number, type?: DealStateRecordType) {
+    if (loading) return "조회 중";
+    if (recordGroups.status === "failed" || (type && failedTypes.includes(type))) return "조회 실패";
+    if (!type && failedTypes.length) return "일부 미확인";
+    return count.toLocaleString("ko-KR") + "건";
+  }
 
   return (
     <div className="space-y-6 pb-8">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex items-start gap-3">
-          <Link href={`/project/${projectId}`} className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300" aria-label="프로젝트로 돌아가기">
+          <Link href={projectWorkspaceHref(projectId, "", track)} className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300" aria-label="프로젝트로 돌아가기">
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <div>
@@ -227,6 +264,14 @@ export default function EvidenceGraphAuditorPage() {
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
+            onClick={() => void load()}
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+          >
+            <RefreshCw className="h-4 w-4" />
+            근거 새로고침
+          </button>
+          <button
+            type="button"
             onClick={() => void runSourceLocatorAudit()}
             disabled={auditRunning}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
@@ -234,7 +279,7 @@ export default function EvidenceGraphAuditorPage() {
             {auditRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
             근거 위치 감사
           </button>
-          <Link href={`/project/${projectId}/chief-orchestration`} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950">
+          <Link href={projectWorkspaceHref(projectId, "chief-orchestration", track)} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950">
             <GitBranch className="h-4 w-4" />
             AI 딜룸으로 이동
           </Link>
@@ -251,17 +296,23 @@ export default function EvidenceGraphAuditorPage() {
         </div>
       ) : null}
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-        <Kpi label="증빙" value={`${counts.evidence.toLocaleString("ko-KR")}건`} />
-        <Kpi label="가정 후보" value={`${counts.assumptions.toLocaleString("ko-KR")}건`} />
-        <Kpi label="파싱값" value={`${counts.parsedFacts.toLocaleString("ko-KR")}건`} />
-        <Kpi label="AI 자동 보강" value={`${counts.autoSupplement.toLocaleString("ko-KR")}건`} tone={counts.autoSupplement ? "warn" : undefined} />
-        <Kpi label="검토 필요" value={`${counts.reviewNeeded.toLocaleString("ko-KR")}건`} tone={counts.reviewNeeded ? "warn" : "good"} />
-        <Kpi label="근거 위치 부족" value={`${counts.weakLocators.toLocaleString("ko-KR")}건`} tone={counts.weakLocators ? "warn" : "good"} />
+      <ArchivedDocuments originals={originals} projectId={projectId} track={track} />
+
+      <section aria-label="정식 근거 집계" className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+        <Kpi label="증빙" value={recordCount(counts.evidence, "evidence")} />
+        <Kpi label="가정 후보" value={recordCount(counts.assumptions, "assumption")} />
+        <Kpi label="파싱값" value={recordCount(counts.parsedFacts, "parsed_fact")} />
+        <Kpi label="AI 자동 보강" value={recordCount(counts.autoSupplement)} tone={counts.autoSupplement ? "warn" : undefined} />
+        <Kpi label="검토 필요" value={recordCount(counts.reviewNeeded)} tone={counts.reviewNeeded ? "warn" : undefined} />
+        <Kpi label="근거 위치 부족" value={recordCount(counts.weakLocators)} tone={counts.weakLocators ? "warn" : undefined} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
-        <Panel title="Deal State 원장" icon={<Database className="h-5 w-5" />}>
+        <Panel title="정식 근거 원장" icon={<Database className="h-5 w-5" />}>
+          {recordGroups.status === "failed" ? <Notice>근거 기록을 불러오지 못했습니다. 근거 새로고침을 눌러 다시 확인해 주세요.</Notice> : null}
+          {failedTypes.length ? (
+            <Notice>일부 근거 기록을 불러오지 못했습니다. 확인이 필요한 유형은 {failedTypes.map(typeLabel).sort().join(", ")}입니다.</Notice>
+          ) : null}
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="flex gap-2 overflow-x-auto">
               {([
@@ -288,7 +339,7 @@ export default function EvidenceGraphAuditorPage() {
 
           <div className="mt-4 max-h-[680px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-800">
             {loading ? (
-              <Loading text="Deal State 원장을 불러오는 중입니다." />
+              <Loading text="근거 원장을 불러오는 중입니다." />
             ) : visibleRecords.length ? (
               <table className="w-full min-w-[1120px] text-left text-xs">
                 <thead className="bg-slate-50 text-slate-500 dark:bg-slate-800">
@@ -336,33 +387,57 @@ export default function EvidenceGraphAuditorPage() {
                 </tbody>
               </table>
             ) : (
-              <Empty text="조건에 맞는 Deal State 레코드가 없습니다. 파일 업로드, Pod 실행, 계산 실행을 하면 자동으로 적재됩니다." />
+              <Empty text={recordGroups.status === "failed" || failedTypes.length
+                ? "현재 확인한 범위에 표시할 근거가 없습니다."
+                : "조건에 맞는 정식 근거 기록이 없습니다. 보관 문서와 파싱 상태는 위에서 확인할 수 있습니다."} />
             )}
           </div>
         </Panel>
 
-        <Panel title="Evidence Graph 원본" icon={<FileSearch className="h-5 w-5" />}>
-          <select value={selectedRunId} onChange={(event) => setSelectedRunId(event.target.value)} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
-            {graphs.length === 0 ? <option value="">저장된 Evidence Graph 없음</option> : null}
-            {graphs.map((item) => (
-              <option key={item.runId} value={item.runId}>
-                {item.runId} · {compactDate(item.updatedAt)} · {item.nodeCount ?? 0} nodes
-              </option>
-            ))}
-          </select>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            <Kpi label="Graph nodes" value={`${graph?.nodes?.length ?? 0}개`} />
-            <Kpi label="Graph edges" value={`${graph?.edges?.length ?? 0}개`} />
-          </div>
-          <div className="mt-4 max-h-[420px] space-y-2 overflow-auto pr-1">
-            {graph?.nodes?.slice(0, 80).map((node) => (
-              <div key={node.id} className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-                <p className="text-xs font-bold text-slate-500">{displayText(node.type, "node")}</p>
-                <p className="mt-1 text-sm font-black text-slate-950 dark:text-white">{displayText(node.label ?? node.id, "-")}</p>
-                <p className="mt-1 break-all text-xs text-slate-500">{node.id}</p>
+        <Panel title="분석 근거 연결" icon={<FileSearch className="h-5 w-5" />}>
+          {graphList.status === "loading" ? <Loading text="저장된 근거 그래프를 확인하는 중입니다." /> : null}
+          {graphList.status === "failed" ? <Notice>근거 그래프 목록을 불러오지 못했습니다. 근거 새로고침을 눌러 다시 확인해 주세요.</Notice> : null}
+          {graphList.status === "ready" && !activeRunId ? <Empty text="저장된 근거 그래프가 없습니다." /> : null}
+          {graphList.status === "ready" && activeRunId ? (
+            <>
+              <select
+                aria-label="분석 실행 선택"
+                value={activeRunId}
+                onChange={(event) => {
+                  setGraphDetail({ status: "loading" });
+                  setSelectedRunId(event.target.value);
+                }}
+                className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+              >
+                {graphList.data.map((item) => (
+                  <option key={item.runId} value={item.runId}>
+                    {item.runId} · {compactDate(item.updatedAt)}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-4">
+                {graphDetail.status === "loading" ? <Loading text="선택한 근거 그래프를 확인하는 중입니다." /> : null}
+                {graphDetail.status === "failed" ? <Notice>선택한 근거 그래프를 불러오지 못했습니다.</Notice> : null}
               </div>
-            )) ?? <Empty text="선택된 Evidence Graph가 없습니다." />}
-          </div>
+            </>
+          ) : null}
+          {graph ? (
+            <>
+              <div className="grid gap-3 md:grid-cols-2">
+                <Kpi label="근거 항목" value={(graph.nodes?.length ?? 0) + "개"} />
+                <Kpi label="연결 관계" value={(graph.edges?.length ?? 0) + "개"} />
+              </div>
+              <div className="mt-4 max-h-[420px] space-y-2 overflow-auto pr-1">
+                {graph.nodes?.length ? graph.nodes.slice(0, 80).map((node) => (
+                  <div key={node.id} className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                    <p className="text-xs font-bold text-slate-500">{displayText(node.type, "항목")}</p>
+                    <p className="mt-1 text-sm font-black text-slate-950 dark:text-white">{displayText(node.label ?? node.id, "-")}</p>
+                    <p className="mt-1 break-all text-xs text-slate-500">{node.id}</p>
+                  </div>
+                )) : <Empty text="이 분석에 연결된 근거 항목이 없습니다." />}
+              </div>
+            </>
+          ) : null}
           {graph?.auditWarnings?.length ? (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-semibold leading-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
               {graph.auditWarnings.map((warning) => <p key={warning}>- {warning}</p>)}
@@ -371,6 +446,93 @@ export default function EvidenceGraphAuditorPage() {
         </Panel>
       </section>
     </div>
+  );
+}
+
+function archiveHash(value: unknown) {
+  return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value) ? value.toLowerCase() : "";
+}
+
+function runTime(run: ParserV2Run) {
+  return Date.parse(run.requestedAt ?? run.createdAt ?? run.startedAt ?? run.completedAt ?? "") || 0;
+}
+
+function parseStatus(run?: ParserV2Run) {
+  if (!run) return "파싱 기록 없음";
+  switch (run.executionStatus) {
+    case "completed": return "구조 파싱 완료";
+    case "completed_with_warnings": return "구조 파싱 완료 · 경고 확인";
+    case "queued": return "파싱 대기";
+    case "running": return "파싱 중";
+    case "failed": return "파싱 실패";
+    default: return "파싱 상태 미확인";
+  }
+}
+
+function ArchivedDocuments({ originals, projectId, track }: {
+  originals: Read<DocumentReviewData>;
+  projectId: string;
+  track: string | null;
+}) {
+  if (originals.status === "loading") {
+    return <Panel title="보관 문서와 파싱 현황" icon={<FileSearch className="h-5 w-5" />}><Loading text="보관 문서를 확인하는 중입니다." /></Panel>;
+  }
+  if (originals.status === "failed") {
+    return <Panel title="보관 문서와 파싱 현황" icon={<FileSearch className="h-5 w-5" />}><Notice>보관 문서와 파싱 상태를 불러오지 못했습니다. 근거 새로고침을 눌러 다시 확인해 주세요.</Notice></Panel>;
+  }
+  const data = originals.data;
+  const latest = new Map<string, ParserV2Run>();
+  for (const { documentVersion, parsingRun } of data.packages) {
+    const hash = archiveHash(documentVersion.archiveId ?? documentVersion.sha256 ?? documentVersion.sourceHash);
+    if (!hash) continue;
+    const previous = latest.get(hash);
+    if (!previous || runTime(parsingRun) > runTime(previous)) latest.set(hash, parsingRun);
+  }
+  const documents = data.sourceDocuments.map((item) => {
+    const id = archiveHash(item.archiveId ?? item.sha256 ?? item.originalFileHash);
+    return { id, name: item.originalFileName ?? item.fileName ?? "파일 이름 미확인", run: latest.get(id) };
+  });
+  const completed = documents.filter(({ run }) => ["completed", "completed_with_warnings"].includes(run?.executionStatus ?? "")).length;
+  const reviewHref = projectWorkspaceHref(projectId, "documents/review", track);
+  const querySeparator = reviewHref.includes("?") ? "&" : "?";
+
+  return (
+    <Panel title="보관 문서와 파싱 현황" icon={<FileSearch className="h-5 w-5" />}>
+      <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">
+        보관 원본과 최신 구조 파싱 상태입니다. 검토할 값과 정식 근거는 아래 원장에서 따로 확인할 수 있습니다.
+      </p>
+      {documents.length ? (
+        <>
+          <p className="mb-3 text-sm font-semibold text-slate-700 dark:text-slate-200">
+            보관 문서 {documents.length.toLocaleString("ko-KR")}건 · 구조 파싱 완료 {completed.toLocaleString("ko-KR")}건
+          </p>
+          <ul className="max-h-72 divide-y divide-slate-100 overflow-auto rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
+            {documents.map(({ id, name, run }, index) => (
+              <li key={id || index} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm">
+                <div className="min-w-0">
+                  <p className="break-words font-semibold text-slate-900 dark:text-slate-100">{name}</p>
+                  <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">{parseStatus(run)}</p>
+                </div>
+                {id ? (
+                  <Link
+                    href={reviewHref + querySeparator + "archiveId=" + encodeURIComponent(id)}
+                    aria-label={name + " 원본 검토"}
+                    className="font-semibold text-blue-700 hover:underline dark:text-blue-300"
+                  >
+                    원본 검토
+                  </Link>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <div className="space-y-3">
+          <Empty text="이 프로젝트에 보관된 문서가 없습니다." />
+          <Link href={projectWorkspaceHref(projectId, "input-package", track) + "#intake-upload"} className="text-sm font-semibold text-blue-700 hover:underline dark:text-blue-300">자료 올리기</Link>
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -430,7 +592,7 @@ function Loading({ text }: { text: string }) {
 }
 
 function Notice({ children }: { children: ReactNode }) {
-  return <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{children}</div>;
+  return <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{children}</div>;
 }
 
 function Empty({ text }: { text: string }) {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -54,11 +54,7 @@ import {
   type SourceLocatorRecord,
   type WorkbookCellPreview,
 } from "../../lib/document-review-workspace";
-import {
-  displayText,
-  fetchWorkspaceContext,
-  type WorkspacePageContext,
-} from "../../lib/workspace-context";
+import { displayText } from "../../lib/workspace-context";
 import {
   ApprovalStatusBadge,
   ExecutionStatusBadge,
@@ -69,6 +65,8 @@ import {
 } from "../ui/primitives";
 import { ProjectWorkspaceLink } from "../layout/project-workspace-link";
 import { PdfPageReadingPanel } from "./pdf-page-reading-panel";
+import { DashboardAtmosphere } from "../dashboard/dashboard-atmosphere";
+import heroStyles from "../orchestration/chief-deal-room-workspace.module.css";
 
 type InspectorTab = "facts" | "evidence" | "issues" | "conflicts" | "glossary" | "review" | "changes" | "audit";
 
@@ -89,6 +87,8 @@ type WorkspaceDocument = {
   downloadUrl?: string;
   runIds: string[];
   parserRegistered: boolean;
+  latestRun?: ParserV2Run;
+  candidateCount?: number;
 };
 
 type WorkspaceFact = {
@@ -132,14 +132,14 @@ type AuditItem = {
 };
 
 const TABS: Array<{ key: InspectorTab; label: string }> = [
-  { key: "facts", label: "Facts" },
-  { key: "evidence", label: "Evidence" },
-  { key: "issues", label: "Queue" },
-  { key: "conflicts", label: "Conflicts" },
-  { key: "glossary", label: "Glossary" },
-  { key: "review", label: "Review" },
-  { key: "changes", label: "Changes" },
-  { key: "audit", label: "Audit" },
+  { key: "facts", label: "파싱값" },
+  { key: "evidence", label: "출처 상세" },
+  { key: "issues", label: "검토할 항목" },
+  { key: "conflicts", label: "값 충돌" },
+  { key: "glossary", label: "용어 확인" },
+  { key: "review", label: "검토 결정" },
+  { key: "changes", label: "승인본 변경" },
+  { key: "audit", label: "검토 이력" },
 ];
 
 function identifier(value: unknown) {
@@ -184,6 +184,9 @@ function mergeWorkspaceDocuments(data: DocumentReviewData): WorkspaceDocument[] 
     const source = archiveId ? sourceByArchiveId.get(archiveId) : undefined;
     if (source && archiveId) matchedArchives.add(archiveId);
     const existing = byVersion.get(documentVersionId);
+    const run = runPackage.parsingRun;
+    const previousRun = existing?.latestRun;
+    const isLatest = !previousRun || dateValue(run.requestedAt ?? run.createdAt) >= dateValue(previousRun.requestedAt ?? previousRun.createdAt);
     const runId = packageRunId(runPackage);
     const runIds = Array.from(new Set([...(existing?.runIds ?? []), ...(runId ? [runId] : [])]));
     byVersion.set(documentVersionId, {
@@ -206,6 +209,8 @@ function mergeWorkspaceDocuments(data: DocumentReviewData): WorkspaceDocument[] 
       downloadUrl: safeSourceUrl(source?.downloadUrl) ?? undefined,
       runIds,
       parserRegistered: true,
+      latestRun: isLatest ? run : previousRun,
+      candidateCount: isLatest ? runPackage.candidates?.length : existing?.candidateCount,
     });
   }
 
@@ -494,7 +499,7 @@ export function DocumentReviewWorkspace({
   requestedArchiveId?: string | null;
 }) {
   const [data, setData] = useState<DocumentReviewData | null>(null);
-  const [context, setContext] = useState<WorkspacePageContext | null>(null);
+  const activeLoad = useRef<AbortController | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -513,25 +518,25 @@ export function DocumentReviewWorkspace({
   const [glossaryError, setGlossaryError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    activeLoad.current?.abort();
+    const controller = new AbortController();
+    activeLoad.current = controller;
     setLoading(true);
     setError(null);
     setNotice(null);
     try {
-      const [reviewData, workspaceContext] = await Promise.all([
-        fetchDocumentReviewData(projectId),
-        fetchWorkspaceContext(projectId, "input_package"),
-      ]);
-      setData(reviewData);
-      setContext(workspaceContext);
-    } catch (caught) {
-      setError(errorMessage(caught));
+      const reviewData = await fetchDocumentReviewData(projectId, controller.signal);
+      if (!controller.signal.aborted) setData(reviewData);
+    } catch {
+      if (!controller.signal.aborted) setError("문서 목록과 파싱 결과를 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
     void load();
+    return () => activeLoad.current?.abort();
   }, [load]);
 
   const documents = useMemo(() => (data ? mergeWorkspaceDocuments(data) : []), [data]);
@@ -728,7 +733,7 @@ export function DocumentReviewWorkspace({
   }, [load, projectId, selectedFact]);
 
   const filteredFacts = useMemo(() => {
-    const documentSource = documentFacts.length ? documentFacts : facts;
+    const documentSource = selectedDocument ? documentFacts : facts;
     const source = sourceFactFilterKey
       ? documentSource.filter((fact) => factHasLocator(fact, sourceFactFilterKey))
       : documentSource;
@@ -741,7 +746,7 @@ export function DocumentReviewWorkspace({
         .toLowerCase()
         .includes(query);
     });
-  }, [documentFacts, factQuery, facts, issuesOnly, sourceFactFilterKey]);
+  }, [documentFacts, factQuery, facts, issuesOnly, selectedDocument, sourceFactFilterKey]);
 
   const glossaryCandidates = useMemo(
     () => (data?.glossaryCandidates ?? []).filter((candidate) => {
@@ -754,7 +759,6 @@ export function DocumentReviewWorkspace({
   );
 
   const auditItems = useMemo(() => collectAuditItems(data), [data]);
-  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
   const openConflictCount = conflicts.filter((item) => identifier(item.conflictStatus) === "open").length;
   const reviewPendingCount = facts.filter((item) => ["pending", "in_review"].includes(item.reviewStatus)).length;
   const approvedCount = facts.filter((item) => item.snapshotApprovalStatus === "approved").length;
@@ -770,72 +774,75 @@ export function DocumentReviewWorkspace({
 
   return (
     <div className="space-y-4 pb-8">
-      <header className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm dark:border-slate-800 dark:bg-slate-950 md:px-5">
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-          <div className="flex min-w-0 items-start gap-3">
-            <ProjectWorkspaceLink
-              projectId={projectId}
-              path="input-package"
-              className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-900"
-              aria-label="자료 입력 패키지로 돌아가기"
-            >
-              <ArrowLeft className="h-4 w-4" />
+      <header className={heroStyles.hero}>
+        <DashboardAtmosphere className={heroStyles.atmosphere} testId="document-review-parallax" strength={0.06} />
+        <div className="relative grid gap-5 p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-center">
+          <div className="min-w-0">
+            <ProjectWorkspaceLink projectId={projectId} path="input-package" className="inline-flex items-center gap-2 text-sm text-slate-200 hover:text-white" aria-label="자료 입력 패키지로 돌아가기">
+              <ArrowLeft className="h-4 w-4" aria-hidden="true" /> 자료 입력
             </ProjectWorkspaceLink>
-            <div className="min-w-0">
-              <p className="truncate text-xs font-bold text-slate-500">{projectName}</p>
-              <h1 className="mt-1 flex items-center gap-2 text-2xl font-black tracking-tight text-slate-950 dark:text-white">
-                <FileCheck2 className="h-6 w-6 text-indigo-600" /> 문서 파싱 · 근거 검토
-              </h1>
-              <p className="mt-1 max-w-4xl text-sm leading-6 text-slate-500">
-                Parser V2 후보값과 보관 원본의 locator를 함께 확인합니다. 후보, 검토, 승인, 검증 상태는 서로 독립적으로 표시됩니다.
-              </p>
+            <h1 className="mt-3 text-2xl font-bold tracking-tight text-white">문서 검토</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-200">
+              {documents.length
+                ? documentFacts.length
+                  ? "원본과 파싱값을 대조한 뒤, 확인할 항목의 검토 의견을 남기세요."
+                  : "문서를 선택하고 원본부터 확인하세요. PDF는 필요한 페이지에서 글자 읽기를 사용할 수 있습니다."
+                : "자료를 올리면 이곳에서 원본과 파싱 결과를 함께 확인할 수 있습니다."}
+            </p>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              {documents.length ? <a href="#document-source-view" className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-white px-4 text-sm font-bold text-slate-950 hover:bg-slate-100">
+                <FileText className="h-4 w-4" aria-hidden="true" /> 원본 확인하기
+              </a> : <ProjectWorkspaceLink projectId={projectId} path="input-package" className="inline-flex min-h-10 items-center rounded-lg bg-white px-4 text-sm font-bold text-slate-950">자료 올리기</ProjectWorkspaceLink>}
+              <button type="button" onClick={() => void load()} disabled={loading || reviewBusy} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-white/30 px-3 text-sm text-white hover:bg-white/10 disabled:opacity-50">
+                {loading ? <Loader2 className="h-4 w-4 motion-safe:animate-spin" /> : <RefreshCw className="h-4 w-4" />} 최신 원장 새로고침
+              </button>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading || reviewBusy}
-            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-black text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
-          >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            최신 원장 새로고침
-          </button>
-        </div>
-
-        <div className="mt-4 grid gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 xl:grid-cols-5 dark:border-slate-800 dark:bg-slate-800">
-          <SummaryMetric label="보관 문서" value={`${documents.length}건`} detail={`Parser 등록 ${documents.filter((item) => item.parserRegistered).length}건`} />
-          <SummaryMetric label="파싱 후보" value={`${facts.length}건`} detail={`검토 대기 ${reviewPendingCount}건 · Queue ${queueCount}건`} />
-          <SummaryMetric label="열린 충돌" value={`${openConflictCount}건`} detail={openConflictCount ? "승인 전 해소 필요" : "현재 열린 충돌 없음"} tone={openConflictCount ? "bad" : "good"} />
-          <SummaryMetric label="Snapshot 승인값" value={`${approvedCount}건`} detail="active ApprovedInputSnapshot 포함 기준" />
-          <SummaryMetric label="원본 연결" value={`${documents.filter((item) => item.downloadUrl).length}건`} detail="실제 downloadUrl만 노출" />
-        </div>
-        {data ? (
-          <div className="mt-3 flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500 dark:border-slate-800 dark:bg-slate-900 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-            <span><strong className="text-slate-700 dark:text-slate-200">서버 Read Model</strong> {data.viewModelVersion}</span>
-            <span>as-of {formatDate(data.asOfDate)}</span>
-            <span className="break-all font-mono">snapshot {data.snapshotHash.slice(0, 16)}…</span>
-            <span>freshness {identifier(data.freshness?.status) || "unknown"}</span>
+          <div className={heroStyles.glass} data-testid="document-review-glass">
+            <dl className="grid grid-cols-2 gap-4 text-white">
+              <div><dt className="text-xs text-slate-200">보관 문서</dt><dd className="mt-1 text-2xl font-semibold">{countLabel(data?.sourceDocuments.length)}</dd>{!data ? <p className="text-xs text-slate-200">조회 불가</p> : null}</div>
+              <div><dt className="text-xs text-slate-200">검토할 항목</dt><dd className="mt-1 text-2xl font-semibold">{countLabel(data ? queueCount : undefined)}</dd></div>
+            </dl>
+            <p className="mt-3 border-t border-white/20 pt-3 text-xs leading-5 text-slate-100">
+              {data ? "파싱값 " + facts.length + "건 · 미검토 " + reviewPendingCount + "건 · 승인된 입력값 " + approvedCount + "건" : "저장 상태를 다시 확인해 주세요."}
+              {openConflictCount ? " · 값 충돌 " + openConflictCount + "건" : ""}
+            </p>
           </div>
-        ) : null}
+        </div>
       </header>
+      {data ? <details className="rounded-lg border border-slate-200 bg-white text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-950">
+        <summary className="cursor-pointer px-4 py-3 font-semibold">조회 기준·진단 정보</summary>
+        <div className="flex flex-wrap gap-3 border-t border-slate-200 px-4 py-3 dark:border-slate-800">
+          <span>서버 Read Model {data.viewModelVersion}</span><span>기준 시각 {formatDate(data.asOfDate)}</span>
+          <span className="break-all font-mono">snapshot {data.snapshotHash.slice(0, 16)}…</span>
+          <span>freshness {identifier(data.freshness?.status) || "unknown"}</span>
+        </div>
+      </details> : null}
 
-      {error ? <Notice tone="bad">{error}</Notice> : null}
+      {error ? <div role="alert"><Notice tone="bad">
+        {error} {data ? "마지막으로 확인한 결과를 표시합니다." : "새로고침해서 원본과 파싱 상태를 다시 확인해 주세요."}
+      </Notice></div> : null}
       {notice ? <Notice tone="good">{notice}</Notice> : null}
-      {data?.warnings.map((warning) => <Notice key={warning} tone="warn">부분 로드: {warning}</Notice>)}
+      {data && documents.some((item) => item.mediaType === "application/pdf" && item.latestRun?.executionStatus === "completed" && item.candidateCount === 0) ? (
+        <p className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
+          파싱이 완료되어도 검토 후보가 없는 PDF가 있습니다. 원본을 열고 필요한 페이지에서 글자 읽기를 사용할 수 있습니다.
+        </p>
+      ) : null}
+      {data?.warnings.filter((warning) => warning !== "DOCUMENT_GLOSSARY_UNAVAILABLE").map((warning) => <Notice key={warning} tone="warn">부분 로드: {warning}</Notice>)}
       {requestedArchiveId === null ? (
         <Notice tone="warn">문서 링크 형식이 올바르지 않습니다. 목록에서 검토할 문서를 선택하세요.</Notice>
       ) : requestedArchiveId && data && !linkedDocument ? (
         <Notice tone="warn">이 프로젝트의 문서 목록에서 링크된 문서를 찾을 수 없습니다.</Notice>
       ) : null}
 
-      {!documents.length && !facts.length ? (
+      {data && !documents.length && !facts.length ? (
         <ControlledEmpty
           icon={<FileQuestion className="h-7 w-7" />}
           title="검토할 문서와 Parser V2 후보값이 없습니다."
-          body="원본 문서를 업로드하고 Parser V2 실행이 완료되면 이 화면에 실제 문서 버전, 후보값, 근거 locator가 표시됩니다."
+          body="자료 입력에서 문서를 올리면 원본과 추출한 값을 이곳에서 확인할 수 있습니다."
         />
-      ) : (
-        <div className="flex min-h-[720px] flex-col gap-3 xl:h-[calc(100vh-15rem)] xl:min-h-[760px] xl:flex-row xl:gap-0">
+      ) : data ? (
+        <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(19rem,25rem)]">
           <DocumentNavigator
             documents={documents}
             selectedDocument={selectedDocument}
@@ -886,7 +893,7 @@ export function DocumentReviewWorkspace({
             glossaryTerms={glossaryTerms}
             glossaryCandidates={glossaryCandidates}
             glossaryLoading={glossaryLoading}
-            glossaryError={glossaryError}
+            glossaryError={glossaryError ?? (data.warnings.includes("DOCUMENT_GLOSSARY_UNAVAILABLE") ? "용어집 후보는 현재 서버에서 조회할 수 없습니다." : null)}
             reviewReason={reviewReason}
             onReviewReasonChange={setReviewReason}
             reviewBusy={reviewBusy}
@@ -895,7 +902,7 @@ export function DocumentReviewWorkspace({
             auditItems={auditItems}
           />
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -920,12 +927,11 @@ function DocumentNavigator({
   onSelectAnchor: (anchor: LocatorAnchor) => void;
 }) {
   return (
-    <aside className="flex w-full shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950 xl:w-[280px] xl:min-w-[230px] xl:max-w-[420px] xl:resize-x xl:rounded-r-none" aria-label="문서 및 위치 탐색">
+    <aside className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950 xl:col-span-2" aria-label="문서 및 위치 탐색">
       <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
-        <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-400">Documents</p>
-        <p className="mt-1 text-sm font-black text-slate-950 dark:text-white">보관 원본 · 버전</p>
+        <p className="text-sm font-semibold text-slate-950 dark:text-white">1. 검토할 문서를 선택하세요 <span className="ml-2 text-xs font-normal text-slate-500">{documents.length}개</span></p>
       </div>
-      <div className="max-h-64 overflow-y-auto border-b border-slate-200 p-2 dark:border-slate-800 xl:max-h-[42%]">
+      <div className="grid max-h-56 gap-2 overflow-y-auto p-3 sm:grid-cols-2 xl:grid-cols-3">
         {documents.map((document) => {
           const selected = selectedDocument?.key === document.key;
           const spreadsheet = /spreadsheet|excel|sheet/i.test(`${document.mediaType} ${document.fileName}`);
@@ -945,12 +951,14 @@ function DocumentNavigator({
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-black">{document.fileName}</span>
                 <span className="mt-1 block text-[11px] text-slate-500">
-                  {document.documentType || document.mediaType || "문서 유형 미분류"}
+                  {document.mediaType === "application/pdf" ? "PDF 문서" : /spreadsheet|excel|sheet/i.test(`${document.mediaType} ${document.fileName}`) ? "엑셀 문서" : document.documentType || "보관 문서"}
                   {document.versionNumber ? ` · v${document.versionNumber}` : ""}
                 </span>
                 <span className="mt-1 flex flex-wrap gap-1">
-                  <StatusPill label="Parser" status={document.parserRegistered ? "registered" : "not_registered"} />
-                  {document.integrityStatus ? <StatusPill label="무결성" status={document.integrityStatus} /> : null}
+                  {document.latestRun ? (
+                    <><StatusPill label="파싱" status={identifier(document.latestRun.executionStatus) || "unknown"} />
+                    {document.candidateCount !== undefined ? <span className="self-center text-[11px] text-slate-500">후보 {document.candidateCount}건</span> : null}</>
+                  ) : <StatusPill label="파싱" status="not_registered" />}
                 </span>
               </span>
             </button>
@@ -958,11 +966,9 @@ function DocumentNavigator({
         })}
       </div>
 
-      <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
-        <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-400">Pages · Sheets</p>
-        <p className="mt-1 text-xs text-slate-500">실제 후보값 locator에서 발견된 위치만 표시합니다.</p>
-      </div>
-      <div className="min-h-44 flex-1 overflow-y-auto p-2">
+      <details className="border-t border-slate-200 dark:border-slate-800">
+        <summary className="cursor-pointer px-4 py-3 text-xs font-semibold text-slate-600">문서 안의 근거 위치 {anchors.length}곳</summary>
+      <div className="grid max-h-52 gap-2 overflow-y-auto p-3 sm:grid-cols-2 lg:grid-cols-3">
         {anchors.length ? (
           anchors.map((anchor) => {
             const selected = selectedLocator
@@ -994,13 +1000,11 @@ function DocumentNavigator({
           })
         ) : (
           <div className="m-2 rounded-lg border border-dashed border-slate-300 p-4 text-xs leading-5 text-slate-500 dark:border-slate-700">
-            이 문서 버전에 연결된 정확 locator가 없습니다. 없는 페이지나 시트를 임의로 생성하지 않습니다.
+            연결된 파싱 근거가 아직 없습니다. 아래 원본에서 내용을 확인할 수 있습니다.
           </div>
         )}
       </div>
-      <div className="border-t border-slate-200 px-3 py-2 text-[10px] text-slate-400 dark:border-slate-800">
-        데스크톱에서는 우측 경계를 드래그해 폭을 조정할 수 있습니다.
-      </div>
+      </details>
     </aside>
   );
 }
@@ -1031,12 +1035,12 @@ function SourcePreview({
     ? locatorMatchesDocument(locator, document)
     : false;
   return (
-    <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-100 dark:border-slate-800 dark:bg-slate-900 xl:rounded-none xl:border-l-0" aria-label="원본 위치 미리보기">
+    <main id="document-source-view" className="flex min-w-0 scroll-mt-20 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-100 shadow-sm dark:border-slate-800 dark:bg-slate-900" aria-label="원본 위치 미리보기">
       <div className="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-950 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <p className="truncate text-sm font-black text-slate-950 dark:text-white">{document?.fileName ?? "선택 문서 없음"}</p>
           <p className="mt-0.5 text-[11px] text-slate-500">
-            {document?.documentVersionId ? `Document version ${document.documentVersionId}` : "Parser V2 document version 미등록"}
+            {document?.parserRegistered ? "파싱 결과 연결됨" : "보관 원본 · 파싱값 미등록"}
             {document?.sizeBytes !== undefined ? ` · ${formatBytes(document.sizeBytes)}` : ""}
           </p>
         </div>
@@ -1048,7 +1052,7 @@ function SourcePreview({
               rel="noreferrer"
               className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-black text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-200"
             >
-              <ExternalLink className="h-3.5 w-3.5" /> 원본 byte-range 뷰어
+              <ExternalLink className="h-3.5 w-3.5" /> 원본 새 창으로 열기
             </a>
           ) : null}
           {document?.downloadUrl ? (
@@ -1074,14 +1078,7 @@ function SourcePreview({
 
       <div className="flex flex-1 items-start justify-center overflow-auto p-4 sm:p-6">
         <div className="w-full max-w-4xl space-y-4">
-          {contentUrl ? (
-            <div className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-xs leading-5 text-indigo-900 dark:border-indigo-900/70 dark:bg-indigo-950/30 dark:text-indigo-100">
-              <span className="font-black">보호된 원본 Viewer 경로</span>
-              <span className="ml-1">요청 시점에 tenant 권한, version-bound 원본 결합, 단일 HTTP byte range, 열람 감사를 검증합니다. 검증 실패는 원본 미리보기로 승격하지 않습니다.</span>
-            </div>
-          ) : (
-            <Notice tone="warn">원본 archiveId가 없어 inline viewer를 열 수 없습니다. 다운로드 링크나 locator를 임의로 생성하지 않습니다.</Notice>
-          )}
+          {!contentUrl ? <Notice tone="warn">원본 미리보기를 열 수 없습니다. 다운로드로 확인하거나 자료 입력에서 원본을 다시 확인해 주세요.</Notice> : null}
 
           {document && locator && !locatorBound ? (
             <ControlledEmpty
@@ -1114,6 +1111,7 @@ function SourcePreview({
           ) : null}
 
           {locator ? (
+            <details className="group"><summary className="cursor-pointer rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-950">선택한 값의 출처·위치 상세</summary>
             <article className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
               <div className="flex flex-col gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-800 sm:flex-row sm:items-start sm:justify-between">
                 <div>
@@ -1148,22 +1146,22 @@ function SourcePreview({
                   이 locator에는 원문 발췌가 저장되지 않았습니다. 페이지·표·행·셀 좌표와 해시만 표시합니다.
                 </div>
               )}
-            </article>
-          ) : (
+            </article></details>
+          ) : !contentUrl ? (
             <ControlledEmpty
               icon={<LocateFixed className="h-7 w-7" />}
-              title="선택할 근거 locator가 없습니다."
-              body="Facts 또는 좌측 위치 목록에서 실제 근거가 연결된 후보값을 선택하세요. 근거가 없는 후보값은 승인 가능한 근거처럼 표시하지 않습니다."
+              title="아직 연결된 파싱값이 없습니다."
+              body="원본을 확인한 뒤 자료 입력 화면에서 파싱 상태를 확인해 주세요."
             />
-          )}
+          ) : null}
 
           {document ? (
-            <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <details><summary className="cursor-pointer px-1 py-2 text-xs text-slate-500">원본 보관 정보</summary><section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <MetaCard label="콘텐츠 유형" value={document.mediaType || "미확인"} />
               <MetaCard label="원본 무결성" value={document.integrityStatus || "미확인"} />
               <MetaCard label="출처 권위" value={document.sourceAuthority || "미확인"} />
               <MetaCard label="등록 시각" value={formatDate(document.uploadedAt)} />
-            </section>
+            </section></details>
           ) : null}
         </div>
       </div>
@@ -1247,7 +1245,7 @@ function PdfLocatorPreview({
       <div className="flex flex-col gap-2 border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="text-xs font-black text-slate-950 dark:text-white">실제 PDF 페이지 · p.{pageNumber}</p>
-          <p className="mt-0.5 text-[11px] text-slate-500">서버가 검증 원본에서 렌더링하며 locator geometry만 overlay합니다.</p>
+          <p className="mt-0.5 text-[11px] text-slate-500">원본 페이지와 추출한 항목의 위치를 함께 확인하세요.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2" aria-label="PDF 페이지 선택">
@@ -1284,11 +1282,11 @@ function PdfLocatorPreview({
           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
             <span>페이지 {pageNumber} / {preview.pageCount} · {Math.round(preview.pageWidth)} × {Math.round(preview.pageHeight)} pt</span>
             {bboxSupported ? (
-              <span className="font-black text-emerald-700 dark:text-emerald-300">BBox overlay 적용</span>
+              <span className="font-black text-emerald-700 dark:text-emerald-300">선택 항목의 위치 표시 중</span>
             ) : bbox ? (
-              <span className="font-black text-amber-700 dark:text-amber-300">좌표계 불일치 또는 페이지 밖 BBox — overlay 차단</span>
+              <span className="font-black text-amber-700 dark:text-amber-300">항목의 위치가 페이지와 맞지 않아 표시하지 않았습니다.</span>
             ) : (
-              <span className="font-black text-slate-500">BBox 없음 — 페이지 원본만 표시</span>
+              <span className="font-black text-slate-500">페이지 전체 표시</span>
             )}
           </div>
         </div>
@@ -1476,10 +1474,10 @@ function Inspector({
   auditItems: AuditItem[];
 }) {
   return (
-    <aside className="flex w-full shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950 xl:w-[450px] xl:min-w-[360px] xl:max-w-[620px] xl:resize-x xl:rounded-l-none xl:border-l-0" aria-label="문서 검토 Inspector">
+    <aside className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950" aria-label="문서 검토 Inspector">
       <div className="overflow-x-auto border-b border-slate-200 dark:border-slate-800">
         <div className="flex min-w-max px-2 pt-2" role="tablist" aria-label="검토 정보 탭">
-          {TABS.map((tab) => (
+          {TABS.filter((tab) => tab.key === "facts" || tab.key === "issues").map((tab) => (
             <button
               key={tab.key}
               type="button"
@@ -1496,8 +1494,18 @@ function Inspector({
             </button>
           ))}
         </div>
+        <details open={!["facts", "issues"].includes(activeTab) || undefined} className="border-t border-slate-100 dark:border-slate-800">
+          <summary className="cursor-pointer px-4 py-3 text-xs font-semibold text-slate-500">검토 더보기</summary>
+          <div className="flex flex-wrap gap-1 px-3 pb-3" role="tablist" aria-label="상세 검토 탭">
+            {TABS.filter((tab) => tab.key !== "facts" && tab.key !== "issues").map((tab) => <button
+              key={tab.key} type="button" role="tab" aria-selected={activeTab === tab.key}
+              onClick={() => onTabChange(tab.key)}
+              className={"min-h-9 rounded-lg px-3 py-2 text-xs font-semibold transition-colors " + (activeTab === tab.key ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-200" : "text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-900")}
+            >{tab.label}</button>)}
+          </div>
+        </details>
       </div>
-      <div className="min-h-[520px] flex-1 overflow-y-auto p-4">
+      <div className="max-h-[900px] overflow-y-auto p-4">
         {activeTab === "facts" ? (
           <FactsPanel
             facts={facts}
@@ -1548,7 +1556,7 @@ function Inspector({
         {activeTab === "audit" ? <AuditPanel items={auditItems} selectedFact={selectedFact} /> : null}
       </div>
       <div className="border-t border-slate-200 px-3 py-2 text-[10px] text-slate-400 dark:border-slate-800">
-        Candidate · Review · Approval · Validation은 서로 대체되지 않습니다.
+        검토 결정과 계산에 사용할 승인 입력값은 별도로 관리됩니다.
       </div>
     </aside>
   );
@@ -1579,20 +1587,20 @@ function FactsPanel({
     <div className="space-y-3">
       <div>
         <p className="text-sm font-black text-slate-950 dark:text-white">파싱 후보값</p>
-        <p className="mt-1 text-xs leading-5 text-slate-500">Parser V2 run package의 실제 candidate만 표시합니다.</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">선택한 문서에서 추출한 값을 원본과 비교하세요.</p>
       </div>
       <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
         <Search className="h-3.5 w-3.5 text-slate-400" />
         <input
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="필드·값·candidate ID 검색"
+          placeholder="항목·값 검색"
           className="min-w-0 flex-1 bg-transparent text-xs outline-none"
         />
       </label>
       <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
         <input type="checkbox" checked={issuesOnly} onChange={(event) => onIssuesOnlyChange(event.target.checked)} />
-        서버 Review Queue 항목만
+        확인이 필요한 값만
       </label>
       {sourceFilterLabel ? (
         <div className="flex items-start justify-between gap-2 rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-950 dark:border-indigo-900/60 dark:bg-indigo-950/30 dark:text-indigo-100">
@@ -1645,8 +1653,8 @@ function FactsPanel({
       ) : (
         <ControlledEmpty
           icon={<Database className="h-6 w-6" />}
-          title="조건에 맞는 Parser V2 후보가 없습니다."
-          body="Legacy parsed_fact를 Parser V2 승인 후보처럼 합치지 않습니다. 해당 데이터의 승격 계약이 필요합니다."
+          title="표시할 파싱값이 없습니다."
+          body="원본을 먼저 확인하세요. 파싱이 끝난 문서의 검토할 값이 이곳에 표시됩니다."
           compact
         />
       )}
@@ -2220,15 +2228,10 @@ function addSnapshotAudit(items: Map<string, AuditItem>, snapshot: ApprovedInput
   });
 }
 
-function SummaryMetric({ label, value, detail, tone = "neutral" }: { label: string; value: string; detail: string; tone?: "neutral" | "good" | "bad" }) {
-  return (
-    <div className="bg-white px-4 py-3 dark:bg-slate-950">
-      <p className="text-[11px] font-black text-slate-500">{label}</p>
-      <p className={`mt-1 text-xl font-black ${tone === "bad" ? "text-rose-600" : tone === "good" ? "text-emerald-600" : "text-slate-950 dark:text-white"}`}>{value}</p>
-      <p className="mt-0.5 text-[10px] text-slate-400">{detail}</p>
-    </div>
-  );
+function countLabel(count: number | undefined) {
+  return count === undefined ? "—" : count + "건";
 }
+
 
 function StatusPill({ label, status }: { label: string; status: string }) {
   const normalized = identifier(status) || "unknown";

@@ -1385,7 +1385,15 @@ def _safe_relative_redirect_path(value: Any) -> str:
 
 @router.get("/stats")
 def get_system_stats():
-    """Return real system statistics from the database for the login screen."""
+    """Return local pilot statistics only where the local database is authoritative."""
+    from core.runtime_profile import is_hardened_environment
+    from storage import storage_backend
+
+    if is_hardened_environment() or storage_backend() in {"postgres", "postgresql"}:
+        raise HTTPException(status_code=503, detail={
+            "error": "normalized_system_statistics_unavailable",
+            "message": "운영 시스템의 통계 집계가 아직 준비되지 않았습니다.",
+        })
     import sqlite3
     from storage import sqlite_file_path
     

@@ -82,6 +82,19 @@ Vercel 서버 함수의 단일 리전은 API와 Supabase가 있는 도쿄로 설
 프로젝트 범위를 검증한다.
 
 
+## 6개 Pod 사전 검토
+
+사용자가 사전 검토를 실행하면 `POST /projects/{id}/chief-orchestration/preflight`가
+현재 저장 자료를 바탕으로 6개 Chief Pod의 준비 상태를 한 번씩 검토한다.
+확인된 입력과 조회 가능한 공개 근거는 기존 형식의 인계로 이어진다. 원본·후보값의
+검토 필요 상태와 사용자가 제출할 자료를 구분한다. 남은 요청은 항목별로 합치고,
+관련 Pod와 사용 목적을 AI 딜룸의 다음 할 일에 표시한다.
+
+검토는 현재 프로젝트 권한을 적용한다. 공개자료 확인 범위를 제한하고,
+필지 응답은 등록된 PNU와 대조한다. 시세 조회는 Agent에 허용된 연결이
+있고 지역과 유형이 확인된 경우에만 수행한다. 사전 검토는 정식 분석과 승인
+기록을 작성하지 않으며, 새 자료를 반영해 다시 실행할 수 있다.
+
 ## Runtime Guarantees
 
 | Capability | Implementation | Status |
@@ -168,3 +181,11 @@ database.
 3. Move full-state `app_state` dual-write to a migration compatibility flag after typed-table parity is proven.
 4. Add a worker/outbox consumer for distributed Event Bus retries and idempotency leases.
 5. Add tenant keys and row-level ownership constraints to every typed table.
+
+## 운영 배선 검증 (2026-11-05)
+
+문서·토지·시장성·딜룸·근거 화면의 수정 범위를 배포용 웹 빌드로 실행해 PC·모바일 회귀 100개와 임시 화면 캡처 검사 2개, API 통합 83개 검사를 통과했다. 웹 타입·변경 파일 린트·빌드도 통과했다. 새 토지·시장 조회의 외부 응답은 회귀 검사용 응답으로 검증했으며 실제 사용자 세션에서의 전 과정 완료를 의미하지 않는다. 운영에서는 기존 PDF 4건과 파싱 실행 기록, 서버 상태·운영 웹 주소·보호 API의 인증 차단을 확인했다.
+
+PF 시장 근거 목록과 검토는 기존 `realytics.market_evidence`를 테넌트 범위로 사용한다. 검토 저장은 읽은 원문과 비교해 충돌 시 409를 반환한다. 운영 테이블의 기존 열과 런타임 SELECT·UPDATE 권한을 확인했으며 새 스키마 변경은 필요하지 않다. 직접 주소·호출, 운영 배포 환경, 저장소 권한이 실제 연결 상태의 기준이다. Markdown은 동작을 재현하기 위한 계약·검증 기록으로 관리한다.
+
+운영 카카오 접수 계획은 인증된 프로젝트 권한과 정규화 감사 기록을 사용한다. 기존 로컬 DB 전용 시스템 통계는 운영에서 503으로 조회 불가를 알린다. 표준 용어 읽기는 운영 DB로 연결하고, 후보 읽기·용어집 편집의 부족한 권한은 별도 검토 대상으로 둔다.

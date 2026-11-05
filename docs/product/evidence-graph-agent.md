@@ -199,3 +199,7 @@ Frontend:
 3. Connect graph claims and term surfaces to snapshot diff and similar-case search.
 4. Add visual graph layout and source-locator query APIs for larger audits.
 5. Add UI deep links from `term_surface` nodes to the glossary candidate review screen.
+
+## 원본과 승인 근거의 조회 구분 (2026-11-05)
+
+근거 화면은 보관 원본·Parser 실행을 문서 검토 API에서 조회하고, Deal State와 Evidence Graph는 각 기존 API에서 조회한다. 일부 조회 실패를 전체 0건으로 표시하지 않는다. 원본 보관·파싱 완료만으로 검토 후보나 승인 근거를 생성하지 않으며, 문서별 검토 화면에서 출처를 확인한다.
