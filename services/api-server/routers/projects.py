@@ -13,7 +13,12 @@ from use_cases.report_calculation_basis import (
     CALCULATION_SLOTS, calculation_choice, freeze_cash_flow_basis, freeze_calculation_basis,
 )
 from use_cases.stored_permit_evidence import resolve_stored_permit_documents
-from use_cases.land_legal_preview import compact_land_legal_review, compact_review_hash
+from use_cases.land_legal_preview import (
+    StaleParcelPreview,
+    compact_land_legal_preview,
+    compact_review_hash,
+    parcel_preview_batch,
+)
 from datetime import datetime, timezone
 import base64
 import tempfile
@@ -184,6 +189,7 @@ from use_cases.feasibility_workbook_llm import (
 )
 from use_cases.intake_finalize import finalize_project_intake_use_case
 from use_cases.parcel_pnu_resolution import (
+    retain_land_ledger_sources,
     canonical_project_parcel_rows,
     parcel_address_lookup_mismatch,
     parcel_lookup_address,
@@ -2649,11 +2655,21 @@ async def analyze_land_ledger_upload(
     # downstream (batch PNU resolution, land pod, map) — previously the analysis
     # was returned to the caller and dropped.
     ledger_payload = {k: v for k, v in ledger.items() if k != "upload"}
+    project = _project_store()[project_id]
     update_payload: Dict[str, Any] = {"landLedger": ledger_payload}
     parcels = ledger_payload.get("parcels") or []
-    if parcels and not (_project_store()[project_id].get("land_acquisition") or []):
+    if parcels and not (project.get("land_acquisition") or []):
         update_payload["land_acquisition"] = parcels
-    project_repository().update(project_id, update_payload)
+    if isinstance(upload_meta, dict) and (source_id := upload_meta.get("archiveId") or upload_meta.get("originalFileHash")):
+        update_payload["landLedgerSources"] = retain_land_ledger_sources(project, ledger_payload, str(source_id))
+    repository = project_repository()
+    try:
+        if storage_backend() in {"postgres", "postgresql"}:
+            repository.update(project_id, update_payload, expected_state_version=(project.get("_meta") or {}).get("stateVersion"))
+        else:
+            repository.update(project_id, update_payload)
+    except ProjectVersionConflict as exc:
+        raise HTTPException(status_code=409, detail="다른 요청이 토지조서를 갱신했습니다. 다시 올려 주세요.") from exc
 
     auto = _maybe_auto_reanalyze(project_id, ["land_ledger"])
     return {
@@ -4531,19 +4547,36 @@ def review_legal_and_permits(
     return review_legal_and_permits_use_case(project, input_data)
 
 
-def _preview_land_legal(project_id: str, request: Request, response: Response, project: Dict[str, Any]) -> Dict[str, Any]:
+def _preview_land_legal(
+    project_id: str,
+    request: Request,
+    response: Response,
+    project: Dict[str, Any],
+    batch_inputs: Dict[str, Any],
+) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "private, no-store"
     enforce_project_tenant_scope(request, project)
+    try:
+        batch = parcel_preview_batch(project_id, project, batch_inputs)
+    except StaleParcelPreview as exc:
+        raise HTTPException(status_code=409, detail="필지 목록이 바뀌었습니다. 첫 필지부터 다시 확인하세요.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="확인할 필지 범위가 올바르지 않습니다.") from exc
     options = _stored_chief_evidence_options(project_id, project, {})
-    return run_legal_pod_use_case(project_id, project, options, persist=False)
+    return run_legal_pod_use_case(project_id, project, options, persist=False, parcel_batch=batch)
 
 
 @router.post("/{project_id}/legal-pod/preview")
-def preview_project_land_legal(project_id: str, request: Request, response: Response):
+def preview_project_land_legal(
+    project_id: str,
+    request: Request,
+    response: Response,
+    input_data: Dict[str, Any] | None = None,
+):
     verified_actor_id(authorize_request(request, "project:analyze"))
     project = authoritative_project(project_id, request)
-    result = _preview_land_legal(project_id, request, response, project)
-    return {**result, "previewHash": compact_review_hash(compact_land_legal_review(result["legalReview"]))}
+    result = _preview_land_legal(project_id, request, response, project, input_data or {})
+    return {**result, "previewHash": compact_review_hash(compact_land_legal_preview(result))}
 
 
 @router.post("/{project_id}/legal-pod/preview-summary")
@@ -4565,8 +4598,11 @@ def save_project_land_legal_summary(project_id: str, request: Request, response:
         or not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
     ):
         raise HTTPException(status_code=400, detail="저장할 항목과 필지를 선택한 뒤 검토를 다시 확인하세요.")
-    result = _preview_land_legal(project_id, request, response, project)
-    compact = compact_land_legal_review(result["legalReview"])
+    batch_inputs = {key: input_data[key] for key in ("parcelOffset", "parcelRevision") if key in input_data}
+    if "reviewedParcelIndexes" in input_data:
+        batch_inputs["parcelIndexes"] = input_data["reviewedParcelIndexes"]
+    result = _preview_land_legal(project_id, request, response, project, batch_inputs)
+    compact = compact_land_legal_preview(result)
     if expected_hash != compact_review_hash(compact):
         raise HTTPException(status_code=409, detail="검토 근거가 바뀌었습니다. 화면 검토를 다시 실행한 뒤 저장하세요.")
     selection = {section: compact[section] for section in sections}

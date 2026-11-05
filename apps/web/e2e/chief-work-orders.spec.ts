@@ -43,6 +43,8 @@ test("opening the deal room loads its plan and execution starts only after a cli
         user: { userId: "u", role: "admin", status: "active", tenantId: "test" },
         permissions: ["project:read", "project:analyze"],
       };
+    } else if (path.endsWith("/auth/onboarding/status")) {
+      body = { platformOperator: true };
     } else if (path.endsWith("/chief-orchestration/plan")) {
       body = saved ? savedPlan : plan;
     } else if (path.endsWith("/chief-orchestration/approval-readiness")) {
@@ -88,7 +90,7 @@ test("opening the deal room loads its plan and execution starts only after a cli
     await route.fulfill({ status, json: body });
   });
 
-  await page.goto("/project/explicit-run/chief-orchestration?track=pf", { waitUntil: "domcontentloaded" });
+  await page.goto("/project/explicit-run/chief-orchestration/diagnostics?track=pf", { waitUntil: "domcontentloaded" });
   const runButton = page.getByRole("button", { name: "전체 자동 실행", exact: true });
   await expect(runButton).toBeInViewport({ timeout: 60_000 });
   await expect(page.getByText("분석 계획을 확인했습니다", { exact: true })).toBeVisible();
@@ -162,6 +164,7 @@ test("saved agent assignments, material requests and execution evidence survive 
     const path = new URL(route.request().url()).pathname;
     let body: unknown = {};
     if (path.endsWith("/auth/me")) body = { authenticated: true, user: { userId: "u", role: "admin", status: "active", tenantId: "test" }, permissions: ["project:read"] };
+    else if (path.endsWith("/auth/onboarding/status")) body = { platformOperator: true };
     else if (path.endsWith("/chief-orchestration/plan")) {
       requestedTracks.push(route.request().postDataJSON().workflowTrack);
       body = plan;
@@ -172,7 +175,7 @@ test("saved agent assignments, material requests and execution evidence survive 
     else if (path.endsWith("/projects/work-orders")) body = { project: { name: "합성 업무 배정 검증" } };
     await route.fulfill({ status: 200, json: body });
   });
-  await page.goto("/project/work-orders/chief-orchestration", { waitUntil: "domcontentloaded" });
+  await page.goto("/project/work-orders/chief-orchestration/diagnostics", { waitUntil: "domcontentloaded" });
   const panel = page.getByRole("region", { name: "추가 업무 배정" });
   await expect(panel).toBeVisible({ timeout: 60_000 });
   expect(requestedTracks.length).toBeGreaterThan(0);

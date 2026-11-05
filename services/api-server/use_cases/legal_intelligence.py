@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from agents.korean_law_context import (
     build_korean_law_mcp_query_plan,
+    ordinance_query_plan,
     build_server_issued_law_context,
 )
 from db.postgres import postgres_configured
@@ -653,6 +654,7 @@ def resolve_project_legal_context(
     service: LegalIntelligenceService | None = None,
     max_queries: int | None = None,
     preview: bool = False,
+    parcel_jurisdictions: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Resolve project law sources, with a read-only runtime for previews."""
 
@@ -662,6 +664,12 @@ def resolve_project_legal_context(
         retain_provider_operations=not preview,
     )
     query_plan = build_korean_law_mcp_query_plan(dict(project_data))
+    # Give exact jurisdiction queries a place in the bounded preview plan.
+    # Preserve the project-wide statutory/permit queries first.
+    if parcel_jurisdictions:
+        statutes = [item for item in query_plan if item.get("tool") != "search_ordinance"]
+        parcel_ordinances = [item for jurisdiction in parcel_jurisdictions for item in ordinance_query_plan(jurisdiction)]
+        query_plan = [*statutes[:4], *parcel_ordinances, *query_plan]
     unique_queries: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in query_plan:
@@ -674,6 +682,8 @@ def resolve_project_legal_context(
     query_limit = max_queries
     if query_limit is None:
         query_limit = int(os.environ.get("REALYTICS_LEGAL_PROJECT_QUERY_LIMIT", "8"))
+        if parcel_jurisdictions:
+            query_limit = max(query_limit, 4 + 2 * len(parcel_jurisdictions))
     unique_queries = unique_queries[: max(1, min(query_limit, 20))]
 
     authoritative: list[SearchHit] = []

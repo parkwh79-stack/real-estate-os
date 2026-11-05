@@ -24,6 +24,9 @@ import {
   Workflow,
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
+import { hasPermission } from "../../lib/authorization";
+import { useAuth } from "../auth/auth-context";
+import { ChiefDealRoomWorkspace } from "./chief-deal-room-workspace";
 import { isNormalizedLegalEvidenceApprovalEligible } from "../../lib/legal-approval-readiness";
 import { LegalIntelligencePanel } from "../legal/legal-intelligence-panel";
 import { LegalGovernanceWorkspace } from "../legal/legal-governance-workspace";
@@ -35,7 +38,7 @@ import {
   type WorkflowTrack,
 } from "../../lib/workflow-track";
 
-type PodKey =
+export type PodKey =
   | "land_legal"
   | "market_product"
   | "cost_schedule"
@@ -47,6 +50,7 @@ type PodStatus = "planned" | "running" | "completed" | "blocked" | "failed" | "n
 
 interface MissingInputRegisterItem {
   itemId: string;
+  status?: string;
   category: string;
   description: string;
   requiredFor?: string[];
@@ -213,7 +217,7 @@ interface RecalculationEvent {
   recommendedAction?: string;
 }
 
-interface ChiefDealOrchestrationPlan {
+export interface ChiefDealOrchestrationPlan {
   schemaVersion: string;
   projectId: string;
   autoSupplements?: AutoSupplementAttempt[];
@@ -487,8 +491,9 @@ const TRIGGER_LABEL: Record<string, string> = {
 };
 
 type ApprovalGate = NonNullable<ChiefDealOrchestrationPlan["approvalReadinessGate"]>;
-type ApprovalReadiness =
-  | { state: "loading" | "unavailable" }
+export type ApprovalReadiness =
+  | { state: "loading" }
+  | { state: "unavailable" }
   | { state: "loaded"; gate: ApprovalGate };
 
 function pickTrackFromUrl(): WorkflowTrack | null {
@@ -593,7 +598,11 @@ function eventTargetPods(event: RecalculationEvent): PodKey[] {
   return rawTargets.map((item) => item.trim()).filter(isPodKey);
 }
 
-export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
+export function ChiefDealRoomMap({ projectId, view = "diagnostics" }: {
+  projectId: string; view?: "workspace" | "diagnostics";
+}) {
+  const { permissions } = useAuth();
+  const diagnostics = view === "diagnostics";
   const [plan, setPlan] = useState<ChiefDealOrchestrationPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -750,9 +759,11 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       if (controller.signal.aborted) return false;
       setPlan(nextPlan);
       void loadApprovalReadiness();
-      void loadRecalculationEvents(controller.signal);
-      void loadPodAiReviews(controller.signal);
-      void loadLegalPod();
+      if (diagnostics) {
+        void loadRecalculationEvents(controller.signal);
+        void loadPodAiReviews(controller.signal);
+        void loadLegalPod();
+      }
       return true;
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -762,7 +773,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, [projectId, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
+  }, [projectId, diagnostics, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
 
   const applyCureAndRerun = useCallback(async () => {
     const amount = Number(cureAmount.replaceAll(",", ""));
@@ -844,9 +855,9 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
     setError(null);
     setExecutingAll(true);
     setExecutionProgress(8);
-    const interval = window.setInterval(() => {
+    const interval = diagnostics ? window.setInterval(() => {
       setExecutionProgress((prev) => (prev >= 92 ? 92 : prev + 8));
-    }, 260);
+    }, 260) : undefined;
 
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/run-all-pods`, {
@@ -863,12 +874,16 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(cleanText(body?.detail, "전체 Pod 실행에 실패했습니다."));
       setExecutionProgress(100);
-      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      if (diagnostics) await new Promise((resolve) => window.setTimeout(resolve, 250));
       const nextPlan = body as ChiefDealOrchestrationPlan;
       setPlan(nextPlan);
       setSupplements(nextPlan.autoSupplements?.length ? nextPlan.autoSupplements : null);
       planRequest.current?.abort();
-      await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
+      if (diagnostics) {
+        await Promise.all([loadApprovalReadiness(), loadRecalculationEvents(), loadPodAiReviews(), loadLegalPod()]);
+      } else {
+        void loadApprovalReadiness();
+      }
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "전체 Pod 실행 중 오류가 발생했습니다.");
@@ -877,7 +892,7 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
       setExecutingAll(false);
       setExecutionProgress(0);
     }
-  }, [projectId, track, plan?.taskGraph?.workflowTrack, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
+  }, [projectId, diagnostics, track, plan?.taskGraph?.workflowTrack, loadApprovalReadiness, loadRecalculationEvents, loadPodAiReviews, loadLegalPod]);
 
   const reanalyzeOnEvidence = useCallback(async () => {
     setReanalyzing(true);
@@ -959,11 +974,25 @@ export function ChiefDealRoomMap({ projectId }: { projectId: string }) {
   // 분석 전(Pod 미실행) vs 분석 후 구분: Pod가 하나라도 실행됐는지로 판단.
   const analyzed =
     (plan?.podRuns ?? []).some((run) => run.status === "completed" || run.status === "running") ||
-    Boolean(plan?.runAllSummary);
+    (plan?.runAllSummary?.completedCount ?? 0) > 0;
   // 파싱 후보값 검증 플래그(PARSED_FACT_*)는 "딜 충돌"이 아니라 "자료 확정 대기"다.
   const parsingConfirmations = conflicts.filter((item) =>
     String((item as Record<string, unknown>).code ?? "").startsWith("PARSED_FACT_"),
   ).length;
+
+  if (!diagnostics) {
+    return <ChiefDealRoomWorkspace
+      projectId={projectId}
+      plan={plan}
+      loading={loading}
+      error={error}
+      readiness={readiness}
+      executing={executingAll}
+      canAnalyze={hasPermission(permissions, "project:analyze")}
+      onRefresh={() => void loadPlan()}
+      onRun={() => void runAllPods()}
+    />;
+  }
 
   if (loading) {
     return (
@@ -2207,7 +2236,7 @@ function RunAllSummaryPanel({ summary }: { summary: NonNullable<ChiefDealOrchest
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <p className="font-black">
-            {blocked ? "전체 실행 완료 · 남은 blocker 있음" : "전체 실행 완료"}
+            {blocked ? "일부 검토 보완 필요" : "전체 실행 완료"}
           </p>
           <p className="mt-1 font-semibold opacity-80">
             완료 {summary.completedCount}개 / 차단 {summary.blockedCount}개 / 요청 {summary.requestedPodCount}개

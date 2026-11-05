@@ -157,7 +157,7 @@ def test_vworld_cadastral_fallback_exposes_zoning_but_not_inferred_far_or_bcr(mo
     monkeypatch.setattr(
         "integrations.land_data_connectors.fetch_parcel_by_pnu",
         lambda *args, **kwargs: (
-            {"prposArea1Nm": "제2종일반주거지역", "lndpclAr": "500"},
+            {"pnu": "2729011700101230004", "prposArea1Nm": "제2종일반주거지역", "lndpclAr": "500"},
             {"status": "resolved"},
         ),
     )
@@ -333,3 +333,21 @@ class _FakeHttpResponse:
 
     def read(self):
         return self.body
+
+
+def test_planning_response_cannot_relabel_another_parcels_data():
+    pnu = "2729011700101230004"
+    router = LandDataConnectorRouter(environ={"REALYTICS_LAND_USE_URL_TEMPLATE": "https://example.test"})
+    wrong = {"pnu": "2729011700101230005", "zoning": "상업지역", "legalFar": 1200}
+    unbound = {"zoning": "상업지역", "legalFar": 900}
+    right = {"pnu": pnu, "zoning": "제2종일반주거지역", "far": 800}
+    assert router._normalize_land_use_record(
+        pnu, [wrong, unbound], source_name="test", source_url=None,
+    ) is None
+    record = router._normalize_land_use_record(
+        pnu, [wrong, unbound, right], source_name="test", source_url=None,
+    )
+    assert record["sourcePnuVerified"] is True
+    assert record["zoning"] == "제2종일반주거지역"
+    assert record["legalFar"] is None
+    assert [item["pnu"] for item in record["landUsePlanItems"]] == [pnu]

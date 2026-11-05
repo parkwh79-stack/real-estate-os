@@ -396,6 +396,21 @@ def normalize_law_context(
     }
 
 
+def ordinance_query_plan(jurisdiction: str) -> List[Dict[str, Any]]:
+    return [
+        {
+            "tool": "search_ordinance",
+            "query": f"{jurisdiction} 도시계획 조례",
+            "purpose": "관할 용도지역·고도지구 등 적용 기준 후보 조회",
+        },
+        {
+            "tool": "search_ordinance",
+            "query": f"{jurisdiction} 건축 조례",
+            "purpose": "관할 가로구역 높이·일조 기준 후보 조회",
+        },
+    ]
+
+
 def build_korean_law_mcp_query_plan(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     project = project_data.get("project")
     project = project if isinstance(project, dict) else {}
@@ -431,18 +446,7 @@ def build_korean_law_mcp_query_plan(project_data: Dict[str, Any]) -> List[Dict[s
             "purpose": "제4조 준주택 분류 검토" if use == "officetel" else "제27조 사업계획승인 규모와 예외 검토",
         })
     if jurisdiction := ordinance_jurisdiction(project_data):
-        queries.extend([
-            {
-                "tool": "search_ordinance",
-                "query": f"{jurisdiction} 도시계획 조례",
-                "purpose": "관할 용도지역·고도지구 등 적용 기준 후보 조회",
-            },
-            {
-                "tool": "search_ordinance",
-                "query": f"{jurisdiction} 건축 조례",
-                "purpose": "관할 가로구역 높이·일조 기준 후보 조회",
-            },
-        ])
+        queries.extend(ordinance_query_plan(jurisdiction))
     queries.extend([
         {
             "tool": "search_law",

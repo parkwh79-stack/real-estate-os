@@ -126,7 +126,47 @@ def _iter_parcel_lists(project: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
             )
         if isinstance(container, list):
             lists.append(container)
+    stored_sources = project.get("landLedgerSources")
+    if isinstance(stored_sources, dict):
+        lists.extend(rows for rows in stored_sources.values() if isinstance(rows, list))
     return lists
+
+
+def retain_land_ledger_sources(
+    project: Dict[str, Any], ledger: Dict[str, Any], source_id: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Retain parcel identities and exact row locations from each uploaded ledger."""
+    existing = project.get("landLedgerSources")
+    sources = dict(existing) if isinstance(existing, dict) else {}
+    previous = project.get("landLedger") or project.get("land_ledger") or {}
+    previous_import = previous.get("importMetadata") or {} if isinstance(previous, dict) else {}
+    previous_id = previous_import.get("originalFileHash") if isinstance(previous_import, dict) else None
+    for document_id, document in ((previous_id, previous), (source_id, ledger)):
+        # A repeated archive hash identifies the same original rows. Keep
+        # any PNU already verified for them during an earlier review.
+        if not document_id or document_id in sources or not isinstance(document, dict):
+            continue
+        rows = []
+        for row in document.get("parcels") or []:
+            if not isinstance(row, dict):
+                continue
+            source = row.get("source") or {}
+            locator = {
+                "sourceType": "excel_row",
+                "sourceDocumentId": document_id,
+                "sheetName": document.get("sheetName"),
+                "rowNumber": source.get("row") if isinstance(source, dict) else None,
+            }
+            rows.append({
+                **{key: row[key] for key in (
+                    "dong", "lotNumber", "normalizedLotNumber", "addressFragment", "isMountain",
+                    "mainLotNo", "subLotNo", "pnu", "resolvedPnu", "pnuMatchMethod", "pnuResolution",
+                    "excludedFromProject", "includedInProject",
+                ) if key in row},
+                "parcelSourceLocators": [locator],
+            })
+        sources[document_id] = rows
+    return sources
 
 
 def _pnu_lot(pnu: Any) -> tuple | None:
@@ -211,6 +251,13 @@ def canonical_project_parcel_rows(project: Dict[str, Any]) -> List[Dict[str, Any
         pnus = {pnu for parcel in group if (pnu := parcel_pnu(parcel))}
         for parcel in reversed(group):
             row.update({key: value for key, value in parcel.items() if value not in (None, "", [], {})})
+        locators = []
+        for parcel in group:
+            for locator in parcel.get("parcelSourceLocators") or []:
+                if isinstance(locator, dict) and locator not in locators:
+                    locators.append(locator)
+        if locators:
+            row["parcelSourceLocators"] = locators
         if len(stored) > 1 or any(group_pnu_counts[pnu] > 1 for pnu in stored):
             row["pnuResolution"] = {"status": "unresolved", "reason": "conflicting_existing_pnu"}
         elif len(pnus) == 1 and not parcel_pnu(row):
@@ -234,6 +281,7 @@ def _pnu_lookup_to_result(props: Dict[str, Any]) -> Dict[str, Any]:
         "lotNumber": props.get("jibun"),
         "landCategory": props.get("jimok") or props.get("dgm_nm"),
         "addressFragment": props.get("addr") or props.get("jibun"),
+        **({"cadastralAddress": props["addr"]} if props.get("addr") else {}),
     }
 
 
@@ -318,6 +366,8 @@ def resolve_parcel_rows(
     dong_code_resolver: Optional[Callable[[str], Optional[str]]] = None,
     pnu_lookup: Optional[Callable[[str], Dict[str, Any]]] = None,
     limit: int = 30,
+    parcel_indexes: set[int] | None = None,
+    timeout_seconds: float = 8.0,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """Resolve a PNU + 공시지가 for every parcel that lacks one (up to ``limit``).
 
@@ -340,14 +390,22 @@ def resolve_parcel_rows(
     if resolver is None:
         from use_cases.intake_finalize import resolve_address_to_parcel
 
-        resolver = resolve_address_to_parcel
+        def resolver(addr: str) -> Dict[str, Any]:
+            if parcel_indexes is not None:
+                return resolve_address_to_parcel(addr, timeout=timeout_seconds, max_address_candidates=1)
+            return resolve_address_to_parcel(addr)
     if not legacy_mode:
         from integrations.vworld import fetch_parcel_by_pnu, resolve_legal_dong_code
 
-        dong_code_resolver = dong_code_resolver or (lambda addr: resolve_legal_dong_code(addr))
-        pnu_lookup = pnu_lookup or (
-            lambda pnu: (lambda props, diag: _pnu_lookup_to_result(props) if diag.get("status") == "resolved" else {"status": diag.get("status", "not_found")})(*fetch_parcel_by_pnu(pnu))
+        dong_code_resolver = dong_code_resolver or (
+            lambda addr: resolve_legal_dong_code(addr, **({} if timeout_seconds == 8.0 else {"timeout": timeout_seconds}))
         )
+        if pnu_lookup is None:
+            def pnu_lookup(pnu: str) -> Dict[str, Any]:
+                props, diag = fetch_parcel_by_pnu(pnu, **({} if timeout_seconds == 8.0 else {"timeout": timeout_seconds}))
+                if props and diag.get("status") == "resolved":
+                    return _pnu_lookup_to_result(props)
+                return {"status": diag.get("status", "not_found")}
 
     prefix = _project_prefix(project)
     groups = _grouped_parcels(project)
@@ -356,10 +414,16 @@ def resolve_parcel_rows(
 
     # Determine the 법정동코드 once (construction mode only).
     legal_dong_code: Optional[str] = None
-    if not legacy_mode and prefix:
+    if not legacy_mode and prefix and any(
+        not any(parcel_pnu(parcel) for parcel in group)
+        for index, group in enumerate(groups, start=1)
+        if parcel_indexes is None or index in parcel_indexes
+    ):
         # Geocode the dong prefix; append the first parcel lot to help VWorld parse.
         first_lot = ""
-        for group in groups:
+        for index, group in enumerate(groups, start=1):
+            if parcel_indexes is not None and index not in parcel_indexes:
+                continue
             head = group[0]
             if _address_prefix(_candidate_address(head, prefix)) == prefix and _parcel_lot(head):
                 first_lot = _parcel_lot(head)
@@ -375,9 +439,12 @@ def resolve_parcel_rows(
         for member in group:
             member.update(patch)
 
-    for group in groups:
+    for index, group in enumerate(groups, start=1):
         head = group[0]
         label = head.get("addressFragment") or _parcel_lot(head)
+        if parcel_indexes is not None and index not in parcel_indexes:
+            results.append({"parcel": label, "status": "skipped_limit"})
+            continue
         existing = _stored_group_pnus(group)
         if len(existing) > 1 or any(group_pnu_counts[pnu] > 1 for pnu in existing):
             reason = "conflicting_existing_pnu"
@@ -426,7 +493,7 @@ def resolve_parcel_rows(
                     patch = _verified_pnu_patch(
                         looked_up, method="pnu_construction",
                         source="VWorld 지적도 PNU 직접조회 (법정동코드+지번)",
-                        now=now, constructedPnu=constructed,
+                        now=now, constructedPnu=constructed, resolvedAddress=address,
                     )
                     _apply(group, patch)
                     resolved_count += 1
@@ -477,7 +544,7 @@ def resolve_parcel_rows(
 
     updates = {
         key: project[key]
-        for key in ("landLedger", "land_ledger", "land_acquisition", "land")
+        for key in ("landLedger", "land_ledger", "land_acquisition", "land", "landLedgerSources")
         if key in project
     } if changed else {}
     return {

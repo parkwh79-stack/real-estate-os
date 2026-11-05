@@ -270,7 +270,8 @@ test("an unavailable requested PNU does not select an unrelated parcel", async (
 
 test("PNU lookup reports a disconnected provider and preserves usable PNU links", async ({ page }) => {
   await fixture(page, { pnuLookupOffline: true });
-  await page.getByRole("region", { name: "다음 조치" }).getByRole("button", { name: "PNU 확인", exact: true }).click();
+  await page.getByText("토지 기본 정보·저장된 증빙", { exact: true }).click();
+  await page.getByRole("button", { name: "PNU 조회 후 원장에 저장", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "VWorld 연결이 필요해 새 PNU를 조회하지 못했습니다." })).toBeVisible();
   await page.getByRole("button", { name: /합성동 1.*상세 보기/ }).click();
   await expect(page.getByRole("dialog").getByRole("link", { name: "지도에서 보기" })).toBeVisible();
@@ -281,7 +282,7 @@ test("PNU lookup reports a disconnected provider and preserves usable PNU links"
 
 test("reopened payment review keeps unknown and explicit zero apart from scheduled amounts", async ({ page }) => {
   await fixture(page);
-  await expect(page.getByRole("region", { name: "다음 조치" }).getByRole("button", { name: "PNU 확인", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "다음 조치" }).getByRole("button", { name: "토지·인허가 미리보기", exact: true })).toBeVisible();
   for (let attempt = 0; attempt < 2; attempt += 1) {
     for (const [parcel, amount] of [[1, "0억원"], [2, "미확인"]] as const) {
       const row = page.getByRole("button", { name: new RegExp(`합성동 ${parcel}.*상세 보기`) });

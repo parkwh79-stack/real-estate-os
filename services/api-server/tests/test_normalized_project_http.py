@@ -337,6 +337,16 @@ def test_normalized_parcel_resolution_and_legal_run_keep_same_tenant_evidence(mo
     assert "no-store" in preview.headers["Cache-Control"]
     preview_body = preview.json()
     assert preview_body["previewOnly"] is True
+    batch = preview_body["parcelBatch"]
+    assert batch["totalParcels"] == 1 and batch["nextOffset"] is None
+    assert batch["rows"][0]["pnu"] == pnu and batch["rows"][0]["status"] == "confirmed"
+    assert client.post("/projects/p/legal-pod/preview", json={
+        "parcelRevision": "a" * 64, "parcelIndexes": [1],
+    }).status_code == 409
+    retry = client.post("/projects/p/legal-pod/preview", json={
+        "parcelRevision": batch["parcelRevision"], "parcelIndexes": [1],
+    })
+    assert retry.status_code == 200 and retry.json()["previewHash"] == preview_body["previewHash"]
     assert preview_body["legalReview"]["developabilityAnalysis"]["heightReview"]["parcelReviews"][0]["pnu"] == pnu
     assert not captured
     assert deal_rows == before_preview

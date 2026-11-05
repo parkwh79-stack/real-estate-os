@@ -135,13 +135,13 @@ def geocode_address(
         return None, {"address": address, "status": "not_found", "message": "no point in response"}
 
 
-def resolve_legal_dong_code(address: str, *, environ: Optional[Dict[str, str]] = None) -> Optional[str]:
+def resolve_legal_dong_code(address: str, *, environ: Optional[Dict[str, str]] = None, timeout: float = 8.0) -> Optional[str]:
     """The 10-digit 법정동코드 for an address, via the VWorld geocoder's parsed
     structure (``refined.structure.level4LC`` is a 19-digit PNU; its first 10
     digits are the legal-dong code). Returns None when VWorld cannot parse it —
     never fabricated. Used to construct per-지번 PNUs precisely.
     """
-    _, diag = geocode_address(address, environ=environ)
+    _, diag = geocode_address(address, environ=environ, timeout=timeout)
     level4lc = str((diag.get("structure") or {}).get("level4LC") or "").strip()
     return level4lc[:10] if len(level4lc) >= 10 and level4lc[:10].isdigit() else None
 
@@ -211,7 +211,11 @@ def fetch_parcel_by_pnu(
     features = ((resp.get("result") or {}).get("featureCollection") or {}).get("features") or []
     if not features:
         return None, {"status": "not_found", "pnu": pnu}
-    return (features[0].get("properties") or {}), {"status": "resolved", "pnu": pnu}
+    for feature in features:
+        properties = feature.get("properties") or {}
+        if str(properties.get("pnu") or "").strip() == pnu:
+            return properties, {"status": "resolved", "pnu": pnu}
+    return None, {"status": "pnu_mismatch", "pnu": pnu}
 
 
 def fetch_parcel_by_point(

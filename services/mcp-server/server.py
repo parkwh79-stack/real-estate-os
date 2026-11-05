@@ -7,6 +7,7 @@ from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from dotenv import load_dotenv
+from hosted_project_api import HostedProjectApi
 
 # Import logic from api-server
 import sys
@@ -68,10 +69,70 @@ def _build_mcp_ai_context(arguments: Dict[str, Any]) -> Dict[str, Any]:
     )
     return resolve_ai_context(context, host="claude_desktop")
 
+
+def _hosted_land_tools() -> List[types.Tool]:
+    project = {"type": "string", "description": "현재 계정에서 접근할 프로젝트 ID"}
+    offset = {"type": "integer", "minimum": 0, "description": "미리보기에서 반환한 다음 조회 위치"}
+    revision = {"type": "string", "description": "미리보기에서 반환한 필지 목록 버전"}
+    indexes = {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "integer", "minimum": 1}}
+    return [
+        types.Tool(
+            name="preview_hosted_land_legal",
+            description="로그인한 계정의 운영 프로젝트에서 필지·PNU·용도지역·법률을 미리 검토합니다. 프로젝트에 저장하지 않습니다.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": project,
+                    "parcel_offset": offset,
+                    "parcel_revision": revision,
+                    "parcel_indexes": {**indexes, "description": "재시도할 필지 번호. 필지 버전이 필요합니다."},
+                },
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+            annotations={"readOnlyHint": True, "openWorldHint": True},
+        ),
+        types.Tool(
+            name="save_hosted_land_legal_summary",
+            description="사용자가 저장을 요청한 미리보기 항목과 필지만 운영 프로젝트에 보관합니다. 실제 저장을 수행합니다.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": project,
+                    "sections": {
+                        "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": True,
+                        "items": {"enum": ["permit", "height", "parcels"]},
+                    },
+                    "expected_preview_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "parcel_indexes": {**indexes, "description": "사용자가 보관을 선택한 필지 번호"},
+                    "parcel_offset": offset,
+                    "parcel_revision": revision,
+                    "reviewed_parcel_indexes": {**indexes, "description": "미리보기에서 재시도했던 필지 번호"},
+                },
+                "required": ["project_id", "sections", "expected_preview_hash"],
+                "additionalProperties": False,
+            },
+            annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+        ),
+        types.Tool(
+            name="list_hosted_land_legal_summaries",
+            description="현재 계정이 접근할 수 있는 운영 프로젝트에서 사용자가 보관한 검토 요약을 조회합니다.",
+            inputSchema={
+                "type": "object",
+                "properties": {"project_id": project},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+            annotations={"readOnlyHint": True, "openWorldHint": True},
+        ),
+    ]
+
+
 @server.list_tools()
 async def handle_list_tools() -> List[types.Tool]:
     """List available tools for PF analysis."""
     return [
+        *_hosted_land_tools(),
         types.Tool(
             name="calculate_pf_metrics",
             description="PF 수지분석 기초 지표(LTV, LTC, Profit, Exit Sale Rate)를 계산합니다.",
@@ -215,6 +276,16 @@ async def handle_call_tool(
             return [types.TextContent(type="text", text=f"Error loading sample: {str(e)}")]
 
     arguments = arguments or {}
+
+    if name in {"preview_hosted_land_legal", "save_hosted_land_legal_summary", "list_hosted_land_legal_summaries"}:
+        api = HostedProjectApi.from_environment()
+        if name == "preview_hosted_land_legal":
+            result = await asyncio.to_thread(api.preview_land_legal, **arguments)
+        elif name == "save_hosted_land_legal_summary":
+            result = await asyncio.to_thread(api.save_land_legal_summary, **arguments)
+        else:
+            result = await asyncio.to_thread(api.list_land_legal_summaries, **arguments)
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     if name == "resolve_ai_connection":
         result = {

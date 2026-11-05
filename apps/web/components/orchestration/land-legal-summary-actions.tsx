@@ -15,10 +15,19 @@ type SummaryRecord = {
   };
 };
 
-export function LandLegalSummaryActions({ projectId, previewHash, analysis }: {
+type BatchSelection = {
+  parcelRevision: string;
+  parcelOffset?: number;
+  reviewedParcelIndexes?: number[];
+  rows: Array<{ parcelIndex: number; parcelLabel?: string; address?: string }>;
+};
+
+export function LandLegalSummaryActions({ projectId, previewHash, analysis, batch, disabled = false }: {
   projectId: string;
   previewHash?: string;
   analysis: PermitHeightAnalysis;
+  batch?: BatchSelection;
+  disabled?: boolean;
 }) {
   const [permit, setPermit] = useState(false);
   const [height, setHeight] = useState(false);
@@ -26,20 +35,26 @@ export function LandLegalSummaryActions({ projectId, previewHash, analysis }: {
   const [saved, setSaved] = useState<SummaryRecord[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const endpoint = `${apiBase}/projects/${projectId}/legal-pod/preview-summary`;
+  const endpoint = `${apiBase}/projects/${encodeURIComponent(projectId)}/legal-pod/preview-summary`;
+  const selectableParcels = batch ? batch.rows.map((row) => ({ parcelIndex: row.parcelIndex, parcelLabel: row.address ?? row.parcelLabel })) : analysis.heightReview?.parcelReviews ?? [];
 
   async function request(save: boolean) {
     setBusy(true);
     setError("");
     try {
       const sections = [permit && "permit", height && "height", parcelIndexes.length > 0 && "parcels"].filter(Boolean);
+      const replay = batch ? {
+        parcelRevision: batch.parcelRevision,
+        ...(batch.reviewedParcelIndexes ? { reviewedParcelIndexes: batch.reviewedParcelIndexes } : { parcelOffset: batch.parcelOffset }),
+      } : {};
       const response = await fetch(endpoint, {
         method: save ? "POST" : "GET",
         cache: "no-store",
         headers: save ? { ...authHeaders("web"), "Content-Type": "application/json" } : authHeaders("web"),
-        body: save ? JSON.stringify({ sections, parcelIndexes, expectedPreviewHash: previewHash }) : undefined,
+        body: save ? JSON.stringify({ sections, parcelIndexes, expectedPreviewHash: previewHash, ...replay }) : undefined,
       });
       const result = await response.json();
+      if (response.status === 409 && save) throw new Error("미리보기 이후 자료가 바뀌었습니다. 해당 필지를 다시 검토한 뒤 저장해 주세요.");
       if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "요약을 처리하지 못했습니다.");
       if (save) {
         const record = result as SummaryRecord;
@@ -58,17 +73,17 @@ export function LandLegalSummaryActions({ projectId, previewHash, analysis }: {
   return (
     <div className="mt-4 space-y-3 border-t border-slate-200 pt-3 dark:border-slate-700">
       {previewHash ? (
-        <fieldset className="space-y-2 text-sm text-slate-700 dark:text-slate-200">
-          <legend className="font-bold">보관할 항목 선택</legend>
+        <fieldset disabled={disabled || busy} className="space-y-2 text-sm text-slate-700 dark:text-slate-200">
+          <legend className="font-bold">{batch ? "이 묶음에서 보관할 항목 선택" : "보관할 항목 선택"}</legend>
           <div className="flex flex-wrap gap-4">
             <label className="flex items-center gap-2"><input type="checkbox" checked={permit} onChange={(event) => setPermit(event.target.checked)} /> 인허가 경로</label>
             <label className="flex items-center gap-2"><input type="checkbox" checked={height} onChange={(event) => setHeight(event.target.checked)} /> 높이 요약</label>
           </div>
-          {analysis.heightReview?.parcelReviews?.length ? (
+          {selectableParcels.length ? (
             <details>
               <summary className="cursor-pointer">보관할 필지 선택</summary>
               <div className="mt-2 flex max-h-40 flex-wrap gap-3 overflow-auto">
-                {analysis.heightReview.parcelReviews.map(({ parcelIndex, parcelLabel }) => parcelIndex ? (
+                {selectableParcels.map(({ parcelIndex, parcelLabel }) => parcelIndex ? (
                   <label key={parcelIndex} className="flex items-center gap-2">
                     <input
                       type="checkbox"

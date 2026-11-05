@@ -668,3 +668,102 @@ def test_legal_pod_distinguishes_planned_height_from_parcel_designation_clues():
     assert height["confirmedLimitM"] is None
     assert not analysis["breaches"]
     assert project["landLedger"]["parcels"][0]["landUsePlanning"] == {"districtUnitPlan": "수기 계획 명칭"}
+
+
+def test_paged_legal_preview_reviews_all_parcels_with_exact_source_and_targets_only_retry(monkeypatch):
+    from copy import deepcopy
+
+    from integrations import vworld
+    from use_cases import legal_pod
+    from use_cases.land_legal_preview import compact_land_legal_preview, parcel_preview_batch
+    from use_cases.parcel_pnu_resolution import retain_land_ledger_sources
+
+    prefix = "4146310300"
+    project = {"project": {"type": "officetel"}, "land": {"address": "경기도 용인시 기흥구 상갈동 1"}}
+    first_ledger = {
+        "importMetadata": {"originalFileHash": "ledger-a"},
+        "sheetName": "필지 A",
+        "parcels": [{"lotNumber": str(i), "source": {"row": i + 1}} for i in range(1, 6)],
+    }
+    second_ledger = {
+        "sheetName": "필지 B",
+        "parcels": [{"lotNumber": str(i), "source": {"row": i + 2}} for i in (5, 6, 7)],
+    }
+    project["landLedger"] = first_ledger
+    project["landLedgerSources"] = retain_land_ledger_sources(project, second_ledger, "ledger-b")
+    project["landLedger"] = second_ledger
+    original = deepcopy(project)
+    cadastre_lookups = []
+    land_use_lookups = []
+    ordinances = []
+
+    def pnu_lookup(value, **_kwargs):
+        cadastre_lookups.append(value)
+        lot = int(value[11:15])
+        if lot == 7:
+            return None, {"status": "not_found"}
+        return {"pnu": value, "jibun": str(lot)}, {"status": "resolved"}
+
+    def land_lookup(_self, parcels, **_kwargs):
+        land_use_lookups.extend(row["pnu"] for row in parcels)
+        return {"status": "completed", "landUsePlanningRecords": [
+            {"pnu": row["pnu"], "zoning": "제2종일반주거지역",
+             "sourceUrlOrEvidenceId": "https://example.test/planning"}
+            for row in parcels
+        ]}
+
+    def law_lookup(_data, *, caller_context, preview, parcel_jurisdictions=()):
+        assert preview
+        ordinances.extend(parcel_jurisdictions)
+        return {"lawContext": {"references": []}, "legalIntelligence": {"references": [
+            {"lawId": "example-ordinance", "verificationStatus": "verified_snapshot",
+             "claimContexts": [{"tool": "search_ordinance", "query": "용인시 도시계획 조례"}]},
+            {"lawId": "other-jurisdiction", "verificationStatus": "verified_snapshot",
+             "claimContexts": [{"tool": "search_ordinance", "query": "수원시 도시계획 조례"}]},
+        ]}}
+
+    def no_write(*_args, **_kwargs):
+        raise AssertionError("Preview may not save anything")
+
+    monkeypatch.setattr(legal_pod, "vworld_configured", lambda: True)
+    monkeypatch.setattr(legal_pod, "resolve_project_legal_context", law_lookup)
+    monkeypatch.setattr(legal_pod, "list_land_evidence_records", lambda _project_id: [])
+    monkeypatch.setattr(legal_pod, "list_deal_state_records", lambda _project_id: [])
+    for name in (
+        "upsert_deal_state_record", "upsert_legal_review_record",
+        "upsert_permit_review_record", "upsert_land_evidence_record",
+    ):
+        monkeypatch.setattr(legal_pod, name, no_write)
+    monkeypatch.setattr(vworld, "resolve_legal_dong_code", lambda _address, **_kwargs: prefix)
+    monkeypatch.setattr(vworld, "fetch_parcel_by_pnu", pnu_lookup)
+    monkeypatch.setattr(LandDataConnectorRouter, "fetch_records_for_parcels", land_lookup)
+
+    def preview(inputs):
+        batch = parcel_preview_batch("p", project, inputs)
+        return run_legal_pod_use_case("p", project, persist=False, parcel_batch=batch)
+
+    first = preview({})["parcelBatch"]
+    revision = first["parcelRevision"]
+    assert first["totalParcels"] == 7
+    assert first["nextOffset"] == 5
+    assert [row["status"] for row in first["rows"]] == ["confirmed", "confirmed", "failed", "confirmed", "confirmed"]
+    duplicate = first["rows"][0]
+    assert duplicate["parcelLabel"] == "5"
+    assert {loc["sourceDocumentId"] for loc in duplicate["sourceLocators"] if "sourceDocumentId" in loc} == {"ledger-a", "ledger-b"}
+    assert duplicate["landUseSourceLocator"]["apiRowId"] == duplicate["pnu"]
+    assert [reference["lawId"] for reference in first["jurisdictions"][0]["ordinanceReferences"]] == ["example-ordinance"]
+
+    second = preview({"parcelRevision": revision, "parcelOffset": first["nextOffset"]})
+    assert [row["parcelIndex"] for row in second["parcelBatch"]["rows"]] == [6, 7]
+    assert second["parcelBatch"]["nextOffset"] is None
+    assert [parcel["parcelIndex"] for parcel in compact_land_legal_preview(second)["parcels"]] == [6, 7]
+    assert len(cadastre_lookups) == 7 and len(set(cadastre_lookups)) == 7
+    assert len(land_use_lookups) == 6 and len(set(land_use_lookups)) == 6
+    assert ordinances == ["용인시", "용인시"]
+    assert second["legalReview"]["developabilityAnalysis"]["heightReview"]["confirmedLimitM"] is None
+
+    failed = preview({"parcelRevision": revision, "parcelIndexes": [3]})
+    assert len(cadastre_lookups) == 8 and cadastre_lookups[-1] == cadastre_lookups[2]
+    assert [row["status"] for row in failed["parcelBatch"]["rows"]] == ["failed"]
+    assert len(land_use_lookups) == 6
+    assert project == original

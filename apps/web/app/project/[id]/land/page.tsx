@@ -59,6 +59,76 @@ type Parcel = {
   };
 };
 
+type PreviewParcelRow = {
+  parcelIndex: number;
+  parcelLabel?: string;
+  address?: string;
+  pnu?: string | null;
+  status: "confirmed" | "ambiguous" | "not_queried" | "failed";
+  landUseStatus: "confirmed" | "not_queried" | "failed";
+  zoning?: string | null;
+  districtUnitPlan?: string | null;
+  landUseSourceLocator?: { sourceName?: string; sourceUrl?: string; sourceType?: string } | null;
+};
+
+type PreviewParcelBatch = {
+  parcelRevision: string;
+  totalParcels: number;
+  nextOffset: number | null;
+  rows: PreviewParcelRow[];
+  jurisdictions?: Array<{
+    jurisdictionCode: string;
+    jurisdictionName?: string;
+    zoning?: string | string[];
+    parcelIndexes: number[];
+    permitRoutes?: Array<{ label?: string }>;
+    ordinanceReferences?: Array<{ title?: string; lawName?: string; citation?: string; article?: string; effectiveDate?: string; url?: string }>;
+  }>;
+};
+
+type PreviewRequest = { parcelOffset?: number; parcelRevision?: string; parcelIndexes?: number[] };
+type PreviewBatchResult = {
+  previewHash: string;
+  legalReview: Record<string, unknown>;
+  request: PreviewRequest;
+  parcelBatch?: PreviewParcelBatch;
+};
+type PreviewSession = {
+  projectId: string;
+  batches: PreviewBatchResult[];
+  active: number;
+  rows: Record<number, PreviewParcelRow>;
+  nextOffset: number | null;
+};
+
+const PNU_PREVIEW_LABEL = {
+  confirmed: "PNU 확인",
+  ambiguous: "후보 확인 필요",
+  not_queried: "미조회",
+  failed: "조회 실패",
+};
+const LAND_USE_PREVIEW_LABEL = {
+  confirmed: "토지이용 근거 확인",
+  not_queried: "토지이용 미조회",
+  failed: "토지이용 조회 실패",
+};
+
+function mergeParcelPreview(projectId: string, previous: PreviewSession | null, result: PreviewBatchResult): PreviewSession {
+  const batch = result.parcelBatch;
+  const continuing = Boolean(result.request.parcelRevision) && previous?.projectId === projectId;
+  const batches = continuing ? [...previous.batches] : [];
+  const requestKey = JSON.stringify(result.request.parcelIndexes ?? result.request.parcelOffset ?? 0);
+  const position = batches.findIndex(({ request }) => JSON.stringify(request.parcelIndexes ?? request.parcelOffset ?? 0) === requestKey);
+  const active = position < 0 ? batches.length : position;
+  batches[active] = result;
+  const rows = continuing ? { ...previous.rows } : {};
+  for (const row of batch?.rows ?? []) rows[row.parcelIndex] = row;
+  return {
+    projectId, batches, active, rows,
+    nextOffset: continuing && (result.request.parcelIndexes || position >= 0) ? previous.nextOffset : batch?.nextOffset ?? null,
+  };
+}
+
 type LandEvidenceRecord = {
   evidenceId?: string;
   evidence_id?: string;
@@ -177,7 +247,9 @@ export default function LandAnalysisPage() {
   const [error, setError] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
-  const [legalPreview, setLegalPreview] = useState<{ projectId: string; previewHash: string; legalReview: Record<string, unknown> } | null>(null);
+  const [legalPreview, setLegalPreview] = useState<PreviewSession | null>(null);
+  const [visibleParcelLimit, setVisibleParcelLimit] = useState(120);
+  const pendingPreview = useRef<AbortController | null>(null);
   const [selectedParcelKey, setSelectedParcelKey] = useState<string | null>(null);
   const activeProject = useRef(projectId);
   const reviewDirty = useRef(false);
@@ -196,6 +268,8 @@ export default function LandAnalysisPage() {
     setError(null);
     setLegalPreview(null);
     setSelectedParcelKey(null);
+    setVisibleParcelLimit(120);
+    return () => pendingPreview.current?.abort();
   }, [projectId]);
 
   const load = useCallback(async () => {
@@ -228,7 +302,10 @@ export default function LandAnalysisPage() {
   const mapUrl = projectWorkspaceHref(projectId, "map", activeTrack);
   const land = asRecord(pageData.land);
   const landLedger = asRecord(pageData.landLedger);
-  const preview = legalPreview?.projectId === projectId ? legalPreview : null;
+  const previewSession = legalPreview?.projectId === projectId ? legalPreview : null;
+  const preview = previewSession?.batches[previewSession.active];
+  const previewBatch = preview?.parcelBatch;
+  const supersededBatch = Boolean(previewBatch?.rows.some((row) => previewSession?.rows[row.parcelIndex] !== row));
   const legalReview = asRecord(preview?.legalReview);
   const legalAnalysis = asRecord(legalReview.developabilityAnalysis) as PermitHeightAnalysis;
   const legalIntelligence = asRecord(legalReview.legalIntelligence);
@@ -247,9 +324,10 @@ export default function LandAnalysisPage() {
   const inclusiveBudget = asRecord(reconciliation.inclusiveBudget);
   const savedReview = asRecord(reconciliation.review);
 
+  const hasPreview = Boolean(preview);
   useEffect(() => {
-    if (preview) previewHeading.current?.focus();
-  }, [preview]);
+    if (hasPreview) previewHeading.current?.focus();
+  }, [hasPreview]);
 
   async function saveReview() {
     if (!reviewComment.trim() || running) return;
@@ -333,30 +411,63 @@ export default function LandAnalysisPage() {
     }
   }
 
-  async function runLandPod() {
+  async function runLandPod(request: PreviewRequest = {}, continueAll = !request.parcelIndexes) {
+    pendingPreview.current?.abort();
+    const controller = new AbortController();
+    pendingPreview.current = controller;
     setRunning("pod");
     setError(null);
     setMessage(null);
-    setLegalPreview(null);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/legal-pod/preview`, {
-        method: "POST",
-        cache: "no-store",
-        headers: authHeaders("web"),
-      });
-      if (!res.ok) throw new Error(`토지·인허가 검토 실패 (${res.status})`);
-      const result = await res.json();
-      if (activeProject.current !== projectId) return;
-      if (result.previewOnly !== true || typeof result.previewHash !== "string") throw new Error("미리보기 결과를 불러오지 못했습니다.");
-      setLegalPreview({ projectId, previewHash: result.previewHash, legalReview: asRecord(result.legalReview) });
+      let batchRequest = request;
+      while (!controller.signal.aborted) {
+        const res = await fetch(apiBase + "/projects/" + encodeURIComponent(projectId) + "/legal-pod/preview", {
+          method: "POST",
+          cache: "no-store",
+          headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify(batchRequest),
+        });
+        if (res.status === 409 && !controller.signal.aborted && activeProject.current === projectId) {
+          setLegalPreview(null);
+          throw new Error("토지 자료가 바뀌었습니다. 최신 자료에서 미리보기를 다시 시작해 주세요.");
+        }
+        if (!res.ok) throw new Error("토지·인허가 검토 실패 (" + res.status + ")");
+        const result = await res.json();
+        if (controller.signal.aborted || activeProject.current !== projectId) return;
+        if (result.previewOnly !== true || typeof result.previewHash !== "string") throw new Error("미리보기 결과를 불러오지 못했습니다.");
+        const parcelBatch = result.parcelBatch as PreviewParcelBatch | undefined;
+        if (batchRequest.parcelRevision && parcelBatch?.parcelRevision !== batchRequest.parcelRevision) {
+          throw new Error("필지 묶음을 확인할 수 없습니다. 미리보기를 다시 시작해 주세요.");
+        }
+        const nextBatch = { previewHash: result.previewHash, legalReview: asRecord(result.legalReview), request: batchRequest, parcelBatch };
+        setLegalPreview((previous) => mergeParcelPreview(projectId, previous, nextBatch));
+        if (!continueAll || !parcelBatch || parcelBatch.nextOffset === null) break;
+
+        const { nextOffset, parcelRevision, totalParcels } = parcelBatch;
+        if (!Number.isSafeInteger(nextOffset) || nextOffset <= (batchRequest.parcelOffset ?? 0) || nextOffset >= totalParcels || !parcelRevision) {
+          throw new Error("다음 필지 묶음을 확인할 수 없습니다. 조회 결과를 확인한 뒤 다시 시도해 주세요.");
+        }
+        batchRequest = { parcelOffset: nextOffset, parcelRevision };
+      }
     } catch (err) {
-      if (activeProject.current === projectId) setError(err instanceof Error ? err.message : "토지·인허가 검토에 실패했습니다.");
+      if (!controller.signal.aborted && activeProject.current === projectId) setError(err instanceof Error ? err.message : "토지·인허가 검토에 실패했습니다.");
     } finally {
-      if (activeProject.current === projectId) setRunning(null);
+      if (pendingPreview.current === controller) {
+        pendingPreview.current = null;
+        if (activeProject.current === projectId) setRunning(null);
+      }
     }
   }
 
-  const visibleParcels = parcels.slice(0, 120).map((parcel, index) => {
+  function pauseLandPod() {
+    pendingPreview.current?.abort();
+    pendingPreview.current = null;
+    setRunning(null);
+    setMessage("필지 조회를 중지했습니다. 확인한 결과는 이 화면에서 이어볼 수 있습니다.");
+  }
+
+  const visibleParcels = parcels.slice(0, visibleParcelLimit).map((parcel, index) => {
     const name = parcelName(parcel, index);
     return { parcel, name, key: `${parcel.sequence ?? index}-${name}` };
   });
@@ -404,16 +515,13 @@ export default function LandAnalysisPage() {
                     토지조서 추가
                   </Link>
                 ) : null}
-                {primaryAction === "pnu" ? (
-                  <button type="button" onClick={() => void runResolvePnu()} disabled={running !== null || loading} className={actionClass(true)}>
-                    {running === "pnu" ? <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" /> : <Database className="h-4 w-4" aria-hidden="true" />}
-                    {running === "pnu" ? "PNU 확인 중…" : "PNU 확인"}
-                  </button>
-                ) : null}
-                <button type="button" onClick={() => void runLandPod()} disabled={running !== null || loading} className={actionClass(primaryAction === "preview")}>
+                <button type="button" onClick={() => void runLandPod()} disabled={running !== null || loading} className={actionClass(primaryAction === "preview" || primaryAction === "pnu")}>
                   {running === "pod" ? <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" /> : <FileSearch className="h-4 w-4" aria-hidden="true" />}
-                  {running === "pod" ? "인허가 검토 중…" : "토지·인허가 미리보기"}
+                  {running === "pod" ? "필지·인허가 조회 중…" : "토지·인허가 미리보기"}
                 </button>
+                {running === "pod" && !preview ? (
+                  <button type="button" onClick={pauseLandPod} className={actionClass(false)}>필지 조회 중지</button>
+                ) : null}
               </div>
             </div>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-re-border bg-re-subtle px-4 py-3 sm:flex sm:flex-wrap sm:gap-x-8 sm:px-5">
@@ -447,7 +555,9 @@ export default function LandAnalysisPage() {
                 })}
               </ul>
               {parcels.length > visibleParcels.length ? (
-                <p className="mt-3 text-xs text-re-secondary">전체 {formatCount(parcels.length, "필지")} 중 처음 {formatCount(visibleParcels.length, "필지")}를 표시합니다.</p>
+                <button type="button" className={`mt-3 ${actionClass(false)}`} onClick={() => setVisibleParcelLimit((limit) => limit + 120)}>
+                  필지 더 보기 ({formatCount(visibleParcels.length, "필지")} / {formatCount(parcels.length, "필지")})
+                </button>
               ) : null}
             </Panel>
           ) : null}
@@ -466,7 +576,20 @@ export default function LandAnalysisPage() {
             ) : (
               <p className="text-sm text-re-secondary">미리보기를 실행하면 계획 용도에 따른 인허가 경로와 필지별 높이 근거를 확인할 수 있습니다.</p>
             )}
-            <LandLegalSummaryActions key={`${projectId}:${preview?.previewHash ?? ""}`} projectId={projectId} previewHash={preview?.previewHash} analysis={legalAnalysis} />
+            {previewSession && previewBatch ? (
+              <ParcelPreviewResults session={previewSession} batch={previewBatch} mapUrl={mapUrl}
+                storedPnus={new Set(parcels.map(parcelPnu).filter((pnu): pnu is string => Boolean(pnu)))}
+                busy={running !== null || loading} onRequest={(request) => void runLandPod(request)}
+                onPause={running === "pod" ? pauseLandPod : undefined}
+                onRefreshBatch={supersededBatch && preview ? () => void runLandPod({ ...preview.request, parcelRevision: previewBatch.parcelRevision }, false) : undefined}
+                onSelectBatch={(active) => setLegalPreview((current) => current ? { ...current, active } : null)} />
+            ) : null}
+            <LandLegalSummaryActions key={`${projectId}:${preview?.previewHash ?? ""}`} projectId={projectId} previewHash={preview?.previewHash} analysis={legalAnalysis} disabled={running !== null || loading || supersededBatch}
+              batch={previewBatch ? {
+                parcelRevision: previewBatch.parcelRevision,
+                ...(preview?.request.parcelIndexes ? { reviewedParcelIndexes: preview.request.parcelIndexes } : { parcelOffset: preview?.request.parcelOffset ?? 0 }),
+                rows: previewBatch.rows.filter((row) => row.status === "confirmed" && row.pnu),
+              } : undefined} />
             <Link href={intakeUrl} className="mt-3 inline-block text-sm font-semibold text-re-action underline">토지이용계획·인허가 자료 입력</Link>
           </Panel>
 
@@ -547,10 +670,10 @@ export default function LandAnalysisPage() {
                   <RefreshCw className="h-4 w-4" aria-hidden="true" />
                   토지 상태 갱신
                 </button>
-                {(parcelCount ?? 0) > 0 && primaryAction === "preview" ? (
+                {(parcelCount ?? 0) > 0 && primaryAction !== "retry" ? (
                   <button type="button" onClick={() => void runResolvePnu()} disabled={loading || running !== null} className={actionClass(false)}>
                     <Database className="h-4 w-4" aria-hidden="true" />
-                    {running === "pnu" ? "PNU 확인 중…" : "PNU 다시 확인"}
+                    {running === "pnu" ? "PNU 원장에 반영 중…" : "PNU 조회 후 원장에 저장"}
                   </button>
                 ) : null}
               </div>
@@ -613,6 +736,134 @@ function EvidenceRecordList({ records }: { records: LandEvidenceRecord[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function ParcelPreviewResults({ session, batch, mapUrl, storedPnus, busy, onRequest, onPause, onSelectBatch, onRefreshBatch }: {
+  session: PreviewSession;
+  batch: PreviewParcelBatch;
+  mapUrl: string;
+  storedPnus: ReadonlySet<string>;
+  busy: boolean;
+  onRequest: (request: PreviewRequest) => void;
+  onPause?: () => void;
+  onSelectBatch: (index: number) => void;
+  onRefreshBatch?: () => void;
+}) {
+  const rows = Object.values(session.rows);
+  const confirmed = rows.filter((row) => row.status === "confirmed").length;
+  const ambiguous = rows.filter((row) => row.status === "ambiguous").length;
+  const failed = rows.filter((row) => row.status === "failed").length;
+  const zoned = rows.filter((row) => row.landUseStatus === "confirmed").length;
+  const landUseFailed = rows.filter((row) => row.landUseStatus === "failed").length;
+  const retryIndexes = batch.rows.map((row) => session.rows[row.parcelIndex] ?? row)
+    .filter((row) => row.status !== "confirmed" || row.landUseStatus !== "confirmed").map((row) => row.parcelIndex);
+
+  return (
+    <div className="mb-4 space-y-3 rounded-re-panel border border-re-border bg-re-subtle p-3 sm:p-4">
+      <div>
+        <h3 className="text-sm font-bold text-re-text">필지별 조회 진행</h3>
+        <p role="status" className="mt-1 text-xs leading-5 text-re-secondary">
+          전체 {formatCount(batch.totalParcels, "필지")} 중 {formatCount(rows.length, "필지")} 상태 확인
+          {" · "}PNU 확인 {formatCount(confirmed, "필지")} · 후보 확인 {formatCount(ambiguous, "필지")}
+          {" · "}미조회 {formatCount(Math.max(0, batch.totalParcels - confirmed - ambiguous - failed), "필지")}
+          {" · "}실패 {formatCount(failed, "필지")} · 토지이용 근거 {formatCount(zoned, "필지")}
+          {landUseFailed ? ` · 토지이용 조회 실패 ${formatCount(landUseFailed, "필지")}` : null}
+        </p>
+      </div>
+      {session.batches.length > 1 ? (
+        <label className="flex flex-wrap items-center gap-2 text-xs font-semibold text-re-text">
+          검토한 필지 묶음
+          <select
+            value={session.active}
+            disabled={busy}
+            onChange={(event) => onSelectBatch(Number(event.target.value))}
+            className="min-h-11 max-w-full rounded-re-control border border-re-border bg-re-surface px-2 text-sm text-re-text"
+          >
+            {session.batches.map(({ parcelBatch, request }, index) => {
+              const indexes = parcelBatch?.rows.map((row) => row.parcelIndex).join(", ");
+              return <option key={index} value={index}>{request.parcelIndexes ? "재조회" : "필지"} {indexes || index + 1}</option>;
+            })}
+          </select>
+        </label>
+      ) : null}
+      {batch.rows.length ? (
+        <ul className="divide-y divide-re-border rounded-re-control border border-re-border bg-re-surface">
+          {batch.rows.map((row) => {
+            const pnu = row.status === "confirmed" && row.pnu && /^[0-9]{10}[12][0-9]{8}$/.test(row.pnu) ? row.pnu : null;
+            const source = row.landUseSourceLocator;
+            let sourceHost = "";
+            try { if (source?.sourceUrl) sourceHost = new URL(source.sourceUrl).hostname; } catch { /* Unstructured locators stay text-only. */ }
+            const sourceName = source?.sourceName || sourceHost || (source ? "공공자료 연결" : "공식 출처 미확인");
+            return (
+              <li key={row.parcelIndex} className="flex flex-wrap items-start justify-between gap-2 p-3">
+                <div className="min-w-0 space-y-1 text-xs leading-5 text-re-secondary">
+                  <p className="break-words text-sm font-bold text-re-text">{displayText(row.address ?? row.parcelLabel, `필지 ${row.parcelIndex}`)}</p>
+                  <p>{PNU_PREVIEW_LABEL[row.status]}{pnu ? ` · ${pnu}` : ""} · {LAND_USE_PREVIEW_LABEL[row.landUseStatus]}</p>
+                  {row.landUseStatus === "confirmed" ? (
+                    <p className="break-words">용도지역 {displayText(row.zoning, "미확인")} · 지구단위계획 {displayText(row.districtUnitPlan, "미확인")} · 출처 {sourceName}</p>
+                  ) : null}
+                </div>
+                {pnu && storedPnus.has(pnu) ? (
+                  <Link href={`${mapUrl}${mapUrl.includes("?") ? "&" : "?"}pnu=${pnu}`} className={actionClass(false)}>
+                    <MapPin className="h-4 w-4" aria-hidden="true" /> 지도에서 보기
+                  </Link>
+                ) : <p className="self-center text-xs text-re-secondary">{pnu ? "미리보기 PNU · 저장된 지도에는 미반영" : "지도 표시용 PNU 미확인"}</p>}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+      {batch.jurisdictions?.length ? (
+        <details className="rounded-re-control border border-re-border bg-re-surface px-3 py-2 text-xs text-re-secondary">
+          <summary className="min-h-9 cursor-pointer py-2 font-semibold text-re-text">이 묶음의 관할·용도지역 근거</summary>
+          <ul className="space-y-2 pb-2">
+            {batch.jurisdictions.map((group, index) => (
+              <li key={`${group.jurisdictionCode}-${index}`} className="space-y-1 break-words border-t border-re-border pt-2">
+                <p className="font-semibold text-re-text">
+                  {displayText(group.jurisdictionName, `관할 코드 ${group.jurisdictionCode}`)}
+                  {" · "}{displayText(Array.isArray(group.zoning) ? group.zoning.join(", ") : group.zoning, "용도지역 미확인")}
+                  {" · 필지 "}{group.parcelIndexes.join(", ")}
+                </p>
+                {group.permitRoutes?.length ? (
+                  <p>검토할 인허가 경로 · {group.permitRoutes.map((route) => route.label).filter(Boolean).join(", ")}</p>
+                ) : null}
+                {group.ordinanceReferences?.length ? (
+                  <ul className="space-y-1">
+                    {group.ordinanceReferences.map((reference, referenceIndex) => {
+                      const title = [reference.title || reference.lawName, reference.citation || reference.article].filter(Boolean).join(" ");
+                      return <li key={referenceIndex}>{reference.url && /^https?:\/\//i.test(reference.url)
+                        ? <a href={reference.url} target="_blank" rel="noreferrer" className="font-medium text-re-action underline">{displayText(title, "공식 조례 원문")}</a>
+                        : displayText(title, "검증된 조례 근거")}
+                        {reference.effectiveDate ? ` · 시행 ${reference.effectiveDate}` : null}</li>;
+                    })}
+                  </ul>
+                ) : <p>이 관할에서 확인된 조례 원문이 없습니다.</p>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+      {onRefreshBatch ? <p className="text-xs text-re-secondary">일부 필지가 이후에 다시 조회됐습니다. 이 묶음의 항목을 저장하려면 이 묶음을 다시 확인해 주세요.</p> : null}
+      <div className="flex flex-wrap gap-2">
+        {onRefreshBatch ? (
+          <button type="button" className={actionClass(false)} disabled={busy} onClick={onRefreshBatch}>이 묶음 다시 확인</button>
+        ) : null}
+        {onPause ? <button type="button" className={actionClass(false)} onClick={onPause}>필지 조회 중지</button> : null}
+        {session.nextOffset !== null && !onPause ? (
+          <button type="button" className={actionClass(true)} disabled={busy}
+            onClick={() => onRequest({ parcelOffset: session.nextOffset ?? 0, parcelRevision: batch.parcelRevision })}>
+            다음 필지 확인
+          </button>
+        ) : null}
+        {retryIndexes.length ? (
+          <button type="button" className={actionClass(false)} disabled={busy}
+            onClick={() => onRequest({ parcelIndexes: retryIndexes, parcelRevision: batch.parcelRevision })}>
+            확인이 필요한 필지 다시 조회 ({retryIndexes.length})
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
