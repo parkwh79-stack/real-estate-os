@@ -1,6 +1,6 @@
 # REALYTICS 현재 구현 현황
 
-Updated: 2026-11-04
+Updated: 2026-11-06
 
 문서와 코드의 연결을 다시 점검한 현재 기준이다. 과거의 기능별 개발 일지와 중복된 상태 설명은 [통합 이전 기록](../archive/documentation-baseline-2026-09-28.md)에 보존했다. 작업 순서는 [제품 실행 계획](realytics-os-next-work-roadmap.md) 한 곳에서 관리한다.
 
@@ -152,7 +152,7 @@ Microsoft Word 출력·PNG로 확인했고 행 분리와 제목 스타일을 보
 | 사업수지·월별 CF·부족자금 | `core/reviewed_monthly_financing.py`, `core/cash_flow_periods.py`, `use_cases/cash_flow.py`, `cash_flow_comparison.py`, Web feasibility/cashflow | 명시적 검토 정책으로 월별 이자·수수료·잔액·상환을 계산한다. 원본 사건 순서와 실제 개월은 구분하여 저장하며 시간 미확인은 해당 월별 금융·기간 스트레스에만 적용한다. 예산·독립 PF 분석과 두 저장 실행의 부분 비교는 계속 제공한다. 실제 사건/약정의 시간 연결과 최종 승인 자격은 미확인이다. |
 | PF·상환·미분양 시나리오 | `agents/scenario_engine_agent.py`, `use_cases/cash_flow_dependencies.py`, Web `/project/[id]/pf-structure` | 기존 계산·화면 유지. CF 화면은 같은 부모·입력 hash의 후속 결과만 표시한다. 새 월별 검토안에 기존 일괄 청구액 방식의 후속 시나리오를 붙이는 작업은 별도 상환 계약 검증까지 보류한다. |
 | 토지·시장·법률 보완 | `use_cases/land_ledger_import.py`, `market_comparables.py`, `legal_pod.py` | 공동계약·개인별 미기재·합계 오류를 구분하고 계약/수지 대사 메모를 저장·재개한다. 조서 기지급과 예정액·미기재를 따로 표시하며 이전 지급 완료 오판정을 재사용하지 않는다. 설계 용적률 오매핑과 물류 누락값/실제 0 구분은 보완했다. 물류 비교 자산 분류·실제 계약 대사는 남아 있다. [범위와 검증](land-ledger-import-and-enrichment.md). |
-| 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 위험별 보완 사유·다음 할 일을 기존 검토 메모로 입력·저장·재개하고 이력을 확인한다. 같은 ID/run/본문/출처 재생성은 사람 검토를 보존하며, 바뀐 근거나 새 실행에 과거 승인을 넘기지 않는다. 편집 중 다른 검토를 막고 실패 시 입력을 유지한다. 다중 사용자 동시 수정 CAS는 미구현이다. CF 비교는 실행 메타데이터와 업무 입력·출처 차이를 구분하며, 다른 재분석·consensus 경로는 별도 확인한다. |
+| 보완사항과 재분석 | `use_cases/reanalyze_on_evidence.py`, `risk_register_agent.py`, Evidence/Risk 화면 | 위험별 보완 사유·다음 할 일을 기존 검토 메모로 입력·저장·재개하고 이력을 확인한다. 같은 ID/run/본문/출처 재생성은 사람 검토를 보존하며, 바뀐 근거나 새 실행에 과거 승인을 넘기지 않는다. 편집 중 다른 검토를 막고 실패 시 입력을 유지한다. 다중 사용자 동시 수정 CAS는 미구현이다. CF 비교는 실행 메타데이터와 업무 입력·출처 차이를 구분한다. 정식 consensus는 초기 평가와 변경 회차마다 구현된 Agent를 새로 실행하고, 미승인 후보와 원래 입력의 보고서를 분리한다. [실행 계약](chief-pod-runtime-integrity.md#정식-pf-합의의-독립-재계산-2026-11-06). |
 | 검토 초안·다운로드 | `use_cases/report_generation.py`, `agents/report_export_agent.py`, Web 프로젝트 보고서와 Cash Flow export | 저장된 CF 비교의 두 계산·입력·출처·검토 이유를 고정한 분석 초안을 기존 보고서 저장·재조회·내보내기에 연결한다. 현재 입력 변경과 분리하고 hash 검증·최종 발행 차단을 유지한다. 상세 검증과 PDF/DOCX 범위는 실행 계획을 따른다. |
 | Chief Pod 계산 계보 | `use_cases/chief_deal_orchestration.py`, `chief_pod_records.py`, `agent_platform/domain_pod_runtime.py` | 6개 Pod 모두 실행 경로가 있다. CF Pod는 실제 계산 요청·입력 hash와 Chief/Pod 실행 ID를 저장하며 소비 입력 변경 시 재실행한다. 원가 Pod·child 캐시와 실제 Agent의 입력을 일치시키고, 재실행한 파생 결과를 수동·승인 입력 보호하에 프로젝트 조회에 반영한다. 총사업비 누락은 미확인으로 유지한다. 공공정책의 전용 시뮬레이션은 미구현이며 기존 개발가능성 분석 재사용이다. |
 | PF Pod·보고서 근거 연결 | `use_cases/pf_structure.py`, `chief_pod_records.py`, `report_generation.py`, Web 보고서 | PF Pod도 실제 PF/시나리오 요청·기본값·실행 ID를 저장하고 재현하며, 입력·옵션 변경은 캐시에 반영한다. 과거 스트레스를 이번 실행으로 등록하지 않고 시나리오 입력 부족은 부분 결과로 표시한다. 6개 Pod의 고정된 지적·근거를 화면/JSON과 Markdown·HTML·PDF·Word 본문에 연결했다. 보고서에서 시나리오를 새로 실행하거나 합성 CF를 만들지 않는다. 본리동 전체 20절 Word 시각 점검은 수행했고 모든 보고서 숫자의 동일 실행 연결·실제 계약 검증은 남아 있다. |

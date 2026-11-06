@@ -258,7 +258,9 @@ class EvidenceGraphAgent:
                     if isinstance(items, list):
                         surfaces.extend(item for item in items if isinstance(item, dict))
                 for child_key, child in node.items():
-                    if child_key in {"termSurface", "termSurfaces", "termSurfaceMetadata", "parser_term_surfaces"}:
+                    if child_key in {"termSurface", "termSurfaces", "termSurfaceMetadata", "parser_term_surfaces", "candidateReview"}:
+                        # Unapproved consensus recalculations are audit-only;
+                        # their references are not formal graph support.
                         continue
                     visit(child)
             elif isinstance(node, list):
@@ -430,6 +432,9 @@ class EvidenceGraphAgent:
         def visit(node: Any) -> None:
             if isinstance(node, dict):
                 for key, item in node.items():
+                    if key == "candidateReview":
+                        # Preserve the approval boundary of consensus proposals.
+                        continue
                     if key in {"evidenceId", "evidence_id", "sourceUrlOrEvidenceId"} and isinstance(item, str):
                         evidence_ids.append(item)
                     elif key in {"evidenceIds", "evidence_ids"} and isinstance(item, list):
