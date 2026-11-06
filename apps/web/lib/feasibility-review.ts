@@ -45,8 +45,68 @@ export type ReviewTerms = { schedule: Record<string, string | null>; financing: 
 export type WorkbookFinancingReview = {
   sourceWorkbook: string; sourceDocument?: ReviewSource;
   terms: { trancheId: string; name: string; principalReconciled: boolean;
+    phase?: "construction" | "refinancing"; contractVerified?: boolean; unconfirmedTerms?: string[];
     fields: Record<string, { value: number | null; sourceCell: string; status: string }> }[];
 };
+export type WorkbookFinancialField = {
+  label: string; value: number | null; rawValue?: number | string | (number | string | null)[] | null;
+  formula?: string | null; sourceCell: string; sourceUnit?: string; normalizedUnit?: string;
+  status: string; calculationState?: string; amountBasis?: string; applyEligible?: boolean;
+  calculationExpression?: string; components?: WorkbookFinancialField[]; sourceComponents?: WorkbookFinancialField[];
+};
+export type WorkbookFinancialReview = {
+  schemaVersion: "sangbong-financial-mapping-v1"; profile: string;
+  variant: "sale" | "rental"; status: string; sourceWorkbook?: string;
+  sourceDocument?: ReviewSource; sourceFields: Record<string, WorkbookFinancialField>;
+  limitations?: string[];
+};
+
+/** Quote-aware worksheet names are source locators, never executable formulas. */
+export function workbookSourceCell(sourceCell: string): { sheetName: string; cellReference: string } | null {
+  if (typeof sourceCell !== "string") return null;
+  const match = /^(?:'((?:[^']|'')+)'|([^'!]+))!(\$?[A-Z]{1,3}\$?[1-9][0-9]*(?::\$?[A-Z]{1,3}\$?[1-9][0-9]*)?)$/i.exec(sourceCell);
+  if (!match) return null;
+  return { sheetName: match[1]?.replace(/''/g, "'") ?? match[2]!, cellReference: match[3]!.replace(/\$/g, "") };
+}
+
+/** Split only explicit complete cell locators; commas inside quoted sheet names remain data. */
+export function workbookSourceCells(sourceCells: string): string[] {
+  if (typeof sourceCells !== "string") return [];
+  const parts: string[] = [];
+  let quoted = false;
+  let start = 0;
+  for (let index = 0; index < sourceCells.length; index += 1) {
+    const character = sourceCells[index];
+    if (character === "'") {
+      if (quoted && sourceCells[index + 1] === "'") index += 1;
+      else quoted = !quoted;
+    } else if (character === "," && !quoted) {
+      parts.push(sourceCells.slice(start, index).trim()); start = index + 1;
+    }
+  }
+  parts.push(sourceCells.slice(start).trim());
+  if (quoted || parts.some((part) => !workbookSourceCell(part))) return [];
+  return [...new Set(parts)];
+}
+
+/** Composite amounts retain every declared component locator, never guess a source cell. */
+export function workbookFinancialSourceCells(field: WorkbookFinancialField): string[] {
+  if (workbookSourceCell(field.sourceCell)) return [field.sourceCell];
+  const components = field.components ?? field.sourceComponents;
+  if (!components?.length || components.some((item) => !workbookSourceCell(item.sourceCell))) return [];
+  return [...new Set(components.map((item) => item.sourceCell))];
+}
+
+export function canLoadWorkbookFinancialField(review: WorkbookFinancialReview, key: string): boolean {
+  const field = review.sourceFields[key];
+  return !!field && typeof field.value === "number" && Number.isSafeInteger(field.value)
+    && field.normalizedUnit === "KRW" && ["read", "needs_review"].includes(field.status) && field.calculationState !== "unavailable"
+    && (key === "development_profit" || field.value >= 0)
+    && field.applyEligible !== false
+    && (review.variant !== "rental" || key !== "total_revenue" || field.applyEligible === true)
+    && workbookFinancialSourceCells(field).length > 0 && !!review.sourceDocument?.archiveId;
+}
+
 export type FinancingDraft = {
   tranche_id: string; name: string; priority: string;
   amount: string; interest_rate: string; fee_rate: string; term_months: string; repayment_source: string;

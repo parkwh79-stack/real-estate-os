@@ -4,6 +4,7 @@ import { CartesianGrid, Legend, Line, LineChart, ReferenceLine, ResponsiveContai
 
 export type AlignedCashFlow = {
   baseMonth: string;
+  cashFlowBasis?: "before_all_financing";
   rows: Array<{ monthIndex: number; baselineValue: number | null; comparisonValue: number | null }>;
 };
 
@@ -48,7 +49,7 @@ export function CashFlowComparisonCharts({ comparison }: { comparison: ChartComp
     </section> : null}
     {aligned?.rows.length ? <section aria-label="같은 월차의 누적 현금흐름 비교" className="min-w-0 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
       <h4 className="text-sm font-semibold">같은 월차의 누적 현금흐름 비교</h4>
-      <p className="mt-1 text-xs text-slate-500">{aligned.baseMonth} 기준 · PF 인출 전 누적 현금흐름 · 원</p>
+      <p className="mt-1 text-xs text-slate-500">{aligned.baseMonth} 기준 · {aligned.cashFlowBasis === "before_all_financing" ? "조달 전 누적 영업현금" : "PF 인출 전 누적 현금흐름"} · 원</p>
       <div className="mt-2 h-64 min-w-0">
         <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <LineChart data={aligned.rows} accessibilityLayer margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>

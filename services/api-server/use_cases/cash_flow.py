@@ -51,6 +51,11 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
         # caller authority. Every differing direct request remains a candidate.
         if approved_request is not None and direct_request == approved_request:
             return approved_request
+        if "capturedWorkbookCashFlow" in direct_request:
+            registered_request = _registered_source_cash_flow_request(project_data)
+            if registered_request is not None and direct_request == registered_request:
+                return registered_request
+            raise ValueError("원본 현금흐름은 서버에 등록된 동일 원본 계획으로만 계산할 수 있습니다. 원본 자료를 다시 선택하세요.")
         return _external_candidate_request(project_data, direct_request)
 
     if approved_request is not None:
@@ -61,6 +66,11 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
             )
         return approved_request
 
+    if not input_data:
+        registered_request = _registered_source_cash_flow_request(project_data)
+        if registered_request is not None:
+            return registered_request
+
     analysis = analyze_development_feasibility_use_case(project_data, input_data)
     missing_amount_fields = analysis["pfReadiness"].get("missingFields", [])
     if missing_amount_fields:
@@ -68,12 +78,54 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
             "대출 금액이 미입력되어 현금흐름을 계산할 수 없습니다: "
             + ", ".join(missing_amount_fields)
         )
-    request = _external_candidate_request(project_data, analysis["cashFlowRunRequestDraft"])
+    request = _external_candidate_request(project_data, analysis["cashFlowRunRequestDraft"], allow_captured=True)
     # Only attach reviews to the saved working inputs they describe. Caller
     # overrides and approved canonical studies have their own source authority.
     if not input_data:
         _capture_working_input_review(request, project_data)
     return request
+
+
+def _registered_source_cash_flow_request(project_data: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Use only the immutable server-extracted draft registered for this project.
+
+    A caller's hashes and source labels cannot attest an external snapshot.
+    Saved working inputs retain their normal calculation path instead of being
+    silently replaced with an older workbook plan.
+    """
+    working_keys = ("feasibility_input", "pf_structure", "cost_assumptions", "sales_assumptions",
+                    "product_mix", "productMix", "schedule", "project_schedule", "cashflow_input",
+                    "sales_schedule", "salesCollectionSchedule")
+    if any(project_data.get(key) for key in working_keys):
+        return None
+    draft = project_data.get("feasibilityStudyV2Draft")
+    if not isinstance(draft, dict):
+        return None
+    raw = draft.get("raw_import") or {}
+    if raw.get("profile") not in {"sangbong-sale-feasibility", "sangbong-private-rental-feasibility"}:
+        return None
+    from use_cases.workbook_import_approval import feasibility_study_draft_hash
+    source, candidate = raw.get("sourceDocument") or {}, raw.get("candidateImport") or {}
+    digest = source.get("originalFileHash")
+    draft_hash = feasibility_study_draft_hash(draft)
+    metadata = project_data.get("_meta") or {}
+    history = metadata.get("feasibilityWorkbookCandidates") or []
+    documents = project_data.get("source_documents") or []
+    project_id = project_data.get("id") or (project_data.get("project") or {}).get("id")
+    if not (project_id is not None and str(draft.get("project_id")) == str(project_id)
+            and candidate.get("status") == "candidate" and candidate.get("draftHash") == draft_hash
+            and candidate.get("importId") == metadata.get("latestFeasibilityWorkbookCandidateId")
+            and any(isinstance(row, dict) and row.get("importId") == candidate.get("importId")
+                    and row.get("draftHash") == draft_hash and digest in (row.get("sourceDocumentHashes") or [])
+                    and row.get("status") == "candidate" for row in history)
+            and any(isinstance(row, dict) and row.get("originalFileHash") == digest
+                    and row.get("feasibilityStudyV2DraftHash") == draft_hash
+                    and row.get("documentType") == "feasibility_workbook" for row in documents)):
+        raise ValueError("저장된 원본 후보의 등록 기록·보관 파일·입력 해시를 확인할 수 없습니다. 원본 자료를 다시 불러오세요.")
+    request = build_cash_flow_run_request_from_feasibility_study(draft)
+    if "capturedWorkbookCashFlow" not in request:
+        raise ValueError("원본 현금흐름의 기간·출처·입력 검증이 불완전합니다. 원본 자료를 다시 확인하세요.")
+    return _external_candidate_request(project_data, request, allow_captured=True)
 
 
 def _capture_working_input_review(request: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -139,6 +191,7 @@ def _approved_canonical_cash_flow_request(project_data: Dict[str, Any]) -> Dict[
 def _external_candidate_request(
     project_data: Dict[str, Any],
     direct_request: Dict[str, Any],
+    *, allow_captured: bool = False,
 ) -> Dict[str, Any]:
     """Copy and de-authorize an API-supplied CashFlowRunRequest.
 
@@ -146,6 +199,8 @@ def _external_candidate_request(
     calculation, but fields inside that scenario cannot assert that its cost,
     sales, or collection-allocation schedules are approved or report-grade.
     """
+    if "capturedWorkbookCashFlow" in direct_request and not allow_captured:
+        raise ValueError("외부 요청에서 원본 현금흐름 출처를 직접 선언할 수 없습니다.")
     candidate = deepcopy(direct_request)
     _downgrade_untrusted_approval_claims(candidate)
     _bind_route_project_identity(candidate, project_data)

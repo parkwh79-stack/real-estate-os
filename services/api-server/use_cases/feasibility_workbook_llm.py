@@ -308,9 +308,28 @@ def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
     workbook_review = raw_import.get("financingTermReview")
     workbook_review = workbook_review if isinstance(workbook_review, dict) else {}
     workbook_review = ({**deepcopy(workbook_review), "sourceDocument": deepcopy(raw_import.get("sourceDocument") or {})}
-                       if workbook_review.get("schemaVersion") == "bonri-workbook-financing-review-v1" else None)
+                       if workbook_review.get("schemaVersion") in {"bonri-workbook-financing-review-v1", "sangbong-workbook-financing-review-v1"} else None)
+    mapping = raw_import.get("financialMapping")
+    financial_review = None
+    if (raw_import.get("profile") in {"sangbong-sale-feasibility", "sangbong-private-rental-feasibility"}
+            and isinstance(mapping, dict) and mapping.get("schemaVersion") == "sangbong-financial-mapping-v1"):
+        fields = mapping.get("sourceFields")
+        fields = fields if isinstance(fields, dict) else {}
+        source = raw_import.get("sourceDocument")
+        source = source if isinstance(source, dict) else {}
+        financial_review = {
+            **deepcopy(mapping),
+            "profile": raw_import["profile"],
+            "sourceWorkbook": raw_import.get("sourceWorkbook") or source.get("originalFileName"),
+            "sourceDocument": {key: deepcopy(source[key]) for key in
+                               ("archiveId", "originalFileName", "originalFileHash", "objectVersion") if key in source},
+            "sourceFields": {key: deepcopy(value) for key, value in fields.items()
+                             if key in EXTRACT_FIELDS and isinstance(value, dict)},
+            "analysisOnly": True, "reportEligible": False,
+        }
     return {**state, "reviewHash": review_hash, "analysisOnly": True, "reportEligible": False,
             "workbookFinancingReview": workbook_review,
+            "workbookFinancialReview": financial_review,
             "canonicalStudyPresent": bool(project.get("canonicalFeasibilityStudyV2") or project.get("feasibilityStudyV2"))}
 
 

@@ -141,6 +141,14 @@ def validate_feasibility_workbook(
     selected_profile = detected_profile
 
     try:
+        if selected_profile.get("family") == "sangbong":
+            from agents.sangbong_workbook_profile import validate_sangbong_workbook
+
+            return validate_sangbong_workbook(
+                formula_wb, value_wb, selected_profile,
+                formula_integrity=_formula_integrity(formula_wb, value_wb, max_error_samples),
+                file_name=workbook_path.name, tolerance=tolerance,
+            )
         sheets = _sheet_profiles(formula_wb)
         required_sheet_checks = _required_sheet_checks(formula_wb.sheetnames, selected_profile["required_sheets"])
         key_cells = _read_key_cells(formula_wb, value_wb, selected_profile["key_cells"])
@@ -193,6 +201,11 @@ def validate_feasibility_workbook(
 
 
 def _detect_profile(workbook: Any) -> Dict[str, Any] | None:
+    from agents.sangbong_workbook_profile import detect_sangbong_profile
+
+    sangbong = detect_sangbong_profile(workbook)
+    if sangbong is not None:
+        return sangbong
     defined_names = set(workbook.defined_names.keys())
     sheet_names = set(workbook.sheetnames)
     if {"\uc190\uc775", "\uac1c\uc694\uc218\uc785", "cash", "\uc784\ub300\ub8cc"}.issubset(sheet_names):

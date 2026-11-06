@@ -38,6 +38,7 @@ const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold d
 const reasons: Record<string, string> = {
   period_mismatch: "기간이 달라 사업 전체 집계만 비교합니다. 월별 수치를 같은 달로 정렬하지 않습니다.",
   financing_policy_mismatch: "금융비용 계산 방식이 다른 두 안입니다.",
+  cash_flow_amount_basis_mismatch: "원본의 실제 영업 입출금과 사업수지 가정 계산은 금액 기준이 달라 직접 비교하지 않습니다. 같은 기준의 두 실행을 선택하세요.",
   same_calculation_run: "서로 다른 두 계산을 선택하세요.",
   saved_calculation_changed: "저장된 계산 기록이 바뀌었습니다. 계산 기준을 다시 확인하세요.",
   saved_calculation_missing: "저장된 선택의 계산 기록을 찾지 못했습니다.",

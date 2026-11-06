@@ -1654,6 +1654,7 @@ class OrchestrationAgent:
         is_passed = (
             report_quality["isComplete"]
             and report_quality.get("inputBasisConsistent") is not False
+            and report_quality.get("cashFlowReportEligible") is not False
             and not missing_artifacts
             and pdf_structure_pass
             and pdf_visual_pass

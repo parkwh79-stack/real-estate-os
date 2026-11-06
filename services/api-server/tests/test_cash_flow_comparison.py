@@ -80,6 +80,22 @@ def test_aligned_rows_preserve_gaps_and_require_paired_stored_values():
     assert result["metrics"] and "alignedCashFlow" not in result
 
 
+def test_source_replay_cannot_mix_cash_receipts_with_business_budget_comparison():
+    base, changed = record(), record("changed")
+    base["resultSnapshot"]["sourceBasis"] = "captured_workbook_cash_flow"
+    result = compare_cash_flow_runs(base, changed)
+    assert result["status"] == "incompatible"
+    assert "cash_flow_amount_basis_mismatch" in result["reasons"]
+    assert result["metrics"] == []
+    changed["resultSnapshot"]["sourceBasis"] = "captured_workbook_cash_flow"
+    result = compare_cash_flow_runs(base, changed)
+    assert result["status"] == "ready"
+    assert result["alignedCashFlow"]["cashFlowBasis"] == "before_all_financing"
+    labels = {item["key"]: item["label"] for item in result["metrics"]}
+    assert labels["totalRevenue"] == "영업 현금수입"
+    assert labels["developmentProfit"] == "영업 현금수지 차액"
+
+
 def test_matching_relative_month_indices_do_not_confirm_calendar_alignment():
     base, changed = record(), record("changed")
     for row in (base, changed):

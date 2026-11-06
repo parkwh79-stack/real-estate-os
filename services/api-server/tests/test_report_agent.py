@@ -44,6 +44,35 @@ def test_generate_structured_phase_11_report_calculates_financial_metrics():
     assert sections["businessFeasibility"]["metrics"]["developmentProfitMillion"] == 30_000
 
 
+def test_captured_workbook_analysis_cannot_pass_final_report_quality():
+    from agents.orchestration_agent import OrchestrationAgent
+    data = load_example()
+    data["cashFlowRunResult"] = {
+        "sourceBasis": "captured_workbook_cash_flow", "analysisOnly": True,
+        "reportEligible": False, "status": "completed",
+        "summary": {"totalRevenue": 123, "totalProjectCost": 100,
+                    "businessDeclaredTotals": {"total_revenue": 120, "total_cost": 99}},
+        "monthlyCashFlow": [{"monthIndex": 0, "cashIn": 123, "cashOut": 100}],
+    }
+    report = ReportAgent().generate_structured_report(data)
+    section = report["sections"]["summaryCashFlow"]
+    assert section["summary"] == data["cashFlowRunResult"]["summary"]
+    assert section["businessDeclaredTotals"]["total_revenue"] == 120
+    assert section["reportEligible"] is False
+    assert report["qualityChecks"]["cashFlowReportEligible"] is False
+    assert report["qualityChecks"]["cashFlowUsageRestriction"] in section["assumption"]
+    names = ["landAgentReview", "developerFeasibility", "feasibility", "pfStructure",
+             "marketEvidenceReview", "marketabilityAnalysis", "dataQualityReview", "reconciliationGate",
+             "legalPermitReview", "riskAssessment", "riskRegister", "creditReviewDecision",
+             "restructuringPlan", "evidenceGraph"]
+    run = {"artifacts": {**{name: {} for name in names}, "phase11Report": {"report": report}}}
+    quality = OrchestrationAgent()._quality_check(run, {"status": "passed"},
+                                                 {"status": "passed", "baseline_reviewed": True})
+    assert quality["missingArtifacts"] == []
+    assert quality["reportComplete"] is True
+    assert quality["pass"] is False
+
+
 def test_hana_style_anonymized_fixture_covers_phase_11_payload():
     fixture = load_hana_fixture()
     report = ReportAgent().generate_structured_report(fixture)

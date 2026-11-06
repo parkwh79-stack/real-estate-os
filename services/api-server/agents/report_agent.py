@@ -375,6 +375,12 @@ class ReportAgent:
             quality_checks["inputBasisReview"] = deepcopy(basis_review)
             quality_checks["inputBasisConsistent"] = basis_review.get("status") == "clear"
             quality_checks["inputBasisWarnings"] = basis_warnings
+        saved_cash_flow = input_data.get("cashFlowRunResult")
+        if isinstance(saved_cash_flow, dict) and saved_cash_flow.get("reportEligible") is False:
+            quality_checks["cashFlowReportEligible"] = False
+            warning = "원본 Excel 현금흐름의 검토용 재현 결과입니다. 원본 수식 재계산·약정 확인과 정식 입력 승인 전에는 최종 심사보고서의 확정 계산으로 사용할 수 없습니다."
+            quality_checks["cashFlowUsageRestriction"] = warning
+            sections["summaryCashFlow"]["assumption"] += " " + warning
 
         return {
             "template": PHASE_11_TEMPLATE,
@@ -543,6 +549,10 @@ class ReportAgent:
             "assumption": "저장된 현금흐름 결과입니다. 현재 입력과의 일치 여부는 계산 이력에서 확인해야 합니다.",
             "summary": deepcopy(saved.get("summary") or {}),
             "rows": deepcopy(saved.get("monthlyCashFlow") or []),
+            **({"sourceBasis": saved["sourceBasis"]} if "sourceBasis" in saved else {}),
+            **({"businessDeclaredTotals": deepcopy(saved.get("businessDeclaredTotals") or (saved.get("summary") or {}).get("businessDeclaredTotals"))}
+               if "businessDeclaredTotals" in saved or "businessDeclaredTotals" in (saved.get("summary") or {}) else {}),
+            **({"reportEligible": saved["reportEligible"]} if "reportEligible" in saved else {}),
             **({"periodBasis": deepcopy(saved["periodBasis"])} if "periodBasis" in saved else {}),
         }
 

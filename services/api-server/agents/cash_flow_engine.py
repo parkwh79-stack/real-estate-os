@@ -19,6 +19,14 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     """Run a deterministic baseline cash-flow analysis from CashFlowRunRequest."""
     require_finite_numbers(request, "cashFlow")
     period_basis(request)
+    if request.get("mappingDiagnostics", {}).get("missingRevenueItems"):
+        raise FinancialInputError("수입 항목 중 미확인 금액이 있습니다. 일부 합계를 전체 수입으로 계산하지 않습니다.",
+                                  code="cash_flow_revenue_items_incomplete")
+    if {"captured_cash_flow_source_inputs_changed_or_unbound", "captured_cash_flow_source_unavailable"} & set(request.get("mappingDiagnostics", {}).get("warnings", [])):
+        raise FinancialInputError("원본 이후 변경된 입력입니다. 원본 자료를 다시 가져오거나 변경 입력의 현금흐름을 검토하세요.",
+                                  code="captured_cash_flow_source_inputs_changed")
+    if "capturedWorkbookCashFlow" in request:
+        return _run_captured_workbook_cash_flow(request)
     monthly_policy = validate_monthly_financing_policy(request.get("monthlyFinancing"))
     if monthly_policy is not None:
         require_monthly_financing_period(request)
@@ -228,6 +236,142 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
             risk_flags.append({"code": "MONTHLY_OPERATING_COST_UNFUNDED", "severity": "critical", "message": "월별 운영·금융비용을 충당할 자금이 부족합니다."})
         result.update(monthlyFinancing=finance_summary, analysisOnly=True, reportEligible=False, dataStatus="partial")
         result["reportFragments"] = _report_fragments(summary, risk_flags, schedule_provenance)
+    return result
+
+
+def _run_captured_workbook_cash_flow(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Replay captured source transactions, without pricing or financing policy.
+
+    This is an analysis of the workbook's saved plan.  It is neither a native
+    Excel recalculation nor a newly underwritten PF structure.
+    """
+    from agents.cash_flow_mapper import captured_cash_flow_binding, captured_cash_flow_content_hash
+    import re
+
+    capture = request.get("capturedWorkbookCashFlow")
+    def invalid(message: str) -> None:
+        raise FinancialInputError(message, code="captured_cash_flow_source_invalid")
+
+    if not isinstance(capture, dict) or capture.get("schemaVersion") != "captured-workbook-cash-flow-v1":
+        invalid("원본 현금흐름 계약을 확인할 수 없습니다.")
+    if capture.get("contentHash") != captured_cash_flow_content_hash(capture):
+        invalid("보관된 원본 거래·출처·검산 결과가 변경되었습니다. 원본 자료를 다시 확인하세요.")
+    if capture.get("bindingHash") != captured_cash_flow_binding(request):
+        invalid("입력이 원본 현금흐름 이후 변경되었습니다. 변경 입력으로 다시 계산하거나 원본을 다시 검토하세요.")
+    if request.get("monthlyFinancing") is not None:
+        invalid("원본 현금흐름 재생과 신규 월별 금융 조건은 함께 계산할 수 없습니다.")
+    if capture.get("sourceProfile") not in {"sangbong-sale-feasibility", "sangbong-private-rental-feasibility"}:
+        invalid("지원하는 원본 현금흐름 프로필이 아닙니다.")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", str(capture.get("originalFileHash") or "")):
+        invalid("원본 파일 해시가 없습니다.")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", str(capture.get("sourceFinancialInputHash") or "")):
+        invalid("원본 입력 스냅샷 해시가 없습니다.")
+    source_rows, checks = capture.get("rows"), capture.get("periodChecks")
+    basis = request.get("periodBasis") or {}
+    if not (isinstance(source_rows, list) and 1 <= len(source_rows) <= 240
+            and isinstance(checks, list) and len(source_rows) == len(checks)
+            and basis.get("kind") == "calendar_monthly"
+            and len(basis.get("periods") or []) == len(source_rows)):
+        invalid("원본 현금흐름의 기간과 검증 결과가 불완전합니다.")
+    inflow_kinds = ("cash_in", "pf_draw", "equity_contribution", "other_financing_inflow")
+    outflow_kinds = ("cash_out", "loan_repayment", "equity_recovery", "other_financing_outflow")
+    totals = {key: 0.0 for key in (*inflow_kinds, *outflow_kinds)}
+    rows, unlevered_flows, funded_cash, cumulative_project_cash = [], [], None, 0.0
+    for index, (source, check) in enumerate(zip(source_rows, checks, strict=True)):
+        if not isinstance(source, dict) or not isinstance(check, dict):
+            invalid("원본 현금흐름 행이 올바르지 않습니다.")
+        locator = source.get("source_locator") or {}
+        period = basis["periods"][index]
+        if not (source.get("month_index") == index == check.get("sourcePeriodIndex")
+                and source.get("period") == period.get("label") and period.get("periodKind") == "monthly"
+                and locator.get("complete") is True and locator.get("cell") and locator.get("sheetName")
+                and locator.get("transactionRowPolicy") == "sangbong-cash-flow-map-v1"
+                and check.get("passed") is True and check.get("cumulativePassed") is True):
+            invalid("원본 현금흐름의 기간별 출처와 검증 상태를 확인하세요.")
+        buckets = {}
+        for kind in totals:
+            values = source.get(kind) or {}
+            if not isinstance(values, dict) or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in values.values()):
+                invalid("원본 현금흐름 금액이 누락되었거나 올바르지 않습니다.")
+            buckets[kind] = dict(values)
+            totals[kind] += sum(values.values())
+        amounts = {kind: sum(values.values()) for kind, values in buckets.items()}
+        net = sum(amounts[kind] for kind in inflow_kinds) - sum(amounts[kind] for kind in outflow_kinds)
+        if source.get("net_cash_flow") is None or not math.isclose(net, source["net_cash_flow"], rel_tol=0, abs_tol=1e-6):
+            invalid("원본 거래 합계와 보관된 순현금흐름이 일치하지 않습니다.")
+        if funded_cash is None:
+            if source.get("cumulative_cash_flow") is None:
+                invalid("원본 기초 현금 잔액을 확인할 수 없습니다.")
+            funded_cash = source["cumulative_cash_flow"] - net
+        beginning = funded_cash
+        funded_cash += net
+        if not math.isclose(funded_cash, source.get("cumulative_cash_flow", float("nan")), rel_tol=0, abs_tol=1e-6):
+            invalid("원본 거래의 누적 잔액이 보관된 잔액과 일치하지 않습니다.")
+        for mapped, original_key, bound_key in ((net, "sourceNetKrw", "roundingBoundKrw"),
+                                                (funded_cash, "sourceBalanceKrw", "cumulativeRoundingBoundKrw")):
+            original, bound = check.get(original_key), check.get(bound_key)
+            if (isinstance(original, bool) or not isinstance(original, (int, float))
+                    or isinstance(bound, bool) or not isinstance(bound, (int, float))
+                    or bound < 0 or abs(mapped - original) > bound + 1e-6):
+                invalid("원본 현금흐름 검산 오차가 보관된 원 단위 반올림 범위를 넘었습니다.")
+        project_net = amounts["cash_in"] - amounts["cash_out"]
+        cumulative_project_cash += project_net
+        unlevered_flows.append(project_net)
+        rows.append({
+            "monthIndex": index, "period": source["period"],
+            "cashIn": {"salesCollection": buckets["cash_in"], "pfDraw": buckets["pf_draw"],
+                       "totalPfDraw": amounts["pf_draw"], "totalCashIn": sum(amounts[k] for k in inflow_kinds)},
+            "cashOut": {"otherCost": amounts["cash_out"], "sourceBreakdown": buckets["cash_out"],
+                        "totalCashOut": amounts["cash_out"]},
+            "loanRepayment": buckets["loan_repayment"],
+            "equityContribution": buckets["equity_contribution"], "equityRecovery": buckets["equity_recovery"],
+            "otherFinancingInflow": buckets["other_financing_inflow"], "otherFinancingOutflow": buckets["other_financing_outflow"],
+            "netCashFlowBeforePfDraw": project_net, "cumulativeCashFlowBeforePfDraw": cumulative_project_cash,
+            "netCashFlowBeforeAllFinancing": project_net,
+            "cumulativeCashFlowBeforeAllFinancing": cumulative_project_cash,
+            "preFinancingBasis": "operating_receipts_minus_payments_before_debt_equity_and_deposits",
+            "netCashFlow": net, "beginningCash": beginning, "endingCash": funded_cash,
+            "remainingPfLimit": None, "sourceLocator": locator,
+            "sourceBasis": "captured_workbook_cash_flow",
+        })
+    max_minus = calculate_cashflow_max_minus_details(unlevered_flows)
+    summary = {
+        "projectId": request.get("project", {}).get("projectId"),
+        "projectName": request.get("project", {}).get("projectName"),
+        "totalRevenue": totals["cash_in"], "totalProjectCost": totals["cash_out"],
+        "businessDeclaredTotals": capture.get("businessDeclaredTotals") or {},
+        "pfLimit": request.get("sourcesAndUses", {}).get("funding", {}).get("pfLoan"),
+        "totalPfDraw": totals["pf_draw"], "totalPrincipalRepaid": totals["loan_repayment"],
+        "totalEquityContribution": totals["equity_contribution"], "totalEquityRecovery": totals["equity_recovery"],
+        "totalOtherFinancingInflow": totals["other_financing_inflow"], "totalOtherFinancingOutflow": totals["other_financing_outflow"],
+        "undrawnPfLimit": None, "maxMinus": max_minus["max_minus"], "maxMinusMonth": max_minus["max_minus_month"],
+        "requiredPfLimit": None, "peakUnfinancedOperatingRequirement": abs(max_minus["max_minus"]), "endingCash": funded_cash,
+        "sourceFundedEndBalanceKrw": checks[-1]["sourceBalanceKrw"],
+        "sourceFundedRoundingDifferenceKrw": funded_cash - checks[-1]["sourceBalanceKrw"],
+        "status": "source_plan_replayed_review_required",
+        "revenueBasis": "captured_operating_receipts_including_refunds_and_interest_recoveries; not_declared_business_sales",
+        "costBasis": "captured_operating_payments; refundable_deposits_and_financing_transfers_excluded",
+        "maxMinusBasis": "operating_receipts_minus_operating_payments_before_all_financing; not_funded_source_balance",
+    }
+    warnings = ["saved_excel_values_not_native_excel_recalculation", "source_plan_not_approved",
+                "business_totals_and_cash_receipts_have_different_bases", *capture.get("warnings", [])]
+    if any(item.get("passed") is not True for item in capture.get("sourceControls", [])):
+        warnings.append("source_declared_total_differs_from_monthly_source_cells")
+    provenance = {"sourceMode": "captured_workbook_cash_flow", "sourceFileHash": capture["originalFileHash"],
+                  "reportEligible": False, "warnings": warnings, "sourceControls": capture.get("sourceControls", [])}
+    result = {
+        "analysisType": "realytics_cash_flow_engine_v1", "engineVersion": "cash_flow_engine-v2",
+        "status": "completed", "dataStatus": "partial", "analysisOnly": True, "reportEligible": False,
+        "sourceBasis": "captured_workbook_cash_flow", "summary": summary, "monthlyCashFlow": rows,
+        "pfDrawSchedule": _pf_draw_schedule(rows), "salesCollectionSchedule": [row["cashIn"]["salesCollection"] for row in rows],
+        "riskFlags": [{"code": "CAPTURED_WORKBOOK_REVIEW_REQUIRED", "severity": "warning", "message": "원본에 저장된 가정의 거래 재생입니다. 실제 약정과 사업수지·현금흐름 기준을 확인하세요."}],
+        "scheduleProvenance": {"costSchedule": provenance, "salesCollection": provenance, "collectionAllocation": provenance,
+                               "reportEligible": False},
+        "reportFragments": {"reportEligible": False, "usageRestriction": "captured_workbook_analysis_only"},
+        "sourceMetadata": {**request.get("sourceMetadata", {}), "analysisOnly": True, "reportEligible": False},
+        "sourceControls": capture.get("sourceControls", []),
+    }
+    result["periodBasis"] = captured_period_basis(request, rows, monthly_financing=False)
     return result
 
 

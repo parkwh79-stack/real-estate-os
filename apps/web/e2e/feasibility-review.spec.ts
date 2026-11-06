@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { eokToWon, wonToEok, termsDraft, reviewedTermsPayload, type ReviewTerms, type WorkbookFinancingReview } from "../lib/feasibility-review";
+import { eokToWon, wonToEok, termsDraft, reviewedTermsPayload, type ReviewTerms, type WorkbookFinancingReview, type WorkbookFinancialReview, workbookSourceCell, workbookSourceCells, canLoadWorkbookFinancialField } from "../lib/feasibility-review";
 
 test.setTimeout(90_000);
 
@@ -13,7 +13,7 @@ test("money survives won to eok to won without rounding", () => {
   }
 });
 
-async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: Promise<void>; initialTerms?: ReviewTerms; workbookReview?: WorkbookFinancingReview } = {}) {
+async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: Promise<void>; initialTerms?: ReviewTerms; workbookReview?: WorkbookFinancingReview; financialReview?: WorkbookFinancialReview } = {}) {
   const source = { archiveId: "a".repeat(64), originalFileName: "검토자료.xlsx" };
   const state = {
     values: { total_revenue: 853951767703 } as Record<string, number>,
@@ -21,9 +21,11 @@ async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: 
     terms: options.initialTerms ?? { schedule: {}, financing: [] } as ReviewTerms,
     termReviews: {} as Record<string, Record<string, unknown>>,
     workbookFinancingReview: options.workbookReview,
+    workbookFinancialReview: options.financialReview,
     reviewHash: "first", sourceDocuments: [source],
   };
   const saves: Record<string, unknown>[] = [];
+  const previews: { sheetName: string | null; cellReference: string | null }[] = [];
   await page.route("**/api/backend/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     let body: unknown = {};
@@ -54,6 +56,8 @@ async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: 
       state.reviewHash = "saved";
       body = { reviewState: state };
     } else if (path.endsWith("/workbook/cells")) {
+      const params = new URL(route.request().url()).searchParams;
+      previews.push({ sheetName: params.get("sheet_name"), cellReference: params.get("cell_reference") });
       body = { schemaVersion: "realytics-workbook-evidence-preview-v1", sheetName: "손익", focusRange: "I2", previewRange: "I2",
         columns: [], rows: [{ rowNumber: 2, cells: [{ coordinate: "I2", displayValue: 853951767704, focused: true }] }], formulaPolicy: "display_only_never_executed" };
     }
@@ -62,7 +66,7 @@ async function mockReview(page: Page, options: { conflict?: boolean; saveGate?: 
   await page.goto("/project/review-1/input-package?view=review", { waitUntil: "domcontentloaded" });
   const panel = page.getByRole("region", { name: "사업수지 입력 검토" });
   await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("8539.51767703", { timeout: 60_000 });
-  return { panel, saves, source };
+  return { panel, saves, source, previews };
 }
 
 test("source loan candidates remain distinct from saved working terms and survive review/reopen", async ({ page }) => {
@@ -80,6 +84,11 @@ test("source loan candidates remain distinct from saved working terms and surviv
       { trancheId: "tr_c", name: "Tr.C", principalReconciled: false, fields: {
         amount: { value: null, sourceCell: "입력!F130", status: "missing" },
       } },
+      { trancheId: "mortgage", name: "모기지", phase: "refinancing", contractVerified: false,
+        unconfirmedTerms: ["약정 체결", "법적 상환순위", "만기와 기산일"], principalReconciled: true, fields: {
+          amount: { value: 70_000_000_000, sourceCell: "'1. 사업수지'!AC9", status: "read" },
+          term_months: { value: 120, sourceCell: "'0. 개요입력'!G40", status: "read" },
+      } },
     ],
   };
   const { panel, saves, source } = await mockReview(page, { workbookReview, initialTerms: {
@@ -92,6 +101,12 @@ test("source loan candidates remain distinct from saved working terms and surviv
   await expect(panel.getByLabel("Tr.B 원본 조건")).toContainText("금액: 0억원");
   await expect(panel.getByLabel("Tr.C 원본 조건")).toContainText("금액: 미입력");
   await expect(panel.getByLabel("Tr.C 원본 조건")).toContainText("자동 적용하지 않습니다");
+  await expect(panel.getByLabel("모기지 원본 조건")).toContainText("후속 대환자금 후보 · 초기 PF와 구분");
+  await expect(panel.getByLabel("모기지 원본 조건")).toContainText("초기 PF 금액이나 아래 저장 대출에 자동 합산하지 않습니다");
+  await expect(panel.getByLabel("모기지 원본 조건")).toContainText("체결 약정 미확인");
+  await expect(panel.getByLabel("모기지 원본 조건")).toContainText("원본 기간 가정: 120개월");
+  await expect(panel.getByLabel("모기지 원본 조건")).toContainText("'0. 개요입력'!G40 원본 보기");
+  await expect(panel.getByLabel("대출 2 명칭", { exact: true })).toHaveCount(0);
   await expect(panel.getByLabel("대출 1 연 금리 (%)", { exact: true })).toHaveValue("4");
   expect(saves).toHaveLength(0);
   await panel.getByLabel("확인할 원본").selectOption(source.archiveId);
@@ -410,4 +425,152 @@ test("calendar order and legacy precision require an explicit correction", () =>
   stored.financingDirty = true;
   stored.reviews.financing.reason = "명시 확인 전";
   expect(() => reviewedTermsPayload(stored)).toThrow();
+});
+
+
+function mappedFinancialReview(): WorkbookFinancialReview {
+  return { schemaVersion: "sangbong-financial-mapping-v1", profile: "sangbong-sale-feasibility", variant: "sale", status: "needs_review",
+    sourceWorkbook: "상봉 사업수지.xlsx", sourceDocument: { archiveId: "a".repeat(64), originalFileName: "검토자료.xlsx" },
+    sourceFields: {
+      total_cost: { label: "총사업비", value: 123456789, rawValue: 123456.789, formula: "=SUM(K54:K80)",
+        sourceCell: "'1. 사업수지'!K81", sourceUnit: "KRW_THOUSAND", normalizedUnit: "KRW", status: "needs_review", calculationState: "saved_formula_cache" },
+      pf_amount: { label: "PF 총액", value: 0, rawValue: 0, sourceCell: "'0. 개요입력'!K10", normalizedUnit: "KRW", status: "read", calculationState: "literal" },
+      finance_cost: { label: "금융비용", value: null, sourceCell: "'1. 사업수지'!K70", normalizedUnit: "KRW", status: "missing", calculationState: "unavailable" },
+    }, limitations: ["저장 수식값이며 재계산 미검증입니다."] };
+}
+
+test("mapped workbook fields require explicit source review and retain source cells after save and reopen", async ({ page }) => {
+  const { panel, saves, previews, source } = await mockReview(page, { financialReview: mappedFinancialReview() });
+  const mapping = panel.getByLabel("원본 재무 항목 검토", { exact: true });
+  await expect(mapping).toContainText("123,456,789원");
+  await expect(mapping).toContainText("저장된 수식값 · 재계산 미검증");
+  await expect(mapping.getByLabel("금융비용 불러오기 선택")).toBeDisabled();
+  await expect(panel.getByLabel("총사업비 (억원)")).toHaveValue("");
+  expect(saves).toHaveLength(0);
+  await mapping.getByRole("button", { name: "'1. 사업수지'!K81 원본 보기", exact: true }).click();
+  expect(previews).toEqual([{ sheetName: "1. 사업수지", cellReference: "K81" }]);
+  await mapping.getByLabel("총사업비 불러오기 선택").check();
+  await mapping.getByLabel("PF 총액 불러오기 선택").check();
+  await mapping.getByRole("button", { name: "선택 항목을 검토 입력에 불러오기" }).click();
+  await expect(panel.getByLabel("총사업비 (억원)")).toHaveValue("1.23456789");
+  await expect(panel.getByLabel("PF 총액 (억원)")).toHaveValue("0");
+  await expect(panel.getByLabel("금융비용 (억원)")).toHaveValue("");
+  await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("8539.51767703");
+  await expect(panel.getByLabel("총사업비 출처 셀")).toHaveValue("'1. 사업수지'!K81");
+  await panel.getByRole("button", { name: "검토 입력 저장", exact: true }).click();
+  await expect(panel.getByRole("alert")).toContainText("총사업비: 수정 또는 가정의 이유를 입력하세요");
+  expect(saves).toHaveLength(0);
+  await panel.getByLabel("총사업비 검토 이유").fill("원본 천원 단위를 원으로 대조, 저장 수식값의 분석 가정");
+  await panel.getByLabel("PF 총액 검토 이유").fill("원본의 명시적 0 확인");
+  await panel.getByRole("button", { name: "검토 입력 저장", exact: true }).click();
+  await expect(panel.getByRole("status")).toContainText("입력과 검토 이유를 저장했습니다");
+  expect(saves).toHaveLength(1);
+  expect(saves[0]?.feasibility_input).toEqual({ total_cost: 123456789, pf_amount: 0 });
+  expect(saves[0]?.fieldSourceDocuments).toEqual({ total_cost: source, pf_amount: source });
+  await page.reload();
+  await expect(panel.getByLabel("총사업비 (억원)")).toHaveValue("1.23456789");
+  await expect(panel.getByLabel("총사업비 출처 셀")).toHaveValue("'1. 사업수지'!K81");
+  await expect(panel.getByLabel("총사업비 검토 이유")).toHaveValue("원본 천원 단위를 원으로 대조, 저장 수식값의 분석 가정");
+  await expect(panel.getByLabel("원본 재무 항목 검토", { exact: true })).toContainText("123,456,789원");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("loading mapped fields preserves unsaved financial edits and their reason", async ({ page }) => {
+  const { panel, saves } = await mockReview(page, { financialReview: mappedFinancialReview() });
+  await panel.getByLabel("총사업비 (억원)").fill("9000");
+  await panel.getByLabel("총사업비 검토 이유").fill("유지할 사용자 검토안");
+  const mapping = panel.getByLabel("원본 재무 항목 검토", { exact: true });
+  await mapping.getByLabel("총사업비 불러오기 선택").check();
+  await mapping.getByLabel("PF 총액 불러오기 선택").check();
+  await mapping.getByRole("button", { name: "선택 항목을 검토 입력에 불러오기" }).click();
+  await expect(panel.getByLabel("총사업비 (억원)")).toHaveValue("9000");
+  await expect(panel.getByLabel("총사업비 검토 이유")).toHaveValue("유지할 사용자 검토안");
+  await expect(panel.getByLabel("PF 총액 (억원)")).toHaveValue("0");
+  await expect(panel.getByRole("status")).toContainText("저장 전 수정 중인 1개 항목은 유지했습니다");
+  expect(saves).toHaveLength(0);
+});
+
+for (const applyEligible of [false, true]) {
+  test(`rental gross receipts load only with explicit verified revenue basis: ${applyEligible}`, async ({ page }) => {
+    const mapping = mappedFinancialReview();
+    mapping.variant = "rental"; mapping.profile = "sangbong-private-rental-feasibility";
+    mapping.sourceFields.total_revenue = { label: "총매출·임대수익(분양전환 정산 기준)", value: 346395641063,
+      sourceCell: "'1. 사업수지'!K51", normalizedUnit: "KRW", status: "needs_review", calculationState: "saved_formula_cache", applyEligible,
+      amountBasis: "gross_conversion_consideration_plus_rents" };
+    const { panel, saves } = await mockReview(page, { financialReview: mapping });
+    const select = panel.getByLabel("총매출·임대수익(분양전환 정산 기준) 불러오기 선택");
+    if (applyEligible) {
+      await expect(select).toBeEnabled();
+      await select.check();
+      await panel.getByRole("button", { name: "선택 항목을 검토 입력에 불러오기" }).click();
+      await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("3463.95641063");
+    } else {
+      await expect(select).toBeDisabled();
+      await expect(panel.getByLabel("총매출 (억원)")).toHaveValue("8539.51767703");
+    }
+    expect(saves).toHaveLength(0);
+  });
+}
+
+test("source locator quotes and mapped loading guards retain exact cells and unknown values", () => {
+  expect(workbookSourceCell("'0. 개요입력'!$B$5")).toEqual({ sheetName: "0. 개요입력", cellReference: "B5" });
+  expect(workbookSourceCell("'O''Brien'!B5")).toEqual({ sheetName: "O'Brien", cellReference: "B5" });
+  expect(workbookSourceCell("'0. 개요입력'!SUM(B5)")).toBeNull();
+  expect(workbookSourceCell("'1. 사업수지'!K90, '1. 사업수지'!K100")).toBeNull();
+  expect(workbookSourceCells("'A, B'!K90, 'O''Brien'!K100")).toEqual(["'A, B'!K90", "'O''Brien'!K100"]);
+  const review = mappedFinancialReview();
+  expect(canLoadWorkbookFinancialField(review, "pf_amount")).toBe(true);
+  expect(canLoadWorkbookFinancialField(review, "finance_cost")).toBe(false);
+  review.sourceFields.pf_amount!.value = Number.NaN;
+  expect(canLoadWorkbookFinancialField(review, "pf_amount")).toBe(false);
+});
+
+
+test("composite cost and initial PF candidates retain every source cell through review and save", async ({ page }) => {
+  const financial = mappedFinancialReview();
+  const component = (value: number, cell: string) => ({ label: "합계 구성값", value, rawValue: value / 1000000,
+    sourceCell: cell, normalizedUnit: "KRW", status: "read", calculationState: "saved_formula_cache" });
+  financial.variant = "rental"; financial.profile = "sangbong-private-rental-feasibility";
+  const costCells = ["'1. 사업수지'!K90", "'1. 사업수지'!K100"];
+  const pfCells = ["'1. 사업수지'!AC7", "'1. 사업수지'!AC8"];
+  financial.sourceFields.other_cost = { label: "기타사업비", value: 123456789, rawValue: "123456.789",
+    sourceCell: costCells.join(", "), normalizedUnit: "KRW", sourceUnit: "KRW_THOUSAND", status: "read",
+    calculationState: "derived_from_source_values", calculationExpression: "SUM(K90,K100)",
+    components: [component(100000000, costCells[0]!), component(23456789, costCells[1]!)] };
+  financial.sourceFields.pf_amount = { label: "초기 PF 약정 계획액", value: 70000000000, rawValue: [30000, 40000],
+    sourceCell: pfCells.join(", "), normalizedUnit: "KRW", sourceUnit: "KRW_MILLION", status: "read",
+    calculationState: "derived_from_source_candidates", applyEligible: true,
+    sourceComponents: [component(30000000000, pfCells[0]!), component(40000000000, pfCells[1]!)] };
+  const { panel, saves, previews } = await mockReview(page, { financialReview: financial });
+  const mapping = panel.getByLabel("원본 재무 항목 검토", { exact: true });
+  await expect(mapping).toContainText("원본 저장값 합계");
+  await expect(mapping).toContainText("30,000 + 40,000 백만원");
+  for (const cell of [...costCells, ...pfCells]) await expect(mapping.getByRole("button", { name: `${cell} 원본 보기`, exact: true })).toBeEnabled();
+  await mapping.getByLabel("기타사업비 불러오기 선택").check();
+  await mapping.getByLabel("초기 PF 약정 계획액 불러오기 선택").check();
+  await mapping.getByRole("button", { name: "선택 항목을 검토 입력에 불러오기" }).click();
+  await expect(panel.getByLabel("기타사업비 (억원)")).toHaveValue("1.23456789");
+  await expect(panel.getByLabel("PF 총액 (억원)")).toHaveValue("700");
+  await expect(panel.getByLabel("기타사업비 출처 셀")).toHaveValue(costCells.join(", "));
+  await expect(panel.getByLabel("PF 총액 출처 셀")).toHaveValue(pfCells.join(", "));
+  await panel.getByRole("button", { name: "원본 보기", exact: true }).last().click();
+  const choices = panel.getByLabel("합계 원본 셀 선택", { exact: true });
+  await expect(choices.getByRole("button")).toHaveCount(2);
+  await choices.getByRole("button", { name: `${pfCells[1]} 원본 보기`, exact: true }).click();
+  expect(previews.at(-1)).toEqual({ sheetName: "1. 사업수지", cellReference: "AC8" });
+  expect(saves).toHaveLength(0);
+  await panel.getByLabel("기타사업비 검토 이유").fill("구성 사업비의 원본 셀과 합계를 확인한 분석 가정");
+  await panel.getByLabel("PF 총액 검토 이유").fill("초기 두 대출만 합산, 후속 모기지 제외");
+  await panel.getByRole("button", { name: "검토 입력 저장", exact: true }).click();
+  await expect(panel.getByRole("status")).toContainText("입력과 검토 이유를 저장했습니다");
+  expect(saves[0]?.feasibility_input).toEqual({ other_cost: 123456789, pf_amount: 70000000000 });
+  const reviews = saves[0]?.fieldReviews as Record<string, { sourceCell: string }>;
+  expect(reviews.pf_amount?.sourceCell).toBe(pfCells.join(", "));
+  await page.reload();
+  await expect(panel.getByLabel("PF 총액 (억원)")).toHaveValue("700");
+  await panel.getByRole("button", { name: "원본 보기", exact: true }).last().click();
+  const reopenedChoices = panel.getByLabel("합계 원본 셀 선택", { exact: true });
+  await expect(reopenedChoices.getByRole("button")).toHaveCount(2);
+  await reopenedChoices.getByRole("button", { name: `${pfCells[0]} 원본 보기`, exact: true }).click();
+  expect(previews.at(-1)).toEqual({ sheetName: "1. 사업수지", cellReference: "AC7" });
 });

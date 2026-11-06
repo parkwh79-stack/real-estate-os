@@ -17,8 +17,11 @@ function displayAmount(value: number | null): string {
 export function CashFlowPeriodChart({ cashflow }: { cashflow: CashflowResult }) {
   const titleId = useId();
   const sourceSequence = cashflow.periodBasis?.kind === "source_sequence";
+  const capturedSource = cashflow.sourceBasis === "captured_workbook_cash_flow";
   const monthlyReview = cashflow.monthlyFinancing != null || cashflow.inputSnapshot?.monthlyFinancing != null;
-  const balanceLabel = monthlyReview ? "월말 계정합계" : "누적 현금흐름";
+  const balanceLabel = capturedSource ? "조달 전 누적 영업현금" : monthlyReview ? "월말 계정합계" : "누적 현금흐름";
+  const incomeLabel = capturedSource ? "영업 수입" : "수입";
+  const expenseLabel = capturedSource ? "영업 지급" : "지출";
   const data = useMemo(() => cashflow.monthly.map((row, index) => ({
     ...row,
     axisKey: String(index),
@@ -42,11 +45,14 @@ export function CashFlowPeriodChart({ cashflow }: { cashflow: CashflowResult }) 
           {sourceSequence ? "원본 사건·기간 순서" : cashflow.periodBasis ? "저장된 달력·월차" : "저장 행 순서 · 기간 기준 미기록"}
           {" · 억원 · 표시값은 정수 반올림"}
         </p>
+        {capturedSource ? <p className="mt-1 text-xs leading-5 text-re-secondary">
+          PF·자기자본·보증금 등 조달 제외 · 최종 심사보고서 확정값 아님
+        </p> : null}
       </figcaption>
       {hasValues ? <>
         <ul aria-label="차트 범례" className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs text-re-secondary">
-          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: incomeColor }} />수입</li>
-          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: expenseColor }} />지출</li>
+          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: incomeColor }} />{incomeLabel}</li>
+          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: expenseColor }} />{expenseLabel}</li>
           <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-0.5 w-4" style={{ backgroundColor: balanceColor }} />{balanceLabel}</li>
           <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-0 w-4 border-t border-dashed border-re-muted" />0원 기준선</li>
         </ul>
@@ -68,16 +74,16 @@ export function CashFlowPeriodChart({ cashflow }: { cashflow: CashflowResult }) 
                   return <div role="status" aria-atomic="true" className="max-w-56 rounded-lg border border-re-border bg-re-surface px-3 py-2 text-xs text-re-text shadow-sm">
                     <p className="font-bold">{row.period}</p>
                     <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1">
-                      <dt>수입</dt><dd className="text-right">{displayAmount(row.cashInEok)}</dd>
-                      <dt>지출</dt><dd className="text-right">{displayAmount(row.cashOutEok)}</dd>
+                      <dt>{incomeLabel}</dt><dd className="text-right">{displayAmount(row.cashInEok)}</dd>
+                      <dt>{expenseLabel}</dt><dd className="text-right">{displayAmount(row.cashOutEok)}</dd>
                       <dt>{balanceLabel}</dt><dd className="text-right">{displayAmount(row.cumulativeEok)}</dd>
                       {verifiedDeficit?.row.axisKey === row.axisKey ? <><dt>최대 자금 부족</dt><dd className="text-right">{displayAmount(-verifiedDeficit.amount)}</dd></> : null}
                     </dl>
                   </div>;
                 }} />
               <ReferenceLine y={0} ifOverflow="extendDomain" stroke="var(--re-text-muted)" strokeDasharray="4 3" />
-              <Bar dataKey="cashInEok" name="수입" fill={incomeColor} maxBarSize={24} isAnimationActive={false} />
-              <Bar dataKey="expensePlotEok" name="지출" fill={expenseColor} maxBarSize={24} isAnimationActive={false} />
+              <Bar dataKey="cashInEok" name={incomeLabel} fill={incomeColor} maxBarSize={24} isAnimationActive={false} />
+              <Bar dataKey="expensePlotEok" name={expenseLabel} fill={expenseColor} maxBarSize={24} isAnimationActive={false} />
               <Line type="linear" dataKey="cumulativeEok" name={balanceLabel} stroke={balanceColor} strokeWidth={2} dot={{ r: 2 }} connectNulls={false} isAnimationActive={false} />
               {verifiedDeficit ? <ReferenceDot x={verifiedDeficit.row.axisKey} y={verifiedDeficit.amount} ifOverflow="extendDomain"
                 r={5} fill={deficitColor} stroke="var(--re-bg-surface)" strokeWidth={2} className="cashflow-maximum-deficit" /> : null}
@@ -94,7 +100,7 @@ export function CashFlowPeriodChart({ cashflow }: { cashflow: CashflowResult }) 
       <p className="mt-2 text-xs leading-5 text-re-secondary">
         지출 막대는 저장값의 부호를 반대로 표시하며, 미확인 값은 비워 둡니다.
         {sourceSequence ? " 가로 간격은 실제 경과 기간을 나타내지 않습니다." : ""}
-        {monthlyReview && verifiedDeficit ? " 최대 자금 부족 표시는 PF 인출 전 기준입니다." : ""}
+        {monthlyReview && !capturedSource && verifiedDeficit ? " 최대 자금 부족 표시는 PF 인출 전 기준입니다." : ""}
       </p>
     </figure>
   );

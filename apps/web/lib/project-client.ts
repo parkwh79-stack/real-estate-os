@@ -446,6 +446,7 @@ export interface CashflowResult {
   runId: string;
   completedAt?: string;
   source: "chief_pod_artifact" | "pf_review_orchestration";
+  sourceBasis?: "captured_workbook_cash_flow";
   artifactKey?: string;
   artifactType?: string;
   monthly: CashflowMonth[];
@@ -573,6 +574,13 @@ function wonToEokOrNull(value: unknown): number | null {
   return won === null ? null : won / WON;
 }
 
+function sumCashAmountsOrNull(value: unknown): number | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const amounts = Object.values(value).map(finiteNumberOrNull);
+  if (amounts.some((amount) => amount === null)) return null;
+  return (amounts as number[]).reduce((total, amount) => total + amount, 0);
+}
+
 function cashflowFromResult(
   cf: Record<string, unknown> | null | undefined,
   source: CashflowResult["source"],
@@ -582,6 +590,7 @@ function cashflowFromResult(
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const summary = (cf?.summary ?? {}) as Record<string, number>;
   const monthlyReview = cf?.monthlyFinancing != null || meta.inputSnapshot?.monthlyFinancing != null;
+  const capturedSource = cf?.sourceBasis === "captured_workbook_cash_flow";
   const maximumRow = summary.maxMinusMonth;
   const maximumPeriodIndex = typeof maximumRow === "number" && Number.isSafeInteger(maximumRow)
     && maximumRow > 0 && maximumRow <= rows.length ? maximumRow - 1 : null;
@@ -589,6 +598,7 @@ function cashflowFromResult(
     runId: meta.runId,
     completedAt: meta.completedAt,
     source,
+    sourceBasis: capturedSource ? "captured_workbook_cash_flow" : undefined,
     artifactKey: meta.artifactKey,
     artifactType: meta.artifactType,
     monthly: rows.map((r: Record<string, unknown>) => {
@@ -599,19 +609,25 @@ function cashflowFromResult(
       const principalRepayment = finiteNumberOrNull(financing.principalRepayment);
       const monthlyTotalOut = operatingAndFinanceCost !== null && principalRepayment !== null
         ? operatingAndFinanceCost + principalRepayment : null;
+      const sourceOperatingCumulative = "cumulativeCashFlowBeforeAllFinancing" in r
+        ? r.cumulativeCashFlowBeforeAllFinancing : r.cumulativeCashFlowBeforePfDraw;
+      const sourceOperatingNet = "netCashFlowBeforeAllFinancing" in r
+        ? r.netCashFlowBeforeAllFinancing : r.netCashFlowBeforePfDraw;
       return {
         period: String(r.period ?? `M${r.monthIndex ?? r.month ?? ""}`),
-        cashInEok: wonToEokOrNull(monthlyReview ? cashIn.totalCashIn : cashIn.totalCashIn ?? r.cash_in),
-        cashOutEok: wonToEokOrNull(monthlyReview ? monthlyTotalOut : cashOut.totalCashOut ?? r.cash_out),
-        netCashFlowEok: wonToEokOrNull(monthlyReview ? r.netCashFlow :
+        cashInEok: wonToEokOrNull(capturedSource ? sumCashAmountsOrNull(cashIn.salesCollection)
+          : monthlyReview ? cashIn.totalCashIn : cashIn.totalCashIn ?? r.cash_in),
+        cashOutEok: wonToEokOrNull(capturedSource ? cashOut.totalCashOut
+          : monthlyReview ? monthlyTotalOut : cashOut.totalCashOut ?? r.cash_out),
+        netCashFlowEok: wonToEokOrNull(capturedSource ? sourceOperatingNet : monthlyReview ? r.netCashFlow :
           r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? r.net_cashflow,
         ),
-        cumulativeEok: wonToEokOrNull(monthlyReview ? r.endingCash :
+        cumulativeEok: wonToEokOrNull(capturedSource ? sourceOperatingCumulative : monthlyReview ? r.endingCash :
           r.cumulativeCashFlowBeforePfDraw ??
             r.cumulativeCashFlow ??
             r.cumulative_cashflow,
         ),
-        prePfCumulativeEok: wonToEokOrNull(r.cumulativeCashFlowBeforePfDraw),
+        prePfCumulativeEok: wonToEokOrNull(capturedSource ? sourceOperatingCumulative : r.cumulativeCashFlowBeforePfDraw),
       };
     }),
     maxMinusEok: wonToEokOrNull(summary.maxMinus),

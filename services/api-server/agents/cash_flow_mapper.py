@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import re
 from typing import Any, Dict, List
 
@@ -22,7 +24,7 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
     allocation_rules = _collection_allocation_rules(study)
     period_basis = _cash_flow_period_basis(study)
 
-    return {
+    request = {
         "requestType": "cash_flow_run_request_v1",
         "sourceSchema": study.version,
         "project": {
@@ -58,6 +60,95 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
             "approval": raw_import.get("approval") or {},
         },
     }
+    captured = _captured_workbook_cash_flow(study, request)
+    if captured is not None:
+        request["capturedWorkbookCashFlow"] = captured
+        request.update(analysisOnly=True, reportEligible=False)
+        request["sourceMetadata"].update(analysisOnly=True, reportEligible=False)
+        diagnostics["warnings"].append("captured_workbook_cash_flow_basis_differs_from_business_totals")
+        diagnostics["status"] = "mapped_with_warnings"
+    return request
+
+
+def captured_cash_flow_binding(request: Dict[str, Any]) -> str:
+    """Detect stale source replay when any mapped financial input is edited."""
+    payload = {key: request.get(key) for key in (
+        "sourcesAndUses", "productMix", "pfStructure", "schedule",
+        "costSchedule", "collectionAllocationRules", "periodBasis", "monthlyFinancing", "scenarioSet",
+    )}
+    payload["project"] = {key: (request.get("project") or {}).get(key)
+                          for key in ("buildingUse", "location", "landAreaSqm", "grossFloorAreaSqm")}
+    capture = request.get("capturedWorkbookCashFlow")
+    payload["capturedSourceContentHash"] = captured_cash_flow_content_hash(capture) if isinstance(capture, dict) else None
+    def financial_only(value: Any) -> Any:
+        if isinstance(value, list):
+            return [financial_only(item) for item in value]
+        if isinstance(value, dict):
+            return {key: financial_only(item) for key, item in value.items()
+                    if key.replace("_", "").casefold() not in {
+                        "approvalstatus", "approval", "canonicalstatus", "authoritystatus", "reporteligible",
+                    }}
+        return value
+    payload = financial_only(payload)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def captured_cash_flow_content_hash(capture: dict) -> str:
+    payload = {key: value for key, value in capture.items() if key not in {"bindingHash", "contentHash"}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def captured_study_financial_binding(study_data: Any) -> str:
+    study = study_data if isinstance(study_data, FeasibilityStudyV2) else FeasibilityStudyV2.model_validate(study_data)
+    payload = study.model_dump(mode="json", exclude={"raw_import"})
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _captured_workbook_cash_flow(study: FeasibilityStudyV2, request: dict) -> dict | None:
+    raw = study.raw_import or {}
+    profile = raw.get("profile")
+    if profile not in {"sangbong-sale-feasibility", "sangbong-private-rental-feasibility"} or not study.monthly_cash_flow:
+        return None
+    request["mappingDiagnostics"]["warnings"].append("captured_cash_flow_source_unavailable")
+    source_binding = raw.get("sourceFinancialInputHash")
+    if source_binding != captured_study_financial_binding(study):
+        request["mappingDiagnostics"]["warnings"].append("captured_cash_flow_source_inputs_changed_or_unbound")
+        return None
+    review = raw.get("cashFlowReview") or {}
+    source = raw.get("sourceDocument") or {}
+    digest = source.get("originalFileHash")
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", digest):
+        return None
+    basis = request.get("periodBasis") or {}
+    rows = [row.model_dump(mode="json") for row in study.monthly_cash_flow]
+    checks = review.get("periodChecks") or []
+    if not (review.get("transactionMappingComplete") is True and review.get("calendarVerified") is True
+            and review.get("periodControlsMatched") is True and basis.get("kind") == "calendar_monthly"
+            and 1 <= len(rows) <= 240 and len(checks) == len(rows) == len(basis.get("periods") or [])):
+        return None
+    if any(row.get("month_index") != index or not (row.get("source_locator") or {}).get("complete")
+           or (row.get("source_locator") or {}).get("transactionRowPolicy") != "sangbong-cash-flow-map-v1"
+           or check.get("sourcePeriodIndex") != index or check.get("passed") is not True
+           or check.get("cumulativePassed") is not True
+           for index, (row, check) in enumerate(zip(rows, checks, strict=True))):
+        return None
+    request["mappingDiagnostics"]["warnings"].remove("captured_cash_flow_source_unavailable")
+    capture = {
+        "schemaVersion": "captured-workbook-cash-flow-v1", "sourceProfile": profile,
+        "originalFileHash": digest, "sourceName": raw.get("sourceWorkbook"),
+        "sourceFinancialInputHash": source_binding,
+        "rows": rows, "periodChecks": copy.deepcopy(checks),
+        "sourceControls": copy.deepcopy(review.get("sourceControls") or []),
+        "warnings": copy.deepcopy(review.get("warnings") or []),
+        "businessDeclaredTotals": study.metrics.model_dump(mode="json") if study.metrics else {},
+        "sourceBasis": "captured_workbook_cash_flow", "analysisOnly": True, "reportEligible": False,
+    }
+    capture["contentHash"] = captured_cash_flow_content_hash(capture)
+    capture["bindingHash"] = captured_cash_flow_binding({**request, "capturedWorkbookCashFlow": capture})
+    return capture
 
 
 def _cash_flow_period_basis(study: FeasibilityStudyV2) -> Dict[str, Any] | None:
@@ -395,25 +486,33 @@ def _profile(asset_profiles: Dict[str, Any], asset_type: str) -> Dict[str, Any]:
 
 
 def _revenue_sources(study: FeasibilityStudyV2) -> Dict[str, Any]:
-    result = {
-        "totalSalesRevenue": study.metrics.total_revenue if study.metrics else 0,
-        "leaseDeposit": 0,
-        "forwardSaleProceeds": 0,
-        "refinancingProceeds": 0,
-        "otherRevenue": 0,
-    }
+    # A declared total is a fallback, not another line item.  A workbook may
+    # split sales into private housing, public housing and commercial receipts.
+    # Each source line must contribute once, including an explicit zero.
+    grouped: Dict[str, List[Any]] = {key: [] for key in (
+        "totalSalesRevenue", "leaseDeposit", "forwardSaleProceeds", "refinancingProceeds", "otherRevenue"
+    )}
     for item in study.revenue_items:
-        if item.category in {"sales", "sales_revenue"}:
-            result["totalSalesRevenue"] = item.amount or result["totalSalesRevenue"]
-        elif item.category in {"lease", "lease_deposit"}:
-            result["leaseDeposit"] += item.amount or 0
-        elif item.category in {"forward_sale", "sale_proceeds"}:
-            result["forwardSaleProceeds"] += item.amount or 0
-        elif item.category in {"refinancing", "refinancing_loan"}:
-            result["refinancingProceeds"] += item.amount or 0
-        else:
-            result["otherRevenue"] += item.amount or 0
+        grouped[_revenue_bucket(item.category)].append(item)
+    result = {
+        key: None if any(item.amount is None for item in items) else sum(item.amount for item in items)
+        for key, items in grouped.items()
+    }
+    if not grouped["totalSalesRevenue"]:
+        result["totalSalesRevenue"] = study.metrics.total_revenue if study.metrics else 0
     return result
+
+
+def _revenue_bucket(category: str) -> str:
+    if category in {"sales", "sales_revenue"}:
+        return "totalSalesRevenue"
+    if category in {"lease", "lease_deposit"}:
+        return "leaseDeposit"
+    if category in {"forward_sale", "sale_proceeds"}:
+        return "forwardSaleProceeds"
+    if category in {"refinancing", "refinancing_loan"}:
+        return "refinancingProceeds"
+    return "otherRevenue"
 
 
 def _cost_uses(study: FeasibilityStudyV2) -> Dict[str, Any]:
@@ -512,8 +611,14 @@ def _mapping_diagnostics(
     warnings = []
     if not product_mix:
         warnings.append("product_mix_missing")
-    if not revenue.get("totalSalesRevenue"):
+    if revenue.get("totalSalesRevenue") is None:
         warnings.append("total_sales_revenue_missing")
+    missing_revenue_items = [
+        {"key": item.key, "category": item.category, "bucket": _revenue_bucket(item.category)}
+        for item in study.revenue_items if item.amount is None
+    ]
+    if missing_revenue_items:
+        warnings.append("revenue_line_items_incomplete")
     if not costs.get("totalProjectCost"):
         warnings.append("total_project_cost_missing")
     if not funding.get("pfLoan"):
@@ -523,6 +628,7 @@ def _mapping_diagnostics(
     return {
         "status": "mapped_with_warnings" if warnings else "ready_for_cash_flow_engine",
         "warnings": warnings,
+        **({"missingRevenueItems": missing_revenue_items} if missing_revenue_items else {}),
     }
 
 

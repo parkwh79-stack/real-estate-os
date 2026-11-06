@@ -62,7 +62,10 @@ export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbo
         <div className="mt-3 grid gap-3 sm:grid-cols-2">{workbookFinancing.terms.map((row) => <div key={row.trancheId}
           className="min-w-0 rounded-md border border-slate-200 p-3 dark:border-slate-700" aria-label={`${row.name} 원본 조건`}>
           <p className="font-bold">{row.name}</p>
-          {([ ["amount", "금액", "억원", 1e-8], ["interest_rate", "금리", "%", 100], ["fee_rate", "수수료율", "%", 100] ] as const).map(([key, label, unit, scale]) => {
+          {row.phase ? <p className="mt-1 text-xs font-bold text-indigo-700 dark:text-indigo-300">{row.phase === "refinancing" ? "후속 대환자금 후보 · 초기 PF와 구분" : "건설 단계 초기자금 후보"}</p> : null}
+          {row.phase === "refinancing" ? <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">기존 건설 대출을 상환하는 후속 자금입니다. 초기 PF 금액이나 아래 저장 대출에 자동 합산하지 않습니다.</p> : null}
+          {row.contractVerified === false ? <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">체결 약정 미확인 · 아래 기간은 원본의 단계별 가정이며 법적 만기·기산일은 확인이 필요합니다.</p> : null}
+          {([ ["amount", "금액", "억원", 1e-8], ["interest_rate", "금리", "%", 100], ["fee_rate", "수수료율", "%", 100], ["term_months", "원본 기간 가정", "개월", 1] ] as const).map(([key, label, unit, scale]) => {
             const field = row.fields[key];
             const value = field?.value;
             return <div key={key} className="mt-1 text-sm">
@@ -73,6 +76,7 @@ export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbo
                 : field.sourceCell}</div> : null}
             </div>;
           })}
+          {row.unconfirmedTerms?.length ? <details className="mt-2 text-xs text-slate-600 dark:text-slate-300"><summary className="cursor-pointer">약정에서 확인할 항목</summary><p className="mt-1">{row.unconfirmedTerms.join(" · ")}</p></details> : null}
           {!row.principalReconciled ? <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">입력표와 현금흐름의 대출금액을 대조하지 못했습니다. 이 행의 금리·수수료를 자동 적용하지 않습니다.</p> : null}
         </div>)}</div>
       </details> : null}

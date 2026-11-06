@@ -124,6 +124,10 @@ def import_feasibility_study_from_workbook(
 
     if profile == "realytics-formula-cash-flow-export":
         draft = _import_realytics_formula_export(workbook_path, validation, project_id, source_document)
+    elif profile in {"sangbong-sale-feasibility", "sangbong-private-rental-feasibility"}:
+        from agents.sangbong_workbook_profile import import_sangbong_workbook
+
+        draft = import_sangbong_workbook(workbook_path, validation, project_id, source_document)
     elif profile == "yongin-public-rental-feasibility":
         draft = _import_yongin_public_rental(workbook_path, validation, project_id, source_document)
     elif profile == "legacy-bonri-mixed-use-pf-feasibility":

@@ -367,6 +367,10 @@ def _aligned_cash_flow(baseline: dict, changed: dict, period: dict) -> dict | No
 def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: dict | None = None) -> dict:
     reasons = sorted(set(run_issues(baseline) + run_issues(changed)))
     base, other = run_summary(baseline), run_summary(changed)
+    captured = [(_snapshot(run, "resultSnapshot").get("sourceBasis") == "captured_workbook_cash_flow")
+                for run in (baseline, changed)]
+    if captured[0] != captured[1]:
+        reasons.append("cash_flow_amount_basis_mismatch")
     if baseline.get("engineVersion") != changed.get("engineVersion"):
         reasons.append("engine_version_mismatch")
     if baseline.get("calculationRunId") == changed.get("calculationRunId"):
@@ -383,6 +387,8 @@ def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: di
                 "businessInputsChanged": business_input(baseline.get("inputSnapshot")) != business_input(changed.get("inputSnapshot")),
                 "inputChangeCount": 0, "inputChangesTruncated": False,
                 "reportEligible": False, "approvalStatus": "not_requested"}
+    if all(captured):
+        response["sourceBasis"] = "captured_workbook_cash_flow"
     if reasons:
         return response
     if base["period"] != other["period"]:
@@ -391,6 +397,8 @@ def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: di
     elif base["period"]["axis"] == "calendar":
         aligned = _aligned_cash_flow(baseline, changed, base["period"])
         if aligned is not None:
+            if all(captured):
+                aligned["cashFlowBasis"] = "before_all_financing"
             response["alignedCashFlow"] = aligned
     if any(info["period"]["basis"] == "source_sequence" for info in (base, other)):
         response["status"] = "partial"
@@ -402,6 +410,9 @@ def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: di
     labels = {"totalRevenue": "총매출", "totalProjectCost": "총사업비", "developmentProfit": "개발이익",
               "financialCost": "금융비용", "requiredPfLimit": "최대 부족자금", "totalPfDraw": "총 대출 인출",
               "endingCash": "기말 현금", "outstandingDebt": "잔여 대출"}
+    if all(captured):
+        labels.update(totalRevenue="영업 현금수입", totalProjectCost="영업 현금지출",
+                      developmentProfit="영업 현금수지 차액")
     for key, label in labels.items():
         before, after = left["values"][key], right["values"][key]
         response["metrics"].append({"key": key, "label": label, "unit": "KRW",
