@@ -491,7 +491,7 @@ class OrchestrationAgent:
             self._complete_step(run, "developability_score", deepcopy(baseline_cycle["stepOutputs"]["developability_score"]), artifact_key="developabilityScore")
 
             report_source = deepcopy(project_data)
-            for field in ("scenariosEvaluation", "cashFlowRunResult", "returnMetrics", "stressTest", "creditEnhancement", "developabilityScore"):
+            for field in ("scenariosEvaluation", "cashFlowRunResult", "cashFlowBasisReview", "returnMetrics", "stressTest", "creditEnhancement", "developabilityScore"):
                 report_source.pop(field, None)
                 if isinstance(run["artifacts"].get(field), dict):
                     report_source[field] = deepcopy(run["artifacts"][field])
@@ -1653,6 +1653,7 @@ class OrchestrationAgent:
 
         is_passed = (
             report_quality["isComplete"]
+            and report_quality.get("inputBasisConsistent") is not False
             and not missing_artifacts
             and pdf_structure_pass
             and pdf_visual_pass

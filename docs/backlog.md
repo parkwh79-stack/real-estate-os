@@ -8,6 +8,7 @@ Updated: 2026-11-06
 
 | Priority | Module | Task | Status | Notes |
 |---|---|---|---|---|
+| P0 | 승인 현금흐름 소비 일치 | 보고서·위험 검토가 같은 선택 계산을 사용하고 원본 가정 차이 명시 | 추가 회귀 96개·확장 통합 5개 통과 | 2026-11-06. 승인 canonical 계산과 작업용 중첩 계산이 다를 때 RiskRegister가 잘못된 중첩 결과를 읽던 경로를 수정했다. 승인 입력·raw Developer 결과는 보존하고 기준 차이는 차단 reconciliation 및 보고서 안내로 남긴다. 정식 승인과 보고서 품질 통과를 막으며 자동 정렬하지 않는다. [실행 계약](product/chief-pod-runtime-integrity.md#정식-pf-합의의-독립-재계산-2026-11-06). |
 | P1 | CI 운영 재검증 | 같은 브랜치의 전체 CI·CodeQL 수동 실행 지원 | 기존 검사 유지·dispatch 추가 | 2026-11-06. 새 커밋의 PR 자동 실행이 생성되지 않은 상태에서 같은 소스를 검증할 수 있도록 기존 ci.yml/codeql.yml에 workflow_dispatch를 추가했다. 기존 권한·PR·main push 조건과 검사 내용은 유지한다. [실행 검증](product/chief-pod-runtime-integrity.md#정식-pf-합의의-독립-재계산-2026-11-06). |
 | P0 | 정식 합의 독립 재계산 | 이전 도메인 결과 재사용을 제거하고 매 회차 실제 Agent·엔진 재실행 | 관련 API 182개·웹 타입/린트 통과 | 2026-11-06 사용자 승인. 공통 평가 경로, 회차별 runtime scope·해시·typed 인계·6개 Pod 범위와 입력 부족 구분. 원본/승인 canonical 입력 및 정식 보고서 분리, 최대 3회·무진행·순환 방어. 중복 초기 계산 제거. 후보 근거가 정식 EvidenceGraph로 섞이는 경로 차단. DB 스키마·권한 변경 없음. Cloud Run 00041-mek 배포·준비 상태와 미인증 접근 차단 확인. 기존 브랜치 CI·Vercel 배포 검증을 이어간다. [실행 계약](product/chief-pod-runtime-integrity.md#정식-pf-합의의-독립-재계산-2026-11-06). |
 | P0 | 운영 반영 검증 | 문서 파싱·검토와 Chief 사전 검토 수정 배포 | 코드 d25bbdad 전체 CI 통과 | 2026-11-05. API 3,479개·별도 PostgreSQL 62개·PC/모바일 682개 통과. CodeQL PR 경고 0개, 기존 critical/high 수정 확인. Cloud Run 00038-kap 100%와 Vercel READY를 확인했다. DB 스키마·권한과 원본은 유지한다. 웹 승인 스냅샷 생성·사업 입력 적용과 상봉 전체 금융 매핑은 후속 범위다. [검증 기록](product/smart-intake.md#운영-반영-검증-2026-11-05) |

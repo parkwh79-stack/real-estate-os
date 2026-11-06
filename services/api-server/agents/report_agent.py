@@ -362,6 +362,19 @@ class ReportAgent:
 
         self._attach_imported_risk_report_sections(sections, input_data.get("riskReportSections") or {})
         self._normalize_korean_report_labels(sections)
+        basis_review = input_data.get("cashFlowBasisReview")
+        basis_warnings = []
+        if isinstance(basis_review, dict):
+            if basis_review.get("status") in {"blocking", "needs_review"}:
+                warning = "입력 기준 확인 필요: 승인 현금흐름과 작업용 사업수지의 매출·사업비 기준을 확인하세요. 기준을 확인하기 전에는 함께 확정된 계산으로 사용할 수 없습니다."
+                basis_warnings.append(warning)
+                sections["summaryCashFlow"]["assumption"] += " " + warning
+                sections["businessFeasibility"]["summary"] += " " + warning
+        quality_checks = self._quality_checks(sections)
+        if isinstance(basis_review, dict):
+            quality_checks["inputBasisReview"] = deepcopy(basis_review)
+            quality_checks["inputBasisConsistent"] = basis_review.get("status") == "clear"
+            quality_checks["inputBasisWarnings"] = basis_warnings
 
         return {
             "template": PHASE_11_TEMPLATE,
@@ -374,7 +387,7 @@ class ReportAgent:
                 for idx, (key, title) in enumerate(PHASE_11_SECTION_ORDER)
             ],
             "sections": sections,
-            "qualityChecks": self._quality_checks(sections),
+            "qualityChecks": quality_checks,
         }
 
     @staticmethod

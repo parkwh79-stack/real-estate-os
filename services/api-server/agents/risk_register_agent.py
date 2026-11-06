@@ -15,7 +15,14 @@ class RiskRegisterAgent:
         risks.extend(self._land_risks(artifacts.get("landAgentReview") or {}))
         risks.extend(self._marketability_risks(artifacts.get("marketabilityAnalysis") or {}))
         risks.extend(self._legal_risks(artifacts.get("legalPermitReview") or {}))
-        risks.extend(self._cash_flow_risks(artifacts.get("developerFeasibility") or {}))
+        cash_flow = artifacts.get("cashFlowRunResult")
+        cash_flow_source = "cashFlowRunResult"
+        if not isinstance(cash_flow, dict):
+            feasibility = artifacts.get("developerFeasibility") or {}
+            nested = feasibility.get("cashFlowRunResult") if isinstance(feasibility, dict) else None
+            cash_flow = nested if isinstance(nested, dict) else {}
+            cash_flow_source = "developerFeasibility.cashFlowRunResult"
+        risks.extend(self._cash_flow_risks(cash_flow, cash_flow_source))
         risks.extend(self._pf_structure_risks(artifacts.get("pfStructure") or {}))
         risks.extend(self._scenario_risks(artifacts.get("scenariosEvaluation") or {}))
         risks.extend(self._data_quality_risks(artifacts.get("dataQualityReview") or {}))
@@ -23,7 +30,7 @@ class RiskRegisterAgent:
         risks = self._dedupe_and_number(risks)
         risks = sorted(risks, key=lambda item: (-item["score"], item["riskId"]))
         status = self._status(risks)
-        limitations = self._data_limitations(artifacts)
+        limitations = self._data_limitations(artifacts, cash_flow)
         if status == "clear" and limitations:
             status = "needs_review"
         top_risks = risks[:10]
@@ -146,15 +153,16 @@ class RiskRegisterAgent:
             ))
         return risks
 
-    def _cash_flow_risks(self, feasibility: Dict[str, Any]) -> List[Dict[str, Any]]:
-        cash_flow = feasibility.get("cashFlowRunResult") or {}
+    def _cash_flow_risks(
+        self, cash_flow: Dict[str, Any], source_artifact: str
+    ) -> List[Dict[str, Any]]:
         risks = []
         for flag in cash_flow.get("riskFlags", []):
             if not isinstance(flag, dict):
                 continue
             risks.append(self._risk(
                 source_agent="CashFlowEngine",
-                source_artifact="developerFeasibility.cashFlowRunResult",
+                source_artifact=source_artifact,
                 category="Financing Risk",
                 code=flag.get("code") or "CASH_FLOW_RISK",
                 title=flag.get("code") or "Cash flow risk",
@@ -168,7 +176,7 @@ class RiskRegisterAgent:
             if abs(summary["maxMinus"]) > summary["requiredPfLimit"]:
                 risks.append(self._risk(
                     source_agent="CashFlowEngine",
-                    source_artifact="developerFeasibility.cashFlowRunResult",
+                    source_artifact=source_artifact,
                     category="Financing Risk",
                     code="MAX_MINUS_GT_REQUIRED_PF_LIMIT",
                     title="Max Minus exceeds required PF limit",
@@ -445,11 +453,13 @@ class RiskRegisterAgent:
             })
         return locators
 
-    def _data_limitations(self, artifacts: Dict[str, Any]) -> List[str]:
+    def _data_limitations(
+        self, artifacts: Dict[str, Any], cash_flow: Dict[str, Any]
+    ) -> List[str]:
         limitations = []
         if not artifacts.get("scenariosEvaluation"):
             limitations.append("Scenario Engine output is missing; waterfall and unsold LTV risks may be incomplete.")
-        if not artifacts.get("developerFeasibility", {}).get("cashFlowRunResult"):
+        if not cash_flow:
             limitations.append("Cash Flow Engine output is missing; Max Minus and drawdown risks may be incomplete.")
         return limitations
 

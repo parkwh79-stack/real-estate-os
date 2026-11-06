@@ -243,10 +243,19 @@ def test_failed_consensus_cycle_does_not_reuse_previous_success(monkeypatch):
     assert run == original_run
 
 
-def test_consensus_legacy_candidate_does_not_replace_approved_cash_flow_source():
+def test_consensus_legacy_candidate_does_not_replace_approved_cash_flow_source(monkeypatch):
     from agents.consensus_review_cycle import recompute_consensus_cycle
+    from agents.report_agent import ReportAgent
     from use_cases.approved_workbook_authority import GOVERNED_WORKBOOK_CORE_FIELDS
 
+    risk_cash_flow_inputs = []
+    cash_flow_risks = RiskRegisterAgent._cash_flow_risks
+
+    def observe_cash_flow_risks(self, cash_flow, source_artifact):
+        risk_cash_flow_inputs.append((deepcopy(cash_flow), source_artifact))
+        return cash_flow_risks(self, cash_flow, source_artifact)
+
+    monkeypatch.setattr(RiskRegisterAgent, "_cash_flow_risks", observe_cash_flow_risks)
     source = _source()
     canonical = {
         "project_name": "Synthetic approved-source boundary fixture",
@@ -280,10 +289,61 @@ def test_consensus_legacy_candidate_does_not_replace_approved_cash_flow_source()
     candidate["feasibility_input"]["total_revenue"] = 180_000_000_000
     final = recompute_consensus_cycle(agent, run, candidate, _OPTIONS, evaluation_index=1)
 
-    for result in (baseline, final):
-        summary = result["artifacts"]["cashFlowRunResult"]["summary"]
+    assert len(risk_cash_flow_inputs) == 2
+    for index, result in enumerate((baseline, final)):
+        artifacts = result["artifacts"]
+        selected = artifacts["cashFlowRunResult"]
+        summary = selected["summary"]
         assert summary["totalRevenue"] == 200_000_000_000
         assert summary["totalProjectCost"] == 80_000_000_000
+        assert risk_cash_flow_inputs[index] == (selected, "cashFlowRunResult")
+        basis_review = artifacts["cashFlowBasisReview"]
+        assert basis_review["status"] == "blocking"
+        assert basis_review["sourceMode"] == "approved_canonical"
+        assert basis_review["comparisonRequired"] is True
+        assert basis_review["selectedTotals"] == {
+            "totalRevenue": 200_000_000_000, "totalProjectCost": 80_000_000_000,
+        }
+        assert basis_review["workingTotals"]["totalRevenue"] == [150_000_000_000, 180_000_000_000][index]
+        assert basis_review["conflicts"]
+        assert result["reconciliation"]["status"] == "blocking"
+        check = next(item for item in result["reconciliation"]["checks"]
+                     if item["key"] == "cash_flow_input_basis_matching")
+        assert check["status"] == "blocking"
+        assert check["sourceArtifact"] == "cashFlowBasisReview"
+        assert artifacts["creditReviewDecision"]["decision"] == "rework_required"
+
+    # A read-only report must disclose that its working feasibility assumptions
+    # and selected approved workbook cash flow use conflicting source totals.
+    report = ReportAgent().generate_structured_report({
+        **deepcopy(source),
+        "cashFlowRunResult": deepcopy(baseline["artifacts"]["cashFlowRunResult"]),
+        "cashFlowBasisReview": deepcopy(baseline["artifacts"]["cashFlowBasisReview"]),
+    })
+    cash_flow_section = report["sections"]["summaryCashFlow"]
+    assert report["qualityChecks"]["inputBasisReview"] == baseline["artifacts"]["cashFlowBasisReview"]
+    assert "inputBasisReview" not in cash_flow_section
+    assert report["qualityChecks"]["inputBasisConsistent"] is False
+    warnings = report["qualityChecks"]["inputBasisWarnings"]
+    assert warnings
+    assert any(warning in cash_flow_section["assumption"] for warning in warnings)
+    assert any(warning in report["sections"]["businessFeasibility"]["summary"] for warning in warnings)
+
+    quality_run = deepcopy(run)
+    quality_run["artifacts"] = deepcopy(baseline["artifacts"])
+    quality_run["artifacts"]["phase11Report"] = {"report": report}
+    # This unit gate inspects artifact presence and supplied QA states only;
+    # these inputs do not represent a rendered PDF or an approved evidence graph.
+    quality_run["artifacts"]["evidenceGraph"] = {}
+    quality = agent._quality_check(
+        quality_run, {"status": "passed"},
+        {"status": "passed", "baseline_reviewed": True},
+    )
+    assert quality["reportComplete"] is True
+    assert quality["missingArtifacts"] == []
+    assert quality["pdfStructureQA"]["status"] == "passed"
+    assert quality["pdfVisualQA"] == {"status": "passed", "baseline_reviewed": True}
+    assert quality["pass"] is False
     assert source["canonicalFeasibilityStudyV2"] == canonical
     assert candidate["canonicalFeasibilityStudyV2"] == canonical
     assert source["feasibility_input"]["total_revenue"] == 150_000_000_000
@@ -321,6 +381,7 @@ def test_formal_consensus_keeps_candidate_cycles_out_of_authoritative_report(mon
     report_source = report_calls["report"][0]["source"]
     assert report_source["land"]["area_sqm"] == 5000
     assert report_source["feasibility_input"] == original["feasibility_input"]
+    assert report_source["cashFlowBasisReview"] == run["artifacts"]["cashFlowBasisReview"]
     assert "agreedProjectData" not in consensus
     assert "finalArtifacts" not in consensus
     assert run["artifacts"]["feasibility"]["total_revenue"] == 150_000_000_000

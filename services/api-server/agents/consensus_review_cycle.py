@@ -8,6 +8,7 @@ or an unapproved proposal; this module never publishes a project/report version.
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
 from math import isfinite
 from typing import Any, Callable
 
@@ -42,7 +43,7 @@ _DERIVED_KEYS = {
     "pfStructureAnalysis", "marketEvidenceReview", "marketabilityAnalysis", "marketability",
     "marketProductDepth", "productPlanning", "productPlanningReadiness", "legalPermitReview",
     "covenantEod", "covenantEodReadiness",
-    "cashFlowRunResult", "cashFlowRunRequest", "cashFlowReadiness",
+    "cashFlowRunResult", "cashFlowRunRequest", "cashFlowReadiness", "cashFlowBasisReview",
     "returnMetrics", "stressTest", "creditEnhancement", "cashSweep",
     "cashSweepReadiness", "developabilityScore", "publicPolicyReview",
     "costScheduleReview", "riskAssessment", "riskRegister",
@@ -178,6 +179,57 @@ def _status(output: dict[str, Any]) -> str:
     return str(status or "completed")
 
 
+def _cash_flow_basis_review(source: dict, developer: dict, selected: Any, *, canonical: bool) -> dict:
+    """Keep an approved calculation and a different working basis distinguishable.
+
+    These are declared totals, not accumulated monthly floating-point sums. An
+    exact decimal comparison introduces no new financial tolerance or buffer.
+    A difference is review evidence, never permission to align source inputs.
+    """
+    selected_summary = selected.get("summary") or {} if isinstance(selected, dict) else {}
+    nested = developer.get("cashFlowRunResult")
+    developer_summary = nested.get("summary") or {} if isinstance(nested, dict) else {}
+    working = source.get("feasibility_input") or {}
+    fields = ("totalRevenue", "totalProjectCost")
+    selected_totals = {field: selected_summary.get(field) for field in fields}
+    working_totals = {"totalRevenue": working.get("total_revenue"), "totalProjectCost": working.get("total_cost")}
+    developer_totals = {field: developer_summary.get(field) for field in fields}
+    conflicts: list[dict] = []
+    missing: list[str] = []
+    if canonical:
+        for field, input_field in (("totalRevenue", "total_revenue"), ("totalProjectCost", "total_cost")):
+            selected_value = selected_totals[field]
+            selected_path = f"cashFlowRunResult.summary.{field}"
+            if _number(selected_value) is None:
+                missing.append(selected_path)
+                continue
+            for right_path, right_value in (
+                (f"feasibility_input.{input_field}", working_totals[field]),
+                (f"developerFeasibility.cashFlowRunResult.summary.{field}", developer_totals[field]),
+            ):
+                if _number(right_value) is None:
+                    missing.append(right_path)
+                    continue
+                if Decimal(str(selected_value)) != Decimal(str(right_value)):
+                    conflicts.append({
+                        "field": field, "leftSource": selected_path, "leftValue": selected_value,
+                        "rightSource": right_path, "rightValue": right_value,
+                        "message": "Approved cash-flow totals differ from the working review basis; source inputs require reconciliation before approval.",
+                    })
+    status = "blocking" if conflicts else "needs_review" if missing else "clear"
+    return {
+        "schemaVersion": "realytics-cash-flow-basis-review-v1",
+        "status": status, "sourceMode": "approved_canonical" if canonical else "working_inputs",
+        "comparisonRequired": canonical, "selectedArtifact": "cashFlowRunResult",
+        "selectedTotals": selected_totals, "workingTotals": working_totals,
+        "developerTotals": developer_totals, "conflicts": conflicts,
+        "missingInputs": list(dict.fromkeys(missing)),
+        "comparisonPolicy": "exact_declared_totals_no_automatic_alignment",
+        "analysisOnly": True, "reportEligible": False,
+        "humanReviewStatus": "pending" if conflicts or missing else "not_required",
+    }
+
+
 def _complete_reconciliation(reconciliation: dict, artifacts: dict) -> dict:
     """Numeric agreement cannot erase independently discovered missing evidence."""
     result = deepcopy(reconciliation)
@@ -197,6 +249,16 @@ def _complete_reconciliation(reconciliation: dict, artifacts: dict) -> dict:
                 "sourceStatus": state,
             })
             existing.add(key)
+    basis = artifacts["cashFlowBasisReview"]
+    if basis.get("status") in {"blocking", "needs_review"}:
+        state = "blocking" if basis["status"] == "blocking" else "warning"
+        checks.append({
+            "key": "cash_flow_input_basis_matching", "label": "Cash-flow input basis reconciliation",
+            "status": state, "severity": state, "ready": False,
+            "sourceArtifact": "cashFlowBasisReview", "sourceMode": basis["sourceMode"],
+            "message": "The selected approved cash-flow calculation and working review inputs use different or incomplete bases. Reconcile their source totals before approval; inputs were not overwritten.",
+            "conflicts": deepcopy(basis["conflicts"]), "missingInputs": deepcopy(basis["missingInputs"]),
+        })
     for artifact, key, message in (
         ("cashFlowReadiness", "cash_flow_engine_ready", "Monthly cash-flow inputs are incomplete; no fresh calculation is available."),
         ("scenarioEngineReadiness", "scenario_engine_ready", "PF recovery scenarios need verified product mix and tranche inputs."),
@@ -219,7 +281,7 @@ def _complete_reconciliation(reconciliation: dict, artifacts: dict) -> dict:
     }
     if blocking or warnings:
         result["nextActions"] = list(dict.fromkeys([
-            *(result.get("nextActions") or []),
+            *((result.get("nextActions") or []) if reconciliation.get("status") != "clear" else []),
             *(str(check.get("message")) for check in checks if check.get("status") in {"blocking", "warning"} and check.get("message")),
         ]))
     return result
@@ -352,6 +414,7 @@ def recompute_consensus_cycle(
     else:
         record("CashFlowEngine", "cashFlowReadiness", "feasibility_cashflow", development_basis,
                artifacts["cashFlowReadiness"], kind="not_executed", executed=False)
+    artifacts["cashFlowBasisReview"] = _cash_flow_basis_review(source, developer, cash_flow, canonical=canonical_cash_flow)
     handoff("DevelopmentFeasibilityAgent", "CashFlowEngine", "developerFeasibility")
 
     # The existing cost/schedule boundary uses this same developer engine. Its
@@ -561,7 +624,7 @@ def recompute_consensus_cycle(
         "land_legal": ["landAgentReview", "legalPermitReview"],
         "market_product": ["marketEvidenceReview", "marketabilityAnalysis", "marketProductDepth", "productPlanningReadiness"] + (["productPlanning"] if "productPlanning" in artifacts else []),
         "cost_schedule": ["costScheduleReview"],
-        "feasibility_cashflow": ["developerFeasibility", "feasibility", "cashFlowReadiness", "returnMetrics"],
+        "feasibility_cashflow": ["developerFeasibility", "feasibility", "cashFlowReadiness", "cashFlowBasisReview", "returnMetrics"],
         "pf_credit": ["pfStructure", "scenarioEngineReadiness", "stressTest", "creditEnhancement", "cashSweepReadiness", "riskRegister", "creditReviewDecision", "covenantEod", "covenantEodReadiness", "restructuringPlan", "dealOptimization"],
         "public_policy": ["developabilityScore", "publicPolicyReview"],
     }
@@ -569,7 +632,7 @@ def recompute_consensus_cycle(
         "land_legal": list(legal.get("requiredFollowUps") or []),
         "market_product": list(marketability.get("missingRequiredData") or []) + (["Product planning requires land area, applied FAR and BCR."] if planning_missing else list(artifacts["productPlanningReadiness"]["limitations"])),
         "cost_schedule": list((cost.get("dataQuality") or {}).get("missingFields") or []) + ["Dedicated contractor-risk, VE and detailed schedule specialists are not implemented; current review covers the fresh developer cost split and supplied schedule."],
-        "feasibility_cashflow": [] if artifacts["cashFlowReadiness"]["executed"] else ["Monthly cash-flow calculation requires additional inputs."],
+        "feasibility_cashflow": ([] if artifacts["cashFlowReadiness"]["executed"] else ["Monthly cash-flow calculation requires additional inputs."]) + ([] if artifacts["cashFlowBasisReview"]["status"] == "clear" else ["The approved cash-flow calculation and working input basis require reconciliation before approval."]),
         "pf_credit": ([] if scenario_readiness["executed"] else ["PF recovery scenario inputs are incomplete."]) + ([] if artifacts["cashSweepReadiness"]["executed"] else ["Cash sweep requires an explicit monthly operating cash-flow series."]) + [str(item.get("reason")) for item in covenant.get("dataQualityNotes") or [] if item.get("reason")],
         "public_policy": list(public["policyNotes"]),
     }
