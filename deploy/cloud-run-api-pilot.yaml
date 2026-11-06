@@ -80,6 +80,11 @@ spec:
               valueFrom:
                 secretKeyRef: {name: realytics-vworld-key, key: '2'}
             - {name: VWORLD_DOMAIN, value: 'realytics-api-obozektnwa-an.a.run.app'}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: {name: realytics-openai-key, key: '1'}
+            - {name: REALYTICS_AI_PROVIDER, value: openai}
+            - {name: OPENAI_MODEL, value: gpt-4.1-mini}
             - {name: REALYTICS_ASYNC_JOB_MODE, value: external_worker}
             - {name: REALYTICS_SECRET_BACKEND, value: google_secret_manager}
             - {name: REALYTICS_GCP_PROJECT, value: realytics-api-pilot-20261103}

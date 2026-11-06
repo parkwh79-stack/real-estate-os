@@ -1,6 +1,26 @@
 # LLM Provider Routing & Hybrid Model Strategy
 
-Updated: 2026-06-20
+Updated: 2026-11-06
+
+## 운영 OpenAI 연결 (2026-11-06 사용자 승인)
+
+사용자가 제공한 새 OpenAI 비밀 키로 공식 모델 조회와 비민감 합성 연결 문장의 실제
+응답을 확인했다. 운영 API의 `OPENAI_API_KEY`는 기존 Google Secret Manager의
+전용 `realytics-openai-key` 버전 1을 참조한다. 도쿄 한 지역에 저장하며 API 서비스
+계정에만 이 항목의 Secret Accessor를 연결했다. 키 값은 코드·문서·브라우저·로그에
+넣지 않는다. 전용 시크릿 1개의 생성·연결과 무료 할당량 초과 비용 가능성은 사용자가
+별도로 승인했다. 새 서버나 DB 스키마는 만들지 않는다.
+
+운영 환경은 `REALYTICS_AI_PROVIDER=openai`, `OPENAI_MODEL=gpt-4.1-mini`로
+선택한다. 코드 자체의 기본값과 사용자별 명시적 제공자·모델 설정은 유지한다.
+기존 LLM 호출이 연결된 문서 해석·조정·설명 단계에서 이 모델을 사용하며, 수치 계산과
+교차검사·입력 근거·사람 승인 절차는 기존 결정론적 경로를 따른다. 키 연결만으로
+미구현 데이터 연결이나 미지원 금융 조건을 완료로 취급하지 않는다.
+
+기존 제공자·사용자 프로필 회귀 29개를 통과했고, 같은 API 이미지의
+`realytics-api-00053-soz`에 비밀 참조·제공자·모델 환경을 반영했다. readiness와
+기동 점검을 통과한 리비전에 운영 트래픽 100%를 연결했다. 합성 인증 시험에는
+실제 사업자료를 보내지 않았다. 사용자별 개인 LLM 설정은 계정 화면에서 따로 확인한다.
 
 REALYTICS handles sensitive PF data (loan amounts, owner names, accounts, PNU, registry) and Korean-language documents under finance/public-sector compliance. LLM use must therefore be **routed by sensitivity, difficulty, and residency**, not fixed to one vendor.
 
