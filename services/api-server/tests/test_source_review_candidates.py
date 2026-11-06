@@ -2,10 +2,11 @@ import hashlib
 from io import BytesIO
 
 from openpyxl import Workbook
+import pytest
 
 from parsing_platform.adapters import ArchivedDocument
 from parsing_platform.runtime_modules import build_parser_v2_runtime_orchestrator
-from parsing_platform.source_review_candidates import _normalized, source_review_profile
+from parsing_platform.source_review_candidates import PROFILE_VERSION, _normalized, source_review_profile
 from test_parser_v2_pipeline import MemoryRecords
 from use_cases.parser_v2_pipeline import run_structural_parsing_use_case
 from use_cases.parser_v2_records import ParserV2RecordStore
@@ -120,7 +121,7 @@ def test_reserved_profile_executes_existing_archive_through_http(monkeypatch):
         primary_media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     payload = {
-        "archiveId": archive_id, "profileId": "realytics.source_review_candidates", "profileVersion": "1.0.0",
+        "archiveId": archive_id, "profileId": "realytics.source_review_candidates", "profileVersion": PROFILE_VERSION,
         "idempotencyKey": "source-review-v1-" + archive_id,
     }
     first = client.post("/projects/p-1/parsing-v2/runs", json=payload)
@@ -158,3 +159,112 @@ def test_source_review_profile_binds_its_scan_budget_before_serializing_large_wo
     assert artifact["metadata"]["coverage"] == "partial"
     assert "ADAPTER_CHUNK_LIMIT_REACHED" in artifact["warnings"]
     assert len(store.list_candidates("tenant-1", "project-1")) == 1
+
+
+def bridge_document(*, title="■ [검증]브릿지론 현황", source_unit="억원", formula_principal=False):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "bridge"
+    sheet["A1"] = title
+    sheet["F2"] = "(단위: " + source_unit + ")" if source_unit else None
+    for column, label in enumerate(["구분", "대출금", "대주", "만기", "금리", "연대보증인", "담보"], 1):
+        sheet.cell(3, column, label)
+    amounts = [50, 50, 50, 50, 50, 40, 40, 200, 50, 50, 115]
+    for index, amount in enumerate(amounts, 4):
+        sheet.cell(index, 2, "=25+25" if formula_principal and index == 4 else amount)
+        sheet.cell(index, 3, "검증 대주 " + str(index))
+    for row, label, rate in [(4, "Tr.A", "변동 7.70 %"), (11, "Tr.B", "변동 8.20%"),
+                             (12, "Tr.C", "변동 9.00%"), (14, "Tr.D", "변동 9.50%")]:
+        sheet.cell(row, 1, label)
+        sheet.cell(row, 5, rate)
+    sheet["D4"] = "2025-06-17"
+    sheet.merge_cells("D4:D14")
+    sheet.merge_cells("E4:E10")
+    sheet.merge_cells("E12:E13")
+    sheet["B17"] = "=SUM(B4:B14)"
+    stream = BytesIO()
+    workbook.save(stream)
+    content = stream.getvalue()
+    return ArchivedDocument(
+        tenant_id="tenant-1", project_id="project-1", archive_id=hashlib.sha256(content).hexdigest(),
+        filename="bridge.xlsx", content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        content=content,
+    )
+
+
+def extract_review_candidates(original):
+    memory = MemoryRecords()
+    store = ParserV2RecordStore(upsert_fn=memory.upsert, list_fn=memory.list)
+    result = run_structural_parsing_use_case(document=original, actor_id="reviewer",
+        profile=source_review_profile(project_id="project-1"),
+        orchestrator=build_parser_v2_runtime_orchestrator(), record_store=store)
+    assert result["parsingRun"]["executionStatus"] in {"completed", "completed_with_warnings"}, result
+    return result, store.list_candidates("tenant-1", "project-1")
+
+
+def test_bridge_financial_table_is_source_bound_review_only_and_not_future_pf():
+    original = bridge_document()
+    original_hash = original.sha256
+    result, candidates = extract_review_candidates(original)
+    assert len(candidates) == 31
+    amounts = [item for item in candidates if item["fieldKey"] == "financing.tranche.loan_amount"]
+    assert len(amounts) == 11
+    assert sum(item["normalizedValue"] for item in amounts) == 74_500_000_000
+    assert all(item["validationStatus"] == "blocked" for item in amounts)
+    assert all(item["validationCodes"] == ["FACT_BASIS_REQUIRED"] for item in amounts)
+    assert {item["fieldKey"] for item in candidates} == {
+        "financing.tranche.loan_amount", "financing.tranche.name", "financing.tranche.interest_rate",
+        "financing.tranche.interest_rate_type", "financing.tranche.maturity_date",
+    }
+    assert len([item for item in candidates if item["fieldKey"] == "financing.tranche.maturity_date"]) == 1
+    rates = [item for item in candidates if item["fieldKey"] == "financing.tranche.interest_rate"]
+    assert [item["normalizedValue"] for item in rates] == [0.077, 0.082, 0.09, 0.095]
+    assert all(item["validationStatus"] == "passed" for item in candidates if item not in amounts)
+    for candidate in candidates:
+        assert candidate["approvalStatus"] != "approved"
+        assert candidate["reviewStatus"] == "pending"
+        assert candidate["metadata"]["referenceOnly"] is True
+        assert candidate["metadata"]["sourceFinancialContext"] == "current_bridge_snapshot"
+        assert candidate["metadata"]["sourceAsOfStatus"] == "unconfirmed"
+        assert "basis" not in candidate["metadata"]
+        assert not candidate.get("asOfDate")
+        for locator in candidate["evidence"]:
+            assert locator["fileSha256"] == original_hash
+            assert locator["sheetName"] == "bridge"
+            assert locator["cellReference"]
+            assert "workbookFormula" not in locator
+    summary = result["orchestration"]["results"]["source_review_candidates"]["output"]["summary"]
+    assert summary["formulaControls"][0]["sourceLocator"]["cellReference"] == "B17"
+    assert summary["formulaControls"][0]["formulaSha256"] == hashlib.sha256(b"=SUM(B4:B14)").hexdigest()
+    assert "formula" not in summary["formulaControls"][0]
+    assert summary["formulaControls"][0]["approvalEligible"] is False
+    assert hashlib.sha256(original.content).hexdigest() == original_hash
+
+
+@pytest.mark.parametrize("kwargs", [{"title": "일반 대출 현황"}, {"source_unit": ""}, {"source_unit": "달러"}])
+def test_bridge_table_requires_its_actual_title_headers_and_explicit_currency_unit(kwargs):
+    _result, candidates = extract_review_candidates(bridge_document(**kwargs))
+    assert candidates == []
+
+
+def test_bridge_formula_principal_and_aggregate_cache_are_never_promoted():
+    _result, candidates = extract_review_candidates(bridge_document(formula_principal=True))
+    amounts = [item for item in candidates if item["fieldKey"] == "financing.tranche.loan_amount"]
+    assert len(amounts) == 10
+    assert all(item["evidence"][-1]["cellReference"] not in {"B4", "B17"} for item in amounts)
+
+
+@pytest.mark.parametrize("target,version", [("realytics-feasibility-study-v2", "2.0"),
+                                           ("realytics-cash-flow-run-request-v1", "1.0")])
+def test_even_a_reviewed_bridge_snapshot_has_no_future_pf_or_cashflow_projection(target, version):
+    from parsing_platform.field_registry import project_approved_inputs
+    from test_parser_v2_field_registry import _approved_snapshot, _financing_basis
+
+    snapshot = _approved_snapshot([{
+        "fieldKey": "financing.tranche.loan_amount", "normalizedValue": 5_000_000_000,
+        "unit": "krw", "entityId": "source-bridge:literal-row-4",
+        "metadata": {"sourceFinancialContext": "current_bridge_snapshot", "referenceOnly": True,
+                     **_financing_basis(financingBalanceBasis="outstanding")},
+    }])
+    with pytest.raises(ValueError, match="no registered projection"):
+        project_approved_inputs(target_schema_id=target, target_schema_version=version, approved_snapshot=snapshot)

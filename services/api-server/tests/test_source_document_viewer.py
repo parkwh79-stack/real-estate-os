@@ -599,6 +599,10 @@ def test_workbook_preview_preserves_formula_text_and_saved_cache(
     cell = next(cell for row in body["rows"] for cell in row["cells"] if cell["coordinate"] == "B1")
     assert cell["formula"] == formula
     assert cell["displayValue"] == cached_value
+    assert cell["rawValue"] == formula
+    assert cell["cachedValue"] == cached_value
+    assert cell["valueState"] == ("formula_cache_missing" if cached_value is None else "formula_cache_error" if isinstance(cached_value, str) else "formula_cached")
+    assert cell["numberFormat"] == "General"
     assert cell["dataType"] == "f"
     assert cell["focused"] is True
     assert body["formulaPolicy"] == "display_only_never_executed"

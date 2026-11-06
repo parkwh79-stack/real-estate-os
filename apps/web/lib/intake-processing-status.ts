@@ -1,3 +1,8 @@
+// One active source-review profile shared by upload and archived review actions.
+export const SOURCE_REVIEW_PROFILE_ID = "realytics.source_review_candidates";
+export const SOURCE_REVIEW_PROFILE_VERSION = "1.1.0";
+export const SOURCE_REVIEW_IDEMPOTENCY_PREFIX = "source-review-v1-1-0-";
+
 type Data = Record<string, unknown>;
 const record = (value: unknown): Data => value && typeof value === "object" && !Array.isArray(value) ? value as Data : {};
 
@@ -33,7 +38,7 @@ export function hasArchivedWorkbookSourceReview(body: Data): boolean {
     && validation.status === "needs_mapping" && record(validation.templateSupport).status === "unsupported_layout"
     && review.reason === "unsupported_workbook_layout" && review.candidateOnly === true && review.authoritative === false
     && review.archiveId === hash && review.sourceDocumentHash === hash && review.projectId === body.project_id
-    && review.profileId === "realytics.source_review_candidates" && review.profileVersion === "1.0.0";
+    && review.profileId === SOURCE_REVIEW_PROFILE_ID && ["1.0.0", SOURCE_REVIEW_PROFILE_VERSION].includes(String(review.profileVersion));
 }
 
 /** HTTP 200 acknowledges transport, not successful extraction. */

@@ -10,6 +10,7 @@ interface CredentialCapture {
 async function mockAuthenticatedSettings(
   page: Page,
   onCredential: (body: CredentialCapture) => Promise<{ status: number; body: object }>,
+  onAiProfile?: () => { status: number; body: object },
 ) {
   await page.route("**/api/backend/auth/**", async (route) => {
     const request = route.request();
@@ -36,10 +37,11 @@ async function mockAuthenticatedSettings(
       return;
     }
     if (path.endsWith("/auth/ai-profile")) {
+      const result = onAiProfile?.() ?? { status: 200, body: { profile: null, effectiveAi: {} } };
       await route.fulfill({
-        status: 200,
+        status: result.status,
         contentType: "application/json",
-        body: JSON.stringify({ profile: null, effectiveAi: {} }),
+        body: JSON.stringify(result.body),
       });
       return;
     }
@@ -217,4 +219,58 @@ test("AI API token is cleared before logout starts", async ({ page }) => {
     text: false,
     storage: false,
   });
+});
+
+
+const configuredSystemAi = {
+  profile: null,
+  fallbackPolicy: { provider: "openai", model: "gpt-4.1-mini", description: "운영 시스템 기본 AI" },
+  effectiveAi: { provider: "openai", runtimeProvider: "openai", model: "gpt-4.1-mini", directModelCall: true,
+    requiresApiKey: null, selectionSource: "system_free_fallback" },
+};
+
+test("a profile-free account shows the configured OpenAI system fallback in both form and current applied model", async ({ page }) => {
+  let credentialWrites = 0;
+  await mockAuthenticatedSettings(page, async () => {
+    credentialWrites += 1;
+    return { status: 200, body: { profile: { apiKeyConfigured: true } } };
+  }, () => ({ status: 200, body: configuredSystemAi }));
+
+  await page.goto("/settings");
+  await expect(page.getByRole("combobox", { name: "AI Provider", exact: true })).toHaveValue("openai");
+  await expect(page.getByRole("textbox", { name: "모델명", exact: true })).toHaveValue("gpt-4.1-mini");
+  const applied = page.locator("section", { has: page.getByRole("heading", { name: "현재 적용 AI 두뇌", exact: true }) }).last();
+  await expect(applied.getByText("openai", { exact: true })).toHaveCount(2);
+  await expect(applied.getByText("gpt-4.1-mini", { exact: true })).toBeVisible();
+  await expect(applied.getByText("시스템 기본 AI", { exact: true })).toBeVisible();
+  await expect(applied.getByText(/무료/)).toHaveCount(0);
+  await expect(page.getByTestId("ai-api-key-input")).toHaveValue("");
+  expect(credentialWrites).toBe(0);
+});
+
+test("an AI profile outage is visible and an explicit reload recovers the configured system model", async ({ page }) => {
+  let unavailable = true;
+  let profileReads = 0;
+  let credentialWrites = 0;
+  await mockAuthenticatedSettings(page, async () => {
+    credentialWrites += 1;
+    return { status: 200, body: {} };
+  }, () => {
+    profileReads += 1;
+    return unavailable ? { status: 503, body: { detail: "fixture_configuration_temporarily_unavailable" } }
+      : { status: 200, body: configuredSystemAi };
+  });
+
+  await page.goto("/settings");
+  const error = page.getByText("AI 설정을 불러오지 못했습니다. 다시 조회해 주세요. 기존 설정은 변경되지 않았습니다.", { exact: true });
+  await expect(error).toBeVisible();
+  const readsBeforeRetry = profileReads;
+  unavailable = false;
+  await page.getByRole("button", { name: "다시 조회", exact: true }).click();
+  await expect(error).toHaveCount(0);
+  await expect.poll(() => profileReads).toBeGreaterThan(readsBeforeRetry);
+  await expect(page.getByRole("combobox", { name: "AI Provider", exact: true })).toHaveValue("openai");
+  await expect(page.getByRole("textbox", { name: "모델명", exact: true })).toHaveValue("gpt-4.1-mini");
+  await expect(page.getByTestId("ai-api-key-input")).toHaveValue("");
+  expect(credentialWrites).toBe(0);
 });

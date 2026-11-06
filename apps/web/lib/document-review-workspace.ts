@@ -59,6 +59,40 @@ function locatorText(value: unknown): string | null {
   return normalized || null;
 }
 
+/** Missing identity permits reading the original, never an evidence overlay. */
+export function sourceLocatorMatchesDocument(locator: unknown, document: unknown): boolean {
+  if (!locator || typeof locator !== "object" || Array.isArray(locator)
+    || !document || typeof document !== "object" || Array.isArray(document)) return false;
+  const source = locator as JsonRecord;
+  const target = document as JsonRecord;
+  const identity = (record: JsonRecord, key: string): string | null => {
+    const value = record[key];
+    return value === null || value === undefined ? "" : typeof value === "string" ? value.trim() : null;
+  };
+  const hash = identity(source, "fileSha256");
+  const archive = identity(target, "archiveId");
+  const version = identity(source, "documentVersionId");
+  const documentVersion = identity(target, "documentVersionId");
+  const sourceDocument = identity(source, "documentId");
+  const targetDocument = identity(target, "documentId");
+  if ([hash, archive, version, documentVersion, sourceDocument, targetDocument].some((value) => value === null)) return false;
+  if ((hash && !/^[0-9a-f]{64}$/i.test(hash)) || (archive && !/^[0-9a-f]{64}$/i.test(archive))) return false;
+  let matched = false;
+  if (hash && archive) {
+    if (hash.toLowerCase() !== archive.toLowerCase()) return false;
+    matched = true;
+  }
+  if (version && documentVersion) {
+    if (version !== documentVersion) return false;
+    matched = true;
+  }
+  if (sourceDocument) {
+    if (sourceDocument === targetDocument || (archive && sourceDocument.toLowerCase() === archive.toLowerCase())) matched = true;
+    else if (targetDocument) return false;
+  }
+  return matched;
+}
+
 function locatorNumber(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const normalized = Number(value);
@@ -181,6 +215,37 @@ export type WorkbookPreviewCell = {
   formula?: string | null;
   dataType: string;
   focused: boolean;
+  rawValue?: unknown;
+  cachedValue?: unknown;
+  valueState?: "literal" | "formula_cached" | "formula_cache_missing" | "formula_cache_error" | "empty" | "error";
+  numberFormat?: string;
+};
+
+export type WorkbookOriginalSheets = {
+  schemaVersion: "realytics-workbook-original-sheets-v1";
+  archiveId: string;
+  sourceSha256: string;
+  fileName: string;
+  archiveVersionId?: string | null;
+  archiveETag?: string | null;
+  archiveIntegrityStatus: "verified";
+  sheets: Array<{
+    sheetName: string;
+    sheetIndex: number;
+    rowCount: number;
+    columnCount: number;
+    declaredRowCount: number;
+    declaredColumnCount: number;
+    state: string;
+    dimensionsTruncated: boolean;
+  }>;
+  limits: { maxRows: number; maxColumns: number; maxCells: number; maxSheets: number };
+  defaultSheetName: string | null;
+  defaultRange: string | null;
+  warnings: string[];
+  truncated: boolean;
+  analysisOnly: true;
+  approvalEligible: false;
 };
 
 export type WorkbookCellPreview = {
@@ -191,6 +256,14 @@ export type WorkbookCellPreview = {
   columns: Array<{ columnNumber: number; label: string }>;
   rows: Array<{ rowNumber: number; cells: WorkbookPreviewCell[] }>;
   formulaPolicy: "display_only_never_executed";
+  archiveId?: string;
+  sourceSha256?: string;
+  fileName?: string;
+  archiveVersionId?: string | null;
+  archiveETag?: string | null;
+  archiveIntegrityStatus?: string;
+  analysisOnly?: boolean;
+  approvalEligible?: boolean;
 };
 
 export type PdfLocatorOverlay = {
@@ -578,6 +651,39 @@ export async function fetchPdfPagePreview(input: {
   };
 }
 
+function workbookPreviewError(status: number) {
+  if (status === 401 || status === 403) return "이 원본을 읽을 권한이 없거나 로그인 상태가 만료됐습니다.";
+  if (status === 404) return "보관 원본 또는 요청한 시트를 찾을 수 없습니다.";
+  if (status === 415) return "화면에서 읽을 수 있는 Excel 형식(XLSX·XLSM)이 아닙니다.";
+  if (status === 422) return "Excel 원본이나 요청한 셀 범위를 읽을 수 없습니다. 다른 범위나 원본 파일을 확인해 주세요.";
+  return "Excel 미리보기 요청을 완료하지 못했습니다. 원본 다시 읽기를 눌러 주세요.";
+}
+
+export async function fetchWorkbookOriginalSheets(input: {
+  projectId: string;
+  archiveId: string;
+  signal?: AbortSignal;
+}): Promise<WorkbookOriginalSheets> {
+  const response = await fetch(
+    `${apiBase}/projects/${encodeURIComponent(input.projectId)}/source-documents/${encodeURIComponent(input.archiveId)}/workbook/sheets`,
+    { cache: "no-store", headers: authHeaders("web-evidence-viewer"), signal: input.signal },
+  );
+  if (!response.ok) throw new Error(workbookPreviewError(response.status));
+  const result = await response.json() as WorkbookOriginalSheets;
+  if (result.schemaVersion !== "realytics-workbook-original-sheets-v1"
+    || result.archiveId !== input.archiveId || result.sourceSha256 !== input.archiveId
+    || result.archiveIntegrityStatus !== "verified" || result.analysisOnly !== true || result.approvalEligible !== false
+    || !Array.isArray(result.sheets) || result.sheets.length > 100 || !Array.isArray(result.warnings)
+    || !result.limits || !Number.isInteger(result.limits.maxCells) || result.limits.maxCells < 1 || result.limits.maxCells > 400
+    || !Number.isInteger(result.limits.maxRows) || result.limits.maxRows < 1 || result.limits.maxRows > 10_000
+    || !Number.isInteger(result.limits.maxColumns) || result.limits.maxColumns < 1 || result.limits.maxColumns > 512
+    || result.sheets.some((sheet) => typeof sheet.sheetName !== "string" || !sheet.sheetName
+      || !Number.isInteger(sheet.rowCount) || sheet.rowCount < 0 || !Number.isInteger(sheet.columnCount) || sheet.columnCount < 0)) {
+    throw new Error("선택한 Excel 원본과 시트 정보의 무결성을 확인할 수 없습니다.");
+  }
+  return result;
+}
+
 export async function fetchWorkbookCellPreview(input: {
   projectId: string;
   archiveId: string;
@@ -585,6 +691,7 @@ export async function fetchWorkbookCellPreview(input: {
   cellReference: string;
   contextRows?: number;
   contextColumns?: number;
+  signal?: AbortSignal;
 }): Promise<WorkbookCellPreview> {
   const params = new URLSearchParams({
     sheet_name: input.sheetName,
@@ -592,10 +699,12 @@ export async function fetchWorkbookCellPreview(input: {
     context_rows: String(input.contextRows ?? 3),
     context_columns: String(input.contextColumns ?? 3),
   });
-  return await fetchJson<WorkbookCellPreview>(
+  const response = await fetch(
     `${apiBase}/projects/${encodeURIComponent(input.projectId)}/source-documents/${encodeURIComponent(input.archiveId)}/workbook/cells?${params.toString()}`,
-    "Excel 근거 셀을 불러오지 못했습니다.",
+    { cache: "no-store", headers: authHeaders("web-evidence-viewer"), signal: input.signal },
   );
+  if (!response.ok) throw new Error(workbookPreviewError(response.status));
+  return await response.json() as WorkbookCellPreview;
 }
 
 export async function recordParserV2Review(input: {

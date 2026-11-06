@@ -3993,7 +3993,8 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(record.get("userId") or record.get("user_id") or "")
     if not user_id:
         raise ValueError("userId is required")
-    existing = get_user_ai_profile(user_id, include_secret=True) or {}
+    scoped_tenant = _normalized_tenant_scope(record.get("tenantId") or record.get("tenant_id"), record) if storage_backend() == "postgres" else None
+    existing = get_user_ai_profile(user_id, include_secret=True, tenant_id=scoped_tenant) or {}
     provider = str(record.get("provider") or existing.get("provider") or "gemini").lower()
     model = record.get("model") or existing.get("model") or _default_model_for_provider(provider)
     raw_key = record.get("apiKey") or record.get("api_key")
@@ -4037,6 +4038,11 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
         "metadata": record.get("metadata") or existing.get("metadata") or {},
     }
 
+    if storage_backend() == "postgres":
+        from db.repositories.user_ai_profile_repository import PostgresUserAIProfileRepository
+        profile["tenantId"] = scoped_tenant
+        PostgresUserAIProfileRepository(tenant_id=scoped_tenant, user_id=user_id).save(profile)
+        return _sanitize_user_ai_profile(profile)
     if _use_document_store():
         state = _load_json_state() or default_state()
         state.setdefault("user_ai_profiles", {})[user_id] = profile
@@ -4086,10 +4092,13 @@ def upsert_user_ai_profile(record: Dict[str, Any]) -> Dict[str, Any]:
     return _sanitize_user_ai_profile(profile)
 
 
-def get_user_ai_profile(user_id: str, *, include_secret: bool = False) -> Dict[str, Any] | None:
+def get_user_ai_profile(user_id: str, *, include_secret: bool = False, tenant_id: str | None = None) -> Dict[str, Any] | None:
     if not user_id:
         return None
-    if _use_document_store():
+    if storage_backend() == "postgres":
+        from db.repositories.user_ai_profile_repository import PostgresUserAIProfileRepository
+        profile = PostgresUserAIProfileRepository(tenant_id=_normalized_tenant_scope(tenant_id), user_id=str(user_id)).get()
+    elif _use_document_store():
         state = _load_json_state() or default_state()
         profile = state.get("user_ai_profiles", {}).get(user_id)
     else:
@@ -4103,9 +4112,12 @@ def get_user_ai_profile(user_id: str, *, include_secret: bool = False) -> Dict[s
     return _sanitize_user_ai_profile(profile)
 
 
-def delete_user_ai_profile(user_id: str) -> bool:
+def delete_user_ai_profile(user_id: str, *, tenant_id: str | None = None) -> bool:
     if not user_id:
         return False
+    if storage_backend() == "postgres":
+        from db.repositories.user_ai_profile_repository import PostgresUserAIProfileRepository
+        return PostgresUserAIProfileRepository(tenant_id=_normalized_tenant_scope(tenant_id), user_id=str(user_id)).delete()
     if _use_document_store():
         state = _load_json_state() or default_state()
         removed = state.setdefault("user_ai_profiles", {}).pop(user_id, None) is not None
@@ -4117,8 +4129,8 @@ def delete_user_ai_profile(user_id: str) -> bool:
         return cur.rowcount > 0
 
 
-def decrypt_user_ai_api_key(user_id: str) -> str | None:
-    profile = get_user_ai_profile(user_id, include_secret=True)
+def decrypt_user_ai_api_key(user_id: str, *, tenant_id: str | None = None) -> str | None:
+    profile = get_user_ai_profile(user_id, include_secret=True, tenant_id=tenant_id)
     encrypted = profile.get("apiKeyEncrypted") if profile else None
     if not encrypted:
         return None

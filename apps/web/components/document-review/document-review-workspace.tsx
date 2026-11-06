@@ -31,11 +31,11 @@ import {
   fetchDocumentReviewData,
   fetchGlossaryTermsForField,
   fetchPdfPagePreview,
-  fetchWorkbookCellPreview,
   pdfLocatorOverlay,
   recordParserV2Review,
   resolveParserV2Conflict,
   safeSourceUrl,
+  sourceLocatorMatchesDocument,
   sourceLocatorSemanticKey,
   sourceDocumentContentUrl,
   type ApprovedSnapshotDiff,
@@ -52,7 +52,6 @@ import {
   type SourceConflictRecord,
   type SourceDocumentRecord,
   type SourceLocatorRecord,
-  type WorkbookCellPreview,
 } from "../../lib/document-review-workspace";
 import { displayText } from "../../lib/workspace-context";
 import {
@@ -66,6 +65,7 @@ import {
 import { ProjectWorkspaceLink } from "../layout/project-workspace-link";
 import { PdfPageReadingPanel } from "./pdf-page-reading-panel";
 import { ArchiveExtractionAction } from "./archive-extraction-action";
+import { WorkbookOriginalPreview } from "./workbook-original-preview";
 import { DashboardAtmosphere } from "../dashboard/dashboard-atmosphere";
 import heroStyles from "../orchestration/chief-deal-room-workspace.module.css";
 
@@ -763,7 +763,9 @@ export function DocumentReviewWorkspace({
   const openConflictCount = conflicts.filter((item) => identifier(item.conflictStatus) === "open").length;
   const reviewPendingCount = facts.filter((item) => ["pending", "in_review"].includes(item.reviewStatus)).length;
   const approvedCount = facts.filter((item) => item.snapshotApprovalStatus === "approved").length;
-  const queueCount = data?.reviewQueue?.length ?? 0;
+  const extractionNotStarted = documents.filter((item) => !item.latestRun).length;
+  const extractionEmpty = documents.filter((item) => ["completed", "completed_with_warnings"].includes(identifier(item.latestRun?.executionStatus)) && item.candidateCount === 0).length;
+  const extractionFailed = documents.filter((item) => ["failed", "cancelled"].includes(identifier(item.latestRun?.executionStatus))).length;
 
   if (loading && !data) {
     return (
@@ -787,7 +789,7 @@ export function DocumentReviewWorkspace({
               {documents.length
                 ? documentFacts.length
                   ? "원본과 파싱값을 대조한 뒤, 확인할 항목의 검토 의견을 남기세요."
-                  : "문서를 선택하고 원본부터 확인하세요. PDF는 필요한 페이지에서 글자 읽기를 사용할 수 있습니다."
+                  : "문서를 선택해 원본을 읽고, 필요한 값을 추출해 검토하세요. Excel은 시트·셀, PDF는 페이지별로 확인할 수 있습니다."
                 : "자료를 올리면 이곳에서 원본과 파싱 결과를 함께 확인할 수 있습니다."}
             </p>
             <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -802,12 +804,15 @@ export function DocumentReviewWorkspace({
           <div className={heroStyles.glass} data-testid="document-review-glass">
             <dl className="grid grid-cols-2 gap-4 text-white">
               <div><dt className="text-xs text-slate-200">보관 문서</dt><dd className="mt-1 text-2xl font-semibold">{countLabel(data?.sourceDocuments.length)}</dd>{!data ? <p className="text-xs text-slate-200">조회 불가</p> : null}</div>
-              <div><dt className="text-xs text-slate-200">검토할 항목</dt><dd className="mt-1 text-2xl font-semibold">{countLabel(data ? queueCount : undefined)}</dd></div>
+              <div><dt className="text-xs text-slate-200">미검토 후보</dt><dd className="mt-1 text-2xl font-semibold">{countLabel(data ? reviewPendingCount : undefined)}</dd></div>
             </dl>
             <p className="mt-3 border-t border-white/20 pt-3 text-xs leading-5 text-slate-100">
               {data ? "파싱값 " + facts.length + "건 · 미검토 " + reviewPendingCount + "건 · 승인된 입력값 " + approvedCount + "건" : "저장 상태를 다시 확인해 주세요."}
               {openConflictCount ? " · 값 충돌 " + openConflictCount + "건" : ""}
             </p>
+            {data && !facts.length ? <p className="mt-2 text-xs leading-5 text-slate-100">
+              저장된 검토 후보가 아직 없습니다.{extractionNotStarted ? ` 후보 추출 전 ${extractionNotStarted}개.` : ""}{extractionEmpty ? ` 읽기 완료·검토 후보 없음 ${extractionEmpty}개.` : ""}{extractionFailed ? ` 추출 실패 ${extractionFailed}개.` : ""} 승인된 입력값은 검토·승인 후 생성됩니다.
+            </p> : null}
           </div>
         </div>
       </header>
@@ -961,9 +966,9 @@ function DocumentNavigator({
                 </span>
                 <span className="mt-1 flex flex-wrap gap-1">
                   {document.latestRun ? (
-                    <><StatusPill label="파싱" status={identifier(document.latestRun.executionStatus) || "unknown"} />
-                    {document.candidateCount !== undefined ? <span className="self-center text-[11px] text-slate-500">후보 {document.candidateCount}건</span> : null}</>
-                  ) : <StatusPill label="파싱" status="not_registered" />}
+                    <><StatusPill label={document.latestRun.profileId === "realytics.source_review_candidates" ? "값 추출" : "문서 읽기"} status={identifier(document.latestRun.executionStatus) || "unknown"} />
+                    {document.candidateCount !== undefined ? <span className="self-center text-[11px] text-slate-500">{document.candidateCount ? `검토 후보 ${document.candidateCount}건` : "검토 후보 없음"}</span> : null}</>
+                  ) : <span className="text-[11px] text-slate-500">원본 보관 · 값 추출 전</span>}
                 </span>
               </span>
             </button>
@@ -1037,7 +1042,7 @@ function SourcePreview({
     ? sourceDocumentContentUrl(projectId, archiveId)
     : null;
   const locatorBound = locator && document
-    ? locatorMatchesDocument(locator, document)
+    ? sourceLocatorMatchesDocument(locator, document)
     : false;
   return (
     <main id="document-source-view" className="flex min-w-0 scroll-mt-20 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-100 shadow-sm dark:border-slate-800 dark:bg-slate-900" aria-label="원본 위치 미리보기">
@@ -1091,20 +1096,22 @@ function SourcePreview({
               title="locator와 선택 원본의 lineage가 일치하지 않습니다."
               body="file SHA-256, documentVersionId 또는 documentId가 다른 locator는 페이지나 셀 위에 표시하지 않습니다. Parser V2 원장을 다시 확인하세요."
             />
-          ) : document && contentUrl && isPdf ? (
+          ) : null}
+          {document && contentUrl && isPdf ? (
             <PdfLocatorPreview
               key={`${archiveId}:${locator?.pageNumber ?? locator?.page ?? "source"}`}
               projectId={projectId}
               archiveId={archiveId}
-              locator={locator}
+              locator={locatorBound ? locator : undefined}
               contentUrl={contentUrl}
               onSelectSourceLocator={onSelectSourceLocator}
             />
-          ) : document && locator && contentUrl && isWorkbook ? (
-            <WorkbookLocatorPreview
+          ) : document && contentUrl && isWorkbook ? (
+            <WorkbookOriginalPreview
+              key={`${archiveId}:${locatorBound ? sheetCellLabel(locator!) : "original"}`}
               projectId={projectId}
               archiveId={archiveId}
-              locator={locator}
+              locator={locatorBound ? locator : undefined}
               onSelectSourceLocator={onSelectSourceLocator}
             />
           ) : locator && document ? (
@@ -1301,121 +1308,6 @@ function PdfLocatorPreview({
   );
 }
 
-function WorkbookLocatorPreview({
-  projectId,
-  archiveId,
-  locator,
-  onSelectSourceLocator,
-}: {
-  projectId: string;
-  archiveId: string;
-  locator: SourceLocatorRecord;
-  onSelectSourceLocator: (locator: SourceLocatorRecord) => void;
-}) {
-  const sheetName = identifier(locator.sheetName ?? locator.sheet);
-  const cellReference = identifier(locator.cellReference ?? locator.cellRange ?? locator.cell);
-  const [preview, setPreview] = useState<WorkbookCellPreview | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!sheetName || !cellReference) {
-      setPreview(null);
-      setError(null);
-      return;
-    }
-    let active = true;
-    setLoading(true);
-    setError(null);
-    void fetchWorkbookCellPreview({
-      projectId,
-      archiveId,
-      sheetName,
-      cellReference,
-    })
-      .then((result) => {
-        if (active) setPreview(result);
-      })
-      .catch((caught) => {
-        if (active) {
-          setPreview(null);
-          setError(errorMessage(caught));
-        }
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [archiveId, cellReference, projectId, sheetName]);
-
-  if (!sheetName || !cellReference) {
-    return (
-      <ControlledEmpty
-        icon={<FileSpreadsheet className="h-7 w-7" />}
-        title="Excel sheet/cell locator가 불완전합니다."
-        body="sheetName과 cellReference 또는 cellRange가 모두 있어야 실제 workbook cell highlight를 표시합니다. 누락된 좌표는 추정하지 않습니다."
-      />
-    );
-  }
-
-  return (
-    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950" aria-label="Excel 근거 셀 미리보기">
-      <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
-        <p className="text-xs font-black text-slate-950 dark:text-white">실제 Excel 셀 · {sheetName}!{cellReference}</p>
-        <p className="mt-0.5 text-[11px] text-slate-500">수식은 실행하지 않고 원문과 저장된 cached value만 표시합니다.</p>
-      </div>
-      {loading ? (
-        <div className="flex min-h-52 items-center justify-center text-xs font-bold text-slate-500"><Loader2 className="mr-2 h-4 w-4 animate-spin" /> workbook locator 읽는 중</div>
-      ) : error ? (
-        <div className="p-4"><Notice tone="bad">{error}</Notice></div>
-      ) : preview ? (
-        <div className="overflow-auto bg-slate-100 p-4 dark:bg-slate-900">
-          <table className="min-w-full border-separate border-spacing-0 text-xs" aria-label={`${preview.sheetName} ${preview.previewRange}`}>
-            <thead>
-              <tr>
-                <th className="sticky left-0 z-10 border border-slate-300 bg-slate-200 px-2 py-1 text-slate-500 dark:border-slate-700 dark:bg-slate-800">#</th>
-                {preview.columns.map((column) => (
-                  <th key={column.columnNumber} className="min-w-28 border border-l-0 border-slate-300 bg-slate-200 px-2 py-1 font-black text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">{column.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {preview.rows.map((row) => (
-                <tr key={row.rowNumber}>
-                  <th className="sticky left-0 border border-t-0 border-slate-300 bg-slate-200 px-2 py-2 text-slate-500 dark:border-slate-700 dark:bg-slate-800">{row.rowNumber}</th>
-                  {row.cells.map((cell) => (
-                    <td
-                      key={cell.coordinate}
-                      className={`max-w-64 border border-l-0 border-t-0 px-2 py-2 align-top dark:border-slate-700 ${cell.focused ? "bg-amber-100 ring-2 ring-inset ring-amber-500 dark:bg-amber-950/50" : "bg-white dark:bg-slate-950"}`}
-                    >
-                      {cell.focused ? (
-                        <button type="button" onClick={() => onSelectSourceLocator(locator)} className="block w-full text-left focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label={`${cell.coordinate}와 연결된 Fact 보기`}>
-                          <span className="block break-words font-semibold text-slate-800 dark:text-slate-200">{workbookCellValue(cell.displayValue)}</span>
-                          {cell.formula ? <code className="mt-1 block break-all text-[10px] text-indigo-600 dark:text-indigo-300">{cell.formula}</code> : null}
-                        </button>
-                      ) : (
-                        <>
-                          <span className="block break-words font-semibold text-slate-800 dark:text-slate-200">{workbookCellValue(cell.displayValue)}</span>
-                          {cell.formula ? <code className="mt-1 block break-all text-[10px] text-indigo-600 dark:text-indigo-300">{cell.formula}</code> : null}
-                        </>
-                      )}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="mt-3 flex flex-wrap justify-between gap-2 text-[11px] text-slate-500">
-            <span>표시 범위 {preview.previewRange}</span>
-            <span className="font-black text-amber-700 dark:text-amber-300">강조 범위 {preview.focusRange}</span>
-          </div>
-        </div>
-      ) : null}
-    </section>
-  );
-}
 
 function Inspector({
   activeTab,
@@ -2373,27 +2265,6 @@ function locatorMetadata(locator: SourceLocatorRecord): Record<string, unknown> 
     : {};
 }
 
-function locatorMatchesDocument(locator: SourceLocatorRecord, document: WorkspaceDocument) {
-  const locatorHash = identifier(locator.fileSha256);
-  if (locatorHash && document.archiveId && locatorHash.toLowerCase() !== document.archiveId.toLowerCase()) {
-    return false;
-  }
-  const locatorVersion = identifier(locator.documentVersionId);
-  if (locatorVersion && document.documentVersionId && locatorVersion !== document.documentVersionId) {
-    return false;
-  }
-  const locatorDocument = identifier(locator.documentId);
-  if (
-    locatorDocument
-    && document.documentId
-    && locatorDocument !== document.documentId
-    && (!document.archiveId || locatorDocument.toLowerCase() !== document.archiveId.toLowerCase())
-  ) {
-    return false;
-  }
-  return true;
-}
-
 function locatorBbox(locator: SourceLocatorRecord): [number, number, number, number] | null {
   const metadata = locatorMetadata(locator);
   const candidate = Array.isArray(locator.bbox) ? locator.bbox : metadata.bbox;
@@ -2408,16 +2279,4 @@ function locatorBbox(locator: SourceLocatorRecord): [number, number, number, num
 function locatorCoordinateSpace(locator: SourceLocatorRecord) {
   const metadata = locatorMetadata(locator);
   return identifier(locator.coordinateSpace ?? metadata.bboxCoordinateSystem);
-}
-
-function workbookCellValue(value: unknown) {
-  if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "number") return value.toLocaleString("ko-KR", { maximumFractionDigits: 8 });
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }

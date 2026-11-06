@@ -12,7 +12,7 @@ from core.secret_vault import (
     resolve_user_credential,
     revoke_credential,
 )
-from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
+from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary, system_ai_fallback_policy
 from storage import upsert_user_ai_profile
 
 
@@ -313,3 +313,80 @@ def test_user_ai_context_rejects_inline_api_key_override():
             tenant_id="t-1",
             override={"provider": "openai", "apiKey": "must-not-pass-through"},
         )
+
+
+def test_configured_system_default_overrides_the_legacy_free_profile(monkeypatch):
+    monkeypatch.setenv("REALYTICS_AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_MODEL", "configured-openai-model")
+    monkeypatch.setenv("REALYTICS_FREE_AI_PROVIDER", "gemini")
+    monkeypatch.setenv("REALYTICS_FREE_AI_MODEL", "old-free-model")
+    context = build_user_ai_context(user_id="system-default", tenant_id="system-default-tenant", use_legacy_profile=False)
+    assert context["provider"] == "openai" and context["model"] == "configured-openai-model"
+    assert system_ai_fallback_policy()["model"] == "configured-openai-model"
+
+
+def test_missing_personal_key_uses_actual_system_default_instead_of_stale_profile(monkeypatch):
+    import use_cases.user_ai_profile as profiles
+    monkeypatch.setenv("REALYTICS_AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_MODEL", "current-system-model")
+    monkeypatch.setattr(profiles, "get_user_ai_profile", lambda *_args, **_kwargs: {
+        "status": "active", "provider": "groq", "model": "stale-personal-model", "allowSystemFallback": True,
+    })
+    monkeypatch.setattr(profiles, "decrypt_user_ai_api_key", lambda *_args, **_kwargs: None)
+    context = build_user_ai_context(user_id="missing-key-default", tenant_id="system-default-tenant")
+    assert context["provider"] == "openai" and context["model"] == "current-system-model"
+    assert context["selection_source"] == "user_ai_profile_without_key_system_fallback"
+
+
+def test_disabled_system_fallback_blocks_native_calls_even_with_matching_and_other_global_keys(monkeypatch):
+    import use_cases.user_ai_profile as profiles
+    from agents.ai_connection import AIConnection
+    monkeypatch.setenv("OPENAI_API_KEY", "global-openai-fixture")
+    monkeypatch.setenv("GEMINI_API_KEY", "global-gemini-fixture")
+    monkeypatch.setattr(profiles, "get_user_ai_profile", lambda *_args, **_kwargs: {
+        "status": "active", "provider": "openai", "model": "chosen-model", "allowSystemFallback": False,
+    })
+    monkeypatch.setattr(profiles, "decrypt_user_ai_api_key", lambda *_args, **_kwargs: None)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("native provider must not execute")
+    monkeypatch.setattr(AIConnection, "_extract_for_context", forbidden)
+    context = build_user_ai_context(user_id="no-personal-key", tenant_id="fallback-disabled-tenant")
+    assert context["direct_model_call"] is False
+    result = AIConnection().extract_json("synthetic", system="synthetic", ai_context=context)
+    assert result.data is None and result.error
+    assert "global-openai-fixture" not in json.dumps(result.meta)
+
+
+def test_valid_personal_key_with_fallback_disabled_never_switches_provider_after_failure(monkeypatch):
+    import use_cases.user_ai_profile as profiles
+    from agents.ai_connection import AIConnection, AIExtractionResult
+    monkeypatch.setenv("OPENAI_API_KEY", "global-openai-fixture")
+    monkeypatch.setenv("GEMINI_API_KEY", "global-gemini-fixture")
+    monkeypatch.setattr(profiles, "get_user_ai_profile", lambda *_args, **_kwargs: {
+        "status": "active", "provider": "groq", "model": "personal-model", "allowSystemFallback": False,
+    })
+    monkeypatch.setattr(profiles, "decrypt_user_ai_api_key", lambda *_args, **_kwargs: "personal-key-fixture")
+    calls = []
+    def failed(_self, _prompt, _system, context):
+        calls.append(context["provider"])
+        assert context["api_key"] == "personal-key-fixture"
+        context["provider_call_attempted"] = True
+        return AIExtractionResult(data=None, meta={}, error="synthetic provider failure")
+    monkeypatch.setattr(AIConnection, "_extract_for_context", failed)
+    context = build_user_ai_context(user_id="personal-only", tenant_id="personal-only-tenant")
+    result = AIConnection().extract_json("synthetic", system="synthetic", ai_context=context)
+    assert result.data is None and calls == ["groq"]
+    with pytest.raises(ValueError, match="공급자를 요청에서 변경"):
+        build_user_ai_context(user_id="personal-only", tenant_id="personal-only-tenant", override={"provider": "openai"})
+
+
+def test_disabled_fallback_keeps_existing_local_privacy_hard_filter(monkeypatch):
+    import use_cases.user_ai_profile as profiles
+    from agents.ai_connection import AIConnection
+    monkeypatch.setattr(profiles, "get_user_ai_profile", lambda *_args, **_kwargs: {
+        "status": "active", "provider": "groq", "model": "personal-model", "allowSystemFallback": False,
+    })
+    monkeypatch.setattr(profiles, "decrypt_user_ai_api_key", lambda *_args, **_kwargs: "personal-key-fixture")
+    context = build_user_ai_context(user_id="private-personal", tenant_id="private-personal-tenant", override={"local_only": True})
+    monkeypatch.setattr(AIConnection, "_extract_for_context", lambda *_a, **_k: pytest.fail("privacy gate must block the call"))
+    assert AIConnection().extract_json("synthetic", system="synthetic", ai_context=context).data is None

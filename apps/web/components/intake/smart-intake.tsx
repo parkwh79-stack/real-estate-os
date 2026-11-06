@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, PlayCircle, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessageForResponse } from "../../lib/backend-error";
-import { hasArchivedFeasibilityReviewDraft, hasArchivedWorkbookSourceReview, intakeProcessingFailure } from "../../lib/intake-processing-status";
+import { hasArchivedFeasibilityReviewDraft, hasArchivedWorkbookSourceReview, intakeProcessingFailure, SOURCE_REVIEW_PROFILE_ID, SOURCE_REVIEW_PROFILE_VERSION, SOURCE_REVIEW_IDEMPOTENCY_PREFIX } from "../../lib/intake-processing-status";
 import { classifyIntakeFiles, processTransferredIntakeFile, releaseIntakeTransfer, type IntakeClassifiedFile } from "../../lib/intake-upload-client";
 import { projectWorkspaceHref } from "../../lib/project-navigation";
 
@@ -138,8 +138,8 @@ async function prepareDocumentReview(projectId: string, row: Row): Promise<Pick<
     body: JSON.stringify({
       archiveId,
       ...(/\.(pdf|xlsx|xlsm)$/i.test(row.c.filename) ? {
-        profileId: "realytics.source_review_candidates", profileVersion: "1.0.0",
-        idempotencyKey: "source-review-v1-" + archiveId,
+        profileId: SOURCE_REVIEW_PROFILE_ID, profileVersion: SOURCE_REVIEW_PROFILE_VERSION,
+        idempotencyKey: SOURCE_REVIEW_IDEMPOTENCY_PREFIX + archiveId,
       } : {}),
     }),
   });

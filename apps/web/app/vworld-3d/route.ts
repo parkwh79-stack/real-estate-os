@@ -104,7 +104,7 @@ export async function GET(req: NextRequest) {
             mapId: "vmap",
             initPosition: new vw.CameraPosition(
               new vw.CoordZ(${lng}, ${lat}, ${height}),
-              new vw.Direction(0, -55, 0)
+              new vw.Direction(0, ${height >= 300000 ? -90 : -55}, 0)
             ),
             logo: true,
             navigation: true

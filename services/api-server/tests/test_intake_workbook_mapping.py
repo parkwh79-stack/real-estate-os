@@ -114,6 +114,7 @@ def test_unsupported_upload_keeps_archive_diagnostics_without_financial_import(m
     assert result["sourceReview"]["projectId"] == "p1"
     assert result["sourceReview"]["candidateOnly"] is True
     assert result["sourceReview"]["authoritative"] is False
+    assert result["sourceReview"]["profileVersion"] == "1.1.0"
 
 
 def test_archive_security_failure_cannot_become_candidate_review(monkeypatch):

@@ -1,10 +1,19 @@
 # Agent AI Brain and Track Workflow Policy v2
 
-Updated: 2026-07-02  
+Updated: 2026-11-06
 Project: REALYTICS x PLATFORM9  
 Status: In Progress  
 Owner: REALYTICS AI LAB / PLATFORM9  
 Purpose: AI Deal Room 기반 부동산 개발, PF, 부동산금융, 실물금융, 리츠, 펀드 심사 운영정책
+
+2026-11-06 현재 구현 대조: 이 문서는 목표 정책과 확장 설계를 포함하며 모든 항목의
+운영 완료 기록이 아니다. 실제 운영 기본은 OpenAI/gpt-4.1-mini이고 키는 Secret Manager를
+참조한다. PostgreSQL 사업 API는 현재 개인 프로필 조회를 사용하지 않는 경로가 있으므로
+모든 Agent가 사용자별 AI 설정을 소비한다고 간주하지 않는다. 개인 프로필 정규화 조회
+코드는 보완했지만 테이블 권한은 사용자 검토 전까지 미반영이다. 요청 본문의 평문 키는
+금지하며 전용 `/auth/ai-credentials`만 사용한다. MCP 호스트 표시가 로그인된 CLI의
+자동 실행 구현을 뜻하지 않는다. [현재 연결·권한 검토](llm-provider-routing.md)가
+아래의 오래된 무료 Gemini·inline apiKey 설계 예시보다 우선한다.
 
 ---
 
@@ -80,10 +89,10 @@ LLM이 수행하면 안 되는 일:
 
 ### 3.1 Resolution Order
 
-1. API 요청의 명시적 `provider / model / apiKey` override
+1. API 요청의 명시적 `provider / model` override (키 평문은 전용 보안 입력만 허용)
 2. 사용자별 저장 AI Profile
 3. Tenant 기본 AI Policy
-4. System Free Fallback: Gemini 2.5 Flash
+4. 런타임에 설정된 System 기본 AI (미설정일 때만 기존 Gemini 기본값)
 5. System key도 없으면 deterministic fallback
 
 ### 3.2 User AI Profile Schema

@@ -52,6 +52,7 @@ from db.repositories.account_profile_repository import (
     AccountProfileUnavailable,
     PostgresAccountProfileRepository,
 )
+from db.repositories.user_ai_profile_repository import UserAIProfileUnavailable
 from db.repositories.onboarding_repository import (
     OnboardingLifecycleError,
     OnboardingRepositoryUnavailable,
@@ -65,14 +66,14 @@ from integrations.kakao import (
 )
 from storage import (
     create_user_session,
-    delete_user_ai_profile,
-    get_user_ai_profile,
+    delete_user_ai_profile as _delete_user_ai_profile,
+    get_user_ai_profile as _get_user_ai_profile,
     get_user,
     get_user_session,
     list_users,
     record_user_activity_log,
     revoke_user_session,
-    upsert_user_ai_profile,
+    upsert_user_ai_profile as _upsert_user_ai_profile,
     upsert_tenant,
     upsert_user,
 )
@@ -93,7 +94,35 @@ from schemas.onboarding import (
     SaveOnboardingProfileInput,
     TenantAccessRequestView,
 )
-from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
+from use_cases.user_ai_profile import (
+    build_user_ai_context as _build_user_ai_context, safe_user_ai_context_summary, system_ai_fallback_policy,
+)
+
+
+def _profile_authority_call(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except UserAIProfileUnavailable:
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_profile_authority_unavailable",
+            "message": "개인 AI 설정 저장소를 확인할 수 없습니다. 설정을 없는 것으로 대체하지 않았습니다.",
+        }) from None
+
+
+def get_user_ai_profile(*args, **kwargs):
+    return _profile_authority_call(_get_user_ai_profile, *args, **kwargs)
+
+
+def upsert_user_ai_profile(*args, **kwargs):
+    return _profile_authority_call(_upsert_user_ai_profile, *args, **kwargs)
+
+
+def delete_user_ai_profile(*args, **kwargs):
+    return _profile_authority_call(_delete_user_ai_profile, *args, **kwargs)
+
+
+def build_user_ai_context(*args, **kwargs):
+    return _profile_authority_call(_build_user_ai_context, *args, **kwargs)
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -944,11 +973,7 @@ def get_ai_profile(request: Request):
         "schemaVersion": "realytics-user-ai-profile-v1",
         "profile": profile,
         "effectiveAi": safe_user_ai_context_summary(ai_context),
-        "fallbackPolicy": {
-            "provider": "gemini",
-            "model": "gemini-2.5-flash",
-            "description": "개인 API Key가 없으면 시스템에 설정된 무료/기본 Gemini 프로필을 사용합니다. 시스템 키도 없으면 deterministic fallback으로 전환합니다.",
-        },
+        "fallbackPolicy": system_ai_fallback_policy(),
         "secretPolicy": "API Key는 전용 보안 입력 API로만 받고 응답·감사로그·프로필 DB에는 평문으로 저장하지 않습니다. 세션 키는 로그아웃 시 폐기됩니다.",
     }
 
@@ -958,11 +983,11 @@ def _cleanup_stale_ai_credential_profile(
     user: Dict[str, Any],
     credential_session: Dict[str, str] | None,
 ) -> Dict[str, Any] | None:
-    current_profile = get_user_ai_profile(user["userId"], include_secret=True)
+    current_profile = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId"))
     if not current_profile or not current_profile.get("credentialRef"):
-        return get_user_ai_profile(user["userId"], include_secret=False)
+        return get_user_ai_profile(user["userId"], include_secret=False, tenant_id=user.get("tenantId"))
     if credential_session is None:
-        return get_user_ai_profile(user["userId"], include_secret=False)
+        return get_user_ai_profile(user["userId"], include_secret=False, tenant_id=user.get("tenantId"))
     access_status = credential_access_status(
         current_profile.get("credentialRef"),
         user_id=user["userId"],
@@ -970,7 +995,7 @@ def _cleanup_stale_ai_credential_profile(
         session_id=credential_session["sessionId"],
     )
     if access_status not in {"missing", "expired"}:
-        return get_user_ai_profile(user["userId"], include_secret=False)
+        return get_user_ai_profile(user["userId"], include_secret=False, tenant_id=user.get("tenantId"))
     profile = upsert_user_ai_profile(
         {
             "userId": user["userId"],
@@ -1012,7 +1037,7 @@ def ingest_ai_credential(request: Request, payload: Dict[str, Any]):
         )
     provider = str(payload.get("provider") or "gemini").strip().lower()
     api_key = payload.get("apiKey") or payload.get("api_key")
-    previous = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    previous = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId")) or {}
     previous_ref = previous.get("credentialRef")
     try:
         credential = ingest_user_credential(
@@ -1143,9 +1168,9 @@ def remove_ai_profile(request: Request):
     if not context.get("authenticated"):
         raise HTTPException(status_code=401, detail="Login required")
     user = context["user"]
-    current_profile = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    current_profile = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId")) or {}
     credential_revoked = revoke_credential(current_profile.get("credentialRef"))
-    deleted = delete_user_ai_profile(user["userId"])
+    deleted = delete_user_ai_profile(user["userId"], tenant_id=user.get("tenantId"))
     record_user_activity_log(
         {
             "eventType": "ai_profile_deleted",
@@ -1188,7 +1213,7 @@ def revoke_current_ai_credential(request: Request):
             status_code=400,
             detail={"error": "credential_session_binding_required"},
         )
-    current_profile = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    current_profile = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId")) or {}
     current_ref = current_profile.get("credentialRef")
     access_status = credential_access_status(
         current_ref,
@@ -1245,7 +1270,7 @@ def logout_current_session(request: Request):
             detail="Bearer-token sessions must be revoked by the configured identity provider.",
         )
     user = context["user"]
-    current_profile = get_user_ai_profile(user["userId"], include_secret=True) or {}
+    current_profile = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId")) or {}
     profile_credential_revoked = revoke_credential(
         current_profile.get("credentialRef"),
         user_id=user["userId"],

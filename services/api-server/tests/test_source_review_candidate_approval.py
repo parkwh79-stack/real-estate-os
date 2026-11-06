@@ -4,8 +4,9 @@ from copy import deepcopy
 import pytest
 
 from parsing_platform.field_registry import project_approved_inputs
+from parsing_platform.source_review_candidates import PROFILE_VERSION
 from test_project_parser_v2_router import _client
-from test_source_review_candidates import document
+from test_source_review_candidates import bridge_document, document
 
 
 def test_generated_source_candidates_require_human_review_and_snapshot_remains_explicit(monkeypatch):
@@ -19,7 +20,7 @@ def test_generated_source_candidates_require_human_review_and_snapshot_remains_e
     run_id = "source-review-approval-run"
     response = client.post("/projects/p-1/parsing-v2/runs", json={
         "archiveId": archive_id,
-        "profileId": "realytics.source_review_candidates", "profileVersion": "1.0.0",
+        "profileId": "realytics.source_review_candidates", "profileVersion": PROFILE_VERSION,
         "parsingRunId": run_id,
     })
     assert response.status_code == 201, response.text
@@ -102,4 +103,56 @@ def test_generated_source_candidates_require_human_review_and_snapshot_remains_e
         requested_selection_ids=[items["project.name"]["selectionId"]],
     )
     assert projected["payload"]["project_name"] == candidates["project.name"]["normalizedValue"]
+    assert projects["p-1"] == initial_project
+
+
+def test_bridge_review_can_approve_a_source_name_but_not_a_basisless_amount_or_future_pf(monkeypatch):
+    original = bridge_document()
+    client, archive_id, projects, _ = _client(
+        monkeypatch, orchestrator_factory=None, primary_content=original.content,
+        primary_filename="bridge.xlsx",
+        primary_media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    initial_project = deepcopy(projects["p-1"])
+    response = client.post("/projects/p-1/parsing-v2/runs", json={
+        "archiveId": archive_id, "profileId": "realytics.source_review_candidates",
+        "profileVersion": PROFILE_VERSION, "parsingRunId": "bridge-source-review-run",
+    })
+    assert response.status_code == 201, response.text
+    assert response.json()["candidateCollection"]["candidateCount"] == 31
+    assert response.json()["candidateCollection"]["blockedCandidateCount"] == 11
+    assert response.json()["candidateCollection"]["reviewEligible"] is True
+    assert response.json()["candidateCollection"]["approvalEligible"] is False
+    package = client.get("/projects/p-1/parsing-v2/runs/bridge-source-review-run").json()
+    assert len(package["candidates"]) == 31
+    assert all(item["approvalStatus"] != "approved" for item in package["candidates"])
+    principal = next(item for item in package["candidates"] if item["fieldKey"] == "financing.tranche.loan_amount")
+    lender = next(item for item in package["candidates"] if item["fieldKey"] == "financing.tranche.name")
+    for label, candidate in [("principal", principal), ("lender", lender)]:
+        review = client.post(f"/projects/p-1/parsing-v2/candidates/{candidate['candidateId']}/reviews", json={
+            "reviewDecisionId": "bridge-review-" + label, "expectedDecisionSequence": 0,
+            "action": "approve", "reason": "Checked this original source cell; current loan basis remains unconfirmed.",
+            "conflictIds": [],
+        }, headers={"x-test-user-id": "parser-v2-reviewer"})
+        assert review.status_code == 201, review.text
+        selection = client.post("/projects/p-1/parsing-v2/canonical-selections", json={
+            "selectionId": "bridge-selection-" + label, "candidateId": candidate["candidateId"],
+            "reviewDecisionId": "bridge-review-" + label, "expectedDecisionSequence": 1,
+        }, headers={"x-test-user-id": "parser-v2-reviewer"})
+        if label == "principal":
+            assert selection.status_code == 409, selection.text
+            assert "FACT_BASIS_REQUIRED" in selection.text
+        else:
+            assert selection.status_code == 201, selection.text
+    snapshot = client.post("/projects/p-1/parsing-v2/approved-snapshots", json={
+        "snapshotId": "bridge-source-name-snapshot", "selectionIds": ["bridge-selection-lender"],
+        "purpose": "original_bridge_reference_review",
+        "expectedSelectionVersions": {"bridge-selection-lender": 1},
+    }, headers={"x-test-user-id": "parser-v2-approver"})
+    assert snapshot.status_code == 201, snapshot.text
+    assert snapshot.json()["inputItems"][0]["metadata"]["referenceOnly"] is True
+    for target, version in [("realytics-feasibility-study-v2", "2.0"), ("realytics-cash-flow-run-request-v1", "1.0")]:
+        with pytest.raises(ValueError, match="no registered projection"):
+            project_approved_inputs(target_schema_id=target, target_schema_version=version,
+                                    approved_snapshot=snapshot.json())
     assert projects["p-1"] == initial_project

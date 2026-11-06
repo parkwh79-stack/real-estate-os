@@ -221,13 +221,17 @@ export default function SettingsPage() {
     });
     if (!res.ok) {
       setAiProfile(null);
-      if (res.status === 401) setError("로그인 후 AI 모델 설정을 조회할 수 있습니다.");
+      setError(res.status === 401
+        ? "로그인 후 AI 모델 설정을 조회할 수 있습니다."
+        : "AI 설정을 불러오지 못했습니다. 다시 조회해 주세요. 기존 설정은 변경되지 않았습니다.");
       return;
     }
     const body = (await res.json()) as AiProfileResponse;
     setAiProfile(body);
     if (body.profile?.provider) setProvider(body.profile.provider);
+    else if (body.fallbackPolicy?.provider) setProvider(body.fallbackPolicy.provider);
     if (body.profile?.model) setModel(body.profile.model);
+    else if (body.fallbackPolicy?.model) setModel(body.fallbackPolicy.model);
     if (typeof body.profile?.allowSystemFallback === "boolean") {
       setAllowSystemFallback(body.profile.allowSystemFallback);
     }
@@ -541,11 +545,11 @@ export default function SettingsPage() {
       if (!res.ok) throw new Error(await res.text());
       const body = (await res.json()) as AiProfileResponse;
       setAiProfile(body);
-      setProvider("gemini");
-      setModel("gemini-2.5-flash");
+      setProvider(body.fallbackPolicy?.provider ?? body.effectiveAi?.provider ?? "gemini");
+      setModel(body.fallbackPolicy?.model ?? body.effectiveAi?.model ?? "gemini-2.5-flash");
       clearApiKeyInput();
       setAllowSystemFallback(true);
-      setNotice("개인 AI 설정을 삭제했습니다. 시스템 기본 Gemini fallback으로 전환됩니다.");
+      setNotice("개인 AI 설정을 삭제했습니다. 시스템 기본 AI 설정을 사용합니다.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "AI 모델 설정 삭제에 실패했습니다.");
     } finally {
@@ -563,8 +567,8 @@ export default function SettingsPage() {
           로그인과 AI 두뇌 설정
         </h1>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
-          사용자가 로그인하면 본인의 LLM API Key와 모델을 우선 사용합니다. 개인 API가 없으면 시스템 기본 Gemini 무료 프로필을 사용하고,
-          그것도 없을 때는 규칙 기반 deterministic fallback으로 분석 흐름을 유지합니다. API Key는 코드·GitHub·로그에 기록하지 않으며,
+          사용자가 로그인하면 본인의 LLM API Key와 모델을 우선 사용합니다. 개인 API가 없고 대체 사용을 허용하면 시스템에 설정된 AI를 사용합니다.
+          모델 호출이 불가능하면 규칙 기반으로 지원되는 검토를 진행합니다. API Key는 코드·GitHub·로그에 기록하지 않으며,
           로그아웃 시 브라우저에 남아 있는 임시 AI 키 저장소는 자동 삭제됩니다.
         </p>
       </div>
@@ -1169,7 +1173,7 @@ export default function SettingsPage() {
                 className="mt-1"
               />
               <span>
-                <span className="block font-bold text-slate-800 dark:text-slate-100">개인 API가 실패하거나 없으면 시스템 Gemini fallback 허용</span>
+                <span className="block font-bold text-slate-800 dark:text-slate-100">개인 API가 실패하거나 없으면 시스템 기본 AI 사용 허용</span>
                 <span className="block text-xs text-slate-500">
                   파일럿에서는 흐름이 끊기지 않도록 권장합니다. 단, 민감 문서 분석은 회사 정책에 맞춰 비활성화할 수 있습니다.
                 </span>
@@ -1230,7 +1234,7 @@ export default function SettingsPage() {
 function sourceLabel(value?: string) {
   if (value === "user_ai_profile") return "개인 API 프로필";
   if (value === "user_ai_profile_without_key_system_fallback") return "개인 프로필 + 시스템 fallback";
-  if (value === "system_free_fallback") return "시스템 무료 fallback";
+  if (value === "system_free_fallback") return "시스템 기본 AI";
   return value ?? "-";
 }
 

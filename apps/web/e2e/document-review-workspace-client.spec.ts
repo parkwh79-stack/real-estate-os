@@ -7,8 +7,29 @@ import {
   recordParserV2Review,
   resolveParserV2Conflict,
   sourceLocatorSemanticKey,
+  sourceLocatorMatchesDocument,
   sourceDocumentContentUrl,
 } from "../lib/document-review-workspace";
+
+test("evidence overlays require a positive source identity and reject conflicting or array bindings", () => {
+  const archiveId = "a".repeat(64);
+  const document = { archiveId, documentId: "document:source", documentVersionId: "version:source" };
+  const position = { sheetName: "sheet", cellReference: "B4" };
+  expect(sourceLocatorMatchesDocument(position, document)).toBe(false);
+  expect(sourceLocatorMatchesDocument({ ...position, fileSha256: archiveId.toUpperCase() }, document)).toBe(true);
+  expect(sourceLocatorMatchesDocument({ ...position, documentVersionId: "version:source" }, document)).toBe(true);
+  expect(sourceLocatorMatchesDocument({ ...position, documentId: "document:source" }, document)).toBe(true);
+  expect(sourceLocatorMatchesDocument({ ...position, documentId: archiveId }, document)).toBe(true);
+  expect(sourceLocatorMatchesDocument({ fileSha256: "b".repeat(64), documentVersionId: "version:source" }, document)).toBe(false);
+  expect(sourceLocatorMatchesDocument({ fileSha256: archiveId, documentVersionId: "version:other" }, document)).toBe(false);
+  expect(sourceLocatorMatchesDocument({ fileSha256: archiveId, documentId: "document:other" }, document)).toBe(false);
+  expect(sourceLocatorMatchesDocument({ documentVersionId: "version:unverified" }, { archiveId })).toBe(false);
+  expect(sourceLocatorMatchesDocument([], document)).toBe(false);
+  expect(sourceLocatorMatchesDocument({ fileSha256: archiveId }, [])).toBe(false);
+  expect(sourceLocatorMatchesDocument({ fileSha256: [archiveId], documentVersionId: "version:source" }, document)).toBe(false);
+  expect(sourceLocatorMatchesDocument({ fileSha256: archiveId, documentVersionId: ["version:source"] }, document)).toBe(false);
+  expect(sourceLocatorMatchesDocument({ fileSha256: "not-a-sha256", documentVersionId: "version:source" }, document)).toBe(false);
+});
 
 test("builds fail-closed semantic locator keys for inverse Fact navigation", () => {
   const evidenceA = sourceLocatorSemanticKey({ evidenceId: "evidence-a" });

@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from agents.parser_agent import ParserAgent
 from core.authz import authorize_request, enforce_project_tenant_scope
@@ -30,6 +30,7 @@ from use_cases.source_documents import (
 from use_cases.source_document_viewer import (
     UnsatisfiableByteRange,
     build_workbook_cell_preview,
+    build_workbook_sheet_preview,
     parse_single_byte_range,
     render_pdf_page_preview,
 )
@@ -454,6 +455,40 @@ def build_project_source_documents_router(
             },
         )
 
+    def require_workbook_preview_source(project_id: str, archive_id: str, request: Request):
+        authz, view, repository = require_view(project_id, archive_id, request)
+        if not _is_openxml_workbook(view):
+            raise HTTPException(status_code=415, detail="Source document is not an OpenXML workbook")
+        if int(view.get("fileSizeBytes") or 0) > MAX_SOURCE_BYTES:
+            raise HTTPException(status_code=413, detail="Workbook source exceeds the controlled preview size")
+        return authz, view, require_full_view_content(repository, view)
+
+    def workbook_preview_response(preview: Dict[str, Any], view: Dict[str, Any]):
+        document = view.get("document") or {}
+        identity = {"archiveId": view["archiveId"], "sourceSha256": view["archiveId"],
+                    "fileName": view["filename"], "archiveVersionId": view.get("archiveVersionId"),
+                    "archiveETag": view.get("archiveETag"), "archiveIntegrityStatus": "verified",
+                    "documentVersionId": document.get("documentVersionId"),
+                    "analysisOnly": True, "approvalEligible": False}
+        return JSONResponse({**preview, **identity}, headers={
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+            "Cross-Origin-Resource-Policy": "same-origin",
+        })
+
+    @router.get("/{project_id}/source-documents/{archive_id}/workbook/sheets")
+    def preview_project_source_workbook_sheets(project_id: str, archive_id: str, request: Request):
+        authz, view, content = require_workbook_preview_source(project_id, archive_id, request)
+        try:
+            preview = build_workbook_sheet_preview(content)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        audit_recorder(request, event_type="source_document_workbook_sheet_view", project_id=project_id, metadata={
+            "archiveId": archive_id, "archiveIntegrityStatus": "verified",
+            "archiveVersionId": view.get("archiveVersionId"), "archiveETag": view.get("archiveETag"),
+            "sheetCount": preview["sheetCount"], "analysisOnly": True, "authorization": authz.get("authorization"),
+        })
+        return workbook_preview_response(preview, view)
+
     @router.get("/{project_id}/source-documents/{archive_id}/workbook/cells")
     def preview_project_source_workbook_cells(
         project_id: str,
@@ -464,12 +499,10 @@ def build_project_source_documents_router(
         context_rows: int = Query(3, ge=0, le=10),
         context_columns: int = Query(3, ge=0, le=10),
     ):
-        authz, view, archive_repository = require_view(project_id, archive_id, request)
-        if not _is_openxml_workbook(view):
-            raise HTTPException(status_code=415, detail="Source document is not an OpenXML workbook")
+        authz, view, content = require_workbook_preview_source(project_id, archive_id, request)
         try:
             preview = build_workbook_cell_preview(
-                require_full_view_content(archive_repository, view),
+                content,
                 sheet_name=sheet_name,
                 cell_reference=cell_reference,
                 context_rows=context_rows,
@@ -495,7 +528,7 @@ def build_project_source_documents_router(
                 "authorization": authz.get("authorization"),
             },
         )
-        return preview
+        return workbook_preview_response(preview, view)
 
     @router.get("/{project_id}/source-documents/{archive_id}/download")
     def download_project_source_document(project_id: str, archive_id: str, request: Request):

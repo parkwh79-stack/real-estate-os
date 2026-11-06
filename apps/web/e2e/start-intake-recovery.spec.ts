@@ -23,7 +23,7 @@ function unmappedWorkbookResponse() {
       diagnostics: [{ code: "unsupported_workbook_layout" }], formulaIntegrity: { status: "not_evaluated" } },
     sourceReview: { reason: "unsupported_workbook_layout", candidateOnly: true, authoritative: false,
       projectId: "start-recovery", archiveId: hash, sourceDocumentHash: hash,
-      profileId: "realytics.source_review_candidates", profileVersion: "1.0.0" } };
+      profileId: "realytics.source_review_candidates", profileVersion: "1.1.0" } };
 }
 
 async function fixture(page: Page, files: string[]) {
@@ -74,7 +74,7 @@ async function fixture(page: Page, files: string[]) {
       state.documentReviewCalls += 1;
       const submitted = request.postDataJSON();
       expect(["c", "d", "e"].map((char) => char.repeat(64))).toContain(submitted.archiveId);
-      expect(submitted).toEqual({ archiveId: submitted.archiveId, profileId: "realytics.source_review_candidates", profileVersion: "1.0.0", idempotencyKey: "source-review-v1-" + submitted.archiveId });
+      expect(submitted).toEqual({ archiveId: submitted.archiveId, profileId: "realytics.source_review_candidates", profileVersion: "1.1.0", idempotencyKey: "source-review-v1-1-0-" + submitted.archiveId });
       if (state.parserFailures > 0) { state.parserFailures -= 1; return reply({ detail: "parser_connection_unavailable" }, 503); }
       return reply({ candidateOnly: true, authoritative: false, candidateCollection: { candidateCount: state.reviewCandidateCount },
         parsingRun: { parsingRunId: "synthetic-review", executionStatus: "completed" } }, 201);

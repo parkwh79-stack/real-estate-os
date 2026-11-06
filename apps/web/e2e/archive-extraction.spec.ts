@@ -82,8 +82,8 @@ test(view + " runs archived originals serially and retries known terminal failur
   for (const item of state.requests) expect(item).toEqual({
     archiveId: item.archiveId,
     profileId: "realytics.source_review_candidates",
-    profileVersion: "1.0.0",
-    idempotencyKey: "source-review-v1-" + item.archiveId,
+    profileVersion: "1.1.0",
+    idempotencyKey: "source-review-v1-1-0-" + item.archiveId,
   });
   await action.getByRole("button", { name: "실패한 문서 다시 확인", exact: true }).click();
   await expect(action.getByText(/원본값 추출이 중단됐습니다/)).toBeVisible();
@@ -94,7 +94,7 @@ test(view + " runs archived originals serially and retries known terminal failur
   expect(state.requests).toHaveLength(5);
   expect(state.requests[4]!.archiveId).toBe(ids[1]);
   expect(state.requests[4]!.idempotencyKey).not.toBe(state.requests[1]!.idempotencyKey);
-  await expect(action.getByRole("button", { name: "보관 원본값 추출", exact: true })).toBeDisabled();
+  await expect(action.getByRole("button", { name: "값이 없는 문서 다시 추출", exact: true })).toBeEnabled();
 });
 
 test(view + " read-only accounts cannot start archived candidate extraction", async ({ page }) => {

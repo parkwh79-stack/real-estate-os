@@ -1641,6 +1641,8 @@ async def parse_uploaded_land_ledger(project_id: str, file: UploadFile) -> Dict[
             os.remove(tmp_path)
 
 async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFile) -> Dict[str, Any]:
+    from parsing_platform.source_review_candidates import PROFILE_ID, PROFILE_VERSION
+
     suffix = os.path.splitext(file.filename or "")[1] or ".xlsx"
     uploaded_at = now_iso()
     content = await file.read()
@@ -1704,7 +1706,7 @@ async def validate_uploaded_feasibility_workbook(project_id: str, file: UploadFi
                 "reason": "unsupported_workbook_layout", "candidateOnly": True, "authoritative": False,
                 "projectId": project_id, "archiveId": upload_meta["archiveId"],
                 "sourceDocumentHash": upload_meta["originalFileHash"],
-                "profileId": "realytics.source_review_candidates", "profileVersion": "1.0.0",
+                "profileId": PROFILE_ID, "profileVersion": PROFILE_VERSION,
             }} if validation.get("status") == "needs_mapping" and
                 (validation.get("templateSupport") or {}).get("status") == "unsupported_layout" else {}),
             "note": "Workbook validation is read-only; a FeasibilityStudyV2 draft is returned for reviewer comparison before persisted import.",

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+import hashlib
 import re
 
 from parsing_platform.contracts import ParsedFactCandidate
@@ -17,9 +19,9 @@ from parsing_platform.registry import ParserModuleManifest
 from parsing_platform.schema_contracts import GENERIC_MODULE_INPUT_SCHEMA
 
 MODULE_ID = "source_review_candidates"
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.1.0"
 PROFILE_ID = "realytics.source_review_candidates"
-PROFILE_VERSION = "1.0.0"
+PROFILE_VERSION = "1.1.0"
 MAX_PAGES = 20
 MAX_CHUNKS = 10000
 MAX_WORKBOOK_CHUNKS = 2500
@@ -37,6 +39,121 @@ _UNITS = {"원": Decimal(1), "천원": Decimal(1000), "백만원": Decimal(10000
           "㎡": Decimal(1), "m²": Decimal(1), "m2": Decimal(1), "제곱미터": Decimal(1)}
 _LABEL = re.compile(r"^\s*(" + "|".join(_RULES) + r")\s*(?:[（(]\s*(원|천원|백만원|억원|㎡|m²|m2|제곱미터)\s*[）)])?\s*[:：]?\s*$")
 _NUMBER = re.compile(r"^\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(원|천원|백만원|억원|㎡|m²|m2|제곱미터)?\s*$")
+
+
+def _worksheet_cells(chunks):
+    cells = {}
+    for chunk in chunks:
+        if chunk.get("kind") != "worksheet_cell":
+            continue
+        locator = chunk.get("sourceLocator") or {}
+        coordinate = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]*)", str(locator.get("cellReference") or ""))
+        values = (chunk.get("metadata") or {}).get("cells") or []
+        if coordinate and len(values) == 1 and isinstance(values[0], dict):
+            cells[(locator.get("sheetName"), coordinate[1], int(coordinate[2]))] = (chunk, values[0])
+    return cells
+
+
+def _bridge_table_rows(chunks):
+    """Read explicit source terms, not a future PF facility or inferred contract."""
+    cells = _worksheet_cells(chunks)
+    for sheet in dict.fromkeys(key[0] for key in cells):
+        header = None
+        for row in range(1, 31):
+            labels = {str(data.get("value") or "").strip(): (column, chunk)
+                      for (name, column, index), (chunk, data) in cells.items()
+                      if name == sheet and index == row and data.get("calculationState") == "literal"}
+            if all(label in labels for label in ("대출금", "대주", "만기", "금리")):
+                header = row, labels
+                break
+        if header is None:
+            continue
+        header_row, labels = header
+        context_cells = [(chunk, data) for (name, _column, row), (chunk, data) in cells.items()
+                         if name == sheet and row < header_row and data.get("calculationState") == "literal"]
+        titles = [chunk for chunk, data in context_cells
+                  if re.search(r"브(?:릿|리)지론현황", re.sub(r"\s+", "", str(data.get("value") or "")))]
+        units = [(match[1], chunk) for chunk, data in context_cells
+                 if (match := re.fullmatch(r"[（(]?\s*단위\s*[:：]\s*(원|천원|백만원|억원)\s*[）)]?",
+                                           str(data.get("value") or "").strip()))]
+        if not titles or len({unit for unit, _chunk in units}) != 1:
+            continue
+        source_unit, unit_chunk = units[0]
+        for row in range(header_row + 1, header_row + 101):
+            amount_cell = cells.get((sheet, labels["대출금"][0], row))
+            lender_cell = cells.get((sheet, labels["대주"][0], row))
+            if amount_cell is None or lender_cell is None:
+                continue
+            amount_chunk, amount_data = amount_cell
+            lender_chunk, lender_data = lender_cell
+            if amount_data.get("calculationState") != "literal" or lender_data.get("calculationState") != "literal":
+                continue
+            raw_amount, lender = amount_data.get("value"), lender_data.get("value")
+            if isinstance(raw_amount, bool) or not isinstance(lender, str) or not 1 <= len(lender.strip()) <= 200:
+                continue
+            numeric = _NUMBER.fullmatch(str(raw_amount))
+            if not numeric or (numeric[2] and numeric[2] != source_unit):
+                continue
+            amount = Decimal(numeric[1].replace(",", "")) * _UNITS[source_unit]
+            if not amount.is_finite() or amount < 0 or amount > Decimal("1e16"):
+                continue
+            if amount != amount.to_integral_value():
+                continue  # A fractional won needs its own explicit rounding decision.
+            entity = "source-bridge:" + hashlib.sha256(
+                (str(amount_chunk["sourceLocator"].get("fileSha256")) + ":" + str(sheet) + ":" + str(row)).encode()
+            ).hexdigest()[:24]
+            common = {
+                "extractionRule": "explicit_bridge_financial_table_literal_v1",
+                "sourceFinancialContext": "current_bridge_snapshot", "referenceOnly": True,
+                "noFuturePfProjection": True, "sourceAsOfStatus": "unconfirmed",
+                "financingBalanceBasisStatus": "unconfirmed", "sourceTableCurrencyUnit": source_unit,
+                "sourceTable": {"sheetName": sheet, "headerRow": header_row, "row": row},
+                "sourceDocumentPurpose": "원본 금융현황·현재 브리지 대출 검토용; 미래 PF 약정 아님",
+                "sourceCalculationState": "literal",
+            }
+            context = [titles[0]["sourceLocator"], unit_chunk["sourceLocator"]]
+            yield ("financing.tranche.loan_amount", int(amount), "krw", entity, raw_amount,
+                   [*context, labels["대출금"][1]["sourceLocator"], amount_chunk["sourceLocator"]],
+                   {**common, "sourceUnit": source_unit})
+            yield ("financing.tranche.name", lender.strip(), None, entity, lender,
+                   [titles[0]["sourceLocator"], labels["대주"][1]["sourceLocator"], lender_chunk["sourceLocator"]],
+                   {**common, "sourceFieldRole": "lender_name"})
+            for label in ("금리", "만기"):
+                term_cell = cells.get((sheet, labels[label][0], row))
+                if term_cell is None or term_cell[1].get("calculationState") != "literal":
+                    continue  # No merged-cell carry or unverified formula-cache promotion.
+                chunk, data = term_cell
+                raw = data.get("value")
+                evidence = [titles[0]["sourceLocator"], labels[label][1]["sourceLocator"], chunk["sourceLocator"]]
+                if label == "금리" and isinstance(raw, str):
+                    rate = re.fullmatch(r"\s*(고정|변동)?\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*", raw)
+                    if rate is None or not 0 <= Decimal(rate[2]) <= 100:
+                        continue
+                    yield ("financing.tranche.interest_rate", float(Decimal(rate[2]) / 100), "ratio", entity,
+                           raw, evidence, {**common, "sourceUnit": "percent"})
+                    if rate[1]:
+                        yield ("financing.tranche.interest_rate_type", "floating" if rate[1] == "변동" else "fixed",
+                               None, entity, raw, evidence, common)
+                elif label == "만기":
+                    try:
+                        maturity = date.fromisoformat(str(raw))
+                    except (ValueError, TypeError):
+                        if data.get("sourceValueType") != "datetime":
+                            continue
+                        try:
+                            maturity = datetime.fromisoformat(str(raw)).date()
+                        except (ValueError, TypeError):
+                            continue
+                    yield ("financing.tranche.maturity_date", maturity.isoformat(), None, entity, raw, evidence, common)
+
+
+def _review_rows(chunks):
+    for label, raw, evidence in _pairs(chunks):
+        parsed = _normalized(label, raw)
+        if parsed is not None:
+            field, value, unit, entity = parsed
+            yield field, value, unit, entity, raw, evidence, {}
+    yield from _bridge_table_rows(chunks)
 
 
 def source_review_profile(*, project_id: str | None = None) -> ProjectParsingProfile:
@@ -145,11 +262,7 @@ class SourceReviewCandidateModule:
         chunks = artifact.get("chunks") or []
         limited = chunks[:MAX_CHUNKS]
         candidates = {}
-        for label, raw, evidence in _pairs(limited):
-            parsed = _normalized(label, raw)
-            if parsed is None:
-                continue
-            field, value, unit, entity = parsed
+        for field, value, unit, entity, raw, evidence, source_metadata in _review_rows(limited):
             metadata = {
                 "domainModuleId": MODULE_ID, "domainModuleVersion": MODULE_VERSION,
                 "domainPackVersion": FEASIBILITY_DOMAIN_PACK_VERSION,
@@ -158,6 +271,7 @@ class SourceReviewCandidateModule:
                 "extractionRule": "exact_label_literal_explicit_unit_v1", "requiresHumanReview": True,
                 "sourceSection": {key: evidence[-1][key] for key in ("pageNumber", "sheetName") if key in evidence[-1]},
                 "requiresProjectAssociation": True,
+                **source_metadata,
             }
             wire = {
                 "candidateId": "pending", "tenantId": context["tenant_id"], "projectId": context["project_id"],
@@ -186,6 +300,18 @@ class SourceReviewCandidateModule:
         summary = {"candidateCount": len(candidates), "scannedChunkCount": len(limited),
                    "nativePageLimit": MAX_PAGES, "coverage": "partial" if partial else "native_source",
                    "outcome": "review_candidates" if candidates else "needs_mapping_or_reading"}
+        bridge_sheets = {item["metadata"]["sourceTable"]["sheetName"] for item in candidates.values()
+                         if item["metadata"].get("sourceFinancialContext") == "current_bridge_snapshot"}
+        if bridge_sheets:
+            summary["sourceFinancialContext"] = "current_bridge_snapshot"
+            summary["referenceOnly"] = True
+            summary["formulaControls"] = [
+                {"sourceLocator": chunk["sourceLocator"], "formula": data.get("formula"),
+                 "cachedValue": data.get("value"), "calculationState": data.get("calculationState"),
+                 "approvalEligible": False}
+                for (sheet, _column, _row), (chunk, data) in _worksheet_cells(limited).items()
+                if sheet in bridge_sheets and data.get("formula") is not None
+            ][:20]
         return {
             "schemaVersion": FEASIBILITY_DOMAIN_OUTPUT_SCHEMA, "outputKind": "candidate_batch",
             "moduleId": MODULE_ID, "moduleVersion": MODULE_VERSION, "domainPackVersion": FEASIBILITY_DOMAIN_PACK_VERSION,

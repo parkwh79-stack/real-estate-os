@@ -7,6 +7,8 @@ import { apiBase, authHeaders } from "../../lib/auth-client";
 import { hasPermission } from "../../lib/authorization";
 import type { DocumentReviewData } from "../../lib/document-review-workspace";
 
+import { SOURCE_REVIEW_PROFILE_ID, SOURCE_REVIEW_PROFILE_VERSION, SOURCE_REVIEW_IDEMPOTENCY_PREFIX } from "../../lib/intake-processing-status";
+
 type Progress = { status: "running" | "needs_review" | "needs_mapping" | "failed"; message: string; terminalRunId?: string };
 
 export function ArchiveExtractionAction({ projectId, originals, onComplete, compact = false, disabled = false }: {
@@ -40,9 +42,35 @@ export function ArchiveExtractionAction({ projectId, originals, onComplete, comp
       ? [{ archiveId: archiveId.toLowerCase(), name }] : [];
   }) : [];
   const uniqueDocuments = documents.filter((document, index) => documents.findIndex((item) => item.archiveId === document.archiveId) === index);
-  const pending = uniqueDocuments.filter((document) => {
-    const state = progress[document.archiveId];
-    return !state || state.status === "failed";
+  // Reopening shows stored registry results, not a fresh local "waiting" state.
+  // Only candidate records count; preview cells never become review/approval data.
+  const persistedProgress: Record<string, Progress> = {};
+  if (originals.projectId === projectId) {
+    const packages = originals.packages.filter((item) => item.parsingRun.profileId === SOURCE_REVIEW_PROFILE_ID)
+      .sort((left, right) => String(left.parsingRun.requestedAt ?? left.parsingRun.createdAt ?? "").localeCompare(String(right.parsingRun.requestedAt ?? right.parsingRun.createdAt ?? "")));
+    for (const item of packages) {
+      const archiveId = item.documentVersion.archiveId ?? item.documentVersion.sourceHash ?? item.documentVersion.sha256;
+      if (typeof archiveId !== "string" || !/^[0-9a-f]{64}$/i.test(archiveId)) continue;
+      const run = item.parsingRun;
+      const terminalRunId = typeof run.parsingRunId === "string" ? run.parsingRunId : undefined;
+      if (["completed", "completed_with_warnings"].includes(run.executionStatus ?? "")) {
+        const count = item.candidates.length;
+        persistedProgress[archiveId.toLowerCase()] = count > 0
+          ? { status: "needs_review", message: "저장된 검토 후보 " + count.toLocaleString("ko-KR") + "건 · 원본과 단위·기준을 대조해 주세요.", terminalRunId }
+          : { status: "needs_mapping", message: "추출은 완료됐지만 지원 범위에서 검토 후보를 찾지 못했습니다. 원본을 읽거나 새 추출로 다시 확인하세요.", terminalRunId };
+      } else if (["failed", "cancelled"].includes(run.executionStatus ?? "")) {
+        persistedProgress[archiveId.toLowerCase()] = { status: "failed", message: "저장된 추출 실행이 중단됐습니다. 새 실행으로 다시 확인할 수 있습니다.", terminalRunId };
+      } else {
+        persistedProgress[archiveId.toLowerCase()] = { status: "running", message: "서버에서 추출 중입니다. 최신 원장을 새로고침해 결과를 확인하세요." };
+      }
+    }
+  }
+  const currentProgress = { ...persistedProgress, ...progress };
+  const failedDocuments = uniqueDocuments.filter((document) => currentProgress[document.archiveId]?.status === "failed");
+  const hasUnattempted = uniqueDocuments.some((document) => !currentProgress[document.archiveId]);
+  const pending = failedDocuments.length ? failedDocuments : uniqueDocuments.filter((document) => {
+    const state = currentProgress[document.archiveId];
+    return !state || state.status === "needs_mapping";
   });
 
   async function extract() {
@@ -57,10 +85,10 @@ export function ArchiveExtractionAction({ projectId, originals, onComplete, comp
     for (const document of pending) {
       if (controller.signal.aborted) break;
       attempted = true;
-      if (progress[document.archiveId]?.terminalRunId) {
-        attemptKeys.current[document.archiveId] = "source-review-v1-" + document.archiveId + "-" + crypto.randomUUID();
+      if (currentProgress[document.archiveId]?.terminalRunId) {
+        attemptKeys.current[document.archiveId] = SOURCE_REVIEW_IDEMPOTENCY_PREFIX + document.archiveId + "-" + crypto.randomUUID();
       }
-      const idempotencyKey = attemptKeys.current[document.archiveId] ?? "source-review-v1-" + document.archiveId;
+      const idempotencyKey = attemptKeys.current[document.archiveId] ?? SOURCE_REVIEW_IDEMPOTENCY_PREFIX + document.archiveId;
       attemptKeys.current[document.archiveId] = idempotencyKey;
       update(document.archiveId, { status: "running", message: "원본과 일치하는 값을 확인하고 있습니다." });
       try {
@@ -68,7 +96,7 @@ export function ArchiveExtractionAction({ projectId, originals, onComplete, comp
           method: "POST", cache: "no-store",
           headers: { ...authHeaders("web"), "Content-Type": "application/json" },
           body: JSON.stringify({
-            archiveId: document.archiveId, profileId: "realytics.source_review_candidates", profileVersion: "1.0.0",
+            archiveId: document.archiveId, profileId: SOURCE_REVIEW_PROFILE_ID, profileVersion: SOURCE_REVIEW_PROFILE_VERSION,
             idempotencyKey,
           }),
           signal: controller.signal,
@@ -92,7 +120,8 @@ export function ArchiveExtractionAction({ projectId, originals, onComplete, comp
         if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) throw new Error("Candidate result not verified");
         update(document.archiveId, count > 0
           ? { status: "needs_review", message: "검토 후보 " + count.toLocaleString("ko-KR") + "건 · 원본과 단위·기준을 대조해 주세요." }
-          : { status: "needs_mapping", message: "지원하는 명시적 항목을 찾지 못했습니다. 원본 페이지 읽기나 항목 연결이 필요합니다." });
+          : { status: "needs_mapping", terminalRunId: typeof run.parsingRunId === "string" ? run.parsingRunId : undefined,
+            message: "지원하는 명시적 항목을 찾지 못했습니다. 원본 페이지 읽기나 항목 연결이 필요합니다." });
       } catch {
         update(document.archiveId, { status: "failed", message: "원본값 추출을 완료하지 못했습니다. 연결과 문서 상태를 확인한 뒤 다시 시도해 주세요." });
       }
@@ -104,13 +133,13 @@ export function ArchiveExtractionAction({ projectId, originals, onComplete, comp
     if (attempted && !controller.signal.aborted) onComplete();
   }
 
-  const states = uniqueDocuments.map((document) => progress[document.archiveId]);
+  const states = uniqueDocuments.map((document) => currentProgress[document.archiveId]);
   const files = (
     <ul className="space-y-2" aria-live={compact ? undefined : "polite"}>
         {uniqueDocuments.map((document) => <li key={document.archiveId} className="text-xs leading-5">
           <span className="break-words font-semibold text-slate-800 dark:text-slate-200">{document.name}</span>
-          <p className={progress[document.archiveId]?.status === "failed" ? "text-rose-700 dark:text-rose-300" : "text-slate-600 dark:text-slate-300"}>
-            {progress[document.archiveId]?.message ?? "원본값 추출 대기"}
+          <p className={currentProgress[document.archiveId]?.status === "failed" ? "text-rose-700 dark:text-rose-300" : "text-slate-600 dark:text-slate-300"}>
+            {currentProgress[document.archiveId]?.message ?? "원본값 추출 대기"}
           </p>
         </li>)}
       </ul>
@@ -130,7 +159,7 @@ export function ArchiveExtractionAction({ projectId, originals, onComplete, comp
         {canAnalyze ? <button type="button" onClick={() => void extract()} disabled={disabled || busy || !pending.length}
           className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-blue-700 px-4 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50">
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSearch className="h-4 w-4" />}
-          {busy ? "보관 원본 확인 중" : Object.values(progress).some((item) => item.status === "failed") ? "실패한 문서 다시 확인" : "보관 원본값 추출"}
+          {busy ? "보관 원본 확인 중" : Object.values(currentProgress).some((item) => item.status === "failed") ? "실패한 문서 다시 확인" : !hasUnattempted && Object.values(currentProgress).some((item) => item.status === "needs_mapping") ? "값이 없는 문서 다시 추출" : "보관 원본값 추출"}
         </button> : <p className="text-xs text-slate-500">원본값 추출에는 프로젝트 분석 권한이 필요합니다.</p>}
       </div>
       {!uniqueDocuments.length ? <p className="text-xs text-slate-600 dark:text-slate-300">값 추출을 지원하는 보관 PDF·Excel이 없습니다.</p> : null}

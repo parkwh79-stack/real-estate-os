@@ -297,7 +297,7 @@ test("a failed review request does not show zero and refresh restores four archi
   const list = page.getByRole("complementary", { name: "문서 및 위치 탐색" });
   await expect(list.getByRole("button", { name: /보관 문서 [1-4]\.pdf/ })).toHaveCount(4);
   await expect(list.getByRole("button", { name: /보관 문서 1\.pdf/ })).toContainText("완료");
-  await expect(list.getByRole("button", { name: /보관 문서 1\.pdf/ })).toContainText("후보 0건");
+  await expect(list.getByRole("button", { name: /보관 문서 1\.pdf/ })).toContainText("검토 후보 없음");
   await expect(page.getByText("DOCUMENT_GLOSSARY_UNAVAILABLE")).toHaveCount(0);
 });
 
