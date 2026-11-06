@@ -4,6 +4,7 @@ import datetime
 from typing import Any, Dict, List, Optional
 
 from agents.cash_flow_engine import run_cash_flow_engine
+from core.financial_input_validation import FinancialInputError, require_finite_numbers
 from core.calculations import (
     calculate_irr_annualized,
     calculate_profit_margin,
@@ -39,6 +40,8 @@ class StressTestAgent:
     analysis_type = "stress_test_v1"
 
     def run_stress_test(self, request: StressTestRequest) -> StressTestResult:
+        require_finite_numbers(request.model_dump(), "stressTest")
+        self._validate_parent_amounts(request)
         schedule = request.schedule or StressTestSchedule()
         scenarios = request.scenarios or DEFAULT_STRESS_SCENARIOS
         sorted_tranches = sorted(request.pfStructure, key=lambda t: t.priority)
@@ -65,6 +68,31 @@ class StressTestAgent:
             reportFragment=self._build_report_fragment(results),
             createdAt=datetime.datetime.now().isoformat(),
         )
+
+    @staticmethod
+    def _validate_parent_amounts(request: StressTestRequest) -> None:
+        if request.baseCashFlowRequest is None:
+            return
+        amounts = request.baseCashFlowRequest.get("sourcesAndUses") or {}
+        costs = amounts.get("cost") or {}
+        revenue = amounts.get("revenue") or {}
+        comparisons = [("totalRevenue", request.totalRevenue, revenue.get("totalSalesRevenue"))]
+        comparisons.extend(
+            (field, getattr(request, field), costs.get(source_key))
+            for field, source_key in (
+                ("landCost", "landCost"), ("constructionCost", "directConstructionCost"),
+                ("otherCost", "otherCost"), ("financeCost", "financialCost"),
+            )
+        )
+        for field, actual, parent in comparisons:
+            # The engine treats an absent amount as zero. The displayed stress
+            # metrics must use the same amounts as the bound IRR cash-flow input.
+            try:
+                matches = float(parent or 0) == actual
+            except (TypeError, ValueError):
+                matches = False
+            if not matches:
+                raise FinancialInputError(f"cash_flow_bound_stress_mismatch: {field} differs from its parent cash-flow request")
 
     def _run_scenario(
         self,
@@ -134,7 +162,7 @@ class StressTestAgent:
         # only the rate shock adds incremental interest. When no feasibility
         # finance cost is supplied, estimate the base from the tranche stack.
         base_finance = request.financeCost
-        if base_finance <= 0 and sorted_tranches:
+        if base_finance <= 0 and sorted_tranches and request.baseCashFlowRequest is None:
             base_finance = sum(t.amount * (t.interestRate + t.feeRate) for t in sorted_tranches) * finance_years
         exposure = pf_amount or sum(t.amount for t in sorted_tranches)
         rate_shock = exposure * driver.interestRateDelta * finance_years
@@ -165,6 +193,8 @@ class StressTestAgent:
         )
         if engine_series is not None:
             return engine_series, "cash_flow_engine", engine_diagnostics
+        if request.baseCashFlowRequest is not None:
+            raise ValueError("cash_flow_bound_stress_failed: " + str(engine_diagnostics.get("fallbackReason")))
         fallback_series = self._build_scenario_cashflow(
             schedule=schedule,
             land_cost=request.landCost,
@@ -220,6 +250,10 @@ class StressTestAgent:
                     for t in request.pfStructure
                 ],
             }
+            if request.baseCashFlowRequest is not None:
+                from use_cases.cash_flow_dependencies import scale_cash_flow_request
+                engine_request = scale_cash_flow_request(request.baseCashFlowRequest,
+                    revenue=adjusted_revenue, construction=adjusted_construction, finance=adjusted_finance)
             result = run_cash_flow_engine(engine_request)
             rows = result.get("monthlyCashFlow") or []
             series = [float(row.get("netCashFlowBeforePfDraw") or 0.0) for row in rows]
@@ -238,6 +272,9 @@ class StressTestAgent:
                 "salesCollection": request.salesCollection,
                 "periodMonths": schedule.months,
             }
+        except FinancialInputError:
+            # Invalid input cannot become a successful uniform fallback.
+            raise
         except Exception as exc:
             return None, {
                 "source": "fallback_uniform",

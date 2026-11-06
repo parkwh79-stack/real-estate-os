@@ -11,10 +11,20 @@ import {
   FileText,
   Link2,
   Loader2,
+  LockKeyhole,
+  Send,
   RefreshCw,
   Settings2,
 } from "lucide-react";
+import {
+  ApprovalStatusBadge,
+  ExecutionStatusBadge,
+  ReportEligibilityBadge,
+  normalizeApprovalStatus,
+  normalizeExecutionStatus,
+} from "../../../../components/ui/primitives";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import { ProjectWorkspaceLink } from "../../../../components/layout/project-workspace-link";
 import {
   fetchDealStateRecordGroups,
   hasSourceLocator,
@@ -26,6 +36,8 @@ import { ConsensusPanel } from "../../../../components/orchestration/consensus-p
 import { CreditDocumentsPanel } from "../../../../components/orchestration/credit-documents-panel";
 import { SimilarCasesRagPanel } from "../../../../components/orchestration/similar-cases-rag-panel";
 import { TermAnnotationsPanel } from "../../../../components/orchestration/term-annotations-panel";
+import { ComparisonReportReview, type ComparisonReportSnapshot, type ReportCashFlowSnapshot, type ReportCalculationSnapshots, type ReportFinancingBasis, type ReportTimingBasis } from "../../../../components/feasibility/comparison-report-review";
+import type { ReportInputReconciliation } from "../../../../components/feasibility/report-input-reconciliation";
 
 interface ProjectResponse {
   project?: { name?: string; type?: string };
@@ -63,6 +75,11 @@ interface PodAiReviewFinding {
   severity?: string;
   message?: string;
   recommendedAction?: string;
+  sourceLocators?: Record<string, unknown>[];
+  sourceArtifactKeys?: string[];
+  runId?: string;
+  reviewId?: string;
+  artifactBindingStatus?: string;
 }
 
 interface ParagraphEvidenceLinks {
@@ -72,6 +89,8 @@ interface ParagraphEvidenceLinks {
   sectionCount?: number;
   linkedRecordCount?: number;
   sourceLocatorReadySectionCount?: number;
+  podReviewReadStatus?: string;
+  podReviewReadMessage?: string;
   links?: ParagraphEvidenceLink[];
 }
 
@@ -79,6 +98,7 @@ interface GeneratedReportResponse {
   report_id?: string;
   version?: number;
   report_markdown?: string;
+  report_display_markdown?: string;
   paragraphEvidenceLinks?: ParagraphEvidenceLinks;
   metadata?: {
     complete?: boolean;
@@ -88,6 +108,13 @@ interface GeneratedReportResponse {
     paragraph_evidence_source_locator_ready_section_count?: number;
   };
   report?: {
+    cashFlowComparisonSnapshot?: ComparisonReportSnapshot;
+    cashFlowCalculationSnapshot?: ReportCashFlowSnapshot;
+    calculationSnapshots?: ReportCalculationSnapshots;
+    calculationReconciliation?: ReportInputReconciliation;
+    financingBasis?: ReportFinancingBasis;
+    timingBasis?: ReportTimingBasis;
+    sectionOrder?: Array<{ key: string; title: string }>;
     paragraphEvidenceLinks?: ParagraphEvidenceLinks;
     appliedTemplate?: { name?: string; version?: number };
     templateApplication?: {
@@ -102,6 +129,81 @@ interface GeneratedReportResponse {
       }>;
     };
   };
+}
+
+interface SavedReportMetadata {
+  report_id: string;
+  project_id?: string;
+  run_id?: string | null;
+  version?: number;
+  title?: string;
+  status?: "draft" | "published" | string;
+  created_at?: string;
+  published_at?: string | null;
+  published_by?: string | null;
+  export_count?: number;
+  metadata?: {
+    complete?: boolean;
+    report_eligible?: boolean;
+    usage_restriction?: string | null;
+    content_sha256?: string;
+    template_unmapped_section_count?: number;
+    paragraph_evidence_link_count?: number;
+    paragraph_evidence_linked_record_count?: number;
+    paragraph_evidence_source_locator_ready_section_count?: number;
+  };
+  publication?: {
+    publishedBy?: string;
+    publishedAt?: string;
+    contentSha256?: string;
+    decisionPackage?: {
+      projectSnapshotId?: string;
+      runId?: string;
+      approvalStatus?: string;
+    };
+  } | null;
+}
+
+interface SavedReportDetail extends SavedReportMetadata {
+  report_markdown?: string;
+  report_display_markdown?: string;
+  report?: GeneratedReportResponse["report"] & {
+    paragraphEvidenceLinks?: ParagraphEvidenceLinks;
+  };
+}
+
+interface ApprovalReadinessGate {
+  pass?: boolean;
+  status?: string;
+  summary?: {
+    blockingIssueCount?: number;
+    warningCount?: number;
+  };
+  blockers?: Array<{ code?: string; message?: string }>;
+  requiredActions?: string[];
+}
+
+interface OrchestrationRun {
+  run_id: string;
+  status?: string;
+  workflow?: string;
+  started_at?: string;
+  completed_at?: string;
+  approvalStatus?: string;
+  approval?: {
+    approved_by?: string;
+    approved_at?: string;
+  } | null;
+  artifacts?: {
+    approvalReadinessGate?: ApprovalReadinessGate;
+  };
+}
+
+interface OrchestrationSummary {
+  run_id: string;
+  status?: string;
+  started_at?: string;
+  completed_at?: string;
 }
 
 type DealStateGroups = {
@@ -131,9 +233,15 @@ export default function ReportPreviewPage() {
   const [templates, setTemplates] = useState<ReportTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [report, setReport] = useState<GeneratedReportResponse | null>(null);
+  const [reports, setReports] = useState<SavedReportMetadata[]>([]);
+  const [selectedReportId, setSelectedReportId] = useState("");
+  const [latestRun, setLatestRun] = useState<OrchestrationRun | null>(null);
+  const [boundRun, setBoundRun] = useState<OrchestrationRun | null>(null);
   const [dealState, setDealState] = useState<DealStateGroups>(EMPTY_GROUPS);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [selectingReport, setSelectingReport] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -152,21 +260,78 @@ export default function ReportPreviewPage() {
   );
   const paragraphLinks = report?.report?.paragraphEvidenceLinks ?? report?.paragraphEvidenceLinks;
 
-  const loadData = useCallback(async () => {
+  const selectedReport = useMemo(
+    () => reports.find((item) => item.report_id === selectedReportId) ?? null,
+    [reports, selectedReportId],
+  );
+  const latestRunApproval = normalizeApprovalStatus(
+    latestRun?.approvalStatus ?? (latestRun?.approval ? "approved" : "not_requested"),
+  );
+  const boundRunApproval = normalizeApprovalStatus(
+    boundRun?.approvalStatus ?? (boundRun?.approval ? "approved" : "not_requested"),
+  );
+  const selectedGate = boundRun?.artifacts?.approvalReadinessGate;
+  const selectedReportEligibility = !selectedReport
+    ? "unknown"
+    : selectedReport.status === "published" || selectedReport.metadata?.report_eligible === true
+      ? "eligible"
+      : "analysis_only";
+  const canPublish = Boolean(
+    selectedReport
+      && selectedReport.status === "draft"
+      && selectedReport.run_id
+      && boundRun?.run_id === selectedReport.run_id
+      && boundRunApproval === "approved"
+      && selectedGate?.pass === true,
+  );
+  const publishBlockReason = reportPublishBlockReason(selectedReport, boundRun, boundRunApproval, selectedGate);
+
+  const loadData = useCallback(async (preferredReportId?: string) => {
     setLoading(true);
     setError(null);
     try {
-      const [projectRes, templateRes, recordGroups] = await Promise.all([
+      const [projectRes, templateRes, reportsRes, runsRes, recordGroups] = await Promise.all([
         fetch(`${apiBase}/projects/${projectId}`, { cache: "no-store", headers: authHeaders("web") }),
         fetch(`${apiBase}/projects/${projectId}/report-templates`, { cache: "no-store", headers: authHeaders("web") }),
+        fetch(`${apiBase}/projects/${projectId}/reports`, { cache: "no-store", headers: authHeaders("web") }),
+        fetch(`${apiBase}/projects/${projectId}/orchestrations`, { cache: "no-store", headers: authHeaders("web") }),
         fetchDealStateRecordGroups(projectId, 700),
       ]);
       if (!projectRes.ok) throw new Error(await responseError(projectRes));
       if (!templateRes.ok) throw new Error(await responseError(templateRes));
+      if (!reportsRes.ok) throw new Error(await responseError(reportsRes));
+      if (!runsRes.ok) throw new Error(await responseError(runsRes));
       const templateBody = (await templateRes.json()) as { templates?: ReportTemplate[] };
       const loadedTemplates = templateBody.templates ?? [];
+      const reportBody = (await reportsRes.json()) as SavedReportMetadata[] | { reports?: SavedReportMetadata[] };
+      const loadedReports = sortReports(Array.isArray(reportBody) ? reportBody : reportBody.reports ?? []);
+      const runBody = (await runsRes.json()) as OrchestrationSummary[] | {
+        runs?: OrchestrationSummary[];
+        orchestrations?: OrchestrationSummary[];
+      };
+      const loadedRuns = Array.isArray(runBody) ? runBody : runBody.runs ?? runBody.orchestrations ?? [];
+      const latestRunSummary = sortRuns(loadedRuns)[0];
+      const targetReport = loadedReports.find((item) => item.report_id === preferredReportId) ?? loadedReports[0] ?? null;
+
+      const latestRunDetail = latestRunSummary
+        ? await fetchOrchestrationRun(projectId, latestRunSummary.run_id)
+        : null;
+      const selectedBoundRun = targetReport?.run_id
+        ? targetReport.run_id === latestRunDetail?.run_id
+          ? latestRunDetail
+          : await fetchOrchestrationRun(projectId, targetReport.run_id)
+        : null;
+      const selectedDetail = targetReport
+        ? await fetchSavedReport(projectId, targetReport.report_id)
+        : null;
+
       setProject((await projectRes.json()) as ProjectResponse);
       setTemplates(loadedTemplates);
+      setReports(loadedReports);
+      setSelectedReportId(targetReport?.report_id ?? "");
+      setReport(selectedDetail ? generatedResponseFromSavedReport(selectedDetail) : null);
+      setLatestRun(latestRunDetail);
+      setBoundRun(selectedBoundRun);
       setDealState(recordGroups);
       setSelectedTemplateId((current) => current || loadedTemplates[0]?.templateId || "");
     } catch (err) {
@@ -196,8 +361,8 @@ export default function ReportPreviewPage() {
       if (!res.ok) throw new Error(await responseError(res));
       const body = (await res.json()) as GeneratedReportResponse;
       setReport(body);
-      setMessage(`보고서가 생성되었습니다. Report ID: ${body.report_id ?? "-"}`);
-      await loadData();
+      setMessage(`분석용 초안이 생성되었습니다. Report ID: ${body.report_id ?? "-"}`);
+      await loadData(body.report_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "보고서 생성에 실패했습니다.");
     } finally {
@@ -205,8 +370,56 @@ export default function ReportPreviewPage() {
     }
   }
 
+  async function selectSavedReport(reportId: string) {
+    if (!reportId || reportId === selectedReportId) return;
+    const metadata = reports.find((item) => item.report_id === reportId);
+    if (!metadata) return;
+    setSelectingReport(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const [detail, selectedBoundRun] = await Promise.all([
+        fetchSavedReport(projectId, reportId),
+        metadata.run_id ? fetchOrchestrationRun(projectId, metadata.run_id) : Promise.resolve(null),
+      ]);
+      setSelectedReportId(reportId);
+      setReport(generatedResponseFromSavedReport(detail));
+      setBoundRun(selectedBoundRun);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "선택한 보고서를 불러오지 못했습니다.");
+    } finally {
+      setSelectingReport(false);
+    }
+  }
+
+  async function publishReport() {
+    if (!selectedReport || !canPublish) return;
+    setPublishing(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/projects/${projectId}/reports/${selectedReport.report_id}/publish`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders("web") },
+        },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      const published = (await response.json()) as SavedReportMetadata;
+      setMessage(`최종 보고서가 발행되었습니다. Report ID: ${published.report_id}`);
+      await loadData(published.report_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "최종 보고서를 발행하지 못했습니다.");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   const coverage = report?.report?.templateApplication?.sectionCoverage ?? [];
-  const sectionRows: ReportSectionRow[] = coverage.length ? coverage : defaultSectionRows();
+  const sectionRows: ReportSectionRow[] = coverage.length ? coverage : report?.report?.cashFlowComparisonSnapshot
+    ? (report.report.sectionOrder ?? []).map((section) => ({ reportSectionKey: section.key, title: section.title, enabled: true, hasReportSection: true }))
+    : defaultSectionRows();
   const sourceLocatorMissing = allRecords.filter((record) => !hasSourceLocator(record)).length;
 
   return (
@@ -222,38 +435,163 @@ export default function ReportPreviewPage() {
           </Link>
           <div>
             <p className="text-sm font-semibold text-slate-500">프로젝트 #{projectId}</p>
-            <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">PF 심사보고서 생성</h2>
+            <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">PF 심사보고서</h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
-              Report Studio는 Deal State 원장에 저장된 증거, 지표, 가정, 리스크를 기준으로 보고서를 생성하고,
-              생성 시점의 문단별 근거 링크를 `paragraphEvidenceLinks`로 저장합니다.
+              분석용 초안 생성과 최종 발행은 서로 다른 단계입니다. 초안은 Deal State 근거를 보존하지만,
+              승인된 PF Review와 통과한 Approval Readiness Gate에 결합된 보고서만 최종 발행할 수 있습니다.
             </p>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={loadData}
+            onClick={() => void loadData(selectedReportId || undefined)}
             disabled={loading}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             새로고침
           </button>
-          <Link
-            href={`/project/${projectId}/report-templates`}
+          <ProjectWorkspaceLink
+            projectId={projectId}
+            path="report-templates"
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
           >
             <Settings2 className="h-4 w-4" />
             템플릿 편집
-          </Link>
+          </ProjectWorkspaceLink>
         </div>
       </header>
 
       {error && <Notice tone="bad" message={error} />}
       {message && <Notice tone="good" message={message} />}
 
-      <section className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+      <ComparisonReportReview projectId={projectId} reportId={report?.report_id} snapshot={report?.report?.cashFlowComparisonSnapshot}
+        cashFlowSnapshot={report?.report?.cashFlowCalculationSnapshot}
+        calculationSnapshots={report?.report?.calculationSnapshots}
+        reconciliation={report?.report?.calculationReconciliation}
+        financingBasis={report?.report?.financingBasis}
+        timingBasis={report?.report?.timingBasis}
+        disabled={loading || generating || publishing || selectingReport} onCreated={loadData} onBusyChange={setGenerating} />
+
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-slate-950 dark:text-white">저장 보고서</h3>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                저장된 버전의 상태와 연결된 PF Review를 확인합니다. 파일 내보내기는 최종 승인이나 발행을 의미하지 않습니다.
+              </p>
+            </div>
+            <ReportEligibilityBadge status={selectedReportEligibility} />
+          </div>
+
+          {loading ? (
+            <div className="mt-4 flex items-center gap-2 text-sm font-semibold text-slate-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              보고서 원장을 불러오는 중
+            </div>
+          ) : reports.length ? (
+            <div className="mt-4 space-y-4">
+              <label className="block space-y-1">
+                <span className="text-xs font-bold text-slate-500">검토할 보고서 버전</span>
+                <div className="relative">
+                  <select
+                    value={selectedReportId}
+                    onChange={(event) => void selectSavedReport(event.target.value)}
+                    disabled={selectingReport}
+                    className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 pr-10 text-sm font-semibold text-slate-900 outline-none focus:border-slate-400 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                  >
+                    {reports.map((item) => (
+                      <option key={item.report_id} value={item.report_id}>
+                        v{item.version ?? "-"} · {item.status === "published" ? "최종 발행" : "분석용 초안"} · {formatDateTime(item.created_at)}
+                      </option>
+                    ))}
+                  </select>
+                  {selectingReport ? <Loader2 className="absolute right-3 top-3.5 h-4 w-4 animate-spin text-slate-400" /> : null}
+                </div>
+              </label>
+
+              <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                <MetadataRow label="Report ID" value={selectedReport?.report_id ?? "-"} mono />
+                <MetadataRow label="PF Review Run" value={selectedReport?.run_id ?? "연결 없음 (수동 초안)"} mono={Boolean(selectedReport?.run_id)} />
+                <MetadataRow label="생성 시각" value={formatDateTime(selectedReport?.created_at)} />
+                <MetadataRow label="Content hash" value={shortHash(selectedReport?.metadata?.content_sha256)} mono />
+              </dl>
+            </div>
+          ) : (
+            <div className="mt-4 rounded-lg border border-dashed border-slate-300 p-5 text-center dark:border-slate-700">
+              <p className="text-sm font-bold text-slate-700 dark:text-slate-200">저장된 보고서가 없습니다.</p>
+              <p className="mt-1 text-xs text-slate-500">아래에서 분석용 초안을 먼저 생성하세요.</p>
+            </div>
+          )}
+        </div>
+
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-slate-950 dark:text-white">최종 발행 통제</h3>
+              <p className="mt-1 text-xs leading-5 text-slate-500">서버가 승인, 스냅샷 계보, Gate 및 보고서 해시를 발행 시점에 다시 검증합니다.</p>
+            </div>
+            <LockKeyhole className="h-5 w-5 text-slate-500" />
+          </div>
+
+          <div className="mt-4 rounded-lg bg-slate-50 p-4 dark:bg-slate-800/60">
+            <p className="text-xs font-bold text-slate-500">최신 PF Review</p>
+            {latestRun ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <ExecutionStatusBadge status={normalizeExecutionStatus(latestRun.status)} />
+                <ApprovalStatusBadge status={latestRunApproval} />
+                <span className="font-mono text-[11px] text-slate-500">{latestRun.run_id}</span>
+              </div>
+            ) : (
+              <p className="mt-2 text-sm font-semibold text-slate-500">실행된 PF Review가 없습니다.</p>
+            )}
+          </div>
+
+          {selectedReport?.run_id ? (
+            <div className="mt-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+              <p className="text-xs font-bold text-slate-500">선택 보고서에 결합된 PF Review</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <ExecutionStatusBadge status={normalizeExecutionStatus(boundRun?.status)} />
+                <ApprovalStatusBadge status={boundRunApproval} />
+                <ReportEligibilityBadge
+                  status={selectedReport.status === "published" ? "eligible" : selectedGate?.pass === true ? "analysis_only" : "blocked"}
+                />
+              </div>
+              <p className="mt-2 text-xs leading-5 text-slate-500">
+                Approval Readiness Gate: {selectedGate?.pass === true ? "통과" : "미통과"}
+                {typeof selectedGate?.summary?.blockingIssueCount === "number"
+                  ? ` · 차단 ${selectedGate.summary.blockingIssueCount}건`
+                  : ""}
+              </p>
+            </div>
+          ) : (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+              수동 생성 보고서는 PF Review 실행에 결합되지 않은 분석 전용 초안입니다. 내보낸 파일도 최종 승인 자료로 사용할 수 없습니다.
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={publishReport}
+            disabled={!canPublish || publishing || loading}
+            className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 dark:disabled:bg-slate-800"
+          >
+            {publishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            {selectedReport?.status === "published" ? "최종 발행 완료" : "최종 발행"}
+          </button>
+          {!canPublish ? <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">{publishBlockReason}</p> : null}
+          {selectedReport?.status === "published" ? (
+            <p className="mt-2 text-xs leading-5 text-emerald-700 dark:text-emerald-300">
+              {formatDateTime(selectedReport.published_at)} · 서버 발행자 {selectedReport.published_by ?? "확인 불가"}
+            </p>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div className="mb-4 flex items-center gap-2">
             <FileText className="h-5 w-5 text-slate-700 dark:text-slate-200" />
             <h3 className="font-bold text-slate-950 dark:text-white">생성 기준</h3>
@@ -291,7 +629,14 @@ export default function ReportPreviewPage() {
               <div className="grid gap-3 md:grid-cols-3">
                 <Kpi label="저장 템플릿" value={`${templates.length}건`} />
                 <Kpi label="선택 버전" value={selectedTemplate?.version ? `v${selectedTemplate.version}` : "-"} />
-                <Kpi label="섹션 수" value={`${selectedTemplate?.sections?.length ?? 20}개`} />
+                <Kpi
+                  label="섹션 수"
+                  value={
+                    Array.isArray(selectedTemplate?.sections)
+                      ? `${selectedTemplate.sections.length}개`
+                      : "미확인"
+                  }
+                />
               </div>
 
               <button
@@ -301,13 +646,16 @@ export default function ReportPreviewPage() {
                 className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white dark:text-slate-950"
               >
                 {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
-                보고서 생성
+                분석용 초안 생성
               </button>
+              <p className="text-xs leading-5 text-amber-700 dark:text-amber-300">
+                이 작업은 승인 상태를 변경하지 않습니다. 생성 결과와 내보내기는 모두 분석용 초안입니다.
+              </p>
             </div>
           )}
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div className="mb-4 flex items-center gap-2">
             <Database className="h-5 w-5 text-slate-700 dark:text-slate-200" />
             <h3 className="font-bold text-slate-950 dark:text-white">보고서 근거 원장</h3>
@@ -382,8 +730,9 @@ export default function ReportPreviewPage() {
           <h3 className="font-bold text-slate-950 dark:text-white">보고서 미리보기</h3>
         </div>
         <div className="min-h-[420px] rounded-lg bg-slate-50 p-4 dark:bg-slate-950">
-          {report?.report_markdown ? (
-            <pre className="whitespace-pre-wrap font-sans text-sm leading-7 text-slate-800 dark:text-slate-100">{report.report_markdown}</pre>
+          {(report?.report_display_markdown || report?.report_markdown) ? (
+            <><p className="mb-3 text-sm text-slate-500">금액·금리·비율은 정수로 반올림해 표시합니다. 계산에 사용한 정확한 값은 입력·결과 JSON에서 확인할 수 있습니다.</p>
+            <pre className="whitespace-pre-wrap font-sans text-sm leading-7 text-slate-800 dark:text-slate-100">{report.report_display_markdown || report.report_markdown}</pre></>
           ) : (
             <p className="text-sm leading-6 text-slate-500">보고서를 생성하면 Markdown 미리보기가 표시됩니다.</p>
           )}
@@ -410,7 +759,7 @@ function ParagraphEvidenceLinkPanel({
           <div>
             <h3 className="font-bold text-slate-950 dark:text-white">문단별 저장 근거</h3>
             <p className="mt-1 text-xs text-slate-500">
-              생성 시점에 저장된 `paragraphEvidenceLinks`를 기준으로 문단별 증거, 지표, 가정, 리스크를 추적합니다.
+              보고서 생성 당시 저장한 근거와 검토 의견입니다.
             </p>
           </div>
         </div>
@@ -421,6 +770,9 @@ function ParagraphEvidenceLinkPanel({
         </div>
       </div>
 
+      {links?.podReviewReadStatus === "unavailable" ? (
+        <p role="alert" className="mb-3 rounded bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-100">{links.podReviewReadMessage}</p>
+      ) : null}
       {!hasGeneratedLinks ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
           아직 저장된 문단별 근거 링크가 없습니다. 보고서를 생성하면 서버가 Deal State 원장을 읽어
@@ -446,10 +798,13 @@ function ParagraphEvidenceLinkPanel({
                   Pod AI Review 지적 {link.podAiReviewBlocking ? "· 차단(blocking)" : ""}
                 </p>
                 <ul className="mt-1.5 space-y-1">
-                  {(link.podAiReviewFindings ?? []).slice(0, 4).map((f, i) => (
+                  {(link.podAiReviewFindings ?? []).map((f, i) => (
                     <li key={f.findingId ?? i} className="text-xs text-slate-700 dark:text-slate-200">
                       <span className="font-mono text-[10px] text-slate-500">[{f.podKey}·{f.severity}]</span> {f.message}
                       {f.recommendedAction ? <span className="mt-0.5 block text-[11px] text-slate-500">→ {f.recommendedAction}</span> : null}
+                      <span className="mt-1 block text-[11px] text-slate-500">{f.artifactBindingStatus === "matched" ? "보고서 생성 시점의 Pod 산출물과 연결됨" : f.artifactBindingStatus === "mismatch" ? "현재 Pod 산출물과 다른 과거 검토 — 현재 계산의 지적으로 확정하지 않음" : "Pod 산출물 연결 여부 미확인"}</span>
+                      {(f.sourceLocators ?? []).map((locator, index) => <span key={index} className="mt-0.5 block break-words text-[11px] text-slate-500">근거: {locatorSummary({ sourceLocator: locator })}</span>)}
+                      <details className="mt-1 break-all text-[11px] text-slate-500"><summary className="cursor-pointer">저장된 검토 식별정보</summary>검토: {f.reviewId || "미기록"}<br />실행: {f.runId || "미기록"}<br />산출물: {f.sourceArtifactKeys?.join(", ") || "미기록"}</details>
                     </li>
                   ))}
                 </ul>
@@ -511,7 +866,7 @@ function TemplateApplication({ report }: { report: GeneratedReportResponse }) {
       <h3 className="font-bold text-slate-950 dark:text-white">템플릿 적용 결과</h3>
       <div className="mt-4 grid gap-3 md:grid-cols-4">
         <Kpi label="보고서 버전" value={`v${report.version ?? "-"}`} />
-        <Kpi label="완성도" value={report.metadata?.complete ? "완료" : "확인 필요"} />
+        <Kpi label="섹션 구성" value={report.metadata?.complete ? "전체 섹션 있음" : "구성 확인 필요"} />
         <Kpi label="적용 템플릿" value={appliedTemplate?.version ? `v${appliedTemplate.version}` : "기본"} />
         <Kpi label="미매핑" value={`${unmappedCount}개`} />
       </div>
@@ -569,6 +924,25 @@ function MiniStat({ label, value }: { label: string; value: string }) {
   );
 }
 
+function MetadataRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
+      <dt className="font-semibold text-slate-500">{label}</dt>
+      <dd className={`mt-1 break-all font-bold text-slate-900 dark:text-white ${mono ? "font-mono text-[11px]" : ""}`}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
 function Notice({ tone, message }: { tone: "good" | "bad"; message: string }) {
   const klass = tone === "good"
     ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200"
@@ -585,5 +959,99 @@ function Notice({ tone, message }: { tone: "good" | "bad"; message: string }) {
 async function responseError(res: Response) {
   const body = await res.json().catch(() => null) as { detail?: unknown } | null;
   if (typeof body?.detail === "string") return body.detail;
+  if (body?.detail && typeof body.detail === "object") {
+    const detail = body.detail as { error?: string; reason?: string; action?: string };
+    return [detail.error, detail.reason, detail.action].filter(Boolean).join(" · ") || `요청 실패: ${res.status}`;
+  }
   return `요청 실패: ${res.status}`;
+}
+
+function sortReports(items: SavedReportMetadata[]) {
+  return [...items].sort((a, b) => {
+    const byDate = String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""));
+    return byDate || Number(b.version ?? 0) - Number(a.version ?? 0);
+  });
+}
+
+function sortRuns(items: OrchestrationSummary[]) {
+  return [...items]
+    .filter((item) => Boolean(item.run_id))
+    .sort((a, b) =>
+      String(b.completed_at ?? b.started_at ?? "").localeCompare(
+        String(a.completed_at ?? a.started_at ?? ""),
+      ),
+    );
+}
+
+async function fetchSavedReport(projectId: string, reportId: string): Promise<SavedReportDetail> {
+  const response = await fetch(`${apiBase}/projects/${projectId}/reports/${reportId}`, {
+    cache: "no-store",
+    headers: authHeaders("web"),
+  });
+  if (!response.ok) throw new Error(await responseError(response));
+  return (await response.json()) as SavedReportDetail;
+}
+
+async function fetchOrchestrationRun(projectId: string, runId: string): Promise<OrchestrationRun> {
+  const response = await fetch(`${apiBase}/projects/${projectId}/orchestrations/${runId}`, {
+    cache: "no-store",
+    headers: authHeaders("web"),
+  });
+  if (!response.ok) throw new Error(await responseError(response));
+  return (await response.json()) as OrchestrationRun;
+}
+
+function generatedResponseFromSavedReport(detail: SavedReportDetail): GeneratedReportResponse {
+  return {
+    report_id: detail.report_id,
+    version: detail.version,
+    report_markdown: detail.report_markdown,
+    report_display_markdown: detail.report_display_markdown,
+    report: detail.report,
+    paragraphEvidenceLinks: detail.report?.paragraphEvidenceLinks,
+    metadata: detail.metadata,
+  };
+}
+
+function reportPublishBlockReason(
+  report: SavedReportMetadata | null,
+  run: OrchestrationRun | null,
+  approvalStatus: string,
+  gate?: ApprovalReadinessGate,
+) {
+  if (!report) return "발행할 저장 보고서를 선택하세요.";
+  if (report.status === "published") return "이미 최종 발행된 불변 보고서입니다.";
+  if (report.status !== "draft") return `지원하지 않는 보고서 상태입니다: ${report.status ?? "unknown"}`;
+  if (!report.run_id) return "수동 생성 초안은 PF Review에 결합되지 않아 최종 발행할 수 없습니다.";
+  if (!run || run.run_id !== report.run_id) return "결합된 PF Review 상세를 검증하지 못했습니다.";
+  if (approvalStatus !== "approved") return "결합된 PF Review의 독립 승인 완료가 필요합니다.";
+  if (gate?.pass !== true) {
+    const blockers = gate?.blockers
+      ?.map((item) => item.code || item.message)
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(", ");
+    return blockers
+      ? `Approval Readiness Gate 차단 항목을 해소하세요: ${blockers}`
+      : "Approval Readiness Gate 통과가 필요합니다.";
+  }
+  return "서버 검증 후 최종 발행할 수 있습니다.";
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function shortHash(value?: string) {
+  if (!value) return "-";
+  return value.length > 30 ? `${value.slice(0, 18)}…${value.slice(-8)}` : value;
 }

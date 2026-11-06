@@ -77,7 +77,9 @@ class PodAIReviewerAgent:
         if not findings:
             findings = deterministic["findings"]
         else:
-            findings.extend(deterministic["guardrailFindings"])
+            # Advisory model text cannot erase a deterministic financial or
+            # evidence blocker from the displayed review status.
+            findings.extend(deterministic["findings"])
 
         review_status = _status_from_findings(findings)
         # Always keep the DETERMINISTIC findings separately, even when an LLM
@@ -131,11 +133,17 @@ class PodAIReviewerAgent:
             "Do not invent facts, source locators, PNU, official land prices, registry conclusions, "
             "market comparables, or financial calculations. Return JSON only."
         )
+        from use_cases.chief_pod_work_orders import POD_EXECUTION_AGENTS, PUBLIC_INPUTS
         prompt = json.dumps(
             {
                 "task": "Review this Chief Deal Orchestrator Pod artifact for evidence gaps, contradictions, handoffs, and report-grade limitations.",
                 "podKey": pod_key,
                 "sourceArtifactKey": source_artifact_key,
+                "workRouting": {
+                    "supportedPodAgents": POD_EXECUTION_AGENTS,
+                    "publicInputOwners": PUBLIC_INPUTS,
+                    "instructions": "Choose the existing Pod/agent that must do the next work. Use collect_public_evidence only for publicInputOwners, rerun_pod for analysis, or request_material for unavailable evidence. Never supply replacement inputs, URLs, code, approvals or financial values. An agent shared by two Pods requires payload.podKey.",
+                },
                 "requiredOutput": {
                     "confidence": "0..1",
                     "findings": [
@@ -148,7 +156,10 @@ class PodAIReviewerAgent:
                             "recommendedAction": "specific next action",
                         }
                     ],
-                    "handoffs": [],
+                    "handoffs": [{"toAgent": "supported Pod key or agent ID", "handoffType": "work_order",
+                                  "payload": {"action": "collect_public_evidence|rerun_pod|request_material",
+                                              "podKey": "supported Pod key", "missingItemId": "public input key when collecting", "reason": "specific next action"},
+                                  "evidenceIds": [], "confidence": 0.8}],
                     "reportFragments": {
                         "riskMemo": "",
                         "missingDataRequest": "",
@@ -156,7 +167,8 @@ class PodAIReviewerAgent:
                     },
                 },
                 "guardrails": POD_AI_REVIEW_GUARDRAILS,
-                "artifact": _compact_json(source_artifact, max_chars=16000),
+                "artifact": _compact_json({key: value for key, value in source_artifact.items()
+                                            if key != "inputSnapshot"}, max_chars=16000),
             },
             ensure_ascii=False,
         )
@@ -250,10 +262,32 @@ class PodAIReviewerAgent:
 
 def _review_ai_context(options: Dict[str, Any], *, project_id: str, agent_id: str, evidence_ids: List[str]) -> Dict[str, Any]:
     base = dict(options.get("ai_context") or options.get("aiContext") or {})
+    # The actual provider call must receive the same residency/cost controls
+    # carried by the enclosing domain request, not just provider/model fields.
+    for snake_key, camel_key in (
+        ("data_classification", "dataClassification"),
+        ("max_cost_usd", "maxCostUsd"),
+    ):
+        if snake_key in options or camel_key in options:
+            base[snake_key] = options.get(snake_key, options.get(camel_key))
+    if options.get("local_only") or options.get("localOnly"):
+        base["local_only"] = True
+    prohibited = {
+        str(item) for item in (
+            *(base.get("prohibited_providers") or base.get("prohibitedProviders") or []),
+            *(options.get("prohibited_providers") or options.get("prohibitedProviders") or []),
+        ) if item
+    }
+    if prohibited:
+        base["prohibited_providers"] = sorted(prohibited)
     base.setdefault("project_id", project_id)
     base.setdefault("agent_id", agent_id)
     base.setdefault("input_evidence_ids", evidence_ids)
-    return resolve_ai_context(base)
+    resolved = resolve_ai_context(base)
+    for control in ("local_only", "localOnly", "data_classification", "dataClassification", "max_cost_usd", "maxCostUsd", "prohibited_providers", "prohibitedProviders"):
+        if control in base:
+            resolved[control] = base[control]
+    return resolved
 
 
 def _agent_id_for_pod(pod_key: str) -> str:

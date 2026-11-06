@@ -32,6 +32,7 @@ class StressTestSchedule(BaseModel):
 
 
 class StressTestRequest(BaseModel):
+    baseCashFlowRequest: Optional[Dict[str, Any]] = None
     projectId: Optional[str] = None
     currency: str = "KRW"
     totalRevenue: float = Field(..., description="Total sales revenue at 100% sale rate, no discount")

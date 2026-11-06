@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import math
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openpyxl import load_workbook
+from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.worksheet import Worksheet
 
 
@@ -109,14 +112,47 @@ def validate_feasibility_workbook(
     """
     workbook_path = Path(workbook_path)
 
+    # Unknown layouts have no licensed cell map. Inspect their structure without
+    # interpreting Bonri coordinates or reporting unperformed formula checks.
+    if profile is None:
+        probe = load_workbook(workbook_path, data_only=False, read_only=True)
+        try:
+            detected_profile = _detect_profile(probe)
+            if detected_profile is None:
+                return {
+                    "status": "needs_mapping", "profile": "unsupported-workbook-layout",
+                    "fileName": workbook_path.name, "sheetCount": len(probe.worksheets),
+                    "sheets": [{"sheetName": sheet.title, "maxRow": sheet.max_row,
+                                "maxColumn": sheet.max_column} for sheet in probe.worksheets],
+                    "templateSupport": {"status": "unsupported_layout", "reason": "no_supported_cell_map"},
+                    "diagnostics": [{"code": "unsupported_workbook_layout", "severity": "review_required",
+                                     "message": "읽을 수 있는 통합문서이지만 지원하는 사업수지 셀 매핑과 다릅니다."}],
+                    "formulaIntegrity": {"status": "not_evaluated"},
+                    "calculationEvidence": {"method": "not_evaluated", "recalculated": False},
+                    "schemaReadiness": {"directV2ImportReady": False, "requiresExplicitMapping": True},
+                    "recommendations": ["원본값을 문서 검토 후보로 확인하고 시트·셀·단위 매핑을 검토하세요. 수식 재계산과 사업수지 반영은 완료되지 않았습니다."],
+                }
+        finally:
+            probe.close()
+    else:
+        detected_profile = profile
     formula_wb = load_workbook(workbook_path, data_only=False, read_only=False)
     value_wb = load_workbook(workbook_path, data_only=True, read_only=False)
-    selected_profile = profile or _detect_profile(formula_wb)
+    selected_profile = detected_profile
 
     try:
+        if selected_profile.get("family") == "sangbong":
+            from agents.sangbong_workbook_profile import validate_sangbong_workbook
+
+            return validate_sangbong_workbook(
+                formula_wb, value_wb, selected_profile,
+                formula_integrity=_formula_integrity(formula_wb, value_wb, max_error_samples),
+                file_name=workbook_path.name, tolerance=tolerance,
+            )
         sheets = _sheet_profiles(formula_wb)
         required_sheet_checks = _required_sheet_checks(formula_wb.sheetnames, selected_profile["required_sheets"])
         key_cells = _read_key_cells(formula_wb, value_wb, selected_profile["key_cells"])
+        required_key_cell_checks = _required_key_cell_checks(key_cells)
         reconciliation_checks = _reconciliation_checks(key_cells, tolerance)
         formula_integrity = _formula_integrity(
             formula_wb,
@@ -131,7 +167,13 @@ def validate_feasibility_workbook(
             selected_profile.get("required_named_ranges", []),
         )
         schema_readiness = _schema_readiness(formula_wb, selected_profile)
-        status = _status(required_sheet_checks, reconciliation_checks, formula_integrity, schema_readiness)
+        status = _status(
+            required_sheet_checks,
+            required_key_cell_checks,
+            reconciliation_checks,
+            formula_integrity,
+            schema_readiness,
+        )
 
         return {
             "status": status,
@@ -141,19 +183,29 @@ def validate_feasibility_workbook(
             "sheets": sheets,
             "requiredSheetChecks": required_sheet_checks,
             "keyCells": key_cells,
+            "requiredKeyCellChecks": required_key_cell_checks,
             "reconciliationChecks": reconciliation_checks,
             "formulaIntegrity": formula_integrity,
+            "calculationEvidence": {
+                "method": "saved_workbook_cache", "recalculated": False,
+                "fullCalcOnLoad": getattr(formula_wb.calculation, "fullCalcOnLoad", None),
+            },
             "definedNames": defined_names,
             "namedRangeValues": named_range_values,
             "schemaReadiness": schema_readiness,
-            "recommendations": _recommendations(status, formula_integrity, schema_readiness),
+            "recommendations": _recommendations(status, formula_integrity, schema_readiness, required_key_cell_checks),
         }
     finally:
         formula_wb.close()
         value_wb.close()
 
 
-def _detect_profile(workbook: Any) -> Dict[str, Any]:
+def _detect_profile(workbook: Any) -> Dict[str, Any] | None:
+    from agents.sangbong_workbook_profile import detect_sangbong_profile
+
+    sangbong = detect_sangbong_profile(workbook)
+    if sangbong is not None:
+        return sangbong
     defined_names = set(workbook.defined_names.keys())
     sheet_names = set(workbook.sheetnames)
     if {"\uc190\uc775", "\uac1c\uc694\uc218\uc785", "cash", "\uc784\ub300\ub8cc"}.issubset(sheet_names):
@@ -165,7 +217,13 @@ def _detect_profile(workbook: Any) -> Dict[str, Any]:
         }
     if "realytics_fs_schema_version" in defined_names or "07_Import계약" in sheet_names:
         return REALYTICS_FORMULA_WORKBOOK_PROFILE
-    return LEGACY_BONRI_WORKBOOK_PROFILE
+    if "사업수지" in sheet_names and {"입력", "분양", "제경비"}.intersection(sheet_names):
+        return LEGACY_BONRI_WORKBOOK_PROFILE
+    return None
+
+
+def _formula_value(value: Any) -> Any:
+    return value.text if isinstance(value, ArrayFormula) else value
 
 
 def _sheet_profiles(workbook: Any) -> List[Dict[str, Any]]:
@@ -175,7 +233,7 @@ def _sheet_profiles(workbook: Any) -> List[Dict[str, Any]]:
         non_empty_count = 0
         for row in sheet.iter_rows():
             for cell in row:
-                value = cell.value
+                value = _formula_value(cell.value)
                 if value is not None:
                     non_empty_count += 1
                 if isinstance(value, str) and value.startswith("="):
@@ -220,14 +278,52 @@ def _read_key_cells(
                 "present": False,
             }
             continue
+        cached_value = _json_safe_value(value_wb[sheet_name][cell_ref].value)
+        formula_value = _formula_value(formula_wb[sheet_name][cell_ref].value)
         result[key] = {
             "sheetName": sheet_name,
             "cell": cell_ref,
-            "value": _json_safe_value(value_wb[sheet_name][cell_ref].value),
-            "formula": formula_wb[sheet_name][cell_ref].value,
+            "value": cached_value,
+            "formula": formula_value,
             "present": True,
+            "hasCachedValue": cached_value not in (None, ""),
         }
     return result
+
+
+def _required_key_cell_checks(key_cells: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    text_keys = {"project_name", "location"}
+    positive_keys = {"land_area_py", "total_revenue", "total_revenue_after_vat", "total_cost"}
+    checks = []
+    for key, record in key_cells.items():
+        cached_value = record.get("value")
+        present = bool(record.get("present") and record.get("hasCachedValue"))
+        numeric_required = key not in text_keys
+        numeric_valid = bool(
+            isinstance(cached_value, (int, float))
+            and not isinstance(cached_value, bool)
+            and math.isfinite(float(cached_value))
+        ) if numeric_required else True
+        positive_valid = bool(float(cached_value) > 0) if key in positive_keys and numeric_valid else key not in positive_keys
+        passed = present and numeric_valid and positive_valid
+        if not present:
+            reason = "missing_cached_value"
+        elif not numeric_valid:
+            reason = "finite_numeric_value_required"
+        elif not positive_valid:
+            reason = "positive_value_required"
+        else:
+            reason = None
+        checks.append({
+            "key": key,
+            "sheetName": record.get("sheetName"),
+            "cell": record.get("cell"),
+            "passed": passed,
+            "numericRequired": numeric_required,
+            "reason": reason,
+            "severity": "ok" if passed else "blocking",
+        })
+    return checks
 
 
 def _reconciliation_checks(key_cells: Dict[str, Dict[str, Any]], tolerance: float) -> List[Dict[str, Any]]:
@@ -302,6 +398,11 @@ def _formula_integrity(
     formula_ref_samples: List[Dict[str, Any]] = []
     formula_ref_count = 0
     formula_count = 0
+    array_formula_count = 0
+    volatile_formula_counts: Dict[str, int] = {}
+    volatile_formula_samples: List[Dict[str, Any]] = []
+    external_reference_count = 0
+    external_reference_samples: List[Dict[str, Any]] = []
     included_sheet_set = set(included_sheet_names or [])
 
     for value_sheet in value_wb.worksheets:
@@ -310,9 +411,30 @@ def _formula_integrity(
         formula_sheet: Worksheet = formula_wb[value_sheet.title]
         for row in value_sheet.iter_rows():
             for value_cell in row:
-                formula = formula_sheet[value_cell.coordinate].value
+                raw_formula = formula_sheet[value_cell.coordinate].value
+                formula = _formula_value(raw_formula)
+                if isinstance(raw_formula, ArrayFormula):
+                    array_formula_count += 1
                 if isinstance(formula, str) and formula.startswith("="):
                     formula_count += 1
+                    for function_name in re.findall(r"\b(OFFSET|INDIRECT)\s*\(", formula, flags=re.IGNORECASE):
+                        name = function_name.upper()
+                        volatile_formula_counts[name] = volatile_formula_counts.get(name, 0) + 1
+                        if len(volatile_formula_samples) < max_error_samples:
+                            volatile_formula_samples.append({
+                                "sheetName": value_sheet.title,
+                                "cell": value_cell.coordinate,
+                                "function": name,
+                                "formula": formula,
+                            })
+                    if re.search(r"\[[^\]]+\.(?:xlsx|xlsm|xlsb|xls)\]", formula, flags=re.IGNORECASE):
+                        external_reference_count += 1
+                        if len(external_reference_samples) < max_error_samples:
+                            external_reference_samples.append({
+                                "sheetName": value_sheet.title,
+                                "cell": value_cell.coordinate,
+                                "formula": formula,
+                            })
                 if isinstance(value_cell.value, str) and value_cell.value.startswith("#"):
                     cached_error_counts[value_cell.value] = cached_error_counts.get(value_cell.value, 0) + 1
                     if len(cached_error_samples) < max_error_samples:
@@ -333,11 +455,18 @@ def _formula_integrity(
 
     return {
         "formulaCount": formula_count,
+        "arrayFormulaCount": array_formula_count,
         "cachedErrorCounts": cached_error_counts,
         "formulaRefCount": formula_ref_count,
         "cachedErrorSamples": cached_error_samples,
         "formulaRefSamples": formula_ref_samples,
-        "hasBlockingFormulaErrors": formula_ref_count > 0 or cached_error_counts.get("#REF!", 0) > 0,
+        "volatileFormulaCounts": volatile_formula_counts,
+        "volatileFormulaCount": sum(volatile_formula_counts.values()),
+        "volatileFormulaSamples": volatile_formula_samples,
+        "externalWorkbookReferenceCount": external_reference_count,
+        "externalWorkbookReferenceSamples": external_reference_samples,
+        "hasExternalWorkbookReferences": external_reference_count > 0,
+        "hasBlockingFormulaErrors": formula_ref_count > 0 or bool(cached_error_counts),
         "scopedSheetNames": sorted(included_sheet_set) if included_sheet_set else "all",
     }
 
@@ -379,7 +508,7 @@ def _read_named_range_values(
             if sheet_name not in formula_wb.sheetnames or ":" in cell_range:
                 continue
             first_value = _json_safe_value(value_wb[sheet_name][cell_range].value)
-            first_formula = formula_wb[sheet_name][cell_range].value
+            first_formula = _formula_value(formula_wb[sheet_name][cell_range].value)
             break
 
         values[name] = {
@@ -463,18 +592,23 @@ def _schema_readiness(workbook: Any, profile: Dict[str, Any]) -> Dict[str, Any]:
 
 def _status(
     required_sheet_checks: List[Dict[str, Any]],
+    required_key_cell_checks: List[Dict[str, Any]],
     reconciliation_checks: List[Dict[str, Any]],
     formula_integrity: Dict[str, Any],
     schema_readiness: Dict[str, Any],
 ) -> str:
     if any(not check["present"] for check in required_sheet_checks):
         return "failed"
+    if any(not check["passed"] for check in required_key_cell_checks):
+        return "failed"
     if schema_readiness["missingRequiredNamedRanges"]:
         return "failed"
     if any(not check["passed"] for check in reconciliation_checks):
         return "failed"
     if formula_integrity["hasBlockingFormulaErrors"]:
-        return "warning"
+        return "failed"
+    if formula_integrity.get("hasExternalWorkbookReferences"):
+        return "failed"
     return "passed"
 
 
@@ -482,12 +616,30 @@ def _recommendations(
     status: str,
     formula_integrity: Dict[str, Any],
     schema_readiness: Dict[str, Any],
+    required_key_cell_checks: List[Dict[str, Any]],
 ) -> List[str]:
     recommendations = []
-    if formula_integrity["hasBlockingFormulaErrors"]:
+    if formula_integrity.get("formulaRefCount", 0) > 0 or formula_integrity["cachedErrorCounts"].get("#REF!", 0) > 0:
         recommendations.append("Resolve #REF! formulas before accepting the workbook as an authoritative feasibility model.")
+    other_cached_errors = {
+        key: count
+        for key, count in formula_integrity.get("cachedErrorCounts", {}).items()
+        if key != "#REF!" and count
+    }
+    if other_cached_errors:
+        recommendations.append(
+            "Resolve cached Excel errors before canonical approval: "
+            + ", ".join(f"{key}={count}" for key, count in sorted(other_cached_errors.items()))
+            + "."
+        )
     if formula_integrity["cachedErrorCounts"].get("#DIV/0!", 0) > 0:
         recommendations.append("Review #DIV/0! cells and confirm whether they are harmless blank-row artifacts or real calculation errors.")
+    if formula_integrity.get("hasExternalWorkbookReferences"):
+        recommendations.append("Resolve or explicitly archive external workbook references before canonical approval.")
+    if formula_integrity.get("volatileFormulaCount", 0) > 0:
+        recommendations.append("Inventory OFFSET/INDIRECT formulas and verify cached values before deterministic migration.")
+    if any(not check["passed"] for check in required_key_cell_checks):
+        recommendations.append("Populate all required key cells with cached values before import approval.")
     if schema_readiness["missingRequiredNamedRanges"]:
         recommendations.append("Add missing REALYTICS named ranges before accepting this workbook for canonical import.")
     if schema_readiness["requiresLegacyAdapter"]:

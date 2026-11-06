@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import datetime
+from decimal import Decimal
 from typing import Any, Dict, List
 
 from core.calculations import calculate_tranche_recovery, simulate_waterfall
+from core.financial_input_validation import FinancialInputError, require_finite_numbers
 from schemas.scenario import (
     ScenarioDrivers,
     ScenarioReportFragments,
@@ -15,6 +17,7 @@ from schemas.scenario import (
     UnsoldLtvRow,
     WaterfallResult,
     WaterfallResultRow,
+    WaterfallRule,
 )
 
 
@@ -25,6 +28,11 @@ class ScenarioEngineAgent:
     """
 
     def run_scenario_set(self, request: ScenarioSetRequest) -> ScenarioSetResult:
+        require_finite_numbers(request.model_dump(), "scenarioSet")
+        if request.currency.strip().upper() != "KRW" or request.unit.strip().upper() != "KRW":
+            raise FinancialInputError("Scenario calculations require currency and unit KRW; convert using a reviewed source first.")
+        if request.waterfallRule is not None and request.waterfallRule != WaterfallRule():
+            raise FinancialInputError("Custom waterfallRule is not implemented; it cannot be silently ignored.")
         scenario_set_id = request.scenarioSetId or f"scenario-set-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
         drivers = request.scenarioDrivers or ScenarioDrivers()
 
@@ -157,7 +165,7 @@ class ScenarioEngineAgent:
 
         for sale_rate in drivers.saleRates:
             unsold_rate = max(0.0, 1.0 - sale_rate)
-            unsold_units = int(total_units * unsold_rate)
+            unsold_units = self._unsold_units(total_units, sale_rate)
             for discount_rate in drivers.discountRates:
                 gross_value = unsold_units * avg_unit_price
                 discounted_value = gross_value * (1.0 - discount_rate)
@@ -215,7 +223,7 @@ class ScenarioEngineAgent:
         for sale_rate in drivers.saleRates:
             for discount_rate in [0.0, 0.1, 0.2]:
                 scenario_id = f"recovery_sale_{int(sale_rate * 100)}_disc_{int(discount_rate * 100)}"
-                unsold_units = int(total_units * max(0.0, 1.0 - sale_rate))
+                unsold_units = self._unsold_units(total_units, sale_rate)
                 discounted_unsold_value = unsold_units * avg_unit_price * (1.0 - discount_rate)
                 collected_cash = max(0.0, total_revenue * sale_rate - drivers.additionalPriorityCosts)
                 recovery_pool = collected_cash + discounted_unsold_value
@@ -232,6 +240,8 @@ class ScenarioEngineAgent:
                             "priority": tranche.priority,
                             "claimAmount": claim,
                             "recoveredAmount": claim * recovery_ratio,
+                            "principalAmount": principal,
+                            "shortfall": max(0.0, claim - claim * recovery_ratio),
                             "recoveryRatio": round(recovery_ratio, 4),
                         }
                     )
@@ -247,6 +257,13 @@ class ScenarioEngineAgent:
                     )
                 )
         return matrix
+
+    @staticmethod
+    def _unsold_units(total_units: int, sale_rate: float) -> int:
+        # Preserve the existing floor-to-whole-units rule without binary-float
+        # underflow (100 * (1 - 0.8) must be 20, not 19).
+        unsold_rate = max(Decimal(0), Decimal(1) - Decimal(str(sale_rate)))
+        return int(Decimal(total_units) * unsold_rate)
 
     @staticmethod
     def _ltv_risk_level(ltv: float) -> str:

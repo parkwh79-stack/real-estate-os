@@ -5,6 +5,11 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft, Landmark, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import {
+  projectChiefArtifactResult,
+  selectChiefPodArtifact,
+  type ChiefPodArtifactRecord,
+} from "../../../../lib/financial-decision-package";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
 import { CovenantEodPanel } from "../../../../components/pf/covenant-eod-panel";
 
@@ -27,14 +32,22 @@ function asArray<T = unknown>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const normalized = Number(value);
+  return Number.isFinite(normalized) ? normalized : null;
+}
+
 function formatEok(value: unknown) {
-  const n = Number(value ?? 0);
-  return n ? `${(n / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억원` : "미확인";
+  const n = finiteNumber(value);
+  return n === null
+    ? "미확인"
+    : `${(n / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억원`;
 }
 
 function formatRate(value: unknown) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "미확인";
+  const n = finiteNumber(value);
+  if (n === null) return "미확인";
   return `${(n * 100).toLocaleString("ko-KR", { maximumFractionDigits: 2 })}%`;
 }
 
@@ -81,13 +94,31 @@ export default function PfStructurePage() {
   }
 
   const pageData = asRecord(context?.pageData);
-  const pfStructure = asRecord(pageData.pfStructure);
-  const riskRegister = asRecord(pageData.riskRegister);
-  const creditDecision = asRecord(pageData.creditReviewDecision);
+  const artifactSummary = asRecord(pageData.latestPfCreditArtifact);
+  const artifactKey = displayText(artifactSummary.artifactKey, "");
+  const artifactRecords = asArray<ChiefPodArtifactRecord>(pageData.chiefArtifacts);
+  const selectedArtifact = selectChiefPodArtifact(artifactRecords, {
+    artifactKey,
+    podKey: "pf_credit",
+  });
+  const artifactPackage = projectChiefArtifactResult(selectedArtifact, [
+    "pfStructure",
+    "riskRegister",
+    "creditReviewDecision",
+    "covenantEod",
+  ] as const);
+  // Do not fill a missing artifact field from the mutable project projection.
+  const pfStructure = asRecord(artifactPackage?.values.pfStructure);
+  const riskRegister = asRecord(artifactPackage?.values.riskRegister);
+  const creditDecision = asRecord(artifactPackage?.values.creditReviewDecision);
+  const covenantEod = artifactPackage?.values.covenantEod;
   const tranches = asArray<Tranche>(pfStructure.tranches ?? pfStructure.pfStructure ?? pfStructure);
-  const artifact = asRecord(pageData.latestPfCreditArtifact);
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
-  const totalPf = tranches.reduce((sum, item) => sum + Number(item.amount ?? 0), 0);
+  const trancheAmounts = tranches.map((item) => finiteNumber(item.amount));
+  const totalPf =
+    trancheAmounts.length > 0 && trancheAmounts.every((amount) => amount !== null)
+      ? trancheAmounts.reduce<number>((sum, amount) => sum + (amount ?? 0), 0)
+      : null;
 
   return (
     <div className="space-y-6 pb-8">
@@ -103,7 +134,8 @@ export default function PfStructurePage() {
               PF 금융구조
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              저장된 PF 구조, Tranche, Risk Register, Credit Decision artifact를 기준으로 표시합니다. 고정 예시 tranche는 사용하지 않습니다.
+              하나의 PF-Credit artifact에 함께 저장된 Tranche, Risk, Credit Decision,
+              Covenant만 표시합니다. 현재 프로젝트 projection은 누락값 보충에 사용하지 않습니다.
             </p>
           </div>
         </div>
@@ -123,11 +155,24 @@ export default function PfStructurePage() {
       ) : (
         <>
           {error ? <Notice>{error}</Notice> : null}
+          {!artifactPackage ? (
+            <Notice>
+              최신 PF artifact의 전체 record를 정확히 확인할 수 없어 mutable 프로젝트
+              projection을 표시하지 않습니다. PF-Credit Pod를 다시 실행해 하나의 패키지를
+              생성하세요.
+            </Notice>
+          ) : null}
+          {artifactPackage?.missingFields.length ? (
+            <Notice>
+              선택한 artifact에 다음 필드가 없습니다: {artifactPackage.missingFields.join(", ")}.
+              다른 실행 결과로 보충하지 않습니다.
+            </Notice>
+          ) : null}
           <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <Kpi label="총 PF 금액" value={formatEok(totalPf)} />
             <Kpi label="Tranche 수" value={`${tranches.length.toLocaleString("ko-KR")}개`} />
             <Kpi label="Credit Decision" value={displayText(creditDecision.decisionLabel ?? creditDecision.decision, "미실행")} />
-            <Kpi label="PF artifact" value={displayText(artifact.artifactKey, "미저장")} />
+            <Kpi label="PF artifact" value={artifactPackage?.artifactKey ?? "미확인"} />
           </section>
 
           <Panel title="Tranche 구조">
@@ -173,12 +218,18 @@ export default function PfStructurePage() {
             </Panel>
             <Panel title="승인 판단">
               <InfoRow label="Decision" value={displayText(creditDecision.decisionLabel ?? creditDecision.decision, "미실행")} />
-              <InfoRow label="Artifact" value={displayText(artifact.artifactType, "미저장")} />
-              <InfoRow label="Updated" value={displayText(artifact.createdAt ?? artifact.updatedAt, "미확인")} />
+              <InfoRow label="Artifact" value={artifactPackage?.artifactKey ?? "미저장"} />
+              <InfoRow label="Calculation Runs" value={artifactPackage?.calculationRunIds.join(", ") || "미확인"} />
+              <InfoRow label="Input hash" value={artifactPackage?.inputHash ?? "미확인"} />
+              <InfoRow label="Output hash" value={artifactPackage?.outputHash ?? "미확인"} />
             </Panel>
           </section>
 
-          <CovenantEodPanel projectId={projectId} />
+          <CovenantEodPanel
+            projectId={projectId}
+            artifactResult={covenantEod}
+            sourceArtifactKey={artifactPackage?.artifactKey}
+          />
         </>
       )}
     </div>

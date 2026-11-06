@@ -4,15 +4,57 @@
 
 :root {
   color-scheme: light;
-  --background: #f8fafc;
-  --foreground: #020617;
+  --re-bg-canvas: #f6f8fb;
+  --re-bg-surface: #ffffff;
+  --re-bg-subtle: #f1f5f9;
+  --re-border-default: #d8e0ea;
+  --re-border-strong: #aab7c7;
+  --re-text-primary: #0b172a;
+  --re-text-secondary: #475569;
+  --re-text-muted: #596a80;
+  --re-brand-900: #08213f;
+  --re-brand-700: #123f73;
+  --re-action-600: #1d5fd1;
+  --re-action-hover: #164ba8;
+  --re-on-action: #ffffff;
+  --re-info-600: #2563eb;
+  --re-success-600: #15803d;
+  --re-warning-600: #b45309;
+  --re-danger-600: #b42318;
+  --re-neutral-600: #526071;
+  --re-focus-ring: #1d5fd1;
+  --re-radius-control: 8px;
+  --re-radius-panel: 12px;
+  --re-shadow-panel: 0 1px 2px rgb(8 33 63 / 0.06);
+  --background: var(--re-bg-canvas);
+  --foreground: var(--re-text-primary);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --background: #020617;
-    --foreground: #f8fafc;
+    --re-bg-canvas: #07111f;
+    --re-bg-surface: #0b172a;
+    --re-bg-subtle: #122238;
+    --re-border-default: #2c4058;
+    --re-border-strong: #50657c;
+    --re-text-primary: #f3f7fb;
+    --re-text-secondary: #c3ceda;
+    --re-text-muted: #91a2b5;
+    --re-brand-900: #07111f;
+    --re-brand-700: #2c67a7;
+    --re-action-600: #4a8df1;
+    --re-action-hover: #76adff;
+    --re-on-action: #07111f;
+    --re-info-600: #60a5fa;
+    --re-success-600: #4ade80;
+    --re-warning-600: #fbbf24;
+    --re-danger-600: #fb7185;
+    --re-neutral-600: #a1afbf;
+    --re-focus-ring: #93c5fd;
+    --re-shadow-panel: none;
+    --background: var(--re-bg-canvas);
+    --foreground: var(--re-text-primary);
   }
 }
 
@@ -22,6 +64,7 @@
 
 html {
   min-width: 320px;
+  scroll-padding-top: 4.5rem;
 }
 
 body {
@@ -29,6 +72,113 @@ body {
   margin: 0;
   background: var(--background);
   color: var(--foreground);
+  font-family: "Pretendard Variable", "Noto Sans KR", Inter, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-rendering: optimizeLegibility;
+}
+
+:focus-visible {
+  outline: 2px solid var(--re-focus-ring);
+  outline-offset: 2px;
+}
+
+.re-financial-number {
+  font-variant-numeric: tabular-nums lining-nums;
+  letter-spacing: -0.01em;
+}
+
+.re-sr-status::before {
+  content: attr(data-status-label) ": ";
+}
+
+/* Dashboard introduction only. Reading surfaces and data cards stay opaque. */
+.re-dashboard-intro {
+  position: relative;
+  isolation: isolate;
+}
+
+.re-dashboard-atmosphere {
+  position: absolute;
+  z-index: -1;
+  inset: -1rem -0.5rem -1rem;
+  overflow: hidden;
+  border-radius: 1.5rem;
+  pointer-events: none;
+}
+
+.re-dashboard-atmosphere::before,
+.re-dashboard-atmosphere::after {
+  position: absolute;
+  content: "";
+  width: 28rem;
+  height: 16rem;
+  max-width: 90%;
+  pointer-events: none;
+}
+
+.re-dashboard-atmosphere::before {
+  top: -6rem;
+  right: -2rem;
+  background: radial-gradient(ellipse, rgb(59 130 246 / 0.22), transparent 68%);
+}
+
+.re-dashboard-atmosphere::after {
+  bottom: -9rem;
+  left: 6%;
+  background: radial-gradient(ellipse, rgb(20 184 166 / 0.16), transparent 68%);
+}
+
+.re-dashboard-glass {
+  background: var(--re-bg-surface);
+  border: 1px solid var(--re-border-default);
+  box-shadow: 0 8px 24px rgb(8 33 63 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.5);
+}
+
+@supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
+  .re-dashboard-glass {
+    background: rgb(255 255 255 / 0.82);
+    -webkit-backdrop-filter: blur(12px) saturate(115%);
+    backdrop-filter: blur(12px) saturate(115%);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .re-dashboard-atmosphere::before {
+    background: radial-gradient(ellipse, rgb(59 130 246 / 0.32), transparent 68%);
+  }
+  .re-dashboard-atmosphere::after {
+    background: radial-gradient(ellipse, rgb(20 184 166 / 0.2), transparent 68%);
+  }
+  .re-dashboard-glass {
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
+  }
+  @supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
+    .re-dashboard-glass {
+      background: rgb(11 23 42 / 0.86);
+    }
+  }
+}
+
+@media (min-width: 768px) and (prefers-reduced-motion: no-preference) {
+  .re-dashboard-atmosphere::before {
+    transform: translate3d(0, var(--dashboard-parallax-y, 0px), 0);
+    will-change: transform;
+  }
+}
+
+@media print {
+  .re-dashboard-atmosphere { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 button,

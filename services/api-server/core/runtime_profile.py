@@ -19,6 +19,71 @@ def security_default(*, local: str, hardened: str) -> str:
     return hardened if is_hardened_environment() else local
 
 
+def identity_membership_authority() -> str:
+    """Return the source allowed to grant tenant membership and RBAC roles.
+
+    Hardened deployments always use the normalized PostgreSQL identity
+    directory.  ``claims`` remains an explicit compatibility lane for local
+    development and deterministic contract tests; it can never be selected in
+    production or staging.
+    """
+
+    configured = (
+        os.environ.get("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY") or ""
+    ).strip().casefold()
+    if configured and configured not in {"postgres", "claims"}:
+        raise RuntimeError(
+            "REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY must be postgres or claims"
+        )
+    if is_hardened_environment():
+        return "postgres"
+    return configured or "claims"
+
+
+def local_auth_bootstrap_enabled() -> bool:
+    """Allow unauthenticated local tenant/user/session bootstrap only by opt-in.
+
+    The bootstrap endpoints exist for deterministic local development and
+    contract tests.  A flag can never enable them in a hardened deployment.
+    """
+
+    return not is_hardened_environment() and _env_flag(
+        "REALYTICS_ENABLE_LOCAL_AUTH"
+    )
+
+
+def raw_identity_headers_enabled() -> bool:
+    """Allow developer user-id headers only with the local-auth opt-in."""
+
+    return local_auth_bootstrap_enabled()
+
+
+def server_issued_sessions_enabled() -> bool:
+    """Allow opaque REALYTICS session ids only in explicit local/test mode."""
+
+    return local_auth_bootstrap_enabled()
+
+
+def oauth_mock_callbacks_enabled() -> bool:
+    """Allow social-login mock callbacks only by explicit local/test opt-in."""
+
+    return server_issued_sessions_enabled() and _env_flag(
+        "REALYTICS_ENABLE_OAUTH_MOCKS"
+    )
+
+
+def legacy_oauth_sessions_enabled() -> bool:
+    """Allow API-owned OAuth sessions only by explicit local/test opt-in.
+
+    Hardened social login is delegated to the configured OIDC/Supabase
+    provider so the API receives a signed bearer token.
+    """
+
+    return server_issued_sessions_enabled() and _env_flag(
+        "REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS"
+    )
+
+
 def cors_origins() -> list[str]:
     configured = os.environ.get("REALYTICS_CORS_ORIGINS")
     origins = _parse_csv(configured) if configured else list(LOCAL_CORS_ORIGINS)
@@ -40,6 +105,19 @@ def validate_security_configuration() -> None:
         errors.append("REALYTICS_RBAC_MODE=strict")
     if (os.environ.get("REALYTICS_TENANT_ISOLATION_MODE") or "").lower() != "strict":
         errors.append("REALYTICS_TENANT_ISOLATION_MODE=strict")
+    if _env_flag("REALYTICS_ENABLE_LOCAL_AUTH"):
+        errors.append("REALYTICS_ENABLE_LOCAL_AUTH=false")
+    if _env_flag("REALYTICS_ENABLE_OAUTH_MOCKS"):
+        errors.append("REALYTICS_ENABLE_OAUTH_MOCKS=false")
+    if _env_flag("REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS"):
+        errors.append("REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS=false")
+    configured_membership_authority = (
+        os.environ.get("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY") or "postgres"
+    ).strip().casefold()
+    if configured_membership_authority != "postgres":
+        errors.append("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY=postgres")
+    if _env_flag("REALYTICS_IDP_PERSONAL_TENANT_FALLBACK"):
+        errors.append("REALYTICS_IDP_PERSONAL_TENANT_FALLBACK=false")
     if (os.environ.get("REALYTICS_IDP_MODE") or "").lower() not in {"oidc", "jwks", "rs256"}:
         errors.append("REALYTICS_IDP_MODE=oidc")
     if not _first_env("REALYTICS_IDP_ISSUER", "REALYTICS_OIDC_ISSUER"):
@@ -50,8 +128,16 @@ def validate_security_configuration() -> None:
         errors.append("REALYTICS_IDP_AUDIENCE")
     if not os.environ.get("REALYTICS_CORS_ORIGINS"):
         errors.append("REALYTICS_CORS_ORIGINS")
-    if not _first_env("REALYTICS_DATABASE_URL", "REALYTICS_PG_HOST"):
-        errors.append("REALYTICS_DATABASE_URL or REALYTICS_PG_HOST")
+    if not _first_env(
+        "REALYTICS_DATABASE_URL",
+        "REALYTICS_PG_HOST",
+        "REALYTICS_API_DATABASE_URL",
+        "REALYTICS_IDENTITY_DATABASE_URL",
+        "REALYTICS_PF_WORKER_DATABASE_URL",
+    ):
+        errors.append(
+            "REALYTICS_DATABASE_URL/REALYTICS_PG_HOST or a dedicated runtime DSN"
+        )
     if (os.environ.get("REALYTICS_STORAGE_BACKEND") or "").lower() not in {
         "postgres",
         "postgresql",
@@ -60,13 +146,29 @@ def validate_security_configuration() -> None:
     if (os.environ.get("REALYTICS_SECRET_BACKEND") or "").lower() not in {
         "aws",
         "aws_secrets_manager",
+        "google_secret_manager",
     }:
-        errors.append("REALYTICS_SECRET_BACKEND=aws_secrets_manager")
+        errors.append("REALYTICS_SECRET_BACKEND=aws_secrets_manager or google_secret_manager")
+    if (os.environ.get("REALYTICS_SECRET_BACKEND") or "").lower() == "google_secret_manager":
+        from core.google_secret_store import google_secret_config
+
+        try:
+            google_secret_config()
+        except RuntimeError as exc:
+            errors.append(str(exc))
     if (os.environ.get("REALYTICS_ASYNC_JOB_MODE") or "").lower() != "external_worker":
         errors.append("REALYTICS_ASYNC_JOB_MODE=external_worker")
-    if (os.environ.get("REALYTICS_OBJECT_STORAGE") or "").lower() != "s3":
-        errors.append("REALYTICS_OBJECT_STORAGE=s3")
-    if not os.environ.get("REALYTICS_S3_BUCKET"):
+    object_backend = (os.environ.get("REALYTICS_OBJECT_STORAGE") or "").lower()
+    if object_backend not in {"s3", "gcs"}:
+        errors.append("REALYTICS_OBJECT_STORAGE=s3 or gcs")
+    if object_backend == "gcs":
+        from db.object_storage import get_object_storage
+
+        try:
+            get_object_storage()
+        except (RuntimeError, ValueError):
+            errors.append("Google object storage requires valid project, bucket and retention days")
+    elif not os.environ.get("REALYTICS_S3_BUCKET"):
         errors.append("REALYTICS_S3_BUCKET")
     try:
         origins = cors_origins()
@@ -94,3 +196,12 @@ def _first_env(*keys: str) -> str | None:
         if value:
             return value
     return None
+
+
+def _env_flag(key: str) -> bool:
+    return (os.environ.get(key) or "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }

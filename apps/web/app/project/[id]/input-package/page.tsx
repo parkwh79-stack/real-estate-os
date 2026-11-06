@@ -2,21 +2,18 @@
 
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
-  ArrowLeft,
-  CheckCircle2,
+  ChevronDown,
   Database,
   FileArchive,
-  FileText,
-  GitBranch,
   Loader2,
-  PackageCheck,
   RefreshCw,
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { SmartIntake } from "../../../../components/intake/smart-intake";
 import { FeasibilityExtractReview } from "../../../../components/intake/feasibility-extract-review";
+import { translateFinancialTerm } from "../../../../lib/financial-terms";
 import {
   displayText,
   fetchWorkspaceContext,
@@ -34,7 +31,6 @@ type SourceDocument = {
   originalFileName?: string;
   fileName?: string;
   documentType?: string;
-  contentType?: string;
   fileSizeBytes?: number;
   uploadedAt?: string;
   validationStatus?: string;
@@ -45,7 +41,7 @@ type ParsedFact = {
   recordId?: string;
   key?: string;
   canonicalField?: string;
-  parserPath?: string;
+  termId?: string;
   value?: unknown;
   normalizedValue?: unknown;
   unit?: string;
@@ -53,35 +49,23 @@ type ParsedFact = {
   validationStatus?: string;
   reviewStatus?: string;
   locatorStatus?: string;
-  locatorPrecision?: string;
   targetPods?: string[];
   sourceLocator?: Record<string, unknown>;
-  textQualityFlags?: Record<string, boolean>;
   podValidationStatusByPod?: Record<string, {
     status?: string;
     findingCount?: number;
     findingCodes?: string[];
-    validatedAt?: string;
   }>;
 };
 
-type IntakeReadinessPlan = {
-  track?: WorkflowTrack;
-  trackLabel?: string;
-  summary?: {
-    readyStageCount?: number;
-    needsSupplementCount?: number;
-    blockedStageCount?: number;
-  };
-  stages?: Array<{
-    key?: string;
-    title?: string;
-    status?: string;
-    missingMaterials?: string[];
-    agents?: string[];
-  }>;
-  nextRecommendedAction?: string;
-};
+const INTAKE_VIEWS = [
+  { id: "materials", label: "자료·원본" },
+  { id: "review", label: "사업수지 검토" },
+  { id: "supplement", label: "보완 작업" },
+] as const;
+
+type IntakeView = typeof INTAKE_VIEWS[number]["id"];
+const REVIEW_ANCHORS = new Set(["#cash-flow-schedule-review", "#cash-flow-financing-review"]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -89,6 +73,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asArray<T = unknown>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function confirmedCount(...values: unknown[]): number | null {
+  return values.find((value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0) ?? null;
+}
+
+function countLabel(value: number | null, unit = "건") {
+  return value === null ? "미확인" : `${value.toLocaleString("ko-KR")}${unit}`;
 }
 
 function formatBytes(value?: number) {
@@ -108,6 +100,30 @@ export default function InputPackagePage() {
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const projectId = String(params.id);
+  const selectedView = INTAKE_VIEWS.find(({ id }) => id === searchParams.get("view"))?.id ?? "materials";
+  const selectView = (view: IntakeView) => {
+    const url = new URL(window.location.href);
+    if (view === "materials") url.searchParams.delete("view");
+    else url.searchParams.set("view", view);
+    if ((url.hash === "#intake-upload" && view !== "materials") || (REVIEW_ANCHORS.has(url.hash) && view !== "review")) url.hash = "";
+    window.history.replaceState(null, "", url);
+  };
+
+  const handleViewKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const count = INTAKE_VIEWS.length;
+    let next: number;
+    switch (event.key) {
+      case "ArrowLeft": next = (index + count - 1) % count; break;
+      case "ArrowRight": next = (index + 1) % count; break;
+      case "Home": next = 0; break;
+      case "End": next = count - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    selectView(INTAKE_VIEWS[next]!.id);
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+  };
+
   const activeTrack = useMemo<WorkflowTrack>(() => {
     const fromUrl = searchParams.get("track");
     if (isWorkflowTrack(fromUrl)) return fromUrl;
@@ -115,27 +131,52 @@ export default function InputPackagePage() {
   }, [searchParams]);
   const workflow = useMemo(() => getTrackWorkflowDefinition(activeTrack), [activeTrack]);
 
-  const [context, setContext] = useState<WorkspacePageContext | null>(null);
-  const [intakePlan, setIntakePlan] = useState<IntakeReadinessPlan | null>(null);
+  // Existing Cash Flow links may name the review section using only a fragment.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (REVIEW_ANCHORS.has(url.hash) && !url.searchParams.has("view")) {
+      url.searchParams.set("view", "review");
+      window.history.replaceState(null, "", url);
+    }
+  }, [projectId]);
+  useEffect(() => {
+    const anchor = window.location.hash;
+    if (selectedView === "review" && REVIEW_ANCHORS.has(anchor)) {
+      document.getElementById(anchor.slice(1))?.scrollIntoView();
+    }
+  }, [selectedView, projectId]);
+
+  const contextKey = `${projectId}:${activeTrack}`;
+  const requestVersion = useRef(0);
+  const [contextResult, setContextResult] = useState<{ key: string; value: WorkspacePageContext } | null>(null);
+  const context = contextResult?.key === contextKey ? contextResult.value : null;
+  const [contextError, setContextError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    const version = ++requestVersion.current;
     setLoading(true);
-    setError(null);
+    setContextError(null);
+    setContextResult(null);
     try {
-      setContext(await fetchWorkspaceContext(projectId, "input_package", activeTrack));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "자료 입력 패키지 상태를 불러오지 못했습니다.");
+      const next = await fetchWorkspaceContext(projectId, "input_package", activeTrack);
+      if (!next || typeof next !== "object" || Array.isArray(next) || next.projectId !== projectId) {
+        throw new Error("Invalid workspace context");
+      }
+      if (version === requestVersion.current) setContextResult({ key: contextKey, value: next });
+    } catch {
+      if (version === requestVersion.current) setContextError("자료 입력 패키지 상태를 불러오지 못했습니다. 저장된 자료와 검토 건수는 아직 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
-  }, [activeTrack, projectId]);
+  }, [activeTrack, contextKey, projectId]);
 
   useEffect(() => {
     void refresh();
+    return () => { requestVersion.current += 1; };
   }, [refresh]);
 
   const finalizeIntake = useCallback(async () => {
@@ -149,8 +190,7 @@ export default function InputPackagePage() {
         body: JSON.stringify({ track: activeTrack, run: false }),
       });
       if (!res.ok) throw new Error(`자료 보완 계획 생성 실패 (${res.status})`);
-      const body = (await res.json()) as { intakeReadinessPlan?: IntakeReadinessPlan };
-      setIntakePlan(body.intakeReadinessPlan ?? null);
+      const body = (await res.json()) as { intakeReadinessPlan?: { nextRecommendedAction?: string } };
       setMessage(body.intakeReadinessPlan?.nextRecommendedAction ?? "자료 접수 및 보완 계획을 업데이트했습니다.");
       await refresh();
     } catch (err) {
@@ -226,6 +266,12 @@ export default function InputPackagePage() {
   };
 
   const pageData = asRecord(context?.pageData);
+  const unavailableSections = new Set(context?.unavailableSections ?? []);
+  const hasParsedFacts = !unavailableSections.has("parsedFacts") && Array.isArray(pageData.parsedFacts);
+  const hasMissingInputs = !unavailableSections.has("missingInputs") && Array.isArray(context?.missingInputRegister);
+  const landEvidenceUnavailable = unavailableSections.has("landEvidence");
+  const cascadeDataUnavailable = ["landEvidence", "parsedFacts", "assumptionOverrides", "missingInputs"]
+    .some((section) => unavailableSections.has(section));
   const documents = asArray<SourceDocument>(pageData.sourceDocuments);
   const sourceSummary = asRecord(pageData.sourceDocumentSummary);
   const landLedgerSummary = asRecord(pageData.landLedgerSummary);
@@ -234,298 +280,253 @@ export default function InputPackagePage() {
   const parsedFactSummary = asRecord(pageData.parsedFactSummary);
   const recommendedActions = asArray<string>(pageData.recommendedActions);
   const missingInputs = asArray<Record<string, unknown>>(context?.missingInputRegister);
-  const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
-  const docCount = Number(context?.projectMemory?.sourceDocumentCount ?? sourceSummary.count ?? documents.length ?? 0);
-  const evidenceCount = Number(context?.projectMemory?.landEvidenceCount ?? landEvidenceSummary.count ?? 0);
+  const docCount = confirmedCount(context?.projectMemory?.sourceDocumentCount, sourceSummary.count, Array.isArray(pageData.sourceDocuments) ? documents.length : undefined);
+  const evidenceCount = unavailableSections.has("landEvidence") ? null : confirmedCount(context?.projectMemory?.landEvidenceCount, landEvidenceSummary.count);
+  const parcelCount = confirmedCount(landLedgerSummary.parcelCount);
+  const pnuCount = confirmedCount(landLedgerSummary.pnuCount);
+  const parsedFactCount = unavailableSections.has("parsedFacts") ? null : confirmedCount(parsedFactSummary.recordCount, hasParsedFacts ? parsedFacts.length : undefined);
+  const missingInputCount = hasMissingInputs ? missingInputs.length : null;
+  const projectPath = `/project/${encodeURIComponent(projectId)}`;
+  const trackQuery = `?track=${encodeURIComponent(activeTrack)}`;
 
   return (
-    <div className="space-y-6 pb-8">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <Link
-            href={`/project/${projectId}`}
-            className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
-            aria-label="프로젝트로 돌아가기"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
-          <div>
-            <p className="text-sm font-semibold text-slate-500">{projectName}</p>
-            <h1 className="mt-1 flex items-center gap-2 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
-              <PackageCheck className="h-7 w-7 text-indigo-600" />
-              자료 입력 패키지
-            </h1>
-            <p className="mt-1 text-sm text-slate-500">
-              업로드 원본, 자동분류 결과, 토지·PNU·공시지가 증빙, Pod 실행 결과를 같은 프로젝트 저장소에서 추적합니다.
-            </p>
-          </div>
+    <div className="min-w-0 space-y-4 pb-8" data-testid="input-package-page">
+      <header className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+        <div>
+          <p className="text-xs font-semibold text-re-secondary">{TRACK_LABELS[activeTrack]}</p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-re-text sm:text-[28px]">자료 입력 패키지</h1>
         </div>
         <button
           type="button"
           onClick={() => void refresh()}
           disabled={loading || running !== null}
-          className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+          className="inline-flex min-h-11 items-center gap-2 rounded-re-control border border-re-border bg-re-surface px-3 text-sm font-semibold text-re-secondary transition-colors hover:border-re-border-strong hover:bg-re-subtle disabled:opacity-50"
+          aria-label="자료 상태 다시 불러오기"
         >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          새로고침
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
+          다시 불러오기
         </button>
       </header>
 
       {loading ? (
-        <div className="flex min-h-[220px] items-center justify-center rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-500 dark:border-slate-800 dark:bg-slate-900">
-          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> 자료 입력 패키지를 불러오는 중입니다.
+        <p role="status" className="text-sm text-re-secondary">저장 자료를 확인하는 중입니다.</p>
+      ) : contextError ? (
+        <p role="alert" className="rounded-re-control border border-re-border bg-re-surface px-3 py-2 text-sm text-re-warning">
+          자료 입력 패키지 상태를 불러오지 못했습니다. 다시 불러오거나 자료 입력을 계속할 수 있습니다.
+        </p>
+      ) : context ? (
+        <section aria-label="저장 자료 현황" className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-re-secondary">
+          <dl className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <div className="inline-flex gap-1.5"><dt>저장 문서</dt><dd className="font-semibold text-re-text">{countLabel(docCount)}</dd></div>
+            <div className="inline-flex gap-1.5"><dt>보완 필요</dt><dd className="font-semibold text-re-text">{countLabel(missingInputCount)}</dd></div>
+          </dl>
+          {context.contextCompleteness === "partial" ? <p role="status" className="text-xs text-re-secondary">일부 자료 상태만 확인했습니다.</p> : null}
+        </section>
+      ) : null}
+
+      <div role="tablist" aria-label="자료 입력 업무" className="grid grid-cols-3 gap-1 rounded-re-panel border border-re-border bg-re-subtle p-1">
+        {INTAKE_VIEWS.map(({ id, label }, index) => (
+          <button
+            key={id}
+            id={`intake-tab-${id}`}
+            role="tab"
+            type="button"
+            aria-selected={selectedView === id}
+            aria-controls={`intake-panel-${id}`}
+            tabIndex={selectedView === id ? 0 : -1}
+            onClick={() => selectView(id)}
+            onKeyDown={(event) => handleViewKey(event, index)}
+            className={`min-h-11 rounded-re-control px-1.5 text-xs font-semibold transition-colors sm:px-3 sm:text-sm ${selectedView === id ? "border border-re-border bg-re-surface text-re-text shadow-re-panel" : "text-re-secondary hover:bg-re-surface hover:text-re-text"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {error ? <Notice tone="bad">{error}</Notice> : null}
+      {message ? <Notice tone="good">{message}</Notice> : null}
+
+      <div id="intake-panel-materials" role="tabpanel" aria-labelledby="intake-tab-materials" hidden={selectedView !== "materials"} className="min-w-0 space-y-4">
+        <div id="intake-upload" className="min-w-0 rounded-re-panel border border-re-border bg-re-surface p-3 shadow-re-panel sm:p-5">
+          <SmartIntake key={projectId} projectId={projectId} track={activeTrack} onProcessed={context && !landEvidenceUnavailable ? finalizeIntake : () => void refresh()} />
         </div>
-      ) : (
-        <>
-          {error ? <Notice tone="bad">{error}</Notice> : null}
-          {message ? <Notice tone="good">{message}</Notice> : null}
 
-          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-            <Kpi label="저장 문서" value={`${docCount.toLocaleString("ko-KR")}건`} icon={<FileArchive />} />
-            <Kpi label="토지조서 필지" value={`${Number(landLedgerSummary.parcelCount ?? 0).toLocaleString("ko-KR")}필지`} icon={<FileText />} />
-            <Kpi label="PNU 확보" value={`${Number(landLedgerSummary.pnuCount ?? 0)}/${Number(landLedgerSummary.parcelCount ?? 0)}`} icon={<Database />} />
-            <Kpi label="토지 증빙" value={`${evidenceCount.toLocaleString("ko-KR")}건`} icon={<Database />} />
-            <Kpi label="파싱 후보값" value={`${Number(parsedFactSummary.recordCount ?? parsedFacts.length ?? 0).toLocaleString("ko-KR")}건`} icon={<GitBranch />} />
-            <Kpi label="보완 필요" value={`${missingInputs.length.toLocaleString("ko-KR")}건`} icon={<GitBranch />} />
-          </section>
+        {context ? (
+          <Panel title="저장된 원본 문서" icon={<FileArchive className="h-4 w-4" aria-hidden="true" />}>
+            {!Array.isArray(pageData.sourceDocuments) ? (
+              <p className="text-sm text-re-secondary">저장된 원본 문서 목록을 확인하지 못했습니다.</p>
+            ) : documents.length ? (
+              <ul className="divide-y divide-re-border">
+                {documents.map((doc, index) => (
+                  <li key={`${doc.originalFileName ?? doc.fileName}-${index}`} className="min-w-0 py-3 first:pt-0">
+                    <p className="break-words text-sm font-semibold text-re-text">{displayText(doc.originalFileName ?? doc.fileName, "파일명 미확인")}</p>
+                    <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-re-secondary">
+                      <span>{doc.documentType ? translateFinancialTerm(doc.documentType) : "원본 문서"}</span>
+                      <span>{formatBytes(doc.fileSizeBytes)}</span>
+                      <span>{formatDate(doc.uploadedAt)}</span>
+                      {doc.documentType === "feasibility_workbook" && doc.validationStatus === "failed"
+                        ? <span className="font-semibold text-re-warning">검증 항목 확인 필요</span>
+                        : doc.validationStatus && <span>검증 {displayText(doc.validationStatus)}</span>}
+                      {doc.archiveIntegrityStatus ? <span>무결성 {displayText(doc.archiveIntegrityStatus)}</span> : null}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-re-secondary">아직 저장된 원본 문서가 없습니다. 위에서 파일을 추가하세요.</p>
+            )}
+            {documents.length ? (
+              <Link href={`${projectPath}/documents/review${trackQuery}`} className="mt-2 inline-flex min-h-11 items-center rounded-re-control text-sm font-semibold text-re-action hover:underline">문서·출처 검토 열기</Link>
+            ) : null}
+          </Panel>
+        ) : null}
+      </div>
 
-          <section className="rounded-lg border border-indigo-200 bg-white p-5 shadow-sm dark:border-indigo-900/60 dark:bg-slate-900">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <p className="text-xs font-black uppercase tracking-wide text-indigo-600 dark:text-indigo-300">
-                  Selected Track Workflow
+      {/* Keep the editor mounted so switching views does not discard its unsaved inputs. */}
+      <div id="intake-panel-review" role="tabpanel" aria-labelledby="intake-tab-review" hidden={selectedView !== "review"} className="min-w-0 space-y-4">
+        <FeasibilityExtractReview key={projectId} projectId={projectId} onApplied={() => void refresh()} />
+        {context ? (
+          <Disclosure title={`AI 추출값 · ${countLabel(parsedFactCount)}`}>
+            {!hasParsedFacts ? (
+              <p className="text-sm text-re-secondary">파싱 후보값 목록을 확인하지 못했습니다.</p>
+            ) : parsedFacts.length ? (
+              <>
+                <p className="mb-2 text-xs text-re-secondary">
+                  근거 위치 부족 {countLabel(confirmedCount(parsedFactSummary.missingLocatorCount))} · 핵심 근거 위치 부족 {countLabel(confirmedCount(parsedFactSummary.criticalMissingLocatorCount))}
                 </p>
-                <h2 className="mt-1 text-xl font-black text-slate-950 dark:text-white">
-                  {TRACK_LABELS[activeTrack]} 자료 보완 흐름
-                </h2>
-                <p className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{workflow.intent}</p>
-              </div>
-              <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-bold text-indigo-950 dark:border-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-100">
-                판단 질문: {workflow.decisionQuestion}
-              </div>
-            </div>
-            <div className="mt-4 grid gap-3 xl:grid-cols-5">
-              {workflow.steps.map((step, index) => (
-                <div key={step.key} className="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-indigo-600 text-xs font-black text-white">
-                    {index + 1}
-                  </span>
-                  <p className="mt-3 text-sm font-black text-slate-950 dark:text-white">{step.title}</p>
-                  <p className="mt-2 text-xs leading-5 text-slate-500">{step.purpose}</p>
-                </div>
-              ))}
-            </div>
-          </section>
+                <ul className="divide-y divide-re-border">
+                  {parsedFacts.slice(0, 12).map((fact, index) => (
+                    <li key={fact.recordId ?? `${fact.canonicalField}-${index}`} className="space-y-2 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="break-words text-sm font-semibold text-re-text">{parsedFactLabel(fact, index)}</p>
+                          <p className="break-words text-sm font-semibold text-re-text">{formatParsedFactValue(fact)}</p>
+                        </div>
+                        <div className="text-xs">
+                          <span className={`inline-block rounded-full px-2 py-1 font-semibold ${parsedFactStatusClass(fact.validationStatus)}`}>
+                            {parsedFactStatusLabel(fact.validationStatus)}
+                          </span>
+                          {fact.reviewStatus ? <p className="mt-1 text-re-secondary">검토 {parsedFactReviewLabel(fact.reviewStatus)}</p> : null}
+                        </div>
+                      </div>
+                      <p className="break-words text-xs text-re-secondary">{parsedFactLocatorSummary(fact)}</p>
+                      <div className="flex flex-wrap gap-2">
+                        <button type="button" disabled={!fact.recordId || running !== null}
+                          onClick={() => void reviewParsedFact(fact.recordId, "approved")}
+                          className="min-h-11 rounded-re-control border border-re-border px-3 text-sm font-semibold text-re-success transition-colors hover:bg-re-subtle disabled:opacity-40">
+                          승인
+                        </button>
+                        <button type="button" disabled={!fact.recordId || running !== null}
+                          onClick={() => void reviewParsedFact(fact.recordId, "needs_revision")}
+                          className="min-h-11 rounded-re-control border border-re-border px-3 text-sm font-semibold text-re-warning transition-colors hover:bg-re-subtle disabled:opacity-40">
+                          보완 요청
+                        </button>
+                      </div>
+                      <details className="text-xs text-re-secondary">
+                        <summary className="cursor-pointer py-1 font-semibold hover:text-re-text">추출 신뢰도·검증 내역</summary>
+                        <p className="my-2">추출 신뢰도 {formatConfidence(fact.confidence)}</p>
+                        <PodValidationChips fact={fact} />
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+                <Link href={`${projectPath}/documents/review${trackQuery}`} className="inline-flex min-h-11 items-center text-sm font-semibold text-re-action hover:underline">문서·출처 검토 열기</Link>
+              </>
+            ) : (
+              <p className="text-sm text-re-secondary">아직 저장된 파싱 후보값이 없습니다. 자료를 추가하면 여기에 표시됩니다.</p>
+            )}
+          </Disclosure>
+        ) : null}
+      </div>
 
-          <SmartIntake projectId={projectId} onProcessed={finalizeIntake} />
-          <FeasibilityExtractReview projectId={projectId} onApplied={refresh} />
-
-          <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
-            <Panel title="다음 보완 작업">
-              <div className="flex flex-wrap gap-2">
-                <ActionButton label="자료 보완 계획 생성" busy={running === "finalize"} disabled={running !== null} onClick={() => void finalizeIntake()} />
-                <ActionButton label="PNU 일괄 해석" busy={running === "pnu"} disabled={running !== null || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
-                <ActionButton label="Land-Legal Pod" busy={running === "land_legal"} disabled={running !== null} onClick={() => void runPod("land_legal", "Land-Legal Pod")} />
-                <ActionButton label="Market-Product Pod" busy={running === "market_product"} disabled={running !== null} onClick={() => void runPod("market_product", "Market-Product Pod")} />
-                <ActionButton label="Feasibility-CF Pod" busy={running === "feasibility_cashflow"} disabled={running !== null} onClick={() => void runPod("feasibility_cashflow", "Feasibility-Cashflow Pod")} />
-              </div>
-              <div className="mt-4 space-y-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
-                {intakePlan?.nextRecommendedAction || recommendedActions.length ? (
-                  <>
-                    {intakePlan?.nextRecommendedAction ? <p className="font-bold text-slate-950 dark:text-white">{intakePlan.nextRecommendedAction}</p> : null}
-                    {recommendedActions.map((item) => (
-                      <p key={item}>- {item}</p>
-                    ))}
-                  </>
-                ) : (
-                  <p>
-                    자료를 업로드하면 오케스트레이터가 어떤 Pod를 실행해야 하는지와 부족한 자료를 안내합니다.
-                  </p>
-                )}
-              </div>
-            </Panel>
-
+      <div id="intake-panel-supplement" role="tabpanel" aria-labelledby="intake-tab-supplement" hidden={selectedView !== "supplement"} className="min-w-0 space-y-4">
+        {context ? (
+          <>
             <Panel title="보완 필요 항목">
-              {missingInputs.length ? (
-                <div className="space-y-2">
+              {missingInputCount === null ? (
+                <p className="text-sm text-re-secondary">보완 필요 항목을 확인하지 못했습니다.</p>
+              ) : missingInputs.length ? (
+                <ul className="divide-y divide-re-border">
                   {missingInputs.slice(0, 8).map((item, index) => (
-                    <div key={index} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-                      <p className="font-black">{displayText(item.title ?? item.label ?? item.code, `보완 항목 ${index + 1}`)}</p>
-                      <p className="mt-1 text-xs leading-5">
+                    <li key={index} className="py-3 first:pt-0">
+                      <p className="break-words text-sm font-semibold text-re-text">{displayText(item.title ?? item.label ?? item.code, `보완 항목 ${index + 1}`)}</p>
+                      <p className="mt-1 break-words text-xs leading-5 text-re-secondary">
                         {displayText(item.reason ?? item.description ?? item.message, "다음 단계 실행을 위해 보완이 필요합니다.")}
                       </p>
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ul>
               ) : (
-                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100">
-                  현재 공통 자료 기준으로 즉시 표시할 보완 항목이 없습니다.
-                </div>
+                <p className="text-sm text-re-secondary">현재 공통 자료 기준으로 즉시 표시할 보완 항목이 없습니다.</p>
               )}
+              {recommendedActions.length ? (
+                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-re-secondary">
+                  {recommendedActions.map((item, index) => <li key={index}>{item}</li>)}
+                </ul>
+              ) : null}
             </Panel>
-          </section>
 
-          <Panel title="AI 파싱 후보값 원장">
-            {parsedFacts.length ? (
-              <div className="space-y-4">
-                <div className="grid gap-3 md:grid-cols-3">
-                  <MiniStat label="전체 후보값" value={`${Number(parsedFactSummary.recordCount ?? parsedFacts.length).toLocaleString("ko-KR")}건`} />
-                  <MiniStat label="근거 위치 부족" value={`${Number(parsedFactSummary.missingLocatorCount ?? 0).toLocaleString("ko-KR")}건`} />
-                  <MiniStat label="핵심 근거 위치 부족" value={`${Number(parsedFactSummary.criticalMissingLocatorCount ?? 0).toLocaleString("ko-KR")}건`} />
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1160px] text-left text-sm">
-                    <thead className="border-b border-slate-200 text-xs text-slate-500 dark:border-slate-800">
-                      <tr>
-                        <th className="px-3 py-2">표준 필드</th>
-                        <th className="px-3 py-2">추출값</th>
-                        <th className="px-3 py-2">검증 Pod</th>
-                        <th className="px-3 py-2">신뢰도</th>
-                        <th className="px-3 py-2">근거 위치</th>
-                        <th className="px-3 py-2">Pod 검증</th>
-                        <th className="px-3 py-2">상태</th>
-                        <th className="px-3 py-2">검토 액션</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {parsedFacts.slice(0, 12).map((fact, index) => (
-                        <tr key={fact.recordId ?? `${fact.canonicalField}-${index}`}>
-                          <td className="px-3 py-3">
-                            <p className="font-black text-slate-950 dark:text-white">
-                              {displayText(fact.canonicalField ?? fact.key, "미매핑 필드")}
-                            </p>
-                            <p className="mt-1 text-xs text-slate-500">{displayText(fact.parserPath, "-")}</p>
-                          </td>
-                          <td className="px-3 py-3 font-bold text-slate-700 dark:text-slate-200">
-                            {formatParsedFactValue(fact)}
-                          </td>
-                          <td className="px-3 py-3">
-                            <div className="flex flex-wrap gap-1">
-                              {(fact.targetPods?.length ? fact.targetPods : ["chief_orchestrator"]).map((pod) => (
-                                <span key={pod} className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                                  {podLabel(pod)}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                          <td className="px-3 py-3 text-slate-500">{formatConfidence(fact.confidence)}</td>
-                          <td className="px-3 py-3 text-slate-500">{parsedFactLocatorSummary(fact)}</td>
-                          <td className="px-3 py-3">
-                            <PodValidationChips fact={fact} />
-                          </td>
-                          <td className="px-3 py-3">
-                            <span className={`rounded-full px-2 py-1 text-xs font-black ${parsedFactStatusClass(fact.validationStatus)}`}>
-                              {parsedFactStatusLabel(fact.validationStatus)}
-                            </span>
-                            {fact.reviewStatus ? (
-                              <p className="mt-1 text-[11px] font-bold text-slate-500">검토: {parsedFactReviewLabel(fact.reviewStatus)}</p>
-                            ) : null}
-                          </td>
-                          <td className="px-3 py-3">
-                            <div className="flex flex-wrap gap-1">
-                              <button
-                                type="button"
-                                disabled={!fact.recordId || running === `parsed-fact-review:${fact.recordId}`}
-                                onClick={() => void reviewParsedFact(fact.recordId, "approved")}
-                                className="rounded-md bg-emerald-50 px-2 py-1 text-[11px] font-black text-emerald-700 disabled:opacity-40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                              >
-                                승인
-                              </button>
-                              <button
-                                type="button"
-                                disabled={!fact.recordId || running === `parsed-fact-review:${fact.recordId}`}
-                                onClick={() => void reviewParsedFact(fact.recordId, "needs_revision")}
-                                className="rounded-md bg-amber-50 px-2 py-1 text-[11px] font-black text-amber-700 disabled:opacity-40 dark:bg-amber-950/30 dark:text-amber-100"
-                              >
-                                보완요청
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+            <Disclosure title="토지 자료 현황과 보완 실행">
+              <dl aria-label="토지 자료 현황" className="mb-4 flex flex-wrap gap-x-4 gap-y-2 text-sm text-re-secondary">
+                <div className="inline-flex gap-1.5"><dt>토지조서 필지</dt><dd className="font-semibold text-re-text">{countLabel(parcelCount, "필지")}</dd></div>
+                <div className="inline-flex gap-1.5"><dt>PNU 확보</dt><dd className="font-semibold text-re-text">{pnuCount === null || parcelCount === null ? "미확인" : parcelCount === 0 ? "산정 전" : `${pnuCount.toLocaleString("ko-KR")}/${parcelCount.toLocaleString("ko-KR")}`}</dd></div>
+                <div className="inline-flex gap-1.5"><dt>토지 증빙</dt><dd className="font-semibold text-re-text">{countLabel(evidenceCount)}</dd></div>
+              </dl>
+              <div className="flex flex-wrap gap-2">
+                <ActionButton label="자료 보완 계획 생성" busy={running === "finalize"} disabled={running !== null || landEvidenceUnavailable} onClick={() => void finalizeIntake()} />
+                <ActionButton label="PNU 일괄 해석" busy={running === "pnu"} disabled={running !== null || landEvidenceUnavailable || !landLedgerSummary.present} onClick={() => void runPnuResolve()} />
+                <Link href={`${projectPath}/land${trackQuery}`} className="inline-flex min-h-11 items-center rounded-re-control border border-re-border px-3 text-sm font-semibold text-re-action transition-colors hover:bg-re-subtle">토지·인허가 미리보기</Link>
+                <ActionButton label="Market-Product Pod" busy={running === "market_product"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("market_product", "Market-Product Pod")} />
+                <ActionButton label="Feasibility-CF Pod" busy={running === "feasibility_cashflow"} disabled={running !== null || cascadeDataUnavailable} onClick={() => void runPod("feasibility_cashflow", "Feasibility-Cashflow Pod")} />
               </div>
-            ) : (
-              <div className="rounded-lg bg-slate-50 p-5 text-sm leading-6 text-slate-500 dark:bg-slate-800/70">
-                아직 저장된 파싱 후보값이 없습니다. 사업계획서, IM, 토지조서, 사업수지 Excel을 업로드하면 ParserAgent가 후보값을 원장에 저장하고 각 Pod가 검증합니다.
-              </div>
-            )}
-          </Panel>
-
-          <Panel title="저장된 원본 문서">
-            {documents.length ? (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[760px] text-left text-sm">
-                  <thead className="border-b border-slate-200 text-xs text-slate-500 dark:border-slate-800">
-                    <tr>
-                      <th className="px-3 py-2">문서 유형</th>
-                      <th className="px-3 py-2">파일명</th>
-                      <th className="px-3 py-2">크기</th>
-                      <th className="px-3 py-2">검증</th>
-                      <th className="px-3 py-2">무결성</th>
-                      <th className="px-3 py-2">업로드</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {documents.map((doc, index) => (
-                      <tr key={`${doc.originalFileName ?? doc.fileName}-${index}`}>
-                        <td className="px-3 py-3 font-bold text-slate-950 dark:text-white">
-                          {displayText(doc.documentType, "source_document")}
-                        </td>
-                        <td className="px-3 py-3 text-slate-600 dark:text-slate-300">
-                          {displayText(doc.originalFileName ?? doc.fileName, "파일명 미확인")}
-                        </td>
-                        <td className="px-3 py-3 text-slate-500">{formatBytes(doc.fileSizeBytes)}</td>
-                        <td className="px-3 py-3 text-slate-500">{displayText(doc.validationStatus, "-")}</td>
-                        <td className="px-3 py-3 text-slate-500">{displayText(doc.archiveIntegrityStatus, "-")}</td>
-                        <td className="px-3 py-3 text-slate-500">{formatDate(doc.uploadedAt)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="rounded-lg bg-slate-50 p-5 text-sm text-slate-500 dark:bg-slate-800/70">
-                아직 저장된 원본 문서가 없습니다. 위의 스마트 업로드에 파일을 올리면 서버 원장에 저장됩니다.
-              </div>
-            )}
-          </Panel>
-        </>
-      )}
-    </div>
-  );
-}
-
-function Kpi({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
-  return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <div className="flex items-center gap-2 text-xs font-bold text-slate-500">{icon}{label}</div>
-      <p className="mt-2 text-xl font-black text-slate-950 dark:text-white">{value}</p>
-    </div>
-  );
-}
-
-function Panel({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <div className="mb-4 flex items-center gap-2">
-        <CheckCircle2 className="h-5 w-5 text-slate-700 dark:text-slate-200" />
-        <h2 className="text-lg font-black text-slate-950 dark:text-white">{title}</h2>
+              {landEvidenceUnavailable || cascadeDataUnavailable ? (
+                <p className="mt-3 text-xs leading-5 text-re-warning">자료 상태를 다시 확인한 뒤 보완 계획·PNU 해석·연쇄 실행을 사용할 수 있습니다. 자료 추가와 사업수지 입력 검토는 계속할 수 있습니다.</p>
+              ) : null}
+            </Disclosure>
+          </>
+        ) : null}
+        <Disclosure title={`${TRACK_LABELS[activeTrack]} 자료 보완 흐름`}>
+          <p className="text-sm text-re-secondary">{workflow.intent}</p>
+          <p className="mt-2 text-sm font-semibold text-re-text">{workflow.decisionQuestion}</p>
+          <ol className="mt-3 list-decimal space-y-3 pl-5">
+            {workflow.steps.map((step) => (
+              <li key={step.key} className="pl-1">
+                <p className="text-sm font-semibold text-re-text">{step.title}</p>
+                <p className="mt-1 text-xs leading-5 text-re-secondary">{step.purpose}</p>
+              </li>
+            ))}
+          </ol>
+        </Disclosure>
       </div>
+    </div>
+  );
+}
+
+function Panel({ title, icon, children }: { title: string; icon?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="min-w-0 rounded-re-panel border border-re-border bg-re-surface p-4 shadow-re-panel sm:p-5">
+      <h2 className="mb-3 flex items-center gap-2 text-base font-semibold text-re-text">{icon}{title}</h2>
       {children}
     </section>
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string }) {
+function Disclosure({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
-      <p className="text-xs font-bold text-slate-500">{label}</p>
-      <p className="mt-1 text-lg font-black text-slate-950 dark:text-white">{value}</p>
-    </div>
+    <details className="group min-w-0 rounded-re-panel border border-re-border bg-re-surface shadow-re-panel">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 rounded-re-panel px-4 py-3 text-sm font-semibold text-re-text transition-colors hover:bg-re-subtle [&::-webkit-details-marker]:hidden">
+        {title}
+        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
+      </summary>
+      <div className="border-t border-re-border px-4 py-3">{children}</div>
+    </details>
   );
+}
+
+function parsedFactLabel(fact: ParsedFact, index: number) {
+  const term = fact.termId ?? fact.canonicalField ?? fact.key;
+  const label = translateFinancialTerm(term);
+  return term && (label !== term || /[가-힣]/.test(label)) ? label : `추출 항목 ${index + 1}`;
 }
 
 function formatParsedFactValue(fact: ParsedFact) {
@@ -640,10 +641,11 @@ function PodValidationChips({ fact }: { fact: ParsedFact }) {
 }
 
 function Notice({ tone, children }: { tone: "good" | "bad"; children: ReactNode }) {
-  const klass = tone === "good"
-    ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100"
-    : "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200";
-  return <div className={`rounded-lg border p-4 text-sm font-bold ${klass}`}>{children}</div>;
+  return (
+    <p role={tone === "bad" ? "alert" : "status"} className={`rounded-re-control border border-re-border bg-re-surface px-3 py-2 text-sm font-semibold ${tone === "bad" ? "text-re-danger" : "text-re-success"}`}>
+      {children}
+    </p>
+  );
 }
 
 function ActionButton({
@@ -662,7 +664,7 @@ function ActionButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-slate-950"
+      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-re-control border border-re-border px-3 text-sm font-semibold text-re-text transition-colors hover:bg-re-subtle disabled:cursor-not-allowed disabled:opacity-40"
     >
       {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
       {label}

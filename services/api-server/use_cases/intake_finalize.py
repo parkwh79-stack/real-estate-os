@@ -50,7 +50,10 @@ def _address_candidates(address: str) -> List[str]:
     return list(dict.fromkeys([c for c in candidates if c]))
 
 
-def resolve_address_to_parcel(address: str, *, environ: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def resolve_address_to_parcel(
+    address: str, *, environ: Optional[Dict[str, str]] = None,
+    timeout: float = 8.0, max_address_candidates: int | None = None,
+) -> Dict[str, Any]:
     """Geocode an address and resolve its cadastral parcel (PNU + 공시지가 + center).
 
     Returns {status, pnu, center, officialLandPricePerSqm, officialLandPriceBaseYear,
@@ -64,15 +67,16 @@ def resolve_address_to_parcel(address: str, *, environ: Optional[Dict[str, str]]
 
     point = None
     geo_status = "geocode_failed"
-    for cand in _address_candidates(address):
-        point, gdiag = geocode_address(cand, environ=environ)
+    candidates = _address_candidates(address)
+    for cand in candidates[:max_address_candidates]:
+        point, gdiag = geocode_address(cand, environ=environ, **({} if timeout == 8.0 else {"timeout": timeout}))
         geo_status = gdiag.get("status", "error")
         if point:
             break
     if not point:
         return {"status": geo_status or "geocode_failed"}
 
-    geometry, pdiag = fetch_parcel_by_point(point["lng"], point["lat"], environ=environ)
+    geometry, pdiag = fetch_parcel_by_point(point["lng"], point["lat"], environ=environ, **({} if timeout == 8.0 else {"timeout": timeout}))
     props = pdiag.get("properties") or {} if pdiag.get("status") == "resolved" else {}
     pnu = (props.get("pnu") or "").strip() or None
 
@@ -92,6 +96,7 @@ def resolve_address_to_parcel(address: str, *, environ: Optional[Dict[str, str]]
         "lotNumber": props.get("jibun"),
         "landCategory": props.get("jimok") or props.get("dgm_nm"),
         "areaSqm": _to_float(props.get("parea") or props.get("area") or props.get("lndpcl_ar")),
+        "cadastralAddress": props.get("addr"),
         "addressFragment": props.get("addr") or props.get("jibun") or address,
         "geometry": geometry,
     }

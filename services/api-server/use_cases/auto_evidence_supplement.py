@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 
 from integrations.market_data import MolitRtmsConnector, lawd_cd_from_pnu
-from storage import list_deal_state_records, load_state, upsert_deal_state_record
+from storage import list_deal_state_records, load_state, storage_backend, upsert_deal_state_record
 from use_cases.intake_finalize import resolve_address_to_parcel
 from use_cases.market_comparables import (
     fetch_project_market_comparables,
@@ -694,6 +694,10 @@ def _fetch_and_inject_market_comparables(project_data: Dict[str, Any]) -> List[D
 
 
 def _historical_candidate(project_id: str, canonical: str) -> Dict[str, Any] | None:
+    # The compatibility snapshot catalog is global. Only normalized, tenant-
+    # scoped sources may contribute candidates in the production runtime.
+    if storage_backend() in {"postgres", "postgresql"}:
+        return None
     seed_key = {
         "feasibility_input.total_revenue": "totalRevenue",
         "feasibility_input.total_cost": "totalCost",

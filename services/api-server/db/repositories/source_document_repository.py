@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
+from use_cases.common import merge_source_documents
 
 
 class SourceDocumentRepository:
@@ -36,14 +37,9 @@ class SourceDocumentRepository:
             return None
         project.setdefault("_meta", {})
         project["_meta"]["upload"] = upload_meta
-        documents = project.setdefault("source_documents", [])
-        upload_archive_id = upload_meta.get("archiveId") or upload_meta.get("originalFileHash")
-        already_listed = any(
-            (document.get("archiveId") or document.get("originalFileHash")) == upload_archive_id
-            for document in documents
+        project["source_documents"] = merge_source_documents(
+            project.get("source_documents") or [], [upload_meta]
         )
-        if not already_listed:
-            documents.append(upload_meta)
         if self.persist_project is not None:
             self.persist_project(project_id)
         else:

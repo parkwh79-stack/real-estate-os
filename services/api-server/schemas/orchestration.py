@@ -340,6 +340,9 @@ class ChiefDealOrchestrationPlan(BaseModel):
     project_id: Optional[str] = Field(None, alias="projectId")
     analysis_purpose: Optional[str] = Field(None, alias="analysisPurpose")
     shared_deal_state_graph: SharedDealStateGraph = Field(..., alias="sharedDealStateGraph")
+    preflight_input_revision: Optional[str] = Field(
+        None, alias="preflightInputRevision", pattern=r"^[0-9a-f]{64}$",
+    )
     task_graph: Dict[str, Any] = Field(default_factory=dict, alias="taskGraph")
     agent_pods: List[AgentPodPlan] = Field(default_factory=list, alias="agentPods")
     pod_runs: List[AgentPodRun] = Field(default_factory=list, alias="podRuns")

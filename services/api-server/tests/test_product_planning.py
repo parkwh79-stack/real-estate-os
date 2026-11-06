@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from agents.product_planning_agent import ProductPlanningAgent
 from main import app
@@ -16,7 +17,7 @@ def _project_body():
     return {
         "project": {"name": "상품기획 QA", "type": "mixed_use"},
         "land": {"address": "서울", "area_sqm": 5000},
-        "regulation": {"applied_far": 300, "applied_bcr": 60},
+        "regulation": {"applied_far": 300, "applied_bcr": 60, "legal_far": 350},
     }
 
 
@@ -74,7 +75,9 @@ def test_compare_use_case_defaults_and_top_by_value():
     assert result["scenarioCount"] == 2
     assert result["pricedCount"] == 2
     # apartment (bigger 전용률·평형, higher price) should top by sales revenue
-    assert result["topByValue"]["assetType"] == "apartment"
+    assert result["topByValue"] is None
+    assert result["exploratoryTopByValue"]["assetType"] == "apartment"
+    assert result["recommendationStatus"] == "exploratory"
     assert result["availableAssetTypes"]
 
 
@@ -89,3 +92,73 @@ def test_product_planning_endpoint(tmp_path, monkeypatch):
     assert body["landAreaSqm"] == 5000
     assert body["rows"]
     client.delete(f"/projects/{project_id}")
+
+
+def test_ineligible_over_far_scenarios_are_excluded_from_value_ranking():
+    result = compare_product_planning_use_case(
+        {
+            "project": {"name": "Over FAR"},
+            "land": {"area_sqm": 5000},
+            "regulation": {"applied_far": 400, "legal_far": 300},
+            "regulatoryConstraintSnapshot": {"snapshotId": "reg-1", "approvalStatus": "approved"},
+        },
+        scenarios=[{"assetType": "apartment", "overrides": {"price_per_py": 30_000_000}}],
+    )
+
+    assert result["rows"][0]["scenarioEligibility"]["eligibility"] == "ineligible"
+    assert result["topByValue"] is None
+    assert result["rankedPricedCount"] == 0
+    assert result["recommendationStatus"] == "blocked"
+
+
+def test_self_attested_regulatory_status_never_creates_report_grade_ranking():
+    result = compare_product_planning_use_case(
+        {
+            "project": {"name": "Self-attested regulation"},
+            "land": {"area_sqm": 5000},
+            "regulation": {"applied_far": 250, "legal_far": 300},
+            "regulatoryConstraintSnapshot": {
+                "snapshotId": "unverified-snapshot",
+                "status": "approved",
+                "approvalStatus": "approved",
+            },
+        },
+        scenarios=[{"assetType": "apartment", "overrides": {"price_per_py": 30_000_000}}],
+    )
+
+    assert result["topByValue"] is None
+    assert result["exploratoryTopByValue"]["assetType"] == "apartment"
+    assert result["rows"][0]["scenarioEligibility"]["reportGrade"] is False
+    assert result["recommendationStatus"] == "exploratory"
+
+
+def test_parcel_weighted_far_overrides_stale_top_level_legal_far():
+    project = {
+        "project": {"name": "Weighted FAR"},
+        "land": {"area_sqm": 3000},
+        "regulation": {"applied_far": 400, "legal_far": 500},
+        "landLedger": {"parcels": [
+            {
+                "pnu": "1111010100100010000",
+                "areaSqm": 1000,
+                "landUsePlanning": {"legalFar": 200},
+            },
+            {
+                "pnu": "1111010100100020000",
+                "areaSqm": 2000,
+                "landUsePlanning": {"legalFar": 300},
+            },
+        ]},
+    }
+
+    result = compare_product_planning_use_case(
+        project,
+        scenarios=[{"assetType": "apartment", "overrides": {"price_per_py": 30_000_000}}],
+    )
+
+    assert result["buildableEnvelope"]["effectiveLegalFar"] == pytest.approx(8000 / 3000 * 100)
+    assert result["rows"][0]["scenarioEligibility"]["eligibility"] == "ineligible"
+    assert result["topByValue"] is None
+    assert result["exploratoryTopByValue"] is None
+    assert result["recommendationStatus"] == "blocked"
+    assert result["regulatoryConflicts"][0]["resolution"] == "parcel_weighted_envelope_used"

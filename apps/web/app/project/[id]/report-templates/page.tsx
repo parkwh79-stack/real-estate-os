@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
   AlertCircle,
@@ -18,6 +17,7 @@ import {
   ToggleRight,
 } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
+import { ProjectWorkspaceLink } from "../../../../components/layout/project-workspace-link";
 
 interface ReportSection {
   sectionKey: string;
@@ -362,13 +362,14 @@ export default function ReportTemplateEditorPage() {
     <div className="space-y-6 pb-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex items-start gap-3">
-          <Link
-            href={`/project/${projectId}`}
+          <ProjectWorkspaceLink
+            projectId={projectId}
+            path="report"
             className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
-            aria-label="프로젝트로 돌아가기"
+            aria-label="심사보고서로 돌아가기"
           >
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+          </ProjectWorkspaceLink>
           <div>
             <p className="text-sm font-semibold text-slate-500">프로젝트 #{projectId}</p>
             <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">보고서 템플릿 편집</h2>

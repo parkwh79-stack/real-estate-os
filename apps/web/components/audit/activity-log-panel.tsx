@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   Activity,
   ArrowDownToLine,
@@ -10,9 +11,7 @@ import {
   UserRound,
 } from "lucide-react";
 import type { ReactNode } from "react";
-
-// eslint-disable-next-line turbo/no-undeclared-env-vars
-const apiBase = process.env.REALYTICS_API_BASE_URL ?? "http://127.0.0.1:8000";
+import { fetchAuthenticatedBackend } from "../../lib/authenticated-backend-fetch";
 
 interface ActivityLog {
   eventId?: string;
@@ -35,6 +34,15 @@ interface ActivityLogResponse {
   logs?: ActivityLog[];
 }
 
+type ActivityLogLoadFailure = {
+  state: "login_required" | "forbidden" | "authority_unavailable" | "request_failed";
+  status?: number;
+};
+
+type ActivityLogLoadResult =
+  | { state: "ready"; logs: ActivityLog[] }
+  | ActivityLogLoadFailure;
+
 interface ActivityLogPanelProps {
   projectId?: string;
   limit?: number;
@@ -52,7 +60,19 @@ export async function ActivityLogPanel({
   eventType,
   showAiBrainAudit = true,
 }: ActivityLogPanelProps) {
-  const logs = await loadActivityLogs({ projectId, limit, eventType });
+  const result = await loadActivityLogs({ projectId, limit, eventType });
+  if (result.state !== "ready") {
+    return (
+      <ActivityLogFailurePanel
+        failure={result}
+        projectId={projectId}
+        title={title}
+        description={description}
+      />
+    );
+  }
+
+  const logs = result.logs;
   const summary = summarizeLogs(logs);
   const aiBrainLogs = logs.filter((log) => log.eventType === "ai_brain_used");
   const tokenSummary = summarizeAiBrainTokens(aiBrainLogs);
@@ -250,24 +270,121 @@ export async function ActivityLogPanel({
   );
 }
 
-async function loadActivityLogs({ projectId, limit, eventType }: { projectId?: string; limit: number; eventType?: string }) {
+async function loadActivityLogs({
+  projectId,
+  limit,
+  eventType,
+}: {
+  projectId?: string;
+  limit: number;
+  eventType?: string;
+}): Promise<ActivityLogLoadResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (projectId) params.set("project_id", projectId);
   if (eventType) params.set("event_type", eventType);
 
   try {
-    const res = await fetch(`${apiBase}/audit/user-activity?${params.toString()}`, {
-      cache: "no-store",
-      headers: {
-        "x-realytics-user-id": "web-dashboard",
-      },
-    });
-    if (!res.ok) return [];
+    const res = await fetchAuthenticatedBackend(
+      `/audit/user-activity?${params.toString()}`,
+    );
+    if (res.status === 401) return { state: "login_required", status: 401 };
+    if (res.status === 403) return { state: "forbidden", status: 403 };
+    if (res.status === 503 || res.status >= 500) {
+      return { state: "authority_unavailable", status: res.status };
+    }
+    if (!res.ok) return { state: "request_failed", status: res.status };
+
     const data = (await res.json()) as ActivityLogResponse;
-    return data.logs ?? [];
+    if (!Array.isArray(data.logs)) {
+      return { state: "authority_unavailable", status: 502 };
+    }
+    return { state: "ready", logs: data.logs };
   } catch {
-    return [];
+    return { state: "authority_unavailable" };
   }
+}
+
+function ActivityLogFailurePanel({
+  failure,
+  projectId,
+  title,
+  description,
+}: {
+  failure: ActivityLogLoadFailure;
+  projectId?: string;
+  title: string;
+  description: string;
+}) {
+  const content = failure.state === "login_required"
+    ? {
+      eyebrow: "세션 확인 필요",
+      heading: "감사 로그를 보려면 다시 로그인해 주세요.",
+      body: "세션이 만료되었거나 인증 정보를 확인할 수 없습니다. 로그인 후 동일한 감사 범위를 다시 열 수 있습니다.",
+      tone: "border-sky-200 bg-sky-50/70 dark:border-sky-900/60 dark:bg-sky-950/20",
+      icon: <LogIn className="h-5 w-5" />,
+    }
+    : failure.state === "forbidden"
+      ? {
+        eyebrow: "감사 권한 제한",
+        heading: "현재 역할에는 이 감사 로그를 볼 권한이 없습니다.",
+        body: "전체 감사 로그에는 audit:read 권한이 필요합니다. 개인 활동만 허용된 역할이면 조직 관리자에게 적절한 범위를 요청하세요.",
+        tone: "border-amber-200 bg-amber-50/70 dark:border-amber-900/60 dark:bg-amber-950/20",
+        icon: <ShieldCheck className="h-5 w-5" />,
+      }
+      : failure.state === "authority_unavailable"
+        ? {
+          eyebrow: "권위 저장소 연결 장애",
+          heading: "감사 기록을 불러오지 못했습니다.",
+          body: "인증 또는 PostgreSQL 감사 권위에 일시적으로 연결할 수 없습니다. 이 상태는 ‘기록 없음’으로 간주되지 않습니다.",
+          tone: "border-rose-200 bg-rose-50/70 dark:border-rose-900/60 dark:bg-rose-950/20",
+          icon: <Server className="h-5 w-5" />,
+        }
+        : {
+          eyebrow: "감사 조회 실패",
+          heading: "감사 API 응답을 확인할 수 없습니다.",
+          body: "요청이 정상 처리되지 않았습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 응답 상태를 알려 주세요.",
+          tone: "border-rose-200 bg-rose-50/70 dark:border-rose-900/60 dark:bg-rose-950/20",
+          icon: <Activity className="h-5 w-5" />,
+        };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-slate-500">REALYTICS Audit</p>
+          <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
+            {title}
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">{description}</p>
+        </div>
+        <span className="inline-flex w-fit items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+          <ShieldCheck className="h-4 w-4" />
+          {projectId ? `Project ${projectId}` : "All projects"}
+        </span>
+      </div>
+
+      <section className={`rounded-xl border p-5 shadow-sm ${content.tone}`} role="alert">
+        <div className="flex items-start gap-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white text-slate-700 shadow-sm dark:bg-slate-900 dark:text-slate-200">
+            {content.icon}
+          </div>
+          <div>
+            <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-500">{content.eyebrow}</p>
+            <h3 className="mt-2 text-lg font-black text-slate-950 dark:text-white">{content.heading}</h3>
+            <p className="mt-2 max-w-3xl text-sm font-semibold leading-6 text-slate-600 dark:text-slate-300">{content.body}</p>
+            {failure.status ? (
+              <p className="mt-3 text-xs font-bold text-slate-500">응답 상태 {failure.status}</p>
+            ) : null}
+            {failure.state === "login_required" ? (
+              <Link href="/login" className="mt-4 inline-flex rounded-lg bg-slate-950 px-4 py-2.5 text-sm font-black text-white dark:bg-white dark:text-slate-950">
+                로그인 화면으로 이동
+              </Link>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function summarizeLogs(logs: ActivityLog[]) {

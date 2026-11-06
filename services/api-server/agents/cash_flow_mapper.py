@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
+import re
 from typing import Any, Dict, List
 
+from core.calculations import normalize_tranche_priority
 from schemas.feasibility_study import FeasibilityStudyV2
 
 
@@ -17,8 +22,9 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
     diagnostics = _mapping_diagnostics(study, product_mix, revenue, costs, funding)
     cost_schedule = _monthly_cost_schedule(study)
     allocation_rules = _collection_allocation_rules(study)
+    period_basis = _cash_flow_period_basis(study)
 
-    return {
+    request = {
         "requestType": "cash_flow_run_request_v1",
         "sourceSchema": study.version,
         "project": {
@@ -42,6 +48,7 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
         "scenarioSet": _scenario_set(study),
         "assetCalculationProfiles": asset_profiles,
         "mappingDiagnostics": diagnostics,
+        **({"periodBasis": period_basis} if period_basis is not None else {}),
         "sourceMetadata": {
             "sourceName": "FeasibilityStudyV2",
             "sourceType": "internal_schema",
@@ -52,6 +59,142 @@ def build_cash_flow_run_request_from_feasibility_study(study_data: Dict[str, Any
             "approvalStatus": (raw_import.get("canonicalStatus") or "unapproved"),
             "approval": raw_import.get("approval") or {},
         },
+    }
+    captured = _captured_workbook_cash_flow(study, request)
+    if captured is not None:
+        request["capturedWorkbookCashFlow"] = captured
+        request.update(analysisOnly=True, reportEligible=False)
+        request["sourceMetadata"].update(analysisOnly=True, reportEligible=False)
+        diagnostics["warnings"].append("captured_workbook_cash_flow_basis_differs_from_business_totals")
+        diagnostics["status"] = "mapped_with_warnings"
+    return request
+
+
+def captured_cash_flow_binding(request: Dict[str, Any]) -> str:
+    """Detect stale source replay when any mapped financial input is edited."""
+    payload = {key: request.get(key) for key in (
+        "sourcesAndUses", "productMix", "pfStructure", "schedule",
+        "costSchedule", "collectionAllocationRules", "periodBasis", "monthlyFinancing", "scenarioSet",
+    )}
+    payload["project"] = {key: (request.get("project") or {}).get(key)
+                          for key in ("buildingUse", "location", "landAreaSqm", "grossFloorAreaSqm")}
+    capture = request.get("capturedWorkbookCashFlow")
+    payload["capturedSourceContentHash"] = captured_cash_flow_content_hash(capture) if isinstance(capture, dict) else None
+    def financial_only(value: Any) -> Any:
+        if isinstance(value, list):
+            return [financial_only(item) for item in value]
+        if isinstance(value, dict):
+            return {key: financial_only(item) for key, item in value.items()
+                    if key.replace("_", "").casefold() not in {
+                        "approvalstatus", "approval", "canonicalstatus", "authoritystatus", "reporteligible",
+                    }}
+        return value
+    payload = financial_only(payload)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def captured_cash_flow_content_hash(capture: dict) -> str:
+    payload = {key: value for key, value in capture.items() if key not in {"bindingHash", "contentHash"}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def captured_study_financial_binding(study_data: Any) -> str:
+    study = study_data if isinstance(study_data, FeasibilityStudyV2) else FeasibilityStudyV2.model_validate(study_data)
+    payload = study.model_dump(mode="json", exclude={"raw_import"})
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _captured_workbook_cash_flow(study: FeasibilityStudyV2, request: dict) -> dict | None:
+    raw = study.raw_import or {}
+    profile = raw.get("profile")
+    if profile not in {"sangbong-sale-feasibility", "sangbong-private-rental-feasibility"} or not study.monthly_cash_flow:
+        return None
+    request["mappingDiagnostics"]["warnings"].append("captured_cash_flow_source_unavailable")
+    source_binding = raw.get("sourceFinancialInputHash")
+    if source_binding != captured_study_financial_binding(study):
+        request["mappingDiagnostics"]["warnings"].append("captured_cash_flow_source_inputs_changed_or_unbound")
+        return None
+    review = raw.get("cashFlowReview") or {}
+    source = raw.get("sourceDocument") or {}
+    digest = source.get("originalFileHash")
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", digest):
+        return None
+    basis = request.get("periodBasis") or {}
+    rows = [row.model_dump(mode="json") for row in study.monthly_cash_flow]
+    checks = review.get("periodChecks") or []
+    if not (review.get("transactionMappingComplete") is True and review.get("calendarVerified") is True
+            and review.get("periodControlsMatched") is True and basis.get("kind") == "calendar_monthly"
+            and 1 <= len(rows) <= 240 and len(checks) == len(rows) == len(basis.get("periods") or [])):
+        return None
+    if any(row.get("month_index") != index or not (row.get("source_locator") or {}).get("complete")
+           or (row.get("source_locator") or {}).get("transactionRowPolicy") != "sangbong-cash-flow-map-v1"
+           or check.get("sourcePeriodIndex") != index or check.get("passed") is not True
+           or check.get("cumulativePassed") is not True
+           for index, (row, check) in enumerate(zip(rows, checks, strict=True))):
+        return None
+    request["mappingDiagnostics"]["warnings"].remove("captured_cash_flow_source_unavailable")
+    capture = {
+        "schemaVersion": "captured-workbook-cash-flow-v1", "sourceProfile": profile,
+        "originalFileHash": digest, "sourceName": raw.get("sourceWorkbook"),
+        "sourceFinancialInputHash": source_binding,
+        "rows": rows, "periodChecks": copy.deepcopy(checks),
+        "sourceControls": copy.deepcopy(review.get("sourceControls") or []),
+        "warnings": copy.deepcopy(review.get("warnings") or []),
+        "businessDeclaredTotals": study.metrics.model_dump(mode="json") if study.metrics else {},
+        "sourceBasis": "captured_workbook_cash_flow", "analysisOnly": True, "reportEligible": False,
+    }
+    capture["contentHash"] = captured_cash_flow_content_hash(capture)
+    capture["bindingHash"] = captured_cash_flow_binding({**request, "capturedWorkbookCashFlow": capture})
+    return capture
+
+
+def _cash_flow_period_basis(study: FeasibilityStudyV2) -> Dict[str, Any] | None:
+    """Project only the source timeline actually used by this request.
+
+    Working budget drafts can copy import context without copying source rows.
+    Their unrelated monthly analysis must not inherit the source-event guard.
+    Older Bonri captures can disclose event sequence, but cannot reconstruct the
+    omitted numeric headers or elapsed dates from display strings alone.
+    """
+    if not study.monthly_cash_flow:
+        return None
+    raw_import = dict(study.raw_import or {})
+    captured = raw_import.get("cashFlowPeriodBasis")
+    if isinstance(captured, dict):
+        return copy.deepcopy(captured)
+    sample_profile = raw_import.get("sampleProfile")
+    profile = raw_import.get("profile") or (sample_profile.get("templateId") if isinstance(sample_profile, dict) else None)
+    if not str(profile or "").startswith("legacy-bonri-mixed-use-pf-feasibility"):
+        return None
+    event_labels = {"토지계약", "교평등", "사업승인", "분양"}
+    if not any(row.period.strip() in event_labels for row in study.monthly_cash_flow):
+        return None
+    periods = []
+    for row in study.monthly_cash_flow:
+        source = row.source_locator or {}
+        periods.append({
+            "sourcePeriodIndex": row.month_index,
+            "label": row.period,
+            "periodKind": "event" if row.period.strip() in event_labels else "unknown",
+            "sourceMonthNumber": None,
+            # Only captured locators are retained. The old transaction range
+            # does not prove which original header cell supplied a month.
+            "sourceLocator": {
+                "sourceName": source.get("sourceDocument") or source.get("sourceName") or raw_import.get("sourceWorkbook"),
+                "sheet": source.get("sheetName") or source.get("sheet"),
+                "cell": source.get("cell"),
+            },
+        })
+    return {
+        "schemaVersion": "cash-flow-period-basis-v1", "kind": "source_sequence", "periods": periods,
+        "scheduleBindings": {event.key: {"sourcePeriodIndex": None, "sourceMonthNumber": None} for event in study.schedule},
+        "warnings": [
+            "이전에 저장된 원본 사건 순서만 확인됩니다. 월 번호 헤더와 일정 대응은 원본 파일을 다시 가져와 확인해 주세요.",
+            "사전 사건의 실제 날짜와 경과 기간은 미확인입니다. 원본 열 순번을 한 달씩의 기간으로 계산하지 않습니다.",
+        ],
     }
 
 
@@ -66,6 +209,7 @@ def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
     raw_import = dict(study.raw_import or {})
     approval_status = str(raw_import.get("canonicalStatus") or "candidate")
     rows: List[Dict[str, Any]] = []
+    excluded_financing_transfers: List[Dict[str, Any]] = []
     for row in study.monthly_cash_flow:
         cash_out = dict(row.cash_out or {})
         if not cash_out:
@@ -81,6 +225,14 @@ def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
             try:
                 amount = abs(float(raw_amount or 0.0))
             except (TypeError, ValueError):
+                continue
+            if _is_financing_transfer_key(key):
+                excluded_financing_transfers.append({
+                    "monthIndex": row.month_index,
+                    "sourceKey": str(key),
+                    "amount": amount,
+                    "reason": "financing_transfer_not_project_cost",
+                })
                 continue
             source_breakdown[str(key)] = amount
             classified[_cost_bucket(key)] += amount
@@ -98,11 +250,22 @@ def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
         "approvalStatus": approval_status,
         "sourceType": "approved_excel_schedule" if approval_status == "approved" else "workbook_schedule_candidate",
         "sourceLocator": _first_source_locator(rows),
+        "excludedFinancingTransfers": excluded_financing_transfers,
     }
 
 
 def _cost_bucket(value: Any) -> str:
     text = str(value or "").strip().casefold()
+    row_number = _legacy_row_number(text)
+    if row_number is not None:
+        if 58 <= row_number <= 62:
+            return "constructionCost"
+        if 63 <= row_number <= 68:
+            return "landCost"
+        if 97 <= row_number <= 110:
+            return "financialCost"
+        if 70 <= row_number <= 92 or 112 <= row_number <= 119:
+            return "otherCost"
     if any(token in text for token in ("land", "site acquisition", "토지", "용지", "매입")):
         return "landCost"
     if any(token in text for token in ("construction", "contractor", "공사", "도급", "기성")):
@@ -110,6 +273,27 @@ def _cost_bucket(value: Any) -> str:
     if any(token in text for token in ("finance", "interest", "fee", "금융", "이자", "수수료")):
         return "financialCost"
     return "otherCost"
+
+
+def _legacy_row_number(value: Any) -> int | None:
+    match = re.match(r"^row_(\d+)_", str(value or "").strip().casefold())
+    return int(match.group(1)) if match else None
+
+
+def _is_financing_transfer_key(value: Any) -> bool:
+    row_number = _legacy_row_number(value)
+    if row_number is not None and (93 <= row_number <= 96 or row_number in {108, 111}):
+        return True
+    text = str(value or "").strip().casefold()
+    return any(token in text for token in (
+        "loan_repayment",
+        "debt_repayment",
+        "equity_recovery",
+        "equity_distribution",
+        "대출금상환",
+        "차입금상환",
+        "투자자금회수",
+    ))
 
 
 def _first_source_locator(rows: List[Dict[str, Any]]) -> Dict[str, Any] | None:
@@ -302,25 +486,33 @@ def _profile(asset_profiles: Dict[str, Any], asset_type: str) -> Dict[str, Any]:
 
 
 def _revenue_sources(study: FeasibilityStudyV2) -> Dict[str, Any]:
-    result = {
-        "totalSalesRevenue": study.metrics.total_revenue if study.metrics else 0,
-        "leaseDeposit": 0,
-        "forwardSaleProceeds": 0,
-        "refinancingProceeds": 0,
-        "otherRevenue": 0,
-    }
+    # A declared total is a fallback, not another line item.  A workbook may
+    # split sales into private housing, public housing and commercial receipts.
+    # Each source line must contribute once, including an explicit zero.
+    grouped: Dict[str, List[Any]] = {key: [] for key in (
+        "totalSalesRevenue", "leaseDeposit", "forwardSaleProceeds", "refinancingProceeds", "otherRevenue"
+    )}
     for item in study.revenue_items:
-        if item.category in {"sales", "sales_revenue"}:
-            result["totalSalesRevenue"] = item.amount or result["totalSalesRevenue"]
-        elif item.category in {"lease", "lease_deposit"}:
-            result["leaseDeposit"] += item.amount or 0
-        elif item.category in {"forward_sale", "sale_proceeds"}:
-            result["forwardSaleProceeds"] += item.amount or 0
-        elif item.category in {"refinancing", "refinancing_loan"}:
-            result["refinancingProceeds"] += item.amount or 0
-        else:
-            result["otherRevenue"] += item.amount or 0
+        grouped[_revenue_bucket(item.category)].append(item)
+    result = {
+        key: None if any(item.amount is None for item in items) else sum(item.amount for item in items)
+        for key, items in grouped.items()
+    }
+    if not grouped["totalSalesRevenue"]:
+        result["totalSalesRevenue"] = study.metrics.total_revenue if study.metrics else 0
     return result
+
+
+def _revenue_bucket(category: str) -> str:
+    if category in {"sales", "sales_revenue"}:
+        return "totalSalesRevenue"
+    if category in {"lease", "lease_deposit"}:
+        return "leaseDeposit"
+    if category in {"forward_sale", "sale_proceeds"}:
+        return "forwardSaleProceeds"
+    if category in {"refinancing", "refinancing_loan"}:
+        return "refinancingProceeds"
+    return "otherRevenue"
 
 
 def _cost_uses(study: FeasibilityStudyV2) -> Dict[str, Any]:
@@ -347,7 +539,11 @@ def _cost_uses(study: FeasibilityStudyV2) -> Dict[str, Any]:
 
 
 def _funding_sources(study: FeasibilityStudyV2) -> Dict[str, Any]:
-    pf_loan = sum(tranche.amount or 0 for tranche in study.financing if tranche.priority in {"senior", "middle", "junior", "other"})
+    pf_loan = sum(
+        tranche.amount or 0
+        for tranche in study.financing
+        if tranche.priority in {"senior", "mezzanine", "junior", "other"}
+    )
     equity = sum(tranche.amount or 0 for tranche in study.financing if tranche.priority == "equity")
     bridge = sum(tranche.amount or 0 for tranche in study.financing if tranche.priority == "bridge")
     return {
@@ -361,6 +557,7 @@ def _funding_sources(study: FeasibilityStudyV2) -> Dict[str, Any]:
 def _pf_structure(study: FeasibilityStudyV2) -> List[Dict[str, Any]]:
     return [
         {
+            "trancheId": tranche.tranche_id,
             "tranche": tranche.name,
             "name": tranche.priority,
             "amount": tranche.amount,
@@ -371,6 +568,7 @@ def _pf_structure(study: FeasibilityStudyV2) -> List[Dict[str, Any]]:
             "repaymentSource": tranche.repayment_source,
         }
         for tranche in study.financing
+        if tranche.priority != "equity"
     ]
 
 
@@ -413,8 +611,14 @@ def _mapping_diagnostics(
     warnings = []
     if not product_mix:
         warnings.append("product_mix_missing")
-    if not revenue.get("totalSalesRevenue"):
+    if revenue.get("totalSalesRevenue") is None:
         warnings.append("total_sales_revenue_missing")
+    missing_revenue_items = [
+        {"key": item.key, "category": item.category, "bucket": _revenue_bucket(item.category)}
+        for item in study.revenue_items if item.amount is None
+    ]
+    if missing_revenue_items:
+        warnings.append("revenue_line_items_incomplete")
     if not costs.get("totalProjectCost"):
         warnings.append("total_project_cost_missing")
     if not funding.get("pfLoan"):
@@ -424,6 +628,7 @@ def _mapping_diagnostics(
     return {
         "status": "mapped_with_warnings" if warnings else "ready_for_cash_flow_engine",
         "warnings": warnings,
+        **({"missingRevenueItems": missing_revenue_items} if missing_revenue_items else {}),
     }
 
 
@@ -447,11 +652,4 @@ def _value(value: Any) -> Any:
 
 
 def _repayment_priority(priority: str) -> int:
-    return {
-        "senior": 1,
-        "middle": 2,
-        "junior": 3,
-        "bridge": 1,
-        "other": 4,
-        "equity": 5,
-    }.get(priority, 99)
+    return normalize_tranche_priority(priority)

@@ -1,5 +1,8 @@
 from use_cases.chief_deal_orchestration import plan_chief_deal_orchestration_use_case
 
+# MOCK-DATA: executable fixtures allocate total cost to land/construction and
+# provide product revenue and construction dates; missing legal evidence stays missing.
+
 
 def test_chief_plan_sparse_project_builds_missing_input_register():
     plan = plan_chief_deal_orchestration_use_case("p1", {"project": {"id": "p1"}})
@@ -28,13 +31,13 @@ def test_chief_plan_tags_source_and_calculated_values():
             "project": {"id": "p2", "name": "테스트 PF"},
             "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "a1"}],
             "land": {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000},
-            "landEvidence": [{"evidenceType": "official_land_price", "pnu": "1111010100100010000"}],
+            "landEvidence": {"officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000"}},
             "regulation": {"far": 300},
             "legal": {"permitStatus": "pending"},
             "market": {"manualComparables": [{"name": "A"}]},
-            "product_mix": [{"type": "apartment", "units": 100}],
-            "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300},
-            "schedule": {"completionMonth": 36},
+            "product_mix": [{"type": "apartment", "units": 100, "totalRevenue": 1000}],
+            "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300, "land_cost": 500},
+            "schedule": {"construction_start": "2026-01", "completion": "2029-01"},
             "pf_structure": [{"tranche": "Senior", "amount": 500}],
         },
     )
@@ -63,13 +66,13 @@ def test_chief_task_graph_changes_by_workflow_track():
         "project": {"id": "p_track", "name": "Track test"},
         "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "a1"}],
         "land": {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000},
-        "landEvidence": [{"evidenceType": "official_land_price", "pnu": "1111010100100010000"}],
+        "landEvidence": {"officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000"}},
         "regulation": {"far": 300},
         "legal": {"permitStatus": "pending"},
         "market": {"manualComparables": [{"name": "A"}]},
-        "product_mix": [{"type": "apartment", "units": 100}],
-        "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300},
-        "schedule": {"completionMonth": 36},
+        "product_mix": [{"type": "apartment", "units": 100, "totalRevenue": 1000}],
+        "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300, "land_cost": 500},
+        "schedule": {"construction_start": "2026-01", "completion": "2029-01"},
         "pf_structure": [{"tranche": "Senior", "amount": 500}],
     }
 
@@ -116,13 +119,13 @@ def test_run_chief_deal_pod_recalculation_triggers():
         "project": {"id": "p_run", "name": "테스트 PF Run"},
         "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "a1"}],
         "land": {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000},
-        "landEvidence": [{"evidenceType": "official_land_price", "pnu": "1111010100100010000"}],
+        "landEvidence": {"officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000"}},
         "regulation": {"far": 300},
         "legal": {"permitStatus": "pending"},
         "market": {"manualComparables": [{"name": "A"}]},
-        "product_mix": [{"type": "apartment", "units": 100}],
-        "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300},
-        "schedule": {"completionMonth": 36},
+        "product_mix": [{"type": "apartment", "units": 100, "totalRevenue": 1000}],
+        "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300, "land_cost": 500},
+        "schedule": {"construction_start": "2026-01", "completion": "2029-01"},
         "pf_structure": [{"tranche": "Senior", "amount": 500}],
     }
     
@@ -192,8 +195,8 @@ def test_land_pod_runs_with_land_ledger_even_when_land_evidence_is_missing():
             "analysisType": "land_ledger_analysis_v1",
             "summary": {"parcelCount": 2, "totalAreaSqm": 1000},
             "parcels": [
-                {"rawLotNumber": "1", "normalizedLotNumber": "1"},
-                {"rawLotNumber": "2", "normalizedLotNumber": "2"},
+                {"rawLotNumber": "1", "normalizedLotNumber": "1", "areaSqm": 500, "owners": []},
+                {"rawLotNumber": "2", "normalizedLotNumber": "2", "areaSqm": 500, "owners": []},
             ],
         },
         "regulation": {"zoning": "제2종일반주거지역"},
@@ -229,7 +232,7 @@ def test_market_product_pod_persists_ai_review_for_market_evidence_gaps():
         "project": {"id": "p_market_gap", "name": "Market gap test", "type": "apartment"},
         "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "bp1"}],
         "land": {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000},
-        "landEvidence": [{"evidenceType": "official_land_price", "pnu": "1111010100100010000", "evidenceId": "ev-land-1"}],
+        "landEvidence": {"officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000", "evidenceId": "ev-land-1"}},
         "regulation": {"zoning": "residential"},
         "legal": {"permitStatus": "pending"},
         "market": {},
@@ -264,8 +267,8 @@ def test_market_product_pod_persists_ai_review_for_market_evidence_gaps():
                 }
             ],
         },
-        "feasibility_input": {"total_revenue": 100000000000, "total_cost": 80000000000},
-        "schedule": {"completionMonth": 36},
+        "feasibility_input": {"total_revenue": 100000000000, "total_cost": 80000000000, "construction_cost": 30000000000, "land_cost": 50000000000},
+        "schedule": {"construction_start": "2026-01", "completion": "2029-01"},
         "pf_structure": [{"tranche": "Senior", "amount": 50000000000}],
         "chief_orchestration_state": {
             "podRuns": {
@@ -326,13 +329,13 @@ def test_run_all_pods_executes_track_order_and_reports_summary():
         "project": {"id": "p_run_all", "name": "Run all PF"},
         "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "a1"}],
         "land": {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000},
-        "landEvidence": [{"evidenceType": "official_land_price", "pnu": "1111010100100010000"}],
+        "landEvidence": {"officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000"}},
         "regulation": {"far": 300},
         "legal": {"permitStatus": "pending"},
         "market": {"manualComparables": [{"name": "A", "pricePerPy": 30_000_000}]},
-        "product_mix": [{"type": "apartment", "units": 100, "pricePerPy": 31_000_000}],
-        "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300},
-        "schedule": {"completionMonth": 36},
+        "product_mix": [{"type": "apartment", "units": 100, "pricePerPy": 31_000_000, "totalRevenue": 1000}],
+        "feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 300, "land_cost": 500},
+        "schedule": {"construction_start": "2026-01", "completion": "2029-01"},
         "pf_structure": [{"tranche": "Senior", "amount": 500}],
     }
     artifacts = {}
@@ -346,9 +349,15 @@ def test_run_all_pods_executes_track_order_and_reports_summary():
 
     summary = plan["runAllSummary"]
     assert summary["requestedPodCount"] == 6
-    assert summary["completedCount"] >= 5
+    assert summary["completedCount"] == 6
     assert summary["workflowTrack"] == "pf"
-    assert artifacts
     runs = {run["podKey"]: run for run in plan["podRuns"]}
-    assert runs["land_legal"]["status"] == "completed"
-    assert runs["pf_credit"]["artifactKeys"]
+    assert set(runs) == {
+        "land_legal", "market_product", "cost_schedule", "feasibility_cashflow", "pf_credit", "public_policy",
+    }
+    for pod_key, run in runs.items():
+        assert run["status"] == "completed"
+        artifact = artifacts[run["artifactKeys"][-1]]
+        assert artifact["podKey"] == pod_key
+        assert artifact["domainAgentRuntime"]["agentRunId"]
+        assert artifact["result"]["agentRuntimeExecutions"]

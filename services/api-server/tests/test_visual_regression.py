@@ -83,7 +83,9 @@ def test_visual_regression_baseline_generation():
 
         # First run creates baseline image
         reg_report_1 = qa_agent.run_visual_regression(pdf_bytes, report_id="regression_test_id")
-        assert reg_report_1["status"] == "passed"
+        assert reg_report_1["status"] == "baseline_created"
+        assert reg_report_1["pages_compared"] == 0
+        assert reg_report_1["matched_pages"] == 0
         assert reg_report_1["results"][0]["status"] == "baseline_created"
         
         # Baseline file should be saved in the directory
@@ -98,6 +100,8 @@ def test_visual_regression_baseline_generation():
         # (<1s). 30s is a generous, non-flaky ceiling that still fails loudly if
         # the quadratic pattern is ever reintroduced.
         start = time.perf_counter()
+        qa_agent.review_baseline("regression_test_id", expected_manifest_hash=reg_report_1["baseline_manifest_hash"],
+                                 reviewer="test-layout-reviewer", reason="Synthetic layout inspected for regression testing")
         reg_report_2 = qa_agent.run_visual_regression(pdf_bytes, report_id="regression_test_id")
         elapsed = time.perf_counter() - start
         assert elapsed < 30, (
@@ -109,3 +113,31 @@ def test_visual_regression_baseline_generation():
         assert reg_report_2["regression_pages"] == 0
         assert reg_report_2["results"][0]["status"] == "matched"
         assert reg_report_2["results"][0]["diff_percentage"] == 0.0
+
+
+def test_reviewed_reference_is_independent_of_execution_and_bound_to_unchanged_images(tmp_path):
+    import fitz
+    import pytest
+    with fitz.open() as doc:
+        doc.new_page(width=120, height=120).insert_text((15, 40), "Reference")
+        pdf = doc.tobytes()
+    agent = VisualQAAgent(tmp_path)
+    key = agent.baseline_key("tenant-a", "project-a", "template-v1")
+    assert key != agent.baseline_key("tenant-b", "project-a", "template-v1")
+    assert key != agent.baseline_key("tenant-a", "project-a", "template-v2")
+    first = agent.run_visual_regression(pdf, "run-1", dpi=72, baseline_id=key)
+    assert first["status"] == "baseline_created" and not first["baseline_reviewed"]
+    before_review = agent.run_visual_regression(pdf, "run-2", dpi=72, baseline_id=key)
+    assert before_review["status"] == "baseline_unreviewed"
+    with pytest.raises(ValueError, match="changed"):
+        agent.review_baseline(key, expected_manifest_hash="stale", reviewer="reviewer", reason="inspected")
+    agent.review_baseline(key, expected_manifest_hash=first["baseline_manifest_hash"], reviewer="reviewer", reason="inspected synthetic page")
+    result = agent.run_visual_regression(pdf, "run-3", dpi=72, baseline_id=key)
+    assert result["status"] == "passed" and result["baseline_reviewed"] is True
+    assert result["baseline_id"] == key and result["report_id"] == "run-3"
+    assert len(list(tmp_path.glob("baseline_*.png"))) == 1
+    assert agent.run_visual_regression(pdf, "run-4", dpi=73, baseline_id=key)["status"] == "baseline_invalid"
+    image = tmp_path / f"baseline_{key}_page_1.png"
+    image.write_bytes(b"modified image")
+    assert agent.run_visual_regression(pdf, "run-5", dpi=72, baseline_id=key)["status"] == "baseline_invalid"
+    assert image.read_bytes() == b"modified image"

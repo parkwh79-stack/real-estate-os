@@ -1,4 +1,9 @@
-# Latest Pilot Execution Status
+# Pilot Execution Record — 2026-06-12
+
+이 문서는 아래에 명시된 과거 실행의 기록이다. 현재 전체 프로젝트의 최신
+실행 상태를 뜻하지 않는다. 현재 구현과 다음 작업은
+[구현 현황](current-implementation-status.md)과
+[제품 실행 계획](realytics-os-next-work-roadmap.md)을 따른다.
 
 Updated: 2026-06-12
 Project ID: `pilot-latest`

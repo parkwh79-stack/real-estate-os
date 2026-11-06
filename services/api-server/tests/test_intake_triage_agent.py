@@ -1,7 +1,11 @@
 from agents.ai_connection import AIExtractionResult
 from agents.intake_triage_agent import triage_intake_documents
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from main import app
+from db.repositories.request_project_repository import project_request_scope
+from routers import projects
+from test_request_project_scope import Authority
 
 
 def test_triage_recommends_pf_for_feasibility_and_risk_docs():
@@ -90,3 +94,32 @@ def test_intake_triage_endpoint_returns_track_cards():
     project = detail.json()
     assert project["latestIntakeTriage"]["recommendedTrack"] == body["recommendedTrack"]
     assert len(project["intakeTriageHistory"]) == 1
+
+
+def test_normalized_intake_persists_offline_triage_and_opens_input_review(monkeypatch):
+    authority = Authority("tenant-a")
+    authority.row["land"] = {"address": "Fixture address"}
+    monkeypatch.setattr(projects, "storage_backend", lambda: "postgres")
+    monkeypatch.setattr(projects, "enforce_project_tenant_scope", lambda *_: None)
+    permissions = []
+    events = []
+
+    def forbid_profile(*_args, **_kwargs):
+        raise AssertionError("Hosted default intake loaded an AI profile")
+
+    monkeypatch.setattr(projects, "ai_context_from_request", forbid_profile)
+    monkeypatch.setattr("agents.intake_triage_agent._try_ai_triage", forbid_profile)
+    monkeypatch.setattr(projects, "authorize_request", lambda _request, permission: permissions.append(permission))
+    monkeypatch.setattr(projects, "record_sensitive_project_event", lambda _request, **event: events.append(event))
+    request = Request({"type": "http", "method": "POST", "path": "/projects/p/intake/triage", "headers": []})
+    with project_request_scope(lambda: authority):
+        triage = projects.smart_intake_triage("p", request, {"files": [
+            {"filename": "pf-review.xlsx", "documentType": "feasibility_workbook", "confidence": 0.95}
+        ]})
+        finalized = projects.finalize_smart_intake("p", request, {"track": triage["recommendedTrack"], "run": False})
+    assert triage["recommendationSource"] == "deterministic"
+    assert authority.row["latestIntakeTriage"]["recommendedTrack"] == triage["recommendedTrack"]
+    assert finalized["projectId"] == "p" and finalized["nextStage"] == "input_review"
+    assert finalized["analysisRun"] is None
+    assert permissions == ["project:write", "project:write"]
+    assert [event["event_type"] for event in events] == ["intake_triage_completed"]

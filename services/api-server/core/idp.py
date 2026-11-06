@@ -11,20 +11,35 @@ from typing import Any, Dict
 
 from fastapi import HTTPException, Request
 
-from core.runtime_profile import security_default
+from core.runtime_profile import identity_membership_authority, security_default
 
 
 SECRET_HINT_KEYS = {"secret", "token", "key", "password"}
+REALYTICS_ROLES = frozenset(
+    {
+        "admin",
+        "reviewer",
+        "analyst",
+        "viewer",
+        "legal_reviewer",
+        "legal_counsel_approver",
+        "external_counsel",
+        "compliance_officer",
+    }
+)
 
 
 @dataclass
 class IdpPrincipal:
     user_id: str
-    tenant_id: str
+    issuer: str
+    subject: str
+    tenant_id: str | None
     email: str | None
     display_name: str
-    role: str
+    role: str | None
     provider: str
+    principal_type: str
     claims: Dict[str, Any]
     token_id: str | None = None
 
@@ -42,6 +57,7 @@ def idp_status() -> Dict[str, Any]:
         "hs256SecretConfigured": bool(os.environ.get("REALYTICS_IDP_JWT_SECRET")),
         "unsignedDevTokensAllowed": _allow_unsigned_dev_tokens(),
         "tenantIsolationMode": tenant_isolation_mode(),
+        "membershipAuthority": identity_membership_authority(),
         "secretPolicy": "Secrets are read from environment/secret manager only and are not returned by this API.",
         "limitations": _limitations(mode),
     }
@@ -59,11 +75,23 @@ def tenant_isolation_mode() -> str:
 
 
 def principal_from_request(request: Request) -> IdpPrincipal | None:
+    cached = verified_principal_from_request_state(request)
+    if cached is not None:
+        return cached
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     token = _bearer_token(auth_header)
     if not token:
         return None
-    return principal_from_bearer_token(token)
+    principal = principal_from_bearer_token(token)
+    request.state.realytics_verified_principal = principal
+    return principal
+
+
+def verified_principal_from_request_state(request: Request) -> IdpPrincipal | None:
+    """Return a principal already verified during this request, without I/O."""
+
+    principal = getattr(request.state, "realytics_verified_principal", None)
+    return principal if isinstance(principal, IdpPrincipal) else None
 
 
 def principal_from_bearer_token(token: str) -> IdpPrincipal:
@@ -172,8 +200,10 @@ def _validate_standard_claims(claims: Dict[str, Any]) -> None:
     nbf = claims.get("nbf")
     if nbf is not None and int(nbf) > now:
         raise HTTPException(status_code=401, detail={"error": "token_not_yet_valid"})
-    issuer = os.environ.get("REALYTICS_IDP_ISSUER")
-    if issuer and claims.get("iss") != issuer:
+    issuer = _first_env("REALYTICS_IDP_ISSUER", "REALYTICS_OIDC_ISSUER")
+    if issuer and canonicalize_issuer(claims.get("iss")) != canonicalize_issuer(
+        issuer
+    ):
         raise HTTPException(status_code=401, detail={"error": "issuer_mismatch"})
     audience = os.environ.get("REALYTICS_IDP_AUDIENCE")
     if audience:
@@ -184,30 +214,182 @@ def _validate_standard_claims(claims: Dict[str, Any]) -> None:
 
 
 def _principal_from_claims(claims: Dict[str, Any]) -> IdpPrincipal:
-    user_id = (
-        claims.get("realytics_user_id")
-        or claims.get("preferred_username")
-        or claims.get("email")
-        or claims.get("sub")
+    app_metadata = claims.get("app_metadata")
+    if not isinstance(app_metadata, dict):
+        app_metadata = {}
+    user_metadata = claims.get("user_metadata")
+    if not isinstance(user_metadata, dict):
+        user_metadata = {}
+    provider = os.environ.get("REALYTICS_IDP_PROVIDER") or claims.get("iss") or "external-idp"
+    authority = identity_membership_authority()
+    issuer = canonicalize_issuer(
+        claims.get("iss")
+        or _first_env("REALYTICS_IDP_ISSUER", "REALYTICS_OIDC_ISSUER")
+        or (provider if authority == "claims" else "")
     )
+    subject = str(claims.get("sub") or "").strip()
+    if authority == "postgres":
+        if not issuer:
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "missing_issuer_claim"},
+            )
+        if not subject:
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "missing_subject_claim"},
+            )
+    is_supabase = _is_supabase_claims(claims, provider=str(provider))
+    if authority == "postgres":
+        # The signed issuer/subject pair is the only identity key accepted by
+        # the normalized directory.  Email, metadata, and other aliases are
+        # profile attributes, never identity or authorization authority.
+        user_id = subject
+    elif is_supabase:
+        user_id = (
+            claims.get("realytics_user_id")
+            or app_metadata.get("realytics_user_id")
+            or claims.get("sub")
+        )
+    else:
+        user_id = (
+            claims.get("realytics_user_id")
+            or app_metadata.get("realytics_user_id")
+            or claims.get("preferred_username")
+            or claims.get("email")
+            or claims.get("sub")
+        )
     if not user_id:
         raise HTTPException(status_code=401, detail={"error": "missing_user_claim"})
-    tenant_id = claims.get("realytics_tenant_id") or claims.get("tenant_id") or claims.get("tid")
-    if not tenant_id:
+    if not subject:
+        # Compatibility-only claims mode predates issuer/subject persistence.
+        # Keep a deterministic subject for audit while production PostgreSQL
+        # authority requires the actual signed ``sub`` claim above.
+        subject = str(user_id)
+    if not issuer:
+        issuer = str(provider)
+    tenant_id = (
+        claims.get("realytics_tenant_id")
+        or app_metadata.get("realytics_tenant_id")
+        or claims.get("tenant_id")
+        or app_metadata.get("tenant_id")
+        or claims.get("tid")
+    )
+    if (
+        not tenant_id
+        and authority == "claims"
+        and is_supabase
+        and _env_flag("REALYTICS_IDP_PERSONAL_TENANT_FALLBACK")
+        and claims.get("sub")
+    ):
+        prefix = (
+            os.environ.get("REALYTICS_IDP_PERSONAL_TENANT_PREFIX")
+            or "supabase-user"
+        ).strip()
+        tenant_id = f"{prefix}:{claims['sub']}"
+    if not tenant_id and authority == "claims":
         raise HTTPException(status_code=401, detail={"error": "missing_tenant_claim"})
-    role = claims.get("realytics_role") or claims.get("role") or _first_role(claims) or "viewer"
+    if authority == "postgres":
+        # Even server-owned app_metadata is deliberately ignored here: stale
+        # JWT authorization data cannot outrank the live DB membership record.
+        tenant_id = None
+        role = None
+    else:
+        explicit_role = claims.get("realytics_role") or app_metadata.get("realytics_role")
+        if is_supabase:
+            # Supabase's top-level role is a Postgres API role such as
+            # "authenticated"; it is not a REALYTICS RBAC role. Only
+            # server-owned app_metadata/custom claims may grant a shared-tenant
+            # role in the local compatibility lane.
+            role = explicit_role
+            if not role and _env_flag("REALYTICS_IDP_PERSONAL_TENANT_FALLBACK"):
+                role = os.environ.get("REALYTICS_IDP_PERSONAL_TENANT_ROLE") or "analyst"
+        else:
+            role = explicit_role or claims.get("role") or _first_role(claims)
+        role = str(role or "viewer").casefold()
+        if role not in REALYTICS_ROLES:
+            role = "viewer"
     email = claims.get("email")
-    display_name = claims.get("name") or claims.get("display_name") or str(user_id)
+    display_name = (
+        claims.get("name")
+        or claims.get("display_name")
+        or user_metadata.get("full_name")
+        or user_metadata.get("name")
+        or str(user_id)
+    )
     return IdpPrincipal(
         user_id=str(user_id),
-        tenant_id=str(tenant_id),
+        issuer=issuer,
+        subject=subject,
+        tenant_id=str(tenant_id) if tenant_id is not None else None,
         email=str(email) if email else None,
         display_name=str(display_name),
-        role=str(role),
-        provider=os.environ.get("REALYTICS_IDP_PROVIDER") or claims.get("iss") or "external-idp",
+        role=str(role) if role is not None else None,
+        provider=str(provider),
+        principal_type=_principal_type_from_claims(claims),
         claims=claims,
         token_id=claims.get("jti"),
     )
+
+
+def _principal_type_from_claims(claims: Dict[str, Any]) -> str:
+    """Classify signed bearer principals without guessing that clients are humans.
+
+    Hardened approval paths require the IdP to map an explicit
+    ``realytics_principal_type=human`` claim. Common client-credential markers
+    are still classified as service for audit clarity; every other token remains
+    unknown and therefore fails closed at the Parser V2 approval boundary.
+    """
+
+    app_metadata = claims.get("app_metadata")
+    if not isinstance(app_metadata, dict):
+        app_metadata = {}
+    explicit = str(
+        claims.get("realytics_principal_type")
+        or app_metadata.get("realytics_principal_type")
+        or ""
+    ).casefold()
+    if explicit in {"human", "service"}:
+        return explicit
+    grant_type = str(claims.get("gty") or claims.get("grant_type") or "").casefold()
+    token_use = str(claims.get("token_use") or "").casefold()
+    identity_type = str(claims.get("idtyp") or "").casefold()
+    if grant_type == "client_credentials" or token_use == "client" or identity_type == "app":
+        return "service"
+    if (
+        _is_supabase_claims(
+            claims,
+            provider=os.environ.get("REALYTICS_IDP_PROVIDER") or "",
+        )
+        and claims.get("sub")
+        and claims.get("session_id")
+        and claims.get("is_anonymous") is not True
+    ):
+        return "human"
+    return "unknown"
+
+
+def _is_supabase_claims(claims: Dict[str, Any], *, provider: str) -> bool:
+    issuer = canonicalize_issuer(claims.get("iss"))
+    return provider.casefold() == "supabase" or (
+        issuer.endswith(".supabase.co/auth/v1")
+        or issuer.endswith(".supabase.in/auth/v1")
+    )
+
+
+def _env_flag(key: str) -> bool:
+    return (os.environ.get(key) or "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def canonicalize_issuer(value: Any) -> str:
+    """Match migration 0012's ``btrim`` plus trailing-slash removal."""
+
+    return str(value or "").strip().rstrip("/")
 
 
 def _first_role(claims: Dict[str, Any]) -> str | None:
@@ -223,7 +405,7 @@ def _allow_unsigned_dev_tokens() -> bool:
 
 def _limitations(mode: str) -> list[str]:
     if mode in {"oidc", "jwks", "rs256"}:
-        return ["OIDC RS256/JWKS signature, issuer, audience, and expiry validation is enabled."]
+        return ["OIDC ES256/RS256 JWKS signature, issuer, audience, and expiry validation is enabled."]
     if mode in {"hs256", "jwt_hs256"}:
         return [
             "HS256 JWT verification is enabled for pilot/enterprise proxy integrations.",

@@ -15,6 +15,17 @@ class RemoteCodingExecutorError(RuntimeError):
     pass
 
 
+class _NoExecutorRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A configured executor is the sole recipient of the authorization
+        # header and job request. Redirects do not inherit that authorization.
+        return None
+
+
+def _open_executor_request(request, *, timeout):
+    return urllib.request.build_opener(_NoExecutorRedirects()).open(request, timeout=timeout)
+
+
 class RemoteIsolatedCodingExecutor:
     """Calls a separately deployed sandbox executor; never runs code in the API process."""
 
@@ -26,7 +37,7 @@ class RemoteIsolatedCodingExecutor:
         timeout_seconds: int = 900,
         heartbeat_seconds: int = 20,
     ) -> None:
-        self.endpoint = (endpoint or os.environ.get("REALYTICS_CODING_EXECUTOR_URL") or "").rstrip("/")
+        self.endpoint = (endpoint or os.environ.get("REALYTICS_CODING_EXECUTOR_URL") or "").strip().rstrip("/")
         self.token = token or os.environ.get("REALYTICS_CODING_EXECUTOR_TOKEN")
         self.timeout_seconds = max(30, int(timeout_seconds))
         self.heartbeat_seconds = max(5, int(heartbeat_seconds))
@@ -79,22 +90,22 @@ class RemoteIsolatedCodingExecutor:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                with _open_executor_request(request, timeout=self.timeout_seconds) as response:
                     result = json.loads(response.read().decode("utf-8"))
-            except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-                raise RemoteCodingExecutorError(f"CODING_EXECUTOR_CALL_FAILED: {exc}") from exc
+            except (urllib.error.URLError, TimeoutError, ValueError):
+                raise RemoteCodingExecutorError("CODING_EXECUTOR_CALL_FAILED") from None
             if heartbeat_error:
-                raise RemoteCodingExecutorError(
-                    f"CODING_EXECUTOR_LEASE_LOST: {heartbeat_error[0]}"
-                )
+                raise RemoteCodingExecutorError("CODING_EXECUTOR_LEASE_LOST")
+            if not isinstance(result, dict):
+                raise RemoteCodingExecutorError("CODING_EXECUTOR_INVALID_RESPONSE")
             if str(result.get("status") or "").lower() not in {"completed", "succeeded"}:
-                raise RemoteCodingExecutorError(
-                    str(result.get("error") or result.get("message") or "CODING_EXECUTOR_FAILED")
-                )
-            artifact_ids = [str(item) for item in result.get("artifactIds") or [] if item]
-            if not artifact_ids:
+                raise RemoteCodingExecutorError("CODING_EXECUTOR_FAILED")
+            artifact_ids = result.get("artifactIds")
+            if not isinstance(artifact_ids, list) or not artifact_ids or any(
+                not isinstance(item, str) or not item.strip() for item in artifact_ids
+            ):
                 raise RemoteCodingExecutorError("CODING_EXECUTOR_RESULT_ARTIFACT_REQUIRED")
-            return artifact_ids
+            return list(dict.fromkeys(item.strip() for item in artifact_ids))
         finally:
             stop.set()
             lease_thread.join(timeout=2)
@@ -103,6 +114,8 @@ class RemoteIsolatedCodingExecutor:
         if not self.endpoint:
             raise RemoteCodingExecutorError("REALYTICS_CODING_EXECUTOR_URL_REQUIRED")
         parsed = urllib.parse.urlparse(self.endpoint)
+        if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise RemoteCodingExecutorError("CODING_EXECUTOR_INVALID_ENDPOINT")
         localhost = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
         if parsed.scheme not in ({"http", "https"} if localhost else {"https"}):
             raise RemoteCodingExecutorError(

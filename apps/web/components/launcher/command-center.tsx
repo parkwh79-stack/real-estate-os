@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useId, useRef, useState, type RefObject } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -8,6 +9,7 @@ import {
   Building2,
   CheckCircle2,
   Landmark,
+  LayoutDashboard,
   Layers3,
   LogOut,
   Loader2,
@@ -16,12 +18,40 @@ import {
   UploadCloud,
   Wallet,
 } from "lucide-react";
-import { apiBase, authHeaders, clearStoredAuthSession } from "../../lib/auth-client";
-import { fetchRecentWork, type RecentWorkItem } from "../../lib/project-client";
+import { apiBase, authHeaders } from "../../lib/auth-client";
+import {
+  hasPermission,
+  PROJECT_WRITE_PERMISSION,
+  projectWriteRestrictionMessage,
+} from "../../lib/authorization";
+import { backendErrorMessageForResponse } from "../../lib/backend-error";
+import { validateIntakeFiles } from "../../lib/intake-upload-client";
 import { getTrackWorkflowDefinition, setStoredWorkflowTrack, TRACK_LABELS, type WorkflowTrack } from "../../lib/workflow-track";
-import { SmartIntake } from "../intake/smart-intake";
+import { useAuth } from "../auth/auth-context";
+import { ReviewOnlyNotice } from "../auth/review-only-notice";
+import { DashboardAtmosphere } from "../dashboard/dashboard-atmosphere";
+import { SmartIntake, type IntakeWorkStatus } from "../intake/smart-intake";
+import { intakeProcessingFailure } from "../../lib/intake-processing-status";
+import { RecentWorkPanel } from "./recent-work-panel";
+import { ProjectNameEditor, PROJECT_NAME_MAX_LENGTH } from "../project/project-name-editor";
 
 type Phase = "idle" | "creating" | "resume" | "ready" | "error";
+type IntakeStage = "preparing" | "checking-history" | "creating-workspace";
+
+const INTAKE_STAGE_COPY: Record<IntakeStage, { title: string; detail: string }> = {
+  preparing: {
+    title: "선택한 자료를 준비하고 있습니다",
+    detail: "브라우저에서 원본을 다시 복사하지 않고 안전하게 처리합니다.",
+  },
+  "checking-history": {
+    title: "이전에 검토한 자료인지 확인하고 있습니다",
+    detail: "파일 지문만 비교하며, 원문은 아직 업로드하지 않습니다.",
+  },
+  "creating-workspace": {
+    title: "새 심사 공간을 만들고 있습니다",
+    detail: "생성이 끝나면 선택한 자료의 분류와 검토를 이어갑니다.",
+  },
+};
 
 type Classified = {
   filename: string;
@@ -217,8 +247,13 @@ function buildLocalTriage(classified: Classified[], fallbackReason: string): Tri
 
 export function CommandCenter() {
   const router = useRouter();
+  const { logout, permissions, user } = useAuth();
+  const canWriteProjects = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const nameInputId = useId();
+  const [requestedName, setRequestedName] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
+  const [intakeStage, setIntakeStage] = useState<IntakeStage>("preparing");
   const [dragOver, setDragOver] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState("");
@@ -229,29 +264,53 @@ export function CommandCenter() {
   const [triageError, setTriageError] = useState<string | null>(null);
   const [selectedTrack, setSelectedTrack] = useState<WorkflowTrack | null>(null);
   const [finalizing, setFinalizing] = useState(false);
-  const [recentWork, setRecentWork] = useState<RecentWorkItem[]>([]);
+  const finalizingRef = useRef(false);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [intakeWork, setIntakeWork] = useState<IntakeWorkStatus>({ busy: false, pending: true });
   const [continuationMatches, setContinuationMatches] = useState<ContinuationMatch[]>([]);
+  const [switchingAccount, setSwitchingAccount] = useState(false);
+  const [switchAccountError, setSwitchAccountError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    void fetchRecentWork(5).then((items) => {
-      if (active) setRecentWork(items);
-    });
-    return () => { active = false; };
-  }, []);
+  const switchAccount = useCallback(async () => {
+    if (switchingAccount) return;
+    setSwitchingAccount(true);
+    setSwitchAccountError(null);
+    try {
+      // Account switching is an explicit current-device sign-out, not an
+      // in-memory UI reset. Await cookie revocation before leaving this page.
+      await logout();
+      window.location.replace("/login?next=/start&switch=1");
+    } catch {
+      setSwitchAccountError(
+        "현재 로그인 세션을 종료하지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.",
+      );
+      setSwitchingAccount(false);
+    }
+  }, [logout, switchingAccount]);
 
   const start = useCallback(async (picked: File[], bypassContinuationCheck = false) => {
     if (!picked.length) return;
-    const name = deriveProjectName(picked);
+    if (!canWriteProjects) {
+      setError(projectWriteRestrictionMessage(user?.role));
+      setPhase("error");
+      return;
+    }
+    const name = requestedName.trim() || deriveProjectName(picked);
     setProjectName(name);
     setPhase("creating");
+    setIntakeStage("preparing");
     setError(null);
     setTriage(null);
     setTriageError(null);
     try {
-      const buffered = await Promise.all(picked.map(async (f) => new File([await f.arrayBuffer()], f.name, { type: f.type })));
+      validateIntakeFiles(picked);
+      // Browser File objects remain valid after the picker is reset. Reusing
+      // them avoids reading every large PDF/XLSX twice before the first API
+      // request, which previously made intake appear stalled.
+      const buffered = picked;
       setFiles(buffered);
       if (!bypassContinuationCheck) {
+        setIntakeStage("checking-history");
         const fingerprints = await Promise.all(buffered.map(async (file) => {
           const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
           const sha256 = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -261,6 +320,7 @@ export function CommandCenter() {
           method: "POST",
           headers: { ...authHeaders("web"), "Content-Type": "application/json" },
           body: JSON.stringify({ files: fingerprints }),
+          signal: AbortSignal.timeout(15_000),
         });
         if (continuationRes.ok) {
           const continuationBody = await continuationRes.json();
@@ -273,22 +333,36 @@ export function CommandCenter() {
         }
       }
       setContinuationMatches([]);
+      setIntakeStage("creating-workspace");
       const res = await fetch(`${apiBase}/projects/`, {
         method: "POST",
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ project: { name, status: "draft" } }),
+        signal: AbortSignal.timeout(15_000),
       });
-      if (!res.ok) throw new Error(`심사 공간 생성 실패 (${res.status})`);
+      if (!res.ok) {
+        throw new Error(
+          await backendErrorMessageForResponse(res, { action: "새 심사 공간 생성" }),
+        );
+      }
       const body = (await res.json()) as { id?: string; project?: { id?: string } };
       const id = body.id ?? body.project?.id;
       if (!id) throw new Error("생성된 심사 ID를 받지 못했습니다.");
       setProjectId(String(id));
       setPhase("ready");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "심사 공간 생성 중 오류가 발생했습니다.");
+      const timedOut = e instanceof DOMException
+        && (e.name === "TimeoutError" || e.name === "AbortError");
+      setError(
+        timedOut
+          ? "서버 응답이 15초 안에 완료되지 않았습니다. 선택한 파일은 전송되지 않았으며 같은 파일로 다시 시도할 수 있습니다."
+          : e instanceof Error
+            ? e.message
+            : "심사 공간 생성 중 오류가 발생했습니다.",
+      );
       setPhase("error");
     }
-  }, []);
+  }, [canWriteProjects, user?.role, requestedName]);
 
   const runTriage = useCallback(
     async (classified: Classified[]) => {
@@ -318,54 +392,83 @@ export function CommandCenter() {
     [projectId],
   );
 
-  const enterWorkspace = useCallback(() => {
-    if (!projectId || !selectedTrack) return;
-    setStoredWorkflowTrack(selectedTrack);
-    router.push(`/project/${projectId}/chief-orchestration?track=${selectedTrack}`);
-  }, [projectId, router, selectedTrack]);
-
   const finalizeAndEnter = useCallback(async () => {
-    if (!projectId) return;
+    if (!projectId || finalizingRef.current) return;
+    finalizingRef.current = true;
     const track = (selectedTrack ?? triage?.recommendedTrack ?? "development") as WorkflowTrack;
     setStoredWorkflowTrack(track);
     setFinalizing(true);
+    setFinalizeError(null);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/intake/finalize`, {
         method: "POST",
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ track, run: false }),
       });
-      await res.json().catch(() => ({}));
-      router.push(`/project/${projectId}/chief-orchestration?track=${track}`);
-    } catch {
-      router.push(`/project/${projectId}/chief-orchestration?track=${track}`);
+      if (!res.ok) throw new Error(await backendErrorMessageForResponse(res, { action: "자료 연결 및 보완 계획 확인" }));
+      const body: unknown = await res.json().catch(() => null);
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || (body as Record<string, unknown>).projectId !== projectId) {
+        throw new Error("현재 프로젝트의 자료 연결 결과를 확인하지 못했습니다.");
+      }
+      const result = body as Record<string, unknown>;
+      const failure = intakeProcessingFailure(result);
+      if (failure) throw new Error(failure);
+      const nextPage = result.nextStage === "input_review" ? "input-package" : "chief-orchestration";
+      router.push(`/project/${encodeURIComponent(projectId)}/${nextPage}?track=${track}`);
+    } catch (caught) {
+      setFinalizeError(caught instanceof Error ? caught.message : "자료 연결 및 보완 계획을 확인하지 못했습니다.");
     } finally {
+      finalizingRef.current = false;
       setFinalizing(false);
     }
   }, [projectId, router, selectedTrack, triage]);
 
+  const enterWorkspace = useCallback(() => {
+    if (!projectId || !selectedTrack || intakeWork.pending || finalizing || finalizeError) return;
+    void finalizeAndEnter();
+  }, [projectId, selectedTrack, intakeWork.pending, finalizing, finalizeError, finalizeAndEnter]);
+
   return (
-    <main className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-slate-950 px-5 py-12 text-white">
+    <main className="relative flex min-h-screen flex-col items-center overflow-hidden bg-slate-950 px-4 py-10 text-white sm:px-6 sm:py-12">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgba(56,189,248,0.12),transparent),radial-gradient(50%_40%_at_80%_100%,rgba(99,102,241,0.12),transparent)]" />
+      {phase === "idle" && projectId === null && files.length === 0 ? (
+        <Link href="/dashboard" className="absolute left-4 top-4 z-20 inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 text-xs font-semibold text-slate-200 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 sm:left-5 sm:top-5">
+          <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
+          대시보드 보기
+        </Link>
+      ) : null}
       <button
         type="button"
-        onClick={() => {
-          clearStoredAuthSession();
-          router.replace("/login?next=/start");
-        }}
-        className="absolute right-5 top-5 z-20 inline-flex h-9 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/80 px-3 text-xs font-bold text-slate-300 backdrop-blur hover:border-sky-500 hover:text-white"
+        data-testid="switch-account-button"
+        disabled={switchingAccount}
+        aria-busy={switchingAccount}
+        onClick={() => void switchAccount()}
+        className="absolute right-5 top-5 z-20 inline-flex h-9 items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/80 px-3 text-xs font-bold text-slate-300 backdrop-blur hover:border-sky-500 hover:text-white disabled:cursor-wait disabled:opacity-60"
       >
-        <LogOut className="h-4 w-4" />
-        다른 계정으로 로그인
+        {switchingAccount ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <LogOut className="h-4 w-4" />
+        )}
+        {switchingAccount ? "현재 세션 종료 중" : "다른 계정으로 로그인"}
       </button>
 
-      <div className="relative z-10 w-full max-w-3xl">
-        <div className="mb-8 flex flex-col items-center text-center">
+      {switchAccountError ? (
+        <div
+          role="alert"
+          data-testid="switch-account-error"
+          className="absolute right-5 top-16 z-20 max-w-sm rounded-lg border border-rose-500/40 bg-rose-950/95 px-4 py-3 text-xs font-semibold leading-5 text-rose-100 shadow-xl"
+        >
+          {switchAccountError}
+        </div>
+      ) : null}
+
+      <div className="relative z-10 w-full max-w-6xl">
+        <div className="re-dashboard-intro mb-8 flex flex-col items-center text-center">
+          <DashboardAtmosphere />
           <div className="inline-flex items-center gap-2 rounded-full border border-sky-400/30 bg-sky-500/10 px-3 py-1.5 text-xs font-bold tracking-[0.15em] text-sky-300">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-sky-500" />
-            </span>
+            <span aria-hidden="true" className="h-2 w-2 rounded-full bg-sky-400" />
             REALYTICS OS
           </div>
           <h1 className="mt-5 text-3xl font-black tracking-tight sm:text-4xl">
@@ -377,16 +480,26 @@ export function CommandCenter() {
           </p>
         </div>
 
-        {phase === "idle" && recentWork.length ? <RecentWorkPanel items={recentWork} onOpen={(item) => router.push(`/project/${item.projectId}/chief-orchestration`)} /> : null}
+        {!canWriteProjects ? (
+          <div className="mb-4">
+            <ReviewOnlyNotice role={user?.role} />
+          </div>
+        ) : null}
 
         {phase === "resume" ? (
-          <ResumePanel matches={continuationMatches} onContinue={(match) => router.push(`/project/${match.projectId}/chief-orchestration`)} onNew={() => void start(files, true)} />
+          <ResumePanel
+            matches={continuationMatches}
+            onContinue={(match) => router.push(`/project/${match.projectId}/chief-orchestration`)}
+            onNew={() => void start(files, true)}
+            canCreate={canWriteProjects}
+          />
         ) : phase === "ready" && projectId ? (
           <div className="space-y-4">
             <div className="flex flex-col gap-2 rounded-2xl border border-sky-500/20 bg-slate-900/60 p-4 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
                 <p className="text-xs font-bold uppercase tracking-wide text-sky-300">심사 공간 생성됨</p>
                 <p className="truncate text-sm font-black">{projectName}</p>
+                <div className="mt-2"><ProjectNameEditor key={projectId} projectId={projectId} currentName={projectName} onSaved={setProjectName} /></div>
               </div>
               <div className="text-xs font-semibold text-slate-400">
                 {triageLoading ? "AI가 업무 트랙을 추론 중입니다." : triage ? "진행 트랙을 선택하세요." : "자료 분류 후 트랙을 추천합니다."}
@@ -399,6 +512,7 @@ export function CommandCenter() {
               selectedTrack={selectedTrack}
               onSelect={setSelectedTrack}
               onEnter={enterWorkspace}
+              entryDisabled={intakeWork.pending || finalizing || Boolean(finalizeError)}
             />
             {finalizing ? (
               <div className="flex items-center gap-3 rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm font-bold text-sky-200">
@@ -406,23 +520,63 @@ export function CommandCenter() {
                 자료를 연결하고 주소·PNU 보강 가능성을 확인 중입니다. 다음 화면에서 부족자료와 보강 순서를 안내합니다.
               </div>
             ) : null}
+            {finalizeError ? (
+              <div role="alert" className="rounded-2xl border border-amber-400/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+                <p className="font-bold">자료 처리는 완료됐지만 연결·보완 계획 확인을 마치지 못했습니다.</p>
+                <p className="mt-2 leading-6">{finalizeError}</p>
+                <p className="mt-2 text-xs leading-5">현재 프로젝트와 파일별 처리 결과를 유지했습니다. 다시 시도해도 완료된 파일을 재전송하지 않습니다.</p>
+                <button type="button" onClick={() => void finalizeAndEnter()} disabled={finalizing || intakeWork.pending}
+                  className="mt-3 min-h-10 rounded-lg border border-amber-300 px-3 font-bold disabled:opacity-50">
+                  자료 연결 다시 시도
+                </button>
+              </div>
+            ) : null}
             <div className="rounded-2xl bg-white p-1 text-slate-900 dark:bg-slate-900 dark:text-white">
               <SmartIntake
                 projectId={projectId}
+                track={selectedTrack}
                 initialFiles={files}
                 onClassified={(classified) => void runTriage(classified)}
                 onProcessed={() => void finalizeAndEnter()}
+                onStatusChange={setIntakeWork}
+                disabled={finalizing}
               />
             </div>
           </div>
         ) : (
-          <DropZone
-            phase={phase}
-            dragOver={dragOver}
-            inputRef={inputRef}
-            onDragOver={setDragOver}
-            onStart={start}
-          />
+          <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.75fr)]">
+            <RecentWorkPanel
+              canCreateAnalysis={canWriteProjects}
+              onNewAnalysis={() => inputRef.current?.click()}
+            />
+            <section aria-labelledby="new-analysis-title" className="rounded-2xl border border-slate-800 bg-slate-900/35 p-4 backdrop-blur sm:p-5">
+              <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">New analysis</p>
+              <h2 id="new-analysis-title" className="mt-1 text-lg font-black text-white">새 자료로 분석 시작</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-400">
+                {canWriteProjects
+                  ? "기존 작업과 별개의 새 심사 공간을 만들고 원본 자료를 연결합니다."
+                  : "심사 전용 역할에서는 기존 작업을 열람할 수 있으며 새 심사 생성과 업로드는 비활성화됩니다."}
+              </p>
+              <div className="mt-4">
+                <label htmlFor={nameInputId} className="block text-sm font-semibold text-slate-200">프로젝트 이름 (선택)</label>
+                <input id={nameInputId} value={requestedName} onChange={(event) => setRequestedName(event.target.value)}
+                  maxLength={PROJECT_NAME_MAX_LENGTH} disabled={!canWriteProjects || phase === "creating"}
+                  placeholder="비워 두면 첫 번째 파일 이름을 사용합니다"
+                  className="mb-1 mt-2 min-h-11 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60" />
+                <p className="mb-4 text-xs text-slate-400">생성 후에도 이름을 바꿀 수 있습니다.</p>
+                <DropZone
+                  phase={phase}
+                  stage={intakeStage}
+                  dragOver={dragOver}
+                  inputRef={inputRef}
+                  onDragOver={setDragOver}
+                  onStart={start}
+                  disabled={!canWriteProjects}
+                  compact
+                />
+              </div>
+            </section>
+          </div>
         )}
 
         {error ? <p className="mt-4 text-center text-sm font-bold text-rose-400">{error}</p> : null}
@@ -437,7 +591,17 @@ export function CommandCenter() {
   );
 }
 
-function ResumePanel({ matches, onContinue, onNew }: { matches: ContinuationMatch[]; onContinue: (match: ContinuationMatch) => void; onNew: () => void }) {
+function ResumePanel({
+  matches,
+  onContinue,
+  onNew,
+  canCreate,
+}: {
+  matches: ContinuationMatch[];
+  onContinue: (match: ContinuationMatch) => void;
+  onNew: () => void;
+  canCreate: boolean;
+}) {
   return (
     <section className="rounded-2xl border border-amber-400/40 bg-amber-500/10 p-5 text-white">
       <p className="text-xs font-bold uppercase tracking-[0.16em] text-amber-300">기존 자료 확인</p>
@@ -446,100 +610,101 @@ function ResumePanel({ matches, onContinue, onNew }: { matches: ContinuationMatc
       <div className="mt-4 space-y-2">
         {matches.map((match) => <button key={match.projectId} type="button" onClick={() => onContinue(match)} className="flex w-full items-center justify-between rounded-xl border border-amber-300/30 bg-slate-950/50 p-3 text-left hover:border-amber-300"><span><span className="block text-sm font-black">{match.projectName}</span><span className="text-xs text-amber-100/70">{match.matchedFiles.map((file) => file.fileName).filter(Boolean).join(", ")}</span></span><ArrowRight className="h-4 w-4 text-amber-300" /></button>)}
       </div>
-      <button type="button" onClick={onNew} className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg border border-slate-600 bg-slate-950 px-4 text-sm font-black text-white hover:border-sky-400">새 프로젝트로 분석 시작</button>
-    </section>
-  );
-}
-
-function RecentWorkPanel({ items, onOpen }: { items: RecentWorkItem[]; onOpen: (item: RecentWorkItem) => void }) {
-  const actionLabels: Record<string, string> = {
-    upload_source_documents: "자료 업로드",
-    run_initial_analysis: "초기 분석 실행",
-    resume_open_reviews: "미해결 심사 이어가기",
-    inspect_latest_run: "최근 실행 확인",
-    continue_next_review_step: "다음 심사 단계",
-  };
-  return (
-    <section className="mb-4 rounded-2xl border border-sky-500/20 bg-slate-900/70 p-4 backdrop-blur">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.16em] text-sky-300">최근 작업 기억</p>
-          <h2 className="mt-1 text-base font-black text-white">이전에 검토하던 프로젝트를 이어갈까요?</h2>
-          <p className="mt-1 text-xs font-semibold text-slate-400">저장된 프로젝트, 업로드 문서, 최근 실행 상태와 승인 Gate를 기준으로 표시합니다.</p>
-        </div>
-      </div>
-      <div className="mt-3 grid gap-2">
-        {items.map((item) => (
-          <button key={item.projectId} type="button" onClick={() => onOpen(item)} className="flex items-center justify-between gap-3 rounded-xl border border-slate-700 bg-slate-950/50 p-3 text-left hover:border-sky-400">
-            <span className="min-w-0"><span className="block truncate text-sm font-black text-white">{item.projectName}</span><span className="mt-1 block text-xs font-semibold text-slate-400">자료 {item.sourceDocumentCount}건 · 검토 대기 {item.openReviewCount}건 · Risk {item.riskCount}건 · Gate {item.approvalStatus}</span></span>
-            <span className="shrink-0 rounded-lg bg-sky-500/15 px-3 py-2 text-xs font-black text-sky-200">{actionLabels[item.nextAction] ?? "작업 이어가기"}<ArrowRight className="ml-1 inline h-3 w-3" /></span>
-          </button>
-        ))}
-      </div>
+      <button
+        type="button"
+        onClick={onNew}
+        disabled={!canCreate}
+        title={!canCreate ? `필요 권한: ${PROJECT_WRITE_PERMISSION}` : undefined}
+        className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg border border-slate-600 bg-slate-950 px-4 text-sm font-black text-white hover:border-sky-400 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+      >
+        {canCreate ? "새 프로젝트로 분석 시작" : "심사 전용 · 새 프로젝트 생성 불가"}
+      </button>
     </section>
   );
 }
 
 function DropZone({
   phase,
+  stage,
   dragOver,
   inputRef,
   onDragOver,
   onStart,
+  disabled = false,
+  compact = false,
 }: {
   phase: Phase;
+  stage: IntakeStage;
   dragOver: boolean;
   inputRef: RefObject<HTMLInputElement | null>;
   onDragOver: (value: boolean) => void;
   onStart: (files: File[]) => void;
+  disabled?: boolean;
+  compact?: boolean;
 }) {
+  const stageCopy = INTAKE_STAGE_COPY[stage];
+  const interactionDisabled = disabled || phase === "creating";
   return (
     <div
       role="button"
-      tabIndex={0}
-      aria-disabled={phase === "creating"}
-      onClick={() => phase !== "creating" && inputRef.current?.click()}
+      tabIndex={interactionDisabled ? -1 : 0}
+      aria-disabled={interactionDisabled}
+      data-testid="new-analysis-dropzone"
+      onClick={() => !interactionDisabled && inputRef.current?.click()}
       onKeyDown={(e) => {
-        if ((e.key === "Enter" || e.key === " ") && phase !== "creating") inputRef.current?.click();
+        if ((e.key === "Enter" || e.key === " ") && !interactionDisabled) inputRef.current?.click();
       }}
       onDragOver={(e) => {
         e.preventDefault();
-        if (phase !== "creating") onDragOver(true);
+        if (!interactionDisabled) onDragOver(true);
       }}
       onDragLeave={() => onDragOver(false)}
       onDrop={(e) => {
         e.preventDefault();
         onDragOver(false);
-        if (phase !== "creating" && e.dataTransfer.files?.length) void onStart(Array.from(e.dataTransfer.files));
+        if (!interactionDisabled && e.dataTransfer.files?.length) void onStart(Array.from(e.dataTransfer.files));
       }}
-      className={`flex cursor-pointer flex-col items-center justify-center gap-3 rounded-3xl border-2 border-dashed px-6 py-16 text-center transition-colors ${
-        phase === "creating"
+      className={`flex cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-5 text-center transition-colors ${compact ? "min-h-[270px] py-10" : "py-16"} ${
+        disabled
+          ? "cursor-not-allowed border-slate-800 bg-slate-950/40 text-slate-500"
+          : phase === "creating"
           ? "cursor-wait border-sky-500/40 bg-sky-500/5"
           : dragOver
             ? "border-sky-400 bg-sky-500/10"
             : "border-slate-700 hover:border-sky-500/50 hover:bg-white/5"
       }`}
     >
-      {phase === "creating" ? (
+      {disabled ? (
+        <>
+          <ShieldCheck className="h-10 w-10 text-amber-300/70" />
+          <p className="text-base font-bold text-slate-300">심사 전용 역할에서는 업로드할 수 없습니다.</p>
+          <p className="text-xs text-slate-500">필요 권한 · {PROJECT_WRITE_PERMISSION}</p>
+        </>
+      ) : phase === "creating" ? (
         <>
           <Loader2 className="h-10 w-10 animate-spin text-sky-400" />
-          <p className="text-base font-bold">심사 공간을 준비하고 있습니다</p>
-          <p className="text-xs text-slate-400">생성되면 올린 자료를 AI가 바로 분류합니다.</p>
+          <p className="text-base font-bold" aria-live="polite">{stageCopy.title}</p>
+          <p className="text-xs text-slate-400">{stageCopy.detail}</p>
         </>
       ) : (
         <>
           <UploadCloud className="h-10 w-10 text-slate-500" />
           <p className="text-base font-bold">파일을 끌어다 놓거나 클릭해서 선택하세요. 여러 개도 가능합니다.</p>
-          <p className="text-xs text-slate-500">PDF · XLS/XLSX · DOCX · JSON · CSV</p>
+          <p className="text-xs text-slate-400">PDF · XLS/XLSX · DOCX · JSON · CSV · 파일당 최대 64MB</p>
         </>
       )}
       <input
         ref={inputRef}
         type="file"
         multiple
+        disabled={interactionDisabled}
         className="hidden"
         onChange={(e) => {
-          if (e.target.files?.length) void onStart(Array.from(e.target.files));
+          if (!e.target.files?.length) return;
+          const selected = Array.from(e.target.files);
+          // Allow retrying the exact same file after a recoverable error.
+          e.target.value = "";
+          void onStart(selected);
         }}
       />
     </div>
@@ -553,6 +718,7 @@ function TrackTriagePanel({
   selectedTrack,
   onSelect,
   onEnter,
+  entryDisabled,
 }: {
   triage: TriageResult | null;
   loading: boolean;
@@ -560,6 +726,7 @@ function TrackTriagePanel({
   selectedTrack: WorkflowTrack | null;
   onSelect: (track: WorkflowTrack) => void;
   onEnter: () => void;
+  entryDisabled: boolean;
 }) {
   const tracks = triage?.tracks ?? [];
   return (
@@ -657,7 +824,7 @@ function TrackTriagePanel({
             <button
               type="button"
               onClick={onEnter}
-              disabled={!selectedTrack}
+              disabled={!selectedTrack || entryDisabled}
               className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-white px-4 text-sm font-black text-slate-950 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
               선택 트랙 워크스페이스로 이동 <ArrowRight className="h-4 w-4" />

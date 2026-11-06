@@ -1,12 +1,13 @@
-version: '3.8'
 services:
   api:
-    build: .
+    build:
+      context: .
+    init: true
     ports:
-      - "8000:8000"
-    volumes:
-      - .:/app
+      - "${REALYTICS_API_PORT:-8000}:${PORT:-8000}"
     environment:
-      - ENVIRONMENT=development
+      PORT: "${PORT:-8000}"
+      REALYTICS_ENVIRONMENT: "${REALYTICS_ENVIRONMENT:-development}"
     env_file:
-      - .env.example
+      - .env
+    stop_grace_period: 30s

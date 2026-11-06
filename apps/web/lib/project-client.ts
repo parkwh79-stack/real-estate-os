@@ -10,29 +10,343 @@ export interface ProjectOption {
   status?: string;
 }
 
+export type RecentWorkKind = "project" | "review" | "analysis";
+
 export interface RecentWorkItem {
+  /** Stable row key. Older recent-work-v2 responses omit this field. */
+  itemId?: string;
+  /** Work category. Older recent-work-v2 responses are normalized as project. */
+  kind?: RecentWorkKind;
   projectId: string;
   projectName: string;
+  title?: string;
+  subtitle?: string;
+  summary?: string;
   track?: string;
   lastWorkedAt?: string;
+  updatedAt?: string;
   latestRunId?: string;
   latestRunStatus?: string;
+  executionStatus?: string;
   sourceDocumentCount: number;
   openReviewCount: number;
   riskCount: number;
   approvalStatus: string;
+  approvalReadinessStatus?: string;
   nextAction: string;
+  nextActionLabel?: string;
+  href?: string;
   sourceHashes?: string[];
 }
 
-export async function fetchRecentWork(limit = 5): Promise<RecentWorkItem[]> {
-  const res = await fetch(`${apiBase}/projects/recent-work?limit=${limit}`, {
-    cache: "no-store",
-    headers: authHeaders("web"),
+export interface RecentWorkFeed {
+  schemaVersion: string;
+  items: RecentWorkItem[];
+  totalCount: number;
+  /** Non-fatal contract or upstream warnings. Valid rows remain usable. */
+  warnings: string[];
+}
+
+export class RecentWorkRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = "RecentWorkRequestError";
+  }
+}
+
+/**
+ * Fetch the tenant-scoped recent-work projection.
+ *
+ * The normalizer accepts the original flat recent-work-v2 response as well as
+ * the extended project/review/analysis collections. Invalid rows are dropped
+ * with a visible warning instead of turning the whole work inbox into an empty
+ * state.
+ */
+export async function fetchRecentWorkFeed(
+  limit = 8,
+  signal?: AbortSignal,
+): Promise<RecentWorkFeed> {
+  // A live tenant lookup crosses the BFF identity boundary and the normalized
+  // PostgreSQL RLS boundary.  Keep the request bounded, but leave enough room
+  // for a cold Supabase pool/JWKS cache instead of racing a valid 10-second
+  // response into a false timeout state.
+  const timeoutSignal = AbortSignal.timeout(20_000);
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal;
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase}/projects/recent-work?limit=${limit}`, {
+      cache: "no-store",
+      headers: authHeaders("web"),
+      signal: requestSignal,
+    });
+  } catch (error) {
+    if (timeoutSignal.aborted && !signal?.aborted) {
+      throw new RecentWorkRequestError(
+        "최근 작업 조회가 20초 안에 완료되지 않았습니다. 새 분석은 계속 사용할 수 있으며, 잠시 후 새로고침해 주세요.",
+      );
+    }
+    throw error;
+  }
+  if (!res.ok) {
+    const message =
+      res.status === 401
+        ? "로그인 세션이 만료되어 최근 작업을 불러오지 못했습니다."
+        : res.status === 403
+          ? "현재 계정의 Tenant 프로젝트 조회 권한을 확인할 수 없습니다."
+          : `최근 작업을 불러오지 못했습니다. (${res.status})`;
+    throw new RecentWorkRequestError(message, res.status);
+  }
+  const body: unknown = await res.json();
+  return normalizeRecentWorkResponse(body, limit);
+}
+
+export async function fetchRecentWork(
+  limit = 5,
+  signal?: AbortSignal,
+): Promise<RecentWorkItem[]> {
+  return (await fetchRecentWorkFeed(limit, signal)).items;
+}
+
+export function normalizeRecentWorkResponse(
+  body: unknown,
+  limit = 20,
+): RecentWorkFeed {
+  const root = record(body);
+  if (!root) {
+    throw new RecentWorkRequestError("최근 작업 응답 형식이 올바르지 않습니다.");
+  }
+  const data = record(root.data) ?? root;
+  const warnings = stringArray(
+    first(data, "warnings", "warningMessages", "warning_messages", "errors"),
+  );
+  const candidates: Array<{ value: unknown; fallbackKind?: RecentWorkKind }> = [];
+  const flat = first(data, "items", "recentWork", "recent_work");
+  let groupedContractSeen = false;
+  if (Array.isArray(flat)) {
+    flat.forEach((value) => candidates.push({ value }));
+  } else {
+    const collections: Array<[RecentWorkKind, unknown]> = [
+      ["project", first(data, "projects", "projectItems", "project_items")],
+      ["review", first(data, "reviews", "reviewItems", "review_items")],
+      ["analysis", first(data, "analyses", "analysisItems", "analysis_items")],
+    ];
+    collections.forEach(([fallbackKind, values]) => {
+      if (Array.isArray(values)) {
+        groupedContractSeen = true;
+        values.forEach((value) => candidates.push({ value, fallbackKind }));
+      }
+    });
+  }
+
+  if (!Array.isArray(flat) && !groupedContractSeen) {
+    throw new RecentWorkRequestError("최근 작업 응답에 items 또는 유형별 목록이 없습니다.");
+  }
+
+  const normalized: RecentWorkItem[] = [];
+  let dropped = 0;
+  candidates.forEach(({ value, fallbackKind }, index) => {
+    const item = normalizeRecentWorkItem(value, index, fallbackKind);
+    if (item) normalized.push(item);
+    else dropped += 1;
   });
-  if (!res.ok) return [];
-  const body = await res.json();
-  return Array.isArray(body.items) ? (body.items as RecentWorkItem[]) : [];
+  if (dropped > 0) warnings.push(`필수 프로젝트 식별자가 없는 최근 작업 ${dropped}건을 제외했습니다.`);
+  if (boolean(first(data, "partial", "isPartial", "is_partial"))) {
+    warnings.push("서버가 일부 최근 작업만 반환했습니다.");
+  }
+
+  const cappedLimit = Math.max(1, Math.min(50, Number.isFinite(limit) ? Math.trunc(limit) : 20));
+  const items = normalized
+    .sort((left, right) => String(right.updatedAt ?? right.lastWorkedAt ?? "").localeCompare(String(left.updatedAt ?? left.lastWorkedAt ?? "")))
+    .slice(0, cappedLimit);
+  const declaredCount = number(first(data, "totalCount", "total_count", "count"));
+  return {
+    schemaVersion: text(first(data, "schemaVersion", "schema_version")) ?? "realytics-recent-work-v2",
+    items,
+    totalCount: declaredCount ?? normalized.length,
+    warnings: unique(warnings),
+  };
+}
+
+function normalizeRecentWorkItem(
+  value: unknown,
+  index: number,
+  fallbackKind?: RecentWorkKind,
+): RecentWorkItem | null {
+  const source = record(value);
+  if (!source) return null;
+  const project = record(first(source, "project"));
+  const review = record(first(source, "review"));
+  const analysis = record(first(source, "analysis"));
+  const kind = normalizeKind(
+    first(source, "kind", "itemKind", "item_kind", "itemType", "item_type", "workType", "work_type"),
+    fallbackKind ?? (review ? "review" : analysis ? "analysis" : "project"),
+  );
+  const projectId = text(
+    first(source, "projectId", "project_id") ?? first(project ?? {}, "id", "projectId", "project_id"),
+  );
+  if (!projectId) return null;
+
+  const projectName =
+    text(first(source, "projectName", "project_name")) ??
+    text(first(project ?? {}, "name", "projectName", "project_name")) ??
+    `프로젝트 ${projectId}`;
+  const title =
+    text(first(source, "title", "displayTitle", "display_title", "workTitle", "work_title", "reviewTitle", "review_title", "analysisTitle", "analysis_title")) ??
+    text(first(review ?? {}, "title", "name")) ??
+    text(first(analysis ?? {}, "title", "name")) ??
+    projectName;
+  const updatedAt = text(
+    first(
+      source,
+      "updatedAt",
+      "updated_at",
+      "lastWorkedAt",
+      "last_worked_at",
+      "reviewedAt",
+      "reviewed_at",
+      "completedAt",
+      "completed_at",
+      "startedAt",
+      "started_at",
+    ),
+  );
+  const latestRunStatus = text(
+    first(source, "latestRunStatus", "latest_run_status", "executionStatus", "execution_status"),
+  );
+  const approvalStatus =
+    text(first(source, "approvalStatus", "approval_status")) ?? "not_requested";
+  const sourceDocumentCount = integer(
+    first(source, "sourceDocumentCount", "source_document_count", "documentCount", "document_count"),
+  );
+  const openReviewCount = integer(
+    first(source, "openReviewCount", "open_review_count", "pendingReviewCount", "pending_review_count"),
+  );
+  const riskCount = integer(first(source, "riskCount", "risk_count"));
+  const nextAction =
+    text(first(source, "nextAction", "next_action")) ??
+    (kind === "review" ? "resume_open_reviews" : kind === "analysis" ? "inspect_latest_run" : "continue_next_review_step");
+  const explicitHref = text(first(source, "href", "url", "link", "nextHref", "next_href"));
+  const href = safeInternalHref(explicitHref) ?? fallbackRecentWorkHref(kind, projectId, nextAction);
+  const summary =
+    text(first(source, "summary", "description", "detail")) ??
+    buildRecentWorkSummary({ kind, sourceDocumentCount, openReviewCount, riskCount });
+
+  return {
+    itemId:
+      text(first(source, "itemId", "item_id", "id")) ??
+      `${kind}:${projectId}:${updatedAt ?? index}`,
+    kind,
+    projectId,
+    projectName,
+    title,
+    subtitle: text(first(source, "subtitle", "subTitle", "sub_title")),
+    summary,
+    track: text(first(source, "track", "workflowTrack", "workflow_track")),
+    lastWorkedAt: updatedAt,
+    updatedAt,
+    latestRunId: text(first(source, "latestRunId", "latest_run_id", "runId", "run_id")),
+    latestRunStatus,
+    executionStatus: latestRunStatus,
+    sourceDocumentCount,
+    openReviewCount,
+    riskCount,
+    approvalStatus,
+    approvalReadinessStatus: text(first(source, "approvalReadinessStatus", "approval_readiness_status")),
+    nextAction,
+    nextActionLabel: text(first(source, "nextActionLabel", "next_action_label", "actionLabel", "action_label")),
+    href,
+    sourceHashes: stringArray(first(source, "sourceHashes", "source_hashes")),
+  };
+}
+
+function fallbackRecentWorkHref(kind: RecentWorkKind, projectId: string, nextAction: string) {
+  const base = `/project/${encodeURIComponent(projectId)}`;
+  if (kind === "review") return `${base}/documents/review`;
+  if (kind === "analysis") return `${base}/chief-orchestration`;
+  if (nextAction === "upload_source_documents") return `${base}/input-package`;
+  if (["run_initial_analysis", "resume_open_reviews", "inspect_latest_run"].includes(nextAction)) {
+    return `${base}/chief-orchestration`;
+  }
+  return base;
+}
+
+function buildRecentWorkSummary(input: {
+  kind: RecentWorkKind;
+  sourceDocumentCount: number;
+  openReviewCount: number;
+  riskCount: number;
+}) {
+  if (input.kind === "review") return `미해결 검토 ${input.openReviewCount.toLocaleString("ko-KR")}건`;
+  if (input.kind === "analysis") return `문서 ${input.sourceDocumentCount.toLocaleString("ko-KR")}건 · Risk ${input.riskCount.toLocaleString("ko-KR")}건`;
+  return `문서 ${input.sourceDocumentCount.toLocaleString("ko-KR")}건 · 검토 ${input.openReviewCount.toLocaleString("ko-KR")}건 · Risk ${input.riskCount.toLocaleString("ko-KR")}건`;
+}
+
+function safeInternalHref(value: string | undefined) {
+  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return undefined;
+  return value;
+}
+
+function normalizeKind(value: unknown, fallback: RecentWorkKind): RecentWorkKind {
+  const normalized = text(value)?.toLowerCase().replaceAll("-", "_");
+  if (normalized && ["review", "document_review", "approval_review", "심사", "검토"].includes(normalized)) return "review";
+  if (normalized && ["analysis", "analysis_run", "orchestration", "run", "calculation", "calculation_run", "분석", "실행"].includes(normalized)) return "analysis";
+  if (normalized && ["project", "deal", "프로젝트", "딜"].includes(normalized)) return "project";
+  return fallback;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function first(source: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined && source[key] !== null) {
+      return source[key];
+    }
+  }
+  return undefined;
+}
+
+function text(value: unknown) {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const normalized = String(value).trim();
+  return normalized || undefined;
+}
+
+function number(value: unknown) {
+  if (value === null || value === undefined || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function integer(value: unknown) {
+  return Math.max(0, Math.trunc(number(value) ?? 0));
+}
+
+function boolean(value: unknown) {
+  return value === true || String(value ?? "").trim().toLowerCase() === "true";
+}
+
+function stringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (typeof entry === "string" || typeof entry === "number") return String(entry).trim();
+      const item = record(entry);
+      return item ? text(first(item, "message", "detail", "code")) : undefined;
+    })
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function unique(values: string[]) {
+  return [...new Set(values)];
 }
 
 interface RawProjectSummary {
@@ -61,6 +375,28 @@ function toOption(p: RawProjectSummary): ProjectOption | null {
   };
 }
 
+/** Reject unavailable collections instead of presenting zero projects. */
+export function projectOptionsFromResponse(data: unknown): ProjectOption[] {
+  if (!Array.isArray(data)) throw new Error("프로젝트 목록 응답 형식이 올바르지 않습니다.");
+  return data.map((value) => {
+    const row = record(value);
+    if (!row || (row.project != null && !record(row.project)) || (row.land != null && !record(row.land))) {
+      throw new Error("프로젝트 정보를 확인할 수 없습니다.");
+    }
+    const project = record(row.project);
+    const land = record(row.land);
+    const id = project?.id ?? row.id;
+    if (!(typeof id === "string" || (typeof id === "number" && Number.isFinite(id)))
+      || [project?.name, project?.projectName, land?.address, land?.pnu, project?.type, project?.status]
+        .some((field) => field != null && typeof field !== "string")) {
+      throw new Error("프로젝트 목록의 필드 형식을 확인할 수 없습니다.");
+    }
+    const option = toOption(value as RawProjectSummary);
+    if (!option || !option.id.trim()) throw new Error("프로젝트 식별자를 확인할 수 없습니다.");
+    return option;
+  });
+}
+
 /** Fetch the session-scoped project list as light options for selectors. */
 export async function fetchProjectOptions(): Promise<ProjectOption[]> {
   const res = await fetch(`${apiBase}/projects/`, {
@@ -68,8 +404,7 @@ export async function fetchProjectOptions(): Promise<ProjectOption[]> {
     headers: authHeaders("web"),
   });
   if (!res.ok) throw new Error(`프로젝트 목록을 불러오지 못했습니다. (${res.status})`);
-  const data = (await res.json()) as RawProjectSummary[];
-  return (Array.isArray(data) ? data : []).map(toOption).filter((o): o is ProjectOption => o !== null);
+  return projectOptionsFromResponse(await res.json());
 }
 
 /** Fetch a single project's full record. */
@@ -85,26 +420,50 @@ export async function fetchProjectDetail<T = Record<string, unknown>>(projectId:
 /** Real monthly cash flow extracted from a completed PF-review (orchestration) run. */
 export interface CashflowMonth {
   period: string;
-  cashInEok: number;
-  cashOutEok: number;
-  netCashFlowEok: number;
-  cumulativeEok: number;
+  cashInEok: number | null;
+  cashOutEok: number | null;
+  netCashFlowEok: number | null;
+  cumulativeEok: number | null;
+  /** Max Minus uses this stored basis even when the table displays ending cash. */
+  prePfCumulativeEok?: number | null;
 }
+
+export type CashFlowPeriodBasis = {
+  schemaVersion: "cash-flow-period-basis-v1";
+  kind: "source_sequence" | "calendar_monthly";
+  periods?: Array<{ sourcePeriodIndex: number; label: string; periodKind: "event" | "monthly" | "unknown";
+    sourceMonthNumber: number | null; sourceLocator: { sourceName?: string; sheet?: string; cell?: string; monthCell?: string } }>;
+  scheduleBindings?: Record<string, { sourcePeriodIndex: number | null; sourceMonthNumber: number | null }>;
+  warnings?: string[];
+  calculationPeriodCount?: number;
+  firstCalculationPeriodIndex?: number;
+  lastCalculationPeriodIndex?: number;
+  interestCalculation?: { status: string; firstChargedMonthIndex?: number | null;
+    lastChargedMonthIndex?: number | null; chargedPeriodCount?: number; method?: string; reason?: string };
+};
 
 export interface CashflowResult {
   runId: string;
   completedAt?: string;
   source: "chief_pod_artifact" | "pf_review_orchestration";
+  sourceBasis?: "captured_workbook_cash_flow";
   artifactKey?: string;
   artifactType?: string;
   monthly: CashflowMonth[];
-  maxMinusEok: number;
-  maxMinusMonth: number;
+  maxMinusEok: number | null;
+  /** Engine compatibility value: one-based row ordinal, not an M-month index. */
+  maxMinusMonth: number | null;
+  maxMinusPeriodIndex: number | null;
   summary: Record<string, number>;
   reportFragments?: Record<string, string>;
   riskFlags?: Array<Record<string, unknown>>;
   sourceMetadata?: Record<string, unknown>;
   inputSnapshot?: Record<string, unknown>;
+  periodBasis?: CashFlowPeriodBasis;
+  monthlyFinancing?: Record<string, unknown>;
+  financingMonthly?: Array<{ period: string; interest: number | null; fees: number | null;
+    principalRepayment: number | null; outstandingDebt: number | null; overdueDebt: number | null;
+    unfundedOperatingCost: number | null }>;
 }
 
 interface RunListItem {
@@ -124,6 +483,7 @@ interface RunListItem {
 export interface CalculationRunRecord {
   calculationRunId: string;
   engineKey: string;
+  status?: string;
   engineVersion?: string;
   inputEvidenceIds?: string[];
   assumptionIds?: string[];
@@ -137,29 +497,89 @@ export interface CalculationRunRecord {
   updatedAt?: string;
 }
 
-export async function fetchLatestCalculationRuns(
+export const CASH_FLOW_DEPENDENT_ENGINES = ["waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"] as const;
+export type CashFlowDependentEngine = typeof CASH_FLOW_DEPENDENT_ENGINES[number];
+
+function matchesCashFlowDependent(
+  cashflow: CashflowResult | null,
+  engineKey: string,
+  run: CalculationRunRecord | null,
+): boolean {
+  if (!run || run.engineKey !== engineKey || !run.calculationRunId
+    || (run.status && run.status !== "completed")) return false;
+  const snapshot = run.inputSnapshot ?? {};
+  const source = run.sourceLocator ?? {};
+  const parent = snapshot.parentCalculationRunId ?? source.parentCalculationRunId;
+  const inputHash = snapshot.financialInputHash ?? source.financialInputHash;
+  const digest = cashflow?.inputSnapshot?.financialInputHash;
+  const monthlyReview = cashflow?.monthlyFinancing != null || cashflow?.inputSnapshot?.monthlyFinancing != null;
+  return !monthlyReview && typeof digest === "string" && digest.length > 0
+    && parent === cashflow?.runId && inputHash === digest;
+}
+
+/** Show dependent results only when both their parent and exact input agree. */
+export function bindCashflowDependents(
+  cashflow: CashflowResult | null,
+  runs: Record<string, CalculationRunRecord | null>,
+): Record<string, CalculationRunRecord | null> {
+  return Object.fromEntries(Object.entries(runs).map(([key, run]) =>
+    [key, matchesCashFlowDependent(cashflow, key, run) ? run : null]));
+}
+
+export async function fetchCashFlowDependentRuns(
   projectId: string,
-  engineKeys: string[],
-): Promise<Record<string, CalculationRunRecord | null>> {
-  const entries = await Promise.all(engineKeys.map(async (engineKey) => {
+  cashflow: CashflowResult | null,
+  signal?: AbortSignal,
+): Promise<{ runs: Record<string, CalculationRunRecord | null>; unavailable: CashFlowDependentEngine[] }> {
+  const digest = cashflow?.inputSnapshot?.financialInputHash;
+  if (!cashflow?.runId || typeof digest !== "string" || !digest
+    || cashflow.monthlyFinancing != null || cashflow.inputSnapshot?.monthlyFinancing != null) {
+    return { runs: {}, unavailable: [] };
+  }
+  const entries = await Promise.all(CASH_FLOW_DEPENDENT_ENGINES.map(async (engineKey) => {
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?engine_key=${encodeURIComponent(engineKey)}&limit=1`, {
+      const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/calculation-runs?engine_key=${engineKey}&limit=10`, {
         cache: "no-store",
         headers: authHeaders("web"),
+        signal,
       });
-      if (!res.ok) return [engineKey, null] as const;
+      if (!res.ok) return { engineKey, run: null, unavailable: true };
       const body = await res.json();
-      const record = Array.isArray(body.records) ? body.records[0] : null;
-      return [engineKey, record ?? null] as const;
+      if (!Array.isArray(body?.records)) return { engineKey, run: null, unavailable: true };
+      const records = body.records as Array<CalculationRunRecord | null>;
+      const run = records.find((candidate) => matchesCashFlowDependent(cashflow, engineKey, candidate)) ?? null;
+      return { engineKey, run, unavailable: false };
     } catch {
       // A missing optional scenario must not hide the primary Cash Flow run.
-      return [engineKey, null] as const;
+      return { engineKey, run: null, unavailable: true };
     }
   }));
-  return Object.fromEntries(entries);
+  return {
+    runs: Object.fromEntries(entries.map(({ engineKey, run }) => [engineKey, run])),
+    unavailable: entries.filter(({ unavailable }) => unavailable).map(({ engineKey }) => engineKey),
+  };
 }
 
 const WON = 1e8;
+
+function finiteNumberOrNull(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function wonToEokOrNull(value: unknown): number | null {
+  const won = finiteNumberOrNull(value);
+  return won === null ? null : won / WON;
+}
+
+function sumCashAmountsOrNull(value: unknown): number | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const amounts = Object.values(value).map(finiteNumberOrNull);
+  if (amounts.some((amount) => amount === null)) return null;
+  return (amounts as number[]).reduce((total, amount) => total + amount, 0);
+}
 
 function cashflowFromResult(
   cf: Record<string, unknown> | null | undefined,
@@ -169,30 +589,70 @@ function cashflowFromResult(
   const rows = cf?.monthlyCashFlow ?? cf?.rows;
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const summary = (cf?.summary ?? {}) as Record<string, number>;
+  const monthlyReview = cf?.monthlyFinancing != null || meta.inputSnapshot?.monthlyFinancing != null;
+  const capturedSource = cf?.sourceBasis === "captured_workbook_cash_flow";
+  const maximumRow = summary.maxMinusMonth;
+  const maximumPeriodIndex = typeof maximumRow === "number" && Number.isSafeInteger(maximumRow)
+    && maximumRow > 0 && maximumRow <= rows.length ? maximumRow - 1 : null;
   return {
     runId: meta.runId,
     completedAt: meta.completedAt,
     source,
+    sourceBasis: capturedSource ? "captured_workbook_cash_flow" : undefined,
     artifactKey: meta.artifactKey,
     artifactType: meta.artifactType,
     monthly: rows.map((r: Record<string, unknown>) => {
       const cashIn = (r.cashIn ?? {}) as Record<string, unknown>;
       const cashOut = (r.cashOut ?? {}) as Record<string, unknown>;
+      const financing = (r.monthlyFinancing ?? {}) as Record<string, unknown>;
+      const operatingAndFinanceCost = finiteNumberOrNull(cashOut.totalCashOut);
+      const principalRepayment = finiteNumberOrNull(financing.principalRepayment);
+      const monthlyTotalOut = operatingAndFinanceCost !== null && principalRepayment !== null
+        ? operatingAndFinanceCost + principalRepayment : null;
+      const sourceOperatingCumulative = "cumulativeCashFlowBeforeAllFinancing" in r
+        ? r.cumulativeCashFlowBeforeAllFinancing : r.cumulativeCashFlowBeforePfDraw;
+      const sourceOperatingNet = "netCashFlowBeforeAllFinancing" in r
+        ? r.netCashFlowBeforeAllFinancing : r.netCashFlowBeforePfDraw;
       return {
         period: String(r.period ?? `M${r.monthIndex ?? r.month ?? ""}`),
-        cashInEok: Number(cashIn.totalCashIn ?? r.cash_in ?? 0) / WON,
-        cashOutEok: Number(cashOut.totalCashOut ?? r.cash_out ?? 0) / WON,
-        netCashFlowEok: Number(r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? r.net_cashflow ?? 0) / WON,
-        cumulativeEok: Number(r.cumulativeCashFlowBeforePfDraw ?? r.cumulativeCashFlow ?? r.cumulative_cashflow ?? 0) / WON,
+        cashInEok: wonToEokOrNull(capturedSource ? sumCashAmountsOrNull(cashIn.salesCollection)
+          : monthlyReview ? cashIn.totalCashIn : cashIn.totalCashIn ?? r.cash_in),
+        cashOutEok: wonToEokOrNull(capturedSource ? cashOut.totalCashOut
+          : monthlyReview ? monthlyTotalOut : cashOut.totalCashOut ?? r.cash_out),
+        netCashFlowEok: wonToEokOrNull(capturedSource ? sourceOperatingNet : monthlyReview ? r.netCashFlow :
+          r.netCashFlowBeforePfDraw ?? r.netCashFlow ?? r.net_cashflow,
+        ),
+        cumulativeEok: wonToEokOrNull(capturedSource ? sourceOperatingCumulative : monthlyReview ? r.endingCash :
+          r.cumulativeCashFlowBeforePfDraw ??
+            r.cumulativeCashFlow ??
+            r.cumulative_cashflow,
+        ),
+        prePfCumulativeEok: wonToEokOrNull(capturedSource ? sourceOperatingCumulative : r.cumulativeCashFlowBeforePfDraw),
       };
     }),
-    maxMinusEok: Number(summary.maxMinus ?? 0) / WON,
-    maxMinusMonth: Number(summary.maxMinusMonth ?? 0),
+    maxMinusEok: wonToEokOrNull(summary.maxMinus),
+    maxMinusMonth: finiteNumberOrNull(summary.maxMinusMonth),
+    maxMinusPeriodIndex: maximumPeriodIndex,
     summary,
     reportFragments: (cf?.reportFragments ?? {}) as Record<string, string>,
     riskFlags: Array.isArray(cf?.riskFlags) ? (cf?.riskFlags as Array<Record<string, unknown>>) : [],
     sourceMetadata: (cf?.sourceMetadata ?? {}) as Record<string, unknown>,
     inputSnapshot: meta.inputSnapshot,
+    periodBasis: cf?.periodBasis && typeof cf.periodBasis === "object"
+      && !Array.isArray(cf.periodBasis)
+      && (cf.periodBasis as CashFlowPeriodBasis).schemaVersion === "cash-flow-period-basis-v1"
+      && ["source_sequence", "calendar_monthly"].includes((cf.periodBasis as CashFlowPeriodBasis).kind)
+      ? cf.periodBasis as CashFlowPeriodBasis : undefined,
+    monthlyFinancing: cf?.monthlyFinancing && typeof cf.monthlyFinancing === "object"
+      ? cf.monthlyFinancing as Record<string, unknown> : undefined,
+    financingMonthly: rows.filter((row: Record<string, unknown>) => row.monthlyFinancing != null).map((row: Record<string, unknown>) => {
+      const financing = row.monthlyFinancing as Record<string, unknown>;
+      return { period: String(row.period ?? `M${row.monthIndex}`),
+        interest: finiteNumberOrNull(financing.interest), fees: finiteNumberOrNull(financing.fees),
+        principalRepayment: finiteNumberOrNull(financing.principalRepayment),
+        outstandingDebt: finiteNumberOrNull(financing.outstandingDebt), overdueDebt: finiteNumberOrNull(financing.overdueDebt),
+        unfundedOperatingCost: finiteNumberOrNull(financing.unfundedOperatingCost) };
+    }),
   };
 }
 

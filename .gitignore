@@ -15,8 +15,12 @@ node_modules
 # Testing
 coverage
 .pytest_cache/
+services/api-server/.pytest*/
+services/api-server/.pytest-*.out
+services/api-server/.pytest-*.err
 apps/web/test-results/
 apps/web/playwright-report/
+apps/web/.auth/
 
 # Turbo
 .turbo
@@ -26,6 +30,8 @@ apps/web/playwright-report/
 
 # Build Outputs
 .next/
+.next-e2e/
+.next-e2e-production/
 out/
 build
 dist
@@ -44,6 +50,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 uvicorn*.log
+debug.log
+**/debug.log
 
 # Misc
 .DS_Store

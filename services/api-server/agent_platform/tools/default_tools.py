@@ -19,7 +19,7 @@ class _ProjectLedgerReadTool:
         self,
         *,
         manifest: ToolManifest,
-        reader: Callable[[str, dict[str, Any]], list[dict[str, Any]]],
+        reader: Callable[[str, str, dict[str, Any]], list[dict[str, Any]]],
     ) -> None:
         self.manifest = manifest
         self._reader = reader
@@ -31,7 +31,11 @@ class _ProjectLedgerReadTool:
         payload_project_id = request.payload.get("projectId")
         if payload_project_id and str(payload_project_id) != request.project_id:
             raise ValueError("TOOL_PROJECT_SCOPE_MISMATCH")
-        records = self._reader(request.project_id, request.payload)
+        records = self._reader(
+            request.tenant_id,
+            request.project_id,
+            request.payload,
+        )
         return ToolResult(
             tool_call_id=request.tool_call_id,
             status=ToolCallStatus.COMPLETED,
@@ -91,9 +95,14 @@ def _read_manifest(
     )
 
 
-def _read_deal_state(project_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _read_deal_state(
+    tenant_id: str,
+    project_id: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     from storage import list_deal_state_records
 
+    del tenant_id
     return list_deal_state_records(
         project_id,
         record_type=_optional(payload.get("recordType")),
@@ -105,11 +114,16 @@ def _read_deal_state(project_id: str, payload: dict[str, Any]) -> list[dict[str,
     )
 
 
-def _read_calculation_runs(project_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _read_calculation_runs(
+    tenant_id: str,
+    project_id: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     from storage import list_calculation_run_records
 
     return list_calculation_run_records(
         project_id,
+        tenant_id=tenant_id,
         engine_key=_optional(payload.get("engineKey")),
         limit=_limit(payload.get("limit"), 100),
     )

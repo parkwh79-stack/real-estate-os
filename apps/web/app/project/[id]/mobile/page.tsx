@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 import {
   AlertCircle,
@@ -16,8 +17,7 @@ import {
   severityLabel,
   translateFinancialTerm,
 } from "../../../../lib/financial-terms";
-
-const apiBase = "http://127.0.0.1:8000";
+import { fetchAuthenticatedBackend } from "../../../../lib/authenticated-backend-fetch";
 
 interface ProjectDetailResponse {
   project?: {
@@ -120,14 +120,134 @@ interface MobileAction {
   icon: "upload" | "risk" | "land" | "review";
 }
 
-async function safeJson<T>(url: string, fallback: T): Promise<T> {
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) return fallback;
-    return (await res.json()) as T;
-  } catch {
-    return fallback;
+type BackendReadFailure = {
+  state: "login_required" | "forbidden" | "authority_unavailable" | "not_found" | "request_failed";
+  status?: number;
+};
+
+type BackendReadResult<T> =
+  | { state: "ready"; data: T }
+  | BackendReadFailure;
+
+function backendReadFailure(status: number): BackendReadFailure {
+  if (status === 401) return { state: "login_required", status };
+  if (status === 403) return { state: "forbidden", status };
+  if (status === 404) return { state: "not_found", status };
+  if (status === 503 || status >= 500) {
+    return { state: "authority_unavailable", status };
   }
+  return { state: "request_failed", status };
+}
+
+async function readBackendJson<T>(
+  path: string,
+  decode: (value: unknown) => T | undefined,
+): Promise<BackendReadResult<T>> {
+  try {
+    const res = await fetchAuthenticatedBackend(path);
+    if (!res.ok) return backendReadFailure(res.status);
+    const decoded = decode(await res.json());
+    return decoded === undefined
+      ? { state: "authority_unavailable", status: 502 }
+      : { state: "ready", data: decoded };
+  } catch {
+    return { state: "authority_unavailable" };
+  }
+}
+
+function decodeProjectDetail(value: unknown): ProjectDetailResponse | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as ProjectDetailResponse
+    : undefined;
+}
+
+function decodeRunSummaries(value: unknown): RunSummary[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.every((item) => (
+    item
+    && typeof item === "object"
+    && !Array.isArray(item)
+    && typeof (item as { run_id?: unknown }).run_id === "string"
+  ))
+    ? value as RunSummary[]
+    : undefined;
+}
+
+function decodeOrchestrationRun(value: unknown): OrchestrationRun | undefined {
+  return value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as { run_id?: unknown }).run_id === "string"
+    ? value as OrchestrationRun
+    : undefined;
+}
+
+function MobileBackendState({
+  failure,
+  currentPath,
+}: {
+  failure: BackendReadFailure;
+  currentPath: string;
+}) {
+  if (failure.state === "login_required") {
+    const query = new URLSearchParams({ next: currentPath });
+    redirect(`/login?${query.toString()}`);
+  }
+
+  const content = failure.state === "forbidden"
+    ? {
+      eyebrow: "접근 권한 제한",
+      title: "이 프로젝트의 모바일 심사 정보를 볼 수 없습니다.",
+      body: "현재 Tenant 멤버십과 프로젝트 열람 권한을 확인해 주세요. 권한 변경이 필요하면 조직 관리자에게 요청하세요.",
+      tone: "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-100",
+    }
+    : failure.state === "not_found"
+      ? {
+        eyebrow: "프로젝트 확인 필요",
+        title: "요청한 프로젝트를 찾을 수 없습니다.",
+        body: "프로젝트가 삭제되었거나 현재 Tenant에 존재하지 않을 수 있습니다. 프로젝트 목록에서 다시 선택해 주세요.",
+        tone: "border-slate-200 bg-white text-slate-900 dark:border-slate-800 dark:bg-slate-900 dark:text-white",
+      }
+      : failure.state === "authority_unavailable"
+        ? {
+          eyebrow: "권위 저장소 연결 장애",
+          title: "프로젝트 심사 정보를 불러오지 못했습니다.",
+          body: "인증 또는 PostgreSQL 업무 권위에 일시적으로 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+          tone: "border-rose-200 bg-rose-50 text-rose-900 dark:border-rose-900 dark:bg-rose-950/20 dark:text-rose-100",
+        }
+        : {
+          eyebrow: "조회 실패",
+          title: "프로젝트 응답을 확인할 수 없습니다.",
+          body: "요청이 정상 처리되지 않았습니다. 계속되면 관리자에게 요청 상태를 알려 주세요.",
+          tone: "border-rose-200 bg-rose-50 text-rose-900 dark:border-rose-900 dark:bg-rose-950/20 dark:text-rose-100",
+        };
+
+  return (
+    <main className="mx-auto max-w-2xl px-4 py-10">
+      <section className={`rounded-3xl border p-6 shadow-sm ${content.tone}`} role="alert">
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/80 text-slate-700 shadow-sm dark:bg-slate-950/40 dark:text-slate-200">
+          {failure.state === "forbidden" ? (
+            <ShieldCheck className="h-5 w-5" />
+          ) : (
+            <AlertCircle className="h-5 w-5" />
+          )}
+        </div>
+        <p className="mt-5 text-xs font-black uppercase tracking-[0.18em] opacity-70">{content.eyebrow}</p>
+        <h1 className="mt-2 text-2xl font-black leading-tight">{content.title}</h1>
+        <p className="mt-3 text-sm font-semibold leading-6 opacity-80">{content.body}</p>
+        <div className="mt-6 flex flex-wrap gap-3">
+          {failure.state === "authority_unavailable" || failure.state === "request_failed" ? (
+            <Link href={currentPath} className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-black text-white dark:bg-white dark:text-slate-950">
+              다시 시도
+            </Link>
+          ) : null}
+          <Link href="/dashboard" className="rounded-xl border border-current/20 bg-white/60 px-4 py-2.5 text-sm font-black dark:bg-slate-950/30">
+            프로젝트 목록
+          </Link>
+        </div>
+      </section>
+    </main>
+  );
 }
 
 function riskNeedsReview(risk: { reviewStatus?: string; status?: string; requiresHumanReview?: boolean }) {
@@ -271,12 +391,38 @@ function fmtDate(value?: string) {
 export default async function ProjectMobileActionPage({ params }: { params: Promise<{ id: string }> | { id: string } }) {
   const resolvedParams = await params;
   const projectId = resolvedParams.id;
-  const data = await safeJson<ProjectDetailResponse>(`${apiBase}/projects/${projectId}`, {});
-  const runs = await safeJson<RunSummary[]>(`${apiBase}/projects/${projectId}/orchestrations`, []);
+  const encodedProjectId = encodeURIComponent(projectId);
+  const currentPath = `/project/${encodedProjectId}/mobile`;
+  const projectResult = await readBackendJson(
+    `/projects/${encodedProjectId}`,
+    decodeProjectDetail,
+  );
+  if (projectResult.state !== "ready") {
+    return <MobileBackendState failure={projectResult} currentPath={currentPath} />;
+  }
+
+  const runListResult = await readBackendJson(
+    `/projects/${encodedProjectId}/orchestrations`,
+    decodeRunSummaries,
+  );
+  if (runListResult.state !== "ready") {
+    return <MobileBackendState failure={runListResult} currentPath={currentPath} />;
+  }
+
+  const data = projectResult.data;
+  const runs = runListResult.data;
   const latestRunSummary = [...runs].sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""))[0];
-  const latestRun = latestRunSummary
-    ? await safeJson<OrchestrationRun | null>(`${apiBase}/projects/${projectId}/orchestrations/${latestRunSummary.run_id}`, null)
-    : null;
+  let latestRun: OrchestrationRun | null = null;
+  if (latestRunSummary) {
+    const latestRunResult = await readBackendJson(
+      `/projects/${encodedProjectId}/orchestrations/${encodeURIComponent(latestRunSummary.run_id)}`,
+      decodeOrchestrationRun,
+    );
+    if (latestRunResult.state !== "ready") {
+      return <MobileBackendState failure={latestRunResult} currentPath={currentPath} />;
+    }
+    latestRun = latestRunResult.data;
+  }
 
   const gate = latestRun?.artifacts?.approvalReadinessGate;
   const credit = latestRun?.artifacts?.creditReviewDecision;

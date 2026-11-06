@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 
 from storage import (
     create_user_session,
@@ -35,6 +36,24 @@ from storage import (
     upsert_risk_register_record,
     upsert_user,
 )
+
+
+def test_unchanged_identity_projection_can_be_read_during_a_write(tmp_path, monkeypatch):
+    db_path = tmp_path / "identity-contention.sqlite3"
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(db_path))
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    record = {"userId": "projection-user", "tenantId": "projection-tenant", "role": "admin", "status": "active"}
+    first = upsert_user(record)
+    writer = sqlite3.connect(db_path)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        assert upsert_user(record, skip_unchanged=True) == first
+    finally:
+        writer.rollback()
+        writer.close()
+    changed = upsert_user({**record, "role": "viewer"}, skip_unchanged=True)
+    assert changed["role"] == "viewer"
+    assert get_user(record["userId"])["role"] == "viewer"
 
 
 def test_json_state_storage_round_trip(tmp_path, monkeypatch):
