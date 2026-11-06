@@ -26,6 +26,7 @@ test("background provider failures remain visible and retry preserves the parcel
     ? route.fulfill({ status: 502, json: { reason: "provider_rejected_request" }, headers: { "Cache-Control": "no-store" } })
     : route.fulfill({ contentType: "image/png", body: image });
   await page.route("**/api/vworld?**", tiles);
+  await page.route("https://api.vworld.kr/**", tiles);
   await page.route("https://tile.openstreetmap.org/**", tiles);
   await page.goto(`/project/${projectId}/map`, { waitUntil: "domcontentloaded" });
   await expect(page.locator("canvas.maplibregl-canvas")).toBeVisible({ timeout: 20_000 });
@@ -46,6 +47,7 @@ test("background provider failures remain visible and retry preserves the parcel
 test("an optional WMS tile failure does not remove the background or parcel map", async ({ page }) => {
   await projectData(page);
   await page.route("https://tile.openstreetmap.org/**", (route) => route.fulfill({ contentType: "image/png", body: image }));
+  await page.route("https://api.vworld.kr/**", (route) => route.fulfill({ contentType: "image/png", body: image }));
   await page.route("**/api/vworld?**", (route) => new URL(route.request().url()).searchParams.get("kind") === "wms"
     ? route.fulfill({ status: 502, json: { reason: "provider_rejected_request" } })
     : route.fulfill({ contentType: "image/png", body: image }));

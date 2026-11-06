@@ -100,6 +100,7 @@ test.beforeEach(async ({ page }) => {
   });
   await page.route("https://tile.openstreetmap.org/**", (route) => route.abort());
   await page.route("**/api/vworld?**", (route) => route.abort());
+  await page.route("https://api.vworld.kr/**", (route) => route.abort());
   // Contract tests never call the real provider or consume a real key/quota.
   await page.route("https://map.vworld.kr/**", (route) => route.abort());
 });

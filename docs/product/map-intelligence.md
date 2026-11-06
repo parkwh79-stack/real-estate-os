@@ -33,6 +33,23 @@ Cloud Build `5914f53c-4f8f-48d6-9a26-2ffcff133a6c`의 이미지
 200, 미로그인 확인과 프로젝트 지도 401을 검증했다. 같은 소스의 GitHub 전체 CI와
 Vercel 배포를 확인한 뒤 이 리비전에 운영 트래픽을 연결한다.
 
+### 배경 타일의 브라우저 직접 조회
+
+첫 수정 배포의 운영 재확인에서 Vercel 서버의 VWorld 호출은 실제 제공기관 502를
+받았다. 같은 키를 사용한 브라우저·로컬 Node의 WMTS는 20,650바이트 PNG·200과
+`Access-Control-Allow-Origin: *`로 응답했다. 이 차이의 제공기관 내부 원인은
+확정하지 않았으며 서버 위치 제한이라고 단정하지 않는다.
+이미 3D에 사용하던 전용 공개 브라우저 키로 고정된 공식 WMTS 주소를 직접
+조회하도록 배경만 연결했다. 서버 전용 키를 브라우저로 보내지 않는다.
+직접 경로의 공백 제거·URL 인코딩·고정 호스트를 검증했으며 브라우저 실패 시에는
+동일한 필지·선택을 유지하고 OSM으로 전환한다. 변경 후 2D PC·모바일 4개를 다시
+확인했고 전체 웹 계약 18개·타입·린트가 통과했다.
+
+WMS는 실제 응답에 CORS 허용 헤더가 없어 프록시를 유지한다. 운영 제공기관 502가
+남은 지적도·용도지역 타일은 부분 실패 안내로 구분하며, 정상 배경과 저장된 필지
+경계 전체를 감추지 않는다. 운영 3D는 실제 브라우저에서 위성 영상과 3D 건물,
+로딩 문구 해제를 확인했다. 이는 각 사업장의 미확인 필지나 법적 경계의 확정을 뜻하지 않는다.
+
 Map Intelligence is the project-level spatial view for REALYTICS. It connects
 land ledger parcels, PNU, VWorld cadastral boundaries, official land price,
 zoning overlays, market evidence, and risk context.

@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { vworldRequestUrl } from '../../apps/web/lib/vworld-request.ts';
+import { vworldRequestUrl, vworldBrowserBaseTileTemplate } from '../../apps/web/lib/vworld-request.ts';
+
+test('public browser base tiles use only the fixed official CORS origin and an encoded trimmed key', () => {
+  assert.equal(vworldBrowserBaseTileTemplate('  fixture/key\r\n'),
+    'https://api.vworld.kr/req/wmts/1.0.0/fixture%2Fkey/Base/{z}/{y}/{x}.png');
+});
+
+test('without a public browser key the tile template retains the server-only key proxy path', () => {
+  assert.equal(vworldBrowserBaseTileTemplate(), '/api/vworld?kind=base&z={z}&x={x}&y={y}');
+  assert.equal(vworldBrowserBaseTileTemplate(' \r\n '), vworldBrowserBaseTileTemplate());
+});
 
 test('VWorld requests stay on the fixed origin and use validated tile coordinates', () => {
   const url = vworldRequestUrl(new URLSearchParams('kind=base&z=10&x=700&y=400'), 'dummy/key');

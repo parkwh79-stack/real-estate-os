@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import { createParcelPopup } from "../../lib/parcel-popup";
+import { vworldBrowserBaseTileTemplate } from "../../lib/vworld-request";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type {
   GeoJSONSource,
@@ -80,14 +81,14 @@ const LAYER_STATUS_TONE: Record<string, string> = {
   planned: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
 };
 
-function baseStyle(provider: "vworld" | "osm"): StyleSpecification {
+function baseStyle(provider: "vworld" | "osm", publicKey?: string): StyleSpecification {
   if (provider === "vworld") {
     return {
       version: 8,
       sources: {
         vworld: {
           type: "raster",
-          tiles: ["/api/vworld?kind=base&z={z}&x={x}&y={y}"],
+          tiles: [vworldBrowserBaseTileTemplate(publicKey)],
           tileSize: 256,
           attribution: "VWorld",
         },
@@ -224,7 +225,7 @@ export function MapIntelligence({ data, transactions = [], compact = false, focu
   const [layerNotice, setLayerNotice] = useState<string | null>(null);
   const [selection, setSelection] = useState<Set<string> | null>(null);
   const [showOnlySelected, setShowOnlySelected] = useState(Boolean(focusPnu));
-  const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
+  const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY?.trim();
   const [baseProvider, setBaseProvider] = useState<"vworld" | "osm">(vworldKey ? "vworld" : "osm");
 
   const parcelFeatures = useMemo(() => data.parcelGeoJson.features as ParcelFeature[], [data.parcelGeoJson.features]);
@@ -265,7 +266,7 @@ export function MapIntelligence({ data, transactions = [], compact = false, focu
       const center: [number, number] = initialCenter ? [initialCenter.lng, initialCenter.lat] : KOREA_CENTER;
       map = new maplibregl.Map({
         container: containerRef.current,
-        style: baseStyle(provider),
+        style: baseStyle(provider, vworldKey),
         center,
         zoom: initialCenter ? 16 : 6,
         attributionControl: { compact: true },

@@ -1,6 +1,14 @@
 const ORIGIN = "https://api.vworld.kr";
 const LAYERS = new Set(["lt_c_landinfobasemap", "lt_c_uq111"]);
 
+/** The SDK already uses this browser key; server-only keys remain in the proxy. */
+export function vworldBrowserBaseTileTemplate(publicKey?: string): string {
+  const key = publicKey?.trim();
+  return key
+    ? `${ORIGIN}/req/wmts/1.0.0/${encodeURIComponent(key)}/Base/{z}/{y}/{x}.png`
+    : "/api/vworld?kind=base&z={z}&x={x}&y={y}";
+}
+
 /** Build only supported VWorld requests; callers cannot choose a host or path. */
 export function vworldRequestUrl(params: URLSearchParams, key: string): URL | null {
   if (params.get("kind") === "base") {
