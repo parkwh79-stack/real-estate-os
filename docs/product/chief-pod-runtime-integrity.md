@@ -129,7 +129,9 @@ canonical 입력과 원래 입력의 계산·보고서는 유지하고, 수치 �
 기존 Cloud Run `realytics-api-00041-mek`에 배포했다. 먼저 트래픽 0%에서 health/ready와
 OpenAPI 200, 미인증 프로젝트 계획 401을 확인한 뒤 해당 리비전으로 전환했다.
 ClamAV 이미지, DB 스키마·권한과 기존 인프라 구성은 유지했다. GitHub의 현재 작업
-브랜치에서 전체 CI와 Vercel 연동 배포 상태를 추가 확인한다.
+브랜치에서 전체 CI와 Vercel 연동 배포 상태를 추가 확인한다. 자동 PR 검사 실행이
+생성되지 않을 때도 동일 브랜치 소스를 검증할 수 있도록 기존 CI·CodeQL에 수동
+workflow_dispatch 진입을 추가했다. 기존 검사 단계와 권한은 유지한다.
 
 ## 6개 Pod 사전 검토
 
