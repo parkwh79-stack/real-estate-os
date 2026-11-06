@@ -80,8 +80,8 @@ const LAYER_STATUS_TONE: Record<string, string> = {
   planned: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
 };
 
-function baseStyle(vworldKey?: string): StyleSpecification {
-  if (vworldKey) {
+function baseStyle(provider: "vworld" | "osm"): StyleSpecification {
+  if (provider === "vworld") {
     return {
       version: 8,
       sources: {
@@ -125,9 +125,30 @@ function parcelLabel(feature: ParcelFeature, index: number): string {
 }
 
 export function parcelGeometryStatus(geometry: GeoJSON.Geometry | null | undefined) {
-  if (geometry?.type === "Polygon" || geometry?.type === "MultiPolygon") return "boundary";
-  if (geometry?.type === "Point") return "point";
+  if (geometry?.type === "Polygon" && validPolygon(geometry.coordinates)) return "boundary";
+  if (geometry?.type === "MultiPolygon" && geometry.coordinates.length && geometry.coordinates.every(validPolygon)) return "boundary";
+  if (geometry?.type === "Point" && validPosition(geometry.coordinates)) return "point";
   return "unlocated";
+}
+
+function validPosition(value: unknown): value is [number, number, number?] {
+  return Array.isArray(value) && [2, 3].includes(value.length)
+    && value.every((component) => typeof component === "number" && Number.isFinite(component))
+    && Math.abs(value[0]) <= 180 && Math.abs(value[1]) <= 90;
+}
+
+function validPolygon(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every((ring: unknown) => {
+    if (!Array.isArray(ring) || ring.length < 4 || !ring.every(validPosition)) return false;
+    const [first, last] = [ring[0]!, ring[ring.length - 1]!];
+    if (first[0] !== last[0] || first[1] !== last[1]
+      || new Set(ring.slice(0, -1).map((position) => `${position[0]},${position[1]}`)).size < 3) return false;
+    const area = ring.slice(1).reduce((sum, point, index) => {
+      const previous = ring[index]!;
+      return sum + (previous[0] - first[0]) * (point[1] - first[1]) - (point[0] - first[0]) * (previous[1] - first[1]);
+    }, 0);
+    return Math.abs(area) > 1e-18;
+  });
 }
 
 export const PARCEL_GEOMETRY_LABEL = {
@@ -141,6 +162,7 @@ function cloneWithSelection(data: ParcelFeatureCollection, selectedIds: Set<stri
     type: "FeatureCollection",
     features: data.features.map((feature, index) => ({
       ...feature,
+      geometry: parcelGeometryStatus(feature.geometry) === "unlocated" ? null : feature.geometry,
       id: feature.id ?? parcelKey(feature, index),
       properties: {
         ...(feature.properties ?? {}),
@@ -157,9 +179,7 @@ function collectCoordinates(geometry: GeoJSON.Geometry | null | undefined): [num
   const walk = (node: unknown) => {
     if (
       Array.isArray(node) &&
-      node.length === 2 &&
-      typeof node[0] === "number" &&
-      typeof node[1] === "number"
+      validPosition(node)
     ) {
       points.push([node[0], node[1]]);
       return;
@@ -199,9 +219,13 @@ export function MapIntelligence({ data, transactions = [], compact = false, focu
   const [zoningVisible, setZoningVisible] = useState(false);
   const [ready, setReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [mapAttempt, setMapAttempt] = useState(0);
+  const [mapNotice, setMapNotice] = useState<string | null>(null);
+  const [layerNotice, setLayerNotice] = useState<string | null>(null);
   const [selection, setSelection] = useState<Set<string> | null>(null);
   const [showOnlySelected, setShowOnlySelected] = useState(Boolean(focusPnu));
   const vworldKey = process.env.NEXT_PUBLIC_VWORLD_API_KEY;
+  const [baseProvider, setBaseProvider] = useState<"vworld" | "osm">(vworldKey ? "vworld" : "osm");
 
   const parcelFeatures = useMemo(() => data.parcelGeoJson.features as ParcelFeature[], [data.parcelGeoJson.features]);
   const allParcelIds = useMemo(() => parcelFeatures.map(parcelKey), [parcelFeatures]);
@@ -228,12 +252,20 @@ export function MapIntelligence({ data, transactions = [], compact = false, focu
   useEffect(() => {
     let map: MlMap | null = null;
     if (typeof window === "undefined" || !containerRef.current) return;
+    setReady(false);
+    setMapError(null);
+    setMapNotice(null);
+    setLayerNotice(null);
+    let provider: "vworld" | "osm" = vworldKey ? "vworld" : "osm";
+    setBaseProvider(provider);
     try {
-      const initialCenter = focusPnu ? null : data.center;
+      const candidateCenter = focusPnu ? null : data.center;
+      const initialCenter = candidateCenter && Number.isFinite(candidateCenter.lng) && Number.isFinite(candidateCenter.lat)
+        && Math.abs(candidateCenter.lng) <= 180 && Math.abs(candidateCenter.lat) <= 90 ? candidateCenter : null;
       const center: [number, number] = initialCenter ? [initialCenter.lng, initialCenter.lat] : KOREA_CENTER;
       map = new maplibregl.Map({
         container: containerRef.current,
-        style: baseStyle(vworldKey),
+        style: baseStyle(provider),
         center,
         zoom: initialCenter ? 16 : 6,
         attributionControl: { compact: true },
@@ -242,8 +274,27 @@ export function MapIntelligence({ data, transactions = [], compact = false, focu
       requestAnimationFrame(() => map?.resize());
       setTimeout(() => map?.resize(), 400);
       map.on("error", (event: unknown) => {
-        const message = (event as { error?: { message?: string } })?.error?.message;
-        if (message) console.warn("[map]", message);
+        const sourceId = (event as { sourceId?: string })?.sourceId;
+        if (sourceId === "cadastral-wms" || sourceId === "zoning-wms") {
+          setLayerNotice("일부 지적도·용도지역 타일을 표시하지 못했습니다. 배경지도와 필지 경계는 계속 확인할 수 있습니다.");
+          return;
+        }
+        if (sourceId === "vworld" && provider === "vworld" && map) {
+          // Replace only the base source. Keep selected parcel GeoJSON and
+          // overlays in place when the provider rejects or times out a tile.
+          provider = "osm";
+          setBaseProvider("osm");
+          setMapNotice("VWorld 배경지도에 연결하지 못해 OpenStreetMap으로 전환했습니다.");
+          if (map.getLayer("vworld")) map.removeLayer("vworld");
+          if (map.getSource("vworld")) map.removeSource("vworld");
+          const fallback = baseStyle("osm");
+          map.addSource("osm", fallback.sources.osm!);
+          map.addLayer(fallback.layers[0]!, map.getStyle().layers?.[0]?.id);
+          return;
+        }
+        if (sourceId === "osm" && provider === "osm") {
+          setMapError("배경지도를 불러오지 못했습니다. 필지 목록은 계속 확인할 수 있습니다.");
+        }
       });
       map.on("load", () => {
         if (!map) return;
@@ -350,7 +401,7 @@ export function MapIntelligence({ data, transactions = [], compact = false, focu
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mapAttempt]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -449,15 +500,19 @@ export function MapIntelligence({ data, transactions = [], compact = false, focu
       <div className={`relative overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800 ${compact ? "h-80 sm:h-[360px]" : "h-[620px]"}`}>
         <div ref={containerRef} className="h-full w-full" />
         {mapError ? (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-rose-50/95 p-4 text-center text-sm font-semibold text-rose-700 dark:bg-rose-950/80 dark:text-rose-200">
-            지도 초기화 오류: {mapError}
+          <div role="alert" className="absolute left-3 right-3 top-12 z-20 rounded-md bg-rose-50/95 p-3 text-sm font-semibold text-rose-700 shadow dark:bg-rose-950/80 dark:text-rose-200">
+            {mapError}
+            <button type="button" onClick={() => setMapAttempt((attempt) => attempt + 1)} className="ml-3 rounded border border-current px-2 py-1">지도 다시 시도</button>
           </div>
         ) : null}
-        {!vworldKey ? (
-          <div className="absolute left-3 top-3 z-10 rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
-            {compact ? "OpenStreetMap · 배경지도" : "OSM 기본지도 · VWorld 키가 있으면 지적도/용도지역 레이어가 활성화됩니다."}
-          </div>
-        ) : null}
+        <div className="absolute left-3 top-3 z-10 rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
+          {baseProvider === "vworld" ? "VWorld · 배경지도" : "OpenStreetMap · 배경지도"}
+        </div>
+        {mapNotice && !mapError ? <div role="status" className="absolute left-3 right-12 top-12 z-10 rounded-md bg-amber-50/95 p-2 text-xs text-amber-900 shadow">
+          {mapNotice}
+          <button type="button" onClick={() => setMapAttempt((attempt) => attempt + 1)} className="ml-2 underline">VWorld 다시 시도</button>
+        </div> : null}
+        {layerNotice ? <p role="status" className="absolute bottom-20 left-3 right-3 z-10 rounded-md bg-white/95 p-2 text-xs text-slate-700 shadow">{layerNotice}</p> : null}
         {!compact ? <div className="absolute bottom-3 left-3 z-10 rounded-md bg-white/90 px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 shadow dark:bg-slate-900/90 dark:text-slate-300">
           <p className="mb-1 font-bold">공시지가 색상</p>
           <div className="flex flex-wrap items-center gap-1.5">

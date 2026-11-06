@@ -18,6 +18,36 @@ const actionClass = "inline-flex items-center justify-center rounded-lg border b
 
 type MapState = { state: "loading" } | { state: "ready"; data: MapIntelligenceData } | { state: "unavailable" };
 
+function validPosition(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length >= 2
+    && value.every((item) => typeof item === "number" && Number.isFinite(item))
+    && Math.abs(value[0] as number) <= 180 && Math.abs(value[1] as number) <= 90;
+}
+
+/** Frame only geometry returned for this exact project parcel; never borrow another PNU's center. */
+function parcelCameraCenter(data: MapIntelligenceData, pnu: string): { lng: number; lat: number } | null {
+  const matching = data.parcelGeoJson.features.filter((feature) => feature.properties?.pnu === pnu);
+  const points: number[][] = [];
+  const collect = (value: unknown, depth: number): boolean => {
+    if (depth === 0) {
+      if (!validPosition(value)) return false;
+      points.push(value); return true;
+    }
+    return Array.isArray(value) && value.length > 0 && value.every((child) => collect(child, depth - 1));
+  };
+  if (!matching.length || !matching.every((feature) => {
+    const geometry = feature.geometry;
+    if (!geometry) return false;
+    if (geometry.type === "Point") return collect(geometry.coordinates, 0);
+    if (geometry.type === "Polygon") return collect(geometry.coordinates, 2);
+    if (geometry.type === "MultiPolygon") return collect(geometry.coordinates, 3);
+    return false;
+  }) || !points.length) return null;
+  const bounds = points.reduce((box, point) => [Math.min(box[0]!, point[0]!), Math.min(box[1]!, point[1]!),
+    Math.max(box[2]!, point[0]!), Math.max(box[3]!, point[1]!)], [180, 90, -180, -90]);
+  return { lng: (bounds[0]! + bounds[2]!) / 2, lat: (bounds[1]! + bounds[3]!) / 2 };
+}
+
 export default function Project3DMapPage() {
   const { id: projectId } = useParams<{ id: string }>();
   const search = useSearchParams();
@@ -30,6 +60,8 @@ export default function Project3DMapPage() {
 function Project3DMap({ projectId, focusPnu, track }: { projectId: string; focusPnu?: string; track: string | null }) {
   const [mapState, setMapState] = useState<MapState>({ state: "loading" });
   const [sdkUnavailable, setSdkUnavailable] = useState(false);
+  const [sdkReady, setSdkReady] = useState(false);
+  const [sdkAttempt, setSdkAttempt] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const iframe = useRef<HTMLIFrameElement>(null);
   const mapPath = projectWorkspaceHref(projectId, "map", track);
@@ -58,21 +90,24 @@ function Project3DMap({ projectId, focusPnu, track }: { projectId: string; focus
   }, [attempt, focusPnu, projectId]);
 
   const data = mapState.state === "ready" ? mapState.data : null;
-  const center = data?.center;
-  // The SDK shows the project center. Keep exact parcel selection on the parcel map.
-  const iframeSrc = browser3DConfigured && !focusPnu && !sdkUnavailable && center
+  const reportedCenter = data ? (focusPnu ? parcelCameraCenter(data, focusPnu) : data.center) : null;
+  const projectCenter = reportedCenter && validPosition([reportedCenter.lng, reportedCenter.lat]) ? reportedCenter : null;
+  const nationalReference = Boolean(data && !focusPnu && !projectCenter);
+  // A national reference view is navigation context, never a fabricated project location.
+  const center = projectCenter ?? (nationalReference ? { lng: 127.6, lat: 36.2 } : null);
+  const iframeSrc = browser3DConfigured && !sdkUnavailable && center
     && Number.isFinite(center.lng) && Math.abs(center.lng) <= 180
     && Number.isFinite(center.lat) && Math.abs(center.lat) <= 90
-    ? `/vworld-3d?${new URLSearchParams({ lng: String(center.lng), lat: String(center.lat) })}`
+    ? `/vworld-3d?${new URLSearchParams({ lng: String(center.lng), lat: String(center.lat), z: nationalReference ? "1000000" : "1800", attempt: String(sdkAttempt) })}`
     : null;
 
   useEffect(() => {
     if (!iframeSrc) return;
-    const timeout = window.setTimeout(() => setSdkUnavailable(true), 25_000);
+    const timeout = window.setTimeout(() => { setSdkReady(false); setSdkUnavailable(true); }, 45_000);
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin || event.source !== iframe.current?.contentWindow) return;
-      if (event.data === "realytics:vworld-3d-ready") window.clearTimeout(timeout);
-      if (event.data === "realytics:vworld-3d-unavailable") setSdkUnavailable(true);
+      if (event.data === "realytics:vworld-3d-ready") { window.clearTimeout(timeout); setSdkReady(true); }
+      if (event.data === "realytics:vworld-3d-unavailable") { window.clearTimeout(timeout); setSdkReady(false); setSdkUnavailable(true); }
     };
     window.addEventListener("message", onMessage);
     return () => {
@@ -84,7 +119,7 @@ function Project3DMap({ projectId, focusPnu, track }: { projectId: string; focus
   const fallbackMessage = !browser3DConfigured || sdkUnavailable
     ? "현재 3D 지도를 불러올 수 없어 2D 필지 지도를 표시합니다."
     : focusPnu
-      ? "선택한 필지의 위치와 경계는 2D 지도에서 확인할 수 있습니다."
+      ? "선택한 필지의 확인된 위치가 없어 2D 지도에서 자료 상태를 표시합니다."
       : "프로젝트의 3D 지도 중심 위치를 확인할 수 없어 2D 필지 지도를 표시합니다.";
 
   return (
@@ -111,15 +146,22 @@ function Project3DMap({ projectId, focusPnu, track }: { projectId: string; focus
         </div>
       ) : null}
       {iframeSrc ? (
-        <div className="h-[440px] overflow-hidden rounded-lg border border-slate-200 sm:h-[640px] dark:border-slate-800">
-          <iframe ref={iframe} src={iframeSrc} title="VWorld 3D 지도" className="h-full w-full border-0" />
-        </div>
+        <section aria-label={nationalReference ? "전국 3D 참고지도" : "프로젝트 3D 지도"} className="space-y-2">
+          {!sdkReady ? <p role="status" className="text-sm text-slate-600 dark:text-slate-300">3D 엔진과 지형을 불러오고 있습니다.</p> : null}
+          {nationalReference ? <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">전국 3D 참고지도 · 사업 위치 미확인. 표시한 좌표는 사업장 위치가 아니며, 사업장 자료를 확인하면 해당 위치로 이동할 수 있습니다.</p> : null}
+          {focusPnu ? <p className="text-sm text-slate-600 dark:text-slate-300">선택한 필지 주변의 3D 공간을 표시합니다. 필지 경계와 PNU 대조는 전체 지도에서 확인하세요.</p> : null}
+          <div className="h-[440px] overflow-hidden rounded-lg border border-slate-200 sm:h-[640px] dark:border-slate-800">
+            <iframe key={iframeSrc} ref={iframe} src={iframeSrc} title="VWorld 3D 지도" className="h-full w-full border-0" />
+          </div>
+        </section>
       ) : data ? (
         <section aria-label="2D 필지 지도" className="space-y-3">
           <p role="status" className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">{fallbackMessage}</p>
           {focusPnu && !data.parcelGeoJson.features.some((parcel) => parcel.properties?.pnu === focusPnu) ? (
             <p role="status" className="text-sm text-slate-600 dark:text-slate-300">이 프로젝트에서 요청한 필지를 확인할 수 없습니다.</p>
           ) : null}
+          {browser3DConfigured && sdkUnavailable && center ? <button type="button" className={actionClass}
+            onClick={() => { setSdkReady(false); setSdkUnavailable(false); setSdkAttempt((value) => value + 1); }}>3D 지도 다시 시도</button> : null}
           <ParcelMap data={data} focusPnu={focusPnu} compact />
         </section>
       ) : null}

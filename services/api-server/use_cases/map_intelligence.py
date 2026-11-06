@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional
 
 from use_cases.parcel_pnu_resolution import canonical_project_parcel_rows, parcel_pnu
@@ -181,21 +182,42 @@ def _parcel_geometry(parcel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(geometry, dict) and geometry.get("type") == "Point" and _coord_pair(geometry.get("coordinates")):
         return geometry
     centroid = parcel.get("centroid")
-    if isinstance(centroid, (list, tuple)) and len(centroid) == 2 and all(_is_num(value) for value in centroid):
+    if _coord_pair(centroid):
         return {"type": "Point", "coordinates": [float(centroid[0]), float(centroid[1])]}
-    lng = parcel.get("lng") or parcel.get("longitude")
-    lat = parcel.get("lat") or parcel.get("latitude")
-    if _is_num(lng) and _is_num(lat):
+    lng = parcel.get("lng") if parcel.get("lng") is not None else parcel.get("longitude")
+    lat = parcel.get("lat") if parcel.get("lat") is not None else parcel.get("latitude")
+    if _coord_pair([lng, lat]):
         return {"type": "Point", "coordinates": [float(lng), float(lat)]}
     return None
 
 
 def _is_parcel_boundary(geometry: Any) -> bool:
-    return (
-        isinstance(geometry, dict)
-        and geometry.get("type") in ("Polygon", "MultiPolygon")
-        and bool(geometry.get("coordinates"))
-    )
+    if not isinstance(geometry, dict):
+        return False
+    coords = geometry.get("coordinates")
+    if geometry.get("type") == "Polygon":
+        return _valid_polygon(coords)
+    if geometry.get("type") == "MultiPolygon":
+        return isinstance(coords, (list, tuple)) and bool(coords) and all(_valid_polygon(polygon) for polygon in coords)
+    return False
+
+
+def _valid_polygon(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    for ring in value:
+        if not isinstance(ring, (list, tuple)) or len(ring) < 4 or not all(_coord_pair(position) for position in ring):
+            return False
+        points = [(position[0], position[1]) for position in ring]
+        if points[0] != points[-1] or len(set(points[:-1])) < 3:
+            return False
+        # Translate first to retain precision for small parcels near 127E.
+        x0, y0 = points[0]
+        area = sum((a[0] - x0) * (b[1] - y0) - (b[0] - x0) * (a[1] - y0)
+                   for a, b in zip(points, points[1:]))
+        if abs(area) <= 1e-18:
+            return False
+    return True
 
 
 def _center_of(features: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
@@ -215,13 +237,13 @@ def _geometry_points(geometry: Dict[str, Any]) -> List[List[float]]:
     coords = geometry.get("coordinates")
     gtype = geometry.get("type")
     if gtype == "Point" and _coord_pair(coords):
-        return [coords]
+        return [list(coords[:2])]
 
     points: List[List[float]] = []
 
     def walk(node: Any) -> None:
         if _coord_pair(node):
-            points.append(node)
+            points.append(list(node[:2]))
             return
         if isinstance(node, (list, tuple)):
             for child in node:
@@ -234,9 +256,10 @@ def _geometry_points(geometry: Dict[str, Any]) -> List[List[float]]:
 def _coord_pair(value: Any) -> bool:
     return (
         isinstance(value, (list, tuple))
-        and len(value) == 2
-        and _is_num(value[0])
-        and _is_num(value[1])
+        and len(value) in (2, 3)
+        and all(_is_num(component) for component in value)
+        and -180 <= value[0] <= 180
+        and -90 <= value[1] <= 90
     )
 
 
@@ -302,4 +325,9 @@ def _data_limitations(parcel_count: int, boundaries: int, priced: int) -> List[s
 
 
 def _is_num(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+from copy import deepcopy
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -232,3 +235,53 @@ def test_vworld_geometry_requires_matching_pnu_and_polygon(monkeypatch):
     geometry, diagnosis = fetch_parcel_geometry_by_pnu(pnu, environ=environ)
     assert geometry == _BOUNDARY
     assert diagnosis["status"] == "resolved"
+
+
+@pytest.mark.parametrize("coordinates", [
+    [[]],
+    [[[128.5, 35.8], [128.6, 35.8], [128.6, 35.9]]],
+    [[[128.5, 35.8], [128.6, 35.8], [128.7, 35.8], [128.5, 35.8]]],
+    [[[958113, 1953471], [958114, 1953471], [958114, 1953472], [958113, 1953471]]],
+    [[[float("nan"), 35.8], [128.6, 35.8], [128.6, 35.9], [float("nan"), 35.8]]],
+    [[[128.5, float("inf")], [128.6, 35.8], [128.6, 35.9], [128.5, float("inf")]]],
+])
+def test_invalid_boundaries_are_unlocated_and_remain_eligible_for_retry(coordinates):
+    project = _project_with_parcels({"type": "Polygon", "coordinates": coordinates})
+    result = build_project_map_intelligence(project)
+    assert result["summary"]["boundaryParcelCount"] == 0
+    assert result["summary"]["hasGeometry"] is False
+    assert result["center"] is None
+    parcels = project_map_parcels(project)
+    assert resolve_and_attach_geometry(parcels, lambda _: _BOUNDARY) == 1
+    assert build_project_map_intelligence(project, parcels=parcels)["summary"]["boundaryParcelCount"] == 1
+    # The invalid original remains untouched; this GET enriches response rows only.
+    assert project["land_ledger"]["parcels"][0]["geometry"]["coordinates"] is coordinates
+
+
+def test_three_dimensional_positions_keep_original_height_but_center_on_longitude_latitude():
+    geometry = deepcopy(_BOUNDARY)
+    geometry["coordinates"] = [[[lng, lat, 23] for lng, lat in ring] for ring in geometry["coordinates"]]
+    result = build_project_map_intelligence(_project_with_parcels(geometry))
+    assert result["summary"]["boundaryParcelCount"] == 1
+    assert result["center"] == pytest.approx({"lng": 128.555, "lat": 35.855})
+    assert result["parcelGeoJson"]["features"][0]["geometry"] == geometry
+
+
+def test_multipolygon_requires_all_boundaries_to_be_valid():
+    valid = {"type": "MultiPolygon", "coordinates": [deepcopy(_BOUNDARY["coordinates"])]}
+    assert build_project_map_intelligence(_project_with_parcels(valid))["summary"]["boundaryParcelCount"] == 1
+    valid["coordinates"].append([[]])
+    assert build_project_map_intelligence(_project_with_parcels(valid))["summary"]["boundaryParcelCount"] == 0
+
+
+@pytest.mark.parametrize("centroid", [[float("nan"), 35], [127, 95000], [True, 35], [10**400, 35]])
+def test_invalid_reference_centroids_never_become_a_map_center(centroid):
+    project = _project_with_parcels()
+    project["land_ledger"]["parcels"][0]["centroid"] = centroid
+    assert build_project_map_intelligence(project)["center"] is None
+
+
+def test_point_height_too_large_for_numeric_coordinates_is_unlocated():
+    result = build_project_map_intelligence(_project_with_parcels({"type": "Point", "coordinates": [127, 35, 10**400]}))
+    assert result["center"] is None
+    assert result["summary"]["locatedParcelCount"] == 0
