@@ -147,7 +147,7 @@ export function WorkbookOriginalPreview({ projectId, archiveId, locator, onSelec
         </form>
       </div> : null}
       {rangeError ? <p role="alert" className="text-xs text-rose-700 dark:text-rose-300">{rangeError}</p> : null}
-      {activeSheet ? <p className="text-xs text-slate-500">원본 시트 {activeSheet.declaredRowCount.toLocaleString("ko-KR")}행 × {activeSheet.declaredColumnCount.toLocaleString("ko-KR")}열{activeSheet.dimensionsTruncated ? " · 일부 범위만 탐색 가능" : ""}. 한 번에 최대 {sheets?.limits.maxCells}셀을 표시합니다.</p> : null}
+      {activeSheet ? <p className="text-xs text-slate-500">원본 시트 {activeSheet.declaredRowCount === null ? "행 수 미확인" : `${activeSheet.declaredRowCount.toLocaleString("ko-KR")}행`} × {activeSheet.declaredColumnCount === null ? "열 수 미확인" : `${activeSheet.declaredColumnCount.toLocaleString("ko-KR")}열`}{activeSheet.dimensionsTruncated ? " · 일부 범위만 탐색 가능" : ""}. 한 번에 최대 {sheets?.limits.maxCells}셀을 표시합니다.</p> : null}
     </div>
     {loading ? <div role="status" className="flex min-h-52 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Excel 시트와 셀을 읽고 있습니다.</div>
       : error ? <p role="alert" className="m-4 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800 dark:bg-rose-950/30 dark:text-rose-200">{error} 원본 다운로드로도 확인할 수 있습니다.</p>

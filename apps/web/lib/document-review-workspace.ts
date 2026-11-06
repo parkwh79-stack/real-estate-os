@@ -234,8 +234,8 @@ export type WorkbookOriginalSheets = {
     sheetIndex: number;
     rowCount: number;
     columnCount: number;
-    declaredRowCount: number;
-    declaredColumnCount: number;
+    declaredRowCount: number | null;
+    declaredColumnCount: number | null;
     state: string;
     dimensionsTruncated: boolean;
   }>;

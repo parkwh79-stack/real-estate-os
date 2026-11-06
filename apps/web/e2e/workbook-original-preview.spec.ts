@@ -6,7 +6,7 @@ const otherArchiveId = "a".repeat(64);
 const fileName = "합성검증_상봉_브릿지론현황.xlsx";
 const identity = { archiveId, sourceSha256: archiveId, fileName, archiveVersionId: "source-v1", archiveETag: "etag-v1", archiveIntegrityStatus: "verified", analysisOnly: true, approvalEligible: false };
 
-async function fixture(page: Page, options: { candidate?: boolean; viewer?: boolean; sheetsStatus?: number; mismatchedCells?: boolean } = {}) {
+async function fixture(page: Page, options: { candidate?: boolean; viewer?: boolean; sheetsStatus?: number; mismatchedCells?: boolean; unknownDimensions?: boolean } = {}) {
   const state = { candidate: Boolean(options.candidate), cellRequests: [] as URLSearchParams[], extractions: [] as Record<string, unknown>[], mutations: [] as string[], sheetsStatus: options.sheetsStatus ?? 200, mismatchedCells: options.mismatchedCells ?? false };
   await page.route("**/api/backend/**", async (route) => {
     const request = route.request(); const path = new URL(request.url()).pathname;
@@ -31,7 +31,7 @@ async function fixture(page: Page, options: { candidate?: boolean; viewer?: bool
     if (path.endsWith("/workbook/sheets")) return reply({
       schemaVersion: "realytics-workbook-original-sheets-v1", ...identity,
       sheets: [
-        { sheetName: "sheet", sheetIndex: 0, rowCount: 107, columnCount: 7, declaredRowCount: 107, declaredColumnCount: 7, state: "visible", dimensionsTruncated: false },
+        { sheetName: "sheet", sheetIndex: 0, rowCount: options.unknownDimensions ? 10000 : 107, columnCount: options.unknownDimensions ? 512 : 7, declaredRowCount: options.unknownDimensions ? null : 107, declaredColumnCount: options.unknownDimensions ? null : 7, state: "visible", dimensionsTruncated: Boolean(options.unknownDimensions) },
         { sheetName: "담보 현황", sheetIndex: 1, rowCount: 5, columnCount: 3, declaredRowCount: 5, declaredColumnCount: 3, state: "visible", dimensionsTruncated: false },
       ], limits: { maxRows: 10000, maxColumns: 512, maxCells: 400, maxSheets: 100 }, defaultSheetName: "sheet", defaultRange: "A1:G20", warnings: [], truncated: false,
     }, state.sheetsStatus);
@@ -134,4 +134,17 @@ test("unreadable and mismatched Excel previews expose a retry and never display 
   await viewer.getByRole("button", { name: "원본 다시 읽기" }).click();
   await expect(viewer.getByText("합성 상봉 브릿지론 현황", { exact: true })).toBeVisible();
   expect(state.mutations).toEqual([]);
+});
+
+
+test("unknown declared Excel dimensions do not hide readable original cells or imply a fabricated sheet size", async ({ page }) => {
+  const state = await fixture(page, { viewer: true, unknownDimensions: true });
+  const viewer = page.getByRole("region", { name: "Excel 원본 미리보기" });
+  await expect(viewer.getByRole("table", { name: "sheet A1:G20" })).toBeVisible({ timeout: 20_000 });
+  await expect(viewer.getByText("원본 시트 행 수 미확인 × 열 수 미확인", { exact: false })).toBeVisible();
+  await expect(viewer.getByText("합성 상봉 브릿지론 현황", { exact: true })).toBeVisible();
+  await expect(viewer.getByRole("button", { name: "B4 셀 상세" })).toHaveText("50");
+  await expect(viewer.getByText(/10,000행|512열/)).toHaveCount(0);
+  expect(state.cellRequests.at(-1)?.get("cell_reference")).toBe("A1:G20");
+  expect(state.mutations).toEqual([]); expect(state.extractions).toEqual([]);
 });
