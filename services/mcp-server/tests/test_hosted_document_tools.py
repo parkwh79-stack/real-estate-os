@@ -184,6 +184,18 @@ class HostedDocumentCliTest(unittest.TestCase):
         factory.return_value.login_password.assert_called_once_with("person@example.com", sentinel)
         self.assertNotIn(sentinel, output.getvalue())
 
+    @patch("hosted_auth.HostedAuth.from_environment")
+    def test_google_login_is_human_initiated_and_does_not_request_a_password(self, factory):
+        factory.return_value.login_oauth.return_value = {"authenticated": True}
+        with patch.object(sys.stdin, "isatty", return_value=True), patch("realytics_cli.getpass.getpass") as password, redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["login", "--provider", "google"]), 0)
+        factory.return_value.login_oauth.assert_called_once_with("google")
+        password.assert_not_called()
+        factory.return_value.reset_mock()
+        with patch.object(sys.stdin, "isatty", return_value=False), redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["login", "--provider", "google"]), 1)
+        factory.return_value.login_oauth.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

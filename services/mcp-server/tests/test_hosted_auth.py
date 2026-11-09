@@ -201,9 +201,33 @@ class AuthFlowTest(unittest.TestCase):
         self.assertNotIn(ACCESS, json.dumps(result))
 
     def test_no_credential_copy_or_unsupported_oauth_fallback(self):
-        with self.assertRaisesRegex(HostedAuthError, "아직 검증되지"):
-            self.auth.login_oauth("google")
+        with self.assertRaisesRegex(HostedAuthError, "Google만 지원"):
+            self.auth.login_oauth("kakao")
         self.opener.open.assert_not_called()
+
+    @patch("hosted_oauth.authorize_google")
+    def test_google_login_checks_operating_identity_before_encrypted_storage(self, authorize):
+        authorize.return_value = session()
+        self.replies(IDENTITY)
+        result = self.auth.login_oauth("google")
+        authorize.assert_called_once_with(self.auth.config, opener=self.opener)
+        self.assertTrue(result["authenticated"])
+        self.assertEqual(self.store.value["identity"]["tenantId"], "tenant-1")
+        self.assertNotIn(ACCESS, json.dumps(result))
+        self.assertNotIn(REFRESH, json.dumps(result))
+
+    @patch("hosted_oauth.authorize_google")
+    def test_google_membership_failure_revokes_fresh_session_without_overwriting_old_cache(self, authorize):
+        self.login()
+        before = copy.deepcopy(self.store.value)
+        authorize.return_value = session("new.access.jwt", "new-refresh-token")
+        self.replies({"authenticated": False}, b"")
+        with self.assertRaisesRegex(HostedAuthError, "사용 권한"):
+            self.auth.login_oauth("google")
+        self.assertEqual(self.store.value, before)
+        request = self.opener.open.call_args_list[-1].args[0]
+        self.assertEqual(request.full_url, AUTH + "/auth/v1/logout?scope=local")
+        self.assertEqual(request.get_header("Authorization"), "Bearer new.access.jwt")
 
     def test_rejects_malformed_session_and_origin_binding(self):
         self.login()

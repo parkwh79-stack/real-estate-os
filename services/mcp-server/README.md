@@ -16,10 +16,21 @@ py -3.12 -m venv .runtime/mcp-venv
 & .runtime/mcp-venv/Scripts/python.exe -B services/mcp-server/realytics_cli.py status
 ```
 
-`login`은 사용자의 실제 터미널에서 이메일·비밀번호를 입력받습니다. 비밀번호는 숨겨
-입력하며 명령 인수·환경변수·채팅·로그에 넣지 않습니다. 첫 지원 경로는 기존 계정의
-이메일·비밀번호입니다. CLI Google/Kakao 로그인은 복귀 주소 검증 전까지 미지원이며
-브라우저 쿠키나 다른 Agent의 인증 파일을 복사하지 않습니다.
+Google로 가입한 계정은 REALYTICS 이메일 비밀번호가 없을 수 있습니다. 이 경우 다음
+명령을 사용하고 열린 브라우저에서 직접 Google 로그인을 완료합니다.
+
+```powershell
+& .runtime/mcp-venv/Scripts/python.exe -B services/mcp-server/realytics_cli.py login --provider google
+```
+
+`login`의 이메일 방식은 사용자 터미널의 숨김 입력만 받으며, 비밀번호를 명령 인수·
+환경변수·채팅·로그에 넣지 않습니다. Google 방식은 비밀번호를 CLI에 묻지 않고 새
+S256 PKCE 세션을 발급받습니다. 복귀 주소는 기존 `http://127.0.0.1:3000/auth/callback`
+한 곳이며, 먼저 해당 포트를 단독 점유한 뒤 최대 5분 기다립니다. 사용 중인 포트,
+복귀 주소 불일치·미도착, 인증 거부·코드 교환 실패를 로그인 성공으로 표시하지 않습니다.
+Supabase 허용 목록을 자동 변경하거나 implicit 방식으로 대체하지 않습니다.
+실제 복귀·코드 교환·운영 권한 확인이 모두 끝나야 연결 완료입니다. Kakao CLI 로그인은
+미지원이며 브라우저 쿠키나 다른 Agent의 인증 파일을 복사하지 않습니다.
 
 공개 `/api/cli/config`에서 운영 주소·인증기관·publishable 키만 얻습니다. 새 CLI 세션을
 발급받고 운영 `/auth/me`의 실제 사용자·테넌트를 확인한 다음 Windows 사용자 DPAPI로

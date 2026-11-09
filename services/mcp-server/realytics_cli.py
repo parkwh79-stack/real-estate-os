@@ -13,7 +13,7 @@ from hosted_project_api import HostedProjectApi, HostedProjectApiError
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="REALYTICS 로그인과 운영 문서·원본 셀 읽기. 사용자 AI 키는 필요하지 않습니다.")
     commands = parser.add_subparsers(dest="command", required=True)
-    login = commands.add_parser("login", help="본인이 REALYTICS에 로그인합니다. 비밀번호는 숨김 입력하며 인수·출력에 저장하지 않습니다.")
+    login = commands.add_parser("login", help="이메일 숨김 입력 또는 --provider google 브라우저 로그인으로 본인 계정을 연결합니다.")
     login.add_argument("--email", help="REALYTICS 로그인 이메일; 생략하면 대화식으로 입력합니다.")
     login.add_argument("--provider", choices=("email", "google", "kakao"), default="email")
     commands.add_parser("status", help="키나 토큰 없이 현재 CLI 로그인 상태를 확인합니다.")
@@ -52,11 +52,12 @@ def main(argv: list[str] | None = None) -> int:
         if command in {"login", "status", "logout"}:
             auth = HostedAuth.from_environment()
             if command == "login":
+                if not sys.stdin.isatty():
+                    raise HostedAuthError("사용자 터미널에서 login을 실행하세요. 이메일 비밀번호는 숨김 입력하고 Google 계정은 --provider google로 연결하세요. 비밀번호를 명령 인수·환경변수·AI 채팅에 넣지 마세요.")
                 if arguments["provider"] != "email":
+                    print("브라우저에서 Google 로그인을 완료하세요. REALYTICS 연결 결과는 이 창에 표시됩니다. 최대 5분 기다립니다.", file=sys.stderr)
                     result = auth.login_oauth(arguments["provider"])
                 else:
-                    if not sys.stdin.isatty():
-                        raise HostedAuthError("사용자 터미널에서 login을 실행해 비밀번호를 숨김 입력하세요. 비밀번호를 명령 인수·환경변수·AI 채팅에 넣지 마세요.")
                     email = arguments["email"] or input("REALYTICS 이메일: ").strip()
                     password = getpass.getpass("REALYTICS 비밀번호 (숨김 입력): ")
                     try:

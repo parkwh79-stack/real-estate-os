@@ -317,7 +317,7 @@ class HostedAuth:
         except _AuthHttpError as error:
             self._discard_new_session(response)
             if error.status in {400, 401, 403, 422}:
-                raise HostedAuthError("로그인 정보 또는 계정 사용 상태를 확인하세요. 비밀번호는 저장하지 않았습니다.") from None
+                raise HostedAuthError("로그인 정보 또는 계정 사용 상태를 확인하세요. Google로 가입한 계정은 login --provider google을 사용하세요. 비밀번호는 저장하지 않았습니다.") from None
             raise HostedAuthError("로그인을 완료하지 못했습니다. 잠시 뒤 다시 시도하세요.") from None
         except HostedAuthError:
             self._discard_new_session(response)
@@ -333,9 +333,23 @@ class HostedAuth:
                 pass
 
     def login_oauth(self, provider: str) -> dict:
-        # Social OAuth requires a verified allowlisted callback. No implicit
-        # browser-session or token-copy fallback is allowed.
-        raise HostedAuthError("CLI 소셜 로그인 복귀 주소는 아직 검증되지 않았습니다. 이메일·비밀번호 로그인 또는 운영 웹을 사용하세요.")
+        if provider != "google":
+            raise HostedAuthError("현재 CLI 소셜 로그인은 Google만 지원합니다. 다른 로그인은 운영 웹을 사용하세요.")
+        from hosted_oauth import authorize_google
+
+        response = {}
+        try:
+            response = authorize_google(self.config, opener=self._opener)
+            record = self._session(response)
+            with self.store.locked():
+                self.store.save(record)
+        except _AuthHttpError:
+            self._discard_new_session(response)
+            raise HostedAuthError("Google 로그인 후 REALYTICS 사용 권한을 확인하지 못했습니다. 운영 웹에서 같은 계정을 확인하세요.") from None
+        except HostedAuthError:
+            self._discard_new_session(response)
+            raise
+        return self._public_status(record)
 
     def access_token(self, force_refresh: bool = False) -> str:
         with self.store.locked():
