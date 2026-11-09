@@ -571,6 +571,50 @@ async function responseError(response: Response, fallback: string) {
   return `${fallback} (${response.status})`;
 }
 
+export class ParserReviewSaveError extends Error {
+  constructor(message: string, readonly status: number, readonly requiresReload: boolean) {
+    super(message);
+    this.name = "ParserReviewSaveError";
+  }
+}
+
+async function reviewSaveError(response: Response): Promise<ParserReviewSaveError> {
+  // Match known server gates without displaying raw responses or treating a
+  // client-side role guess as permission to submit a review.
+  let detail = "";
+  try {
+    const body = asRecord(await response.json());
+    const gate = asRecord(body.detail);
+    detail = [body.detail, gate.error, gate.message, body.message]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ").slice(0, 4096);
+  } catch {
+    // Non-JSON error pages only use the status-aware public message below.
+  }
+  const status = response.status;
+  if (status === 401) return new ParserReviewSaveError("검토 결정을 저장하려면 다시 로그인해 주세요.", status, false);
+  if (status === 403 && detail.includes("mfa_required")) {
+    return new ParserReviewSaveError("검토 결정을 저장하려면 다단계 인증을 완료해 주세요.", status, false);
+  }
+  if (status === 403) {
+    return new ParserReviewSaveError("현재 계정은 이 검토 결정을 저장할 수 없습니다. 담당 관리자에게 검토 권한을 확인해 주세요.", status, false);
+  }
+  if (status === 409 && detail.includes("maker-checker separation")) {
+    return new ParserReviewSaveError("이 후보를 생성한 사용자는 검토 결정을 저장할 수 없습니다. 다른 검토자가 확인해야 합니다.", status, false);
+  }
+  if (status === 409) {
+    return new ParserReviewSaveError("다른 검토 기록이 먼저 저장되었습니다. 최신 기록을 다시 불러온 뒤 제출해 주세요.", status, true);
+  }
+  if (status === 503 && detail.includes("parser_v2_review_pilot_")) {
+    return new ParserReviewSaveError("이 환경에서는 검토 결정 저장을 사용할 수 없습니다. 관리자에게 검토 기능 설정을 확인해 주세요.", status, false);
+  }
+  if (status >= 500) {
+    return new ParserReviewSaveError("검토 저장 요청의 결과를 확인하지 못했습니다. 최신 기록을 다시 불러와 확인해 주세요.", status, true);
+  }
+  if (status === 429) return new ParserReviewSaveError("검토 저장 요청이 많습니다. 잠시 뒤 다시 시도해 주세요.", status, false);
+  return new ParserReviewSaveError("검토 항목과 결정 사유를 확인해 주세요. 작성한 사유는 유지됩니다.", status, false);
+}
+
 async function fetchJson<T>(url: string, fallback: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     signal,
@@ -715,23 +759,40 @@ export async function recordParserV2Review(input: {
   reason: string;
   conflictIds: string[];
 }): Promise<ReviewDecisionRecord> {
-  const response = await fetch(
-    `${apiBase}/projects/${encodeURIComponent(input.projectId)}/parsing-v2/candidates/${encodeURIComponent(input.candidateId)}/reviews`,
-    {
-      method: "POST",
-      headers: { ...authHeaders("web-reviewer"), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        expectedDecisionSequence: input.expectedDecisionSequence,
-        action: input.action,
-        reason: input.reason,
-        conflictIds: input.conflictIds,
-      }),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(await responseError(response, "Parser V2 검토 결정을 저장하지 못했습니다."));
+  let response: Response;
+  try {
+    response = await fetch(
+      `${apiBase}/projects/${encodeURIComponent(input.projectId)}/parsing-v2/candidates/${encodeURIComponent(input.candidateId)}/reviews`,
+      {
+        method: "POST",
+        headers: { ...authHeaders("web-reviewer"), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedDecisionSequence: input.expectedDecisionSequence,
+          action: input.action,
+          reason: input.reason,
+          conflictIds: input.conflictIds,
+        }),
+      },
+    );
+  } catch {
+    throw new ParserReviewSaveError("검토 저장 요청의 결과를 확인하지 못했습니다. 최신 기록을 다시 불러와 확인해 주세요.", 0, true);
   }
-  return (await response.json()) as ReviewDecisionRecord;
+  if (!response.ok) {
+    throw await reviewSaveError(response);
+  }
+  try {
+    const decision = await response.json() as ReviewDecisionRecord;
+    if (!decision || typeof decision !== "object" || Array.isArray(decision)
+      || typeof decision.reviewDecisionId !== "string" || !decision.reviewDecisionId.trim()
+      || decision.candidateId !== input.candidateId || decision.action !== input.action
+      || !Number.isInteger(decision.decisionSequence)
+      || decision.decisionSequence !== input.expectedDecisionSequence + 1) {
+      throw new Error("unverified review response");
+    }
+    return decision;
+  } catch {
+    throw new ParserReviewSaveError("검토 저장 응답을 확인하지 못했습니다. 최신 기록을 다시 불러와 저장 여부를 확인해 주세요.", response.status, true);
+  }
 }
 
 export async function resolveParserV2Conflict(input: {

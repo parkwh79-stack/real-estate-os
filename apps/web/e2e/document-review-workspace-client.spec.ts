@@ -5,6 +5,7 @@ import {
   fetchWorkbookCellPreview,
   pdfLocatorOverlay,
   recordParserV2Review,
+  ParserReviewSaveError,
   resolveParserV2Conflict,
   sourceLocatorSemanticKey,
   sourceLocatorMatchesDocument,
@@ -191,6 +192,71 @@ test("submits only the existing append-only Parser V2 review contract", async ()
       reason: "페이지와 표 좌표의 재확인이 필요합니다.",
       conflictIds: ["conflict-1"],
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("review save failures explain server gates without reflecting internal responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const input = { projectId: "project-1", candidateId: "candidate-1", expectedDecisionSequence: 0,
+    action: "approve" as const, reason: "원본 대조 사유", conflictIds: [] };
+  const cases = [
+    { status: 401, detail: "private-auth-detail", message: "다시 로그인", reload: false },
+    { status: 403, detail: { error: "parser_v2_review_pilot_mfa_required" }, message: "다단계 인증", reload: false },
+    { status: 403, detail: { error: "parser_v2_review_pilot_identity_not_allowlisted" }, message: "검토 권한", reload: false },
+    { status: 409, detail: "maker-checker separation prohibits reviewing a candidate created by the same actor", message: "다른 검토자", reload: false },
+    { status: 409, detail: "review decision sequence changed; reload before appending a decision", message: "최신 기록", reload: true },
+    { status: 503, detail: { error: "parser_v2_review_pilot_disabled", message: "private-environment-detail" }, message: "검토 기능 설정", reload: false },
+    { status: 500, detail: "private-database-detail", message: "결과를 확인하지 못했습니다", reload: true },
+    { status: 422, detail: "private-validation-detail", message: "결정 사유", reload: false },
+  ];
+  try {
+    for (const item of cases) {
+      let calls = 0;
+      globalThis.fetch = (async () => { calls += 1; return jsonResponse({ detail: item.detail }, item.status); }) as typeof fetch;
+      const error = await recordParserV2Review(input).then(() => null, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ParserReviewSaveError);
+      expect((error as ParserReviewSaveError).status).toBe(item.status);
+      expect((error as ParserReviewSaveError).requiresReload).toBe(item.reload);
+      expect((error as Error).message).toContain(item.message);
+      expect((error as Error).message).not.toMatch(/private-|parser_v2_|maker-checker|sequence changed/);
+      expect(calls).toBe(1);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("uncertain or mismatched save responses require a fresh read and never automatically retry", async () => {
+  const originalFetch = globalThis.fetch;
+  const input = { projectId: "project-1", candidateId: "candidate-1", expectedDecisionSequence: 0,
+    action: "request_revision" as const, reason: "작성 사유 유지", conflictIds: [] };
+  const replies = [
+    () => { throw new Error("private-network-detail"); },
+    () => new Response("not-json", { status: 201 }),
+    () => jsonResponse({ reviewDecisionId: "decision-1", candidateId: "another-candidate", decisionSequence: 1, action: "request_revision" }, 201),
+    () => jsonResponse({ reviewDecisionId: "decision-1", candidateId: "candidate-1", decisionSequence: 0, action: "request_revision" }, 201),
+    () => jsonResponse({ reviewDecisionId: "decision-1", candidateId: "candidate-1", decisionSequence: 1, action: "approve" }, 201),
+  ];
+  try {
+    for (const reply of replies) {
+      let calls = 0;
+      globalThis.fetch = (async () => { calls += 1; return reply(); }) as typeof fetch;
+      const error = await recordParserV2Review(input).then(() => null, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ParserReviewSaveError);
+      expect((error as ParserReviewSaveError).requiresReload).toBe(true);
+      expect((error as Error).message).not.toContain("private-");
+      expect(calls).toBe(1);
+      expect(input.reason).toBe("작성 사유 유지");
+    }
+    for (const sequence of [1, 99]) {
+      globalThis.fetch = (async () => jsonResponse({ reviewDecisionId: "another-sequence-decision", candidateId: "candidate-1",
+        decisionSequence: sequence, action: "request_revision" }, 201)) as typeof fetch;
+      const error = await recordParserV2Review({ ...input, expectedDecisionSequence: 3 }).then(() => null, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ParserReviewSaveError);
+      expect((error as ParserReviewSaveError).requiresReload).toBe(true);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

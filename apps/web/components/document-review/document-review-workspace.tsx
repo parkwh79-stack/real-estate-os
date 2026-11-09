@@ -32,6 +32,7 @@ import {
   fetchGlossaryTermsForField,
   fetchPdfPagePreview,
   pdfLocatorOverlay,
+  ParserReviewSaveError,
   recordParserV2Review,
   resolveParserV2Conflict,
   safeSourceUrl,
@@ -166,6 +167,90 @@ function sourceDate(document: SourceDocumentRecord) {
 
 function packageRunId(runPackage: ParserV2RunPackage) {
   return identifier(runPackage.parsingRun.parsingRunId);
+}
+
+function candidateMetadata(fact: WorkspaceFact): Record<string, unknown> {
+  const metadata = fact.candidate.metadata;
+  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? metadata as Record<string, unknown>
+    : {};
+}
+
+function preferredFactLocator(fact: WorkspaceFact, evidence: SourceLocatorRecord[]) {
+  const metadata = candidateMetadata(fact);
+  const table = metadata.sourceTable;
+  if (metadata.extractionRule === "explicit_bridge_financial_table_literal_v1"
+    && table && typeof table === "object" && !Array.isArray(table)) {
+    const sourceTable = table as Record<string, unknown>;
+    const row = sourceTable.row;
+    const headerRow = sourceTable.headerRow;
+    const sheetName = sourceTable.sheetName;
+    if (typeof row === "number" && Number.isInteger(row)
+      && typeof headerRow === "number" && Number.isInteger(headerRow) && headerRow > 0 && row > headerRow
+      && typeof sheetName === "string" && sheetName.trim()) {
+      const version = fact.package.documentVersion;
+      const document = { ...version, documentVersionId: fact.documentVersionId,
+        archiveId: version.archiveId ?? version.sha256 ?? version.sourceHash };
+      const rowLocators = evidence.filter((locator) => {
+        const cell = identifier(locator.cellReference ?? locator.cellRange ?? locator.cell);
+        const match = cell.match(/^\$?[A-Z]{1,3}\$?([1-9]\d*)$/i);
+        return identifier(locator.sheetName ?? locator.sheet) === sheetName
+          && match && Number(match[1]) === row && sourceLocatorMatchesDocument(locator, document);
+      });
+      if (rowLocators.length === 1) return rowLocators[0];
+    }
+  }
+  const primary = fact.candidate.sourceLocator;
+  const semanticKey = primary && sourceLocatorSemanticKey(primary, fact.documentVersionId);
+  return (semanticKey && evidence.find((locator) => sourceLocatorSemanticKey(locator, fact.documentVersionId) === semanticKey))
+    || evidence.at(0);
+}
+
+function reviewDraftKey(projectId: string, fact: WorkspaceFact) {
+  return JSON.stringify([projectId, fact.documentVersionId, fact.runId, fact.candidateId]);
+}
+
+function factLabel(fact: WorkspaceFact) {
+  const labels: Record<string, string> = {
+    "financing.tranche.loan_amount": "대출금",
+    "financing.tranche.name": "대주명",
+    "financing.tranche.interest_rate": "금리",
+    "financing.tranche.interest_rate_type": "금리 유형",
+    "financing.tranche.maturity_date": "만기",
+  };
+  return candidateMetadata(fact).sourceFinancialContext === "current_bridge_snapshot"
+    ? labels[fact.fieldKey] ?? fact.fieldKey : fact.fieldKey;
+}
+
+function bridgeReference(fact: WorkspaceFact) {
+  const metadata = candidateMetadata(fact);
+  return metadata.sourceFinancialContext === "current_bridge_snapshot" && metadata.referenceOnly === true;
+}
+
+function factBasisRequired(fact: WorkspaceFact) {
+  return fact.candidate.validationCodes?.includes("FACT_BASIS_REQUIRED")
+    || fact.issueCodes.includes("VALIDATION:FACT_BASIS_REQUIRED");
+}
+
+function factValue(fact: WorkspaceFact) {
+  const value = fact.candidate.normalizedValue ?? fact.candidate.value;
+  if (bridgeReference(fact)) {
+    if (fact.fieldKey === "financing.tranche.loan_amount" && fact.candidate.unit?.toLowerCase() === "krw" && typeof value === "number") {
+      return `${value.toLocaleString("ko-KR", { maximumFractionDigits: 0 })} 원`;
+    }
+    if (fact.fieldKey === "financing.tranche.interest_rate" && fact.candidate.unit === "ratio" && typeof value === "number") {
+      return `${(value * 100).toLocaleString("ko-KR", { maximumFractionDigits: 0 })}%`;
+    }
+    if (fact.fieldKey === "financing.tranche.interest_rate_type") {
+      if (value === "floating") return "변동";
+      if (value === "fixed") return "고정";
+    }
+    if (fact.fieldKey === "financing.tranche.name" && typeof value === "string") return value || "-";
+    if (fact.fieldKey === "financing.tranche.maturity_date" && typeof value === "string" && /^\d{4}-\d{2}-\d{2}(?:T|$)/.test(value)) {
+      return value.slice(0, 10);
+    }
+  }
+  return formatValue(value, fact.candidate.unit);
 }
 
 function mergeWorkspaceDocuments(data: DocumentReviewData): WorkspaceDocument[] {
@@ -511,8 +596,16 @@ export function DocumentReviewWorkspace({
   const [activeTab, setActiveTab] = useState<InspectorTab>("facts");
   const [factQuery, setFactQuery] = useState("");
   const [issuesOnly, setIssuesOnly] = useState(false);
-  const [reviewReason, setReviewReason] = useState("");
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const [reviewBusy, setReviewBusy] = useState(false);
+  const reviewWriteInFlight = useRef<string | null>(null);
+  const [reviewDataFresh, setReviewDataFresh] = useState(false);
+  const [reviewRefreshRequired, setReviewRefreshRequired] = useState<"saved" | "missing" | "uncertain" | null>(null);
+  const savedReviewReceipt = useRef<{
+    projectId: string; candidateId: string; decisionId: string; draftKey: string; reason: string;
+  } | null>(null);
+  const activeProject = useRef(projectId);
+  activeProject.current = projectId;
   const [conflictBusyId, setConflictBusyId] = useState<string | null>(null);
   const [glossaryTerms, setGlossaryTerms] = useState<GlossaryTermRecord[]>([]);
   const [glossaryLoading, setGlossaryLoading] = useState(false);
@@ -523,15 +616,38 @@ export function DocumentReviewWorkspace({
     const controller = new AbortController();
     activeLoad.current = controller;
     setLoading(true);
+    setReviewDataFresh(false);
     setError(null);
     setNotice(null);
     try {
       const reviewData = await fetchDocumentReviewData(projectId, controller.signal);
-      if (!controller.signal.aborted) setData(reviewData);
+      if (controller.signal.aborted || activeProject.current !== projectId) return false;
+      setData(reviewData);
+      const receipt = savedReviewReceipt.current?.projectId === projectId ? savedReviewReceipt.current : null;
+      if (receipt) {
+        const confirmed = reviewData.packages.some((runPackage) => runPackage.reviewDecisions.some((decision) =>
+          identifier(decision.reviewDecisionId) === receipt.decisionId && identifier(decision.candidateId) === receipt.candidateId));
+        if (!confirmed) {
+          setReviewRefreshRequired("missing");
+          return false;
+        }
+        setReviewDrafts((drafts) => {
+          if (drafts[receipt.draftKey]?.trim() !== receipt.reason) return drafts;
+          const next = { ...drafts };
+          delete next[receipt.draftKey];
+          return next;
+        });
+        savedReviewReceipt.current = null;
+        setNotice("저장된 검토 결정을 최신 기록에서 확인했습니다.");
+      }
+      setReviewDataFresh(true);
+      setReviewRefreshRequired(null);
+      return true;
     } catch {
-      if (!controller.signal.aborted) setError("문서 목록과 파싱 결과를 불러오지 못했습니다.");
+      if (!controller.signal.aborted && activeProject.current === projectId) setError("문서 목록과 파싱 결과를 불러오지 못했습니다.");
+      return false;
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted && activeProject.current === projectId) setLoading(false);
     }
   }, [projectId]);
 
@@ -569,6 +685,13 @@ export function DocumentReviewWorkspace({
   }, [documentFacts, selectedFactKey]);
 
   const selectedFact = documentFacts.find((item) => item.key === selectedFactKey) ?? documentFacts.at(0);
+  const selectedReviewKey = selectedFact ? reviewDraftKey(projectId, selectedFact) : null;
+  const selectedReviewKeyRef = useRef(selectedReviewKey);
+  selectedReviewKeyRef.current = selectedReviewKey;
+  const reviewReason = selectedReviewKey ? reviewDrafts[selectedReviewKey] ?? "" : "";
+  const changeReviewReason = useCallback((reason: string) => {
+    if (selectedReviewKey) setReviewDrafts((drafts) => ({ ...drafts, [selectedReviewKey]: reason }));
+  }, [selectedReviewKey]);
   const documentAnchors = useMemo(() => collectLocatorAnchors(documentFacts), [documentFacts]);
   const selectedEvidence = useMemo(() => {
     if (!selectedFact) return [];
@@ -581,8 +704,8 @@ export function DocumentReviewWorkspace({
       const matched = selectedEvidence.find((locator, index) => locatorKey(selectedFact?.key ?? "fact", locator, index) === selectedLocatorKey);
       if (matched) return matched;
     }
-    return selectedEvidence.at(0);
-  }, [selectedEvidence, selectedFact?.key, selectedLocatorKey]);
+    return selectedFact ? preferredFactLocator(selectedFact, selectedEvidence) : undefined;
+  }, [selectedEvidence, selectedFact, selectedLocatorKey]);
 
   useEffect(() => {
     if (!selectedFact || !selectedEvidence.length) {
@@ -592,8 +715,8 @@ export function DocumentReviewWorkspace({
     const stillPresent = selectedLocatorKey
       ? selectedEvidence.some((locator, index) => locatorKey(selectedFact.key, locator, index) === selectedLocatorKey)
       : false;
-    const firstLocator = selectedEvidence.at(0);
-    if (!stillPresent && firstLocator) setSelectedLocatorKey(locatorKey(selectedFact.key, firstLocator, 0));
+    const preferred = preferredFactLocator(selectedFact, selectedEvidence);
+    if (!stillPresent && preferred) setSelectedLocatorKey(locatorKey(selectedFact.key, preferred, selectedEvidence.indexOf(preferred)));
   }, [selectedEvidence, selectedFact, selectedLocatorKey]);
 
   useEffect(() => {
@@ -626,16 +749,20 @@ export function DocumentReviewWorkspace({
   const selectFact = useCallback((fact: WorkspaceFact, locator?: SourceLocatorRecord, locatorIndex = 0) => {
     setSelectedFactKey(fact.key);
     const document = documents.find((item) => item.documentVersionId === fact.documentVersionId);
-    if (document) setDocumentSelection({ key: document.key, archiveId: document.archiveId });
-    const evidence = locator
-      ? [locator]
-      : fact.candidate.evidence?.length
-        ? fact.candidate.evidence
-        : fact.candidate.sourceLocator
-          ? [fact.candidate.sourceLocator]
-          : [];
-    setSelectedLocatorKey(evidence[0] ? locatorKey(fact.key, evidence[0], locatorIndex) : null);
-  }, [documents]);
+    if (document) {
+      if (document.key !== selectedDocument?.key) {
+        setSourceFactFilterKey(null);
+        setFactQuery("");
+        setIssuesOnly(false);
+      }
+      setDocumentSelection({ key: document.key, archiveId: document.archiveId });
+    }
+    const evidence = fact.candidate.evidence?.length
+      ? fact.candidate.evidence
+      : fact.candidate.sourceLocator ? [fact.candidate.sourceLocator] : [];
+    const preferred = locator ?? preferredFactLocator(fact, evidence);
+    setSelectedLocatorKey(preferred ? locatorKey(fact.key, preferred, locator ? locatorIndex : evidence.indexOf(preferred)) : null);
+  }, [documents, selectedDocument?.key]);
 
   const showRelatedFacts = useCallback((locator: SourceLocatorRecord) => {
     const semanticKey = sourceLocatorSemanticKey(
@@ -665,12 +792,15 @@ export function DocumentReviewWorkspace({
   }, [facts, selectFact, selectedFact?.documentVersionId]);
 
   const saveReview = useCallback(async (action: "approve" | "reject" | "request_revision") => {
-    if (!selectedFact) return;
+    if (!selectedFact || reviewWriteInFlight.current || loading || !reviewDataFresh
+      || reviewRefreshRequired || data?.projectId !== projectId) return;
+    const draftKey = reviewDraftKey(projectId, selectedFact);
     const reason = reviewReason.trim();
     if (!reason) {
       setError("검토 결정에는 구체적인 근거 또는 보완 사유가 필요합니다.");
       return;
     }
+    reviewWriteInFlight.current = draftKey;
     setReviewBusy(true);
     setError(null);
     setNotice(null);
@@ -678,7 +808,7 @@ export function DocumentReviewWorkspace({
       const decisions = selectedFact.package.reviewDecisions.filter(
         (item) => identifier(item.candidateId) === selectedFact.candidateId,
       );
-      await recordParserV2Review({
+      const savedDecision = await recordParserV2Review({
         projectId,
         candidateId: selectedFact.candidateId,
         expectedDecisionSequence: decisions.length,
@@ -686,22 +816,36 @@ export function DocumentReviewWorkspace({
         reason,
         conflictIds: selectedFact.conflicts.map((item) => identifier(item.conflictId)).filter(Boolean),
       });
-      setReviewReason("");
+      savedReviewReceipt.current = { projectId, candidateId: selectedFact.candidateId,
+        decisionId: identifier(savedDecision.reviewDecisionId), draftKey, reason };
+      if (activeProject.current !== projectId) return;
+      setReviewRefreshRequired("saved");
+      setReviewDataFresh(false);
       const savedNotice =
         action === "approve"
           ? "검토 승인 결정이 append-only 원장에 저장되었습니다. Canonical selection과 승인 snapshot은 별도 단계입니다."
           : action === "request_revision"
             ? "보완 요청 결정이 append-only 원장에 저장되었습니다."
             : "반려 결정이 append-only 원장에 저장되었습니다.";
-      await load();
-      setNotice(savedNotice);
-      setActiveTab("audit");
+      const reloaded = await load();
+      if (activeProject.current !== projectId) return;
+      if (reloaded) {
+        setNotice(savedNotice);
+        if (selectedReviewKeyRef.current === draftKey) setActiveTab("audit");
+      }
     } catch (caught) {
-      setError(errorMessage(caught));
+      if (activeProject.current === projectId) {
+        setError(errorMessage(caught));
+        if (caught instanceof ParserReviewSaveError && caught.requiresReload) {
+          setReviewRefreshRequired("uncertain");
+          setReviewDataFresh(false);
+        }
+      }
     } finally {
+      reviewWriteInFlight.current = null;
       setReviewBusy(false);
     }
-  }, [load, projectId, reviewReason, selectedFact]);
+  }, [data?.projectId, load, loading, projectId, reviewDataFresh, reviewReason, reviewRefreshRequired, selectedFact]);
 
   const resolveConflict = useCallback(async (conflict: SourceConflictRecord) => {
     const conflictId = identifier(conflict.conflictId);
@@ -742,7 +886,7 @@ export function DocumentReviewWorkspace({
     return source.filter((fact) => {
       if (issuesOnly && !fact.issueCodes.length) return false;
       if (!query) return true;
-      return [fact.fieldKey, fact.candidateId, formatValue(fact.candidate.normalizedValue ?? fact.candidate.value, fact.candidate.unit)]
+      return [fact.fieldKey, factLabel(fact), fact.candidateId, factValue(fact)]
         .join(" ")
         .toLowerCase()
         .includes(query);
@@ -825,10 +969,20 @@ export function DocumentReviewWorkspace({
         </div>
       </details> : null}
 
-      {error ? <div role="alert"><Notice tone="bad">
+      {error && !reviewRefreshRequired ? <div role="alert"><Notice tone="bad">
         {error} {data ? "마지막으로 확인한 결과를 표시합니다." : "새로고침해서 원본과 파싱 상태를 다시 확인해 주세요."}
       </Notice></div> : null}
       {notice ? <Notice tone="good">{notice}</Notice> : null}
+      {reviewRefreshRequired ? <div role={loading || reviewBusy ? "status" : "alert"}><Notice tone="warn">
+        {reviewRefreshRequired === "uncertain" && error ? <p>{error}</p> : null}
+        <p>{reviewRefreshRequired === "saved"
+          ? loading || reviewBusy ? "검토 결정이 저장되었습니다. 최신 검토 상태를 확인하고 있습니다."
+            : "검토 결정은 저장되었지만 최신 검토 상태를 다시 불러오지 못했습니다. 저장 상태를 다시 확인해 주세요."
+          : reviewRefreshRequired === "missing" ? "검토 결정은 저장되었지만 최신 목록에서 해당 결정을 아직 확인하지 못했습니다. 저장 상태를 다시 확인해 주세요."
+            : "검토 결정의 최신 저장 상태를 확인해야 합니다. 중복 제출을 막기 위해 다시 불러온 뒤 검토를 이어갑니다."}</p>
+        <button type="button" onClick={() => void load()} disabled={loading || reviewBusy}
+          className="mt-2 min-h-9 rounded-lg border border-amber-400 px-3 text-xs font-bold disabled:opacity-40">저장 상태 다시 확인</button>
+      </Notice></div> : null}
       {data?.projectId === projectId && data.sourceDocuments.length > 0 ? (
         <ArchiveExtractionAction compact projectId={projectId} originals={data}
           disabled={loading || Boolean(error) || reviewBusy} onComplete={() => void load()} />
@@ -859,6 +1013,9 @@ export function DocumentReviewWorkspace({
             anchors={documentAnchors}
             selectedLocator={selectedLocator}
             onSelectDocument={(document) => {
+              setSourceFactFilterKey(null);
+              setFactQuery("");
+              setIssuesOnly(false);
               setDocumentSelection({ key: document.key, archiveId: document.archiveId });
               const firstFact = facts.find((fact) => fact.documentVersionId === document.documentVersionId);
               if (firstFact) selectFact(firstFact);
@@ -905,8 +1062,9 @@ export function DocumentReviewWorkspace({
             glossaryLoading={glossaryLoading}
             glossaryError={glossaryError ?? (data.warnings.includes("DOCUMENT_GLOSSARY_UNAVAILABLE") ? "용어집 후보는 현재 서버에서 조회할 수 없습니다." : null)}
             reviewReason={reviewReason}
-            onReviewReasonChange={setReviewReason}
+            onReviewReasonChange={changeReviewReason}
             reviewBusy={reviewBusy}
+            reviewDisabled={loading || !reviewDataFresh || Boolean(reviewRefreshRequired) || data.projectId !== projectId}
             onSaveReview={saveReview}
             snapshotDiffs={data?.snapshotDiffs ?? []}
             auditItems={auditItems}
@@ -1336,6 +1494,7 @@ function Inspector({
   reviewReason,
   onReviewReasonChange,
   reviewBusy,
+  reviewDisabled,
   onSaveReview,
   snapshotDiffs,
   auditItems,
@@ -1366,6 +1525,7 @@ function Inspector({
   reviewReason: string;
   onReviewReasonChange: (value: string) => void;
   reviewBusy: boolean;
+  reviewDisabled: boolean;
   onSaveReview: (action: "approve" | "reject" | "request_revision") => Promise<void>;
   snapshotDiffs: ApprovedSnapshotDiff[];
   auditItems: AuditItem[];
@@ -1414,6 +1574,7 @@ function Inspector({
             onIssuesOnlyChange={onIssuesOnlyChange}
             sourceFilterLabel={sourceFilterLabel}
             onClearSourceFilter={onClearSourceFilter}
+            onReview={() => onTabChange("review")}
           />
         ) : null}
         {activeTab === "evidence" ? (
@@ -1443,9 +1604,11 @@ function Inspector({
         {activeTab === "review" ? (
           <ReviewPanel
             fact={selectedFact}
+            locator={selectedLocator}
             reason={reviewReason}
             onReasonChange={onReviewReasonChange}
             busy={reviewBusy}
+            disabled={reviewDisabled}
             onSave={onSaveReview}
           />
         ) : null}
@@ -1469,6 +1632,7 @@ function FactsPanel({
   onIssuesOnlyChange,
   sourceFilterLabel,
   onClearSourceFilter,
+  onReview,
 }: {
   facts: WorkspaceFact[];
   selectedFact?: WorkspaceFact;
@@ -1479,12 +1643,14 @@ function FactsPanel({
   onIssuesOnlyChange: (value: boolean) => void;
   sourceFilterLabel?: string;
   onClearSourceFilter: () => void;
+  onReview: () => void;
 }) {
   return (
     <div className="space-y-3">
       <div>
         <p className="text-sm font-black text-slate-950 dark:text-white">파싱 후보값</p>
         <p className="mt-1 text-xs leading-5 text-slate-500">선택한 문서에서 추출한 값을 원본과 비교하세요.</p>
+        {selectedFact ? <button type="button" onClick={onReview} className="mt-2 min-h-9 rounded-lg bg-indigo-600 px-3 text-xs font-bold text-white">선택한 후보 검토 결정</button> : null}
       </div>
       <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
         <Search className="h-3.5 w-3.5 text-slate-400" />
@@ -1524,10 +1690,11 @@ function FactsPanel({
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="truncate font-mono text-[11px] font-bold text-slate-500">{fact.fieldKey}</p>
+                  <p className="truncate text-xs font-bold text-slate-500">{factLabel(fact)}</p>
                   <p className="mt-1 break-words text-sm font-black text-slate-950 dark:text-white">
-                    {formatValue(fact.candidate.normalizedValue ?? fact.candidate.value, fact.candidate.unit)}
+                    {factValue(fact)}
                   </p>
+                  {bridgeReference(fact) ? <p className="mt-1 text-[11px] font-semibold text-amber-800 dark:text-amber-300">현재 브리지 현황 · 참조용</p> : null}
                 </div>
                 <span className="shrink-0 text-right text-[10px] font-bold leading-4 text-slate-500" title="Parser 추출 confidence이며 검토 또는 승인 신뢰도가 아닙니다.">
                   추출 confidence<br />
@@ -1542,7 +1709,8 @@ function FactsPanel({
                 <StatusPill label="충돌" status={fact.conflictStatus} />
                 <StatusPill label="권위" status={fact.authorityStage} />
               </div>
-              {fact.issueCodes.length ? <p className="mt-2 break-all text-[10px] font-bold text-rose-600">{fact.issueCodes.join(" · ")}</p> : null}
+              {factBasisRequired(fact) ? <p className="mt-2 text-xs font-semibold text-amber-800 dark:text-amber-300">금액 기준 미확인 · 계산용 승인 입력 선택 불가</p>
+                : fact.issueCodes.length ? <p className="mt-2 text-[11px] font-bold text-rose-600">원본·검증 상태 확인 필요</p> : null}
               <p className="mt-2 truncate text-[10px] text-slate-400">Candidate {fact.candidateId}</p>
             </button>
           ))}
@@ -1934,15 +2102,19 @@ function GlossaryPanel({
 
 function ReviewPanel({
   fact,
+  locator,
   reason,
   onReasonChange,
   busy,
+  disabled,
   onSave,
 }: {
   fact?: WorkspaceFact;
+  locator?: SourceLocatorRecord;
   reason: string;
   onReasonChange: (value: string) => void;
   busy: boolean;
+  disabled: boolean;
   onSave: (action: "approve" | "reject" | "request_revision") => Promise<void>;
 }) {
   if (!fact) {
@@ -1952,7 +2124,7 @@ function ReviewPanel({
   const runCompleted = ["completed", "completed_with_warnings"].includes(runStatus);
   const seal = fact.package.candidateSetSeal;
   const sealPresent = Boolean(seal && Object.keys(seal).length);
-  const canSubmit = runCompleted && sealPresent && !busy;
+  const canSubmit = runCompleted && sealPresent && !busy && !disabled;
   const decisions = fact.package.reviewDecisions
     .filter((item) => identifier(item.candidateId) === fact.candidateId)
     .sort((left, right) => Number(left.decisionSequence ?? 0) - Number(right.decisionSequence ?? 0));
@@ -1961,9 +2133,20 @@ function ReviewPanel({
     <div className="space-y-4">
       <div>
         <p className="text-sm font-black text-slate-950 dark:text-white">사람 검토 결정</p>
-        <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{fact.candidateId}</p>
+        <p className="mt-2 text-sm font-bold text-slate-900 dark:text-white">{factLabel(fact)} · {factValue(fact)}</p>
+        {locator ? <p className="mt-1 text-xs text-slate-500">선택 근거 · {locatorLabel(locator)}</p> : null}
       </div>
 
+      {bridgeReference(fact) ? <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+        <p className="font-bold">현재 브리지 현황 · 참조용</p>
+        <p className="mt-1">원본 대조에 대한 사람의 검토 결정을 기록합니다. 기준일과 잔액·약정 기준은 미확인 상태입니다.</p>
+        {factBasisRequired(fact) ? <p className="mt-1">금액 기준이 확인되기 전에는 검토 결정을 저장해도 계산용 승인 입력으로 선택할 수 없습니다.</p> : null}
+        {candidateMetadata(fact).noFuturePfProjection === true ? <p className="mt-1">이 후보는 미래 PF 약정이나 현금흐름 계산 입력에 반영되지 않습니다.</p> : null}
+      </div> : null}
+
+      <details className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+      <summary className="cursor-pointer text-xs font-semibold text-slate-500">검토 상태와 제출 조건</summary>
+      <p className="mt-2 break-all font-mono text-[11px] text-slate-500">{fact.fieldKey} · {fact.candidateId}</p>
       <div className="grid grid-cols-2 gap-2">
         <StateAxis label="실행" status={runStatus} />
         <StateAxis label="검증" status={fact.validationStatus} />
@@ -1982,7 +2165,10 @@ function ReviewPanel({
         <GateLine ok={fact.validationStatus === "passed"} label={`Ontology 검증 · ${statusLabel(fact.validationStatus)}`} advisory />
         <GateLine ok={fact.conflictStatus !== "open"} label={`열린 충돌 없음 · ${statusLabel(fact.conflictStatus)}`} advisory />
         <p className="mt-2 text-[11px] text-slate-500">엄격 RBAC, allowlist, 사람 principal, OIDC/JWKS, MFA, maker-checker는 서버가 최종 강제합니다.</p>
+        {fact.issueCodes.length ? <p className="mt-2 break-all font-mono text-[10px]">{fact.issueCodes.join(" · ")}</p> : null}
+        {fact.candidate.validationCodes?.length ? <p className="mt-1 break-all font-mono text-[10px]">{fact.candidate.validationCodes.join(" · ")}</p> : null}
       </div>
+      </details>
 
       <label className="block">
         <span className="text-xs font-black text-slate-700 dark:text-slate-200">결정 근거 또는 보완 사유</span>
