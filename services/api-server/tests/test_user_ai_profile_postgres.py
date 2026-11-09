@@ -162,6 +162,61 @@ def test_profile_clear_denied_by_read_only_authority_does_not_revoke_vault_key(m
     assert response.status_code == 503 and response.json()["detail"]["error"] == "ai_profile_authority_unavailable"
 
 
+@pytest.mark.parametrize("status,session,expected", [("forbidden", "other-session", 409), ("active", None, 400), ("outage", "profile-session", 503)])
+def test_profile_delete_rejects_unbound_other_session_or_unavailable_key_before_mutation(monkeypatch, status, session, expected):
+    monkeypatch.setattr(auth, "identity_context_from_request", lambda _request: {"authenticated": True,
+                        "user": {"userId": "profile-user", "tenantId": "profile-tenant"}})
+    monkeypatch.setattr(auth, "credential_session_binding_from_request", lambda *_a: {"sessionId": session} if session else None)
+    monkeypatch.setattr(auth, "_get_user_ai_profile", lambda *_a, **_kw: {"credentialRef": "owner-key-reference"})
+    def access(*_args, **_kwargs):
+        if status == "outage":
+            raise RuntimeError("private vault fixture detail")
+        return status
+    monkeypatch.setattr(auth, "credential_access_status", access)
+    monkeypatch.setattr(auth, "_delete_user_ai_profile", lambda *_a, **_kw: pytest.fail("rejected key boundary must not delete a profile"))
+    monkeypatch.setattr(auth, "revoke_credential", lambda *_a, **_kw: pytest.fail("rejected key boundary must not revoke a key"))
+    app = FastAPI()
+    app.include_router(auth.router)
+    response = TestClient(app).delete("/auth/ai-profile")
+    assert response.status_code == expected and "private vault" not in response.text
+
+
+@pytest.mark.parametrize("delete_result", [True, False, "denied"])
+def test_profile_delete_only_revokes_its_bound_key_after_successful_database_delete(monkeypatch, delete_result):
+    events = []
+    monkeypatch.setattr(auth, "identity_context_from_request", lambda _request: {"authenticated": True,
+                        "user": {"userId": "profile-user", "tenantId": "profile-tenant"}})
+    monkeypatch.setattr(auth, "credential_session_binding_from_request", lambda *_a: {"sessionId": "profile-session"})
+    monkeypatch.setattr(auth, "_get_user_ai_profile", lambda *_a, **_kw: {"credentialRef": "owner-key-reference"})
+    monkeypatch.setattr(auth, "credential_access_status", lambda *_a, **_kw: "active")
+    def delete(user_id, *, tenant_id):
+        assert (user_id, tenant_id) == ("profile-user", "profile-tenant")
+        events.append("database-delete")
+        if delete_result == "denied":
+            raise UserAIProfileUnavailable("private SQL failure")
+        return delete_result
+    def revoke(reference, **boundary):
+        assert events == ["database-delete"] and delete_result is True
+        assert reference == "owner-key-reference"
+        assert boundary == {"user_id": "profile-user", "tenant_id": "profile-tenant", "session_id": "profile-session"}
+        events.append("key-revoke")
+        return True
+    monkeypatch.setattr(auth, "_delete_user_ai_profile", delete)
+    monkeypatch.setattr(auth, "revoke_credential", revoke)
+    monkeypatch.setattr(auth, "record_user_activity_log", lambda *_a, **_kw: None)
+    monkeypatch.setattr(auth, "build_user_ai_context", lambda **_kw: {})
+    monkeypatch.setattr(auth, "safe_user_ai_context_summary", lambda _context: {})
+    app = FastAPI()
+    app.include_router(auth.router)
+    response = TestClient(app).delete("/auth/ai-profile")
+    if delete_result == "denied":
+        assert response.status_code == 503 and events == ["database-delete"]
+        assert "private SQL" not in response.text
+    else:
+        assert response.status_code == 200 and response.json()["deleted"] is delete_result
+        assert events == (["database-delete", "key-revoke"] if delete_result else ["database-delete"])
+
+
 @pytest.mark.parametrize("action", ["--render", "--rollback-sql"])
 def test_profile_provisioner_can_render_without_any_database_connection(monkeypatch, capsys, action):
     from scripts import provision_user_ai_profiles as provisioner

@@ -994,6 +994,10 @@ def test_supabase_bearer_byok_uses_signed_session_id_and_rejects_other_session(
         == "user_ai_profile_without_key_system_fallback"
     )
 
+    wrong_session_delete = client.delete("/auth/ai-profile", headers=headers_b)
+    assert wrong_session_delete.status_code == 409
+    assert wrong_session_delete.json()["detail"]["error"] == "credential_session_mismatch"
+
     wrong_session_revoke = client.delete(
         "/auth/ai-credentials/current",
         headers=headers_b,

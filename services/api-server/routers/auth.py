@@ -1170,8 +1170,22 @@ def remove_ai_profile(request: Request):
         raise HTTPException(status_code=401, detail="Login required")
     user = context["user"]
     current_profile = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId")) or {}
-    credential_revoked = revoke_credential(current_profile.get("credentialRef"))
+    reference = current_profile.get("credentialRef")
+    credential_session = credential_session_binding_from_request(request, context)
+    if reference:
+        if credential_session is None:
+            raise HTTPException(status_code=400, detail={"error": "credential_session_binding_required"})
+        try:
+            access_status = credential_access_status(reference, user_id=user["userId"], tenant_id=user.get("tenantId"),
+                                                     session_id=credential_session["sessionId"])
+        except Exception:
+            raise HTTPException(status_code=503, detail={"error": "ai_profile_authority_unavailable"}) from None
+        if access_status == "forbidden":
+            raise HTTPException(status_code=409, detail={"error": "credential_session_mismatch"})
     deleted = delete_user_ai_profile(user["userId"], tenant_id=user.get("tenantId"))
+    credential_revoked = bool(deleted and reference and revoke_credential(
+        reference, user_id=user["userId"], tenant_id=user.get("tenantId"), session_id=credential_session["sessionId"],
+    ))
     record_user_activity_log(
         {
             "eventType": "ai_profile_deleted",
