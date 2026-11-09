@@ -50,6 +50,13 @@ class PostgresActivityLogRepository:
         self._required_text(event.get("projectId"), "project_id")
         return self._append(normalized_type, event)
 
+    def append_user_event(self, event_type: str, event: Mapping[str, Any]) -> str:
+        """Append a server-owned account event without inventing a project."""
+        normalized_type = self._required_text(event_type, "event_type")
+        if normalized_type == "api_request" or self._optional_text(event.get("projectId")):
+            raise ValueError("Account events must not impersonate project HTTP activity")
+        return self._append(normalized_type, event)
+
     def _append(self, event_type: str, event: Mapping[str, Any]) -> str:
         event_id = self._optional_text(event.get("eventId")) or str(uuid4())
         metadata = event.get("metadata")

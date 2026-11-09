@@ -102,6 +102,28 @@ def test_project_event_preserves_type_metadata_and_verified_scope():
     assert not {"other-tenant", "forged-user", "2099-01-01", "api_request"}.intersection(params)
 
 
+def test_account_event_keeps_verified_scope_without_a_project():
+    connection = _Connection(("account-event",))
+    @contextmanager
+    def transaction(tenant_id):
+        assert tenant_id == "tenant-a"
+        yield connection
+    repository = PostgresActivityLogRepository(tenant_id="tenant-a", user_id="verified-user", transaction_factory=transaction)
+    assert repository.append_user_event("ai_profile_updated", {"eventId": "account-event", "userId": "forged-user",
+               "tenantId": "forged-tenant", "metadata": {"provider": "openai"}}) == "account-event"
+    sql, params = connection.calls[0]
+    assert params[1:4] == ("ai_profile_updated", "verified-user", None) and params[-1] == "tenant-a"
+    assert "statement_timestamp()" in sql and "CREATE" not in sql
+
+
+@pytest.mark.parametrize("event_type,project_id", [("", None), ("api_request", None), ("ai_profile_updated", "project-a")])
+def test_account_event_cannot_impersonate_project_activity(event_type, project_id):
+    repository = PostgresActivityLogRepository(tenant_id="tenant-a", user_id="verified-user",
+                    transaction_factory=lambda _tenant: pytest.fail("Invalid event must not acquire a pool"))
+    with pytest.raises(ValueError):
+        repository.append_user_event(event_type, {"projectId": project_id})
+
+
 @pytest.mark.parametrize(("event_type", "project_id"), [("", "p"), ("api_request", "p"), ("input_saved", "")])
 def test_project_event_rejects_missing_scope_or_request_event_type(event_type, project_id):
     def forbidden_transaction(_tenant):

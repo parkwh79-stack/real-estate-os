@@ -53,6 +53,7 @@ from db.repositories.account_profile_repository import (
     PostgresAccountProfileRepository,
 )
 from db.repositories.user_ai_profile_repository import UserAIProfileUnavailable
+from db.repositories.activity_log_repository import PostgresActivityLogRepository
 from db.repositories.onboarding_repository import (
     OnboardingLifecycleError,
     OnboardingRepositoryUnavailable,
@@ -72,6 +73,7 @@ from storage import (
     get_user_session,
     list_users,
     record_user_activity_log,
+    storage_backend,
     revoke_user_session,
     upsert_user_ai_profile as _upsert_user_ai_profile,
     upsert_tenant,
@@ -123,6 +125,38 @@ def delete_user_ai_profile(*args, **kwargs):
 
 def build_user_ai_context(*args, **kwargs):
     return _profile_authority_call(_build_user_ai_context, *args, **kwargs)
+
+
+def _record_ai_profile_activity(request: Request, context: Dict[str, Any], event: Dict[str, Any]):
+    """Persist AI account audit under verified scope, never legacy app_state."""
+    if storage_backend() not in {"postgres", "postgresql"}:
+        return record_user_activity_log(event)
+    user = context.get("user") or {}
+    user_id = str(user.get("userId") or "").strip()
+    tenant_id = str(user.get("tenantId") or "").strip()
+    if context.get("authenticated") is not True or not user_id or not tenant_id:
+        raise HTTPException(status_code=401, detail={"error": "authentication_required"})
+    event_type = event.get("eventType")
+    if event_type not in {"ai_credential_ingested", "ai_profile_updated", "ai_profile_deleted", "ai_credential_revoked", "logout"}:
+        raise ValueError("Unsupported AI account audit event")
+    allowed_metadata = {"provider", "model", "apiKeyConfigured", "allowSystemFallback", "credentialBackend",
+                        "expiresOnLogout", "secretPersistedInProfile", "deleted", "credentialRevoked", "reason",
+                        "sessionRevoked", "sessionCredentialsRevoked", "profileCredentialRevoked"}
+    metadata = {key: value for key, value in (event.get("metadata") or {}).items()
+                if key in allowed_metadata and isinstance(value, (str, bool, int, float, type(None)))}
+    metadata["tenantId"] = tenant_id
+    try:
+        return PostgresActivityLogRepository(tenant_id=tenant_id, user_id=user_id).append_user_event(event_type, {
+            "method": request.method, "path": request.url.path,
+            "requestId": request.headers.get("x-request-id"), "metadata": metadata,
+        })
+    except Exception:
+        # Profile writes and the audit append currently commit separately.
+        # Preserve an honest partial-result boundary instead of replaying writes.
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_profile_audit_unavailable", "mutationState": "may_have_applied", "retryable": False,
+            "message": "설정이 이미 반영되었을 수 있으나 감사 기록을 확인하지 못했습니다. 다시 저장하거나 자동 재시도하지 말고 현재 설정을 조회해 확인해 주세요.",
+        }) from None
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -1072,7 +1106,7 @@ def ingest_ai_credential(request: Request, payload: Dict[str, Any]):
         # that are intentionally no longer resolvable through the hardened
         # user/tenant/session boundary.
         revoke_credential(previous_ref)
-    record_user_activity_log(
+    _record_ai_profile_activity(request, context,
         {
             "eventType": "ai_credential_ingested",
             "userId": user["userId"],
@@ -1137,7 +1171,7 @@ def save_ai_profile(request: Request, payload: Dict[str, Any]):
     if cleared_reference:
         revoke_credential(cleared_reference, user_id=user["userId"], tenant_id=user.get("tenantId"),
                           session_id=credential_session["sessionId"])
-    record_user_activity_log(
+    _record_ai_profile_activity(request, context,
         {
             "eventType": "ai_profile_updated",
             "userId": user["userId"],
@@ -1186,7 +1220,7 @@ def remove_ai_profile(request: Request):
     credential_revoked = bool(deleted and reference and revoke_credential(
         reference, user_id=user["userId"], tenant_id=user.get("tenantId"), session_id=credential_session["sessionId"],
     ))
-    record_user_activity_log(
+    _record_ai_profile_activity(request, context,
         {
             "eventType": "ai_profile_deleted",
             "userId": user["userId"],
@@ -1255,7 +1289,7 @@ def revoke_current_ai_credential(request: Request):
                 "clearApiKey": True,
             }
         )
-    record_user_activity_log(
+    _record_ai_profile_activity(request, context,
         {
             "eventType": "ai_credential_revoked",
             "userId": user["userId"],
@@ -1306,7 +1340,7 @@ def logout_current_session(request: Request):
         tenant_id=user.get("tenantId"),
     )
     session_revoked = revoke_user_session(session_id)
-    record_user_activity_log(
+    _record_ai_profile_activity(request, context,
         {
             "eventType": "logout",
             "userId": user["userId"],
