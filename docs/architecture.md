@@ -1,12 +1,22 @@
 # REALYTICS x PLATFORM9 Architecture
 
-Updated: 2026-07-15
+Updated: 2026-09-28 (scope and entry points; detailed migration sections retain their original context)
 
 ## 1. Purpose
 
 This document records the current repository structure, the target architecture, and a safe migration plan.
 
-The project already contains most of the core REALYTICS and PLATFORM9 functions, but the folder layout is still MVP-oriented. The immediate goal is not to move files aggressively. The goal is to create a clear map so future refactoring can be done in small, testable steps.
+The authoritative production component and data-ownership boundary is
+`docs/architecture/architecture-boundary.md`. The PostgreSQL tenant/RLS/pool
+boundary is `docs/architecture/postgres-runtime-authority.md`. Any older
+SQLite-first or direct OAuth wording in historical sections of this document
+describes the migration history, not the production authority.
+
+The existing Agents and six Chief Pods remain the product architecture. The
+current implementation order is [the product execution plan](product/realytics-os-next-work-roadmap.md).
+Package extraction and expanded topology below are reference designs, not
+requirements to create more packages before delivering a usable review flow.
+Remove proven-unused scaffolding; keep active domain boundaries and handoffs.
 
 ## 2. Current Repository Structure
 
@@ -60,12 +70,32 @@ Important current implementation locations:
 | Agents | `services/api-server/agents` | Development feasibility, cash flow, marketability, land ledger, legal, parser, orchestration, and report agents |
 | Calculations | `services/api-server/core` | Pure calculation functions, logistics helpers, and risk assessment |
 | Schemas | `services/api-server/schemas` | Feasibility Study v2, report, orchestration, agent handoff/progress, and Valuemap schemas |
-| Storage | `services/api-server/storage.py` | SQLite/JSON controlled implementation plus PostgreSQL app-state compatibility and typed critical-table persistence |
+| Storage | `services/api-server/storage.py` plus `services/api-server/db` | Normalized PostgreSQL/PostGIS is the production authority; SQLite/JSON remains local compatibility for stores not yet promoted |
 | Repositories | `services/api-server/db/repositories` | Wrapper layer over current MVP runtime stores for projects, source document metadata, upload archives, reports, market evidence, and orchestration runs |
 | Runtime data | `services/api-server/data/runtime` | SQLite state and uploaded document archive; ignored by Git |
 | Agent control plane | `services/api-server/agent_platform` | Typed Agent/Brain/Tool contracts, registries, durable runtime, policy routing, operational outbox, learning lifecycle, and isolated Coding Pod control |
 | Product docs | `docs/product` | Agent roadmaps and implementation status |
 | Integration docs | `docs/integrations` | Korean Law MCP and external integration notes |
+
+## 2.1 Production Runtime Boundary
+
+```text
+Browser -> Next.js Web/BFF -> FastAPI -> PostgreSQL/PostGIS
+                                      -> Agent Outbox -> External Worker
+                                                        -> S3/MinIO
+```
+
+- Supabase Auth owns email/password authentication, optional Google/Kakao linked identities, and session/token lifecycle.
+- PostgreSQL `principals` and `tenant_memberships` own application identity
+  status, tenant membership, and role.
+- FastAPI owns authorization, business rules, approval gates, and use-case
+  transitions.
+- PostgreSQL/PostGIS owns canonical transactional business state.
+- S3/MinIO owns document/evidence/report bytes; PostgreSQL owns their metadata,
+  hashes, versions, and lineage.
+- The external worker executes leased jobs but cannot grant human approval.
+- Supabase Edge Functions, Storage, Realtime, and direct browser access to
+  business tables are not part of the current runtime.
 
 ## 3. Target Architecture
 

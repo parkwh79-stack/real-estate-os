@@ -130,7 +130,9 @@ def main() -> int:
     summary["inputPath"] = str(payload_path)
 
     rendered = json.dumps(summary, ensure_ascii=False, indent=2)
-    print(rendered)
+    # Console/CI logs are not a document export destination. Detailed results
+    # can contain private project evidence; save them only on explicit request.
+    print("Pilot execution finished. Use --output to save the private review summary.")
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -1,18 +1,60 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Tuple
 
 from core.calculations import calculate_cashflow_max_minus_details
+from core.financial_input_validation import FinancialInputError, require_finite_numbers
+from core.schedule import schedule_month_indices
+from core.reviewed_monthly_financing import ReviewedMonthlyFinancing, validate_monthly_financing_policy
+from core.cash_flow_periods import (
+    calculation_period_label, captured_period_basis, interest_calculation,
+    is_source_sequence, period_basis, require_monthly_financing_period,
+)
+
+MAX_CASH_FLOW_HORIZON_MONTHS = 600
 
 
 def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     """Run a deterministic baseline cash-flow analysis from CashFlowRunRequest."""
+    require_finite_numbers(request, "cashFlow")
+    period_basis(request)
+    if request.get("mappingDiagnostics", {}).get("missingRevenueItems"):
+        raise FinancialInputError("수입 항목 중 미확인 금액이 있습니다. 일부 합계를 전체 수입으로 계산하지 않습니다.",
+                                  code="cash_flow_revenue_items_incomplete")
+    if {"captured_cash_flow_source_inputs_changed_or_unbound", "captured_cash_flow_source_unavailable"} & set(request.get("mappingDiagnostics", {}).get("warnings", [])):
+        raise FinancialInputError("원본 이후 변경된 입력입니다. 원본 자료를 다시 가져오거나 변경 입력의 현금흐름을 검토하세요.",
+                                  code="captured_cash_flow_source_inputs_changed")
+    if "capturedWorkbookCashFlow" in request:
+        return _run_captured_workbook_cash_flow(request)
+    monthly_policy = validate_monthly_financing_policy(request.get("monthlyFinancing"))
+    if monthly_policy is not None:
+        require_monthly_financing_period(request)
+    financing = ReviewedMonthlyFinancing(request) if monthly_policy is not None else None
     months = _project_month_count(request)
     sales_schedule = _sales_collection_schedule(request, months)
+    if financing is not None and not math.isclose(
+        sum(sum(row.values()) for row in sales_schedule), _total_revenue(request), rel_tol=1e-9, abs_tol=1e-6
+    ):
+        raise FinancialInputError(
+            "월별 수금 합계와 총매출이 일치하지 않습니다. 원본의 수금 일정과 수정 매출을 대사해 주세요. "
+            "잔여 미수금·미분양을 별도로 남기는 계약은 현재 월별 금융 검토 방식에서 지원하지 않습니다.",
+            code="monthly_financing_sales_total_mismatch",
+        )
     cost_schedule, cost_schedule_provenance = _cost_schedule(request, months)
+    declared_cost = _total_project_cost(request)
+    scheduled_cost = sum(sum(row.values()) for row in cost_schedule)
+    if declared_cost > 0 and not math.isclose(scheduled_cost, declared_cost, rel_tol=1e-9, abs_tol=1e-6):
+        raise FinancialInputError(
+            "cash_flow_cost_total_mismatch: monthly costs do not reconcile to totalProjectCost; "
+            "a reviewed cost allocation is required.",
+            code="cash_flow_cost_total_mismatch",
+        )
     allocation_policy = _collection_allocation_policy(request)
     sales_schedule_provenance = _sales_schedule_provenance(request)
     tranche_limits = _tranche_limits(request)
+    if financing is not None:
+        tranche_limits = financing.tranches
     pf_limit = sum(tranche["remaining"] for tranche in tranche_limits)
 
     rows = []
@@ -23,34 +65,46 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     total_pf_draw = 0.0
     cumulative_sales_collection = 0.0
     total_revenue = _total_revenue(request)
+    budget_financial_cost = sum(row.get("financialCost", 0.0) for row in cost_schedule)
+    completion_month = schedule_month_indices(request.get("schedule")).get("completion", months) if financing else months
 
     for month_index in range(months + 1):
-        period = f"M{month_index}"
+        period = calculation_period_label(request, month_index)
         sales_collection = sales_schedule[month_index] if month_index < len(sales_schedule) else {}
-        cost_out = cost_schedule[month_index] if month_index < len(cost_schedule) else {}
+        cost_out = dict(cost_schedule[month_index]) if month_index < len(cost_schedule) else {}
         cash_in_before_pf = sum(sales_collection.values())
         cumulative_sales_collection += cash_in_before_pf
-        cash_out = sum(cost_out.values())
         cumulative_sales_rate = cumulative_sales_collection / total_revenue if total_revenue > 0 else 0.0
         sales_allocation = _allocate_sales_collection(
             sales_collection,
             month_index,
-            months,
+            completion_month,
             cumulative_sales_rate,
             allocation_policy,
         )
+        financing_month = None
+        if financing is not None:
+            cost_out["financialCost"] = 0.0
+            financing_month = financing.month(
+                month_index, non_finance_cost=sum(cost_out.values()),
+                operating_cash=beginning_operating_cash + sales_allocation["operating"],
+                repayment_reserve=beginning_repayment_reserve + sales_allocation["repaymentReserve"],
+            )
+            cost_out["financialCost"] = financing_month["financialCost"]
+        cash_out = sum(cost_out.values())
         pre_pf_net = cash_in_before_pf - cash_out
         cumulative_before_pf += pre_pf_net
         pre_pf_net_cashflows.append(pre_pf_net)
 
         required_draw = max(0.0, cash_out - beginning_operating_cash - sales_allocation["operating"])
-        pf_draw_by_tranche = _draw_by_priority(required_draw, tranche_limits)
+        pf_draw_by_tranche = financing_month["drawByTranche"] if financing_month is not None else _draw_by_priority(required_draw, tranche_limits)
         pf_draw_total = sum(pf_draw_by_tranche.values())
         remaining_pf_limit = sum(tranche["remaining"] for tranche in tranche_limits)
         total_pf_draw += pf_draw_total
 
         ending_operating_cash = beginning_operating_cash + sales_allocation["operating"] + pf_draw_total - cash_out
-        ending_repayment_reserve = beginning_repayment_reserve + sales_allocation["repaymentReserve"]
+        principal_repayment = financing_month["principalRepayment"] if financing_month is not None else 0.0
+        ending_repayment_reserve = beginning_repayment_reserve + sales_allocation["repaymentReserve"] - principal_repayment
         ending_cash = ending_operating_cash + ending_repayment_reserve
         rows.append({
             "monthIndex": month_index,
@@ -69,7 +123,7 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
                 "operatingAccountInflow": sales_allocation["operating"] + pf_draw_total,
                 "repaymentReserveAccountInflow": sales_allocation["repaymentReserve"],
                 "operatingAccountOutflow": cash_out,
-                "repaymentReserveAccountOutflow": 0.0,
+                "repaymentReserveAccountOutflow": principal_repayment,
                 "beginningOperatingCash": beginning_operating_cash,
                 "endingOperatingCash": ending_operating_cash,
                 "beginningRepaymentReserve": beginning_repayment_reserve,
@@ -77,7 +131,7 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
             },
             "netCashFlowBeforePfDraw": pre_pf_net,
             "pfDrawRequired": required_draw,
-            "netCashFlow": cash_in_before_pf + pf_draw_total - cash_out,
+            "netCashFlow": cash_in_before_pf + pf_draw_total - cash_out - principal_repayment,
             "beginningCash": beginning_operating_cash + beginning_repayment_reserve,
             "endingCash": ending_cash,
             "cumulativeCashFlowBeforePfDraw": cumulative_before_pf,
@@ -87,6 +141,11 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
                 "collectionAllocation": allocation_policy["sourceMode"],
             },
         })
+        if financing_month is not None:
+            rows[-1]["monthlyFinancing"] = financing_month
+            # Principal is a financing transfer, never a project expense.
+            rows[-1]["loanRepayment"] = {row["trancheId"]: row["principalRepayment"]
+                                              for row in financing_month["debtBalances"] if row["principalRepayment"] > 0}
         beginning_operating_cash = ending_operating_cash
         beginning_repayment_reserve = ending_repayment_reserve
 
@@ -101,6 +160,16 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
         bool(item.get("reportEligible"))
         for item in (cost_schedule_provenance, sales_schedule_provenance, allocation_policy)
     )
+    if is_source_sequence(request):
+        schedule_provenance["periodBasis"] = {
+            "sourceMode": "source_sequence_duration_unconfirmed", "reportEligible": False,
+            "warnings": ["원본 순서와 실제 달력 월차의 연결이 미확인입니다."],
+        }
+        schedule_provenance["reportEligible"] = False
+    if financing is not None:
+        schedule_provenance["monthlyFinancing"] = {"sourceMode": "reviewed_analysis_policy", "reportEligible": False,
+                                                   "policy": financing.policy, "warnings": ["monthly_financing_analysis_only"]}
+        schedule_provenance["reportEligible"] = False
     risk_flags = _risk_flags(
         max_minus,
         pf_limit,
@@ -124,8 +193,9 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
         "endingCash": beginning_operating_cash + beginning_repayment_reserve,
         "status": "funding_gap_covered" if abs(max_minus) <= pf_limit else "pf_limit_shortfall",
     }
-    return {
+    result = {
         "analysisType": "realytics_cash_flow_engine_v1",
+        "engineVersion": "cash_flow_engine-v2",
         "status": "completed",
         "dataStatus": "complete" if not request.get("mappingDiagnostics", {}).get("warnings") and schedule_provenance["reportEligible"] else "partial",
         "summary": summary,
@@ -137,15 +207,219 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
         "reportFragments": _report_fragments(summary, risk_flags, schedule_provenance),
         "sourceMetadata": request.get("sourceMetadata", {}),
     }
+    captured_period = captured_period_basis(request, rows, monthly_financing=financing is not None)
+    if captured_period is not None:
+        captured_period["interestCalculation"] = interest_calculation(rows, monthly_financing=financing is not None)
+        result["periodBasis"] = captured_period
+    if financing is not None:
+        finance_summary = financing.summary(budget_financial_cost=budget_financial_cost, budget_project_cost=scheduled_cost)
+        actual_cost = sum(row["cashOut"]["totalCashOut"] for row in rows)
+        finance_summary["costReconciliationDifference"] = actual_cost - finance_summary["calculatedTotalProjectCost"]
+        finance_summary["endingUnfundedOperatingCost"] = max(0.0, -beginning_operating_cash)
+        finance_summary["peakUnfundedOperatingCost"] = max(row["monthlyFinancing"]["unfundedOperatingCost"] for row in rows)
+        finance_summary["overdueDebt"] = rows[-1]["monthlyFinancing"]["overdueDebt"]
+        finance_summary["availableDrawCapacity"] = rows[-1]["monthlyFinancing"]["availableDrawCapacity"]
+        finance_summary["expiredUndrawnCommitment"] = rows[-1]["monthlyFinancing"]["expiredUndrawnCommitment"]
+        finance_summary["reconciliation"] = {key: value for key, value in finance_summary.items()
+                                              if isinstance(value, (int, float)) and not isinstance(value, bool)}
+        summary.update(totalProjectCost=actual_cost, outstandingDebt=finance_summary["outstandingDebt"],
+                       totalPrincipalRepaid=finance_summary["totalPrincipalRepaid"],
+                       unfundedOperatingCost=finance_summary["endingUnfundedOperatingCost"],
+                       overdueDebt=finance_summary["overdueDebt"],
+                       financialCost=finance_summary["calculatedFinancialCost"],
+                       developmentProfit=summary["totalRevenue"] - actual_cost)
+        if finance_summary["peakUnfundedOperatingCost"] > 1e-6 or finance_summary["outstandingDebt"] > 1e-6:
+            summary["status"] = "monthly_financing_shortfall"
+        if finance_summary["overdueDebt"] > 1e-6:
+            risk_flags.append({"code": "MONTHLY_DEBT_UNREPAID", "severity": "critical", "message": "만기 이후 미상환 원금이 남아 있습니다."})
+        if finance_summary["peakUnfundedOperatingCost"] > 1e-6:
+            risk_flags.append({"code": "MONTHLY_OPERATING_COST_UNFUNDED", "severity": "critical", "message": "월별 운영·금융비용을 충당할 자금이 부족합니다."})
+        result.update(monthlyFinancing=finance_summary, analysisOnly=True, reportEligible=False, dataStatus="partial")
+        result["reportFragments"] = _report_fragments(summary, risk_flags, schedule_provenance)
+    return result
+
+
+def _run_captured_workbook_cash_flow(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Replay captured source transactions, without pricing or financing policy.
+
+    This is an analysis of the workbook's saved plan.  It is neither a native
+    Excel recalculation nor a newly underwritten PF structure.
+    """
+    from agents.cash_flow_mapper import captured_cash_flow_binding, captured_cash_flow_content_hash
+    import re
+
+    capture = request.get("capturedWorkbookCashFlow")
+    def invalid(message: str) -> None:
+        raise FinancialInputError(message, code="captured_cash_flow_source_invalid")
+
+    if not isinstance(capture, dict) or capture.get("schemaVersion") != "captured-workbook-cash-flow-v1":
+        invalid("원본 현금흐름 계약을 확인할 수 없습니다.")
+    if capture.get("contentHash") != captured_cash_flow_content_hash(capture):
+        invalid("보관된 원본 거래·출처·검산 결과가 변경되었습니다. 원본 자료를 다시 확인하세요.")
+    if capture.get("bindingHash") != captured_cash_flow_binding(request):
+        invalid("입력이 원본 현금흐름 이후 변경되었습니다. 변경 입력으로 다시 계산하거나 원본을 다시 검토하세요.")
+    if request.get("monthlyFinancing") is not None:
+        invalid("원본 현금흐름 재생과 신규 월별 금융 조건은 함께 계산할 수 없습니다.")
+    if capture.get("sourceProfile") not in {"sangbong-sale-feasibility", "sangbong-private-rental-feasibility"}:
+        invalid("지원하는 원본 현금흐름 프로필이 아닙니다.")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", str(capture.get("originalFileHash") or "")):
+        invalid("원본 파일 해시가 없습니다.")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", str(capture.get("sourceFinancialInputHash") or "")):
+        invalid("원본 입력 스냅샷 해시가 없습니다.")
+    source_rows, checks = capture.get("rows"), capture.get("periodChecks")
+    basis = request.get("periodBasis") or {}
+    if not (isinstance(source_rows, list) and 1 <= len(source_rows) <= 240
+            and isinstance(checks, list) and len(source_rows) == len(checks)
+            and basis.get("kind") == "calendar_monthly"
+            and len(basis.get("periods") or []) == len(source_rows)):
+        invalid("원본 현금흐름의 기간과 검증 결과가 불완전합니다.")
+    inflow_kinds = ("cash_in", "pf_draw", "equity_contribution", "other_financing_inflow")
+    outflow_kinds = ("cash_out", "loan_repayment", "equity_recovery", "other_financing_outflow")
+    totals = {key: 0.0 for key in (*inflow_kinds, *outflow_kinds)}
+    rows, unlevered_flows, funded_cash, cumulative_project_cash = [], [], None, 0.0
+    for index, (source, check) in enumerate(zip(source_rows, checks, strict=True)):
+        if not isinstance(source, dict) or not isinstance(check, dict):
+            invalid("원본 현금흐름 행이 올바르지 않습니다.")
+        locator = source.get("source_locator") or {}
+        period = basis["periods"][index]
+        if not (source.get("month_index") == index == check.get("sourcePeriodIndex")
+                and source.get("period") == period.get("label") and period.get("periodKind") == "monthly"
+                and locator.get("complete") is True and locator.get("cell") and locator.get("sheetName")
+                and locator.get("transactionRowPolicy") == "sangbong-cash-flow-map-v1"
+                and check.get("passed") is True and check.get("cumulativePassed") is True):
+            invalid("원본 현금흐름의 기간별 출처와 검증 상태를 확인하세요.")
+        buckets = {}
+        for kind in totals:
+            values = source.get(kind) or {}
+            if not isinstance(values, dict) or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in values.values()):
+                invalid("원본 현금흐름 금액이 누락되었거나 올바르지 않습니다.")
+            buckets[kind] = dict(values)
+            totals[kind] += sum(values.values())
+        amounts = {kind: sum(values.values()) for kind, values in buckets.items()}
+        net = sum(amounts[kind] for kind in inflow_kinds) - sum(amounts[kind] for kind in outflow_kinds)
+        if source.get("net_cash_flow") is None or not math.isclose(net, source["net_cash_flow"], rel_tol=0, abs_tol=1e-6):
+            invalid("원본 거래 합계와 보관된 순현금흐름이 일치하지 않습니다.")
+        if funded_cash is None:
+            if source.get("cumulative_cash_flow") is None:
+                invalid("원본 기초 현금 잔액을 확인할 수 없습니다.")
+            funded_cash = source["cumulative_cash_flow"] - net
+        beginning = funded_cash
+        funded_cash += net
+        if not math.isclose(funded_cash, source.get("cumulative_cash_flow", float("nan")), rel_tol=0, abs_tol=1e-6):
+            invalid("원본 거래의 누적 잔액이 보관된 잔액과 일치하지 않습니다.")
+        for mapped, original_key, bound_key in ((net, "sourceNetKrw", "roundingBoundKrw"),
+                                                (funded_cash, "sourceBalanceKrw", "cumulativeRoundingBoundKrw")):
+            original, bound = check.get(original_key), check.get(bound_key)
+            if (isinstance(original, bool) or not isinstance(original, (int, float))
+                    or isinstance(bound, bool) or not isinstance(bound, (int, float))
+                    or bound < 0 or abs(mapped - original) > bound + 1e-6):
+                invalid("원본 현금흐름 검산 오차가 보관된 원 단위 반올림 범위를 넘었습니다.")
+        project_net = amounts["cash_in"] - amounts["cash_out"]
+        cumulative_project_cash += project_net
+        unlevered_flows.append(project_net)
+        rows.append({
+            "monthIndex": index, "period": source["period"],
+            "cashIn": {"salesCollection": buckets["cash_in"], "pfDraw": buckets["pf_draw"],
+                       "totalPfDraw": amounts["pf_draw"], "totalCashIn": sum(amounts[k] for k in inflow_kinds)},
+            "cashOut": {"otherCost": amounts["cash_out"], "sourceBreakdown": buckets["cash_out"],
+                        "totalCashOut": amounts["cash_out"]},
+            "loanRepayment": buckets["loan_repayment"],
+            "equityContribution": buckets["equity_contribution"], "equityRecovery": buckets["equity_recovery"],
+            "otherFinancingInflow": buckets["other_financing_inflow"], "otherFinancingOutflow": buckets["other_financing_outflow"],
+            "netCashFlowBeforePfDraw": project_net, "cumulativeCashFlowBeforePfDraw": cumulative_project_cash,
+            "netCashFlowBeforeAllFinancing": project_net,
+            "cumulativeCashFlowBeforeAllFinancing": cumulative_project_cash,
+            "preFinancingBasis": "operating_receipts_minus_payments_before_debt_equity_and_deposits",
+            "netCashFlow": net, "beginningCash": beginning, "endingCash": funded_cash,
+            "remainingPfLimit": None, "sourceLocator": locator,
+            "sourceBasis": "captured_workbook_cash_flow",
+        })
+    max_minus = calculate_cashflow_max_minus_details(unlevered_flows)
+    summary = {
+        "projectId": request.get("project", {}).get("projectId"),
+        "projectName": request.get("project", {}).get("projectName"),
+        "totalRevenue": totals["cash_in"], "totalProjectCost": totals["cash_out"],
+        "businessDeclaredTotals": capture.get("businessDeclaredTotals") or {},
+        "pfLimit": request.get("sourcesAndUses", {}).get("funding", {}).get("pfLoan"),
+        "totalPfDraw": totals["pf_draw"], "totalPrincipalRepaid": totals["loan_repayment"],
+        "totalEquityContribution": totals["equity_contribution"], "totalEquityRecovery": totals["equity_recovery"],
+        "totalOtherFinancingInflow": totals["other_financing_inflow"], "totalOtherFinancingOutflow": totals["other_financing_outflow"],
+        "undrawnPfLimit": None, "maxMinus": max_minus["max_minus"], "maxMinusMonth": max_minus["max_minus_month"],
+        "requiredPfLimit": None, "peakUnfinancedOperatingRequirement": abs(max_minus["max_minus"]), "endingCash": funded_cash,
+        "sourceFundedEndBalanceKrw": checks[-1]["sourceBalanceKrw"],
+        "sourceFundedRoundingDifferenceKrw": funded_cash - checks[-1]["sourceBalanceKrw"],
+        "status": "source_plan_replayed_review_required",
+        "revenueBasis": "captured_operating_receipts_including_refunds_and_interest_recoveries; not_declared_business_sales",
+        "costBasis": "captured_operating_payments; refundable_deposits_and_financing_transfers_excluded",
+        "maxMinusBasis": "operating_receipts_minus_operating_payments_before_all_financing; not_funded_source_balance",
+    }
+    warnings = ["saved_excel_values_not_native_excel_recalculation", "source_plan_not_approved",
+                "business_totals_and_cash_receipts_have_different_bases", *capture.get("warnings", [])]
+    if any(item.get("passed") is not True for item in capture.get("sourceControls", [])):
+        warnings.append("source_declared_total_differs_from_monthly_source_cells")
+    provenance = {"sourceMode": "captured_workbook_cash_flow", "sourceFileHash": capture["originalFileHash"],
+                  "reportEligible": False, "warnings": warnings, "sourceControls": capture.get("sourceControls", [])}
+    result = {
+        "analysisType": "realytics_cash_flow_engine_v1", "engineVersion": "cash_flow_engine-v2",
+        "status": "completed", "dataStatus": "partial", "analysisOnly": True, "reportEligible": False,
+        "sourceBasis": "captured_workbook_cash_flow", "summary": summary, "monthlyCashFlow": rows,
+        "pfDrawSchedule": _pf_draw_schedule(rows), "salesCollectionSchedule": [row["cashIn"]["salesCollection"] for row in rows],
+        "riskFlags": [{"code": "CAPTURED_WORKBOOK_REVIEW_REQUIRED", "severity": "warning", "message": "원본에 저장된 가정의 거래 재생입니다. 실제 약정과 사업수지·현금흐름 기준을 확인하세요."}],
+        "scheduleProvenance": {"costSchedule": provenance, "salesCollection": provenance, "collectionAllocation": provenance,
+                               "reportEligible": False},
+        "reportFragments": {"reportEligible": False, "usageRestriction": "captured_workbook_analysis_only"},
+        "sourceMetadata": {**request.get("sourceMetadata", {}), "analysisOnly": True, "reportEligible": False},
+        "sourceControls": capture.get("sourceControls", []),
+    }
+    result["periodBasis"] = captured_period_basis(request, rows, monthly_financing=False)
+    return result
 
 
 def _project_month_count(request: Dict[str, Any]) -> int:
-    schedule = request.get("schedule") or {}
-    start = _planned_date(schedule.get("construction_start"))
-    completion = _planned_date(schedule.get("completion"))
-    if start and completion:
-        return max(1, _month_diff(start, completion))
-    return 36
+    schedule = schedule_month_indices(request.get("schedule"))
+    if request.get("monthlyFinancing") is not None and not {"construction_start", "completion"} <= schedule.keys():
+        raise FinancialInputError("월별 금융 검토 계산에는 착공·준공 일정이 모두 필요합니다. 기본 36개월을 대신 넣지 않습니다.",
+                                  code="monthly_financing_schedule_required")
+    candidates = [max(1, schedule["completion"])
+                  if {"construction_start", "completion"} <= schedule.keys() else 36]
+    candidates.extend(schedule.values())
+
+    explicit_cost = request.get("costSchedule") or request.get("cost_schedule") or {}
+    cost_rows = explicit_cost.get("rows") if isinstance(explicit_cost, dict) else explicit_cost
+    for fallback_index, row in enumerate(cost_rows or []):
+        if isinstance(row, dict):
+            candidates.append(
+                _non_negative_int(row.get("monthIndex", row.get("month_index", fallback_index)), fallback_index)
+            )
+
+    for product in request.get("productMix") or []:
+        if not isinstance(product, dict):
+            continue
+        for step in product.get("collectionSteps") or []:
+            if not isinstance(step, dict):
+                continue
+            monthly_amounts = step.get("monthlyCollectionAmounts")
+            if isinstance(monthly_amounts, list) and monthly_amounts:
+                candidates.append(len(monthly_amounts) - 1)
+            candidates.append(_non_negative_int(step.get("dueMonth"), 0))
+
+    for tranche in request.get("pfStructure") or []:
+        if isinstance(tranche, dict):
+            candidates.append(_non_negative_int(tranche.get("maturityMonths"), 0))
+    horizon = max(candidates)
+    if horizon > MAX_CASH_FLOW_HORIZON_MONTHS:
+        raise ValueError(
+            f"cash-flow horizon {horizon} exceeds the supported maximum "
+            f"of {MAX_CASH_FLOW_HORIZON_MONTHS} months"
+        )
+    return horizon
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _sales_collection_schedule(request: Dict[str, Any], months: int) -> List[Dict[str, float]]:
@@ -359,7 +633,11 @@ def _pf_limit(request: Dict[str, Any]) -> float:
 
 def _tranche_limits(request: Dict[str, Any]) -> List[Dict[str, Any]]:
     tranches = []
+    explicit_equity_only = bool(request.get("pfStructure"))
     for index, tranche in enumerate(request.get("pfStructure", []), start=1):
+        if tranche.get("priority") == "equity" or tranche.get("name") == "equity":
+            continue
+        explicit_equity_only = False
         amount = float(tranche.get("amount") or 0.0)
         if amount <= 0:
             continue
@@ -370,6 +648,8 @@ def _tranche_limits(request: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     if tranches:
         return sorted(tranches, key=lambda item: item["drawPriority"])
+    if explicit_equity_only:
+        return []
     pf_limit = _pf_limit(request)
     return [{"tranche": "PF Loan", "drawPriority": 1, "remaining": pf_limit}] if pf_limit else []
 
@@ -590,15 +870,3 @@ def _report_fragments(
         ),
         "riskOpinion": risk_text,
     }
-
-
-def _planned_date(value: Any) -> str | None:
-    if isinstance(value, dict):
-        return value.get("plannedDate") or value.get("planned_date")
-    return value if isinstance(value, str) else None
-
-
-def _month_diff(start: str, end: str) -> int:
-    start_year, start_month = [int(part) for part in start[:7].split("-")]
-    end_year, end_month = [int(part) for part in end[:7].split("-")]
-    return (end_year - start_year) * 12 + (end_month - start_month)

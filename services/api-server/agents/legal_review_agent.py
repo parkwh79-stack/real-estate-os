@@ -1,7 +1,10 @@
+from math import isfinite
 from typing import Any, Dict, List
 
 from agents.korean_law_context import build_korean_law_mcp_query_plan, normalize_law_context
-from agents.legal_developability_agent import LegalDevelopabilityAgent
+from agents.legal_developability_agent import LegalDevelopabilityAgent, _first, _number
+from core.schedule import schedule_event_map
+from use_cases.parcel_pnu_resolution import canonical_project_parcel_rows, parcel_pnu
 
 
 class LegalReviewAgent:
@@ -9,17 +12,21 @@ class LegalReviewAgent:
         self,
         project_data: Dict[str, Any],
         law_context: Dict[str, Any] | None = None,
+        *,
+        approval_documents: list[dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         normalized_context = normalize_law_context(law_context)
+        developability = LegalDevelopabilityAgent().analyze(
+            project_data, normalized_context, approval_documents=approval_documents,
+        )
         checks = [
             self._zoning_check(project_data),
-            self._permit_check(project_data),
+            self._permit_check(project_data, developability["permitRouteReview"]),
             self._land_rights_check(project_data),
             self._trust_security_check(project_data),
             self._covenant_check(project_data),
             self._law_context_check(normalized_context),
         ]
-        developability = LegalDevelopabilityAgent().analyze(project_data, normalized_context)
         checks.append(self._developability_check(developability))
         blocking = [check for check in checks if check["severity"] == "blocking"]
         caution = [check for check in checks if check["severity"] == "caution"]
@@ -29,9 +36,17 @@ class LegalReviewAgent:
             "mcp": {
                 "requested": True,
                 "connected": normalized_context["connected"],
+                "verifiedEvidenceAvailable": normalized_context.get(
+                    "verifiedEvidenceAvailable",
+                    False,
+                ),
                 "source": normalized_context.get("source", "not_connected"),
                 "adapter": normalized_context.get("version"),
-                "note": "Korean Law MCP sidecar results are normalized into law_context and merged into this legal precheck.",
+                "note": (
+                    "Connectivity only. MCP transport success is never approval "
+                    "evidence; verifiedEvidenceAvailable is supplied separately "
+                    "by the Legal Intelligence Core."
+                ),
             },
             "status": "blocking_issue" if blocking else "caution" if caution else "clear",
             "checks": checks,
@@ -63,18 +78,18 @@ class LegalReviewAgent:
         )
 
     def _zoning_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        regulation = data.get("regulation", {})
-        legal_far = regulation.get("legal_far", 0)
-        applied_far = regulation.get("applied_far", 0)
-        legal_bcr = regulation.get("legal_bcr", 0)
-        applied_bcr = regulation.get("applied_bcr", 0)
+        regulation = data.get("regulation") if isinstance(data.get("regulation"), dict) else {}
+        legal_far = _number(_first(regulation, "legal_far", "legalFar", "statutoryFar"))
+        applied_far = _number(_first(regulation, "applied_far", "appliedFar", "plannedFar"))
+        legal_bcr = _number(_first(regulation, "legal_bcr", "legalBcr", "statutoryBcr"))
+        applied_bcr = _number(_first(regulation, "applied_bcr", "appliedBcr", "plannedBcr"))
         issues = []
-        if legal_far and applied_far and applied_far > legal_far:
+        if legal_far is not None and applied_far is not None and applied_far > legal_far:
             issues.append("Applied FAR exceeds the legal FAR limit.")
-        if legal_bcr and applied_bcr and applied_bcr > legal_bcr:
+        if legal_bcr is not None and applied_bcr is not None and applied_bcr > legal_bcr:
             issues.append("Applied BCR exceeds the legal BCR limit.")
-        if not regulation:
-            issues.append("Zoning, statutory FAR, and statutory BCR data are missing.")
+        if any(value is None for value in (legal_far, applied_far, legal_bcr, applied_bcr)):
+            issues.append("FAR and BCR limits or planned values are missing or invalid; the zoning comparison is incomplete.")
         return self._check(
             "zoning",
             "Zoning, FAR and BCR",
@@ -82,47 +97,48 @@ class LegalReviewAgent:
             issues or ["No zoning limit breach was detected from the supplied data."],
         )
 
-    def _permit_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        schedule = data.get("schedule", {})
-        permit = schedule.get("permit_approval")
-        construction = schedule.get("construction_start")
-        issues = []
-        if not permit:
-            issues.append("Permit approval or building permit schedule is missing.")
-        if construction and not permit:
-            issues.append("Construction start is scheduled but permit approval date is missing.")
+    def _permit_check(self, data: Dict[str, Any], permit_review: Dict[str, Any]) -> Dict[str, Any]:
+        schedule = schedule_event_map(data.get("schedule"))
+        issues = list(permit_review["requiredChecks"])
+        if permit_review["plannedDate"] is None:
+            issues.append("인허가 계획 일정이 입력되지 않았습니다.")
+        if schedule.get("construction_start") not in (None, "") and permit_review["approvalEvidenceStatus"] == "missing":
+            issues.append("착공 일정이 입력되어 있습니다. 승인서·허가서의 발급과 착공 요건을 확인합니다.")
         return self._check(
             "permit",
-            "Permit and construction prerequisites",
-            "caution" if issues else "clear",
-            issues or ["Permit schedule is reflected in the project schedule."],
+            "인허가 검토 경로와 착공 조건",
+            "caution",
+            issues,
+            details=permit_review,
         )
 
     def _land_rights_check(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        parcels = data.get("land_acquisition", [])
-        if isinstance(parcels, dict):
-            parcels = parcels.get("parcels") or parcels.get("rows") or []
-        if not isinstance(parcels, list):
-            parcels = []
-        if not parcels:
-            land_ledger = data.get("landLedger") if isinstance(data.get("landLedger"), dict) else {}
-            parcels = land_ledger.get("parcels") if isinstance(land_ledger.get("parcels"), list) else []
+        parcels = canonical_project_parcel_rows(data)
         land_evidence = data.get("landEvidence") or data.get("land_evidence") or {}
         registry_records = self._registry_records(land_evidence)
         issues = []
         if not parcels and not registry_records:
             issues.append("Land ownership, share ratio, area, and encumbrance data are missing.")
-        share_values = []
+        incomplete_shares = []
+        missing_shares = 0
         for parcel in parcels:
-            value = parcel.get("share") or parcel.get("ownershipShare") or parcel.get("knownShareSum")
+            value = next(
+                (parcel[key] for key in ("knownShareSum", "ownershipShare", "share") if parcel.get(key) not in (None, "")),
+                None,
+            )
             try:
-                if value not in (None, ""):
-                    share_values.append(float(value))
+                share = float(value) if not isinstance(value, bool) else float("nan")
             except (TypeError, ValueError):
-                continue
-        share_sum = sum(share_values)
-        if share_values and share_sum < 0.999:
-            issues.append(f"Confirmed ownership share totals {share_sum:.2%}, below 100%.")
+                share = float("nan")
+            if not isfinite(share) or share < 0 or share > 1.001:
+                missing_shares += 1
+            elif share < 0.999:
+                key = parcel.get("addressFragment") or parcel.get("parcelKey") or parcel_pnu(parcel) or "unidentified parcel"
+                incomplete_shares.append(f"{key} ({share:.2%})")
+        if incomplete_shares:
+            issues.append(f"Ownership shares below 100% by parcel: {', '.join(incomplete_shares)}.")
+        if missing_shares:
+            issues.append(f"Ownership share is missing or invalid for {missing_shares} parcel(s).")
         mortgages = [p.get("mortgage") for p in parcels if p.get("mortgage")]
         if mortgages:
             issues.append("Existing mortgages or encumbrances require release or trust-transfer conditions.")
@@ -144,9 +160,17 @@ class LegalReviewAgent:
             issues.append("Registry evidence includes encumbrances or release-required items.")
         if owner_unmatched:
             issues.append("Registry owner match status requires legal confirmation.")
-        if parcels and not registry_records:
-            issues.append("Registry and encumbrance evidence is not attached; legal review remains pending.")
-        blocking_issue = bool(registry_release_required or owner_unmatched or (share_values and share_sum < 0.999))
+        registry_pnus = {parcel_pnu(record) for record in registry_records} - {""}
+        registry_parcel_keys = {str(record["parcelKey"]) for record in registry_records if record.get("parcelKey")}
+        missing_registry = sum(
+            parcel_pnu(parcel) not in registry_pnus
+            and str(parcel.get("parcelKey") or "") not in registry_parcel_keys
+            and not parcel.get("registryEvidence")
+            for parcel in parcels
+        )
+        if missing_registry:
+            issues.append(f"Registry and encumbrance evidence is missing for {missing_registry} parcel(s); legal review remains pending.")
+        blocking_issue = bool(registry_release_required or owner_unmatched or incomplete_shares)
         return self._check(
             "land_rights",
             "Land rights and encumbrances",
@@ -206,12 +230,12 @@ class LegalReviewAgent:
         )
 
     def _law_context_check(self, law_context: Dict[str, Any]) -> Dict[str, Any]:
-        if not law_context.get("connected"):
+        if not law_context.get("verifiedEvidenceAvailable"):
             return self._check(
                 "korean_law_mcp",
-                "Korean Law MCP evidence",
+                "Verified legal-source evidence",
                 "caution",
-                ["Korean Law MCP sidecar results were not supplied as law_context."],
+                ["No current, hash-bound official legal evidence was supplied."],
             )
 
         citation_verification = law_context.get("citationVerification", {})
@@ -219,7 +243,7 @@ class LegalReviewAgent:
         if failures:
             return self._check(
                 "korean_law_mcp",
-                "Korean Law MCP evidence",
+                "Verified legal-source evidence",
                 "blocking",
                 [f"Citation verification failed: {failures}"],
             )
@@ -227,7 +251,7 @@ class LegalReviewAgent:
         references = law_context.get("references", [])
         return self._check(
             "korean_law_mcp",
-            "Korean Law MCP evidence",
+            "Verified legal-source evidence",
             "clear" if references else "caution",
             [f"{len(references)} legal references were connected."] if references else ["law_context was supplied but references is empty."],
         )

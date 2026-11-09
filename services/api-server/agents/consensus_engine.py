@@ -16,7 +16,9 @@ evidence-priority rules, and the underlying calculations stay deterministic.
 """
 
 import copy
+import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -33,10 +35,52 @@ EVIDENCE_REQUIRED_KEYS = {
     "pf_metrics_available",
 }
 
+_OUTPUT_BOOKKEEPING_KEYS = {
+    "generatedAt", "createdAt", "updatedAt", "timestamp", "startedAt", "finishedAt",
+    "runId", "run_id", "reviewId", "legalReviewId", "permitReviewId", "agentRunId",
+    "calculationRunId", "handoffId", "traceId",
+}
+
+
+def _canonical_value(value: Any, *, semantic: bool = False) -> Any:
+    if isinstance(value, dict):
+        return {key: _canonical_value(child, semantic=semantic) for key, child in value.items()
+                if not semantic or key not in _OUTPUT_BOOKKEEPING_KEYS}
+    if isinstance(value, list):
+        return [_canonical_value(child, semantic=semantic) for child in value]
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _digest(value: Any, *, semantic: bool = False) -> str:
+    payload = _canonical_value(value, semantic=semantic)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _conflicts(reconciliation: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [check for check in reconciliation["checks"] if check["status"] in {"blocking", "warning"}]
+
+
+def _validate_reconciliation(value: Any) -> None:
+    if not isinstance(value, dict) or not isinstance(value.get("checks"), list):
+        raise ValueError("Consensus reconciliation must contain an explicit checks list")
+    if value.get("status") in {"failed", "error", "unavailable"}:
+        raise ValueError("Consensus recalculation did not complete")
+    if any(not isinstance(check, dict) or not isinstance(check.get("key"), str)
+           or not check["key"] or check.get("status") not in {"clear", "warning", "blocking"}
+           for check in value["checks"]):
+        raise ValueError("Consensus reconciliation contains an invalid check")
+    if len({check["key"] for check in value["checks"]}) != len(value["checks"]):
+        raise ValueError("Consensus reconciliation check keys must be unique")
+
 
 def _num(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     return None
 
 
@@ -95,6 +139,7 @@ class LLMCoordinator:
         return self._connection
 
     def order_conflicts(self, conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        self._rationale = {}
         keys = [c.get("key") for c in conflicts]
         by_key = {c.get("key"): c for c in conflicts}
         prompt = json.dumps(
@@ -121,7 +166,9 @@ class LLMCoordinator:
             data = result.data if result and result.error is None else None
             if not isinstance(data, dict):
                 raise ValueError("no coordinator response")
-            raw_order = [k for k in (data.get("order") or []) if k in by_key]
+            raw_order = list(dict.fromkeys(
+                k for k in (data.get("order") or []) if isinstance(k, str) and k in by_key
+            ))
             # keep it a strict permutation: append any conflicts the model omitted
             ordered_keys = raw_order + [k for k in keys if k not in raw_order]
             rationale = data.get("rationale") or {}
@@ -153,45 +200,112 @@ class ConsensusEngine:
         coordinator: Optional[Any] = None,
         max_rounds: int = 3,
     ) -> Dict[str, Any]:
+        if type(max_rounds) is not int or not 1 <= max_rounds <= 3:
+            raise ValueError("Consensus max_rounds must be an integer between 1 and 3")
         coordinator = coordinator or DeterministicCoordinator()
         working = copy.deepcopy(project_data)
+        working_artifacts = copy.deepcopy(artifacts)
 
         round_log: List[Dict[str, Any]] = []
+        evaluation_log: List[Dict[str, Any]] = []
         resolutions: List[Dict[str, Any]] = []
         patches: List[Dict[str, Any]] = []
 
-        reconciliation = reconcile_fn(working, artifacts)
+        def evaluate(round_index: int) -> Dict[str, Any]:
+            nonlocal working_artifacts
+            input_hash = _digest(working)
+            evaluation_input = copy.deepcopy(working)
+            candidate_artifacts = copy.deepcopy(working_artifacts)
+            result = reconcile_fn(evaluation_input, candidate_artifacts)
+            if _digest(evaluation_input) != input_hash:
+                raise ValueError("Consensus reconciliation must not mutate its input snapshot")
+            _validate_reconciliation(result)
+            output_hash = _digest(candidate_artifacts, semantic=True)
+            reconciliation_hash = _digest(result, semantic=True)
+            # A failed callback or malformed result cannot publish half of a
+            # refreshed domain cycle into the caller's artifacts.
+            working_artifacts = copy.deepcopy(candidate_artifacts)
+            evaluation_log.append({
+                "round": round_index, "inputHash": input_hash,
+                "outputHash": output_hash, "reconciliationHash": reconciliation_hash,
+                "artifactHashes": {key: _digest(value, semantic=True)
+                                   for key, value in sorted(candidate_artifacts.items())},
+                "conflictCount": len(_conflicts(result)),
+            })
+            return copy.deepcopy(result)
+
+        reconciliation = evaluate(0)
+        seen = {(evaluation_log[-1]["inputHash"], evaluation_log[-1]["outputHash"],
+                 evaluation_log[-1]["reconciliationHash"])}
+        stop_reason = "converged" if not _conflicts(reconciliation) else "round_limit"
         for round_index in range(1, max_rounds + 1):
-            conflicts = [c for c in (reconciliation.get("checks") or []) if c.get("status") in {"blocking", "warning"}]
+            conflicts = _conflicts(reconciliation)
             if not conflicts:
+                stop_reason = "converged"
                 break
             resolvable = [c for c in conflicts if c.get("key") not in EVIDENCE_REQUIRED_KEYS]
-            ordered = coordinator.order_conflicts(resolvable)
+            # A coordinator controls ordering only. Even a faulty custom/LLM
+            # coordinator cannot replace the verified conflict values.
+            by_key = {conflict["key"]: conflict for conflict in resolvable}
+            proposed_order = coordinator.order_conflicts(copy.deepcopy(resolvable))
+            ordered_keys = list(dict.fromkeys(
+                item.get("key") for item in proposed_order
+                if isinstance(item, dict) and item.get("key") in by_key
+            ))
+            ordered = [by_key[key] for key in [*ordered_keys,
+                       *(key for key in by_key if key not in ordered_keys)]]
             applied_this_round: List[Dict[str, Any]] = []
+            no_op_keys: List[str] = []
+            before = evaluation_log[-1]
             for conflict in ordered:
-                resolution = self._resolve(conflict, artifacts, working)
+                resolution = self._resolve(conflict, working_artifacts, working)
                 if not resolution.get("resolved"):
                     continue
-                resolution["rationale"] = coordinator.rationale(resolution)
-                resolution["round"] = round_index
                 patch = resolution.get("patch")
                 if patch:
+                    current: Any = working
+                    for part in patch["field"].split("."):
+                        current = current.get(part) if isinstance(current, dict) else None
+                    if current == patch["value"]:
+                        no_op_keys.append(conflict["key"])
+                        continue
                     _set_by_path(working, patch["field"], patch["value"])
-                    patches.append(patch)
+                    patches.append(copy.deepcopy(patch))
+                resolution["rationale"] = coordinator.rationale(copy.deepcopy(resolution))
+                resolution["round"] = round_index
                 resolutions.append(resolution)
                 applied_this_round.append(resolution)
-            round_log.append({
+            row = {
                 "round": round_index,
                 "coordinator": coordinator.name,
                 "conflictCount": len(conflicts),
                 "resolvedKeys": [r["key"] for r in applied_this_round],
                 "evidenceRequiredKeys": [c.get("key") for c in conflicts if c.get("key") in EVIDENCE_REQUIRED_KEYS],
-            })
+                "noOpKeys": no_op_keys,
+                "inputHashBefore": before["inputHash"],
+                "outputHashBefore": before["outputHash"],
+                "recalculationPerformed": False,
+            }
+            round_log.append(row)
             if not applied_this_round:
-                break  # only evidence-required conflicts remain; stop to avoid spinning
-            reconciliation = reconcile_fn(working, artifacts)
+                stop_reason = "evidence_required" if not resolvable else "no_progress"
+                break
+            reconciliation = evaluate(round_index)
+            after = evaluation_log[-1]
+            row.update({
+                "inputHashAfter": after["inputHash"], "outputHashAfter": after["outputHash"],
+                "remainingConflictCount": after["conflictCount"], "recalculationPerformed": True,
+            })
+            if not _conflicts(reconciliation):
+                stop_reason = "converged"
+                break
+            signature = (after["inputHash"], after["outputHash"], after["reconciliationHash"])
+            if signature in seen:
+                stop_reason = "oscillation"
+                break
+            seen.add(signature)
 
-        final_conflicts = [c for c in (reconciliation.get("checks") or []) if c.get("status") in {"blocking", "warning"}]
+        final_conflicts = _conflicts(reconciliation)
         unresolved = [
             {
                 "key": c.get("key"),
@@ -210,16 +324,22 @@ class ConsensusEngine:
             "generatedAt": datetime.now(timezone.utc).isoformat(),
             "status": status,
             "coordinator": coordinator.name,
+            "stopReason": stop_reason,
+            "maxRounds": max_rounds,
             "rounds": len(round_log),
             "roundLog": round_log,
+            "evaluationLog": evaluation_log,
             "resolutions": resolutions,
             "patches": patches,
             "agreedProjectData": working,
+            "finalArtifacts": working_artifacts,
+            "finalReconciliation": reconciliation,
             "unresolved": unresolved,
             "summary": {
                 "resolvedCount": len(resolutions),
                 "unresolvedCount": len(unresolved),
                 "converged": status == "converged",
+                "evaluationCount": len(evaluation_log),
             },
         }
 

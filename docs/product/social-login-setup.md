@@ -1,6 +1,41 @@
-# Social Login Setup — Kakao & Google (실제 계정 연동)
+# Social Login Setup — Kakao & Google (Legacy Direct OAuth Reference)
 
-Updated: 2026-06-29
+Updated: 2026-07-30
+
+> **LEGACY / 운영 설정에 사용 금지**
+>
+> 아래 FastAPI 직접 OAuth, `localStorage` 세션, `pilot_mock` 흐름은 이전
+> 호환 경로입니다. 현재 기본 운영 경로는 Supabase Auth email/password 가입과
+> 이메일 확인이며, Google/Kakao는 사용자가 나중에 설정에서 명시적으로 연결하는
+> 선택 경로입니다. 공개 provider 로그인 진입점은 live gate 전까지 화면에서
+> 노출하지 않습니다. 향후 소셜 로그인 경로를 활성화할 때에는 Supabase Auth,
+> Next.js `/api/auth/supabase/oauth`, `/auth/callback`, HttpOnly cookie/BFF,
+> FastAPI JWKS 검증, PostgreSQL membership 권위입니다. 신규 설정과 테스트는
+> `docs/product/identity-tenant-access-contract.md`와
+> `docs/architecture/architecture-boundary.md`를 따릅니다. 운영 환경에서는
+> `REALYTICS_ENABLE_LOCAL_AUTH`, `REALYTICS_ENABLE_OAUTH_MOCKS`,
+> `REALYTICS_ENABLE_LEGACY_OAUTH_SESSIONS`를 모두 비활성화해야 합니다.
+
+## Current production account path
+
+```text
+email/password signup
+  -> hosted email confirmation
+  -> memberless /onboarding session
+  -> invitation or organization access request
+  -> AAL2 administrator approval
+  -> normalized PostgreSQL membership
+  -> optional Google/Kakao identity link in Settings
+```
+
+The public `/guest` route is static sample content. It does not use Supabase
+anonymous sign-in and does not call tenant, project, upload, document, or
+analysis APIs. OAuth provider enablement is therefore no longer a blocker for
+creating an account or submitting a membership application. It remains an
+operational prerequisite only for post-approval provider linking and any later
+provider-login rollout.
+
+## Historical reference only
 
 로그인 페이지의 "실제 카카오 계정으로 연동하기" / "실제 구글 계정으로 연동하기" 버튼이
 **실제 계정으로 동작**하려면 각 개발자 콘솔에서 OAuth 앱을 등록하고 Client ID/Secret을
@@ -28,7 +63,12 @@ authorize-url 응답의 `mode` 필드로 현재 모드를 알 수 있습니다 (
 3. **Redirect URI** 등록 (백엔드 `KAKAO_REDIRECT_URI`와 정확히 일치):
    - 로컬: `http://127.0.0.1:8000/auth/kakao/callback`
    - 운영: `https://<api-domain>/auth/kakao/callback`
-4. **동의항목**: `openid`, `profile_nickname`, `account_email` 사용 설정(이메일은 검수 필요할 수 있음).
+4. **동의항목**: `openid`, `profile_nickname` 사용 설정. `account_email`은
+   선택 사항이며, 사용하려면 Biz App 조건이 필요할 수 있습니다. 이메일이
+   없더라도 `issuer + subject`로 식별하고 PostgreSQL 초대·멤버십을 별도로
+   확인해야 합니다. 운영 Supabase 경로는 OAuth 시작 시 provider query를
+   `scope=profile_nickname profile_image`로 서버에서 고정하고, hosted Kakao
+   provider의 이메일 선택 허용 설정을 함께 적용해야 합니다.
 5. 키 확인: **REST API 키** = `KAKAO_REST_API_KEY`. 보안 → **Client Secret** 발급 시 `KAKAO_CLIENT_SECRET`.
 
 ```

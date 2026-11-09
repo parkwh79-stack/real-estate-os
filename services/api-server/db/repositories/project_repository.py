@@ -88,10 +88,12 @@ class ProjectRepository:
         deleted = self.projects_store.pop(project_id, None)
         if deleted is None:
             return None
-        self.reports_store.pop(project_id, None)
-        self.orchestrations_store.pop(project_id, None)
-        self.market_evidence_store.pop(project_id, None)
-        self.project_snapshots_store.pop(project_id, None)
+        for store in (self.reports_store, self.orchestrations_store, self.market_evidence_store, self.project_snapshots_store):
+            # Removing a known project does not require parsing its historical
+            # payloads (which may be large or corrupt). SQLite cascade owns the
+            # persisted deletion; the other projects' lazy entries stay intact.
+            if project_id in store:
+                del store[project_id]
         self._persist_one(project_id)
         return deleted
 

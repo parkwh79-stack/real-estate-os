@@ -209,7 +209,7 @@ def compare_asset_feasibility_use_case(
                     "assetType": scenario["assetType"],
                     "assetTypeLabel": _ASSET_TYPE_LABELS_KO.get(scenario["assetType"], scenario["assetType"]),
                     "status": "error",
-                    "error": str(exc),
+                    "error": "사업성 시나리오 계산에 실패했습니다. 입력과 근거를 확인해 주세요.",
                     "missingFields": [],
                 }
             )

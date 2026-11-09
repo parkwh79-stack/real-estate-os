@@ -1,10 +1,33 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+from collections.abc import Mapping
+from contextlib import AbstractContextManager
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
+from db.postgres_runtime_pool import api_tenant_transaction
+
+
+SnapshotTransactionFactory = Callable[
+    [str],
+    AbstractContextManager[Any],
+]
+
 
 PROJECT_SNAPSHOT_SCHEMA_VERSION = "realytics-project-snapshot-v1"
+PROJECT_SNAPSHOT_HASH_PREFIX = "sha256:"
+_MUTABLE_PROJECT_SNAPSHOT_FIELDS = frozenset(
+    {
+        "snapshotHash",
+        "historicalOutcome",
+        "historicalOutcomeHistory",
+        "updatedAt",
+    }
+)
 
 
 class ProjectSnapshotRepository:
@@ -88,6 +111,7 @@ class ProjectSnapshotRepository:
     def metadata(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "schemaVersion": snapshot.get("schemaVersion"),
+            "snapshotHash": snapshot.get("snapshotHash"),
             "snapshotId": snapshot.get("snapshotId"),
             "projectId": snapshot.get("projectId"),
             "runId": snapshot.get("runId"),
@@ -108,6 +132,270 @@ class ProjectSnapshotRepository:
         }
 
 
+class PostgresProjectSnapshotRepository:
+    """Tenant-scoped immutable review Snapshot authority."""
+
+    def __init__(
+        self,
+        *,
+        tenant_id: str,
+        transaction_factory: SnapshotTransactionFactory = api_tenant_transaction,
+    ) -> None:
+        normalized_tenant_id = str(tenant_id or "").strip()
+        if not normalized_tenant_id:
+            raise ValueError("tenant_id is required")
+        self.tenant_id = normalized_tenant_id
+        self._transaction = transaction_factory
+
+    def create_from_run(
+        self,
+        project_id: str,
+        project_data: Dict[str, Any],
+        run: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        with self._transaction(self.tenant_id) as connection:
+            return self.create_from_run_in_transaction(
+                connection,
+                project_id,
+                project_data,
+                run,
+            )
+
+    def create_from_run_in_transaction(
+        self,
+        connection: Any,
+        project_id: str,
+        project_data: Dict[str, Any],
+        run: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized_project_id = _required_text(project_id, "project_id")
+        run_id = _required_text(run.get("run_id"), "run.run_id")
+        snapshot_id = f"snapshot-{run_id}"
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"project-snapshot:{self.tenant_id}:{normalized_project_id}:{run_id}",),
+        )
+        existing = self._get_in_transaction(
+            connection,
+            normalized_project_id,
+            snapshot_id,
+        )
+        if existing is not None:
+            if str(existing.get("runId") or "") != run_id:
+                raise ValueError("Existing project Snapshot run lineage conflicts")
+            if not verify_project_snapshot_hash(existing):
+                raise ValueError("Existing project Snapshot hash is invalid")
+            return existing
+
+        project_exists = connection.execute(
+            """
+            SELECT project_id
+            FROM realytics.projects
+            WHERE tenant_id = %s AND project_id = %s
+            """,
+            (self.tenant_id, normalized_project_id),
+        ).fetchone()
+        if project_exists is None:
+            raise LookupError("Project not found in normalized PostgreSQL")
+        run_exists = connection.execute(
+            """
+            SELECT run_id
+            FROM realytics.orchestrations
+            WHERE tenant_id = %s AND project_id = %s AND run_id = %s
+            """,
+            (self.tenant_id, normalized_project_id, run_id),
+        ).fetchone()
+        if run_exists is None:
+            raise LookupError("Orchestration run not found in normalized PostgreSQL")
+
+        snapshot = build_project_snapshot(
+            normalized_project_id,
+            project_data,
+            run,
+        )
+        inserted = connection.execute(
+            """
+            INSERT INTO realytics.project_snapshots (
+                tenant_id,
+                project_id,
+                snapshot_id,
+                run_id,
+                created_at,
+                payload_json
+            ) VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (project_id, snapshot_id) DO NOTHING
+            RETURNING snapshot_id
+            """,
+            (
+                self.tenant_id,
+                normalized_project_id,
+                snapshot["snapshotId"],
+                run_id,
+                snapshot["createdAt"],
+                _snapshot_json(snapshot),
+            ),
+        ).fetchone()
+        if inserted is None:
+            existing = self._get_in_transaction(
+                connection,
+                normalized_project_id,
+                snapshot_id,
+            )
+            if existing is None:
+                raise ValueError("Project Snapshot identity conflicts across tenants")
+            if existing.get("snapshotHash") != snapshot.get("snapshotHash"):
+                raise ValueError("Project Snapshot retry content conflicts")
+            return existing
+        return deepcopy(snapshot)
+
+    def list_metadata(self, project_id: str) -> List[Dict[str, Any]]:
+        normalized_project_id = _required_text(project_id, "project_id")
+        with self._transaction(self.tenant_id) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM realytics.project_snapshots
+                WHERE tenant_id = %s AND project_id = %s
+                ORDER BY created_at DESC, snapshot_id DESC
+                """,
+                (self.tenant_id, normalized_project_id),
+            ).fetchall()
+        return [self.metadata(_snapshot_payload(row[0])) for row in rows]
+
+    def list_all(self) -> List[Dict[str, Any]]:
+        with self._transaction(self.tenant_id) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM realytics.project_snapshots
+                WHERE tenant_id = %s
+                ORDER BY created_at DESC, snapshot_id DESC
+                """,
+                (self.tenant_id,),
+            ).fetchall()
+        return [_snapshot_payload(row[0]) for row in rows]
+
+    def get(self, project_id: str, snapshot_id: str) -> Dict[str, Any] | None:
+        with self._transaction(self.tenant_id) as connection:
+            return self._get_in_transaction(
+                connection,
+                _required_text(project_id, "project_id"),
+                _required_text(snapshot_id, "snapshot_id"),
+            )
+
+    def latest(self, project_id: str) -> Dict[str, Any] | None:
+        normalized_project_id = _required_text(project_id, "project_id")
+        with self._transaction(self.tenant_id) as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM realytics.project_snapshots
+                WHERE tenant_id = %s AND project_id = %s
+                ORDER BY created_at DESC, snapshot_id DESC
+                LIMIT 1
+                """,
+                (self.tenant_id, normalized_project_id),
+            ).fetchone()
+        return _snapshot_payload(row[0]) if row is not None else None
+
+    def upsert_historical_outcome(
+        self,
+        project_id: str,
+        snapshot_id: str,
+        outcome_data: Dict[str, Any],
+        *,
+        updated_by: str = "system",
+    ) -> Dict[str, Any] | None:
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_snapshot_id = _required_text(snapshot_id, "snapshot_id")
+        with self._transaction(self.tenant_id) as connection:
+            snapshot = self._get_in_transaction(
+                connection,
+                normalized_project_id,
+                normalized_snapshot_id,
+                for_update=True,
+            )
+            if snapshot is None:
+                return None
+            outcome = normalize_historical_outcome(
+                outcome_data,
+                updated_by=updated_by,
+            )
+            history = list(snapshot.get("historicalOutcomeHistory") or [])
+            if snapshot.get("historicalOutcome"):
+                history.append(snapshot["historicalOutcome"])
+            snapshot["historicalOutcome"] = outcome
+            snapshot["historicalOutcomeHistory"] = history[-20:]
+            snapshot["updatedAt"] = outcome["updatedAt"]
+            connection.execute(
+                """
+                UPDATE realytics.project_snapshots
+                SET payload_json = %s::jsonb
+                WHERE tenant_id = %s AND project_id = %s AND snapshot_id = %s
+                """,
+                (
+                    _snapshot_json(snapshot),
+                    self.tenant_id,
+                    normalized_project_id,
+                    normalized_snapshot_id,
+                ),
+            )
+            return snapshot
+
+    def delete_project(self, project_id: str) -> None:
+        raise RuntimeError(
+            "Normalized project Snapshots are retained; delete through the governed retention workflow"
+        )
+
+    metadata = ProjectSnapshotRepository.metadata
+
+    def _get_in_transaction(
+        self,
+        connection: Any,
+        project_id: str,
+        snapshot_id: str,
+        *,
+        for_update: bool = False,
+    ) -> Dict[str, Any] | None:
+        suffix = " FOR UPDATE" if for_update else ""
+        row = connection.execute(
+            """
+            SELECT payload_json
+            FROM realytics.project_snapshots
+            WHERE tenant_id = %s AND project_id = %s AND snapshot_id = %s
+            """
+            + suffix,
+            (self.tenant_id, project_id, snapshot_id),
+        ).fetchone()
+        return _snapshot_payload(row[0]) if row is not None else None
+
+
+def _snapshot_payload(value: Any) -> Dict[str, Any]:
+    decoded = value
+    if isinstance(value, (str, bytes, bytearray)):
+        decoded = json.loads(value)
+    if not isinstance(decoded, Mapping):
+        raise ValueError("Project Snapshot payload must be a JSON object")
+    return deepcopy(dict(decoded))
+
+
+def _snapshot_json(value: Mapping[str, Any]) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _required_text(value: Any, label: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{label} is required")
+    return normalized
+
+
 def build_project_snapshot(
     project_id: str,
     project_data: Dict[str, Any],
@@ -117,7 +405,7 @@ def build_project_snapshot(
     created_at = datetime.now(timezone.utc).isoformat()
     run_id = run.get("run_id")
     artifacts = run.get("artifacts", {})
-    return {
+    snapshot = {
         "schemaVersion": PROJECT_SNAPSHOT_SCHEMA_VERSION,
         "snapshotId": f"snapshot-{run_id}",
         "projectId": project_id,
@@ -143,6 +431,48 @@ def build_project_snapshot(
         "caseComparisonSeed": _case_comparison_seed(project_data, artifacts),
         "historicalOutcome": _historical_outcome_seed(project_data),
     }
+    snapshot["snapshotHash"] = project_snapshot_content_hash(snapshot)
+    return snapshot
+
+
+def project_snapshot_content_hash(snapshot: Dict[str, Any]) -> str:
+    """Hash only the immutable review content of a project snapshot.
+
+    Historical outcomes are intentionally mutable after review completion, so
+    they and their audit-history timestamps are excluded from this seal. Every
+    other top-level field is included, making newly added immutable review
+    fields fail closed without maintaining a second allowlist.
+    """
+    immutable_content = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in _MUTABLE_PROJECT_SNAPSHOT_FIELDS
+    }
+    canonical = json.dumps(
+        immutable_content,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return PROJECT_SNAPSHOT_HASH_PREFIX + hashlib.sha256(canonical).hexdigest()
+
+
+def verify_project_snapshot_hash(snapshot: Dict[str, Any]) -> bool:
+    """Return whether a snapshot carries a valid seal for its current content."""
+    stored_hash = snapshot.get("snapshotHash")
+    if not isinstance(stored_hash, str) or not stored_hash.startswith(
+        PROJECT_SNAPSHOT_HASH_PREFIX
+    ):
+        return False
+    digest = stored_hash.removeprefix(PROJECT_SNAPSHOT_HASH_PREFIX)
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return False
+    try:
+        calculated_hash = project_snapshot_content_hash(snapshot)
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(stored_hash, calculated_hash)
 
 
 def normalize_historical_outcome(outcome_data: Dict[str, Any], *, updated_by: str = "system") -> Dict[str, Any]:

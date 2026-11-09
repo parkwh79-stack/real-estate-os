@@ -54,6 +54,8 @@ def search_similar_project_snapshots_use_case(
     snapshot_repository: ProjectSnapshotRepository,
     project_id: str,
     options: Dict[str, Any] | None = None,
+    *,
+    candidate_snapshots: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Search stored project snapshots for deterministic similar PF review cases."""
     options = options or {}
@@ -70,8 +72,13 @@ def search_similar_project_snapshots_use_case(
     if not query_snapshot:
         raise LookupError("Project snapshot not found")
 
+    eligible_snapshots = (
+        list(candidate_snapshots)
+        if candidate_snapshots is not None
+        else snapshot_repository.list_all()
+    )
     candidates = []
-    for candidate in snapshot_repository.list_all():
+    for candidate in eligible_snapshots:
         if candidate.get("snapshotId") == query_snapshot.get("snapshotId"):
             continue
         if not include_same_project and candidate.get("projectId") == project_id:
@@ -91,7 +98,7 @@ def search_similar_project_snapshots_use_case(
         "queryRunId": query_snapshot.get("runId"),
         "querySeed": query_snapshot.get("caseComparisonSeed", {}),
         "summary": {
-            "candidateCount": len(snapshot_repository.list_all()) - 1,
+            "candidateCount": max(0, len(eligible_snapshots) - 1),
             "returnedCount": len(candidates),
             "queryRiskCount": len(query_risks),
             "topScore": candidates[0]["similarityScore"] if candidates else 0,

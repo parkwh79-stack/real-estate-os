@@ -1,10 +1,11 @@
 # PDF Print Layout QA
 
-Updated: 2026-05-12
+Updated: 2026-10-14
 
 ## Scope
 
-This checklist covers the `/report` Phase 11 PF review report page.
+This checklist covers report layout. `/report` is the sample entry; actual
+project review uses `/project/[id]/report` and its saved report/export context.
 
 ## Implemented Controls
 
@@ -44,10 +45,38 @@ The visual agent automatically scans every generated PDF document for layout ano
 *   **Empty Page Identification:** Counts block elements to detect stray blank pages or page-break policy failures.
 
 ### 2. Pixel-Level Visual Regression
-The harness supports pixel-by-pixel rendering comparison against a certified approved baseline:
-1.  **Baseline Generation:** During the initial approved execution, the PDF pages are rasterized into high-resolution images (`baseline_*.png`) in the runtime baselines storage.
-2.  **Visual Comparer:** On subsequent runs (such as after system or style modifications), pages are re-rasterized and matched pixel-by-pixel against the references.
-3.  **Visual Layout Diff:** If changes exceed a 0.05% pixel-count threshold (protecting against sub-pixel anti-aliasing), a visual diff layout is generated (`diff_page_*.png`) highlighting modifications in bright red to aid the manual review.
+The harness compares PDF pages with a reference independent of each execution's
+report ID. PF orchestration derives `baseline_id` from tenant, project and template;
+the current report ID identifies only the current result/difference directory.
+
+1. **Candidate capture:** The first run creates immutable images and a manifest
+   containing source report/PDF hash, image hashes, DPI and capture time. It returns
+   `baseline_created`, zero compared pages, and `baseline_reviewed=false`.
+2. **Explicit layout review:** A trusted local maintainer inspects every image,
+   then calls `VisualQAAgent.review_baseline(baseline_id, expected_manifest_hash=...,
+   reviewer=..., reason=...)`. This is an administrative Python operation, not an
+   API payload or automatic PF-run action. It records a separate immutable review
+   receipt bound to the manifest. An existing receipt is not overwritten; use a new
+   template revision for a replacement. This is layout review, not credit approval.
+3. **Comparison:** Later report IDs use the same reference. Matching an unreviewed
+   reference returns `baseline_unreviewed`. Only matching a reviewed, hash-valid
+   reference returns `passed`; orchestration also checks `baseline_reviewed=true`.
+   Added/removed pages and differences above 0.05% produce `regression_detected`.
+   Changed images, missing manifests or different DPI produce `baseline_invalid`.
+   Old images without a manifest cannot be silently promoted. Competing captures
+   cannot overwrite reference images; an incomplete capture requires inspection.
+4. **Difference artifacts:** `diff_page_*.png` contains the current changed page,
+   not a red-highlight overlay. Numeric/content changes and visible report metadata
+   can legitimately differ; this comparison does not mask them or auto-approve them.
+
+No operational reference has been approved by this development change. Tests review
+only synthetic fixtures. Missing layout approval affects final report quality, not
+independent feasibility calculations or analysis-only comparison drafts.
+
+The PDF writer now uses the correctly named `HYGothic-Medium` CID font and a
+FontDescriptor. A raw UTF-16 text-operator check had not caught the previous Korean
+glyph fallback; regression coverage now also extracts and renders text with PyMuPDF.
+The actual-source six-page comparison draft was visually checked after the fix.
 
 ### 3. Execution in Test Suite
 Automated regression tests are fully integrated into our testing suite under `tests/test_visual_regression.py` and are checked alongside compiler and structural assertions.

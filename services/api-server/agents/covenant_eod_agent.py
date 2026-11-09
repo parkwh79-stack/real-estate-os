@@ -313,7 +313,9 @@ class CovenantEodAgent:
             })
 
         # 9) 공사비 초과 충당 — construction cost overrun buffer → equity top-up.
-        buffer = _num(policy.get("costOverrunBuffer")) or DEFAULT_COST_OVERRUN_BUFFER
+        buffer = _num(policy.get("costOverrunBuffer"))
+        if buffer is None:
+            buffer = DEFAULT_COST_OVERRUN_BUFFER
         if construction_cost is not None and construction_cost > 0:
             ceiling = round(construction_cost * (1 + buffer))
             covenants.append({

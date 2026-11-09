@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional
+
+from domains.feasibility.regulatory import build_preliminary_buildable_envelope
 
 DEVELOPABILITY_SCHEMA_VERSION = "realytics-developability-score-v1"
 
@@ -15,7 +18,7 @@ _WEIGHTS = {
 
 
 def _num(value: Any) -> Optional[float]:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
         return float(value)
     return None
 
@@ -50,7 +53,16 @@ class DevelopabilityScoreAgent:
 
     def score(self, project_data: Dict[str, Any], *, return_metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         dimensions: Dict[str, Dict[str, Any]] = {}
-        dimensions["regulation"] = self._regulation(project_data.get("regulation") or {})
+        land = project_data.get("land") or {}
+        declared_land_area = land.get("area_sqm") or land.get("areaSqm") if isinstance(land, dict) else None
+        envelope = build_preliminary_buildable_envelope(
+            project_data,
+            declared_land_area_sqm=declared_land_area,
+        )
+        dimensions["regulation"] = self._regulation(
+            project_data.get("regulation") or {},
+            envelope=envelope,
+        )
         dimensions["landReadiness"] = self._land_readiness(project_data)
         dimensions["feasibility"] = self._feasibility(project_data, return_metrics)
         dimensions["marketability"] = self._marketability(project_data.get("marketability") or project_data.get("marketabilityAnalysis") or {})
@@ -65,36 +77,102 @@ class DevelopabilityScoreAgent:
         drivers = [v["label"] for v in available.values() if v["score"] >= 75]
         gaps = [v["label"] for v in available.values() if v["score"] < 50]
         data_limitations = [dimensions[k]["label"] for k in dimensions if not dimensions[k]["available"]]
+        regulation_eligibility = dimensions["regulation"].get("eligibility")
+        if regulation_eligibility == "ineligible":
+            overall = 0.0
+            business_readiness = "blocked"
+        elif regulation_eligibility == "not_assessable":
+            overall = 0.0
+            business_readiness = "not_assessable"
+        else:
+            business_readiness = "conditional"
 
         return {
             "schemaVersion": DEVELOPABILITY_SCHEMA_VERSION,
             "analysisType": self.analysis_type,
             "generatedAt": datetime.now(timezone.utc).isoformat(),
             "overallScore": overall,
-            "grade": self._grade(overall) if available else "no_data",
+            "grade": (
+                "not_assessable"
+                if business_readiness == "not_assessable"
+                else self._grade(overall) if available else "no_data"
+            ),
             "dimensions": dimensions,
             "drivers": drivers,
             "gaps": gaps,
             "dataLimitations": data_limitations,
-            "summary": self._summary(overall, available, gaps),
+            "businessReadinessStatus": business_readiness,
+            "reportGrade": False,
+            "buildableEnvelope": envelope,
+            "summary": (
+                "법정 용적률을 초과한 계획으로 개발가능성 판단이 차단되었습니다."
+                if business_readiness == "blocked"
+                else self._summary(overall, available, gaps)
+            ),
         }
 
-    def _regulation(self, reg: Dict[str, Any]) -> Dict[str, Any]:
-        applied_far = _num(reg.get("applied_far"))
-        legal_far = _num(reg.get("legal_far"))
-        zoning = reg.get("zoning")
-        if applied_far is None and not zoning:
-            return self._dim("규제 적합성", 0.0, False, ["용도지역·용적률 정보 없음"])
+    def _regulation(
+        self,
+        reg: Dict[str, Any],
+        *,
+        envelope: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        applied_far = _num(reg.get("applied_far")) or _num(reg.get("appliedFar"))
+        legal_far = _num(reg.get("legal_far")) or _num(reg.get("legalFar"))
+        zoning = reg.get("zoning") or reg.get("zone")
+        if envelope:
+            if envelope.get("blockingCodes"):
+                result = self._dim(
+                    "규제 적합성",
+                    0.0,
+                    False,
+                    ["필지별 규제 envelope 입력이 완전하지 않습니다."],
+                )
+                result["eligibility"] = "not_assessable"
+                result["blockingConstraintIds"] = list(envelope.get("blockingCodes") or [])
+                return result
+            if envelope.get("effectiveLegalFar") is not None:
+                legal_far = _num(envelope.get("effectiveLegalFar"))
+        if applied_far is None or legal_far is None:
+            missing = []
+            if applied_far is None:
+                missing.append("계획 용적률")
+            if legal_far is None:
+                missing.append("법정 용적률")
+            result = self._dim("규제 적합성", 0.0, False, [f"{'·'.join(missing)} 정보 없음"])
+            result["eligibility"] = "not_assessable"
+            result["blockingConstraintIds"] = [
+                code
+                for missing_value, code in (
+                    (applied_far is None, "APPLIED_FAR_MISSING"),
+                    (legal_far is None, "LEGAL_FAR_MISSING"),
+                )
+                if missing_value
+            ]
+            return result
+        if applied_far > legal_far:
+            result = self._dim(
+                "규제 적합성",
+                0.0,
+                True,
+                [f"법정 용적률 초과 (적용 {applied_far:.0f}% > 법정 {legal_far:.0f}%)"],
+            )
+            result["eligibility"] = "ineligible"
+            result["blockingConstraintIds"] = ["LEGAL_FAR_EXCEEDED"]
+            return result
         score = 55.0
         notes: List[str] = []
-        if applied_far is not None and legal_far:
-            utilization = applied_far / legal_far if legal_far else 0.0
-            score += max(-15.0, min(35.0, (utilization - 0.5) * 70.0))
-            notes.append(f"용적률 활용 {utilization:.0%} (적용 {applied_far:.0f}/법정 {legal_far:.0f})")
+        utilization = applied_far / legal_far
+        score += max(-15.0, min(35.0, (utilization - 0.5) * 70.0))
+        notes.append(f"용적률 활용 {utilization:.0%} (적용 {applied_far:.0f}/법정 {legal_far:.0f})")
         if zoning:
             score += 10.0
             notes.append(f"용도지역 {zoning}")
-        return self._dim("규제 적합성", round(min(100.0, max(0.0, score)), 1), True, notes)
+        result = self._dim("규제 적합성", round(min(100.0, max(0.0, score)), 1), True, notes)
+        result["eligibility"] = "eligible" if envelope and envelope.get("reportGrade") else "conditional"
+        result["blockingConstraintIds"] = []
+        result["conditionIds"] = [] if result["eligibility"] == "eligible" else ["REGULATORY_SNAPSHOT_APPROVAL_REQUIRED"]
+        return result
 
     def _land_readiness(self, data: Dict[str, Any]) -> Dict[str, Any]:
         land = data.get("land") or {}
@@ -117,9 +195,9 @@ class DevelopabilityScoreAgent:
             irr = _num(((return_metrics.get("metrics") or {}).get("projectIrr") or {}).get("value"))
         fi = data.get("feasibility_input") or {}
         revenue = _num(fi.get("total_revenue")) or 0.0
-        cost = _num(fi.get("total_cost")) or 0.0
+        cost = _num(fi.get("total_cost"))
         margin = _num(fi.get("profit_margin"))
-        if margin is None and revenue > 0:
+        if margin is None and revenue > 0 and cost is not None:
             margin = (revenue - cost) / revenue
         if irr is None and margin is None:
             return self._dim("사업성", 0.0, False, ["사업수지/수익지표 없음"])

@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { AlertTriangle, ArrowLeft, BarChart3, Database, Loader2, RefreshCw, TrendingUp } from "lucide-react";
+import { useParams, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AlertTriangle, ArrowLeft, BarChart3, Database, Loader2, TrendingUp } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
-import { MarketDepthPanel } from "../../../../components/market/market-depth-panel";
+import { MarketDepthPanel, type PublicMarketLookup } from "../../../../components/market/market-depth-panel";
+import { projectWorkspaceHref } from "../../../../lib/project-navigation";
 
 type MarketAnalysis = {
   applicable?: boolean;
@@ -47,6 +48,7 @@ function formatManPerPy(value: unknown) {
 }
 
 function formatPct(value: unknown) {
+  if (value === null || value === undefined || value === "") return "미확인";
   const n = Number(value);
   if (!Number.isFinite(n)) return "미확인";
   return `${(n * 100).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}%`;
@@ -61,32 +63,31 @@ function riskLabel(code?: string) {
 }
 
 export default function MarketabilityPage() {
-  const params = useParams<{ id: string }>();
-  const projectId = params.id;
+  const { id } = useParams<{ id: string }>();
+  const track = useSearchParams().get("track");
+  return <MarketabilityWorkspace key={id} projectId={id} track={track} />;
+}
+
+function MarketabilityWorkspace({ projectId, track }: { projectId: string; track: string | null }) {
   const [context, setContext] = useState<WorkspacePageContext | null>(null);
   const [analysis, setAnalysis] = useState<MarketAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [depthRevision, setDepthRevision] = useState(0);
+  const [publicLookup, setPublicLookup] = useState<PublicMarketLookup | null>(null);
+  const [publicLookupBusy, setPublicLookupBusy] = useState(false);
+  const pendingPublic = useRef<AbortController | null>(null);
+  const intakeHref = projectWorkspaceHref(projectId, "input-package", track) + "#intake-upload";
 
-  const load = useCallback(async (runLive = false) => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const ctxPromise = fetchWorkspaceContext(projectId, "marketability");
-      const analysisPromise = runLive
-        ? fetch(`${apiBase}/projects/${projectId}/marketability/analyze?live_comparables=true`, {
-            method: "POST",
-            cache: "no-store",
-            headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-            body: "{}",
-          }).then((res) => (res.ok ? res.json() : null))
-        : Promise.resolve(null);
-      const [ctx, liveAnalysis] = await Promise.all([ctxPromise, analysisPromise]);
+      const ctx = await fetchWorkspaceContext(projectId, "marketability");
       setContext(ctx);
-      const pageData = asRecord(ctx.pageData);
-      const storedAnalysis = asRecord(pageData.marketability) as MarketAnalysis;
-      setAnalysis((liveAnalysis as MarketAnalysis | null) ?? (Object.keys(storedAnalysis).length ? storedAnalysis : null));
+      const storedAnalysis = asRecord(asRecord(ctx.pageData).marketability) as MarketAnalysis;
+      setAnalysis(Object.keys(storedAnalysis).length ? storedAnalysis : null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "시장성 저장 상태를 불러오지 못했습니다.");
     } finally {
@@ -95,22 +96,51 @@ export default function MarketabilityPage() {
   }, [projectId]);
 
   useEffect(() => {
-    void load(false);
+    void load();
+    return () => pendingPublic.current?.abort();
   }, [load]);
+
+  async function runPublicLookup() {
+    pendingPublic.current?.abort();
+    const controller = new AbortController();
+    pendingPublic.current = controller;
+    setPublicLookupBusy(true);
+    setPublicLookup(null);
+    try {
+      const response = await fetch(apiBase + "/projects/" + encodeURIComponent(projectId) + "/marketability/analyze?live_comparables=true", {
+        method: "POST",
+        cache: "no-store",
+        headers: { ...authHeaders("web"), "Content-Type": "application/json" },
+        body: "{}",
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error("Public market lookup unavailable");
+      const body = await response.json() as { publicLookup?: PublicMarketLookup };
+      if (!body.publicLookup || !["available", "empty", "needs_input", "unavailable", "failed"].includes(body.publicLookup.status)) {
+        throw new Error("Unexpected public market lookup response");
+      }
+      if (!controller.signal.aborted) setPublicLookup(body.publicLookup);
+    } catch {
+      if (!controller.signal.aborted) setPublicLookup({ status: "failed", count: 0 });
+    } finally {
+      if (!controller.signal.aborted) setPublicLookupBusy(false);
+    }
+  }
 
   async function runMarketPod() {
     setRunning(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/projects/${projectId}/chief-orchestration/run-pod`, {
+      const res = await fetch(apiBase + "/projects/" + encodeURIComponent(projectId) + "/chief-orchestration/run-pod", {
         method: "POST",
         headers: { ...authHeaders("web"), "Content-Type": "application/json" },
         body: JSON.stringify({ podKey: "market_product" }),
       });
-      if (!res.ok) throw new Error(`Market-Product Pod 실행 실패 (${res.status})`);
-      await load(true);
+      if (!res.ok) throw new Error("시장성 검토 실행에 실패했습니다. 필요한 자료를 확인한 뒤 다시 시도해 주세요.");
+      await load();
+      setDepthRevision((revision) => revision + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Market-Product Pod 실행에 실패했습니다.");
+      setError(err instanceof Error ? err.message : "시장성 검토 실행에 실패했습니다.");
     } finally {
       setRunning(false);
     }
@@ -130,22 +160,17 @@ export default function MarketabilityPage() {
   const exitRate = analysis?.exitSaleRate?.base ?? analysis?.exitSaleRate?.baseSaleRate ?? analysis?.exitSaleRate?.requiredSaleRate;
 
   const comparableCount = useMemo(() => {
-    const candidates = [
-      market.transactionComparables,
-      market.presaleComparables,
-      market.listingComparables,
-      marketEvidence.transactionComparables,
-      marketEvidence.presaleComparables,
-      marketEvidence.listingComparables,
-      analysis?.comparableSummary?.count,
-    ];
-    for (const candidate of candidates) {
-      if (Array.isArray(candidate)) return candidate.length;
-      const n = Number(candidate);
-      if (Number.isFinite(n) && n > 0) return n;
-    }
-    return 0;
+    const recordedCount = analysis?.comparableSummary?.count;
+    if (typeof recordedCount === "number" && Number.isSafeInteger(recordedCount) && recordedCount >= 0) return recordedCount;
+    const storedGroups = ["transactionComparables", "presaleComparables", "listingComparables"]
+      .map((key) => Math.max(
+        Array.isArray(market[key]) ? market[key].length : -1,
+        Array.isArray(marketEvidence[key]) ? marketEvidence[key].length : -1,
+      ))
+      .filter((count) => count >= 0);
+    return storedGroups.length ? storedGroups.reduce((total, count) => total + count, 0) : null;
   }, [analysis, market, marketEvidence]);
+  const hasComparables = comparableCount !== null && comparableCount > 0;
 
   const hasProposedPriceBasis = Number(proposed) > 0;
   const sourceQuality = sources.length > 0
@@ -155,7 +180,7 @@ export default function MarketabilityPage() {
       : "근거 보강 필요";
   const pricingGap = !hasProposedPriceBasis
     ? "제안 분양가 기준이 부족합니다. 분양면적 기준인지, 계약면적 기준인지, VAT 포함 여부를 먼저 확인해야 합니다."
-    : comparableCount === 0
+    : !hasComparables
       ? "비교사례가 부족합니다. 실거래가, 분양사례, 임대료, 수동 비교사례를 보강해야 합니다."
       : "제안 분양가와 비교사례를 함께 검토할 수 있습니다.";
 
@@ -178,13 +203,9 @@ export default function MarketabilityPage() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void load(true)} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-            <RefreshCw className="h-4 w-4" />
-            Live 분석
-          </button>
           <button type="button" onClick={() => void runMarketPod()} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-bold text-white disabled:opacity-50">
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <TrendingUp className="h-4 w-4" />}
-            Market-Product Pod 실행
+            시장성 검토 실행
           </button>
         </div>
       </header>
@@ -206,7 +227,7 @@ export default function MarketabilityPage() {
             <Kpi label="Exit 분양률" value={formatPct(exitRate)} />
           </section>
 
-          <section className={`rounded-lg border p-4 text-sm font-semibold ${!hasProposedPriceBasis || comparableCount === 0 ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100" : "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100"}`}>
+          <section className={`rounded-lg border p-4 text-sm font-semibold ${!hasProposedPriceBasis || !hasComparables ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100" : "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100"}`}>
             <div className="flex items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <div>
@@ -225,15 +246,15 @@ export default function MarketabilityPage() {
                   <InfoRow label="가격 판단" value={displayText(pricing.judgement, "근거 부족")} />
                   <InfoRow label="출처 상태" value={sourceQuality} />
                   <p className="mt-4 rounded-lg bg-slate-50 p-4 text-sm leading-6 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200">
-                    {displayText(analysis.summary ?? pricing.pricingComment ?? pricing.comment, "아직 저장된 시장성 분석 문단이 없습니다. Market-Product Pod를 실행하세요.")}
+                    {displayText(analysis.summary ?? pricing.pricingComment ?? pricing.comment, "아직 저장된 시장성 검토 의견이 없습니다.")}
                   </p>
                 </>
               ) : (
-                <Empty icon={<AlertTriangle />} text="아직 저장된 시장성 분석이 없습니다. Live 분석 또는 Market-Product Pod를 실행하세요." />
+                <Empty icon={<AlertTriangle />} text="아직 저장된 시장성 분석이 없습니다. 아래에서 공개 실거래를 조회하거나 시장성 검토를 실행하세요." />
               )}
             </Panel>
             <Panel title="근거와 한계">
-              <InfoRow label="비교사례" value={`${comparableCount.toLocaleString("ko-KR")}건`} />
+              <InfoRow label="비교사례" value={comparableCount === null ? "미확인" : comparableCount.toLocaleString("ko-KR") + "건"} />
               <InfoRow label="제안가 기준" value={hasProposedPriceBasis ? "확보" : "부족"} />
               <InfoRow label="Data source" value={sources.length ? `${sources.length}건` : sourceQuality} />
               <InfoRow label="Risk flags" value={`${riskFlags.length}건`} />
@@ -275,7 +296,8 @@ export default function MarketabilityPage() {
         </>
       )}
 
-      <MarketDepthPanel projectId={projectId} />
+      <MarketDepthPanel projectId={projectId} refreshRevision={depthRevision} publicLookup={publicLookup}
+        publicLookupBusy={publicLookupBusy} onPublicLookup={() => void runPublicLookup()} intakeHref={intakeHref} />
     </div>
   );
 }

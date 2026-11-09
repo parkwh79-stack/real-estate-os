@@ -7,20 +7,18 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable
 from uuid import uuid4
 
-SECRET_KEYS = {"api_key", "apikey", "token", "secret", "password"}
+from core.secret_redaction import (
+    collect_secret_values,
+    redact_secret_text,
+    redact_sensitive_value,
+)
+
 logger = logging.getLogger(__name__)
 
 
 def _safe_context(context: Dict[str, Any] | None) -> Dict[str, Any]:
-    safe: Dict[str, Any] = {}
-    for key, value in (context or {}).items():
-        if any(secret in key.lower() for secret in SECRET_KEYS):
-            safe[key] = "[redacted]"
-        elif isinstance(value, dict):
-            safe[key] = _safe_context(value)
-        else:
-            safe[key] = value
-    return safe
+    source = context or {}
+    return redact_sensitive_value(source, secrets=collect_secret_values(source))
 
 
 def brain_source_from_context(context: Dict[str, Any] | None) -> str:
@@ -100,7 +98,7 @@ def build_ai_brain_used_audit_event(
         "startedAt": started,
         "completedAt": completed,
         "status": status,
-        "error": error,
+        "error": redact_secret_text(error, secrets=collect_secret_values(context)) if error else None,
         "aiContext": safe_context,
     }
     return {
@@ -123,7 +121,7 @@ def record_ai_brain_used(event: Dict[str, Any]) -> Dict[str, Any] | None:
 
         stored = record_user_activity_log(event)
     except Exception as exc:
-        failures.append(f"activity_log:{exc}")
+        failures.append(redact_secret_text(f"activity_log:{exc}"))
     try:
         from storage import upsert_brain_usage_event_record
 
@@ -163,7 +161,7 @@ def record_ai_brain_used(event: Dict[str, Any]) -> Dict[str, Any] | None:
             },
         })
     except Exception as exc:
-        failures.append(f"brain_usage:{exc}")
+        failures.append(redact_secret_text(f"brain_usage:{exc}"))
     if failures:
         logger.error("AI audit persistence failed: %s", "; ".join(failures))
         if os.environ.get("REALYTICS_AUDIT_FAIL_CLOSED", "false").lower() in {"1", "true", "yes"}:

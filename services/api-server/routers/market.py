@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request, Response
+
+from core.authz import authorize_request
 
 from integrations.market_data import (
     MolitRtmsConnector,
@@ -10,6 +12,7 @@ from integrations.market_data import (
     aggregate_by_complex,
     attach_coordinates,
     market_data_status,
+    molit_display_connector,
     summarize_transactions,
 )
 import math
@@ -21,7 +24,7 @@ from integrations.vworld import (
     geocode_address,
     vworld_configured,
 )
-from integrations.market_data import MolitRtmsConnector, lawd_cd_from_pnu
+from integrations.market_data import lawd_cd_from_pnu
 from use_cases.map_intelligence import build_project_map_intelligence
 from use_cases.market_comparables import recent_deal_yms
 from agents.marketability_agent import MarketabilityAgent
@@ -38,6 +41,8 @@ def get_market_data_status():
 
 @router.get("/transactions")
 def get_market_transactions(
+    request: Request,
+    response: Response,
     lawd_cd: str = Query(..., description="법정동코드 5자리 (LAWD_CD)"),
     deal_ym: str = Query(..., description="거래년월 YYYYMM (DEAL_YMD)"),
     asset_type: str = Query("apartment", description="apartment|officetel|row_house|detached_house|land|commercial"),
@@ -50,7 +55,12 @@ def get_market_transactions(
     """국토부 실거래가(MOLIT RTMS) — actual closed transactions for the given
     법정동/월. Public data; each record carries its source for provenance.
     With geocode=true and a VWorld key, top-N records get lat/lng for map pins."""
-    records, diagnostic = MolitRtmsConnector().fetch(
+    authorize_request(request, "project:read")
+    # Display-only public-data lookup: never retain results in HTTP caches.
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    records, diagnostic = molit_display_connector().fetch(
         lawd_cd=lawd_cd,
         deal_ym=deal_ym,
         asset_type=asset_type,
@@ -60,7 +70,7 @@ def get_market_transactions(
     geocoded = 0
     if geocode and records and vworld_configured():
         geocoded = attach_coordinates(records, build_geocoder(), limit=geocode_limit)
-    response = {
+    payload = {
         "schemaVersion": "realytics-market-transactions-v1",
         "query": {"lawdCd": lawd_cd, "dealYm": deal_ym, "assetType": asset_type, "dealKind": deal_kind},
         "summary": {**summarize_transactions(records), "geocodedCount": geocoded},
@@ -68,8 +78,8 @@ def get_market_transactions(
         "diagnostic": diagnostic,
     }
     if aggregate:
-        response["complexes"] = aggregate_by_complex(records)
-    return response
+        payload["complexes"] = aggregate_by_complex(records)
+    return payload
 
 
 @router.get("/parcel-lookup")

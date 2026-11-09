@@ -21,6 +21,7 @@ from agent_platform.contracts import (
 )
 from agent_platform.learning import LearningLifecycleService
 from agent_platform.operational import AgentPlatformWorker, OperationalRepository
+from agent_platform.operational.handlers import build_default_outbox_handlers
 from agent_platform.operational.outbox import RuntimeOutboxDispatcher
 from agent_platform.tools import ToolExecutor, build_default_tool_registry
 from agents.ai_connection import AIConnection, AIExtractionResult
@@ -64,6 +65,78 @@ def test_calculation_run_and_outbox_are_persisted_and_reprocessed():
     assert published and published.status == OutboxEventStatus.PUBLISHED
     metrics = list_deal_state_records("project-ops", record_type="metric")
     assert any(item.get("key") == "cashflow.max_minus" for item in metrics)
+
+
+def test_default_worker_looks_up_parser_snapshot_by_identity(monkeypatch):
+    from db.repositories import parser_v2_repository as parser_repository
+
+    calls = []
+
+    class _ParserRepositoryStub:
+        def get_approved_snapshot(self, tenant_id, project_id, snapshot_id):
+            calls.append((tenant_id, project_id, snapshot_id))
+            return {
+                "eventKind": "created",
+                "snapshotId": "snapshot-1",
+                "selectionIds": ["selection-1"],
+            }
+
+        def list_records(self, *_args, **_kwargs):
+            raise AssertionError("snapshot verification must not use a bounded list")
+
+    monkeypatch.setattr(
+        parser_repository,
+        "ParserV2PostgresRepository",
+        _ParserRepositoryStub,
+    )
+    handler = build_default_outbox_handlers()[
+        "parser.approved_snapshot.created"
+    ]
+
+    handler(
+        {
+            "tenantId": "tenant-1",
+            "projectId": "project-1",
+            "snapshotId": "snapshot-1",
+            "selectionIds": ["selection-1"],
+        }
+    )
+
+    assert calls == [("tenant-1", "project-1", "snapshot-1")]
+
+
+def test_parser_snapshot_handler_rejects_mismatched_selection_set(monkeypatch):
+    from db.repositories import parser_v2_repository as parser_repository
+
+    class _ParserRepositoryStub:
+        def get_approved_snapshot(self, *_args, **_kwargs):
+            return {
+                "eventKind": "created",
+                "snapshotId": "snapshot-1",
+                "selectionIds": ["selection-authoritative"],
+            }
+
+    monkeypatch.setattr(
+        parser_repository,
+        "ParserV2PostgresRepository",
+        _ParserRepositoryStub,
+    )
+    handler = build_default_outbox_handlers()[
+        "parser.approved_snapshot.created"
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match="OUTBOX_PARSER_SNAPSHOT_SELECTIONS_MISMATCH",
+    ):
+        handler(
+            {
+                "tenantId": "tenant-1",
+                "projectId": "project-1",
+                "snapshotId": "snapshot-1",
+                "selectionIds": ["selection-stale"],
+            }
+        )
 
 
 def test_coding_pod_claim_is_exclusive_and_recovers_expired_worker():
@@ -156,7 +229,7 @@ def test_remote_coding_executor_sends_only_the_isolated_job_contract(monkeypatch
         captured["timeout"] = timeout
         return Response()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("agent_platform.coding.remote_executor._open_executor_request", fake_urlopen)
     executor = RemoteIsolatedCodingExecutor(
         endpoint="http://localhost:9010",
         token="ephemeral-worker-token",
@@ -184,7 +257,12 @@ def test_remote_coding_executor_sends_only_the_isolated_job_contract(monkeypatch
     assert '"credentialsIncluded": false' in captured["payload"]
 
 
-def test_default_tool_registry_reads_real_ledger_and_audits_idempotently():
+def test_default_tool_registry_reads_real_ledger_and_audits_idempotently(monkeypatch):
+    from fastapi import HTTPException
+    from psycopg.errors import InsufficientPrivilege
+    from starlette.requests import Request
+    from routers import agent_platform
+
     upsert_calculation_run_record("project-tool", {
         "tenantId": "tenant-1",
         "calculationRunId": "calc-tool-1",
@@ -216,6 +294,34 @@ def test_default_tool_registry_reads_real_ledger_and_audits_idempotently():
     assert first.output and first.output["records"][0]["calculationRunId"] == "calc-tool-1"
     assert second.tool_call_id == first.tool_call_id
 
+    monkeypatch.setattr(agent_platform, "authorize_request", lambda *_: {
+        "user": {"tenantId": "tenant-1", "userId": "verified-user"}, "role": "analyst",
+    })
+    actual_execute = executor.execute
+
+    def check_identity(command):
+        assert command.user_id == "verified-user"
+        assert command.actor_roles == ["analyst"]
+        return actual_execute(command)
+
+    monkeypatch.setattr(executor, "execute", check_identity)
+    monkeypatch.setattr(agent_platform, "tool_executor", executor)
+    result = agent_platform.execute_tool(request.model_copy(update={
+        "tool_call_id": "tool-call-via-api", "idempotency_key": "api-idem",
+        "user_id": "client-supplied-user", "actor_roles": ["admin"],
+    }), Request({"type": "http"}))
+    assert result["output"]["records"][0]["calculationRunId"] == "calc-tool-1"
+
+    def audit_unavailable(_command):
+        raise InsufficientPrivilege("private database diagnostic")
+
+    monkeypatch.setattr(executor, "execute", audit_unavailable)
+    with pytest.raises(HTTPException) as unavailable:
+        agent_platform.execute_tool(request, Request({"type": "http"}))
+    assert unavailable.value.status_code == 503
+    assert unavailable.value.detail["error"] == "tool_authority_unavailable"
+    assert "private database diagnostic" not in unavailable.value.detail["message"]
+
 
 def test_outbox_failure_retries_and_then_dead_letters():
     repository = OperationalRepository()
@@ -245,6 +351,42 @@ def test_outbox_failure_retries_and_then_dead_letters():
     assert second == {"claimed": 1, "published": 0, "failed": 1}
     dead = repository.get(RuntimeOutboxEvent, event.event_id)
     assert dead and dead.status == OutboxEventStatus.DEAD_LETTER
+
+
+def test_outbox_dispatcher_injects_authoritative_tenant_and_project_scope():
+    repository = OperationalRepository()
+    now = datetime.now(timezone.utc)
+    repository.enqueue_outbox(
+        RuntimeOutboxEvent(
+            event_id="outbox-scope-1",
+            tenant_id="tenant-1",
+            project_id="project-1",
+            aggregate_type="calculation_run",
+            aggregate_id="calculation-1",
+            event_type="scope_test",
+            idempotency_key="outbox-scope-idem-1",
+            payload={"calculationRunId": "calculation-1"},
+            available_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    received = []
+    dispatcher = RuntimeOutboxDispatcher(
+        repository=repository,
+        handlers={"scope_test": lambda payload: received.append(payload)},
+    )
+
+    result = dispatcher.publish_batch(worker_id="outbox-scope-worker")
+
+    assert result == {"claimed": 1, "published": 1, "failed": 0}
+    assert received == [
+        {
+            "calculationRunId": "calculation-1",
+            "tenantId": "tenant-1",
+            "projectId": "project-1",
+        }
+    ]
 
 
 def test_ai_connection_falls_back_after_a_real_provider_failure(monkeypatch):
@@ -282,7 +424,7 @@ def test_ai_connection_falls_back_after_a_real_provider_failure(monkeypatch):
 def test_selected_workflow_domain_agents_use_durable_runtime():
     run = OrchestrationAgent().run_workflow(
         "project-domain-runtime",
-        {"feasibility_input": {"total_revenue": 1000, "total_cost": 800}},
+        {"feasibility_input": {"total_revenue": 1000, "total_cost": 800, "construction_cost": 800}},
         "feasibility",
         {"tenantId": "tenant-1", "userId": "user-1"},
     )

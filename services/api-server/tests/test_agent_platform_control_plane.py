@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from agent_platform.bootstrap import (
     POD_AI_REVIEW_AGENT_ID,
+    POD_AI_REVIEW_MANIFEST,
     build_default_agent_registry,
     run_pod_ai_review_with_contract,
 )
@@ -138,7 +139,7 @@ def test_brain_profile_rejects_nested_inline_secret():
 
 def test_agent_registry_rejects_duplicate_manifest_version():
     registry = build_default_agent_registry()
-    duplicate = build_default_agent_registry().get(POD_AI_REVIEW_AGENT_ID, "1.0.0")
+    duplicate = build_default_agent_registry().get(POD_AI_REVIEW_AGENT_ID, POD_AI_REVIEW_MANIFEST.version)
     with pytest.raises(AgentRegistryError, match="already registered"):
         registry.register(duplicate)
 

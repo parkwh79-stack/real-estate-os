@@ -1,11 +1,16 @@
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agents.report_agent import ReportAgent
+from db.repositories.project_snapshot_repository import project_snapshot_content_hash
+from db.repositories.report_repository import ReportRepository
 from main import app
 from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
+from use_cases import report_generation
+from use_cases.report_generation import publish_saved_report_use_case
 
 
 def load_example():
@@ -37,6 +42,35 @@ def test_generate_structured_phase_11_report_calculates_financial_metrics():
     assert sections["financialTerms"]["totalAmountMillion"] == 70_000
     assert sections["businessFeasibility"]["metrics"]["ltv"] == 70_000_000_000 / 150_000_000_000
     assert sections["businessFeasibility"]["metrics"]["developmentProfitMillion"] == 30_000
+
+
+def test_captured_workbook_analysis_cannot_pass_final_report_quality():
+    from agents.orchestration_agent import OrchestrationAgent
+    data = load_example()
+    data["cashFlowRunResult"] = {
+        "sourceBasis": "captured_workbook_cash_flow", "analysisOnly": True,
+        "reportEligible": False, "status": "completed",
+        "summary": {"totalRevenue": 123, "totalProjectCost": 100,
+                    "businessDeclaredTotals": {"total_revenue": 120, "total_cost": 99}},
+        "monthlyCashFlow": [{"monthIndex": 0, "cashIn": 123, "cashOut": 100}],
+    }
+    report = ReportAgent().generate_structured_report(data)
+    section = report["sections"]["summaryCashFlow"]
+    assert section["summary"] == data["cashFlowRunResult"]["summary"]
+    assert section["businessDeclaredTotals"]["total_revenue"] == 120
+    assert section["reportEligible"] is False
+    assert report["qualityChecks"]["cashFlowReportEligible"] is False
+    assert report["qualityChecks"]["cashFlowUsageRestriction"] in section["assumption"]
+    names = ["landAgentReview", "developerFeasibility", "feasibility", "pfStructure",
+             "marketEvidenceReview", "marketabilityAnalysis", "dataQualityReview", "reconciliationGate",
+             "legalPermitReview", "riskAssessment", "riskRegister", "creditReviewDecision",
+             "restructuringPlan", "evidenceGraph"]
+    run = {"artifacts": {**{name: {} for name in names}, "phase11Report": {"report": report}}}
+    quality = OrchestrationAgent()._quality_check(run, {"status": "passed"},
+                                                 {"status": "passed", "baseline_reviewed": True})
+    assert quality["missingArtifacts"] == []
+    assert quality["reportComplete"] is True
+    assert quality["pass"] is False
 
 
 def test_hana_style_anonymized_fixture_covers_phase_11_payload():
@@ -178,6 +212,144 @@ def test_report_export_rejects_unsupported_format():
     assert res.status_code == 400
 
 
+def test_manual_report_remains_draft_and_cannot_be_finally_published():
+    client = TestClient(app)
+    project_id = client.get("/projects/").json()[0]["project"]["id"]
+    report = client.post(
+        f"/projects/{project_id}/reports/generate",
+        json={"template": PHASE_11_TEMPLATE},
+    ).json()
+
+    detail = client.get(
+        f"/projects/{project_id}/reports/{report['report_id']}"
+    ).json()
+    assert detail["status"] == "draft"
+    assert detail["metadata"]["report_eligible"] is False
+    assert detail["metadata"]["usage_restriction"] == (
+        "analysis_only_not_final_approval"
+    )
+
+    publication = client.post(
+        f"/projects/{project_id}/reports/{report['report_id']}/publish"
+    )
+    assert publication.status_code == 409
+    assert "orchestration-bound" in publication.json()["detail"]
+
+
+def test_orchestration_bound_report_publication_is_hashed_and_idempotent(monkeypatch):
+    store = {}
+    repository = ReportRepository(store, lambda: None)
+    structured = ReportAgent().generate_structured_report(load_example())
+    markdown = ReportAgent().generate_report(load_example())
+    record = repository.create(
+        "project-1",
+        structured,
+        markdown,
+        run_id="run-1",
+    )
+    run = {
+        "run_id": "run-1",
+        "project_id": "project-1",
+        "workflow": "pf-review",
+        "approvalStatus": "approved",
+        "approval": {
+            "approved_by": "checker-1",
+            "approved_at": "2026-07-24T00:00:00Z",
+        },
+        "artifacts": {
+            "projectSnapshot": {"snapshotId": "snapshot-run-1"},
+        },
+    }
+    snapshot = {
+        "schemaVersion": "realytics-project-snapshot-v1",
+        "snapshotId": "snapshot-run-1",
+        "projectId": "project-1",
+        "runId": "run-1",
+    }
+    snapshot["snapshotHash"] = project_snapshot_content_hash(snapshot)
+    run["artifacts"]["projectSnapshot"]["snapshotHash"] = snapshot["snapshotHash"]
+
+    class Orchestrations:
+        def get(self, project_id, run_id):
+            assert (project_id, run_id) == ("project-1", "run-1")
+            return run
+
+    class Snapshots:
+        def get(self, project_id, snapshot_id):
+            assert (project_id, snapshot_id) == (
+                "project-1",
+                "snapshot-run-1",
+            )
+            return snapshot
+
+    monkeypatch.setattr(
+        report_generation,
+        "refresh_approval_readiness_gate",
+        lambda _run: {
+            "schemaVersion": "realytics-approval-readiness-gate-v1",
+            "gateType": "approval_readiness",
+            "status": "ready_for_approval",
+            "pass": True,
+            "summary": {"blockingIssueCount": 0, "warningCount": 1},
+        },
+    )
+
+    published = publish_saved_report_use_case(
+        repository,
+        Orchestrations(),
+        Snapshots(),
+        "project-1",
+        record["report_id"],
+        published_by="publisher-1",
+        published_at="2026-07-24T01:00:00Z",
+    )
+    assert published["status"] == "published"
+    assert published["metadata"]["report_eligible"] is True
+    assert published["metadata"]["content_sha256"].startswith("sha256:")
+    assert published["publication"]["decisionPackage"]["projectSnapshotId"] == (
+        "snapshot-run-1"
+    )
+    assert published["publication"]["decisionPackage"]["projectSnapshotHash"] == (
+        snapshot["snapshotHash"]
+    )
+
+    repeated = publish_saved_report_use_case(
+        repository,
+        Orchestrations(),
+        Snapshots(),
+        "project-1",
+        record["report_id"],
+        published_by="publisher-1",
+        published_at="2026-07-24T01:00:00Z",
+    )
+    assert repeated is published
+
+    snapshot["schemaVersion"] = "tampered"
+    with pytest.raises(ValueError, match="hash seal is invalid"):
+        publish_saved_report_use_case(
+            repository,
+            Orchestrations(),
+            Snapshots(),
+            "project-1",
+            record["report_id"],
+            published_by="publisher-1",
+            published_at="2026-07-24T01:00:00Z",
+        )
+
+    snapshot["schemaVersion"] = "realytics-project-snapshot-v1"
+    run["artifacts"]["projectSnapshot"]["snapshotHash"] = "sha256:" + ("0" * 64)
+    with pytest.raises(ValueError, match="hash lineage does not match"):
+        publish_saved_report_use_case(
+            repository,
+            Orchestrations(),
+            Snapshots(),
+            "project-1",
+            record["report_id"],
+            published_by="publisher-1",
+            published_at="2026-07-24T01:00:00Z",
+        )
+
+
 def test_report_land_acquisition_tolerates_parsed_ledger_parcels():
     """실제 토지조서 파싱 필지(share/owner/area_sqm 없이 camelCase areaSqm만)로도
     보고서 생성이 크래시하지 않아야 한다 (통합 리허설에서 발견한 500 회귀 방지)."""
@@ -188,16 +360,17 @@ def test_report_land_acquisition_tolerates_parsed_ledger_parcels():
             {"addressFragment": "본리 1-4", "lotNumber": "1-4"},  # area/share 전부 없음
         ]
     }
-    section = agent._build_land_acquisition(data)
-    assert "사업부지 확보 현황" in section
+    section = agent.generate_report(data)
     assert "본리 1-3" in section
-    assert "735.5" in section
+    assert "736" in section
+    assert "735.5" not in section
+    structured = agent.generate_structured_report(data)
+    assert structured["sections"]["landSecuring"]["parcels"][0]["areaSqm"] == 735.5
     # share/area 없는 필지도 '-'로 안전 렌더
     assert "본리 1-4" in section
 
 
 def test_report_use_of_funds_tolerates_missing_amount():
     agent = ReportAgent()
-    section = agent._build_use_of_funds({"use_of_funds": [{"item": "토지비"}]})
-    assert "자금 사용 용도" in section
+    section = agent.generate_report({"use_of_funds": [{"item": "토지비"}]})
     assert "토지비" in section

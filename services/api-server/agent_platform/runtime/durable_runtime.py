@@ -312,6 +312,7 @@ class DurableAgentRuntime:
         safe_result = _sanitize_result(result)
         target = safe_result.status
         if target not in {
+            AgentRunStatus.FAILED,
             AgentRunStatus.COMPLETED,
             AgentRunStatus.COMPLETED_WITH_REVIEW,
             AgentRunStatus.WAITING_FOR_HUMAN,

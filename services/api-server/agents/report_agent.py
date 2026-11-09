@@ -1,9 +1,16 @@
 from typing import Dict, Any, List
+from copy import deepcopy
+from math import isfinite
 
-from core.calculations import calculate_exit_sale_rate, calculate_sales_value_ltv
+from core.calculations import (
+    calculate_exit_sale_rate,
+    calculate_sales_value_ltv,
+    normalize_tranche_priority,
+)
+from core.schedule import schedule_event_map
 from schemas.report import PHASE_11_SECTION_ORDER, PHASE_11_TEMPLATE
-from schemas.scenario import ScenarioSetRequest
-from agents.scenario_engine_agent import ScenarioEngineAgent
+from schemas.scenario import ScenarioSetResult
+from agents.report_export_agent import ReportExportAgent
 
 
 def _looks_corrupted_text(value: Any) -> bool:
@@ -13,9 +20,180 @@ def _looks_corrupted_text(value: Any) -> bool:
     return any(marker in value for marker in markers)
 
 
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).replace(",", ""))
+        return number if isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _sum_amounts(tranches: List[Dict[str, Any]]) -> float | None:
+    amounts = [_number(item.get("amount")) for item in tranches]
+    return sum(amounts) if amounts and all(amount is not None for amount in amounts) else None
+
+
+def _amount_text(value: Any) -> str:
+    number = _number(value)
+    return f"{ReportExportAgent.whole_number_text(number)}원" if number is not None else "미확인"
+
+
+def _percent_text(value: Any) -> str:
+    number = _number(value)
+    return ReportExportAgent.presentation_value(number, "interest_rate") if number is not None else "미확인"
+
+
 class ReportAgent:
     def __init__(self):
         pass
+
+    @staticmethod
+    def _saved_scenario(data: Dict[str, Any]):
+        value = data.get("scenariosEvaluation")
+        if not isinstance(value, dict):
+            return None
+        try:
+            return ScenarioSetResult.model_validate(value)
+        except ValueError:
+            return None
+
+    def generate_cash_flow_comparison_review(self, snapshot: Dict[str, Any], snapshot_hash: str) -> Dict[str, Any]:
+        """Describe two frozen calculations; never calculate from today's project."""
+        comparison = snapshot["comparison"]
+        baseline, changed = snapshot["baselineRun"], snapshot["comparisonRun"]
+
+        def policy_text(info):
+            if info.get("policyMode") == "reviewed_monthly_v1":
+                return "월초 잔액 이자·최초 인출 약정수수료·M0 기준 만기 일시상환"
+            return "저장된 금융비용 예산 배분(월별 이자·원금상환 잔액 미산정)"
+
+        def review_reason(run):
+            review = (run.get("inputSnapshot") or {}).get("reviewedMonthlyFinancingReview")
+            value = review.get("reason") if isinstance(review, dict) else None
+            return value.strip() if isinstance(value, str) and value.strip() else "미기록"
+
+        def value_text(value, path):
+            if value is None:
+                return "미입력"
+            if isinstance(value, bool):
+                return "적용" if value else "미적용"
+            if isinstance(value, (dict, list)):
+                return "세부 조건 변경(고정 원본 기록 참조)"
+            if isinstance(value, (int, float)):
+                lower = path.lower()
+                if "interest" in lower or "fee" in lower or "rate" in lower:
+                    return _percent_text(value)
+                if "month" in lower or "maturity" in lower:
+                    return f"{ReportExportAgent.whole_number_text(value)}개월"
+                if any(word in lower for word in ("cost", "revenue", "amount", "price", "loan", "funding")):
+                    return _amount_text(value)
+                return ReportExportAgent.whole_number_text(value)
+            return {"senior": "선순위", "mezzanine": "중순위", "junior": "후순위", "equity": "자기자본",
+                "bridge": "브리지 대출", "other": "기타", "repayment_reserve": "분양대금 상환계정", "sales_proceeds": "분양대금"}.get(str(value), str(value))
+
+        metric_rows, metric_lines, missing = [], [], []
+        for metric in comparison["metrics"]:
+            label = metric["label"]
+            before, after, delta = (_amount_text(metric.get(key)) for key in ("baselineValue", "comparisonValue", "delta"))
+            metric_rows.append({"업무 지표": label, "기준안": before, "변경안": after, "차이": delta})
+            metric_lines.append(f"| {label} | {before} | {after} | {delta} |")
+            if metric.get("status") != "available":
+                missing.append(f"{label}: 저장된 계산에 양쪽 값을 비교할 근거가 없습니다. 기존 예산 배분은 잔여 대출을 산정하지 않습니다."
+                    if metric.get("key") == "outstandingDebt" else f"{label}: 저장된 계산에 해당 값 또는 산출 근거가 없습니다.")
+        changes = [{"확인 항목": row["label"], "변경 전": value_text(row.get("before"), row["path"]),
+                    "변경 후": value_text(row.get("after"), row["path"])} for row in comparison.get("inputChanges", [])[:100]]
+        caveats = ["검토용 초안이며 최종 승인·대출조건 확정·투자의사결정용 보고서가 아닙니다."]
+        if "period_mismatch" in comparison.get("reasons", []):
+            caveats.append("두 계산의 기간 또는 기준월이 달라 사업 전체 집계만 비교합니다. 월별 수치를 같은 달로 정렬하지 않았습니다.")
+        if "financing_policy_mismatch" in comparison.get("reasons", []):
+            caveats.append("금융비용 계산 방식이 다릅니다. 입력 조건과 계산 방식을 함께 검토해야 합니다.")
+        if comparison.get("sourceChanged"):
+            caveats.append("두 계산의 원본 또는 근거가 다릅니다. 원본 위치와 저장 시점의 차이를 확인하세요.")
+        if comparison.get("inputChangesTruncated") or len(comparison.get("inputChanges", [])) > 100:
+            caveats.append("본문에는 변경 항목 중 앞 100개만 표시합니다. 전체 비교와 원시 기록은 고정 스냅샷에 보존했습니다.")
+        if any((comparison.get(side) or {}).get("policyMode") == "reviewed_monthly_v1" for side in ("baseline", "comparison")):
+            caveats.append("월별 검토 계산은 비회전 대출·만기 상환계정 원금상환만 지원합니다. 사용자 지정 자기자본 투입표·개별 인출표·분할 원금상환·이자 자본화·연체가산·변동금리는 지원하지 않습니다.")
+
+        sources = []
+        for label, run, info in (("기준안", baseline, comparison["baseline"]), ("변경안", changed, comparison["comparison"])):
+            meta = (run.get("inputSnapshot") or {}).get("sourceMetadata") or {}
+            locator = run.get("sourceLocator") or {}
+            meta = meta if isinstance(meta, dict) else {}
+            locator = locator if isinstance(locator, dict) else {}
+            name = meta.get("sourceName")
+            name = name if isinstance(name, str) and name.strip() else "원본 문서명 미확인"
+            name = {"FeasibilityStudyV2": "사업수지 검토 입력", "CashFlowRunRequest": "현금흐름 계산 입력"}.get(name, name)
+            positions = [str(locator[key]) for key in ("documentName", "fileName", "sheetName", "sheet_name", "cell", "page") if locator.get(key) is not None]
+            sources.append({"구분": label, "계산 기록": run["calculationRunId"], "저장 시각": run.get("createdAt") or "미확인",
+                "원본": str(name), "원본 위치": " · ".join(positions) or "문서 위치 미확인(저장된 계산 기록 기준)",
+                "입력 검증값(앞 12자리)": info["inputHash"][:12], "결과 검증값(앞 12자리)": info["resultHash"][:12]})
+        project = (baseline.get("inputSnapshot") or {}).get("project")
+        project_name = project.get("projectName") if isinstance(project, dict) else None
+        project_name = project_name if isinstance(project_name, str) and project_name.strip() else f"프로젝트 {snapshot['projectId']}"
+        sections = {
+            "comparisonSummary": {"대상 사업": project_name, "고정 시각": snapshot["capturedAt"], "금액 표시": "원 단위, 표시값은 반올림", "주요 지표": metric_rows},
+            "assumptions": {"기준안 계산 방식": policy_text(comparison["baseline"]), "변경안 계산 방식": policy_text(comparison["comparison"]),
+                "기준안 검토 이유": review_reason(baseline), "변경안 검토 이유": review_reason(changed),
+                "확인할 입력 변경": changes or ["업무 입력 변경 없음"]},
+            "limitations": {"검토 한계": caveats, "미확인 지표": missing or ["제시된 비교 지표는 양쪽 저장값으로 확인했습니다."]},
+            "sources": {"저장된 원본": sources, "고정 검증값(앞 16자리)": snapshot_hash[:16],
+                "보존 범위": "두 계산의 입력·결과·출처 원시 기록은 이 초안에 고정 보존했습니다. 이후 입력이나 선택 변경으로 이 초안의 수치는 바뀌지 않습니다."},
+        }
+        reserve_lines = []
+        reserve = comparison.get("reserveReview")
+        if isinstance(reserve, dict):
+            basis_points = round(reserve["ratePercent"] * 100)
+            rate_label = f"{basis_points // 100}%" if basis_points % 100 == 0 else f"{basis_points}bp (100bp = 1%)"
+            reserve_values = {"적용 예비비율": rate_label}
+            for key, label in (
+                ("baselineIncludedReserveWon", "기준안에 이미 포함된 예비비"),
+                ("comparisonIncludedReserveWon", "변경안에 이미 포함된 예비비"),
+                ("baselineCostExcludingReserveWon", "기준안 예비비 제외 사업비"),
+                ("comparisonCostExcludingReserveWon", "변경안 예비비 제외 사업비"),
+                ("targetReserveWon", "검토 예비비"),
+                ("reviewBudgetWon", "예비비 반영 검토 예산"),
+                ("costIncreaseWon", "비교 사업비 증가액"),
+                ("absorbedWon", "예비비 충당 가능액"),
+                ("remainingWon", "남은 예비비"),
+                ("excessWon", "예비비 초과액"),
+            ):
+                reserve_values[label] = _amount_text(reserve[key])
+            sections["comparisonSummary"]["사업비 예비비 검토"] = reserve_values
+            sections["assumptions"]["예비비 검토 이유"] = reserve["reason"]
+            caveats.append("예비비는 비교 예산에만 적용한 사용자 가정입니다. 현금흐름과 승인 사업비는 각 저장 계산을 따릅니다.")
+            reserve_lines = ["### 사업비 예비비 검토", "",
+                             *[f"- {label} {value}" for label, value in reserve_values.items()],
+                             f"- 검토 이유 {' '.join(reserve['reason'].split())}", ""]
+        input_reviews = [{"계산": side, "항목": row["label"], "구분": row["classification"],
+                          "검토 이유": row["reason"], "원본 위치": " · ".join(str(part) for part in (row.get("sourceName"), row.get("sourceCell")) if part) or "원본 근거 미지정"}
+                         for side, key in (("기준안", "baseline"), ("변경안", "comparison"))
+                         for row in comparison[key].get("inputReviews", [])]
+        if input_reviews:
+            sections["assumptions"]["입력 근거와 사용자 가정"] = input_reviews
+        order = [{"index": index, "key": key, "title": title} for index, (key, title) in enumerate((
+            ("comparisonSummary", "저장된 계산 비교"), ("assumptions", "계산 방식과 변경 조건"),
+            ("limitations", "검토 한계와 미확인 사항"), ("sources", "원본과 저장 기준")), 1)]
+        report = {"template": "cash-flow-comparison-review-v1", "reportType": "cash-flow-comparison-review",
+            "title": "현금흐름 비교 검토 초안", "reportEligible": False, "displayUnit": "원", "sectionOrder": order, "sections": sections,
+            "qualityChecks": {"actualSectionCount": 4, "expectedSectionCount": 4, "isComplete": True},
+            "cashFlowComparisonSnapshot": deepcopy(snapshot), "cashFlowComparisonSnapshotHash": snapshot_hash}
+        lines = ["# 현금흐름 비교 검토 초안", "", f"대상 사업: {project_name}", "", "> 검토용 초안 — 최종 승인·대출조건 확정용 보고서가 아닙니다.", "", ReportExportAgent.DISPLAY_NOTE, "",
+            "## 1. 저장된 계산 비교", "", "금액은 원 단위이며 표시값은 반올림했습니다.", "",
+            "| 업무 지표 | 기준안 | 변경안 | 차이 |", "| --- | ---: | ---: | ---: |", *metric_lines, "", *reserve_lines,
+            "## 2. 계산 방식과 변경 조건", "", f"기준안: {policy_text(comparison['baseline'])}", f"기준안 검토 이유: {review_reason(baseline)}",
+            f"변경안: {policy_text(comparison['comparison'])}", f"변경안 검토 이유: {review_reason(changed)}", ""]
+        lines.extend(f"- {row['확인 항목']}: {row['변경 전']} → {row['변경 후']}" for row in changes)
+        if not changes:
+            lines.append("업무 입력 변경 없음")
+        if input_reviews:
+            lines.extend(["", "입력 근거와 사용자 가정(계산 당시 저장값):"])
+            lines.extend(f"- {row['계산']} {row['항목']} · {row['구분']} · {row['검토 이유']} · {row['원본 위치']}" for row in input_reviews)
+        lines.extend(["", "## 3. 검토 한계와 미확인 사항", "", *[f"- {item}" for item in caveats + missing], "", "## 4. 원본과 저장 기준", ""])
+        lines.extend(f"- {row['구분']}: {row['계산 기록']} · {row['원본']} · {row['원본 위치']} · 저장 {row['저장 시각']}" for row in sources)
+        lines.extend(["", f"고정 시각: {snapshot['capturedAt']}", f"고정 검증값(앞 16자리): {snapshot_hash[:16]}", "", sections["sources"]["보존 범위"]])
+        return {"structuredReport": report, "reportMarkdown": "\n".join(lines)}
 
     def generate_structured_report(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -27,7 +205,6 @@ class ReportAgent:
         feasibility = input_data.get("feasibility_input", {})
         covenants = input_data.get("covenants", {})
         tranches = input_data.get("pf_structure", [])
-        expected = input_data.get("expected_results", {})
 
         # Deck headline engines injected by the orchestration run (may be absent
         # when the report is generated outside a full PF review run).
@@ -37,58 +214,24 @@ class ReportAgent:
         developability = input_data.get("developabilityScore") or {}
         rm_metrics = return_metrics.get("metrics", {}) if isinstance(return_metrics, dict) else {}
         stress_scenarios = stress_test.get("scenarios", []) if isinstance(stress_test, dict) else []
+        stress_scenarios = [s for s in stress_scenarios if isinstance(s, dict)] if isinstance(stress_scenarios, list) else []
         base_stress = next((s for s in stress_scenarios if s.get("key") == "base"), None)
 
         def _metric_value(block: Dict[str, Any], key: str):
             entry = block.get(key, {}) if isinstance(block, dict) else {}
-            return entry.get("value") if isinstance(entry, dict) else None
+            return _number(entry.get("value")) if isinstance(entry, dict) else None
 
-        total_pf = sum(t.get("amount", 0) for t in tranches)
-        total_revenue = feasibility.get("total_revenue", 0)
-        total_cost = feasibility.get("total_cost", 0)
-        finance_cost = feasibility.get("finance_cost", 0)
-        development_profit = expected.get(
-            "development_profit",
-            total_revenue - total_cost if total_revenue or total_cost else 0,
-        )
-        profit_margin = expected.get(
-            "profit_margin",
-            development_profit / total_revenue if total_revenue else 0,
-        )
+        total_pf = _sum_amounts(tranches)
+        total_revenue = _number(feasibility.get("total_revenue"))
+        total_cost = _number(feasibility.get("total_cost"))
+        finance_cost = _number(feasibility.get("finance_cost"))
+        development_profit = total_revenue - total_cost if total_revenue is not None and total_cost is not None else None
+        profit_margin = development_profit / total_revenue if development_profit is not None and total_revenue else None
+        sales_ltv = calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None and total_revenue and total_revenue > 0 else None
+        exit_rate = calculate_exit_sale_rate(total_pf, finance_cost, total_revenue) if total_pf is not None and finance_cost is not None and total_revenue and total_revenue > 0 else None
 
-        # Build ScenarioSetRequest on the fly using project inputs to get rich sensitivity grids
-        scenario_result = None
-        try:
-            raw_mix = input_data.get("product_mix") or input_data.get("productMix") or []
-            product_mix = []
-            for item in raw_mix:
-                if isinstance(item, dict):
-                    product_mix.append({
-                        "type": item.get("type") or item.get("name") or "A",
-                        "units": int(item.get("units") or item.get("unit_count") or 0),
-                        "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
-                        "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
-                    })
-            pf_structure = []
-            for idx, item in enumerate(tranches):
-                if isinstance(item, dict):
-                    pf_structure.append({
-                        "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
-                        "amount": float(item.get("amount") or 0.0),
-                        "priority": int(item.get("priority") or idx + 1),
-                        "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
-                        "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
-                    })
-            if product_mix and pf_structure:
-                req = ScenarioSetRequest(
-                    scenarioSetId="auto-report-set",
-                    scenarioSetName="Auto Generated Report Scenario Set",
-                    productMix=product_mix,
-                    pfStructure=pf_structure,
-                )
-                scenario_result = ScenarioEngineAgent().run_scenario_set(req)
-        except Exception:
-            scenario_result = None
+        # Rendering reads the captured result and never runs a scenario engine.
+        scenario_result = self._saved_scenario(input_data)
 
         precedent_conditions = list(covenants.get("drawdown_conditions", []))
         if scenario_result:
@@ -127,8 +270,8 @@ class ReportAgent:
                 "items": [
                     {
                         "item": u.get("item", "자료 미확인"),
-                        "amount": u.get("amount", 0),
-                        "amountMillion": self._million(u.get("amount", 0)),
+                        "amount": _number(u.get("amount")),
+                        "amountMillion": self._million(u.get("amount")),
                     }
                     for u in input_data.get("use_of_funds", [])
                 ],
@@ -141,16 +284,18 @@ class ReportAgent:
                 "policy": scenario_result.reportFragments.waterfallSummary if scenario_result else covenants.get("revenue_distribution", "대주단 협의 기준에 따름"),
                 "waterfall": [w.model_dump() for w in scenario_result.waterfallScenarios] if scenario_result else covenants.get("execution_order", []),
             },
-            "summaryCashFlow": self._structured_cashflow(input_data, total_revenue, total_cost, scenario_result),
+            "summaryCashFlow": self._structured_cashflow(input_data),
             "borrowerAnalysis": self._structured_party(input_data.get("developer_info", {}), "시행사"),
             "contractorAnalysis": self._structured_party(input_data.get("contractor_info", {}), "시공사"),
             "marketAnalysis": self._structured_market(input_data),
             "businessFeasibility": {
+                "scenarioBasis": "저장된 시나리오 결과입니다. 현재 입력과의 일치 여부는 계산 이력에서 확인해야 합니다."
+                    if scenario_result else "사용할 수 있는 저장 시나리오가 없습니다.",
                 "metrics": {
-                    "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue),
-                    "ltv": calculate_sales_value_ltv(total_pf, total_revenue),
+                    "salesValueLtv": sales_ltv,
+                    "ltv": sales_ltv,
                     "ltvBasis": "gross_sales_value",
-                    "exitSalesRate": calculate_exit_sale_rate(total_pf, finance_cost, total_revenue),
+                    "exitSalesRate": exit_rate,
                     "profitMargin": profit_margin,
                     "developmentProfit": development_profit,
                     "developmentProfitMillion": self._million(development_profit),
@@ -165,6 +310,12 @@ class ReportAgent:
                     "icr": _metric_value(rm_metrics, "icr"),
                     "unsoldLtvBase": scenario_result.unsoldLtvMatrix.summary["baseCaseLtv"] if scenario_result else None,
                     "unsoldLtvStress": scenario_result.unsoldLtvMatrix.summary["stressCaseLtv"] if scenario_result else None,
+                },
+                "metricSourceFields": {
+                    "developmentProfit": ["feasibility_input.total_revenue", "feasibility_input.total_cost"],
+                    "profitMargin": ["feasibility_input.total_revenue", "feasibility_input.total_cost"],
+                    "salesValueLtv": ["pf_structure[].amount", "feasibility_input.total_revenue"],
+                    "exitSalesRate": ["pf_structure[].amount", "feasibility_input.finance_cost", "feasibility_input.total_revenue"],
                 },
                 "returnMetrics": return_metrics or None,
                 "stressTest": {
@@ -211,6 +362,25 @@ class ReportAgent:
 
         self._attach_imported_risk_report_sections(sections, input_data.get("riskReportSections") or {})
         self._normalize_korean_report_labels(sections)
+        basis_review = input_data.get("cashFlowBasisReview")
+        basis_warnings = []
+        if isinstance(basis_review, dict):
+            if basis_review.get("status") in {"blocking", "needs_review"}:
+                warning = "입력 기준 확인 필요: 승인 현금흐름과 작업용 사업수지의 매출·사업비 기준을 확인하세요. 기준을 확인하기 전에는 함께 확정된 계산으로 사용할 수 없습니다."
+                basis_warnings.append(warning)
+                sections["summaryCashFlow"]["assumption"] += " " + warning
+                sections["businessFeasibility"]["summary"] += " " + warning
+        quality_checks = self._quality_checks(sections)
+        if isinstance(basis_review, dict):
+            quality_checks["inputBasisReview"] = deepcopy(basis_review)
+            quality_checks["inputBasisConsistent"] = basis_review.get("status") == "clear"
+            quality_checks["inputBasisWarnings"] = basis_warnings
+        saved_cash_flow = input_data.get("cashFlowRunResult")
+        if isinstance(saved_cash_flow, dict) and saved_cash_flow.get("reportEligible") is False:
+            quality_checks["cashFlowReportEligible"] = False
+            warning = "원본 Excel 현금흐름의 검토용 재현 결과입니다. 원본 수식 재계산·약정 확인과 정식 입력 승인 전에는 최종 심사보고서의 확정 계산으로 사용할 수 없습니다."
+            quality_checks["cashFlowUsageRestriction"] = warning
+            sections["summaryCashFlow"]["assumption"] += " " + warning
 
         return {
             "template": PHASE_11_TEMPLATE,
@@ -223,14 +393,14 @@ class ReportAgent:
                 for idx, (key, title) in enumerate(PHASE_11_SECTION_ORDER)
             ],
             "sections": sections,
-            "qualityChecks": self._quality_checks(sections),
+            "qualityChecks": quality_checks,
         }
 
     @staticmethod
     def _normalize_korean_report_labels(sections: Dict[str, Any]) -> None:
         claim = sections.get("claimPreservation")
         if isinstance(claim, dict):
-            claim["summary"] = "신탁, 책임준공, 보증 및 covenant를 통한 복합 채권보전 구조입니다."
+            claim["summary"] = "입력된 채권보전 방안이며 약정과 증빙 확인이 필요합니다." if claim.get("items") else "채권보전 방안과 약정 증빙이 미확인 상태입니다."
 
         discount = sections.get("discountTrigger", {})
         for trigger in discount.get("triggers", []) if isinstance(discount, dict) else []:
@@ -263,72 +433,9 @@ class ReportAgent:
             )
 
     def generate_report(self, input_data: Dict[str, Any]) -> str:
-        """
-        Generates a professional 20-section PF Review Report based on realistic sample data.
-        """
-        project = input_data.get("project", {})
-        covenants = input_data.get("covenants", {})
-        tranches = input_data.get("pf_structure", [])
-        feasibility = input_data.get("feasibility_input", {})
-        total_pf = sum(t.get("amount", 0) for t in tranches)
-        total_revenue = feasibility.get("total_revenue", 0)
+        from agents.report_export_agent import ReportExportAgent
 
-        # Build ScenarioSetRequest on the fly using project inputs to get rich sensitivity grids
-        scenario_result = None
-        try:
-            raw_mix = input_data.get("product_mix") or input_data.get("productMix") or []
-            product_mix = []
-            for item in raw_mix:
-                if isinstance(item, dict):
-                    product_mix.append({
-                        "type": item.get("type") or item.get("name") or "A",
-                        "units": int(item.get("units") or item.get("unit_count") or 0),
-                        "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
-                        "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
-                    })
-            pf_structure = []
-            for idx, item in enumerate(tranches):
-                if isinstance(item, dict):
-                    pf_structure.append({
-                        "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
-                        "amount": float(item.get("amount") or 0.0),
-                        "priority": int(item.get("priority") or idx + 1),
-                        "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
-                        "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
-                    })
-            if product_mix and pf_structure:
-                req = ScenarioSetRequest(
-                    scenarioSetId="auto-report-set",
-                    scenarioSetName="Auto Generated Report Scenario Set",
-                    productMix=product_mix,
-                    pfStructure=pf_structure,
-                )
-                scenario_result = ScenarioEngineAgent().run_scenario_set(req)
-        except Exception:
-            scenario_result = None
-
-        md = self._build_cover(project)
-        md += self._build_financial_terms(input_data)
-        md += self._build_claim_preservation(covenants)
-        md += self._build_discount_triggers(covenants)
-        md += self._build_financing_structure(input_data)
-        md += self._build_use_of_funds(input_data)
-        md += self._build_land_acquisition(input_data)
-        md += self._build_project_schedule(input_data)
-        md += self._build_financial_structure_diagram(input_data)
-        md += self._build_sales_schedule(input_data)
-        md += self._build_revenue_distribution(covenants, scenario_result)
-        md += self._build_cashflow_summary(input_data, scenario_result)
-        md += self._build_borrower_analysis(input_data)
-        md += self._build_contractor_analysis(input_data)
-        md += self._build_marketability_analysis(input_data)
-        md += self._build_feasibility_analysis(input_data)
-        md += self._build_exit_strategy(input_data, scenario_result)
-        md += self._build_drawdown_conditions(covenants, scenario_result)
-        md += self._build_eod(covenants)
-        md += self._build_fund_execution_order(covenants)
-        
-        return md
+        return ReportExportAgent().export({"report": self.generate_structured_report(input_data)}, "markdown")["content"]
 
     def _structured_cover(self, project: Dict[str, Any]) -> Dict[str, Any]:
         name = project.get("name", "자료 미확인")
@@ -346,16 +453,11 @@ class ReportAgent:
             "tranches": [
                 {
                     "name": t.get("tranche", "자료 미확인"),
-                    "amount": t.get("amount", 0),
-                    "amountMillion": self._million(t.get("amount", 0)),
+                    "amount": _number(t.get("amount")),
+                    "amountMillion": self._million(t.get("amount")),
                     "interestRate": self._rate(t, "interest_rate", "interestRate"),
                     "feeRate": self._rate(t, "fee_rate", "feeRate"),
-                    "allInCost": self._rate(
-                        t,
-                        "all_in_cost",
-                        "allInCost",
-                        default=self._rate(t, "interest_rate", "interestRate") + self._rate(t, "fee_rate", "feeRate"),
-                    ),
+                    "allInCost": self._all_in_cost(t),
                     "priority": t.get("priority"),
                 }
                 for t in tranches
@@ -363,12 +465,12 @@ class ReportAgent:
         }
 
     def _structured_funding(self, feasibility: Dict[str, Any], total_pf: float) -> Dict[str, Any]:
-        total_revenue = feasibility.get("total_revenue", 0)
+        total_revenue = _number(feasibility.get("total_revenue"))
         cash_out = [
-            ("토지비", feasibility.get("land_cost", 0)),
-            ("공사비", feasibility.get("construction_cost", 0)),
-            ("금융비용", feasibility.get("finance_cost", 0)),
-            ("기타사업비", feasibility.get("other_cost", 0)),
+            ("토지비", _number(feasibility.get("land_cost"))),
+            ("공사비", _number(feasibility.get("construction_cost"))),
+            ("금융비용", _number(feasibility.get("finance_cost"))),
+            ("기타사업비", _number(feasibility.get("other_cost"))),
         ]
         return {
             "cashIn": [
@@ -386,8 +488,8 @@ class ReportAgent:
         if not parcels and land:
             parcels = [{
                 "owner": "자료 미확인",
-                "share": 1.0,
-                "area_sqm": land.get("area_sqm", 0),
+                "share": None,
+                "area_sqm": land.get("area_sqm"),
                 "mortgage": "자료 미확인",
             }]
         return {
@@ -396,8 +498,9 @@ class ReportAgent:
             "parcels": [
                 {
                     "owner": p.get("owner", "자료 미확인"),
-                    "share": p.get("share", 0),
-                    "areaSqm": p.get("area_sqm", 0),
+                    "parcel": p.get("addressFragment") or p.get("lotNumber") or "자료 미확인",
+                    "share": _number(p.get("share")),
+                    "areaSqm": _number(p.get("area_sqm", p.get("areaSqm"))),
                     "mortgage": p.get("mortgage", "자료 미확인"),
                 }
                 for p in parcels
@@ -405,6 +508,7 @@ class ReportAgent:
         }
 
     def _structured_schedule(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
+        schedule = schedule_event_map(schedule)
         mapping = [
             ("land_purchase", "토지매입"),
             ("permit_approval", "사업인허가"),
@@ -431,30 +535,25 @@ class ReportAgent:
 
     def _structured_sales_schedule(self, schedule: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [
-            {"type": "계약금", "ratio": schedule.get("contract_deposit", 0), "timing": "계약 시"},
-            {"type": "중도금", "ratio": schedule.get("middle_payment", 0), "timing": "공정률 및 약정 회차별"},
-            {"type": "잔금", "ratio": schedule.get("balance", 0), "timing": "입주 지정기간"},
+            {"type": "계약금", "ratio": _number(schedule.get("contract_deposit")), "timing": "계약 시"},
+            {"type": "중도금", "ratio": _number(schedule.get("middle_payment")), "timing": "공정률 및 약정 회차별"},
+            {"type": "잔금", "ratio": _number(schedule.get("balance")), "timing": "입주 지정기간"},
         ]
 
-    def _structured_cashflow(self, data: Dict[str, Any], total_revenue: float, total_cost: float, scenario_result: Any = None) -> Dict[str, Any]:
-        profit = total_revenue - total_cost
-        rows = [
-            {"scenario": "기준", "cashIn": total_revenue, "cashOut": total_cost, "netCashFlow": profit},
-            {"scenario": "분양수입 10% 하락", "cashIn": total_revenue * 0.9, "cashOut": total_cost, "netCashFlow": total_revenue * 0.9 - total_cost},
-        ]
-        if scenario_result:
-            for w in scenario_result.waterfallScenarios:
-                if w.scenarioId in {"sale_70_disc_0", "sale_50_disc_10"}:
-                    label = "분양률 70% 시나리오" if "70" in w.scenarioId else "스트레스 분양률 50% (할인 10%)"
-                    rows.append({
-                        "scenario": label,
-                        "cashIn": w.cashAvailable,
-                        "cashOut": total_cost,
-                        "netCashFlow": w.cashAvailable - total_cost
-                    })
+    def _structured_cashflow(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        saved = data.get("cashFlowRunResult")
+        if not isinstance(saved, dict):
+            return {"status": "not_assessable", "assumption": "저장된 현금흐름 계산이 없습니다. 계산 후 보고서를 다시 생성해 주세요.", "rows": []}
         return {
-            "assumption": "분양률 기본 및 스트레스 시나리오 기준 요약 현금흐름입니다.",
-            "rows": rows,
+            "status": saved.get("status", "completed"),
+            "assumption": "저장된 현금흐름 결과입니다. 현재 입력과의 일치 여부는 계산 이력에서 확인해야 합니다.",
+            "summary": deepcopy(saved.get("summary") or {}),
+            "rows": deepcopy(saved.get("monthlyCashFlow") or []),
+            **({"sourceBasis": saved["sourceBasis"]} if "sourceBasis" in saved else {}),
+            **({"businessDeclaredTotals": deepcopy(saved.get("businessDeclaredTotals") or (saved.get("summary") or {}).get("businessDeclaredTotals"))}
+               if "businessDeclaredTotals" in saved or "businessDeclaredTotals" in (saved.get("summary") or {}) else {}),
+            **({"reportEligible": saved["reportEligible"]} if "reportEligible" in saved else {}),
+            **({"periodBasis": deepcopy(saved["periodBasis"])} if "periodBasis" in saved else {}),
         }
 
     def _structured_party(self, party: Dict[str, Any], role: str) -> Dict[str, Any]:
@@ -533,240 +632,22 @@ class ReportAgent:
     def _as_label_items(self, values: List[Any]) -> List[Dict[str, Any]]:
         return [{"label": str(value), "status": "반영"} for value in values]
 
-    def _million(self, amount: float) -> float:
-        return round((amount or 0) / 1_000_000, 2)
+    def _million(self, amount: Any) -> float | None:
+        number = _number(amount)
+        return round(number / 1_000_000, 2) if number is not None else None
 
-    def _rate(self, data: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
+    def _rate(self, data: Dict[str, Any], *keys: str, default: float | None = None) -> float | None:
         for key in keys:
             value = data.get(key)
             if value is None:
                 continue
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return default
+            return _number(value)
         return default
 
-    def _build_cover(self, project: Dict[str, Any]) -> str:
-        name = project.get("name", "Unknown Project")
-        date = project.get("review_date", "TBD")
-        fi = project.get("financial_institution", "Our Institution")
-        
-        return f"""# PF 심사보고서 (Draft)
-
-| 항목 | 상세 내용 |
-|:---|:---|
-| **사업명** | {name} |
-| **심의일** | {date} |
-| **금융기관** | {fi} |
-| **검토 의견** | 본건은 {name} 개발사업을 위한 PF 대출 건으로, 제반 조건 및 사업성 검토 결과 대출 실행이 적정할 것으로 판단됨. |
-
----
-"""
-
-    def _build_financial_terms(self, data: Dict[str, Any]) -> str:
-        tranches = data.get("pf_structure", [])
-        if not tranches:
-            return "## 1. 주요 금융조건 요약표\n데이터 없음.\n\n"
-            
-        md = "## 1. 주요 금융조건 요약표\n\n"
-        md += "| Tranche | 대출금액 | 금리 | 수수료 | All-in Cost | 우선순위 |\n"
-        md += "|:---|---:|:---:|:---:|:---:|:---:|\n"
-        for t in tranches:
-            interest_rate = self._rate(t, "interest_rate", "interestRate")
-            fee_rate = self._rate(t, "fee_rate", "feeRate")
-            all_in_cost = self._rate(t, "all_in_cost", "allInCost", default=interest_rate + fee_rate)
-            md += f"| {t.get('tranche')} | {t.get('amount', 0):,}원 | {interest_rate*100}% | {fee_rate*100}% | {all_in_cost*100}% | {t.get('priority')}순위 |\n"
-        return md + "\n"
-
-    def _build_claim_preservation(self, covenants: Dict[str, Any]) -> str:
-        claims = covenants.get("claim_preservation", [])
-        md = "## 2. 주요 채권보전방안\n\n"
-        if not claims:
-            md += "- 해당사항 없음\n"
-        else:
-            for claim in claims:
-                md += f"- **{claim}**\n"
-        return md + "\n"
-
-    def _build_discount_triggers(self, covenants: Dict[str, Any]) -> str:
-        triggers = covenants.get("discount_triggers", [])
-        md = "## 3. Discount Sale Trigger Conditions\n\n"
-        if not triggers:
-            md += "- No discount trigger supplied.\n"
-        else:
-            md += "| Month | Target sale rate | Discount rate | Note |\n|:---:|:---:|:---:|:---|\n"
-            for t in triggers:
-                target_rate = t.get("target_rate")
-                if target_rate is None:
-                    target_rate = t.get("targetSalesRate")
-                discount = t.get("discount")
-                if discount is None:
-                    discount = t.get("allowedDiscountRate")
-                md += f"| {t.get('month')} | {(target_rate or 0)*100}% | {(discount or 0)*100}% | Execute if target is missed |\n"
-        return md + "\n"
-    def _build_financing_structure(self, data: Dict[str, Any]) -> str:
-        pf = sum(t.get("amount", 0) for t in data.get("pf_structure", []))
-        rev = data.get("feasibility_input", {}).get("total_revenue", 0)
-        
-        md = "## 4. 자금조달 구조\n\n"
-        md += f"- **총 조달금액(PF)**: {pf:,}원\n"
-        md += f"- **총 분양수입(예상)**: {rev:,}원\n"
-        md += f"- **LTV (분양수입 대비)**: {(pf/rev*100 if rev > 0 else 0):.2f}%\n"
-        return md + "\n"
-
-    def _build_use_of_funds(self, data: Dict[str, Any]) -> str:
-        uses = data.get("use_of_funds", [])
-        md = "## 5. 자금 사용 용도\n\n"
-        if not uses:
-            md += "데이터 없음.\n"
-        else:
-            md += "| 자금 집행 항목 | 금액(원) | 비고 |\n|:---|---:|:---|\n"
-            for u in uses:
-                amount = u.get("amount")
-                amount_str = f"{amount:,}" if isinstance(amount, (int, float)) else "-"
-                md += f"| {u.get('item')} | {amount_str} | 사업계획 기준 |\n"
-        return md + "\n"
-
-    def _build_land_acquisition(self, data: Dict[str, Any]) -> str:
-        lands = data.get("land_acquisition", [])
-        md = "## 6. 사업부지 확보 현황\n\n"
-        if not lands:
-            md += "데이터 없음.\n"
-        else:
-            md += "| 소유자/필지 | 지분율 | 면적(㎡) | 제한물권 및 특이사항 |\n|:---:|:---:|:---:|:---|\n"
-            for l in lands:
-                # Parsed 토지조서 parcels may lack owner/share and use camelCase
-                # areaSqm; format defensively so a real ledger never breaks the report.
-                owner = l.get("owner") or l.get("addressFragment") or l.get("lotNumber") or "-"
-                share = l.get("share")
-                share_str = f"{share * 100:g}%" if isinstance(share, (int, float)) else "-"
-                area = l.get("area_sqm")
-                if area is None:
-                    area = l.get("areaSqm")
-                area_str = f"{area:,.1f}" if isinstance(area, (int, float)) else "-"
-                mortgage = l.get("mortgage") or l.get("landCategory") or "-"
-                md += f"| {owner} | {share_str} | {area_str} | {mortgage} |\n"
-        return md + "\n"
-
-    def _build_project_schedule(self, data: Dict[str, Any]) -> str:
-        s = data.get("schedule", {})
-        md = "## 7. 사업추진 일정\n\n"
-        md += f"- **토지매입 완료**: {s.get('land_purchase', 'TBD')}\n"
-        md += f"- **사업인허가 완료**: {s.get('permit_approval', 'TBD')}\n"
-        md += f"- **착공 및 분양**: {s.get('construction_start', 'TBD')}\n"
-        md += f"- **준공 및 입주**: {s.get('completion', 'TBD')}\n"
-        return md + "\n"
-
-    def _build_financial_structure_diagram(self, data: Dict[str, Any]) -> str:
-        dev_name = data.get("developer_info", {}).get("name", "시행사")
-        con_name = data.get("contractor_info", {}).get("name", "시공사")
-        fi_name = data.get("project", {}).get("financial_institution", "대주단")
-        
-        md = "## 8. 금융구조도\n\n"
-        md += "```mermaid\n"
-        md += "graph TD;\n"
-        md += f"  Lender[\"{fi_name} (대주단)\"] -- \"PF 대출금\" --> Trust[\"신탁사 (자금관리)\"];\n"
-        md += f"  Trust -- \"공사비 지급\" --> Contractor[\"{con_name}\"];\n"
-        md += f"  Contractor -- \"책임준공 확약\" --> Lender;\n"
-        md += f"  Dev[\"{dev_name}\"] -- \"사업권/수익권\" --> Trust;\n"
-        md += f"  Buyer[\"수분양자\"] -- \"분양대금\" --> Trust;\n"
-        md += "```\n\n"
-        return md
-
-    def _build_sales_schedule(self, data: Dict[str, Any]) -> str:
-        s = data.get("sales_schedule", {})
-        md = "## 9. 분양대금 납입 일정\n\n"
-        md += f"- **계약금**: {s.get('contract_deposit', 0)*100}% (계약 시)\n"
-        md += f"- **중도금**: {s.get('middle_payment', 0)*100}% (회차별 분할)\n"
-        md += f"- **잔금**: {s.get('balance', 0)*100}% (입주 시)\n"
-        return md + "\n"
-
-    def _build_revenue_distribution(self, covenants: Dict[str, Any], scenario_result: Any = None) -> str:
-        md = "## 10. 분양수입금 배분 기준\n\n"
-        if scenario_result:
-            md += f"{scenario_result.reportFragments.waterfallSummary}\n"
-        else:
-            md += f"{covenants.get('revenue_distribution', '대주단 협의 기준에 따름')}\n"
-        return md + "\n"
-
-    def _build_cashflow_summary(self, data: Dict[str, Any], scenario_result: Any = None) -> str:
-        md = "## 11. 요약 현금흐름표\n\n"
-        if scenario_result:
-            md += "### 분양률/할인 시나리오별 자금회수 및 현금유입\n\n"
-            md += "| 시나리오 ID | 분양률 | 할인율 | 회수 자금 | 리스크 경고 |\n"
-            md += "|:---|:---|:---|:---|:---|\n"
-            for w in scenario_result.waterfallScenarios:
-                md += f"| {w.scenarioId} | {w.saleRate*100}% | {w.discountRate*100}% | {w.cashAvailable:,}원 | {'경고 발생' if w.totalShortfall > 0 else '정상 회수'} |\n"
-        else:
-            md += "분양률 시나리오 기반의 월별 Cash-In/Out 분석 결과, 본 사업의 자금 부족액(Max Minus)은 대출 한도 내에서 충분히 커버 가능함.\n"
-        return md + "\n"
-
-    def _build_borrower_analysis(self, data: Dict[str, Any]) -> str:
-        dev = data.get("developer_info", {})
-        md = "## 12. 차주(시행사) 분석\n\n"
-        md += f"- **시행사명**: {dev.get('name', 'N/A')}\n"
-        md += f"- **신용등급**: {dev.get('credit_rating', 'N/A')}\n"
-        md += f"- **주요 재무현황**: {dev.get('financials', 'N/A')}\n"
-        return md + "\n"
-
-    def _build_contractor_analysis(self, data: Dict[str, Any]) -> str:
-        con = data.get("contractor_info", {})
-        md = "## 13. 시공사 분석\n\n"
-        md += f"- **시공사명**: {con.get('name', 'N/A')}\n"
-        md += f"- **신용등급**: {con.get('credit_rating', 'N/A')}\n"
-        md += f"- **수주잔고**: {con.get('order_backlog', 'N/A')}\n"
-        md += f"- **재무 건전성**: {con.get('financials', 'N/A')}\n"
-        return md + "\n"
-
-    def _build_marketability_analysis(self, data: Dict[str, Any]) -> str:
-        md = "## 14. 분양성 분석\n\n"
-        md += "인근 지역 유사 평형 공급 현황 및 시세 분석 결과, 당 사업지의 경쟁 우위가 확보되어 목표 분양률 달성이 무난할 것으로 사료됨.\n"
-        return md + "\n"
-
-    def _build_feasibility_analysis(self, data: Dict[str, Any]) -> str:
-        er = data.get("expected_results", {})
-        md = "## 15. 사업성 분석 결과\n\n"
-        md += f"- **예상 개발이익**: {er.get('development_profit', 0):,}원\n"
-        md += f"- **수익률(Margin)**: {er.get('profit_margin', 0)*100}%\n"
-        return md + "\n"
-
-    def _build_exit_strategy(self, data: Dict[str, Any], scenario_result: Any = None) -> str:
-        md = "## 16. Exit 전략 및 상환 재원\n\n"
-        md += "1차적으로 분양수입금을 통한 원리금 상환을 추진하며, 비상시 할인분양 또는 미분양 담보대출을 통한 대환 상환 시나리오를 확보함.\n"
-        if scenario_result:
-            md += f"\n**[시나리오 스트레스 테스트 분석]**\n{scenario_result.reportFragments.trancheRecoverySummary}\n"
-        return md + "\n"
-
-    def _build_drawdown_conditions(self, covenants: Dict[str, Any], scenario_result: Any = None) -> str:
-        conds = list(covenants.get("drawdown_conditions", []))
-        if scenario_result:
-            conds.append(scenario_result.reportFragments.approvalCondition)
-        md = "## 17. 대출금 인출 선행조건\n\n"
-        if not conds:
-            md += "- 인허가 완료 및 신탁계약 체결 등\n"
-        else:
-            for c in conds:
-                md += f"- {c}\n"
-        return md + "\n"
-
-    def _build_eod(self, covenants: Dict[str, Any]) -> str:
-        eods = covenants.get("eod", [])
-        md = "## 18. 기한이익상실(EOD) 사유\n\n"
-        if not eods:
-            md += "- 이자 미납, 책임준공 기한 초과 등\n"
-        else:
-            for e in eods:
-                md += f"- {e}\n"
-        return md + "\n"
-
-    def _build_fund_execution_order(self, covenants: Dict[str, Any]) -> str:
-        orders = covenants.get("execution_order", [])
-        md = "## 19. 자금집행 순서\n\n"
-        if not orders:
-            md += "1. 필수사업비 2. 대출이자 3. 대출원금 순\n"
-        else:
-            for i, o in enumerate(orders):
-                md += f"{o}\n"
-        md += "\n## 20. 변제 충당 및 기타\n\n상기 순서에 의거하여 분양수입금을 배분하며, 대주단 동의 없는 자금 인출은 엄격히 제한함.\n"
-        return md + "\n"
+    def _all_in_cost(self, tranche: Dict[str, Any]) -> float | None:
+        explicit = self._rate(tranche, "all_in_cost", "allInCost")
+        if explicit is not None:
+            return explicit
+        interest = self._rate(tranche, "interest_rate", "interestRate")
+        fee = self._rate(tranche, "fee_rate", "feeRate")
+        return interest + fee if interest is not None and fee is not None else None

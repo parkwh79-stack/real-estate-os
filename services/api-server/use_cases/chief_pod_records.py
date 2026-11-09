@@ -7,12 +7,17 @@ outputs, preserve their source locators, and create typed communication records.
 """
 
 import hashlib
+from copy import deepcopy
 import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 from uuid import uuid4
 
 from schemas.orchestration import AgentHandoffEnvelope
+from agents.development_feasibility_agent import DEVELOPMENT_FEASIBILITY_AGENT_VERSION
+from use_cases.cash_flow_dependencies import financial_input_hash
+from use_cases.development_feasibility import development_feasibility_input_basis
+from use_cases.pf_structure import build_pf_structure_input
 from use_cases.calculation_run_capture import (
     scenario_engine_run_payloads,
     stress_test_run_payload,
@@ -20,17 +25,37 @@ from use_cases.calculation_run_capture import (
 
 
 _POD_INPUT_KEYS: Dict[str, tuple[str, ...]] = {
-    "land_legal": ("land", "landLedger", "landEvidence", "legalContext", "source_documents"),
-    "market_product": ("market", "marketEvidence", "product_mix", "productMix", "land", "source_documents"),
+    "land_legal": (
+        "land", "landLedger", "landEvidence", "regulation", "regulatoryConstraintSnapshot",
+        "schedule", "covenants", "legalContext", "source_documents",
+    ),
+    "market_product": (
+        "market", "marketEvidence", "product_mix", "productMix", "land", "landLedger",
+        "regulation", "regulatoryConstraintSnapshot", "buildableEnvelope", "source_documents",
+    ),
     "cost_schedule": ("feasibility_input", "costs", "schedule", "project_schedule", "source_documents"),
     "feasibility_cashflow": (
+        "project",
+        "land",
+        "regulation",
+        "architectural_plan",
         "feasibility_input",
         "feasibilityStudyV2",
+        "canonicalFeasibilityStudyV2",
+        "cost_assumptions",
+        "sales_assumptions",
+        "cashflow_input",
+        "sales_schedule",
+        "salesCollectionSchedule",
+        "logistics",
+        "version",
         "product_mix",
         "productMix",
         "schedule",
         "pf_structure",
         "marketabilityAnalysis",
+        "regulatoryConstraintSnapshot",
+        "buildableEnvelope",
     ),
     "pf_credit": (
         "pf_structure",
@@ -40,6 +65,9 @@ _POD_INPUT_KEYS: Dict[str, tuple[str, ...]] = {
         "marketabilityAnalysis",
         "landEvidence",
         "adoptedRestructuringCures",
+        "legalPermitReview",
+        "regulatoryConstraintSnapshot",
+        "buildableEnvelope",
     ),
     "public_policy": ("land", "landLedger", "legalContext", "developabilityScore", "source_documents"),
 }
@@ -54,6 +82,8 @@ def pod_input_snapshot(
     pod_key: str,
     project_data: Dict[str, Any],
     dependency_artifacts: Dict[str, Any] | None = None,
+    *,
+    options: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     snapshot = {
         key: project_data.get(key)
@@ -62,7 +92,26 @@ def pod_input_snapshot(
     }
     snapshot["dependencyArtifacts"] = dependency_artifacts or {}
     snapshot["activeAssumptionOverrides"] = project_data.get("activeAssumptionOverrides") or []
-    return snapshot
+    if pod_key in {"cost_schedule", "feasibility_cashflow"}:
+        snapshot["developmentFeasibilityVersion"] = DEVELOPMENT_FEASIBILITY_AGENT_VERSION
+    if pod_key == "cost_schedule":
+        snapshot["developmentFeasibilityInput"] = development_feasibility_input_basis(project_data, options)
+    if pod_key == "feasibility_cashflow":
+        metadata = project_data.get("_meta")
+        if isinstance(metadata, dict) and "parsing_source" in metadata:
+            snapshot["parsingSource"] = metadata["parsing_source"]
+    if pod_key == "pf_credit":
+        # Risk/credit agents consume the project as well as the PF request.
+        # Exclude only the orchestration bookkeeping that this run itself writes.
+        snapshot["pfReviewInput"] = {key: value for key, value in project_data.items()
+                                     if key != "chief_orchestration_state"}
+        snapshot["pfStructureInput"] = build_pf_structure_input(project_data, options)
+        snapshot["scenarioOptions"] = {key: (options or {}).get(key) for key in
+            ("productMix", "pfStructure", "tranches", "totalRevenue", "total_revenue", "units", "scenarioDrivers", "waterfallRule")
+            if key in (options or {})}
+    # Executors mutate their working project. Retain the exact pre-execution
+    # values whose hash is recorded in the calculation and handoff ledgers.
+    return deepcopy(snapshot)
 
 
 def _iter_numeric_metrics(value: Any, path: str = "result") -> Iterable[Dict[str, Any]]:
@@ -158,8 +207,8 @@ def _generic_calculation_record(
         "assumptionIds": _assumption_ids(input_snapshot),
         "outputMetrics": list(_iter_numeric_metrics(result)),
         "riskIssues": _risk_issues(result),
-        "inputSnapshot": input_snapshot,
-        "resultSnapshot": result,
+        "inputSnapshot": deepcopy(input_snapshot),
+        "resultSnapshot": deepcopy(result),
         "artifactRef": artifact_ref
         or {"artifactKey": artifact_key, "podKey": pod_key, "section": engine_key},
         "sourceLocator": {
@@ -183,6 +232,8 @@ def calculation_records_for_pod(
     artifact: Dict[str, Any],
     input_snapshot: Dict[str, Any],
     project_data: Dict[str, Any],
+    run_id: str | None = None,
+    agent_run_id: str | None = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if pod_key == "feasibility_cashflow":
@@ -200,18 +251,33 @@ def calculation_records_for_pod(
             )
         cash_flow = artifact.get("cashFlowRunResult")
         if isinstance(cash_flow, dict):
-            records.append(
-                _generic_calculation_record(
-                    project_id=project_id,
-                    pod_key=pod_key,
-                    artifact_key=artifact_key,
-                    engine_key="cash_flow_engine",
-                    result=cash_flow,
-                    input_snapshot=input_snapshot,
-                )
+            request = artifact.get("cashFlowRunRequest")
+            if not isinstance(request, dict) or request.get("requestType") != "cash_flow_run_request_v1":
+                raise ValueError("현금흐름 계산의 실제 실행 입력이 없어 계산 기록을 저장할 수 없습니다.")
+            request = deepcopy(request)
+            digest = financial_input_hash(request)
+            record = _generic_calculation_record(
+                project_id=project_id,
+                pod_key=pod_key,
+                artifact_key=artifact_key,
+                engine_key="cash_flow_engine",
+                result=deepcopy(cash_flow),
+                input_snapshot={**request, "financialInputHash": digest},
             )
+            record["financialInputHash"] = digest
+            if run_id:
+                record["sourceLocator"]["runId"] = run_id
+            if agent_run_id:
+                record["sourceLocator"]["agentRunId"] = agent_run_id
+            records.append(record)
 
     if pod_key == "pf_credit":
+        def captured_request(key: str) -> Dict[str, Any]:
+            request = artifact.get(key)
+            if not isinstance(request, dict) or not request:
+                raise ValueError(f"PF Pod 실행 입력 {key}이 없어 계산 이력을 연결할 수 없습니다.")
+            return deepcopy(request)
+
         pf_structure = artifact.get("pfStructure")
         if isinstance(pf_structure, dict):
             records.append(
@@ -221,7 +287,7 @@ def calculation_records_for_pod(
                     artifact_key=artifact_key,
                     engine_key="pf_structure",
                     result=pf_structure,
-                    input_snapshot=input_snapshot,
+                    input_snapshot=captured_request("pfStructureInput"),
                 )
             )
         scenario_dump = artifact.get("scenariosEvaluation")
@@ -235,7 +301,7 @@ def calculation_records_for_pod(
                         engine_key=str(payload["engineKey"]),
                         engine_version=str(payload["engineVersion"]),
                         result=payload["result"],
-                        input_snapshot=input_snapshot,
+                        input_snapshot=captured_request("scenarioRunRequest"),
                         artifact_ref={
                             **(payload.get("artifactRef") or {}),
                             "artifactKey": artifact_key,
@@ -243,7 +309,8 @@ def calculation_records_for_pod(
                         },
                     )
                 )
-        stress = project_data.get("stressTest") or artifact.get("stressTest")
+        # A project's previous stress result is not a calculation from this Pod.
+        stress = artifact.get("stressTest")
         if isinstance(stress, dict):
             payload = stress_test_run_payload(stress)
             records.append(
@@ -254,7 +321,7 @@ def calculation_records_for_pod(
                     engine_key=str(payload["engineKey"]),
                     engine_version=str(payload["engineVersion"]),
                     result=payload["result"],
-                    input_snapshot=input_snapshot,
+                    input_snapshot=captured_request("stressTestRequest"),
                     artifact_ref={
                         **(payload.get("artifactRef") or {}),
                         "artifactKey": artifact_key,
@@ -262,6 +329,13 @@ def calculation_records_for_pod(
                     },
                 )
             )
+    for record in records:
+        if pod_key == "pf_credit" or record["engineKey"] == "cash_flow_engine":
+            record["inputDigest"] = {"capturePolicy": "effective_request_v1"}
+        if run_id:
+            record["sourceLocator"]["runId"] = run_id
+        if agent_run_id:
+            record["sourceLocator"]["agentRunId"] = agent_run_id
     return records
 
 

@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from copy import deepcopy
+from datetime import datetime, timezone
 
 from agents.report_agent import ReportAgent
 from agents.report_export_agent import ReportExportAgent
-from db.repositories.report_repository import ReportRepository
+from db.repositories.orchestration_repository import OrchestrationRepository
+from db.repositories.project_snapshot_repository import (
+    ProjectSnapshotRepository,
+    verify_project_snapshot_hash,
+)
+from db.repositories.report_repository import ReportRepository, ReportPublicationConflict, is_cash_flow_comparison_report, verify_report_snapshots
+from use_cases.cash_flow_comparison import compare_cash_flow_runs, content_hash
 from storage import list_deal_state_records, list_pod_ai_review_records
 from use_cases.common import deep_merge
+from use_cases.orchestration_approval import refresh_approval_readiness_gate
+from use_cases.report_calculation_basis import attach_cash_flow_basis, attach_calculation_bases
+from use_cases.report_input_reconciliation import attach_input_reconciliation
+from use_cases.report_financing_basis import attach_financing_basis
+from use_cases.report_timing_basis import attach_timing_basis
 
 REPORT_TEMPLATE_TO_REPORT_SECTION = {
     "cover": "cover",
@@ -68,21 +81,22 @@ _SECTION_CATEGORY_PODS = {
 _ADVISORY_REVIEW_CATEGORIES = {"guardrail", "info", "note"}
 
 
-def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str, Any]]]:
+def _load_pod_review_findings_by_pod(project_id: str, expected_artifacts: Dict[str, List[str]] | None = None) -> Dict[str, List[Dict[str, Any]]]:
     """Latest unresolved Pod AI Review findings per pod (deterministic-grounded).
 
-    Best-effort: read/shape errors yield {} so report generation never breaks."""
-    try:
-        reviews = list_pod_ai_review_records(str(project_id), limit=200)
-    except Exception:
-        return {}
+    Read failures are surfaced by the caller, never reported as no findings."""
+    reviews = list_pod_ai_review_records(str(project_id), limit=200)
     latest_by_pod: Dict[str, Dict[str, Any]] = {}
     for review in reviews:
         pod_key = str(review.get("podKey") or "")
         if not pod_key:
             continue
         current = latest_by_pod.get(pod_key)
-        if current is None or str(review.get("updatedAt") or "") >= str(current.get("updatedAt") or ""):
+        def rank(item):
+            keys = item.get("sourceArtifactKeys") or ([item["sourceArtifactKey"]] if item.get("sourceArtifactKey") else [])
+            matches = bool(set(keys) & set((expected_artifacts or {}).get(pod_key) or []))
+            return matches, str(item.get("updatedAt") or "")
+        if current is None or rank(review) >= rank(current):
             latest_by_pod[pod_key] = review
     out: Dict[str, List[Dict[str, Any]]] = {}
     for pod_key, review in latest_by_pod.items():
@@ -91,6 +105,11 @@ def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str
         source = review.get("deterministicFindings")
         if not isinstance(source, list):
             source = review.get("findings") or []
+        artifact_keys = review.get("sourceArtifactKeys") or ([review["sourceArtifactKey"]] if review.get("sourceArtifactKey") else [])
+        expected = (expected_artifacts or {}).get(pod_key)
+        binding = "unverified"
+        if expected and artifact_keys:
+            binding = "matched" if set(artifact_keys) & set(expected) else "mismatch"
         findings = [
             {
                 "findingId": f.get("findingId"),
@@ -100,6 +119,12 @@ def _load_pod_review_findings_by_pod(project_id: str) -> Dict[str, List[Dict[str
                 "severity": f.get("severity"),
                 "message": f.get("message"),
                 "recommendedAction": f.get("recommendedAction"),
+                "runId": review.get("runId"),
+                "sourceArtifactKeys": deepcopy(artifact_keys),
+                "artifactBindingStatus": binding,
+                "sourceLocators": deepcopy(f.get("sourceLocators") or review.get("sourceLocators") or []),
+                "inputEvidenceIds": deepcopy(review.get("inputEvidenceIds") or []),
+                "inputAssumptionIds": deepcopy(review.get("inputAssumptionIds") or []),
             }
             for f in source
             if isinstance(f, dict)
@@ -122,11 +147,10 @@ def generate_pf_report_use_case(
     structured_report = agent.generate_structured_report(source_data)
     structured_report["title"] = "AI PF 심사보고서"
     structured_report["displayUnit"] = "백만원"
-    markdown = agent.generate_report(source_data)
     selected_template = _select_report_template(project_data, input_data)
     if selected_template:
         _apply_report_template(structured_report, selected_template)
-        markdown = _append_template_application_summary(markdown, structured_report["templateApplication"])
+    markdown = ReportExportAgent().export({"report": structured_report}, "markdown")["content"]
     return {
         "structuredReport": structured_report,
         "reportMarkdown": markdown,
@@ -138,15 +162,28 @@ def generate_and_save_pf_report_use_case(
     project_id: str,
     project_data: Dict[str, Any],
     input_data: Dict[str, Any] | None = None,
+    *, cash_flow_run: Dict[str, Any] | None = None,
+    calculation_runs: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Generate and persist a PF review report through the report repository."""
     generated = generate_pf_report_use_case(project_data, input_data)
+    if cash_flow_run is not None:
+        attach_cash_flow_basis(generated["structuredReport"], cash_flow_run)
+    if calculation_runs:
+        attach_calculation_bases(generated["structuredReport"], calculation_runs)
+    attach_financing_basis(generated["structuredReport"])
+    attach_timing_basis(generated["structuredReport"])
+    attach_input_reconciliation(generated["structuredReport"])
     paragraph_evidence_links = build_paragraph_evidence_links(
         project_id,
         generated["structuredReport"],
+        expected_artifacts={key: value.get("artifactKeys") or []
+            for key, value in ((project_data.get("chief_orchestration_state") or {}).get("podRuns") or {}).items()
+            if isinstance(value, dict)},
     )
     generated["paragraphEvidenceLinks"] = paragraph_evidence_links
     generated["structuredReport"]["paragraphEvidenceLinks"] = paragraph_evidence_links
+    generated["reportMarkdown"] = ReportExportAgent().export({"report": generated["structuredReport"]}, "markdown")["content"]
     report_record = report_repository.create(
         project_id,
         generated["structuredReport"],
@@ -158,9 +195,32 @@ def generate_and_save_pf_report_use_case(
     }
 
 
+def generate_and_save_cash_flow_comparison_report_use_case(
+    report_repository: ReportRepository, project_id: str, tenant_id: str,
+    selection: Dict[str, Any], comparison_hash: str, baseline_run: Dict[str, Any], comparison_run: Dict[str, Any],
+    *, captured_by: str | None,
+) -> Dict[str, Any]:
+    """Freeze reviewed calculations into a separate analysis draft, without new calculations."""
+    for run in (baseline_run, comparison_run):
+        if str(run.get("projectId")) != str(project_id) or str(run.get("tenantId") or "legacy") != str(tenant_id):
+            raise LookupError("Calculation run not found in this project")
+    comparison = compare_cash_flow_runs(baseline_run, comparison_run, saved_selection=selection)
+    if comparison["status"] == "incompatible":
+        raise ReportPublicationConflict("저장된 비교의 원본 계산이 변경되었거나 유효하지 않습니다. 비교를 다시 확인하고 저장해 주세요.")
+    snapshot = {"schemaVersion": "realytics-frozen-cash-flow-comparison-v1",
+        "projectId": str(project_id), "tenantId": str(tenant_id),
+        "capturedAt": datetime.now(timezone.utc).isoformat(), "capturedBy": captured_by,
+        "selection": deepcopy(selection), "comparisonHash": comparison_hash,
+        "baselineRun": deepcopy(baseline_run), "comparisonRun": deepcopy(comparison_run), "comparison": comparison}
+    generated = ReportAgent().generate_cash_flow_comparison_review(snapshot, content_hash(snapshot))
+    record = report_repository.create(project_id, generated["structuredReport"], generated["reportMarkdown"], run_id=None)
+    return {"generated": generated, "reportRecord": record}
+
+
 def build_paragraph_evidence_links(
     project_id: str,
     structured_report: Dict[str, Any],
+    *, expected_artifacts: Dict[str, List[str]] | None = None,
 ) -> Dict[str, Any]:
     """Create report-section evidence links from persisted Deal State records.
 
@@ -169,7 +229,12 @@ def build_paragraph_evidence_links(
     a later frontend heuristic.
     """
     records = list_deal_state_records(project_id, limit=1000)
-    pod_findings = _load_pod_review_findings_by_pod(project_id)
+    try:
+        pod_findings = _load_pod_review_findings_by_pod(project_id, expected_artifacts)
+        pod_review_status = "loaded"
+    except Exception:
+        pod_findings = {}
+        pod_review_status = "unavailable"
     sections = _report_sections(structured_report)
     links = [
         _build_section_link(project_id, section, records, pod_findings)
@@ -202,6 +267,8 @@ def build_paragraph_evidence_links(
         "linkedRecordCount": len(linked_record_ids),
         "sourceLocatorReadySectionCount": source_locator_ready,
         "podAiReviewFindingCount": len(linked_finding_ids),
+        "podReviewReadStatus": pod_review_status,
+        "podReviewReadMessage": "Pod 검토 이력을 조회하지 못했습니다. 지적사항이 없다는 뜻은 아닙니다." if pod_review_status == "unavailable" else None,
         "sectionsWithPodReviewCount": sum(1 for link in links if link.get("podAiReviewFindings")),
         "links": links,
     }
@@ -213,6 +280,7 @@ def export_report_use_case(
 ) -> Dict[str, Any]:
     """Render a saved report record into a requested export format."""
     input_data = input_data or {}
+    verify_report_snapshots(report_record)
     export_format = input_data.get("format", "markdown")
     return ReportExportAgent().export(report_record, export_format)
 
@@ -229,6 +297,118 @@ def export_saved_report_use_case(
         raise LookupError("Report not found")
     rendered = export_report_use_case(report_record, input_data)
     return report_repository.add_export(report_record, rendered)
+
+
+def publish_saved_report_use_case(
+    report_repository: ReportRepository,
+    orchestration_repository: OrchestrationRepository,
+    project_snapshot_repository: ProjectSnapshotRepository,
+    project_id: str,
+    report_id: str,
+    *,
+    published_by: str,
+    published_at: str,
+) -> Dict[str, Any]:
+    """Publish only a report bound to an approved, currently eligible PF run."""
+    report_record = report_repository.get(project_id, report_id)
+    if not report_record:
+        raise LookupError("Report not found")
+
+    if is_cash_flow_comparison_report(report_record):
+        raise ReportPublicationConflict("현금흐름 비교 검토 초안은 최종 승인 보고서로 발행할 수 없습니다.")
+
+    run_id = str(report_record.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError(
+            "Only an orchestration-bound report can be finally published; manual reports remain drafts"
+        )
+    run = orchestration_repository.get(project_id, run_id)
+    if not run:
+        raise ValueError("The report's source orchestration run is unavailable")
+    if str(run.get("approvalStatus") or "").lower() != "approved":
+        raise ValueError("The source PF review run must be approved before report publication")
+
+    maker_id = str(
+        run.get("user_id")
+        or run.get("requestedBy")
+        or run.get("requested_by")
+        or (run.get("options") or {}).get("requestedBy")
+        or (run.get("options") or {}).get("requested_by")
+        or ""
+    ).strip()
+    if (
+        maker_id
+        and maker_id.casefold() not in {"system", "anonymous", "unknown"}
+        and maker_id.casefold() == str(published_by).strip().casefold()
+    ):
+        raise ValueError(
+            "Maker-checker violation: the PF review requester cannot finally publish the same report"
+        )
+
+    gate = refresh_approval_readiness_gate(run)
+    if gate.get("pass") is not True:
+        blocker_codes = [
+            str(item.get("code"))
+            for item in (gate.get("blockers") or [])
+            if isinstance(item, dict) and item.get("code")
+        ]
+        suffix = f" Blocking gates: {', '.join(blocker_codes[:12])}." if blocker_codes else ""
+        raise ValueError(
+            "Approval Readiness Gate must still pass at report publication time."
+            + suffix
+        )
+
+    snapshot_meta = (run.get("artifacts") or {}).get("projectSnapshot") or {}
+    snapshot_id = str(snapshot_meta.get("snapshotId") or f"snapshot-{run_id}")
+    snapshot = project_snapshot_repository.get(project_id, snapshot_id)
+    if not snapshot:
+        raise ValueError("The immutable project review snapshot is unavailable")
+    if str(snapshot.get("runId") or "") != run_id:
+        raise ValueError("Project snapshot lineage does not match the report run")
+    if str(snapshot.get("projectId") or "") != project_id:
+        raise ValueError("Project snapshot lineage does not match the report project")
+
+    snapshot_hash = str(snapshot.get("snapshotHash") or "")
+    run_snapshot_hash = str(snapshot_meta.get("snapshotHash") or "")
+    if not snapshot_hash or not run_snapshot_hash:
+        raise ValueError(
+            "The project review snapshot is not hash-sealed; final publication is blocked"
+        )
+    if not verify_project_snapshot_hash(snapshot):
+        raise ValueError(
+            "The project review snapshot hash seal is invalid; final publication is blocked"
+        )
+    if snapshot_hash != run_snapshot_hash:
+        raise ValueError(
+            "Project snapshot hash lineage does not match the approved report run"
+        )
+
+    approval = run.get("approval") or {}
+    decision_package = {
+        "schemaVersion": "realytics-decision-package-manifest-v1",
+        "projectId": project_id,
+        "projectSnapshotId": snapshot_id,
+        "projectSnapshotSchemaVersion": snapshot.get("schemaVersion"),
+        "projectSnapshotHash": snapshot_hash,
+        "orchestrationRunId": run_id,
+        "workflow": run.get("workflow"),
+        "approvalStatus": run.get("approvalStatus"),
+        "approvedBy": approval.get("approved_by") or approval.get("approvedBy"),
+        "approvedAt": approval.get("approved_at") or approval.get("approvedAt"),
+        "approvalReadiness": {
+            "schemaVersion": gate.get("schemaVersion"),
+            "status": gate.get("status"),
+            "gateType": gate.get("gateType"),
+            "blockingIssueCount": (gate.get("summary") or {}).get("blockingIssueCount"),
+            "warningCount": (gate.get("summary") or {}).get("warningCount"),
+        },
+    }
+    return report_repository.publish(
+        report_record,
+        published_by=published_by,
+        published_at=published_at,
+        decision_package=decision_package,
+    )
 
 
 def _select_report_template(
@@ -382,7 +562,7 @@ def _build_section_link(
     pod_review_findings: List[Dict[str, Any]] = []
     for pod_key in _SECTION_CATEGORY_PODS.get(category, ()):
         pod_review_findings.extend((pod_findings or {}).get(pod_key, []))
-    blocking_review = any(str(f.get("severity")).lower() == "blocking" for f in pod_review_findings)
+    blocking_review = any(str(f.get("severity")).lower() == "blocking" and f.get("artifactBindingStatus") != "mismatch" for f in pod_review_findings)
     return {
         "paragraphId": paragraph_id,
         "projectId": project_id,
@@ -403,7 +583,7 @@ def _build_section_link(
             "missingLocator": max(len(compact_records) - linked_with_locator, 0),
         },
         "linkedRecords": compact_records,
-        "podAiReviewFindings": pod_review_findings[:8],
+        "podAiReviewFindings": pod_review_findings,
         "podAiReviewBlocking": blocking_review,
     }
 
@@ -550,26 +730,6 @@ def _has_source_locator(record: Dict[str, Any]) -> bool:
     if not isinstance(locator, dict):
         return False
     return any(value not in (None, "") for value in locator.values())
-
-
-def _append_template_application_summary(markdown: str, application: Dict[str, Any]) -> str:
-    if not application.get("templateId"):
-        return markdown
-    enabled_count = len([
-        row for row in application.get("sectionCoverage", [])
-        if row.get("enabled") and row.get("hasReportSection")
-    ])
-    unmapped_count = len(application.get("unmappedSections") or [])
-    return (
-        markdown
-        + "\n\n---\n\n"
-        + "## 적용 보고서 템플릿\n\n"
-        + f"- 템플릿명: {application.get('name') or '-'}\n"
-        + f"- 템플릿 ID: {application.get('templateId') or '-'}\n"
-        + f"- 버전: v{application.get('version') or '-'}\n"
-        + f"- 적용 섹션 수: {enabled_count}\n"
-        + f"- 미매핑 섹션 수: {unmapped_count}\n"
-    )
 
 
 def _snake_to_camel(value: str) -> str:

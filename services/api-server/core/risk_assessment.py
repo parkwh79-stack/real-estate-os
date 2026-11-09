@@ -1,5 +1,7 @@
 from typing import List, Dict, Any, Optional
 
+from core.schedule import schedule_event_map
+
 RISK_CATEGORIES = [
     "Land Risk",
     "Permit Risk",
@@ -132,7 +134,7 @@ def build_basic_risk_matrix(
 def _infer_default_risk_items(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     feasibility = project_data.get("feasibility_input", {})
     regulation = project_data.get("regulation", {})
-    schedule = project_data.get("schedule", {})
+    schedule = schedule_event_map(project_data.get("schedule"))
     parcels = project_data.get("land_acquisition", [])
     pf_structure = project_data.get("pf_structure", [])
     covenants = project_data.get("covenants", {})

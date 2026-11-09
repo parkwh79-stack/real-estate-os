@@ -1,6 +1,7 @@
 from agents.land_ledger_enrichment_agent import LandLedgerEnrichmentAgent
 from integrations.land_data_connectors import LandDataConnectorRouter, generate_pnu_from_parcel
 from scripts.fetch_land_evidence_from_connectors import build_evidence_payload
+import pytest
 
 
 def test_generate_pnu_from_legal_dong_and_lot_fields():
@@ -12,6 +13,41 @@ def test_generate_pnu_from_legal_dong_and_lot_fields():
     assert pnu["pnu"] == "2729011700101230004"
     assert pnu["matchConfidence"] == 0.95
     assert pnu["matchMethod"] == "legal_dong_code_and_normalized_lot"
+
+
+def test_selected_public_lookup_does_not_call_other_services_and_preserves_pnu_verification(monkeypatch):
+    pnu = "2729011700101230004"
+    router = LandDataConnectorRouter(environ={"REALYTICS_OFFICIAL_LAND_PRICE_URL_TEMPLATE": "https://example.test/price?pnu={pnu}"})
+    monkeypatch.setattr(router, "_fetch_template", lambda *a, **kw: {
+        "body": '{"items":[{"pnu":"' + pnu + '","pricePerSqm":12345}]}', "url": "https://example.test/price",
+    })
+    def forbidden(*a, **kw):
+        raise AssertionError("Unrequested source must not be called")
+    for method in ("_fetch_cadastral_record", "_fetch_land_use_planning_record", "_fetch_building_use_records",
+                   "_fetch_land_characteristics_record", "_fetch_region_land_price_change"):
+        monkeypatch.setattr(router, method, forbidden)
+    result = router.fetch_records_for_parcels([{"pnu": pnu}], evidence_types={"official_land_price"})
+    assert result["officialLandPrices"][0]["pricePerSqm"] == 12345
+    assert result["officialLandPrices"][0]["sourcePnuVerified"] is True
+    deferred = router.fetch_records_for_parcels([{"pnu": pnu}], evidence_types={"official_land_price"}, deadline=0)
+    assert deferred["officialLandPrices"] == []
+    assert {row["status"] for row in deferred["diagnostics"]} == {"deferred"}
+    with pytest.raises(ValueError):
+        router.fetch_records_for_parcels([{"pnu": pnu}], evidence_types={"arbitrary_endpoint"})
+
+
+@pytest.mark.parametrize("properties,diagnostic,expected", [
+    (None, {"status": "error"}, "fetch_failed"),
+    ({"pnu": "2729011700101230005", "jiga": "100"}, {"status": "resolved"}, "pnu_unverified"),
+    (None, {"status": "not_found"}, "no_record"),
+])
+def test_price_connection_failure_and_pnu_mismatch_are_not_missing_configuration(monkeypatch, properties, diagnostic, expected):
+    monkeypatch.setattr("integrations.land_data_connectors.fetch_parcel_by_pnu", lambda *a, **kw: (properties, diagnostic))
+    result = LandDataConnectorRouter(environ={"VWORLD_API_KEY": "synthetic-test-key"}).fetch_records_for_parcels(
+        [{"pnu": "2729011700101230004"}], evidence_types={"official_land_price"}, include_region_trends=False,
+    )
+    assert result["officialLandPrices"] == []
+    assert result["diagnostics"][0]["status"] == expected
 
 
 def test_live_connector_router_skips_missing_configuration_without_fabricating_records():
@@ -30,7 +66,7 @@ def test_live_connector_router_skips_missing_configuration_without_fabricating_r
     assert "skipped_missing_config" in statuses
 
 
-def test_land_ledger_enrichment_live_connector_mode_records_diagnostics():
+def test_land_ledger_enrichment_keeps_unverified_candidate_out_of_live_lookup():
     analysis = {
         "parcels": [
             {
@@ -53,10 +89,14 @@ def test_land_ledger_enrichment_live_connector_mode_records_diagnostics():
     )
 
     parcel = result["parcels"][0]
-    assert parcel["pnu"] == "2729011700101230004"
-    assert result["enrichmentRun"]["liveConnectorResult"]["mode"] == "live_connector_router"
-    assert result["enrichmentRun"]["liveConnectorResult"]["diagnostics"]
-    assert result["enrichmentRun"]["status"] == "partial_success"
+    assert parcel["pnuCandidate"] == "2729011700101230004"
+    assert "pnu" not in parcel
+    run = result["enrichmentRun"]
+    assert run["parcelResults"][0]["pnuResolved"] is False
+    assert any(issue["code"] == "pnu_candidate_unverified" for issue in run["parcelResults"][0]["issues"])
+    assert run["liveConnectorResult"]["mode"] == "live_connector_router"
+    assert run["liveConnectorResult"]["diagnostics"] == []
+    assert run["status"] == "partial_success"
 
 
 def test_land_characteristics_are_attached_to_parcel_and_supply_price_fallback():
@@ -153,7 +193,7 @@ def test_vworld_cadastral_fallback_exposes_zoning_but_not_inferred_far_or_bcr(mo
     monkeypatch.setattr(
         "integrations.land_data_connectors.fetch_parcel_by_pnu",
         lambda *args, **kwargs: (
-            {"prposArea1Nm": "제2종일반주거지역", "lndpclAr": "500"},
+            {"pnu": "2729011700101230004", "prposArea1Nm": "제2종일반주거지역", "lndpclAr": "500"},
             {"status": "resolved"},
         ),
     )
@@ -329,3 +369,21 @@ class _FakeHttpResponse:
 
     def read(self):
         return self.body
+
+
+def test_planning_response_cannot_relabel_another_parcels_data():
+    pnu = "2729011700101230004"
+    router = LandDataConnectorRouter(environ={"REALYTICS_LAND_USE_URL_TEMPLATE": "https://example.test"})
+    wrong = {"pnu": "2729011700101230005", "zoning": "상업지역", "legalFar": 1200}
+    unbound = {"zoning": "상업지역", "legalFar": 900}
+    right = {"pnu": pnu, "zoning": "제2종일반주거지역", "far": 800}
+    assert router._normalize_land_use_record(
+        pnu, [wrong, unbound], source_name="test", source_url=None,
+    ) is None
+    record = router._normalize_land_use_record(
+        pnu, [wrong, unbound, right], source_name="test", source_url=None,
+    )
+    assert record["sourcePnuVerified"] is True
+    assert record["zoning"] == "제2종일반주거지역"
+    assert record["legalFar"] is None
+    assert [item["pnu"] for item in record["landUsePlanItems"]] == [pnu]

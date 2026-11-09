@@ -1,19 +1,19 @@
 from datetime import datetime, timezone
+from copy import deepcopy
 from typing import Any, Dict, List
 from uuid import uuid4
 
-from agents.development_feasibility_agent import DevelopmentFeasibilityAgent
+from agents.development_feasibility_agent import DevelopmentFeasibilityAgent, DEVELOPMENT_FEASIBILITY_AGENT_VERSION
+from use_cases.development_feasibility import development_feasibility_input_basis
 from agents.ai_connection import resolve_ai_context, safe_ai_context
 from agents.ai_router import describe_selection, select_ai_context
 from agents.consensus_engine import ConsensusEngine, build_consensus_coordinator
+from agents.consensus_review_cycle import recompute_consensus_cycle
 from agents.credit_document_agent import CreditDocumentAgent
-from agents.credit_review_agent import CreditReviewAgent
-from agents.data_quality_agent import DataQualityAgent
 from agents.deal_optimization_agent import DealOptimizationAgent
 from agents.developability_score_agent import DevelopabilityScoreAgent
 from schemas.credit_policy import resolve_credit_policy
 from agents.evidence_graph_agent import EvidenceGraphAgent
-from agents.legal_review_agent import LegalReviewAgent
 from agents.market_evidence_agent import MarketEvidenceAgent
 from agents.marketability_agent import MarketabilityAgent
 from integrations.market_data import MolitRtmsConnector
@@ -27,11 +27,11 @@ from use_cases.glossary import capture_unmapped_term_surface_candidates_use_case
 from use_cases.approval_readiness_gate import build_deal_state_approval_readiness
 from agents.report_agent import ReportAgent
 from agents.restructuring_agent import RestructuringAgent
-from agents.risk_register_agent import RiskRegisterAgent
 from core.calculations import (
     calculate_feasibility_metrics,
     calculate_pf_metrics,
     calculate_return_metrics,
+    normalize_tranche_priority,
 )
 from agents.stress_test_agent import StressTestAgent
 from agents.credit_enhancement_agent import CreditEnhancementAgent
@@ -40,6 +40,9 @@ from schemas.stress_test import StressTestRequest, StressTranche
 from schemas.credit_enhancement import CreditEnhancementRequest, CreditEnhancementInput
 from schemas.cash_sweep import CashSweepRequest, CashSweepTranche
 from core.risk_assessment import build_basic_risk_matrix
+from core.secret_redaction import collect_secret_values, redact_sensitive_value
+from core.agent_execution import require_successful_runtime
+from db.repositories.request_project_repository import current_project_scope
 from schemas.orchestration import AgentHandoffEnvelope, AgentProgress, PF_REVIEW_STEPS, PF_REVIEW_WORKFLOW
 from agent_platform.domain_agent_runtime import run_domain_agent_callable_with_contract
 from use_cases.assumption_proposals import build_consensus_assumption_proposals
@@ -52,7 +55,8 @@ class OrchestrationAgent:
         project_data: Dict[str, Any],
         options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        options = options or {}
+        project_data = deepcopy(project_data)
+        options, tenant_id = self._runtime_context(project_data, options or {})
         ai_connection = resolve_ai_context(
             options.get("ai_context"),
             user_id=options.get("user_id") or options.get("requested_by"),
@@ -62,15 +66,17 @@ class OrchestrationAgent:
         run = {
             "run_id": str(uuid4()),
             "project_id": project_id,
+            "tenant_id": tenant_id,
             "workflow": PF_REVIEW_WORKFLOW,
             "status": "running",
             "executionStatus": "running",
-            "approvalStatus": "not_evaluated",
+            "approvalStatus": "not_requested",
+            "approvalReadinessStatus": "not_started",
             "reportStatus": "not_started",
             "started_at": now,
             "completed_at": None,
             "user_id": ai_connection["user_id"],
-            "ai_connection": ai_connection,
+            "ai_connection": safe_ai_context(ai_connection),
             "options": self._sanitize_options(options),
             "steps": [],
             "agentProgress": self._initial_agent_progress(now),
@@ -89,21 +95,67 @@ class OrchestrationAgent:
 
             self._run_term_annotation_step(run, project_data)
 
-            land_review = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="LandReadinessAgent",
-                task_type="land_readiness_review",
-                domain="land_legal",
-                input_snapshot={
-                    "land": project_data.get("land"),
-                    "landLedger": project_data.get("landLedger"),
-                    "landEvidence": project_data.get("landEvidence"),
-                },
-                executor=lambda: self._review_land_readiness(project_data),
-                output_schema_name="LandReadinessReview",
+            # Freeze reference evidence once. Every consensus evaluation then
+            # executes the domain Agents against an isolated working snapshot.
+            from use_cases.legal_intelligence import resolve_project_legal_context
+
+            supplied_law_context = options.get("law_context")
+            frozen_legal_resolution = resolve_project_legal_context(
+                project_data,
+                caller_context=supplied_law_context if isinstance(supplied_law_context, dict) else None,
+                preview=True,
             )
+            market_reference_input = deepcopy(project_data)
+            self._maybe_inject_live_market_comparables(run, project_data, market_reference_input)
+            raw_market = market_reference_input.get("market") or {}
+            frozen_market = {
+                key: deepcopy(raw_market[key]) for key in
+                ("transactionComparables", "closedTransactionComparables", "leaseComparables")
+                if key in raw_market
+            }
+            consensus_evaluations = []
+            baseline_cycle = {}
+
+            def _reconcile_with(working_pd: Dict[str, Any], supplied_artifacts: Dict[str, Any]) -> Dict[str, Any]:
+                cycle = recompute_consensus_cycle(
+                    self, run, working_pd, options,
+                    evaluation_index=len(consensus_evaluations),
+                    frozen_market=frozen_market,
+                    frozen_legal_resolution=frozen_legal_resolution,
+                )
+                supplied_artifacts.clear()
+                supplied_artifacts.update(deepcopy(cycle["artifacts"]))
+                if not consensus_evaluations:
+                    baseline_cycle.update(deepcopy(cycle))
+                consensus_evaluations.append({
+                    "evaluationIndex": len(consensus_evaluations),
+                    "inputHash": cycle["inputHash"], "outputHash": cycle["outputHash"],
+                    "executions": cycle["executions"], "handoffs": cycle["handoffs"],
+                    "podCoverage": cycle["podCoverage"],
+                })
+                run["agentRuntimeExecutions"].extend(cycle.get("agentRuntimeExecutions") or [])
+                return deepcopy(cycle["reconciliation"])
+
+            consensus_ai = select_ai_context(tier="coordination")
+            consensus_coordinator = build_consensus_coordinator(consensus_ai)
+            consensus = ConsensusEngine().reach_consensus(
+                project_data, {}, _reconcile_with, coordinator=consensus_coordinator
+            )
+            consensus["aiSelection"] = describe_selection(consensus_ai)
+            consensus_artifact = {k: v for k, v in consensus.items()
+                                  if k not in {"agreedProjectData", "finalArtifacts", "finalReconciliation"}}
+            # The original-input evaluation remains authoritative for this run.
+            # Proposed patched outputs are exposed only as an unapproved review.
+            original_artifacts = baseline_cycle["artifacts"]
+            run["artifacts"].update(deepcopy(original_artifacts))
+            land_review = original_artifacts["landAgentReview"]
+            developer_feasibility = original_artifacts["developerFeasibility"]
+            feasibility = original_artifacts["feasibility"]
+            pf_structure = original_artifacts["pfStructure"]
+            market_evidence = original_artifacts["marketEvidenceReview"]
+            marketability = original_artifacts["marketabilityAnalysis"]
+            data_quality = original_artifacts["dataQualityReview"]
+            reconciliation = original_artifacts["reconciliationGate"]
             run["artifacts"]["landAgentReview"] = land_review
             self._complete_step(run, "land_agent_review", {
                 "status": land_review["status"],
@@ -142,23 +194,6 @@ class OrchestrationAgent:
                 },
             )
 
-            developer_feasibility = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="DevelopmentFeasibilityAgent",
-                task_type="development_feasibility_analysis",
-                domain="feasibility_cashflow",
-                input_snapshot={
-                    "feasibilityInput": project_data.get("feasibility_input"),
-                    "feasibilityStudyV2": project_data.get("feasibilityStudyV2"),
-                    "productMix": project_data.get("productMix") or project_data.get("product_mix"),
-                    "schedule": project_data.get("schedule"),
-                },
-                executor=lambda: DevelopmentFeasibilityAgent().analyze(project_data),
-                output_schema_name="DevelopmentFeasibilityResult",
-                deterministic_authority_required=True,
-            )
             run["artifacts"]["developerFeasibility"] = developer_feasibility
             self._complete_step(run, "development_feasibility_analysis", {
                 "summary": developer_feasibility["summary"],
@@ -188,110 +223,21 @@ class OrchestrationAgent:
                 },
             )
 
-            feasibility = self._calculate_feasibility(project_data)
             run["artifacts"]["feasibility"] = feasibility
             self._complete_step(run, "feasibility_calculation", feasibility, artifact_key="feasibility")
-
-            pf_structure = self._calculate_pf_structure(project_data)
-
-            # Execute Scenario Engine during orchestration run to dynamically construct sensitivity analyses
-            scenario_req = None
-            scenario_run_result = None
-            try:
-                from schemas.scenario import ScenarioDrivers, ScenarioSetRequest
-                from agents.scenario_engine_agent import ScenarioEngineAgent
-
-                raw_mix = project_data.get("product_mix") or project_data.get("productMix") or []
-                product_mix = []
-                for item in raw_mix:
-                    if isinstance(item, dict):
-                        product_mix.append({
-                            "type": item.get("type") or item.get("name") or "A",
-                            "units": int(item.get("units") or item.get("unit_count") or 0),
-                            "avgUnitPrice": float(item.get("avgUnitPrice") or item.get("avg_unit_price") or 0.0),
-                            "totalRevenue": float(item.get("totalRevenue") or item.get("total_revenue") or 0.0)
-                        })
-                tranches = project_data.get("pf_structure", [])
-                pf_structure_list = []
-                for idx, item in enumerate(tranches):
-                    if isinstance(item, dict):
-                        pf_structure_list.append({
-                            "tranche": item.get("tranche") or item.get("name") or f"Tr.{idx+1}",
-                            "amount": float(item.get("amount") or 0.0),
-                            "priority": int(item.get("priority") or idx + 1),
-                            "interestRate": float(item.get("interest_rate") or item.get("interestRate") or 0.0),
-                            "feeRate": float(item.get("fee_rate") or item.get("feeRate") or 0.0)
-                        })
-                raw_scenario_drivers = (
-                    project_data.get("scenarioDrivers")
-                    or project_data.get("scenario_drivers")
-                    or project_data.get("scenarioAssumptions")
-                    or project_data.get("scenario_assumptions")
-                    or {}
-                )
-                scenario_drivers = None
-                if isinstance(raw_scenario_drivers, dict) and raw_scenario_drivers:
-                    scenario_drivers = ScenarioDrivers.model_validate(raw_scenario_drivers)
-
-                missing_scenario_inputs = []
-                if not product_mix:
-                    missing_scenario_inputs.append("product_mix")
-                if not pf_structure_list:
-                    missing_scenario_inputs.append("pf_structure")
-                if missing_scenario_inputs:
-                    run["artifacts"]["scenarioEngineReadiness"] = {
-                        "status": "not_ready",
-                        "reason": "deterministic_input_missing",
-                        "missingInputs": missing_scenario_inputs,
-                        "message": "Scenario Engine was not executed because verified product mix or PF structure inputs are missing.",
-                    }
-                else:
-                    scenario_req = ScenarioSetRequest(
-                        scenarioSetId=f"run-{run['run_id']}",
-                        scenarioSetName="Orchestration Run Scenario Set",
-                        productMix=product_mix,
-                        pfStructure=pf_structure_list,
-                        scenarioDrivers=scenario_drivers,
-                    )
-                    scenario_run_result = ScenarioEngineAgent().run_scenario_set(scenario_req)
-                    run["artifacts"]["scenariosEvaluation"] = scenario_run_result.model_dump(by_alias=True)
-
-                    # Include scenario fragments directly in the pf_structure artifact.
-                    pf_structure["scenariosSummary"] = scenario_run_result.reportFragments.waterfallSummary
-                    pf_structure["unsoldLtvSummary"] = scenario_run_result.reportFragments.unsoldLtvSummary
-                    pf_structure["trancheRecoverySummary"] = scenario_run_result.reportFragments.trancheRecoverySummary
-            except Exception as exc:
-                run["errors"].append({"message": f"Scenario calculation failed: {str(exc)}", "type": exc.__class__.__name__})
 
             run["artifacts"]["pfStructure"] = pf_structure
             self._complete_step(run, "pf_structure_calculation", pf_structure, artifact_key="pfStructure")
 
-            # --- Deck headline engines (surfaced into the run and Phase 11 report) ---
-            self._run_return_metrics_step(run, project_data)
-            self._run_stress_test_step(run, project_data)
-            self._run_credit_enhancement_step(run, project_data, pf_structure)
-            self._run_cash_sweep_step(run, project_data)
+            # Publish the original-input cycle without calculating it twice.
+            for key, artifact_key in (
+                ("return_metrics", "returnMetrics"),
+                ("stress_test", "stressTest"),
+                ("credit_enhancement_review", "creditEnhancement"),
+                ("cash_sweep_simulation", "cashSweep"),
+            ):
+                self._complete_step(run, key, deepcopy(baseline_cycle["stepOutputs"][key]), artifact_key=artifact_key)
 
-            market_evidence = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="MarketEvidenceAgent",
-                task_type="market_evidence_reconciliation",
-                domain="market_product",
-                input_snapshot={
-                    "market": project_data.get("market"),
-                    "marketEvidence": project_data.get("marketEvidence") or project_data.get("market_evidence"),
-                    "developerFeasibility": developer_feasibility,
-                    "feasibility": feasibility,
-                },
-                executor=lambda: MarketEvidenceAgent().review(
-                    project_data,
-                    developer_feasibility,
-                    feasibility,
-                ),
-                output_schema_name="MarketEvidenceReview",
-            )
             run["artifacts"]["marketEvidenceReview"] = market_evidence
             self._complete_step(run, "market_evidence_reconciliation", {
                 "status": market_evidence["status"],
@@ -322,27 +268,6 @@ class OrchestrationAgent:
                 },
             )
 
-            marketability_input = self._deep_merge(
-                project_data,
-                market_evidence.get("marketPayloadPatch", {}),
-            )
-            marketability_input["marketEvidenceReview"] = market_evidence
-            self._maybe_inject_live_market_comparables(run, project_data, marketability_input)
-            marketability = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="MarketabilityAgent",
-                task_type="marketability_analysis",
-                domain="market_product",
-                input_snapshot={
-                    "marketEvidenceReview": market_evidence,
-                    "market": marketability_input.get("market"),
-                    "productMix": marketability_input.get("productMix") or marketability_input.get("product_mix"),
-                },
-                executor=lambda: MarketabilityAgent().analyze(marketability_input),
-                output_schema_name="MarketabilityAnalysis",
-            )
             run["artifacts"]["marketabilityAnalysis"] = marketability
             self._complete_step(run, "marketability_analysis", marketability, artifact_key="marketabilityAnalysis")
             self._add_handoff(
@@ -366,25 +291,6 @@ class OrchestrationAgent:
                 },
             )
 
-            data_quality_inputs = {
-                    "landAgentReview": land_review,
-                    "developerFeasibility": developer_feasibility,
-                    "feasibility": feasibility,
-                    "pfStructure": pf_structure,
-                    "marketEvidenceReview": market_evidence,
-                    "marketabilityAnalysis": marketability,
-                }
-            data_quality = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="DataQualityAgent",
-                task_type="cross_document_data_quality_review",
-                domain="cross_agent_reconciliation",
-                input_snapshot=data_quality_inputs,
-                executor=lambda: DataQualityAgent().review(project_data, data_quality_inputs),
-                output_schema_name="DataQualityReview",
-            )
             run["artifacts"]["dataQualityReview"] = data_quality
             self._complete_step(run, "data_quality_review", {
                 "status": data_quality["status"],
@@ -392,15 +298,6 @@ class OrchestrationAgent:
                 "nextActions": data_quality["nextActions"],
             }, artifact_key="dataQualityReview")
 
-            reconciliation = self._reconcile_agent_outputs(
-                project_data=project_data,
-                land_review=land_review,
-                developer_feasibility=developer_feasibility,
-                feasibility=feasibility,
-                pf_structure=pf_structure,
-                market_evidence=market_evidence,
-                marketability=marketability,
-            )
             run["artifacts"]["reconciliationGate"] = reconciliation
             self._complete_step(run, "cross_agent_reconciliation", {
                 "status": reconciliation["status"],
@@ -408,27 +305,6 @@ class OrchestrationAgent:
                 "nextActions": reconciliation["nextActions"],
             }, artifact_key="reconciliationGate")
 
-            # Iterative cross-agent consensus: agents re-analyse (patch -> recompute
-            # -> re-reconcile) until their cross-checked numbers agree. Calculations
-            # stay deterministic; a coordinator only sequences/judges the loop.
-            def _reconcile_with(working_pd: Dict[str, Any], _art: Dict[str, Any]) -> Dict[str, Any]:
-                return self._reconcile_agent_outputs(
-                    project_data=working_pd,
-                    land_review=land_review,
-                    developer_feasibility=developer_feasibility,
-                    feasibility=feasibility,
-                    pf_structure=self._calculate_pf_structure(working_pd),
-                    market_evidence=market_evidence,
-                    marketability=marketability,
-                )
-
-            consensus_ai = select_ai_context(tier="coordination")
-            consensus_coordinator = build_consensus_coordinator(consensus_ai)
-            consensus = ConsensusEngine().reach_consensus(
-                project_data, run["artifacts"], _reconcile_with, coordinator=consensus_coordinator
-            )
-            consensus["aiSelection"] = describe_selection(consensus_ai)
-            consensus_artifact = {k: v for k, v in consensus.items() if k != "agreedProjectData"}
             proposals = build_consensus_assumption_proposals(
                 project_id,
                 run["run_id"],
@@ -437,6 +313,16 @@ class OrchestrationAgent:
             )
             consensus_artifact["assumptionProposals"] = proposals
             consensus_artifact["proposalStatus"] = "pending_approval" if proposals else "not_required"
+            consensus_artifact["candidateReview"] = {
+                "analysisOnly": True, "reportEligible": False,
+                "approvalStatus": consensus_artifact["proposalStatus"],
+                "inputHash": consensus_evaluations[-1]["inputHash"],
+                "workingInputHash": consensus["evaluationLog"][-1]["inputHash"],
+                "artifactSource": "unapproved_candidate" if proposals else "original_input_evaluation",
+                "artifacts": consensus["finalArtifacts"] if proposals else {},
+                "reconciliation": consensus["finalReconciliation"],
+                "evaluations": consensus_evaluations,
+            }
             consensus_artifact["calculationPolicy"] = (
                 "Original project assumptions remain authoritative until proposals are approved into a new project version."
             )
@@ -457,25 +343,7 @@ class OrchestrationAgent:
                 "pendingProposalCount": len(proposals),
             }, artifact_key="consensusResolution")
 
-            legal_review = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="LegalReviewAgent",
-                task_type="legal_permit_review",
-                domain="land_legal",
-                input_snapshot={
-                    "land": project_data.get("land"),
-                    "landLedger": project_data.get("landLedger"),
-                    "legalContext": options.get("law_context"),
-                    "sourceDocuments": project_data.get("source_documents"),
-                },
-                executor=lambda: LegalReviewAgent().review(
-                    project_data,
-                    options.get("law_context"),
-                ),
-                output_schema_name="LegalReviewResult",
-            )
+            legal_review = deepcopy(original_artifacts["legalPermitReview"])
             run["artifacts"]["legalPermitReview"] = legal_review
             self._complete_step(run, "legal_permit_review", {
                 "status": legal_review["status"],
@@ -505,26 +373,10 @@ class OrchestrationAgent:
                 },
             )
 
-            risk = self._assess_risk(project_data)
+            risk = deepcopy(original_artifacts["riskAssessment"])
             run["artifacts"]["riskAssessment"] = risk
             self._complete_step(run, "risk_assessment", risk, artifact_key="riskAssessment")
-
-            risk_register = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="RiskRegisterAgent",
-                task_type="risk_register_aggregation",
-                domain="pf_credit",
-                input_snapshot={
-                    "artifactKeys": sorted(run["artifacts"]),
-                    "legalReview": legal_review,
-                    "marketability": marketability,
-                    "pfStructure": pf_structure,
-                },
-                executor=lambda: RiskRegisterAgent().build(project_data, run["artifacts"]),
-                output_schema_name="RiskRegister",
-            )
+            risk_register = deepcopy(original_artifacts["riskRegister"])
             run["artifacts"]["riskRegister"] = risk_register
             self._complete_step(run, "risk_register_generation", {
                 "status": risk_register["status"],
@@ -559,21 +411,7 @@ class OrchestrationAgent:
                 },
             )
 
-            credit_review = self._run_domain_agent(
-                run,
-                project_data=project_data,
-                options=options,
-                agent_id="CreditReviewAgent",
-                task_type="credit_decision_review",
-                domain="pf_credit",
-                input_snapshot={
-                    "riskRegister": risk_register,
-                    "pfStructure": pf_structure,
-                    "scenariosEvaluation": run["artifacts"].get("scenariosEvaluation"),
-                },
-                executor=lambda: CreditReviewAgent().decide(project_data, run["artifacts"]),
-                output_schema_name="CreditReviewDecision",
-            )
+            credit_review = deepcopy(original_artifacts["creditReviewDecision"])
             run["artifacts"]["creditReviewDecision"] = credit_review
             self._complete_step(run, "credit_review_decision", {
                 "decision": credit_review["decision"],
@@ -610,7 +448,7 @@ class OrchestrationAgent:
                 },
             )
 
-            restructuring_plan = self._build_restructuring_plan(scenario_req, scenario_run_result, project_data)
+            restructuring_plan = deepcopy(original_artifacts["restructuringPlan"])
             run["artifacts"]["restructuringPlan"] = restructuring_plan
             restructuring_blockers = self._restructuring_blockers(restructuring_plan)
             self._complete_step(run, "scenario_restructuring_plan", {
@@ -648,15 +486,23 @@ class OrchestrationAgent:
                 },
             )
 
-            self._run_deal_optimization_step(run, project_data)
+            self._complete_step(run, "deal_optimization", deepcopy(baseline_cycle["stepOutputs"]["deal_optimization"]), artifact_key="dealOptimization")
 
-            self._run_developability_score_step(run, project_data)
+            self._complete_step(run, "developability_score", deepcopy(baseline_cycle["stepOutputs"]["developability_score"]), artifact_key="developabilityScore")
+
+            report_source = deepcopy(project_data)
+            for field in ("scenariosEvaluation", "cashFlowRunResult", "cashFlowBasisReview", "returnMetrics", "stressTest", "creditEnhancement", "developabilityScore"):
+                report_source.pop(field, None)
+                if isinstance(run["artifacts"].get(field), dict):
+                    report_source[field] = deepcopy(run["artifacts"][field])
 
             def generate_report_artifact() -> Dict[str, Any]:
+                from agents.report_export_agent import ReportExportAgent
                 report_agent = ReportAgent()
+                report = report_agent.generate_structured_report(report_source)
                 return {
-                    "report": report_agent.generate_structured_report(project_data),
-                    "report_markdown": report_agent.generate_report(project_data),
+                    "report": report,
+                    "report_markdown": ReportExportAgent().export({"report": report}, "markdown")["content"],
                 }
 
             report_artifact = self._run_domain_agent(
@@ -667,6 +513,7 @@ class OrchestrationAgent:
                 task_type="phase11_report_generation",
                 domain="report_studio",
                 input_snapshot={
+                    "reportSource": report_source,
                     "creditReviewDecision": credit_review,
                     "riskRegister": risk_register,
                     "artifactKeys": sorted(run["artifacts"]),
@@ -739,10 +586,11 @@ class OrchestrationAgent:
 
                 qa_agent = VisualQAAgent()
                 structure_results = qa_agent.analyze_pdf_structure(pdf_bytes)
-                visual_results = qa_agent.run_visual_regression(pdf_bytes, report_id=f"report-{run['run_id']}")
+                visual_results = qa_agent.run_visual_regression(pdf_bytes, report_id=f"report-{run['run_id']}",
+                    baseline_id=qa_agent.baseline_key(str(run.get("tenant_id") or "legacy"), str(project_id), str(structured_report["template"])))
             except Exception as qa_exc:
                 run["errors"].append({
-                    "message": f"Visual QA execution failed: {str(qa_exc)}",
+                    "message": "Visual QA execution failed. The report has not passed visual review.",
                     "type": qa_exc.__class__.__name__
                 })
 
@@ -752,25 +600,35 @@ class OrchestrationAgent:
 
             approval_readiness = self._approval_readiness_gate(run)
             run["artifacts"]["approvalReadinessGate"] = approval_readiness
-            run["approvalStatus"] = "ready_for_review" if approval_readiness.get("status") in {"ready", "pass"} else "not_ready"
+            readiness_pass = approval_readiness.get("status") in {
+                "ready",
+                "pass",
+                "ready_for_approval",
+            }
+            run["approvalReadinessStatus"] = (
+                "ready_for_approval" if readiness_pass else "not_ready_for_approval"
+            )
+            # Readiness is not approval.  Keep approvalStatus in its canonical
+            # lifecycle and let the separate, authenticated maker-checker
+            # action move it to approved/rejected.
+            run["approvalStatus"] = "pending" if readiness_pass else "not_requested"
             self._complete_step(run, "approval_readiness_gate", approval_readiness, artifact_key="approvalReadinessGate")
 
             # Credit documents synthesise every prior artifact (incl. the approval
             # readiness gate), so they are generated last.
             self._run_credit_document_step(run, project_data)
 
-            run["executionStatus"] = "completed" if quality["pass"] else "completed_with_warnings"
-            run["reportStatus"] = "quality_pass" if quality["pass"] else "quality_warning"
-            run["status"] = run["executionStatus"]
+            self._finalize_pf_execution(run, quality)
         except Exception as exc:
+            safe_error = "PF review execution failed. Retry or contact an operator with the run ID."
             run["executionStatus"] = "failed"
             run["reportStatus"] = "failed" if run.get("reportStatus") == "not_started" else run.get("reportStatus")
             run["status"] = run["executionStatus"]
-            run["errors"].append({"message": str(exc), "type": exc.__class__.__name__})
-            self._mark_failed_progress(run, str(exc))
+            run["errors"].append({"message": safe_error, "type": exc.__class__.__name__})
+            self._mark_failed_progress(run, safe_error)
 
         run["completed_at"] = self._now()
-        return run
+        return redact_sensitive_value(run, secrets=collect_secret_values((ai_connection, options)))
 
     # ------------------------------------------------------------------
     # Intent-driven workflow executor
@@ -789,7 +647,8 @@ class OrchestrationAgent:
         agents instead of always running the full 18-step PF review. The full
         review still delegates to ``run_pf_review``.
         """
-        options = options or {}
+        project_data = deepcopy(project_data)
+        options, tenant_id = self._runtime_context(project_data, options or {})
         if workflow == "full_pf_review":
             return self.run_pf_review(project_id, project_data, options)
 
@@ -797,6 +656,7 @@ class OrchestrationAgent:
             "run_id": str(uuid4()),
             "project_id": project_id,
             "workflow": workflow,
+            "tenant_id": tenant_id,
             "status": "running",
             "started_at": self._now(),
             "completed_at": None,
@@ -831,9 +691,45 @@ class OrchestrationAgent:
             run["status"] = "completed" if not run["errors"] else "completed_with_warnings"
         except Exception as exc:  # pragma: no cover - defensive
             run["status"] = "error"
-            run["errors"].append({"message": str(exc), "type": exc.__class__.__name__})
+            run["errors"].append({"message": "Workflow execution failed. Check the run status and input evidence.", "type": exc.__class__.__name__})
         run["completed_at"] = self._now()
-        return run
+        return redact_sensitive_value(run, secrets=collect_secret_values(options))
+
+    @staticmethod
+    def _runtime_context(project_data: Dict[str, Any], options: Dict[str, Any]):
+        options = dict(options)
+        scope = current_project_scope()
+        metadata = project_data.get("_meta") or {}
+        declared = [str(value).strip() for value in (
+            options.get("tenantId"), options.get("tenant_id"),
+            metadata.get("tenantId"), metadata.get("tenant_id"),
+        ) if value is not None and str(value).strip()]
+        tenant = str(scope.tenant_id) if scope is not None else (declared[0] if declared else None)
+        if tenant is not None and any(value != tenant for value in declared):
+            raise ValueError("Orchestration tenant does not match its runtime scope")
+        if tenant is not None:
+            options["tenantId"] = tenant
+        return options, tenant
+
+    def _finalize_pf_execution(self, run: Dict[str, Any], quality: Dict[str, Any]) -> None:
+        failed = [step for step in run.get("steps", []) if step.get("status") == "failed"]
+        if failed:
+            gate = run["artifacts"].setdefault("approvalReadinessGate", {})
+            check = self._approval_readiness_check(
+                "AGENT_EXECUTION_SUCCEEDED", False,
+                "All required Agent executions must succeed before approval.", "blocking",
+            )
+            for key in ("gates", "blockers"):
+                gate[key] = [item for item in gate.get(key, []) if item.get("code") != check["code"]] + [check]
+            gate.update({"pass": False, "status": "not_ready_for_approval"})
+            gate.setdefault("summary", {})["blockingIssueCount"] = len(gate["blockers"])
+            run["approvalReadinessStatus"] = "not_ready_for_approval"
+            run["approvalStatus"] = "not_requested"
+        run["executionStatus"] = "failed" if failed else (
+            "completed" if quality["pass"] and not run.get("errors") else "completed_with_warnings"
+        )
+        run["reportStatus"] = "failed" if failed else ("quality_pass" if quality["pass"] else "quality_warning")
+        run["status"] = run["executionStatus"]
 
     def _wf_land_review(self, run, data, step, options) -> None:
         land = self._run_domain_agent(
@@ -958,6 +854,9 @@ class OrchestrationAgent:
              "stressTest", stress)
 
     def _wf_pf_structure_review(self, run, data, step, options) -> None:
+        from use_cases.pf_structure import build_pf_structure_input, execute_pf_structure_input
+
+        request = build_pf_structure_input(data, options)
         pf = self._run_domain_agent(
             run,
             project_data=data,
@@ -965,15 +864,12 @@ class OrchestrationAgent:
             agent_id="PFStructuringAgent",
             task_type="pf_structure_calculation",
             domain="pf_credit",
-            input_snapshot={
-                "feasibilityInput": data.get("feasibility_input"),
-                "pfStructure": data.get("pf_structure") or data.get("pfStructure"),
-                "cashFlowRunResult": data.get("cashFlowRunResult"),
-            },
-            executor=lambda: self._calculate_pf_structure(data),
+            input_snapshot=request,
+            executor=lambda: {**execute_pf_structure_input(request), "tranche_count": len(request["tranches"])},
             output_schema_name="PFStructureResult",
             deterministic_authority_required=True,
         )
+        run.setdefault("artifacts", {})["pfStructureInput"] = deepcopy(request)
         step("pf_structure_calculation", "completed",
              {"ltv": pf.get("ltv"), "ltc": pf.get("ltc"), "exit_sale_rate": pf.get("exit_sale_rate")},
              "pfStructure", pf)
@@ -1009,10 +905,22 @@ class OrchestrationAgent:
         output_schema_name: str,
         deterministic_authority_required: bool = False,
         llm_required: bool = False,
+        execution_scope: str | None = None,
     ) -> Any:
+        if agent_id == "DevelopmentFeasibilityAgent":
+            input_snapshot = development_feasibility_input_basis(project_data)
+        if execution_scope is not None:
+            # An independent consensus evaluation must execute the Agent even
+            # when its business inputs equal those of an earlier evaluation.
+            # This trusted scope is separate from the source-input fingerprint.
+            input_snapshot = {
+                **deepcopy(input_snapshot),
+                "_consensusEvaluation": {"scope": execution_scope},
+            }
         output, runtime_envelope = run_domain_agent_callable_with_contract(
             project_id=str(run.get("project_id") or project_data.get("projectId") or ""),
             agent_id=agent_id,
+            agent_version=DEVELOPMENT_FEASIBILITY_AGENT_VERSION if agent_id == "DevelopmentFeasibilityAgent" else "1.0.0",
             task_type=task_type,
             domain=domain,
             input_snapshot=input_snapshot,
@@ -1024,6 +932,7 @@ class OrchestrationAgent:
             llm_required=llm_required,
         )
         run.setdefault("agentRuntimeExecutions", []).append(runtime_envelope)
+        require_successful_runtime(runtime_envelope, label=agent_id)
         return output
 
     @staticmethod
@@ -1036,7 +945,7 @@ class OrchestrationAgent:
             tranches.append(StressTranche(
                 tranche=str(item.get("tranche") or item.get("name") or f"Tr.{index}"),
                 amount=float(item.get("amount") or 0.0),
-                priority=int(item.get("priority") or index),
+                priority=normalize_tranche_priority(item.get("priority"), index),
                 interestRate=float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                 feeRate=float(item.get("fee_rate") or item.get("feeRate") or 0.0),
             ))
@@ -1080,8 +989,8 @@ class OrchestrationAgent:
                 "unmappedCandidates": summary.get("unmappedCandidateCount"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Term annotation failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Term annotation failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "term_annotation_failed"}
         self._complete_step(run, "term_annotation", output, artifact_key="termAnnotations")
 
     def _run_credit_document_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1105,8 +1014,8 @@ class OrchestrationAgent:
                 "icMemoApprovalReady": ic_memo.get("recommendation", {}).get("approvalReady"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Credit document generation failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Credit document generation failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "credit_document_generation_failed"}
         self._complete_step(run, "credit_document_generation", output, artifact_key="icMemo")
 
     def _add_term_sheet_contribution_handoffs(self, run: Dict[str, Any], term_sheet: Dict[str, Any]) -> None:
@@ -1158,8 +1067,8 @@ class OrchestrationAgent:
                 "actionCount": len(optimization.get("borrowerActions", [])),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Deal optimization failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Deal optimization failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "deal_optimization_failed"}
         self._complete_step(run, "deal_optimization", output, artifact_key="dealOptimization")
 
     def _run_developability_score_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1181,8 +1090,8 @@ class OrchestrationAgent:
                 "gaps": score.get("gaps", []),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Developability score failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Developability score failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "developability_score_failed"}
         self._complete_step(run, "developability_score", output, artifact_key="developabilityScore")
 
     def _maybe_inject_live_market_comparables(
@@ -1213,7 +1122,7 @@ class OrchestrationAgent:
             }
         except Exception as exc:  # external data must never break the credit run
             run.setdefault("errors", []).append(
-                {"message": f"Live market comparables fetch failed: {exc}", "type": exc.__class__.__name__}
+                {"message": "Live market comparables fetch failed.", "type": exc.__class__.__name__}
             )
 
     def _run_return_metrics_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1236,8 +1145,8 @@ class OrchestrationAgent:
                 "icr": metrics.get("icr", {}).get("value"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Return metrics failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Return metrics failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "return_metrics_failed"}
         self._complete_step(run, "return_metrics", output, artifact_key="returnMetrics")
 
     @staticmethod
@@ -1312,8 +1221,8 @@ class OrchestrationAgent:
                 "seniorBreakScenarioKey": stress.get("seniorBreakScenarioKey"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Stress test failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Stress test failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "stress_test_failed"}
         self._complete_step(run, "stress_test", output, artifact_key="stressTest")
 
     def _run_credit_enhancement_step(self, run: Dict[str, Any], project_data: Dict[str, Any], pf_structure: Dict[str, Any]) -> None:
@@ -1337,8 +1246,8 @@ class OrchestrationAgent:
                 "missingCriticalMeasures": credit_enh.get("missingCriticalMeasures"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Credit enhancement failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Credit enhancement failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "credit_enhancement_failed"}
         self._complete_step(run, "credit_enhancement_review", output, artifact_key="creditEnhancement")
 
     def _run_cash_sweep_step(self, run: Dict[str, Any], project_data: Dict[str, Any]) -> None:
@@ -1357,7 +1266,7 @@ class OrchestrationAgent:
                 tranches.append(CashSweepTranche(
                     tranche=str(item.get("tranche") or item.get("name") or f"Tr.{index}"),
                     amount=float(item.get("amount") or 0.0),
-                    priority=int(item.get("priority") or index),
+                    priority=normalize_tranche_priority(item.get("priority"), index),
                     interestRate=float(item.get("interest_rate") or item.get("interestRate") or 0.0),
                     feeRate=float(item.get("fee_rate") or item.get("feeRate") or 0.0),
                 ))
@@ -1373,8 +1282,8 @@ class OrchestrationAgent:
                 "endingTotalBalance": cash_sweep.get("endingTotalBalance"),
             }
         except Exception as exc:
-            run["errors"].append({"message": f"Cash sweep failed: {exc}", "type": exc.__class__.__name__})
-            output = {"status": "error", "reason": str(exc)}
+            run["errors"].append({"message": "Cash sweep failed.", "type": exc.__class__.__name__})
+            output = {"status": "error", "reason": "cash_sweep_failed"}
         self._complete_step(run, "cash_sweep_simulation", output, artifact_key="cashSweep")
 
     def _review_land_readiness(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1739,15 +1648,13 @@ class OrchestrationAgent:
         missing_artifacts = [
             artifact for artifact in required_artifacts if artifact not in run["artifacts"]
         ]
-        pdf_structure_pass = True
-        pdf_visual_pass = True
-        if structure_results:
-            pdf_structure_pass = structure_results.get("status") != "failed"
-        if visual_results:
-            pdf_visual_pass = visual_results.get("status") != "failed"
+        pdf_structure_pass = bool(structure_results) and structure_results.get("status") in {"passed", "warnings"}
+        pdf_visual_pass = bool(visual_results) and visual_results.get("status") == "passed" and visual_results.get("baseline_reviewed") is True
 
         is_passed = (
             report_quality["isComplete"]
+            and report_quality.get("inputBasisConsistent") is not False
+            and report_quality.get("cashFlowReportEligible") is not False
             and not missing_artifacts
             and pdf_structure_pass
             and pdf_visual_pass
@@ -1768,6 +1675,24 @@ class OrchestrationAgent:
         risk_register = artifacts.get("riskRegister") or {}
         credit_review = artifacts.get("creditReviewDecision") or {}
         legal_review = artifacts.get("legalPermitReview") or {}
+        legal_intelligence = legal_review.get("legalIntelligence") or {}
+        verified_reference_count = legal_intelligence.get(
+            "verifiedReferenceCount"
+        )
+        verified_citation_count = legal_intelligence.get(
+            "verifiedCitationCount"
+        )
+        legal_evidence_trusted = (
+            legal_intelligence.get("evidenceStatus") == "verified"
+            and isinstance(verified_reference_count, int)
+            and not isinstance(verified_reference_count, bool)
+            and verified_reference_count > 0
+            and isinstance(verified_citation_count, int)
+            and not isinstance(verified_citation_count, bool)
+            and verified_citation_count > 0
+            and legal_intelligence.get("citationCoverageComplete") is True
+            and legal_intelligence.get("claimCoverageComplete") is True
+        )
         data_quality = artifacts.get("dataQualityReview") or {}
         reconciliation = artifacts.get("reconciliationGate") or {}
         quality = artifacts.get("qualityCheck") or {}
@@ -1790,31 +1715,41 @@ class OrchestrationAgent:
             ),
             self._approval_readiness_check(
                 "LEGAL_NOT_BLOCKING",
-                legal_review.get("status") != "blocking_issue",
+                legal_review.get("status") in {"clear", "caution"},
                 f"Legal review status is {legal_review.get('status')}.",
                 severity="blocking",
             ),
             self._approval_readiness_check(
+                "LEGAL_EVIDENCE_TRUSTED",
+                legal_evidence_trusted,
+                (
+                    "Legal evidence must be verified, exact-citation complete, "
+                    "and complete for every required research claim. "
+                    "Caller-supplied law_context remains candidate-only."
+                ),
+                severity="blocking",
+            ),
+            self._approval_readiness_check(
                 "DATA_QUALITY_NOT_BLOCKING",
-                data_quality.get("status") != "blocking",
+                data_quality.get("status") in {"clear", "needs_review"},
                 f"Data Quality status is {data_quality.get('status')}.",
                 severity="blocking",
             ),
             self._approval_readiness_check(
                 "RECONCILIATION_NOT_BLOCKING",
-                reconciliation.get("status") != "blocking",
+                reconciliation.get("status") in {"clear", "needs_review", "warning"},
                 f"Reconciliation status is {reconciliation.get('status')}.",
                 severity="blocking",
             ),
             self._approval_readiness_check(
                 "RISK_REGISTER_NOT_BLOCKING",
-                risk_register.get("status") != "blocking",
+                risk_register.get("status") in {"clear", "watch", "high_risk"},
                 f"Risk Register status is {risk_register.get('status')}.",
                 severity="blocking",
             ),
             self._approval_readiness_check(
                 "CREDIT_DECISION_NOT_REJECT_OR_REWORK",
-                credit_review.get("decision") not in {"reject_recommended", "rework_required"},
+                credit_review.get("decision") in {"approve", "conditional_approval"},
                 f"Credit Review decision is {credit_review.get('decision')}.",
                 severity="blocking",
             ),
@@ -1833,6 +1768,12 @@ class OrchestrationAgent:
         ]
 
         unresolved_handoffs = self._unresolved_handoff_reviews(run)
+        gates.append(self._approval_readiness_check(
+            "AGENT_EXECUTION_SUCCEEDED",
+            not any(step.get("status") == "failed" for step in run.get("steps", [])),
+            "Agent execution failures must be resolved before approval.",
+            severity="blocking",
+        ))
         unresolved_risks = self._unresolved_risk_reviews(run)
         gates.append(self._approval_readiness_check(
             "HANDOFF_REVIEWS_RESOLVED",
@@ -1907,7 +1848,17 @@ class OrchestrationAgent:
 
         project_id = run.get("project_id") or run.get("projectId")
         deal_state_context = (
-            build_deal_state_approval_readiness(str(project_id))
+            build_deal_state_approval_readiness(
+                str(project_id),
+                tenant_id=(
+                    str(
+                        run.get("tenant_id")
+                        or run.get("tenantId")
+                        or ""
+                    ).strip()
+                    or None
+                ),
+            )
             if project_id
             else self._deal_state_approval_context(run)
         )
@@ -2000,7 +1951,17 @@ class OrchestrationAgent:
                 "warnings": [],
                 "requiredActions": [],
             }
-        return build_deal_state_approval_readiness(str(project_id))
+        return build_deal_state_approval_readiness(
+            str(project_id),
+            tenant_id=(
+                str(
+                    run.get("tenant_id")
+                    or run.get("tenantId")
+                    or ""
+                ).strip()
+                or None
+            ),
+        )
 
     def _unresolved_handoff_reviews(self, run: Dict[str, Any]) -> List[Dict[str, Any]]:
         unresolved = []
@@ -2069,10 +2030,14 @@ class OrchestrationAgent:
         artifact_key: str | None = None,
     ) -> None:
         title = self._step_title(key)
+        output_status = str(output.get("status") or "").casefold()
+        status = "failed" if output_status in {"failed", "error", "cancelled", "timed_out"} else (
+            "skipped" if output_status in {"skipped", "not_run"} else "completed"
+        )
         run["steps"].append({
             "key": key,
             "title": title,
-            "status": "completed",
+            "status": status,
             "started_at": self._now(),
             "completed_at": self._now(),
             "output": output,
@@ -2080,12 +2045,14 @@ class OrchestrationAgent:
         self._update_agent_progress(
             run,
             key,
-            status="completed",
+            status=status,
             progress_percent=100,
-            completed_tasks=[title],
+            completed_tasks=[title] if status == "completed" else [],
             pending_tasks=[],
             last_artifact_key=artifact_key or key,
             next_action=self._next_action_after(key),
+            blocked_tasks=[title] if status == "failed" else [],
+            review_required=status == "failed",
         )
 
     def _add_handoff(
@@ -2176,7 +2143,7 @@ class OrchestrationAgent:
             downstreamDependencies=current.get("downstreamDependencies", self._downstream_for_step(key)),
             lastArtifactKey=last_artifact_key,
             nextAction=next_action,
-            reviewRequired=review_required,
+            reviewRequired=review_required or bool(current.get("reviewRequired")),
             handoffIds=existing_handoffs,
             updatedAt=self._now(),
         ).model_dump(by_alias=True, exclude_none=True)

@@ -3,10 +3,14 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
+import core.secret_vault as secret_vault
 from main import app
+from routers import projects
+from storage import upsert_deal_state_record, upsert_orchestration_run
 
 
 def test_auth_identity_session_and_me_context():
@@ -57,6 +61,153 @@ def test_auth_identity_session_and_me_context():
     logs = client.get("/audit/user-activity", params={"user_id": "auth-user", "limit": 20}).json()["logs"]
     assert any(record["eventType"] == "login" for record in logs)
     assert any(record.get("path") == "/projects/" for record in logs)
+
+
+def test_review_mutations_ignore_client_supplied_actor_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "REALYTICS_SQLITE_FILE",
+        str(tmp_path / "verified-review-actor.sqlite3"),
+    )
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    client = TestClient(app)
+    tenant_id = "verified-review-tenant"
+    client.post("/auth/tenants", json={"tenantId": tenant_id, "name": tenant_id})
+    for user_id, role in (
+        ("verified-review-admin", "admin"),
+        ("verified-reviewer", "reviewer"),
+    ):
+        client.post(
+            "/auth/users",
+            json={
+                "userId": user_id,
+                "tenantId": tenant_id,
+                "displayName": user_id,
+                "role": role,
+            },
+        )
+    admin_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "verified-review-admin",
+            "tenantId": tenant_id,
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    reviewer_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "verified-reviewer",
+            "tenantId": tenant_id,
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    reviewer_headers = {"x-realytics-session-id": reviewer_session}
+    created = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": admin_session},
+        json={"project": {"name": "Verified Review Actor", "type": "mixed_use"}},
+    ).json()
+    project_id = created["project"]["id"]
+
+    deal_state = upsert_deal_state_record(
+        project_id,
+        {
+            "recordId": "verified-review-deal-state",
+            "recordType": "risk_issue",
+            "key": "VERIFIED_REVIEW_RISK",
+            "reviewStatus": "open",
+        },
+    )
+    projects.MARKET_EVIDENCE_DB.setdefault(project_id, {})[
+        "verified-review-market-evidence"
+    ] = {
+        "recordKey": "verified-review-market-evidence",
+        "projectId": project_id,
+        "reviewStatus": "pending_review",
+    }
+    run_id = "verified-review-run"
+    run_record = {
+        "run_id": run_id,
+        "project_id": project_id,
+        "status": "completed",
+        "executionStatus": "completed",
+        "approvalStatus": "not_ready",
+        "handoffs": [
+            {
+                "handoffId": "verified-review-handoff",
+                "reviewStatus": "pending",
+                "requiresHumanReview": True,
+            }
+        ],
+        "agentProgress": {},
+        "artifacts": {
+            "riskRegister": {
+                "risks": [
+                    {
+                        "riskId": "verified-review-risk",
+                        "reviewStatus": "open",
+                        "requiresHumanReview": True,
+                    }
+                ]
+            }
+        },
+    }
+    upsert_orchestration_run(
+        project_id,
+        run_id,
+        run_record,
+    )
+    projects.ORCHESTRATIONS_DB.setdefault(project_id, {})[run_id] = run_record
+
+    deal_state_response = client.patch(
+        f"/projects/{project_id}/deal-state-records/{deal_state['recordId']}/review",
+        headers=reviewer_headers,
+        json={"reviewStatus": "approved", "reviewedBy": "spoofed-reviewer"},
+    )
+    anonymous_market_response = client.post(
+        f"/projects/{project_id}/market-evidence/review",
+        json={
+            "record_key": "verified-review-market-evidence",
+            "review_status": "approved",
+        },
+    )
+    market_response = client.post(
+        f"/projects/{project_id}/market-evidence/review",
+        headers=reviewer_headers,
+        json={
+            "record_key": "verified-review-market-evidence",
+            "review_status": "approved",
+            "reviewed_by": "spoofed-reviewer",
+        },
+    )
+    handoff_response = client.post(
+        f"/projects/{project_id}/orchestrations/{run_id}/handoffs/verified-review-handoff/review",
+        headers=reviewer_headers,
+        json={"review_status": "approved", "reviewed_by": "spoofed-reviewer"},
+    )
+    risk_response = client.post(
+        f"/projects/{project_id}/orchestrations/{run_id}/risk-register/verified-review-risk/review",
+        headers=reviewer_headers,
+        json={"review_status": "approved", "reviewed_by": "spoofed-reviewer"},
+    )
+
+    assert deal_state_response.status_code == 200
+    assert anonymous_market_response.status_code == 401
+    assert market_response.status_code == 200
+    assert handoff_response.status_code == 200
+    assert risk_response.status_code == 200
+    assert deal_state_response.json()["record"]["reviewedBy"] == "verified-reviewer"
+    assert market_response.json()["reviewedBy"] == "verified-reviewer"
+    reviewed_handoff = handoff_response.json()["handoffs"][0]
+    assert reviewed_handoff["reviewedBy"] == "verified-reviewer"
+    reviewed_risk = risk_response.json()["artifacts"]["riskRegister"]["risks"][0]
+    assert reviewed_risk["reviewedBy"] == "verified-reviewer"
+
+    projects.MARKET_EVIDENCE_DB.pop(project_id, None)
+    client.delete(
+        f"/projects/{project_id}",
+        headers={"x-realytics-session-id": admin_session},
+    )
 
 
 def test_project_list_scopes_to_authenticated_session_owner():
@@ -116,7 +267,7 @@ def test_strict_tenant_isolation_blocks_cross_tenant_project_access(monkeypatch)
                 "userId": user_id,
                 "tenantId": tenant_id,
                 "displayName": user_id,
-                "role": "reviewer",
+                "role": "admin" if user_id == "tenant-owner" else "reviewer",
             },
         )
     owner_session = client.post(
@@ -149,6 +300,233 @@ def test_strict_tenant_isolation_blocks_cross_tenant_project_access(monkeypatch)
     assert blocked.json()["detail"]["error"] == "tenant_scope_mismatch"
 
 
+def test_strict_tenant_isolation_blocks_cross_tenant_decision_artifact_routes(monkeypatch):
+    client = TestClient(app)
+    for user_id, tenant_id in (
+        ("decision-artifact-owner", "decision-artifact-tenant-one"),
+        ("decision-artifact-outsider", "decision-artifact-tenant-two"),
+    ):
+        client.post("/auth/tenants", json={"tenantId": tenant_id, "name": tenant_id})
+        client.post(
+            "/auth/users",
+            json={
+                "userId": user_id,
+                "tenantId": tenant_id,
+                "displayName": user_id,
+                "role": "admin",
+            },
+        )
+
+    owner_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "decision-artifact-owner",
+            "tenantId": "decision-artifact-tenant-one",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    outsider_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "decision-artifact-outsider",
+            "tenantId": "decision-artifact-tenant-two",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    project = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": owner_session},
+        json={"project": {"name": "Decision Artifact Boundary", "type": "residential"}},
+    ).json()
+    project_id = project["project"]["id"]
+    outsider_headers = {"x-realytics-session-id": outsider_session}
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+
+    responses = [
+        client.get(f"/projects/{project_id}/orchestrations", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/credit-documents",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/credit-documents/term-sheet/export",
+            headers=outsider_headers,
+        ),
+        client.get(f"/projects/{project_id}/risk-registers", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/risk-register",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/calculation-runs",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/cashflow-export-package",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/cashflow-export-completions",
+            headers=outsider_headers,
+            json={
+                "anchorCalculationRunId": "anchor-outside-tenant",
+                "calculationRunIds": {
+                    "cash_flow_engine": "anchor-outside-tenant",
+                    "waterfall": "waterfall-outside-tenant",
+                    "tranche_recovery": "recovery-outside-tenant",
+                    "unsold_ltv": "ltv-outside-tenant",
+                    "discount_stress": "stress-outside-tenant",
+                },
+                "artifactSha256": "a" * 64,
+                "fileName": "outside-tenant.xlsx",
+                "sizeBytes": 1024,
+            },
+        ),
+        client.get(
+            f"/projects/{project_id}/market-evidence",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/market-evidence/review",
+            headers=outsider_headers,
+            json={"record_key": "missing", "review_status": "approved"},
+        ),
+        client.patch(
+            f"/projects/{project_id}/deal-state-records/missing-record/review",
+            headers=outsider_headers,
+            json={"reviewStatus": "approved"},
+        ),
+        client.get(f"/projects/{project_id}/evidence-graphs", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/orchestrations/missing-run/evidence-graph",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/orchestrations/missing-run/approve",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/orchestrations/missing-run/handoffs/missing-handoff/review",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/orchestrations/missing-run/risk-register/missing-risk/review",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.get(f"/projects/{project_id}/source-documents", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/download",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/content",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/pdf/pages/1.png",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/source-documents/missing-archive/workbook/cells",
+            headers=outsider_headers,
+            params={"sheet_name": "Sheet1", "cell_reference": "A1"},
+        ),
+        client.post(
+            f"/projects/{project_id}/reports/generate",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.get(f"/projects/{project_id}/reports", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/reports/missing-report",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/reports/missing-report/exports",
+            headers=outsider_headers,
+            json={"format": "markdown"},
+        ),
+        client.get(
+            f"/projects/{project_id}/reports/missing-report/exports",
+            headers=outsider_headers,
+        ),
+        client.get(
+            f"/projects/{project_id}/reports/missing-report/exports/missing-export/download",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/reports/missing-report/publish",
+            headers=outsider_headers,
+        ),
+        client.get(f"/projects/{project_id}/report-templates", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/report-templates/missing-template",
+            headers=outsider_headers,
+        ),
+        client.post(
+            f"/projects/{project_id}/report-templates",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.get(f"/projects/{project_id}/snapshots", headers=outsider_headers),
+        client.get(
+            f"/projects/{project_id}/snapshots/missing-snapshot",
+            headers=outsider_headers,
+        ),
+        client.get(f"/projects/{project_id}/similar-cases/rag", headers=outsider_headers),
+        client.post(
+            f"/projects/{project_id}/snapshots/similar",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/snapshots/diff",
+            headers=outsider_headers,
+            json={},
+        ),
+        client.post(
+            f"/projects/{project_id}/snapshots/missing-snapshot/outcome",
+            headers=outsider_headers,
+            json={},
+        ),
+    ]
+
+    for response in responses:
+        assert response.status_code == 403
+        assert response.json()["detail"]["error"] == "tenant_scope_mismatch"
+
+
+def test_similar_case_snapshot_corpus_excludes_other_tenants_and_unknown_lineage():
+    project_a = "snapshot-corpus-project-a"
+    project_a_peer = "snapshot-corpus-project-a-peer"
+    project_b = "snapshot-corpus-project-b"
+    projects.PROJECTS_DB[project_a] = {"_meta": {"tenantId": "snapshot-tenant-a"}}
+    projects.PROJECTS_DB[project_a_peer] = {"_meta": {"tenantId": "snapshot-tenant-a"}}
+    projects.PROJECTS_DB[project_b] = {"_meta": {"tenantId": "snapshot-tenant-b"}}
+    snapshots = [
+        {"snapshotId": "same-project", "projectId": project_a},
+        {"snapshotId": "same-tenant", "projectId": project_a_peer},
+        {"snapshotId": "other-tenant", "projectId": project_b},
+        {"snapshotId": "unknown-lineage", "projectId": "missing-project"},
+    ]
+
+    try:
+        scoped = projects._tenant_scoped_snapshot_corpus(project_a, snapshots)
+    finally:
+        projects.PROJECTS_DB.pop(project_a, None)
+        projects.PROJECTS_DB.pop(project_a_peer, None)
+        projects.PROJECTS_DB.pop(project_b, None)
+
+    assert {item["snapshotId"] for item in scoped} == {"same-project", "same-tenant"}
+
+
 def test_auth_me_returns_anonymous_context_when_user_missing():
     client = TestClient(app)
 
@@ -159,11 +537,52 @@ def test_auth_me_returns_anonymous_context_when_user_missing():
     assert me.json()["user"]["role"] == "anonymous"
 
 
-def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
+def test_strict_rbac_blocks_anonymous_project_listing(monkeypatch):
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
     client = TestClient(app)
-    project_id = client.get("/projects/").json()[0]["project"]["id"]
-    report = client.post(f"/projects/{project_id}/reports/generate", json={})
+
+    response = client.get("/projects/")
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["requiredPermission"] == "project:read"
+
+
+def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
+    monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+    client = TestClient(app)
+
+    admin_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "admin-user",
+            "tenantId": "tenant-auth",
+            "role": "admin",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    created = client.post(
+        "/projects/",
+        headers={"x-realytics-session-id": admin_session},
+        json={"project": {"name": "Strict report export", "type": "mixed_use"}},
+    )
+    assert created.status_code == 200
+    project_id = created.json()["project"]["id"]
+
+    reviewer_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "reviewer-user",
+            "tenantId": "tenant-auth",
+            "role": "reviewer",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
+    report = client.post(
+        f"/projects/{project_id}/reports/generate",
+        headers={"x-realytics-session-id": reviewer_session},
+        json={},
+    )
     assert report.status_code == 200
     report_id = report.json()["report_id"]
 
@@ -184,15 +603,36 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
     assert blocked.status_code == 403
     assert blocked.json()["detail"]["requiredPermission"] == "report:export"
 
-    reviewer_session = client.post(
-        "/auth/session",
+    blocked_cashflow = client.get(
+        f"/projects/{project_id}/cashflow-export-package",
+        headers={"x-realytics-session-id": viewer_session},
+    )
+    assert blocked_cashflow.status_code == 403
+    assert blocked_cashflow.json()["detail"]["requiredPermission"] == "report:export"
+
+    blocked_cashflow_completion = client.post(
+        f"/projects/{project_id}/cashflow-export-completions",
+        headers={"x-realytics-session-id": viewer_session},
         json={
-            "userId": "reviewer-user",
-            "tenantId": "tenant-auth",
-            "role": "reviewer",
-            "provider": "local-test",
+            "anchorCalculationRunId": "blocked-anchor",
+            "calculationRunIds": {
+                "cash_flow_engine": "blocked-anchor",
+                "waterfall": "blocked-waterfall",
+                "tranche_recovery": "blocked-recovery",
+                "unsold_ltv": "blocked-ltv",
+                "discount_stress": "blocked-stress",
+            },
+            "artifactSha256": "b" * 64,
+            "fileName": "blocked.xlsx",
+            "sizeBytes": 1024,
         },
-    ).json()["session"]["sessionId"]
+    )
+    assert blocked_cashflow_completion.status_code == 403
+    assert (
+        blocked_cashflow_completion.json()["detail"]["requiredPermission"]
+        == "report:export"
+    )
+
     allowed = client.post(
         f"/projects/{project_id}/reports/{report_id}/exports",
         headers={"x-realytics-session-id": reviewer_session},
@@ -200,21 +640,50 @@ def test_strict_rbac_blocks_viewer_report_export(monkeypatch):
     )
     assert allowed.status_code == 200
 
+    allowed_cashflow = client.get(
+        f"/projects/{project_id}/cashflow-export-package",
+        headers={"x-realytics-session-id": reviewer_session},
+    )
+    assert allowed_cashflow.status_code == 409
+    assert (
+        allowed_cashflow.json()["detail"]["error"]
+        == "cashflow_export_lineage_incomplete"
+    )
+
+    export_events = client.get(
+        "/audit/user-activity",
+        headers={"x-realytics-session-id": reviewer_session},
+        params={
+            "user_id": "reviewer-user",
+            "project_id": project_id,
+            "event_type": "report_export_created",
+        },
+    )
+    assert export_events.status_code == 200
+    assert not any(
+        (event.get("metadata") or {}).get("exportType")
+        == "cashflow_calculation_package"
+        for event in export_events.json()["logs"]
+    )
+
 
 def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
     monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
     client = TestClient(app)
+    admin_session = client.post(
+        "/auth/session",
+        json={
+            "userId": "analysis-admin-user",
+            "tenantId": "tenant-auth",
+            "role": "admin",
+            "provider": "local-test",
+        },
+    ).json()["session"]["sessionId"]
     created = client.post(
         "/projects/",
+        headers={"x-realytics-session-id": admin_session},
         json={
             "project": {"name": "Reviewer Analysis Contract", "type": "mixed_use"},
-            "source_documents": [
-                {
-                    "documentType": "business_plan",
-                    "originalFileName": "reviewer-analysis-fixture.json",
-                    "archiveId": "reviewer-analysis-fixture",
-                }
-            ],
             "land": {
                 "pnu": "1111010100100010000",
                 "area_sqm": 1000,
@@ -239,6 +708,14 @@ def test_reviewer_can_run_analysis_but_does_not_get_project_write(monkeypatch):
     )
     assert created.status_code == 200
     project_id = created.json()["project"]["id"]
+    projects.source_document_repository().save_upload_metadata(
+        project_id,
+        {
+            "documentType": "business_plan",
+            "originalFileName": "reviewer-analysis-fixture.json",
+            "archiveId": "reviewer-analysis-fixture",
+        },
+    )
     session = client.post(
         "/auth/session",
         json={
@@ -278,6 +755,7 @@ def test_hs256_bearer_token_creates_idp_identity_context(monkeypatch):
             "name": "IdP Reviewer",
             "tenant_id": "tenant-idp",
             "role": "reviewer",
+            "realytics_principal_type": "human",
             "exp": int(time.time()) + 3600,
             "jti": "token-001",
         },
@@ -293,9 +771,31 @@ def test_hs256_bearer_token_creates_idp_identity_context(monkeypatch):
     assert body["user"]["userId"] == "idp-user@example.com"
     assert body["user"]["tenantId"] == "tenant-idp"
     assert body["user"]["role"] == "reviewer"
+    assert body["user"]["metadata"]["principalType"] == "human"
     assert "risk:review" in body["permissions"]
     assert body["identityProvider"]["mode"] == "hs256"
     assert "hs256SecretConfigured" not in body["identityProvider"]
+
+
+def test_client_credentials_bearer_is_not_classified_as_human(monkeypatch):
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "test-idp-secret")
+    client = TestClient(app)
+    token = _make_hs256_token(
+        {
+            "sub": "parser-service",
+            "tenant_id": "tenant-idp",
+            "role": "reviewer",
+            "gty": "client_credentials",
+            "exp": int(time.time()) + 3600,
+        },
+        "test-idp-secret",
+    )
+
+    me = client.get("/auth/me", headers={"authorization": f"Bearer {token}"})
+
+    assert me.status_code == 200
+    assert me.json()["user"]["metadata"]["principalType"] == "service"
 
 
 def test_bearer_token_tenant_mismatch_is_blocked(monkeypatch):
@@ -411,6 +911,192 @@ def test_byok_uses_dedicated_credential_ingest_and_is_revoked_on_logout(monkeypa
 
     me_after_logout = client.get("/auth/me", headers=headers)
     assert me_after_logout.json()["authenticated"] is False
+
+
+def test_supabase_bearer_byok_uses_signed_session_id_and_rejects_other_session(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "bearer-byok.sqlite3"))
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
+    monkeypatch.setenv("REALYTICS_AI_CREDENTIAL_TTL_SECONDS", "3600")
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "bearer-byok-secret")
+    monkeypatch.setenv("REALYTICS_IDP_PROVIDER", "supabase")
+    monkeypatch.setenv("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY", "claims")
+    client = TestClient(app)
+    base_claims = {
+        "iss": "https://pilot.supabase.co/auth/v1",
+        "sub": "supabase-byok-user",
+        "realytics_tenant_id": "supabase-byok-tenant",
+        "realytics_role": "reviewer",
+        "exp": int(time.time()) + 3600,
+    }
+    token_a = _make_hs256_token(
+        {**base_claims, "session_id": "supabase-provider-session-a"},
+        "bearer-byok-secret",
+    )
+    token_b = _make_hs256_token(
+        {**base_claims, "session_id": "supabase-provider-session-b"},
+        "bearer-byok-secret",
+    )
+    headers_a = {"authorization": f"Bearer {token_a}"}
+    headers_b = {"authorization": f"Bearer {token_b}"}
+
+    ingested = client.post(
+        "/auth/ai-credentials",
+        headers=headers_a,
+        json={
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "apiKey": "supabase-session-secret-value",
+        },
+    )
+    assert ingested.status_code == 200
+    assert "supabase-session-secret-value" not in json.dumps(ingested.json())
+    assert "supabase-provider-session-a" not in json.dumps(ingested.json())
+    assert (
+        client.get("/auth/ai-profile", headers=headers_a).json()["effectiveAi"][
+            "selectionSource"
+        ]
+        == "user_ai_profile"
+    )
+    assert (
+        client.get("/auth/ai-profile", headers=headers_b).json()["effectiveAi"][
+            "selectionSource"
+        ]
+        == "user_ai_profile_without_key_system_fallback"
+    )
+    monkeypatch.setitem(
+        projects.PROJECTS_DB,
+        "supabase-byok-project",
+        {"id": "supabase-byok-project", "name": "Supabase BYOK Project"},
+    )
+    owner_project_ai = client.post(
+        "/projects/supabase-byok-project/ai/connection/resolve",
+        headers=headers_a,
+        json={},
+    )
+    other_project_ai = client.post(
+        "/projects/supabase-byok-project/ai/connection/resolve",
+        headers=headers_b,
+        json={},
+    )
+    assert owner_project_ai.status_code == 200
+    assert (
+        owner_project_ai.json()["ai_connection"]["selectionSource"]
+        == "user_ai_profile"
+    )
+    assert other_project_ai.status_code == 200
+    assert (
+        other_project_ai.json()["ai_connection"]["selectionSource"]
+        == "user_ai_profile_without_key_system_fallback"
+    )
+
+    wrong_session_delete = client.delete("/auth/ai-profile", headers=headers_b)
+    assert wrong_session_delete.status_code == 409
+    assert wrong_session_delete.json()["detail"]["error"] == "credential_session_mismatch"
+
+    wrong_session_revoke = client.delete(
+        "/auth/ai-credentials/current",
+        headers=headers_b,
+    )
+    assert wrong_session_revoke.status_code == 409
+    assert wrong_session_revoke.json()["detail"]["error"] == "credential_session_mismatch"
+    assert (
+        client.get("/auth/ai-profile", headers=headers_a).json()["effectiveAi"][
+            "selectionSource"
+        ]
+        == "user_ai_profile"
+    )
+
+    owner_revoke = client.delete("/auth/ai-credentials/current", headers=headers_a)
+    assert owner_revoke.status_code == 200
+    assert owner_revoke.json()["credentialRevoked"] is True
+
+
+def test_bearer_byok_fails_closed_without_signed_session_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "bearer-without-session.sqlite3"))
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
+    monkeypatch.setenv("REALYTICS_IDP_MODE", "hs256")
+    monkeypatch.setenv("REALYTICS_IDP_JWT_SECRET", "bearer-no-session-secret")
+    monkeypatch.setenv("REALYTICS_IDP_PROVIDER", "supabase")
+    monkeypatch.setenv("REALYTICS_IDENTITY_MEMBERSHIP_AUTHORITY", "claims")
+    token = _make_hs256_token(
+        {
+            "iss": "https://pilot.supabase.co/auth/v1",
+            "sub": "supabase-no-session-user",
+            "realytics_tenant_id": "supabase-no-session-tenant",
+            "realytics_role": "reviewer",
+            "exp": int(time.time()) + 3600,
+        },
+        "bearer-no-session-secret",
+    )
+
+    response = TestClient(app).post(
+        "/auth/ai-credentials",
+        headers={"authorization": f"Bearer {token}"},
+        json={"provider": "gemini", "apiKey": "must-not-be-stored"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "credential_session_binding_required"
+
+
+def test_expired_byok_get_only_projects_unavailable_key_until_explicit_post(tmp_path, monkeypatch):
+    monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "expired-byok.sqlite3"))
+    monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
+    monkeypatch.setenv("REALYTICS_AI_CREDENTIAL_TTL_SECONDS", "60")
+    now = datetime(2026, 7, 28, 2, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(secret_vault, "_utc_now", lambda: now)
+    client = TestClient(app)
+    client.post("/auth/tenants", json={"tenantId": "expired-tenant", "name": "Expired Tenant"})
+    client.post(
+        "/auth/users",
+        json={
+            "userId": "expired-user",
+            "tenantId": "expired-tenant",
+            "role": "reviewer",
+        },
+    )
+    session_id = client.post(
+        "/auth/session",
+        json={"userId": "expired-user", "tenantId": "expired-tenant"},
+    ).json()["session"]["sessionId"]
+    headers = {"x-realytics-session-id": session_id}
+    assert client.post(
+        "/auth/ai-credentials",
+        headers=headers,
+        json={"provider": "gemini", "apiKey": "short-lived-secret"},
+    ).status_code == 200
+
+    from storage import get_user_ai_profile
+    before = get_user_ai_profile("expired-user", tenant_id="expired-tenant", include_secret=True)
+
+    monkeypatch.setattr(
+        secret_vault,
+        "_utc_now",
+        lambda: now + timedelta(seconds=61),
+    )
+    profile = client.get("/auth/ai-profile", headers=headers)
+
+    assert profile.status_code == 200
+    assert profile.json()["profile"]["apiKeyConfigured"] is False
+    assert profile.json()["profile"]["credentialRefConfigured"] is False
+    assert profile.json()["profile"]["credentialStatus"] == "expired"
+    assert get_user_ai_profile("expired-user", tenant_id="expired-tenant", include_secret=True) == before
+    assert secret_vault.credential_access_status(before["credentialRef"], user_id="expired-user", tenant_id="expired-tenant", session_id=session_id) == "expired"
+    assert (
+        profile.json()["effectiveAi"]["selectionSource"]
+        == "user_ai_profile_without_key_system_fallback"
+    )
+    cleared = client.post("/auth/ai-profile", headers=headers, json={"clearApiKey": True})
+    assert cleared.status_code == 200
+    assert get_user_ai_profile("expired-user", tenant_id="expired-tenant", include_secret=True)["credentialRef"] is None
+    assert secret_vault.credential_access_status(before["credentialRef"], user_id="expired-user", tenant_id="expired-tenant", session_id=session_id) == "missing"
 
 
 def _make_hs256_token(claims: dict, secret: str) -> str:

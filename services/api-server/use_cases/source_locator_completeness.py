@@ -44,6 +44,7 @@ def run_source_locator_completeness_audit_use_case(
     *,
     report_records: List[Dict[str, Any]] | None = None,
     actor: str = "source_locator_auditor",
+    persist: bool = True,
 ) -> Dict[str, Any]:
     """Check Deal State and report paragraph evidence links for traceability.
 
@@ -69,8 +70,27 @@ def run_source_locator_completeness_audit_use_case(
             weak_records.append(record)
 
     paragraph_issues = _audit_report_paragraph_links(report_records)
-    audit_id = f"source-locator-audit:{uuid4()}"
     now = datetime.now(timezone.utc).isoformat()
+    summary = {
+        "schemaVersion": "realytics-source-locator-completeness-audit-v1",
+        "projectId": project_id,
+        "checkedAt": now,
+        "checkedBy": actor,
+        "checkedDealStateRecordCount": len(records),
+        "checkedReportCount": len(report_records),
+        "hasReviewableRecords": bool(records or report_records),
+        "missingLocatorCount": len(missing_records),
+        "weakTraceCount": len(weak_records),
+        "weakParagraphCount": len(paragraph_issues),
+        "missingExamples": [_record_example(record) for record in missing_records[:20]],
+        "weakExamples": [_record_example(record) for record in weak_records[:20]],
+        "weakParagraphExamples": paragraph_issues[:20],
+        "persisted": persist,
+        "analysisOnly": not persist,
+    }
+    if not persist:
+        return {**summary, "auditId": None, "sourceLocatorMissingRisk": None, "evidenceTraceWeakRisk": None}
+    audit_id = f"source-locator-audit:{uuid4()}"
     missing_risk = _persist_missing_locator_risk(
         project_id,
         audit_id=audit_id,
@@ -89,20 +109,9 @@ def run_source_locator_completeness_audit_use_case(
         checked_count=len(records),
     )
     return {
-        "schemaVersion": "realytics-source-locator-completeness-audit-v1",
-        "projectId": project_id,
-        "auditId": audit_id,
-        "checkedAt": now,
-        "checkedBy": actor,
-        "checkedDealStateRecordCount": len(records),
-        "missingLocatorCount": len(missing_records),
-        "weakTraceCount": len(weak_records),
-        "weakParagraphCount": len(paragraph_issues),
+        **summary, "auditId": audit_id,
         "sourceLocatorMissingRisk": missing_risk,
         "evidenceTraceWeakRisk": weak_risk,
-        "missingExamples": [_record_example(record) for record in missing_records[:20]],
-        "weakExamples": [_record_example(record) for record in weak_records[:20]],
-        "weakParagraphExamples": paragraph_issues[:20],
     }
 
 

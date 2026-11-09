@@ -1,8 +1,30 @@
 # Calculation Run Registry
 
-Updated: 2026-07-03 (scenario/stress engines added)
+Updated: 2026-11-09
 
 Project: REALYTICS x PLATFORM9
+
+## Saved working-input budget and timing reviews (2026-11-09)
+
+`POST /projects/{id}/cash-flow/run` accepts the explicit
+`workingInputReview: {expectedReviewHash}` budget mode in addition to its existing
+project-default and reviewed-monthly modes. It rereads stored working inputs,
+rejects stale review hashes and mixed overrides, and stores the actual request
+and result as a new analysis-only CalculationRun. An explicitly reviewed aggregate
+PF amount can be used as an analysis limit only in this mode when no detailed
+financing exists. It never creates tranche terms, a monthly policy or approval.
+Project-default and canonical/original paths retain their existing behavior.
+
+User-entered `terms.cashFlowTiming` is stored through the existing review CAS,
+bound to the source period hash and captured with `sourceMetadata.inputReview`.
+Only complete, consistent assumptions enter a new reviewed-monthly request;
+partial or stale assumptions do not block independent budget calculations.
+
+Saved comparison/report snapshots retain both complete calculations. Review-only
+execution hashes/reasons are distinguished from actual business input changes;
+changed dates, cost rows and collection amounts still count. Principal repaid is
+reported only when the saved monthly engine actually calculated it, and remains
+unavailable in budget results. Historical runs and reports are not rewritten.
 
 ## Goal
 

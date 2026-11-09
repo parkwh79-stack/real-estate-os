@@ -2,9 +2,14 @@ import os
 from typing import Any, Dict
 from uuid import uuid4
 from urllib.parse import quote
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from core.oauth_redirects import safe_relative_path, web_session_url
 
+from core.runtime_profile import (
+    legacy_oauth_sessions_enabled,
+    oauth_mock_callbacks_enabled,
+)
 from integrations.kakao import (
     build_kakao_authorize_url,
     build_safe_kakao_message_preview,
@@ -31,7 +36,7 @@ def get_kakao_status():
 def create_kakao_authorize_url(payload: Dict[str, Any] | None = None):
     payload = payload or {}
     nonce = str(payload.get("nonce") or uuid4())
-    redirect_path = str(payload.get("redirectPath") or payload.get("redirect_path") or "/start")
+    redirect_path = safe_relative_path(payload.get("redirectPath") or payload.get("redirect_path"))
     if redirect_path in {"/", "/dashboard"} or not redirect_path.startswith("/") or redirect_path.startswith("//") or "://" in redirect_path:
         redirect_path = "/start"
     state = str(payload.get("state") or create_kakao_oauth_state(
@@ -45,9 +50,28 @@ def create_kakao_authorize_url(payload: Dict[str, Any] | None = None):
         prompt=payload.get("prompt"),
     )
     if not res.get("ready") or not res.get("authorizeUrl"):
+        if not oauth_mock_callbacks_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "kakao_oauth_not_configured",
+                    "message": "Kakao OAuth is unavailable and mock callbacks are disabled.",
+                },
+            )
         base_url = os.environ.get("REALYTICS_API_BASE_URL", "http://127.0.0.1:8000")
         res["ready"] = True
         res["authorizeUrl"] = f"{base_url}/integrations/kakao/mock-callback?redirect_path={quote(redirect_path)}"
+    elif not legacy_oauth_sessions_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "legacy_oauth_session_disabled",
+                "message": (
+                    "API-owned Kakao OAuth sessions are disabled. "
+                    "Use the configured Supabase/OIDC login flow."
+                ),
+            },
+        )
     return res
 
 
@@ -56,6 +80,14 @@ def kakao_mock_callback(
     request: Request,
     redirect_path: str = Query("/start"),
 ):
+    if not oauth_mock_callbacks_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "kakao_oauth_mock_disabled",
+                "message": "Kakao mock callbacks are disabled outside explicit local/test use.",
+            },
+        )
     if redirect_path in {"/", "/dashboard"} or not redirect_path.startswith("/") or redirect_path.startswith("//") or "://" in redirect_path:
         redirect_path = "/start"
     tenant_id = "kakao-workspace"
@@ -95,10 +127,7 @@ def kakao_mock_callback(
         },
     })
     web_base_url = os.environ.get("REALYTICS_WEB_BASE_URL", "http://localhost:3000")
-    session_url = (
-        f"{web_base_url.rstrip('/')}/auth/kakao/session"
-        f"?session_id={quote(session['sessionId'])}&redirect={quote(redirect_path)}"
-    )
+    session_url = web_session_url(web_base_url, session["sessionId"], redirect_path)
     return RedirectResponse(session_url, status_code=303)
 
 

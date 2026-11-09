@@ -6,8 +6,25 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 ## Endpoints
 
 ### `GET /health`
+
+- Backward-compatible process liveness response.
 - **Description**: Check if the API server is running.
 - **Response**: `{ "status": "ok" }`
+
+### `GET /health/live`
+
+- **Response**: Process-only liveness. This endpoint does not claim that
+  PostgreSQL, S3, ClamAV, or external workers are ready.
+- **Deployment use**: Container health check.
+
+### `GET /health/ready`
+
+- **Response**: Secret-safe runtime readiness with API/identity PostgreSQL pool
+  checkouts and explicit data/membership/object authority. S3 and ClamAV are
+  labelled as configuration-only checks; live dependency drills are separate.
+- **Status**: `200` when ready, `503` with stable non-secret failure codes when
+  a required hardened dependency is unavailable.
+- **Deployment use**: External load-balancer readiness check.
 
 ### `GET /projects`
 - **Description**: Retrieve a list of all projects.
@@ -145,6 +162,16 @@ This document outlines the core APIs required for the REALYTICS x PLATFORM9 appl
 - **Request Body**: Optional `CashFlowRunRequest` directly, `{ "cashFlowRunRequest": {...} }`, `{ "cashFlowRunRequestDraft": {...} }`, or project-data overrides that can be analyzed by Development Feasibility Agent.
 - **Response**: `realytics_cash_flow_engine_v1` result with summary, product-based sales collection schedule, operating/repayment reserve account allocation, tranche-aware PF draw schedule, monthly cash-flow rows, Max Minus, risk flags, report fragments, and source metadata. When the canonical FeasibilityStudyV2 contains workbook-derived `raw_import.productMonthlySalesRateScenarios`, each `productMix` row carries `collectionSteps`, `monthlyCollectionAmounts`, `monthlyCollectionRates`, `cumulativeCollectionRates`, and a source locator; those explicit contract/interim/balance amounts are used before asset-type defaults. The persisted `cash_flow_engine` CalculationRun stores the exact resolved request in `inputSnapshot` and the deterministic output in `resultSnapshot`, including the workbook locator. Aggregate asset-type schedules are allocated across existing product types by revenue or unit weight so the schedule is not duplicated.
 - **Canonical path**: `DevelopmentFeasibilityAgent -> FeasibilityStudyV2 -> CashFlowRunRequest -> Cash Flow Engine`.
+
+### `GET /projects/{project_id}/cashflow-export-package`
+- **Description**: Read one report-eligible Cash Flow calculation package. PostgreSQL deployments select the latest completed `cash_flow_engine` inside the verified tenant transaction and include a dependent engine only when its persisted `parentCalculationRunId` matches that anchor.
+- **Fail-closed policy**: Missing or unbound `waterfall`, `tranche_recovery`, `unsold_ltv`, or `discount_stress` runs return `409 cashflow_export_lineage_incomplete`; independently latest runs are never mixed into a workbook package.
+- **Audit**: A successful read emits `cashflow_export_package_read`. It does not claim that a report artifact was created.
+
+### `POST /projects/{project_id}/cashflow-export-completions`
+- **Description**: Record authenticated metadata only after the Web BFF has generated the XLSX bytes. The server reselects the exact anchor and all dependent CalculationRun IDs before accepting the completion.
+- **Request Body**: `{ "anchorCalculationRunId": "...", "calculationRunIds": { "cash_flow_engine": "...", "waterfall": "...", "tranche_recovery": "...", "unsold_ltv": "...", "discount_stress": "..." }, "artifactSha256": "<64 hex>", "fileName": "cashflow.xlsx", "sizeBytes": 1234, "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }`
+- **Audit**: Emits `cashflow_export_completed`. The hash is authenticated BFF-reported metadata, not server-side object-storage verification.
 
 ### `POST /projects/{project_id}/pf/structure`
 - **Description**: Configure and calculate PF structure.

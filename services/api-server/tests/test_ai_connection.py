@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from agents.ai_audit import build_ai_brain_used_audit_event
 from agents.ai_connection import (
     AIConnection,
@@ -57,6 +59,37 @@ def test_parser_openai_without_key_returns_honest_unavailable(monkeypatch):
     assert "feasibility_input" not in data
     assert "project" not in data
     assert "pf_structure" not in data
+
+
+def test_parser_chunks_all_document_text_without_dropping_tail():
+    prompts = []
+
+    class RecordingAI:
+        def extract_json(self, prompt, system=None, ai_context=None):
+            prompts.append(prompt)
+            return SimpleNamespace(
+                data={"project": {"name": "Chunked Project"}},
+                error=None,
+                meta={"provider": "recording"},
+            )
+
+    parser = ParserAgent({"provider": "groq", "api_key": "test-only"})
+    parser.ai = RecordingAI()
+    tail_marker = "TAIL_FACT_MUST_BE_PARSED"
+    text = (
+        "--- PAGE 1 ---\n"
+        + ("A" * 31_000)
+        + "\n--- PAGE 2 ---\n"
+        + tail_marker
+    )
+
+    result = parser.extract_project_data(text)
+
+    assert len(prompts) > 1
+    assert any(tail_marker in prompt for prompt in prompts)
+    assert result["_meta"]["chunkCount"] == len(prompts)
+    assert result["_meta"]["inputCoverage"] == "complete"
+    assert result["_meta"]["sourceTextSha256"]
 
 
 def test_gemini_provider_resolves_openai_compatible_base_url(monkeypatch):

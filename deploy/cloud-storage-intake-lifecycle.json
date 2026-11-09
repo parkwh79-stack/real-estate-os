@@ -1,0 +1,18 @@
+{
+  "rule": [
+    {
+      "action": { "type": "Delete" },
+      "condition": {
+        "age": 1,
+        "matchesPrefix": ["realytics/intake-transfers/quarantine/"]
+      }
+    },
+    {
+      "action": { "type": "Delete" },
+      "condition": {
+        "age": 7,
+        "matchesPrefix": ["realytics/derived/pdf-reading/"]
+      }
+    }
+  ]
+}

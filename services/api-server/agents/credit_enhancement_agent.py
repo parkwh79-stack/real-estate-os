@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Dict, List, Optional
 
+from core.financial_input_validation import require_finite_numbers
 from schemas.credit_enhancement import (
     CREDIT_ENHANCEMENT_TYPES,
     CreditEnhancementInput,
@@ -82,6 +83,7 @@ class CreditEnhancementAgent:
     analysis_type = "credit_enhancement_v1"
 
     def evaluate(self, request: CreditEnhancementRequest) -> CreditEnhancementResult:
+        require_finite_numbers(request.model_dump(), "creditEnhancement")
         supplied = {e.type: e for e in request.enhancements if e.type in _CATALOG}
 
         measures: List[CreditEnhancementMeasureResult] = [
@@ -145,7 +147,10 @@ class CreditEnhancementAgent:
                 recommendation=self._recommend(catalog),
             )
 
-        has_evidence = bool(supplied.evidenceIds) or bool(supplied.sourceLocators)
+        has_evidence = any(item.strip() for item in supplied.evidenceIds) or any(
+            any(value.strip() if isinstance(value, str) else bool(value) for value in locator.values())
+            for locator in supplied.sourceLocators
+        )
         ltv_delta = supplied.seniorLtvDeltaPp if supplied.seniorLtvDeltaPp is not None else catalog["seniorLtvDeltaPp"]
         notch = supplied.gradeNotch if supplied.gradeNotch is not None else catalog["gradeNotch"]
         dscr_support = supplied.dscrSupport if supplied.dscrSupport is not None else catalog["dscrSupport"]

@@ -1,0 +1,2 @@
+# The operating read-only MCP connection imports no local Agent or provider SDK.
+mcp==1.30.0

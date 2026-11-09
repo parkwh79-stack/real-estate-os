@@ -30,7 +30,7 @@ from use_cases.pf_review import run_and_save_pf_review_use_case
 PF_REVIEW_AGENT_ID = "pf_review_orchestration_agent"
 PF_REVIEW_MANIFEST = AgentManifest(
     agent_id=PF_REVIEW_AGENT_ID,
-    version="1.0.0",
+    version="1.0.6",
     display_name="PF Review Orchestration Agent",
     domain="pf_credit",
     role="Execute and persist the deterministic PF review workflow",
@@ -118,7 +118,12 @@ def run_pf_review_with_durable_runtime(
         input_schema_name=PF_REVIEW_MANIFEST.input_schema_name,
         input_schema_version=PF_REVIEW_MANIFEST.input_schema_version,
         payload={"projectData": project_data, "options": _without_secrets(options)},
-        idempotency_key=_idempotency_key(project_id, project_data, options),
+        idempotency_key=_idempotency_key(
+            project_id,
+            project_data,
+            options,
+            agent_version=PF_REVIEW_MANIFEST.version,
+        ),
         requested_at=now,
         metadata={"source": "pf_review_async_job", "secretsPersisted": False},
     )
@@ -152,8 +157,15 @@ def run_pf_review_with_durable_runtime(
     }
 
 
-def _idempotency_key(project_id: str, project_data: dict[str, Any], options: dict[str, Any]) -> str:
+def _idempotency_key(
+    project_id: str,
+    project_data: dict[str, Any],
+    options: dict[str, Any],
+    *,
+    agent_version: str = PF_REVIEW_MANIFEST.version,
+) -> str:
     payload = {
+        "agentVersion": agent_version,
         "projectId": project_id,
         "projectData": project_data,
         "options": _without_secrets(options),

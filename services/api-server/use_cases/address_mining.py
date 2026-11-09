@@ -102,7 +102,9 @@ def _pdf_text_bytes(content: bytes) -> str:
 
 
 def _default_archive_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "data" / "runtime" / "uploads"
+    from core.runtime_paths import runtime_data_dir
+
+    return runtime_data_dir() / "uploads"
 
 
 def mine_project_address(
@@ -117,9 +119,16 @@ def mine_project_address(
     Returns {"address", "provenance": {"source", "documentFileName", "excerpt"}}
     or None when nothing matches — never invents an address.
     """
-    root = (archive_root or _default_archive_root()) / str(project_id)
+    from db.repositories.request_project_repository import current_project_scope
+    from storage import storage_backend
+
+    normalized = storage_backend() in {"postgres", "postgresql"}
+    scope = current_project_scope() if normalized else None
+    if normalized and scope is None:
+        return None
+    root = None if normalized else (archive_root or _default_archive_root()) / str(project_id)
     archive_repository = upload_archive_repository
-    if archive_repository is None and archive_root is None:
+    if archive_repository is None and (normalized or archive_root is None):
         from db.repositories.upload_archive_repository import UploadArchiveRepository
 
         archive_repository = UploadArchiveRepository()
@@ -135,6 +144,8 @@ def mine_project_address(
 
     candidates: List[Dict[str, Any]] = []
     for doc in ordered:
+        if normalized and doc.get("archiveTenantId") != scope.tenant_id:
+            continue
         archive_id = str(doc.get("archiveId") or doc.get("originalFileHash") or "")
         if not archive_id:
             continue
@@ -146,15 +157,19 @@ def mine_project_address(
         source_identity = ""
         if archive_repository is not None:
             resolved = archive_repository.resolve_download_metadata(project_id, doc)
-            if resolved:
+            if resolved and (not normalized or (
+                resolved.get("archiveTenantId") == scope.tenant_id
+                and resolved.get("archiveBackend") in {"s3", "gcs"}
+                and resolved.get("archiveIntegrityStatus") == "verified"
+            )):
                 resolved_path = resolved.get("path")
-                if resolved_path:
+                if resolved_path and not normalized:
                     source_identity = str(resolved_path)
                     text = _pdf_text(Path(resolved_path))
                 elif resolved.get("content") is not None:
                     source_identity = str(resolved.get("archiveObjectKey") or archive_id)
                     text = _pdf_text_bytes(resolved["content"])
-        if not text:
+        if not text and root is not None:
             path = root / f"{archive_id}{suffix}"
             if path.exists():
                 source_identity = str(path)
@@ -177,7 +192,7 @@ def mine_project_address(
         if candidates:
             break  # first document with addresses wins (usually the business plan)
 
-    if not candidates and root.exists():
+    if not candidates and root is not None and root.exists():
         # Fallback: any archived PDF not tracked in source_documents metadata.
         for path in sorted(root.glob("*.pdf")):
             if str(path) in scanned:

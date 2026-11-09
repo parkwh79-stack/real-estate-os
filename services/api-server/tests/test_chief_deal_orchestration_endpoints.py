@@ -4,14 +4,16 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 from main import app
-from routers.projects import PROJECTS_DB
-from storage import upsert_project_record
+from routers.projects import ORCHESTRATIONS_DB, PROJECTS_DB
+from storage import upsert_orchestration_run, upsert_project_record
+from use_cases.cash_flow_dependencies import financial_input_hash
 
 
 @pytest.fixture(autouse=True)
 def _isolated_chief_e2e_database(tmp_path, monkeypatch):
     """Keep endpoint tests off developer/pilot state and the default runtime DB."""
     original_projects = copy.deepcopy(PROJECTS_DB)
+    original_orchestrations = copy.deepcopy(ORCHESTRATIONS_DB)
     monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "chief-e2e.sqlite3"))
     monkeypatch.setenv("REALYTICS_AI_PROVIDER", "none")
@@ -33,6 +35,7 @@ def _isolated_chief_e2e_database(tmp_path, monkeypatch):
         },
     )
     PROJECTS_DB.clear()
+    ORCHESTRATIONS_DB.clear()
     project_id = "chief-e2e-project"
     project_data = {"project": {"id": project_id, "name": "Chief isolated E2E project"}}
     PROJECTS_DB[project_id] = project_data
@@ -40,10 +43,162 @@ def _isolated_chief_e2e_database(tmp_path, monkeypatch):
     yield
     PROJECTS_DB.clear()
     PROJECTS_DB.update(original_projects)
+    ORCHESTRATIONS_DB.clear()
+    ORCHESTRATIONS_DB.update(original_orchestrations)
 
 
 def first_project_id(client: TestClient) -> str:
     return client.get("/projects/").json()[0]["project"]["id"]
+
+
+def _cost_schedule_project(client):
+    project_id = first_project_id(client)
+    data = PROJECTS_DB[project_id]
+    data.update({
+        "source_documents": [{"documentType": "business_plan", "originalFileName": "cost-review.xlsx"}],
+        "feasibility_input": {"total_revenue": 1000, "total_cost": 800,
+                              "construction_cost": 500, "land_cost": 200, "finance_cost": 50, "other_cost": 50},
+        "schedule": {"construction_start": "M0", "completion": "M2"},
+        # This regression starts after the existing dependency gate. The
+        # Land-Legal execution itself is covered by test_chief_orchestration_endpoints.
+        "chief_orchestration_state": {"podRuns": {"land_legal": {"status": "completed"}}},
+    })
+    upsert_project_record(project_id, data)
+    return project_id
+
+
+def test_failed_queued_work_is_persisted_without_uncommitted_domain_outputs(monkeypatch):
+    from storage import get_project_record
+    import use_cases.chief_deal_orchestration as chief
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    data = PROJECTS_DB[project_id]
+    data["chief_orchestration_state"]["workOrders"] = [
+        {"workOrderId": "queued-work", "podKey": "cost_schedule", "action": "rerun_pod", "status": "queued"}]
+    upsert_project_record(project_id, data)
+    def fail(**kwargs):
+        kwargs["project_data"]["uncommitted_result"] = 999
+        raise RuntimeError("controlled execution failure")
+    monkeypatch.setattr(chief, "run_domain_pod_with_contract", fail)
+    response = client.post(f"/projects/{project_id}/chief-orchestration/run-pod", json={"podKey": "cost_schedule"})
+    assert response.status_code == 502
+    saved = get_project_record(project_id)
+    assert saved["chief_orchestration_state"]["workOrders"][0]["status"] == "failed"
+    assert "uncommitted_result" not in saved
+
+
+def _run_cost_schedule(client, project_id):
+    response = client.post(f"/projects/{project_id}/chief-orchestration/run-pod", json={
+        "podKey": "cost_schedule", "options": {"podAiReviewMode": "deterministic"},
+    })
+    assert response.status_code == 200, response.text
+    run = next(row for row in response.json()["podRuns"] if row["podKey"] == "cost_schedule")
+    artifact = client.get(f"/projects/{project_id}/chief-orchestration/artifacts/{run['artifactKeys'][0]}")
+    assert artifact.status_code == 200
+    return artifact.json()
+
+
+def test_cost_schedule_reexecution_publishes_latest_derived_project_value_and_cached_result():
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    first = _run_cost_schedule(client, project_id)
+    original_projection = client.get(f"/projects/{project_id}").json()["costSchedule"]
+    assert original_projection == first["result"]
+    assert original_projection["costBreakdown"]["totalCost"] == 800
+
+    updated = client.put(f"/projects/{project_id}", json={
+        "feasibility_input": {"total_cost": 900, "construction_cost": 600},
+    })
+    assert updated.status_code == 200
+    second = _run_cost_schedule(client, project_id)
+    current = client.get(f"/projects/{project_id}").json()["costSchedule"]
+    assert second["result"]["costBreakdown"]["totalCost"] == 900
+    assert current == second["result"]
+    assert current["costBreakdown"]["totalCost"] == 900
+
+    # Reopening an older, still hash-bound derived projection must also be
+    # repaired when the latest successful deterministic Pod run is replayed.
+    PROJECTS_DB[project_id]["costSchedule"] = copy.deepcopy(original_projection)
+    upsert_project_record(project_id, PROJECTS_DB[project_id])
+    replay = _run_cost_schedule(client, project_id)
+    assert replay["domainAgentRuntime"]["replayed"] is True
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == replay["result"]
+
+    # A manual edit retaining the historical artifactType is still user input:
+    # its content no longer matches a stored Chief artifact hash.
+    manual = client.put(f"/projects/{project_id}", json={"costSchedule": {"costBreakdown": {"totalCost": 123}}})
+    assert manual.status_code == 200
+    preserved = manual.json()["costSchedule"]
+    rerun = _run_cost_schedule(client, project_id)
+    assert rerun["result"]["costBreakdown"]["totalCost"] == 900
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == preserved
+
+
+@pytest.mark.parametrize("provided", [
+    {"rows": [{"monthIndex": 0, "constructionCost": 123}], "sourceType": "manual_input"},
+    {"rows": [{"monthIndex": 0, "constructionCost": 123}], "approvalStatus": "approved",
+     "approval": {"approvedInputSnapshotId": "existing-approved-input"}},
+    {"artifactType": "cost_schedule_pod_result", "costBreakdown": {"totalCost": 123}},
+    None,
+])
+def test_cost_schedule_keeps_unprovenanced_or_explicit_project_input(provided):
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    supplied = client.put(f"/projects/{project_id}", json={"costSchedule": provided})
+    assert supplied.status_code == 200
+    result = _run_cost_schedule(client, project_id)
+    assert result["result"]["costBreakdown"]["totalCost"] == 800
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == provided
+
+
+def test_cost_schedule_pod_and_child_cache_share_consumed_cost_assumptions(monkeypatch):
+    import use_cases.chief_deal_orchestration as chief
+
+    client = TestClient(app)
+    project_id = _cost_schedule_project(client)
+    data = PROJECTS_DB[project_id]
+    data["feasibility_input"].pop("construction_cost")
+    data["feasibility_input"].pop("total_cost")
+    data["architectural_plan"] = {"gross_floor_area_sqm": 100}
+    data["cost_assumptions"] = {"construction_cost_per_sqm": 5}
+    upsert_project_record(project_id, data)
+    pod_inputs, child_inputs = [], []
+    pod_runtime = chief.run_domain_pod_with_contract
+    child_runtime = chief.run_domain_agent_callable_with_contract
+
+    def traced_pod(**kwargs):
+        pod_inputs.append(copy.deepcopy(kwargs["input_snapshot"]))
+        return pod_runtime(**kwargs)
+
+    def traced_child(**kwargs):
+        child_inputs.append(copy.deepcopy(kwargs["input_snapshot"]))
+        return child_runtime(**kwargs)
+
+    monkeypatch.setattr(chief, "run_domain_pod_with_contract", traced_pod)
+    monkeypatch.setattr(chief, "run_domain_agent_callable_with_contract", traced_child)
+    first = _run_cost_schedule(client, project_id)
+    assert first["result"]["costBreakdown"]["constructionCost"] == 500
+    assert first["result"]["costBreakdown"]["totalCost"] == 800
+    unchanged_feasibility = copy.deepcopy(PROJECTS_DB[project_id]["feasibility_input"])
+    updated = client.put(f"/projects/{project_id}", json={"cost_assumptions": {"construction_cost_per_sqm": 6}})
+    assert updated.status_code == 200
+    assert updated.json()["feasibility_input"] == unchanged_feasibility
+    second = _run_cost_schedule(client, project_id)
+    assert second["domainAgentRuntime"]["replayed"] is False
+    assert second["result"]["costBreakdown"]["constructionCost"] == 600
+    assert second["result"]["costBreakdown"]["totalCost"] == 900
+    assert first["domainAgentRuntime"]["agentRunId"] != second["domainAgentRuntime"]["agentRunId"]
+    assert first["result"]["agentRuntimeExecutions"][0]["agentRunId"] != second["result"]["agentRuntimeExecutions"][0]["agentRunId"]
+    assert second["result"]["agentRuntimeExecutions"][0]["replayed"] is False
+    assert len(child_inputs) == 2
+    assert child_inputs == [row["developmentFeasibilityInput"] for row in pod_inputs]
+
+    replay = _run_cost_schedule(client, project_id)
+    assert replay["domainAgentRuntime"]["replayed"] is True
+    assert replay["domainAgentRuntime"]["agentRunId"] == second["domainAgentRuntime"]["agentRunId"]
+    assert len(child_inputs) == 2
+    assert pod_inputs[-1]["developmentFeasibilityInput"] == child_inputs[-1]
+    assert client.get(f"/projects/{project_id}").json()["costSchedule"] == replay["result"]
 
 
 def test_chief_orchestration_endpoints():
@@ -54,7 +209,9 @@ def test_chief_orchestration_endpoints():
     project_data = PROJECTS_DB[project_id]
     project_data["source_documents"] = [{"documentType": "business_plan", "originalFileName": "business.pdf", "archiveId": "a1"}]
     project_data["land"] = {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1000000}
-    project_data["landEvidence"] = [{"evidenceType": "official_land_price", "pnu": "1111010100100010000"}]
+    project_data["landEvidence"] = {
+        "officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000"},
+    }
     project_data["regulation"] = {"zoning": "residential", "far": 300, "bcr": 60}
     project_data["legal"] = {"permitStatus": "pending"}
     project_data["market"] = {
@@ -72,8 +229,9 @@ def test_chief_orchestration_endpoints():
         "total_revenue": 100_000_000_000,
         "total_cost": 80_000_000_000,
         "construction_cost": 30_000_000_000,
+        "land_cost": 50_000_000_000,
     }
-    project_data["schedule"] = {"completionMonth": 36}
+    project_data["schedule"] = {"construction_start": "2026-01", "completion": "2029-01"}
     project_data["pf_structure"] = [
         {"tranche": "Senior", "amount": 50_000_000_000, "priority": 1}
     ]
@@ -187,9 +345,20 @@ def test_chief_orchestration_endpoints():
 
     calculations_res = client.get(f"/projects/{project_id}/calculation-runs")
     assert calculations_res.status_code == 200
-    engine_keys = {row["engineKey"] for row in calculations_res.json()["records"]}
+    calculation_rows = calculations_res.json()["records"]
+    engine_keys = {row["engineKey"] for row in calculation_rows}
     assert "development_feasibility" in engine_keys
     assert "cash_flow_engine" in engine_keys
+    cash_flow_run = next(row for row in calculation_rows if row["engineKey"] == "cash_flow_engine")
+    executed_request = {key: value for key, value in cash_flow_run["inputSnapshot"].items() if key != "financialInputHash"}
+    assert executed_request["requestType"] == "cash_flow_run_request_v1"
+    assert cash_flow_run["financialInputHash"] == financial_input_hash(executed_request)
+    assert cash_flow_run["inputSnapshot"]["financialInputHash"] == cash_flow_run["financialInputHash"]
+    parent_artifact = client.get(
+        f"/projects/{project_id}/chief-orchestration/artifacts/{cash_flow_run['sourceLocator']['artifactKey']}"
+    ).json()
+    assert parent_artifact["result"]["cashFlowRunRequest"] == executed_request
+    assert parent_artifact["domainAgentRuntime"]["agentRunId"] == cash_flow_run["sourceLocator"]["agentRunId"]
 
     cure_res = client.post(
         f"/projects/{project_id}/chief-orchestration/unsold-ltv-cure",
@@ -224,11 +393,30 @@ def test_recent_work_returns_resume_action_and_continuation_match():
         "approvalReadinessGate": {"status": "not_ready_for_approval"}
     }
     upsert_project_record(project_id, project_data)
+    # MOCK-DATA: resuming a review requires an existing analysis in this
+    # isolated database; a readiness flag alone is not evidence of a prior run.
+    upsert_orchestration_run(project_id, "resume-review-run", {
+        "run_id": "resume-review-run",
+        "project_id": project_id,
+        "workflow": "full_pf_review",
+        "status": "completed_with_warnings",
+        "executionStatus": "completed_with_warnings",
+        "approvalStatus": "not_requested",
+        "steps": [],
+        "errors": [],
+        "started_at": "2026-09-15T00:00:00+00:00",
+        "completed_at": "2026-09-15T00:01:00+00:00",
+    })
 
     recent = client.get("/projects/recent-work")
     assert recent.status_code == 200
-    item = next(row for row in recent.json()["items"] if row["projectId"] == project_id)
+    body = recent.json()
+    assert body["schemaVersion"] == "realytics-recent-work-v2"
+    item = next(row for row in body["items"] if row["projectId"] == project_id)
     assert item["nextAction"] == "resume_open_reviews"
+    assert item["latestRunId"] == "resume-review-run"
+    assert item["approvalReadinessStatus"] == "not_ready_for_approval"
+    assert item["approvalStatus"] != item["approvalReadinessStatus"]
     assert "sha-repeatable-001" in item["sourceHashes"]
 
     check = client.post("/projects/intake/continuation-check", json={"files": [{"name": "repeatable-plan.pdf", "sha256": "sha-repeatable-001"}]})
@@ -263,6 +451,42 @@ def test_workspace_context_persists_shared_deal_state_and_page_data():
     assert set(body["pageDataContract"]["requiredPageDataFields"]).issubset(body["pageData"].keys())
     assert body["dealStateGraph"]["schemaVersion"] == "realytics-shared-deal-state-graph-record-v1"
     assert PROJECTS_DB[project_id]["chief_orchestration_state"]["sharedDealStateGraph"]["projectId"] == project_id
+
+
+def test_document_review_workspace_is_one_versioned_server_read_model():
+    client = TestClient(app)
+    project_id = first_project_id(client)
+    project_data = PROJECTS_DB[project_id]
+    project_data["source_documents"] = [
+        {
+            "documentType": "business_plan",
+            "originalFileName": "business.pdf",
+            "archiveId": "a" * 64,
+            "originalFileHash": "a" * 64,
+            "sha256": "a" * 64,
+            "uploadedAt": "2026-07-27T01:00:00+00:00",
+        }
+    ]
+    upsert_project_record(project_id, project_data)
+
+    response = client.get(f"/projects/{project_id}/workspace/document-review")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schemaVersion"] == "realytics-document-review-workspace-v1"
+    assert body["viewModelVersion"] == "document-review-workspace-2026-07-27"
+    assert body["projectId"] == project_id
+    assert body["snapshotId"].startswith(f"document-review:{project_id}:")
+    assert len(body["snapshotHash"]) == 64
+    assert body["sourceDocuments"][0]["originalFileName"] == "business.pdf"
+    assert body["reviewQueue"] == []
+    assert body["snapshotDiffs"] == []
+    assert body["authority"] == {
+        "candidateOnly": True,
+        "authoritativeProjectionMutated": False,
+        "approvalAuthority": "approved_input_snapshot_only",
+        "assembly": "server_versioned_read_model",
+    }
 
 
 def test_workspace_context_page_data_contracts_for_core_pages():

@@ -3,26 +3,20 @@
 /* eslint-disable react/prop-types -- component props are declared with TypeScript interfaces. */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft, Loader2, Map as MapIcon, RefreshCw } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
-import { MapIntelligence, type MapIntelligenceData, type TxMarker } from "../../../../components/map/map-intelligence";
+import { MapIntelligence, PARCEL_GEOMETRY_LABEL, parcelGeometryStatus, type MapIntelligenceData, type TxMarker } from "../../../../components/map/map-intelligence";
 import { TransactionsPanel, type TxRecord } from "../../../../components/map/transactions-panel";
+import { projectWorkspaceHref } from "../../../../lib/project-navigation";
+import { isWorkflowTrack } from "../../../../lib/workflow-track";
 
-type ParcelFeature = {
-  geometry?: unknown;
-  properties: {
-    pnu?: string;
-    addressFragment?: string;
-    lotNumber?: string;
-    landCategory?: string;
-    areaSqm?: number;
-    officialLandPricePerSqm?: number;
-    officialLandPriceBaseYear?: string;
-    owner?: string;
-  };
+const GEOMETRY_LOOKUP_LABEL = {
+  not_configured: "운영 연결 필요",
+  no_eligible_parcels: "추가 조회 대상 없음",
+  unresolved: "경계 미확인",
 };
 
 function eok(value?: number): string {
@@ -34,8 +28,17 @@ function formatSqm(value?: number) {
 }
 
 export default function ProjectMapPage() {
-  const params = useParams<{ id: string }>();
-  const projectId = params.id;
+  const { id } = useParams<{ id: string }>();
+  const query = useSearchParams();
+  const requestedPnu = query.get("pnu");
+  const track = query.get("track");
+  return <ProjectMap key={JSON.stringify([id, requestedPnu, track])}
+    projectId={id} requestedPnu={requestedPnu} track={isWorkflowTrack(track) ? track : undefined} />;
+}
+
+function ProjectMap({ projectId, requestedPnu, track }: { projectId: string; requestedPnu: string | null; track?: string }) {
+  const focusPnu = requestedPnu && /^[0-9]{10}[12][0-9]{8}$/.test(requestedPnu) ? requestedPnu : undefined;
+  const pendingLoad = useRef<AbortController | null>(null);
   const [context, setContext] = useState<WorkspacePageContext | null>(null);
   const [data, setData] = useState<MapIntelligenceData | null>(null);
   const [txRecords, setTxRecords] = useState<TxRecord[]>([]);
@@ -43,35 +46,57 @@ export default function ProjectMapPage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    pendingLoad.current?.abort();
+    const controller = new AbortController();
+    pendingLoad.current = controller;
     setLoading(true);
     setError(null);
     try {
+      const query = new URLSearchParams({ resolve_geometry: "true", geometry_limit: focusPnu ? "1" : "150" });
+      if (focusPnu) query.set("focus_pnu", focusPnu);
       const [ctx, res] = await Promise.all([
-        fetchWorkspaceContext(projectId, "land").catch(() => null),
-        fetch(`${apiBase}/projects/${projectId}/map?resolve_geometry=true&geometry_limit=150`, {
+        fetchWorkspaceContext(projectId, "land", track).catch(() => null),
+        fetch(`${apiBase}/projects/${projectId}/map?${query}`, {
           cache: "no-store",
           headers: authHeaders("web"),
+          signal: controller.signal,
         }),
       ]);
+      if (controller.signal.aborted) return;
       if (ctx) setContext(ctx);
       if (!res.ok) throw new Error(`지도 데이터 조회 실패 (${res.status})`);
-      setData(await res.json());
+      const payload = await res.json() as MapIntelligenceData;
+      if (!controller.signal.aborted) setData(payload);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "지도 데이터를 불러오지 못했습니다.");
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "지도 데이터를 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, focusPnu, track]);
 
   useEffect(() => {
     void load();
+    return () => pendingLoad.current?.abort();
   }, [load]);
 
-  const parcels = (data?.parcelGeoJson?.features ?? []) as ParcelFeature[];
-  const locatedCount = parcels.filter((parcel) => Boolean(parcel.geometry)).length;
-  const firstPnu = parcels.find((parcel) => parcel.properties.pnu)?.properties.pnu;
-  const lawdCd = firstPnu && firstPnu.length >= 5 ? firstPnu.slice(0, 5) : undefined;
+  const parcels = data?.parcelGeoJson.features ?? [];
+  const focusedParcel = focusPnu ? parcels.find((parcel) => parcel.properties.pnu === focusPnu) : undefined;
+  const boundaryCount = parcels.filter((parcel) => parcelGeometryStatus(parcel.geometry) === "boundary").length;
+  const pointCount = parcels.filter((parcel) => parcelGeometryStatus(parcel.geometry) === "point").length;
+  const regionPnu = focusPnu ? focusedParcel?.properties.pnu : parcels.find((parcel) => parcel.properties.pnu)?.properties.pnu;
+  const lawdCd = regionPnu?.slice(0, 5);
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
+  const activeTrack = track ?? (isWorkflowTrack(context?.workflowTrack) ? context.workflowTrack : undefined);
+  const geometryLookup = data?.geometryResolution;
+  const lookupStatus = geometryLookup?.status;
+  const lookupCounts = [
+    typeof geometryLookup?.fetchedFromVworld === "number" ? `신규 ${geometryLookup.fetchedFromVworld}건` : null,
+    typeof geometryLookup?.cacheHits === "number" ? `캐시 ${geometryLookup.cacheHits}건` : null,
+  ].filter(Boolean).join(" · ");
+  const lookupLabel = lookupStatus === "not_configured" || lookupStatus === "no_eligible_parcels" || lookupStatus === "unresolved"
+    ? GEOMETRY_LOOKUP_LABEL[lookupStatus]
+    : lookupStatus === "partial" ? "일부 경계 미확인" : lookupCounts || "미실행";
+  const returnLabel = focusPnu ? "토지 검토로 돌아가기" : "프로젝트로 돌아가기";
 
   const markers: TxMarker[] = useMemo(
     () =>
@@ -91,8 +116,8 @@ export default function ProjectMapPage() {
     <div className="space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Link href={`/project/${projectId}`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-300" aria-label="프로젝트로 돌아가기">
-            <ArrowLeft className="h-4 w-4" />
+          <Link href={projectWorkspaceHref(projectId, focusPnu ? "land" : "", activeTrack)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-300" aria-label={returnLabel}>
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           </Link>
           <div className="flex items-center gap-2">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-950">
@@ -111,12 +136,17 @@ export default function ProjectMapPage() {
         </button>
       </header>
 
+      {requestedPnu !== null && !focusPnu ? (
+        <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">지정한 PNU 형식을 확인해 주세요.</p>
+      ) : null}
+
       {data ? (
         <section className="grid gap-3 md:grid-cols-4">
           <Metric label="필지 수" value={`${parcels.length.toLocaleString("ko-KR")}필지`} />
-          <Metric label="지도 경계 확인" value={`${locatedCount.toLocaleString("ko-KR")}/${parcels.length.toLocaleString("ko-KR")}`} />
+          <Metric label="지도 경계 확인" value={`${boundaryCount.toLocaleString("ko-KR")}/${parcels.length.toLocaleString("ko-KR")}`}
+            detail={pointCount ? `참고 위치만 ${pointCount.toLocaleString("ko-KR")}필지` : undefined} />
           <Metric label="공시지가 확인" value={`${data.summary?.pricedParcelCount ?? 0}/${parcels.length.toLocaleString("ko-KR")}`} />
-          <Metric label="VWorld 조회" value={data.geometryResolution ? `신규 ${data.geometryResolution.fetchedFromVworld ?? 0}건 · 캐시 ${data.geometryResolution.cacheHits ?? 0}건` : "미실행"} />
+          <Metric label="VWorld 조회" value={lookupLabel} detail={lookupStatus === "partial" ? lookupCounts : undefined} />
         </section>
       ) : null}
 
@@ -126,7 +156,14 @@ export default function ProjectMapPage() {
         <div className="flex min-h-[400px] items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 h-5 w-5 animate-spin" /> 지도 데이터를 불러오는 중입니다.</div>
       ) : data ? (
         <>
-          <MapIntelligence data={data} transactions={markers} />
+          {focusPnu ? (
+            <p role="status" className="rounded-lg border border-re-border bg-re-surface px-4 py-3 text-sm text-re-text">
+              {focusedParcel
+                ? <><strong>{displayText(focusedParcel.properties.addressFragment ?? focusedParcel.properties.lotNumber, focusPnu)}</strong> · {PARCEL_GEOMETRY_LABEL[parcelGeometryStatus(focusedParcel.geometry)]}</>
+                : "이 프로젝트에서 요청한 PNU를 확인할 수 없습니다. 토지 검토에서 필지 정보를 확인해 주세요."}
+            </p>
+          ) : null}
+          <MapIntelligence data={data} transactions={markers} focusPnu={focusPnu} />
           <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-5 py-3 dark:border-slate-800">
               <div>
@@ -151,11 +188,12 @@ export default function ProjectMapPage() {
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {parcels.map((parcel, index) => {
                       const props = parcel.properties;
+                      const geometryStatus = parcelGeometryStatus(parcel.geometry);
                       return (
-                        <tr key={props.pnu ?? props.lotNumber ?? index} className="hover:bg-slate-50 dark:hover:bg-slate-950/40">
+                        <tr key={`${index}:${parcel.id ?? props.pnu ?? ""}`} className="hover:bg-slate-50 dark:hover:bg-slate-950/40">
                           <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{displayText(props.addressFragment ?? props.lotNumber, "미확인")}</td>
                           <td className="px-4 py-3 font-mono text-xs text-slate-500">{props.pnu ?? "미확인"}</td>
-                          <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${parcel.geometry ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{parcel.geometry ? "확인" : "미확인"}</span></td>
+                          <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${geometryStatus === "boundary" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{PARCEL_GEOMETRY_LABEL[geometryStatus]}</span></td>
                           <td className="px-4 py-3 text-slate-700 dark:text-slate-200">{displayText(props.landCategory, "미확인")}</td>
                           <td className="px-4 py-3 text-slate-700 dark:text-slate-200">{formatSqm(props.areaSqm)}</td>
                           <td className="px-4 py-3 text-slate-700 dark:text-slate-200">
@@ -180,6 +218,6 @@ export default function ProjectMapPage() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900"><p className="text-xs font-bold text-slate-500">{label}</p><p className="mt-2 text-xl font-black text-slate-950 dark:text-white">{value}</p></div>;
+function Metric({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900"><p className="text-xs font-bold text-slate-500">{label}</p><p className="mt-2 text-xl font-black text-slate-950 dark:text-white">{value}</p>{detail ? <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">{detail}</p> : null}</div>;
 }
