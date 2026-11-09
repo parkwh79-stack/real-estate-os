@@ -382,7 +382,10 @@ export function ChiefDealRoomWorkspace({
               })}
             </ul>
             {preflight.publicLookups.length ? <ul className="mt-3 space-y-1 text-xs text-re-secondary">
-              {preflight.publicLookups.map((lookup) => <li key={lookup.key}>{lookup.label} · {lookup.message}</li>)}
+              {preflight.publicLookups.map((lookup) => <li key={lookup.key}>
+                {lookup.label}{lookup.requestedCount ? ` · ${lookup.checkedCount ?? 0}/${lookup.requestedCount}필지` : ""} · {lookup.message}
+              </li>)}
+              <li className="pt-1">공개 근거는 이번 분석에서만 사용합니다. 공사 견적·대출 약정·최종 승인 자료는 원본 확인이 필요합니다.</li>
             </ul> : null}
           </div>
         </details>

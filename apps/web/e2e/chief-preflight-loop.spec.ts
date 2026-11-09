@@ -70,6 +70,19 @@ async function mockLoop(page: Page, response: (index: number, revision: string) 
   return state;
 }
 
+test("collection progress shows matched parcels and remaining private evidence", async ({ page }) => {
+  await mockLoop(page, (index, revision) => ({ body: { ...result(revision, index), publicLookups: [
+    { key: "land_use_planning", label: "용도지역·토지이용계획", status: "deferred", checkedCount: 2, requestedCount: 3,
+      message: "남은 필지의 공개 조회를 이어서 확인합니다." },
+    { key: "market", label: "국토교통부 실거래가", status: "empty", message: "조회 기간의 거래를 확인하지 못했습니다." },
+  ] } }));
+  await page.getByRole("button", { name: "사전 검토 실행", exact: true }).click();
+  await page.getByText(/사전 검토 결과 · 6개 영역/).click();
+  await expect(page.getByText("용도지역·토지이용계획 · 2/3필지 · 남은 필지의 공개 조회를 이어서 확인합니다.")).toBeVisible();
+  await expect(page.getByText("국토교통부 실거래가 · 조회 기간의 거래를 확인하지 못했습니다.")).toBeVisible();
+  await expect(page.getByText("공개 근거는 이번 분석에서만 사용합니다. 공사 견적·대출 약정·최종 승인 자료는 원본 확인이 필요합니다.")).toBeVisible();
+});
+
 test("failed preparation does not enable analysis and explicit retry restarts the failed request", async ({ page }) => {
   const state = await mockLoop(page, (index) => index === 0 ? { status: 503, body: { detail: "unavailable" } } : {});
   await page.getByRole("button", { name: "사전 검토 실행", exact: true }).click();

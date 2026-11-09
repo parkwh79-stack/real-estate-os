@@ -41,7 +41,9 @@ export type ChiefPreflightResult = {
   publicLookups: Array<{
     key: string;
     label: string;
-    status: "available" | "checked" | "unavailable" | "needs_input" | "failed";
+    status: "available" | "checked" | "unavailable" | "needs_input" | "failed" | "deferred" | "empty";
+    checkedCount?: number;
+    requestedCount?: number;
     message: string;
   }>;
   reviewLoop: {

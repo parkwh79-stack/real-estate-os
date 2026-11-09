@@ -519,7 +519,16 @@ def run_legal_pod_use_case(
     options = input_data or {}
     normalized_storage = storage_backend() == "postgres"
     land_enrichment = {"status": "not_requested", "diagnostics": []}
-    live_preview_records = []
+    # Chief's read-only collection projection already contains PNU-checked public
+    # responses. Do not discard those in favour of the persisted-only query below.
+    preview_pnus = {parcel_pnu(row) for row in _parcel_source_rows(project_data)}
+    preview_pnus.add(parcel_pnu(project_data.get("land") or {}))
+    live_preview_records = [
+        deepcopy(row) for row in (project_data.get("landEvidence") or {}).get("records") or []
+        if not persist and row.get("pnu") in preview_pnus and row.get("pnu")
+        and row.get("sourcePnuVerified") is True and row.get("sourceLocator")
+        and row.get("evidenceType") in {"cadastral", "land_use_planning", "official_land_price", "land_characteristics"}
+    ]
     if options.get("autoEnrichLand", True):
         parcels = _parcel_source_rows(project_data)
         preview_resolution = None
@@ -661,14 +670,14 @@ def run_legal_pod_use_case(
             if record.get("evidenceType") not in {"cadastral", "cadastral_characteristics", "land_use_planning"}
             or _land_record_has_verified_source_pnu(record)
         ]
-    review_data["landEvidence"]["records"] = persisted_land_records
+    review_data["landEvidence"]["records"] = [*live_preview_records, *persisted_land_records]
     review_land_records = [*live_preview_records, *persisted_land_records]
     cadastral = [item for item in review_land_records if item.get("evidenceType") in {"cadastral_characteristics", "cadastral"}]
     current_land_use = [
         record for record in land_enrichment.get("landUsePlanningRecords") or []
         if record.get("pnu") in parcel_pnus
     ]
-    persisted_land_use = [item for item in persisted_land_records if item.get("evidenceType") == "land_use_planning"]
+    persisted_land_use = [item for item in review_land_records if item.get("evidenceType") == "land_use_planning"]
     land_use_records = [*current_land_use, *persisted_land_use]
     land_use_by_pnu: Dict[str, Dict[str, Any]] = {}
     for item in reversed(land_use_records):

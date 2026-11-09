@@ -425,7 +425,7 @@ def test_previous_runner_version_cannot_reuse_old_public_provenance():
     assert result["reviewLoop"]["executedCount"] == 6
     assert result["reviewLoop"]["reusedCount"] == 0
     assert result["resumeState"]["publicState"] is None
-    assert result["reviewLoop"]["runnerVersion"] == "realytics-chief-preflight-review-v2"
+    assert result["reviewLoop"]["runnerVersion"] == "realytics-chief-preflight-review-v3"
 
 
 def test_pnu_identification_does_not_borrow_unverified_same_pnu_document_locator():

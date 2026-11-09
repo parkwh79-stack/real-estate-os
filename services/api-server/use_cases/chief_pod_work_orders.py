@@ -20,6 +20,7 @@ POD_EXECUTION_AGENTS = {
 PUBLIC_INPUTS = {
     "pnu_or_land_ledger_missing": "land_legal",
     "land_evidence_missing": "land_legal",
+    "regulation_data_missing": "land_legal",
     "market_evidence_missing": "market_product",
 }
 

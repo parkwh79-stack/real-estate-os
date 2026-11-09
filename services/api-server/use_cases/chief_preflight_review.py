@@ -19,6 +19,7 @@ from use_cases.chief_deal_orchestration import _agent_pods, _missing_inputs, _wo
 from use_cases.chief_pod_preflight import POD_PURPOSES, _confirmed_parcels, run_chief_pod_preflight
 from use_cases.chief_pod_records import stable_digest
 from use_cases.chief_pod_work_orders import route_review_work_orders
+from use_cases.chief_public_collection import collect_land_evidence
 from use_cases.market_comparables import ASSET_TYPE_MAP, fetch_project_market_comparables, recent_deal_yms
 from use_cases.parcel_pnu_resolution import canonical_project_parcel_rows, parcel_pnu
 from use_cases.common import deep_merge
@@ -30,7 +31,7 @@ from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.pf_structure import build_pf_structure_input, execute_pf_structure_input
 from use_cases.pod_execution_coordinator import PodExecutionCoordinator
 
-RUNNER_VERSION = "realytics-chief-preflight-review-v2"
+RUNNER_VERSION = "realytics-chief-preflight-review-v3"
 
 # These are consumed source inputs, not previous generated domain projections.
 _INPUT_KEYS = {
@@ -54,6 +55,12 @@ _INPUT_KEYS = {
     "public_policy": ("project", "land", "landLedger", "landEvidence", "regulation", "regulatoryConstraintSnapshot",
                       "legalContext", "publicContribution", "public_contribution", "policy", "source_documents"),
 }
+# Every parcel source participates in the same revision/consumption boundary.
+for _pod in ("land_legal", "market_product", "public_policy"):
+    _INPUT_KEYS[_pod] += ("landLedgerSources",)
+for _pod in ("cost_schedule", "pf_credit"):
+    _INPUT_KEYS[_pod] += ("_meta",)
+_INPUT_KEYS["feasibility_cashflow"] += ("source_documents",)
 _BOOKKEEPING = {
     "createdAt", "updatedAt", "generatedAt", "timestamp", "reviewId", "legalReviewId", "permitReviewId",
     "handoffId", "artifactKey", "sourceArtifactKey", "runId", "agentRunId", "fetchedAt",
@@ -101,6 +108,24 @@ def _positive(value: Any) -> bool:
     except (ValueError, TypeError):
         return False
     return 0 < number < float("inf")
+
+
+def _reviewed_input_sources(source: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep exact archived-cell provenance for the working values actually consumed."""
+    reviews = (source.get("_meta") or {}).get("feasibilityFieldReviews") or {}
+    values = source.get("feasibility_input") or {}
+    archives = {row.get("archiveId") for row in source.get("source_documents") or [] if isinstance(row, dict)}
+    rows = []
+    for field, review in reviews.items():
+        if not isinstance(review, dict) or field not in values or review.get("value") != values[field]:
+            continue
+        document = review.get("sourceDocument") or {}
+        if (review.get("origin") == "document_correction" and document.get("archiveId") in archives
+                and document.get("archiveId") and review.get("sourceCell")):
+            rows.append({"field": field, "value": values[field], "analysisOnly": True,
+                         "sourceLocator": {"sourceType": "excel_cell", "archiveId": document["archiveId"],
+                                           "cell": review["sourceCell"]}})
+    return rows
 
 
 def _execute_agents(
@@ -217,6 +242,9 @@ def _execute_agents(
         result["supportScope"] = "existing_developability_review"
         result["unsupportedTasks"] = ["dedicated_policy_simulation", "public_contribution_optimization"]
 
+    input_sources = _reviewed_input_sources(source)
+    if input_sources:
+        result["inputSources"] = input_sources
     review = call("PodAIReviewerAgent", "review", lambda: PodAIReviewerAgent().review_pod(
         project_id=project_id, pod_key=pod_key, source_artifact=result, project_data=source,
         source_artifact_key="preflight:" + stable_digest([project_id, pod_key, source]),
@@ -285,6 +313,10 @@ def _collect_public(
     if old and (attempted >= 18 or (not deferred and (not failed or not retry_failed or int(old.get("failureAttempts") or 0) >= 3))):
         return deepcopy(old)
     working = deep_merge(source, old.get("patch") or {})
+    site = working.get("land") or {}
+    if not canonical_project_parcel_rows(working) and site.get("address") and not parcel_pnu(site):
+        # Only the user's explicit site address, never an arbitrary document address.
+        working["landLedger"] = {"parcels": [{**deepcopy(site), "addressFragment": site["address"]}]}
     cadastral_matches = []
     checked, lookup = _confirmed_parcels(
         project_id, working, allow_live=True, cadastral_matches=cadastral_matches,
@@ -299,6 +331,10 @@ def _collect_public(
     if rows:
         evidence["records"] = rows
         working["landEvidence"] = evidence
+    land_lookups, land_tasks = collect_land_evidence(
+        working, checked, old.get("landTasks") or {}, deadline=deadline, retry_failed=retry_failed,
+    )
+    lookups.extend(land_lookups)
     market = working.get("market") or {}
     market_lookup = {"key": "market", "label": "국토교통부 실거래가", "podKey": "market_product"}
     parcels = canonical_project_parcel_rows(working)
@@ -325,7 +361,7 @@ def _collect_public(
         else:
             try:
                 records, diagnostic = fetch_project_market_comparables(
-                    working, connector=connector, deal_yms=recent_deal_yms(1),
+                    working, connector=connector, deal_yms=recent_deal_yms(3),
                     lawd_cd=next(iter(districts)), asset_type=asset, per_month_rows=30, max_records=12,
                 )
             except Exception:
@@ -338,10 +374,11 @@ def _collect_public(
                                      message="조회 기간의 거래를 확인하지 못했습니다.")
     lookups.append(market_lookup)
     patch = {key: deepcopy(working[key]) for key in
-             ("land", "landLedger", "land_ledger", "land_acquisition", "landEvidence", "market")
+             ("land", "landLedger", "land_ledger", "landLedgerSources", "land_acquisition", "landEvidence", "market")
              if key in working and working.get(key) != source.get(key)}
     failed_now = any(row["status"] == "failed" for row in lookups)
     return {"inputHash": identity, "patch": patch, "lookups": lookups, "attempts": attempted + 1,
+            "landTasks": land_tasks,
             "failureAttempts": int(old.get("failureAttempts") or 0) + 1 if failed_now else 0}
 
 
@@ -408,6 +445,21 @@ def _agent_requests(
         })
 
 
+def _settle_collection_orders(orders: list[dict[str, Any]], public_state: dict[str, Any] | None) -> None:
+    keys = {"pnu_or_land_ledger_missing": {"parcels"}, "regulation_data_missing": {"land_use_planning"},
+            "land_evidence_missing": {"land_characteristics", "official_land_price"},
+            "market_evidence_missing": {"market"}}
+    for request in orders:
+        if request.get("action") != "collect_public_evidence" or request.get("status") == "needs_review":
+            continue
+        relevant = [row for row in (public_state or {}).get("lookups") or []
+                    if row["key"] in keys.get(request.get("missingItemId"), set())]
+        request["lookupKeys"] = [row["key"] for row in relevant]
+        request["status"] = next((status for status in ("failed", "deferred", "unavailable", "needs_input", "empty")
+                                  if any(row["status"] == status for row in relevant)),
+                                 "checked_in_preview" if relevant else "not_enabled")
+
+
 def run_chief_preflight_review(
     project_id: str, project_data: dict[str, Any], *, workflow_track: str | None = None,
     previous_state: dict[str, Any] | None = None, retry_failed: bool = False,
@@ -454,7 +506,7 @@ def run_chief_preflight_review(
             public_state = _collect_public(
                 project_id, source, previous_public, retry_failed=False, deadline=deadline,
             )
-            if public_state["patch"] == previous_public["patch"]:
+            if public_state["patch"] == previous_public["patch"] and public_state.get("landTasks") == previous_public.get("landTasks"):
                 break
     effective_source = deep_merge(source, (public_state or {}).get("patch") or {})
 
@@ -533,12 +585,11 @@ def run_chief_preflight_review(
         ) if review else []
         for request in [*orders, *(outcome.get("workOrders") or [])]:
             target = request.get("podKey")
-            if request.get("action") == "collect_public_evidence":
-                request["status"] = "checked_in_preview" if public_state else "not_enabled"
             if target in dependencies and request.get("action") == "rerun_pod" \
                     and not any(queued["podKey"] == target for queued in queue):
                 queue.append({"podKey": target, "round": round_index + 1})
 
+    _settle_collection_orders(work_state["workOrders"], public_state)
     final = run_chief_pod_preflight(project_id, effective_source, workflow_track=track, allow_public_lookups=False)
     if public_state:
         final["publicLookups"] = public_state["lookups"]
