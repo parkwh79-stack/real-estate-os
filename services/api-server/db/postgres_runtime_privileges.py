@@ -68,6 +68,14 @@ PROJECT_RUNTIME_SEQUENCE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
     "project_id_sequence": ("USAGE",),
 }
 
+# Owner-approved personal AI settings. Deployment installs/checks user + tenant RLS.
+USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "user_ai_profiles": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+}
+USER_AI_PROFILE_FORBIDDEN_PRIVILEGES: Mapping[str, tuple[str, ...]] = {
+    "user_ai_profiles": ("TRUNCATE", "REFERENCES", "TRIGGER"),
+}
+
 # Tenant membership administration runs through the tenant-scoped API pool,
 # never the read-only identity pool.  The directory relations intentionally do
 # not receive broad table SELECT/UPDATE grants: only the columns projected by
@@ -648,6 +656,7 @@ def required_table_privileges() -> dict[str, tuple[str, ...]]:
     return {
         **PARSER_V2_TABLE_PRIVILEGES,
         **PROJECT_RUNTIME_TABLE_PRIVILEGES,
+        **USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES,
         **PARSER_V2_SUPPORT_PRIVILEGES,
         **PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
         **MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
@@ -695,6 +704,7 @@ def forbidden_table_privileges() -> dict[str, tuple[str, ...]]:
         **MEMBERSHIP_ADMIN_FORBIDDEN_TABLE_PRIVILEGES,
         **REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES,
         **PROJECT_RUNTIME_FORBIDDEN_PRIVILEGES,
+        **USER_AI_PROFILE_FORBIDDEN_PRIVILEGES,
     }
 
 
@@ -874,6 +884,7 @@ def provision_parser_v2_runtime_role(
                 *PARSER_V2_TABLE_PRIVILEGES,
                 *PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
                 *PROJECT_RUNTIME_TABLE_PRIVILEGES,
+                *USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES,
                 *MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
                 *PARSER_V2_SUPPORT_PRIVILEGES,
                 *REPORT_PUBLICATION_PRIVILEGES,
@@ -1049,6 +1060,7 @@ def render_parser_v2_runtime_role_sql(
         **PARSER_V2_TABLE_PRIVILEGES,
         **PARSER_V2_MANAGED_SUPPORT_PRIVILEGES,
         **PROJECT_RUNTIME_TABLE_PRIVILEGES,
+        **USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES,
         **MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
         **REPORT_PUBLICATION_PRIVILEGES,
         **LEGAL_INTELLIGENCE_GLOBAL_PRIVILEGES,
@@ -1056,15 +1068,14 @@ def render_parser_v2_runtime_role_sql(
         **LEGAL_INTELLIGENCE_READ_ONLY_SUPPORT_PRIVILEGES,
         **LEGAL_PROVIDER_OPERATIONS_PRIVILEGES,
     }
+    # CRUD is valid only behind the exact restrictive user + tenant policy.
+    from db.user_ai_profile_privileges import render_user_ai_profile_policy_sql
+    statements.append(render_user_ai_profile_policy_sql(role_name=role, schema_name=schema))
     for table, privileges in exact_privileges.items():
         relation = f"{schema_identifier}.{_quoted_identifier(table)}"
-        statements.extend(
-            (
-                f"REVOKE ALL PRIVILEGES ON TABLE {relation} FROM PUBLIC",
-                "REVOKE ALL PRIVILEGES ON TABLE "
-                f"{relation} FROM {role_identifier}",
-            )
-        )
+        if table not in USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES:
+            statements.append(f"REVOKE ALL PRIVILEGES ON TABLE {relation} FROM PUBLIC")
+        statements.append("REVOKE ALL PRIVILEGES ON TABLE " f"{relation} FROM {role_identifier}")
         if privileges:
             statements.append(
                 _render_grant(relation, role_identifier, privileges)
@@ -1288,6 +1299,8 @@ __all__ = [
     "PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES",
     "PROJECT_RUNTIME_SEQUENCE_PRIVILEGES",
     "PROJECT_RUNTIME_TABLE_PRIVILEGES",
+    "USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES",
+    "USER_AI_PROFILE_FORBIDDEN_PRIVILEGES",
     "REPORT_PUBLICATION_FORBIDDEN_PRIVILEGES",
     "REPORT_PUBLICATION_PRIVILEGES",
     "POSTGIS_SCHEMA_ENV",

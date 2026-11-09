@@ -20,11 +20,18 @@ GET 프로필·키 상태 확인은 만료 여부만 반환하고 프로필 갱�
 기존 POST의 `clearApiKey:true`는 DB 변경 성공 후 현재 사용자·세션의 키만 폐기한다.
 키 저장 체계나 IAM을 새로 만들지 않는다.
 
-`db/user_ai_profile_privileges.py`는 조회 전용/기존 편집 범위 두 가지의 검토용 SQL만
-렌더한다. `realytics_runtime`의 `user_ai_profiles` 접근에 현재 사용자와 테넌트를 함께
-제한한다. 운영 provisioner·필수 권한 manifest에는 연결하지 않았고 운영 GRANT/RLS는
-미반영이다. 적용 전 실제 PostgreSQL 격리 검증, 사용자 범위 선택, 기존 strict preflight와
-프로비저닝의 동일 권한 연결이 필요하다. 읽기 전용 MCP·CLI에는 이 권한 확대가 필요 없다.
+사용자는 2026-11-09 기존 `realytics_runtime` 역할의 `user_ai_profiles` 조회·저장·수정·삭제를
+승인했다. 현재 사용자와 테넌트가 모두 일치하는 restrictive ALL 정책을 추가하고
+TRUNCATE·REFERENCES·TRIGGER는 금지한다. 다른 역할·PUBLIC의 권한은 변경하지 않는다.
+PF Worker는 API manifest에서 개인 프로필 조회 권한을 상속하지 않는다.
+
+`db/user_ai_profile_privileges.py`의 동일 계약을 필수/금지 manifest, 전체 및 전용
+provisioner, strict startup preflight가 공유한다. RLS 비활성·역할/소유권 경계 위반·허용
+기반 정책 부재·동명 다른 정책은 적용을 중단하며 기존 정책을 임의로 교체하지 않는다.
+전용 `scripts/provision_user_ai_profiles.py`는 연결 없는 SQL/롤백 렌더와 승인된 배포 DSN의
+트랜잭션 적용·audit를 제공한다. 적용 코드와 실제 운영 반영은 구분하며 현재 배포 검증 중이다.
+배포별 역할 정책이므로 불변 numbered schema migration을 수정하지 않는다.
+읽기 전용 MCP·CLI 자체에는 이 권한 확대가 필요 없다.
 
 ## 사용자 AI의 운영 Excel 읽기 (2026-11-09)
 

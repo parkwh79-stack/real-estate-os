@@ -34,7 +34,7 @@ PF_WORKER_TABLE_PRIVILEGES.update({
     table: () for table in (
         *MEMBERSHIP_ADMIN_TABLE_PRIVILEGES,
         "tenant_invitations", "identity_invitation_token_index", "users", "sessions",
-        "report_publications",
+        "report_publications", "user_ai_profiles",
     )
 })
 # Deny every table reserved by the API's policy, even when it has no required

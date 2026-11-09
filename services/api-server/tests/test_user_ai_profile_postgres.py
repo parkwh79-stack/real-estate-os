@@ -8,7 +8,7 @@ import pytest
 import storage
 from db.repositories.user_ai_profile_repository import PostgresUserAIProfileRepository, UserAIProfileUnavailable
 from routers import auth
-from db.user_ai_profile_privileges import USER_AI_PROFILE_ACCESS_CHOICES, render_user_ai_profile_access_review_sql
+from db.user_ai_profile_privileges import render_user_ai_profile_access_sql, render_user_ai_profile_access_rollback_sql
 
 
 class _Connection:
@@ -111,16 +111,16 @@ def test_profile_endpoint_reports_configured_system_policy_when_verified_profile
     assert payload["fallbackPolicy"]["model"] == payload["effectiveAi"]["model"] == "configured-model-fixture"
 
 
-@pytest.mark.parametrize("mode", ["read_only", "edit"])
-def test_profile_access_review_manifest_is_explicit_and_scoped(mode):
-    sql = render_user_ai_profile_access_review_sql(mode=mode)
+def test_approved_edit_manifest_is_scoped_and_has_guarded_rollback():
+    sql = ";\n".join(render_user_ai_profile_access_sql())
     assert "AS RESTRICTIVE" in sql and "WITH CHECK" in sql
     assert "realytics.tenant_id" in sql and "realytics.user_id" in sql
-    grants = ", ".join(USER_AI_PROFILE_ACCESS_CHOICES[mode])
-    assert f'GRANT {grants} ON TABLE "realytics"."user_ai_profiles" TO "realytics_runtime";' in sql
+    assert 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "realytics"."user_ai_profiles" TO "realytics_runtime"' in sql
     assert "GRANT ALL" not in sql and "CREATE TABLE" not in sql
-    with pytest.raises(ValueError):
-        render_user_ai_profile_access_review_sql(mode="automatic")
+    assert "conflicts with the approved contract" in sql and "rolbypassrls" in sql
+    rollback = ";\n".join(render_user_ai_profile_access_rollback_sql())
+    assert 'REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLE "realytics"."user_ai_profiles" FROM "realytics_runtime"' in rollback
+    assert 'DROP POLICY user_scope_user_ai_profiles_runtime ON "realytics"."user_ai_profiles"' in rollback
 
 
 def test_select_only_profile_get_projects_expiry_without_any_write(monkeypatch):
@@ -160,3 +160,48 @@ def test_profile_clear_denied_by_read_only_authority_does_not_revoke_vault_key(m
     app.include_router(auth.router)
     response = TestClient(app).post("/auth/ai-profile", json={"clearApiKey": True})
     assert response.status_code == 503 and response.json()["detail"]["error"] == "ai_profile_authority_unavailable"
+
+
+@pytest.mark.parametrize("action", ["--render", "--rollback-sql"])
+def test_profile_provisioner_can_render_without_any_database_connection(monkeypatch, capsys, action):
+    from scripts import provision_user_ai_profiles as provisioner
+    monkeypatch.setattr(provisioner.postgres, "connect", lambda *_a, **_kw: pytest.fail("SQL rendering must not connect"))
+    assert provisioner.main([action, "--role", "realytics_runtime"]) == 0
+    sql = capsys.readouterr().out
+    assert sql.startswith("BEGIN;") and sql.rstrip().endswith("COMMIT;")
+    assert "user_ai_profiles" in sql and 'TO "anon"' not in sql and "CREATE TABLE" not in sql
+    assert ("DROP POLICY user_scope_user_ai_profiles_runtime" in sql) is (action == "--rollback-sql")
+
+
+def test_profile_provisioner_rolls_back_a_policy_collision_before_grants(monkeypatch):
+    from scripts import provision_user_ai_profiles as provisioner
+    class Cursor:
+        statements = []
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def execute(self, statement, _params=None):
+            self.statements.append(statement)
+            if statement.startswith("DO $realytics_user_ai_profile$"):
+                raise RuntimeError("policy collision fixture")
+        def fetchone(self):
+            return ("realytics",)
+    class Connection:
+        rolled_back = closed = False
+        cursor_value = Cursor()
+        def cursor(self):
+            return self.cursor_value
+        def commit(self):
+            pytest.fail("failed policy must not commit")
+        def rollback(self):
+            self.rolled_back = True
+        def close(self):
+            self.closed = True
+    connection = Connection()
+    monkeypatch.setenv("REALYTICS_MIGRATION_DATABASE_URL", "postgresql://synthetic.invalid/test")
+    monkeypatch.setattr(provisioner.postgres, "connect", lambda *_a, **_kw: connection)
+    with pytest.raises(RuntimeError, match="policy collision fixture"):
+        provisioner.main(["--apply", "--role", "realytics_runtime"])
+    assert connection.rolled_back and connection.closed
+    assert not any(statement.startswith("GRANT") for statement in connection.cursor_value.statements)

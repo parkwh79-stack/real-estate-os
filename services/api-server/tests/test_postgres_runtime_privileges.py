@@ -22,6 +22,8 @@ from db.postgres_runtime_privileges import (
     PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES,
     PROJECT_RUNTIME_SEQUENCE_PRIVILEGES,
     PROJECT_RUNTIME_TABLE_PRIVILEGES,
+    USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES,
+    USER_AI_PROFILE_FORBIDDEN_PRIVILEGES,
     REVOKE_PUBLIC_DATABASE_TEMPORARY_ENV,
     RuntimePrivilegeProvisioningError,
     audit_runtime_privileges,
@@ -73,6 +75,14 @@ def test_project_runtime_manifest_supports_crud_without_delete_or_setval() -> No
     assert forbidden_sequence_privileges() == (
         PROJECT_RUNTIME_SEQUENCE_FORBIDDEN_PRIVILEGES
     )
+
+
+def test_approved_user_ai_profile_manifest_requires_exact_crud_only():
+    from db.postgres_runtime_privileges import forbidden_table_privileges
+    assert USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES == {"user_ai_profiles": ("SELECT", "INSERT", "UPDATE", "DELETE")}
+    assert USER_AI_PROFILE_FORBIDDEN_PRIVILEGES == {"user_ai_profiles": ("TRUNCATE", "REFERENCES", "TRIGGER")}
+    assert required_table_privileges()["user_ai_profiles"] == USER_AI_PROFILE_RUNTIME_TABLE_PRIVILEGES["user_ai_profiles"]
+    assert forbidden_table_privileges()["user_ai_profiles"] == USER_AI_PROFILE_FORBIDDEN_PRIVILEGES["user_ai_profiles"]
 
 
 def test_membership_admin_manifest_is_column_scoped_and_append_only() -> None:
@@ -671,6 +681,8 @@ def test_rendered_manifest_matches_private_schema_contract() -> None:
     assert 'TO "anon"' not in sql
     assert 'TO "authenticated"' not in sql
     assert 'TO "service_role"' not in sql
+    assert sql.index("DO $realytics_user_ai_profile$") < sql.index('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "realytics"."user_ai_profiles"')
+    assert 'REVOKE ALL PRIVILEGES ON TABLE "realytics"."user_ai_profiles" FROM PUBLIC' not in sql
 
 
 def test_rendered_manifest_can_opt_into_shared_database_temp_revocation() -> None:

@@ -1,6 +1,7 @@
 import hashlib
 import io
 import zipfile
+import xml.etree.ElementTree as ET
 
 import fitz
 import openpyxl
@@ -222,7 +223,14 @@ def test_xlsx_streams_sparse_formula_and_cached_rows_once_without_cell_seek(monk
         for entry in source.infolist():
             content = source.read(entry.filename)
             if entry.filename == "xl/worksheets/sheet1.xml":
-                content = content.replace(b"<f>SUM(2,3)</f><v />", b"<f>SUM(2,3)</f><v>5</v>")
+                # lxml and ElementTree serialize empty values differently.
+                # Set the actual cache node rather than matching one spelling.
+                sheet_xml = ET.fromstring(content)
+                namespace = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                cached_value = sheet_xml.find(".//m:c[@r='B9']/m:v", namespace)
+                assert cached_value is not None
+                cached_value.text = "5"
+                content = ET.tostring(sheet_xml, encoding="utf-8")
             target.writestr(entry, content)
     def no_repeated_cell_seek(*args):
         raise AssertionError("Read-only structural extraction must stream rows rather than seek per cell")

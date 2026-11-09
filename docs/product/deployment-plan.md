@@ -1,8 +1,27 @@
 # Deployment Plan
 
-Updated: 2026-11-04
+Updated: 2026-11-09
 
 Status: **Controlled implementation; not production-ready**
+
+### Approved personal AI profile permissions (2026-11-09)
+
+The owner approved CRUD for the existing API runtime role on `user_ai_profiles`
+only, with a restrictive policy requiring both transaction user and tenant IDs.
+The exact required/forbidden manifests, deployment provisioners and startup
+preflight share this policy. PF workers retain no access to personal profiles.
+Role-specific SQL is rendered by `scripts/provision_user_ai_profiles.py`; it is
+not a modification to an applied numbered migration. SQL rendering is not live
+application evidence.
+
+Build and validate the immutable API image first. Recheck the existing catalog,
+apply the approved policy and exact CRUD in one transaction, audit them, then
+immediately deploy the new API container and verify readiness before routing.
+The old process keeps its initialized pool, but an old-image cold start rejects
+the new privileges. A new-image startup rejects missing grants/policy. Therefore
+the database change and revision deployment must be adjacent; zero interruption
+is not claimed. Roll back image and guarded profile grants/policy together.
+Profile rows, other tables and PUBLIC/other-role privileges are preserved.
 
 ### Sample intake and review continuity (2026-11-04)
 

@@ -20,6 +20,7 @@ from db.postgres_runtime_privileges import (
     required_table_privileges,
     required_column_privileges,
 )
+from db.user_ai_profile_privileges import PROFILE_SCOPE_SQL
 
 
 ROLE = "realytics_runtime"
@@ -64,6 +65,9 @@ class _FakeCursor:
             return
         if "AS runtime_owned_objects" in normalized:
             self.rows = [(item,) for item in self.connection.owned_objects]
+            return
+        if "AS user_ai_profile_policy_metadata" in normalized:
+            self.row = self.connection.profile_policy
             return
         if "AS expected_function" in normalized:
             self.rows = [(item,) for item in self.connection.missing_functions]
@@ -154,6 +158,7 @@ class _FakeConnection:
         self.closed = False
         self.owned_objects: tuple[str, ...] = ()
         self.missing_functions: tuple[str, ...] = ()
+        self.profile_policy = (True, "migration-owner", True, False, "*", True, PROFILE_SCOPE_SQL, PROFILE_SCOPE_SQL)
         self.unlisted_privileges: tuple[str, ...] = ()
         self.column_grants = {
             (table, column, privilege)
@@ -190,6 +195,29 @@ def test_exact_login_role_and_project_privileges_pass() -> None:
     connection = _FakeConnection()
 
     assert_api_runtime_connection(connection, expected_role=ROLE)
+
+
+@pytest.mark.parametrize("state", [None,
+    (False, "migration-owner", True, False, "*", True, PROFILE_SCOPE_SQL, PROFILE_SCOPE_SQL),
+    (True, "migration-owner", True, True, "*", True, PROFILE_SCOPE_SQL, PROFILE_SCOPE_SQL),
+    (True, "migration-owner", True, False, "*", False, PROFILE_SCOPE_SQL, PROFILE_SCOPE_SQL),
+    (True, "migration-owner", True, False, "*", True, "true", PROFILE_SCOPE_SQL),
+    (True, "migration-owner", True, False, "*", True, PROFILE_SCOPE_SQL, "true"),
+])
+def test_profile_crud_cannot_pass_preflight_without_exact_user_and_tenant_policy(state):
+    connection = _FakeConnection()
+    connection.profile_policy = state
+    assert ApiRuntimePreflightCode.INVALID_USER_AI_PROFILE_POLICY in _codes(inspect_api_runtime_role(connection, expected_role=ROLE))
+
+
+def test_profile_missing_edit_privilege_and_excess_privilege_are_rejected():
+    connection = _FakeConnection()
+    connection.table_grants.remove(("user_ai_profiles", "UPDATE"))
+    connection.table_grants.add(("user_ai_profiles", "TRUNCATE"))
+    issues = inspect_api_runtime_role(connection, expected_role=ROLE)
+    by_code = {issue.code: issue for issue in issues}
+    assert "user_ai_profiles.UPDATE" in by_code[ApiRuntimePreflightCode.MISSING_RUNTIME_PRIVILEGE].objects
+    assert "user_ai_profiles.TRUNCATE" in by_code[ApiRuntimePreflightCode.FORBIDDEN_RUNTIME_PRIVILEGE].objects
 
 
 def test_role_inspection_distinguishes_nologin_and_bypassrls() -> None:
@@ -385,6 +413,17 @@ def _worker_connection():
 def test_pf_worker_exact_direct_login_and_execution_grants_pass() -> None:
     from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection
     assert_pf_worker_runtime_connection(_worker_connection(), expected_role="realytics_pf_worker")
+
+
+@pytest.mark.parametrize("privilege", ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"])
+def test_pf_worker_rejects_every_personal_ai_profile_privilege(privilege):
+    from db.postgres_pf_worker_privileges import PF_WORKER_TABLE_PRIVILEGES
+    from db.postgres_pf_worker_runtime_preflight import assert_pf_worker_runtime_connection, PFWorkerRuntimePreflightError
+    assert PF_WORKER_TABLE_PRIVILEGES["user_ai_profiles"] == ()
+    connection = _worker_connection()
+    connection.table_grants.add(("user_ai_profiles", privilege))
+    with pytest.raises(PFWorkerRuntimePreflightError, match="pf_worker_forbidden_runtime_privilege"):
+        assert_pf_worker_runtime_connection(connection, expected_role="realytics_pf_worker")
 
 
 @pytest.mark.parametrize("unsafe_index", range(1, 7))

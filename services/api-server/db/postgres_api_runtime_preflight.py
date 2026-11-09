@@ -33,6 +33,7 @@ from db.postgres_privilege_inspection import (
     owned_runtime_objects,
     missing_function_privileges,
 )
+from db.user_ai_profile_privileges import user_ai_profile_policy_issues
 
 
 API_DATABASE_URL_ENV = "REALYTICS_API_DATABASE_URL"
@@ -65,6 +66,7 @@ class ApiRuntimePreflightCode(StrEnum):
     MISSING_RUNTIME_PRIVILEGE = "missing_runtime_privilege"
     FORBIDDEN_RUNTIME_PRIVILEGE = "forbidden_runtime_privilege"
     FORBIDDEN_OWNERSHIP = "forbidden_ownership"
+    INVALID_USER_AI_PROFILE_POLICY = "invalid_user_ai_profile_policy"
 
 
 @dataclass(frozen=True)
@@ -379,6 +381,7 @@ def inspect_api_runtime_role(
                 *(f'"{postgis_schema}".{signature}' for signature in LEGAL_INTELLIGENCE_RUNTIME_EXTENSION_FUNCTIONS),
             ),
         ))
+        profile_policy_issues = user_ai_profile_policy_issues(cursor, role_name=role, schema_name=schema)
 
     grouped_findings = (
         (
@@ -425,6 +428,11 @@ def inspect_api_runtime_role(
             owned_objects,
             ApiRuntimePreflightCode.FORBIDDEN_OWNERSHIP,
             "The API role must not own the database, runtime schemas, relations, or functions.",
+        ),
+        (
+            profile_policy_issues,
+            ApiRuntimePreflightCode.INVALID_USER_AI_PROFILE_POLICY,
+            "Personal AI settings require the approved restrictive user and tenant policy.",
         ),
     )
     for findings, code, message in grouped_findings:

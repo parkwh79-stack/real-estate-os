@@ -91,9 +91,12 @@ def test_materialized_risk_preserves_exact_record_review_in_isolated_postgres(mo
 
 @pytest.mark.parametrize("mode", ["read_only", "edit"])
 def test_proposed_user_ai_grants_and_rls_in_rollback_only_isolated_schema(mode):
-    """Exercise the review SQL as a non-owner; no live runtime grants are used."""
-    from db.user_ai_profile_privileges import render_user_ai_profile_access_review_sql
-    from psycopg.errors import InsufficientPrivilege
+    """Approved edit contract; retain SELECT-only as a denial regression fixture."""
+    from db.user_ai_profile_privileges import (
+        render_user_ai_profile_access_sql, render_user_ai_profile_access_rollback_sql,
+        user_ai_profile_access_issues, user_ai_profile_policy_issues,
+    )
+    from psycopg.errors import InsufficientPrivilege, RaiseException
 
     suffix = uuid4().hex
     schema, role = f"ai_review_{suffix}", f"ai_runtime_{suffix}"
@@ -110,7 +113,14 @@ def test_proposed_user_ai_grants_and_rls_in_rollback_only_isolated_schema(mode):
                      "WITH CHECK (tenant_id = NULLIF(current_setting('realytics.tenant_id', true), ''))")
         conn.execute(f'INSERT INTO "{schema}".user_ai_profiles VALUES (%s,%s,%s),(%s,%s,%s),(%s,%s,%s)',
                      ("user-a", "tenant-a", "model-a", "user-b", "tenant-a", "model-b", "user-c", "tenant-b", "model-c"))
-        conn.execute(render_user_ai_profile_access_review_sql(mode=mode, role_name=role, schema_name=schema))
+        for _repeat in range(2):
+            for statement in render_user_ai_profile_access_sql(role_name=role, schema_name=schema):
+                conn.execute(statement)
+        with conn.cursor() as cursor:
+            assert user_ai_profile_access_issues(cursor, role_name=role, schema_name=schema) == ()
+        if mode == "read_only":
+            # Historical lower-privilege fixture; no production read_only mode.
+            conn.execute(f'REVOKE INSERT, UPDATE, DELETE ON "{schema}".user_ai_profiles FROM "{role}"')
         conn.execute(f'SET LOCAL ROLE "{role}"')
         table = f'"{schema}".user_ai_profiles'
         for tenant, user, expected in (("tenant-a", "user-a", "model-a"), ("tenant-a", "user-b", "model-b"),
@@ -134,6 +144,19 @@ def test_proposed_user_ai_grants_and_rls_in_rollback_only_isolated_schema(mode):
             assert conn.execute(f"DELETE FROM {table} WHERE user_id='user-a'").rowcount == 1
             conn.execute(f"INSERT INTO {table} VALUES ('user-a','tenant-a','recreated')")
             assert conn.execute(f"SELECT model FROM {table}").fetchone() == ("recreated",)
+            conn.execute("RESET ROLE")
+            for statement in render_user_ai_profile_access_rollback_sql(role_name=role, schema_name=schema):
+                conn.execute(statement)
+            assert conn.execute("SELECT has_table_privilege(%s,%s,'SELECT')", (role, table)).fetchone() == (False,)
+            for statement in render_user_ai_profile_access_sql(role_name=role, schema_name=schema):
+                conn.execute(statement)
+            conn.execute(f"ALTER POLICY user_scope_user_ai_profiles_runtime ON {table} WITH CHECK (true)")
+            with pytest.raises(RaiseException, match="conflicts with the approved contract"):
+                with conn.transaction():
+                    for statement in render_user_ai_profile_access_sql(role_name=role, schema_name=schema):
+                        conn.execute(statement)
+            with conn.cursor() as cursor:
+                assert "user_ai_profiles.user_tenant_scope_invalid" in user_ai_profile_policy_issues(cursor, role_name=role, schema_name=schema)
     finally:
         conn.rollback()
         conn.close()
