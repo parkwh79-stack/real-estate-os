@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { bindCashflowDependents, type CashflowResult, type CashFlowPeriodBasis } from "../lib/project-client";
 import type { ReserveInput } from "../components/feasibility/cash-flow-reserve-review";
+import type { SavedCashFlowPeriod } from "../components/feasibility/cash-flow-period-basis";
 
 test.setTimeout(90_000);
 
@@ -8,6 +9,8 @@ const policy = { method: "reviewed_monthly_v1", interestBasis: "opening_balance"
   feeBasis: "committed_limit_first_draw", maturityBasis: "project_month_zero", repaymentSource: "repayment_reserve",
   costTreatment: "replace_budget_finance_cost", overdueInterestBasis: "contract_rate_simple", revolving: "non_revolving", rounding: "unrounded_analysis" };
 const period = { baseMonth: "2026-01", lastMonthIndex: 2 };
+const savedBudgetPeriod: SavedCashFlowPeriod = { ...period, basis: "monthly", axis: "calendar",
+  firstMonthIndex: 0, rowCount: 3, valid: true };
 const baselineRun = { calculationRunId: "base-run", label: "기준", createdAt: "2026-10-14T01:00:00Z",
   policyMode: "budget_finance_allocation", period };
 const changedRun = { calculationRunId: "changed-run", label: "변경", createdAt: "2026-10-14T01:01:00Z",
@@ -57,16 +60,21 @@ function result(monthly: boolean, missingMonthlyValues = false, periodBasis?: Ca
 async function fixture(page: Page, options: { runConflict?: boolean; saveConflict?: boolean; initialTwo?: boolean;
   saveGate?: Promise<void>; missingMonthlyValues?: boolean; periodBasis?: CashFlowPeriodBasis;
   firstRowMaximum?: boolean; maximumRowValue?: unknown; budgetError?: string | Record<string, unknown>;
-  budgetPartial?: boolean; budgetCreatesRun?: boolean; refreshFailsOnce?: boolean } = {}) {
+  budgetPartial?: boolean; budgetCreatesRun?: boolean; refreshFailsOnce?: boolean;
+  savedBudgetPeriod?: SavedCashFlowPeriod; periodRunId?: string; savedWorkingBudget?: boolean;
+  surface?: "feasibility" | "cashflow"; firstComparisonGate?: Promise<void> } = {}) {
   let calculated = options.initialTwo ?? false;
   let budgetRecalculated = false;
   let refreshFails = options.refreshFailsOnce ?? false;
   let saved = false;
   let reserveReview: ReserveInput | null = null;
   let workingStart = "2026-01-01";
+  let latestRunId = "base-run";
+  let comparisonReads = 0;
   const sourceSequence = options.periodBasis?.kind === "source_sequence";
-  const frozenPeriod = sourceSequence ? { ...period, kind: "source_sequence", baseMonth: null } : period;
-  const baseRun = { ...baselineRun, period: frozenPeriod };
+  const frozenPeriod = options.savedBudgetPeriod ?? (sourceSequence ? { ...period, kind: "source_sequence", baseMonth: null } : period);
+  const baseRun = { ...baselineRun, period: frozenPeriod, calculationRunId: options.periodRunId ?? baselineRun.calculationRunId,
+    ...(options.savedWorkingBudget ? { sourceMetadata: { sourceType: "saved_working_input_budget" } } : {}) };
   const nextRun = { ...changedRun, period: frozenPeriod, ...(sourceSequence ? { policyMode: "budget_finance_allocation" } : {}) };
   const budgetRun = { ...baseRun, calculationRunId: "budget-rerun", createdAt: "2026-10-14T01:02:00Z" };
   const calculations: Record<string, unknown>[] = [];
@@ -75,7 +83,9 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
   const legacyPodRuns: Record<string, unknown>[] = [];
   let calculationReads = 0;
   const storedResult = () => {
-    const value = result(calculated && !sourceSequence, options.missingMonthlyValues, options.periodBasis, options.firstRowMaximum);
+    const original = result(calculated && !sourceSequence, options.missingMonthlyValues, options.periodBasis, options.firstRowMaximum);
+    const value = options.savedWorkingBudget
+      ? { ...original, sourceMetadata: { ...original.sourceMetadata, sourceType: "saved_working_input_budget" } } : original;
     return "maximumRowValue" in options ? { ...value, summary: { ...value.summary, maxMinusMonth: options.maximumRowValue } } : value;
   };
   const preview = () => ({ status: "partial", reasons: sourceSequence ? [] : ["financing_policy_mismatch"],
@@ -110,7 +120,7 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
     else if (path.endsWith("/calculation-runs")) {
       const engine = url.searchParams.get("engine_key");
       if (engine === "cash_flow_engine") calculationReads += 1;
-      body = { records: engine === "cash_flow_engine" ? [{ calculationRunId: budgetRecalculated ? budgetRun.calculationRunId : calculated ? "changed-run" : "base-run", engineKey: engine,
+      body = { records: engine === "cash_flow_engine" ? [{ calculationRunId: budgetRecalculated ? budgetRun.calculationRunId : calculated ? "changed-run" : latestRunId, engineKey: engine,
         inputSnapshot: { financialInputHash: calculated ? "new-hash" : "base-hash", ...(calculated && !sourceSequence ? { monthlyFinancing: policy } : {}) },
         resultSnapshot: storedResult() }] : [{ calculationRunId: "stale-child", engineKey: engine,
         inputSnapshot: { parentCalculationRunId: "base-run", financialInputHash: "base-hash" },
@@ -160,19 +170,30 @@ async function fixture(page: Page, options: { runConflict?: boolean; saveConflic
         if ("reserveReview" in payload) reserveReview = payload.reserveReview;
       }
       body = state(url.searchParams.has("baselineRunId"));
+      if (route.request().method() === "GET") {
+        comparisonReads += 1;
+        if (comparisonReads === 1) await options.firstComparisonGate;
+      }
     }
     await route.fulfill({ status: 200, json: body });
   });
-  await page.goto("/project/r2-1/feasibility", { waitUntil: "domcontentloaded" });
+  await page.goto(`/project/r2-1/${options.surface ?? "feasibility"}`, { waitUntil: "domcontentloaded" });
   const panel = page.getByRole("region", { name: "금융 검토안 계산과 비교", exact: true });
-  await expect(panel.getByLabel("월별 금융 계산 방식")).toBeEnabled({ timeout: 60_000 });
+  if (options.surface === "cashflow") {
+    await expect(page.getByRole("region", { name: "저장 계산의 기간·이자 기준", exact: true })).toBeVisible({ timeout: 60_000 });
+  } else {
+    await expect(panel.getByLabel("월별 금융 계산 방식")).toBeEnabled({ timeout: 60_000 });
+  }
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth))
     .toBeLessThanOrEqual(page.viewportSize()!.width);
-  return { panel, calculations, selections, budgetRuns, legacyPodRuns, calculationReads: () => calculationReads, changeWorkingDates: () => { workingStart = "2099-12-01"; } };
+  return { panel, calculations, selections, budgetRuns, legacyPodRuns, calculationReads: () => calculationReads,
+    comparisonReads: () => comparisonReads, changeLatestRun: () => { latestRunId = "new-run"; },
+    changeWorkingDates: () => { workingStart = "2099-12-01"; } };
 }
 
 test("explicitly choose a monthly policy, calculate and reopen the saved comparison", async ({ page }) => {
-  const { panel, calculations, selections, changeWorkingDates } = await fixture(page, { periodBasis: calendarBasis });
+  const { panel, calculations, selections, changeWorkingDates } = await fixture(page, { periodBasis: calendarBasis, savedBudgetPeriod });
+  await expect(panel.getByText("저장된 예산 계획 일정", { exact: true })).toHaveCount(0);
   await panel.getByRole("button", { name: "월별 금융 검토안 계산·저장", exact: true }).click();
   await expect(panel.getByRole("alert")).toContainText("계산 방식을 선택하세요");
   expect(calculations).toHaveLength(0);
@@ -216,6 +237,73 @@ test("a legacy saved run shows missing period basis instead of deriving it from 
   await expect(savedBasis).toContainText("기간 기준이 미기록");
   await expect(savedBasis).not.toContainText("2099");
   await expect(savedBasis.getByRole("link", { name: "저장 입력·원본 자료 확인" })).toHaveAttribute("href", "/project/r2-1/input-package");
+});
+
+for (const surface of ["feasibility", "cashflow"] as const) {
+test(`${surface} shows a saved working budget's own planned calendar after current dates change`, async ({ page }) => {
+  const { panel, changeWorkingDates, calculations, budgetRuns } = await fixture(page, { savedBudgetPeriod, savedWorkingBudget: true, surface });
+  const savedBasis = page.getByRole("region", { name: "저장 계산의 기간·이자 기준", exact: true });
+  await expect(savedBasis).toContainText("계산 기록: base-run");
+  await expect(savedBasis.getByText("저장된 예산 계획 일정", { exact: true })).toBeVisible();
+  await expect(savedBasis).toContainText("2026-01");
+  await expect(savedBasis).toContainText("M0 ~ M2");
+  await expect(savedBasis).toContainText("3개");
+  await expect(savedBasis).toContainText("실제 월별 이자·원금 상환이나 대출 약정의 이자기간을 확정하지 않습니다");
+  await expect(savedBasis).not.toContainText("기간 기준이 미기록");
+  const chart = page.getByRole("figure", { name: "현금흐름 추이", exact: true });
+  await expect(chart).toContainText("저장된 계산 월차 순서");
+  await expect(chart).not.toContainText("기간 기준 미기록");
+  if (surface === "feasibility") {
+    await expect(panel.getByLabel("기준 계산", { exact: true }).locator('option[value="base-run"]')).toContainText("검토 입력 예산");
+  }
+  changeWorkingDates();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(savedBasis).toContainText("2026-01");
+  await expect(savedBasis).toContainText("M0 ~ M2");
+  await expect(savedBasis).not.toContainText("2099");
+  expect(calculations).toHaveLength(0);
+  expect(budgetRuns).toHaveLength(0);
+});
+}
+
+for (const boundary of ["different-run", "non-contiguous", "different-row-count", "relative-only"] as const) {
+  test(`a budget period stays unrecorded for a ${boundary} saved summary`, async ({ page }) => {
+    const { panel } = await fixture(page, { savedBudgetPeriod: {
+      ...savedBudgetPeriod,
+      ...(boundary === "non-contiguous" ? { valid: false } : {}),
+      ...(boundary === "different-row-count" ? { rowCount: 4, lastMonthIndex: 3 } : {}),
+      ...(boundary === "relative-only" ? { axis: "relative", baseMonth: null } : {}),
+    }, ...(boundary === "different-run" ? { periodRunId: "another-saved-run" } : {}) });
+    const savedBasis = panel.getByRole("region", { name: "저장 계산의 기간·이자 기준", exact: true });
+    await expect(savedBasis).toContainText("계산 기록: base-run");
+    await expect(savedBasis).toContainText("기간 기준이 미기록");
+    await expect(savedBasis).not.toContainText("2026-01");
+    await expect(savedBasis.getByText("저장된 예산 계획 일정", { exact: true })).toHaveCount(0);
+  });
+}
+
+test("a slow budget period lookup leaves the chart visible and cannot overwrite a newer run", async ({ page }) => {
+  let release!: () => void;
+  const firstComparisonGate = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const state = await fixture(page, { savedBudgetPeriod, savedWorkingBudget: true, surface: "cashflow", firstComparisonGate });
+    const savedBasis = page.getByRole("region", { name: "저장 계산의 기간·이자 기준", exact: true });
+    await expect(page.getByRole("figure", { name: "현금흐름 추이", exact: true })).toBeVisible();
+    await expect(savedBasis).toContainText("저장된 예산 계획 일정을 확인하는 중");
+    await expect(savedBasis).not.toContainText("기간 기준이 미기록");
+    state.changeLatestRun();
+    await page.getByRole("button", { name: "새로고침", exact: true }).click();
+    await expect.poll(state.comparisonReads).toBe(2);
+    await expect(savedBasis).toContainText("계산 기록: new-run");
+    await expect(savedBasis).toContainText("기간 기준이 미기록");
+    const lateResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/cash-flow/comparison"));
+    release();
+    await lateResponse;
+    await expect(savedBasis.getByRole("status")).toHaveCount(0);
+    await expect(savedBasis).toContainText("계산 기록: new-run");
+    await expect(savedBasis).not.toContainText("2026-01");
+    await expect(savedBasis.getByText("저장된 예산 계획 일정", { exact: true })).toHaveCount(0);
+  } finally { release(); }
 });
 
 test("reserve review requires explicit included amounts, saves exact won and reopens with the original comparison", async ({ page }) => {

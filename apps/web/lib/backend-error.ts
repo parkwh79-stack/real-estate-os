@@ -81,6 +81,9 @@ export function backendErrorMessage(
   error: StructuredBackendError,
   { action }: BackendErrorMessageOptions,
 ): string {
+  if (error.error === "ai_profile_audit_unavailable") {
+    return "설정이 이미 반영되었을 수 있으나 감사 기록을 확인하지 못했습니다. 다시 저장하거나 자동 재시도하지 말고 현재 설정을 조회해 확인해 주세요.";
+  }
   if (error.error === "ai_profile_authority_unavailable") {
     return "개인 AI 설정을 읽지 못해 실행하지 않았습니다. 시스템 AI로 바꾸지 않았습니다. 계정의 AI 설정을 다시 조회해 주세요.";
   }

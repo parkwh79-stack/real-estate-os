@@ -33,7 +33,9 @@ test("unauthenticated users can reach the real login entry point", async ({ page
   await page.goto("/login");
 
   await expect(page).toHaveURL(/\/login/);
-  await expect(page.getByTestId("login-heading")).toBeVisible();
+  await expect(page.getByTestId("login-heading")).toHaveText("로그인하고 시작하기");
+  await expect(page.getByText(/로그인 후 사용할 작업공간을 확인합니다/)).toBeVisible();
+  await expect(page.getByText(/PostgreSQL|Tenant membership|RBAC|초대 또는 관리자 승인 후 접근/)).toHaveCount(0);
   await expect(page.getByLabel("이메일")).toBeVisible();
   await expect(page.getByLabel("비밀번호", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "비회원으로 체험" })).toBeVisible();
@@ -90,6 +92,8 @@ test("signup collects profile intent and both versioned consents", async ({ page
   await expect(page.getByText(/realytics-terms-2026-07-30/)).toBeVisible();
   await expect(page.getByText(/realytics-privacy-2026-07-30/)).toBeVisible();
   await expect(page.getByText("12~128자 · 대/소문자·숫자·기호 포함")).toBeVisible();
+  await expect(page.getByText("가입하려면 위의 필수 이용약관과 개인정보 처리방침에 동의해 주세요.")).toBeVisible();
+  await expect(page.getByText(/가입 BFF|온보딩 프로필/)).toHaveCount(0);
 });
 
 test("signup sends versioned consent and offers privacy-safe confirmation resend", async ({ page }) => {

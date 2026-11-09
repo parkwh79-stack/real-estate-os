@@ -42,7 +42,7 @@ export function CashFlowPeriodChart({ cashflow }: { cashflow: CashflowResult }) 
       <figcaption>
         <h2 id={titleId} className="text-lg font-bold text-re-text">현금흐름 추이</h2>
         <p className="mt-1 text-xs leading-5 text-re-secondary">
-          {sourceSequence ? "원본 사건·기간 순서" : cashflow.periodBasis ? "저장된 달력·월차" : "저장 행 순서 · 기간 기준 미기록"}
+          {sourceSequence ? "원본 사건·기간 순서" : cashflow.periodBasis ? "저장된 달력·월차" : "저장된 계산 월차 순서"}
           {" · 억원 · 표시값은 정수 반올림"}
         </p>
         {capturedSource ? <p className="mt-1 text-xs leading-5 text-re-secondary">

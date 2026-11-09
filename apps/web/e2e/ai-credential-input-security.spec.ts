@@ -339,3 +339,70 @@ test("personal AI authority failure is distinct from a project database outage",
   expect(message).toContain("시스템 AI로 바꾸지 않았습니다");
   expect(message).not.toContain("프로젝트 데이터베이스");
 });
+
+const partialAuditFailure = {
+  detail: { error: "ai_profile_audit_unavailable", mutationState: "may_have_applied", retryable: false },
+};
+const partialAuditMessage = "설정이 이미 반영되었을 수 있으나 감사 기록을 확인하지 못했습니다. 다시 저장하거나 자동 재시도하지 말고 현재 설정을 조회해 확인해 주세요.";
+
+for (const withNewKey of [false, true]) {
+  test(`an audit failure after ${withNewKey ? "key connection" : "profile save"} instructs readback and never repeats the write`, async ({ page }) => {
+    let writes = 0;
+    let reads = 0;
+    let saved = false;
+    await mockAuthenticatedSettings(page, async () => {
+      writes += 1;
+      saved = true;
+      return { status: 503, body: partialAuditFailure };
+    }, () => {
+      reads += 1;
+      return { status: 200, body: { ...configuredSystemAi,
+        profile: saved ? { provider: "openai", model: "gpt-4.1-mini", status: "active", apiKeyConfigured: withNewKey } : null } };
+    });
+    await page.route("**/api/backend/auth/ai-profile", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      writes += 1;
+      saved = true;
+      await route.fulfill({ status: 503, json: partialAuditFailure });
+    });
+    await page.goto("/settings");
+    await expect(page.getByRole("combobox", { name: "AI Provider", exact: true })).toHaveValue("openai");
+    const sentinel = "sentinel-audit-failure-do-not-persist";
+    if (withNewKey) await page.getByTestId("ai-api-key-input").fill(sentinel);
+    await page.getByTestId("save-ai-profile").click();
+    await expect(page.getByText(partialAuditMessage, { exact: true })).toBeVisible();
+    await expect(page.getByText("AI API Key를 안전 저장소에 연결하지 못했습니다. 입력값은 폐기되었습니다.", { exact: true })).toHaveCount(0);
+    expect(writes).toBe(1);
+    expect(await secretResidue(page, sentinel)).toEqual({ fieldValues: false, valueAttributes: false, html: false, text: false, storage: false });
+    const readsBefore = reads;
+    await page.getByRole("button", { name: "다시 조회", exact: true }).click();
+    await expect.poll(() => reads).toBeGreaterThan(readsBefore);
+    await expect(page.getByText(partialAuditMessage, { exact: true })).toHaveCount(0);
+    expect(writes).toBe(1);
+  });
+}
+
+test("an audit failure after deletion requires readback without repeating deletion", async ({ page }) => {
+  let deletes = 0;
+  let deleted = false;
+  let reads = 0;
+  await mockAuthenticatedSettings(page, async () => ({ status: 200, body: {} }), () => {
+    reads += 1;
+    return { status: 200, body: { ...configuredSystemAi, profile: deleted ? null : { provider: "openai", model: "gpt-4.1-mini", status: "active" } } };
+  });
+  await page.route("**/api/backend/auth/ai-profile", async (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    deletes += 1;
+    deleted = true;
+    await route.fulfill({ status: 503, json: partialAuditFailure });
+  });
+  await page.goto("/settings");
+  await page.getByRole("button", { name: "개인 설정 삭제", exact: true }).click();
+  await expect(page.getByText(partialAuditMessage, { exact: true })).toBeVisible();
+  expect(deletes).toBe(1);
+  const readsBefore = reads;
+  await page.getByRole("button", { name: "다시 조회", exact: true }).click();
+  await expect.poll(() => reads).toBeGreaterThan(readsBefore);
+  await expect(page.getByText(partialAuditMessage, { exact: true })).toHaveCount(0);
+  expect(deletes).toBe(1);
+});

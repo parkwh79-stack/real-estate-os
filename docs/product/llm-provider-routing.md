@@ -39,7 +39,8 @@ PF Worker는 API manifest에서 개인 프로필 조회 권한을 상속하지 �
 provisioner, strict startup preflight가 공유한다. RLS 비활성·역할/소유권 경계 위반·허용
 기반 정책 부재·동명 다른 정책은 적용을 중단하며 기존 정책을 임의로 교체하지 않는다.
 전용 `scripts/provision_user_ai_profiles.py`는 연결 없는 SQL/롤백 렌더와 승인된 배포 DSN의
-트랜잭션 적용·audit를 제공한다. 적용 코드와 실제 운영 반영은 구분하며 현재 배포 검증 중이다.
+트랜잭션 적용·audit를 제공한다. 운영에 승인된 CRUD/RLS를 적용했고 새 API에서 실제
+설정값·키 상태를 보존한 저장·재조회와 해당 감사 이벤트를 확인했다.
 배포별 역할 정책이므로 불변 numbered schema migration을 수정하지 않는다.
 읽기 전용 MCP·CLI 자체에는 이 권한 확대가 필요 없다.
 

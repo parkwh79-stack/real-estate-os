@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useParams } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Calculator, Download, Loader2, PlayCircle, RefreshCw, ShieldCheck, TrendingDown, Wallet } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import { fetchCashFlowDependentRuns, fetchLatestCashflow, type CalculationRunRecord, type CashflowResult } from "../../../../lib/project-client";
 import { trancheAmounts, amountInEok } from "../../../../lib/tranche-display";
-import { CashFlowPeriodBasisPanel, cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flow-period-basis";
+import { CashFlowPeriodBasisPanel, cashFlowPeriodLabel, type SavedRunPeriod } from "../../../../components/feasibility/cash-flow-period-basis";
 import { CashFlowPeriodChart } from "../../../../components/feasibility/cash-flow-period-chart";
 import { PfFollowupStatus } from "../../../../components/feasibility/pf-followup-status";
 import { readPfFollowupExecution } from "../../../../lib/pf-followup-status";
@@ -52,6 +52,10 @@ export default function ProjectCashflowPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const [cashflow, setCashflow] = useState<CashflowResult | null>(null);
+  const [savedPeriodRun, setSavedPeriodRun] = useState<SavedRunPeriod>();
+  const [periodPending, setPeriodPending] = useState(false);
+  const loadGeneration = useRef(0);
+  const activeProject = useRef<string | null>(null);
   const [followupRegistry, setFollowupRegistry] = useState<Awaited<ReturnType<typeof fetchCashFlowDependentRuns>>>({ runs: {}, unavailable: [] });
   const [followupExecution, setFollowupExecution] = useState<ReturnType<typeof readPfFollowupExecution>>();
   const [loading, setLoading] = useState(true);
@@ -63,23 +67,47 @@ export default function ProjectCashflowPage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
+    const current = () => activeProject.current === projectId && loadGeneration.current === generation;
     setLoading(true);
     setError(null);
+    setSavedPeriodRun(undefined);
+    setPeriodPending(false);
     try {
       // Scenario registry is supplementary. A transient scenario/API failure
       // must not hide the primary persisted Cash Flow calculation.
       const cashflowResult = await fetchLatestCashflow(projectId);
-      const followups = await fetchCashFlowDependentRuns(projectId, cashflowResult);
+      if (!current()) return;
       setCashflow(cashflowResult);
-      setFollowupRegistry(followups);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "계산 결과를 불러오지 못했습니다.");
-    } finally {
+      setFollowupRegistry({ runs: {}, unavailable: [] });
       setLoading(false);
+      if (cashflowResult && !cashflowResult.periodBasis && !cashflowResult.monthlyFinancing
+          && cashflowResult.sourceMetadata?.sourceType === "saved_working_input_budget") {
+        setPeriodPending(true);
+        void fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/cash-flow/comparison`, {
+            cache: "no-store", headers: authHeaders("web"),
+          }).then(async (response) => {
+            if (!response.ok) return undefined;
+            const body = await response.json() as { availableRuns?: SavedRunPeriod[] };
+            return Array.isArray(body.availableRuns)
+              ? body.availableRuns.find((run) => run.calculationRunId === cashflowResult.runId) : undefined;
+          }).then((run) => { if (current()) setSavedPeriodRun(run); })
+          .catch(() => undefined).finally(() => { if (current()) setPeriodPending(false); });
+      }
+      const followups = await fetchCashFlowDependentRuns(projectId, cashflowResult);
+      if (current()) setFollowupRegistry(followups);
+    } catch (err) {
+      if (current()) setError(err instanceof Error ? err.message : "계산 결과를 불러오지 못했습니다.");
+    } finally {
+      if (current()) setLoading(false);
     }
   }, [projectId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    activeProject.current = projectId;
+    void load();
+    return () => { activeProject.current = null; loadGeneration.current += 1; };
+  }, [load, projectId]);
 
   const recalculateCashFlow = useCallback(async () => {
     setRunning(true);
@@ -187,7 +215,8 @@ export default function ProjectCashflowPage() {
             <KpiCard label="계산 상태" value={summary.status ? String(summary.status) : "미확인"} sub={`CalculationRun ${runId.slice(0, 18)}`} icon={<ShieldCheck className="h-5 w-5 text-slate-600" />} />
           </section>
 
-          <CashFlowPeriodBasisPanel basis={cashflow.periodBasis} runId={runId} projectId={projectId} />
+          <CashFlowPeriodBasisPanel basis={cashflow.periodBasis} runId={runId} projectId={projectId}
+            savedRun={savedPeriodRun} calculationRowCount={cashflow.monthly.length} periodPending={periodPending} />
           <CashFlowPeriodChart cashflow={cashflow} />
           <PfFollowupStatus projectId={projectId} cashflow={cashflow} runs={followupRegistry.runs}
             unavailableEngines={followupRegistry.unavailable} execution={followupExecution} />

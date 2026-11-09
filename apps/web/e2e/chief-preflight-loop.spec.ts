@@ -82,6 +82,42 @@ test("failed preparation does not enable analysis and explicit retry restarts th
   expect(state.bodies).toEqual([{ workflowTrack: "development" }, { workflowTrack: "development" }]);
 });
 
+test("known internal follow-up copy is localized without changing the preflight receipt", async ({ page }) => {
+  const internalDescription = "Run Evidence Graph/source locator enrichment or attach locator-backed evidence.";
+  const userDescription = "원본 문서의 페이지·표·셀 위치와 연결된 근거를 확인해 주세요.";
+  const sourceSpecificDescription = "Additional source-specific check remains unresolved.";
+  const requests = [
+    { ...material, itemId: "cost_assumption_missing", description: internalDescription, severity: "high", requiredFor: ["cost_schedule"] },
+    { ...material, itemId: "schedule_missing", description: "사업 일정은 사용자가 확인해야 합니다.", severity: "high", requiredFor: ["cost_schedule"] },
+    { ...material, itemId: "source_specific_follow_up", description: sourceSpecificDescription, severity: "high", requiredFor: ["cost_schedule"] },
+  ];
+  const originalResumeState = { materialRequests: requests, checkpoint: 0, privateValue: "synthetic-private-review" };
+  const state = await mockLoop(page, (index, revision) => ({ body: {
+    ...result(revision, index, "needs_material"),
+    materialRequests: requests,
+    resumeState: originalResumeState,
+  } }));
+  await page.getByRole("button", { name: "사전 검토 실행", exact: true }).click();
+  await expect(page.getByText("사전 검토 결과 · 6개 영역 · 제출·확인 항목 3건")).toBeVisible();
+  const next = page.getByRole("region", { name: "다음 할 일" });
+  await next.getByText("필요한 자료 2건", { exact: true }).click();
+  await expect(next.getByText(userDescription, { exact: true })).toBeVisible();
+  await expect(next.getByText("사업 일정은 사용자가 확인해야 합니다.", { exact: true })).toBeVisible();
+  await next.getByText("필요한 자료 1건", { exact: true }).click();
+  await expect(next.getByText(sourceSpecificDescription, { exact: true })).toBeVisible();
+  await expect(page.getByText(internalDescription, { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: /^공사비·일정/ }).click();
+  const drawer = page.getByRole("dialog", { name: "공사비·일정" });
+  await expect(drawer.getByText(userDescription, { exact: true })).toBeVisible();
+  await expect(drawer.getByText(sourceSpecificDescription, { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  state.revision = "2".repeat(64);
+  await page.getByRole("button", { name: "자료 반영 확인", exact: true }).click();
+  await expect.poll(() => state.bodies.length).toBe(2);
+  expect(state.bodies[1]?.previousReview).toEqual({ receiptId: receipt(0), resumeState: originalResumeState });
+  expect(state.formalRuns).toBe(0);
+});
+
 test("only explicit failed retry reuses the receipt and input changes recheck automatically", async ({ page }) => {
   const state = await mockLoop(page, (index, revision) => ({
     body: result(revision, index, index === 0 ? "retry_needed" : "stable"),

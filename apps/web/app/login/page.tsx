@@ -68,16 +68,16 @@ export default function LoginPage() {
 
             <div className="mt-20 max-w-2xl xl:mt-24">
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-sky-300">
-                Institutional real estate workflow
+                부동산 검토와 분석
               </p>
               <h1 className="mt-5 text-4xl font-black leading-[1.22] tracking-[-0.045em] xl:text-[3.35rem]">
-                기관의 부동산 투자 의사결정을
+                문서와 숫자를 연결해
                 <br />
-                더 빠르고 정확하게
+                부동산 투자를 검토하세요
               </h1>
               <p className="mt-6 max-w-xl text-base leading-7 text-slate-300 xl:text-lg xl:leading-8">
-                문서 근거, 사업성 분석, PF 실행과 승인 조건을 하나의 검토 흐름으로
-                연결합니다. 핵심 수치와 판단 상태는 원문 근거와 함께 추적됩니다.
+                문서 근거와 사업성 분석을 한곳에서 확인하세요. 프로젝트의 핵심 수치와
+                검토 상태를 원문 근거와 함께 살펴볼 수 있습니다.
               </p>
             </div>
 
@@ -89,22 +89,22 @@ export default function LoginPage() {
               />
               <ProductPrinciple
                 icon={<Landmark className="h-5 w-5" />}
-                title="금융 실행 연결"
-                description="사업수지부터 Debt·Gate까지 동일 프로젝트 기준"
+                title="자료와 분석 연결"
+                description="사업수지·대출 조건·검토 결과를 함께 확인"
               />
               <ProductPrinciple
                 icon={<Scale className="h-5 w-5" />}
-                title="승인 책임 분리"
-                description="실행·검토·승인 상태를 서로 다른 축으로 관리"
+                title="검토 상태 구분"
+                description="작성·검토·승인 상태를 구분해 확인"
               />
             </div>
           </div>
 
           <div className="relative z-10 flex items-center justify-between border-t border-white/10 pt-6 text-xs text-slate-400">
-            <span>Tenant membership · RBAC · Audit trail</span>
+            <span>문서 근거 · 작업 이력 · 계정별 접근</span>
             <span className="inline-flex items-center gap-2 text-slate-300">
               <LockKeyhole className="h-4 w-4 text-sky-300" />
-              초대 또는 관리자 승인 후 접근
+              로그인 후 사용할 작업공간 확인
             </span>
           </div>
         </section>
@@ -133,18 +133,18 @@ export default function LoginPage() {
                 data-testid="login-heading"
                 className="mt-5 text-3xl font-black tracking-[-0.035em] text-slate-950"
               >
-                워크스페이스 로그인
+                로그인하고 시작하기
               </h2>
               <p className="mt-3 text-sm leading-6 text-slate-600">
-                조직에서 승인한 계정으로 로그인하세요. 인증 후 PostgreSQL의
-                테넌트 멤버십과 역할을 다시 확인합니다.
+                이메일이나 연결된 계정으로 로그인해 주세요. 로그인 후 사용할
+                작업공간을 확인합니다.
               </p>
             </div>
 
             <AccountAccessPanel />
 
             <p className="mt-7 text-sm leading-6 text-slate-600">
-              아직 소속 기관이 없다면 이메일 확인 후 신규 기관 신청을 제출할 수 있습니다.
+              이메일로 가입하면 메일의 확인 링크를 누른 뒤 안내에 따라 작업공간으로 이동해 주세요.
             </p>
           </div>
         </section>

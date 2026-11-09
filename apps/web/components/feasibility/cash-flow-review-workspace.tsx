@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { backendErrorMessage, parseBackendErrorResponse } from "../../lib/backend-error";
 import type { CashflowResult } from "../../lib/project-client";
-import { CashFlowPeriodBasisPanel } from "./cash-flow-period-basis";
+import { CashFlowPeriodBasisPanel, type SavedCashFlowPeriod } from "./cash-flow-period-basis";
 import { CashFlowComparisonCharts, type AlignedCashFlow } from "./cash-flow-comparison-charts";
 import {
   CashFlowReserveForm, CashFlowReserveResult, reserveDraftFromInput, reserveInputFromDraft,
@@ -20,7 +20,7 @@ const MONTHLY_POLICY = {
 } as const;
 type Run = { calculationRunId: string; label: string; createdAt?: string; policyMode?: string;
   inputHash?: string; resultHash?: string;
-  period: { baseMonth: string | null; lastMonthIndex: number | null; basis?: string; kind?: string; lastPeriodIndex?: number | null }; sourceHashes?: string[];
+  period: SavedCashFlowPeriod; sourceHashes?: string[]; sourceMetadata?: Record<string, unknown>;
   inputReviews?: Array<{ field: string; label: string; classification: string; reason: string; sourceName?: string | null; sourceCell?: string | null }> };
 export type Comparison = {
   status: string; reasons: string[]; baseline?: Run; comparison?: Run; sourceChanged?: boolean;
@@ -75,7 +75,9 @@ function period(run?: Run): string {
 function runLabel(run: Run): string {
   const parsed = run.createdAt ? new Date(run.createdAt) : null;
   const date = parsed && !Number.isNaN(parsed.getTime()) ? parsed.toLocaleString("ko-KR") : run.label;
-  return `${date} · ${run.policyMode === "reviewed_monthly_v1" ? "월별 금융 검토" : "기존 계산"} · ${run.calculationRunId.slice(-8)}`;
+  const mode = run.policyMode === "reviewed_monthly_v1" ? "월별 금융 검토"
+    : run.sourceMetadata?.sourceType === "saved_working_input_budget" ? "검토 입력 예산" : "기존 계산";
+  return `${date} · ${mode} · ${run.calculationRunId.slice(-8)}`;
 }
 function changeValue(value: unknown, path: string): string {
   if (value === null || value === undefined) return "미입력";
@@ -287,7 +289,9 @@ export function CashFlowReviewWorkspace({ projectId, cashflow, recalculatedRunId
     {busy ? <p role="status" className="mt-3 text-sm">계산 기록을 처리하고 있습니다.</p> : null}
     {error ? <p role="alert" className="mt-3 text-sm font-bold text-rose-600">{error}</p> : null}
     {notice ? <p role="status" className="mt-3 text-sm font-bold text-emerald-700">{notice}</p> : null}
-    {cashflow ? <CashFlowPeriodBasisPanel basis={cashflow.periodBasis} runId={cashflow.runId} projectId={projectId} /> : null}
+    {cashflow ? <CashFlowPeriodBasisPanel basis={cashflow.periodBasis} runId={cashflow.runId} projectId={projectId}
+      savedRun={state?.availableRuns.find((run) => run.calculationRunId === cashflow.runId)} calculationRowCount={cashflow.monthly.length}
+      periodPending={!state && !error && cashflow.sourceMetadata?.sourceType === "saved_working_input_budget"} /> : null}
     {cashflow?.monthlyFinancing && cashflow.financingMonthly?.length ? <details className="mt-4 rounded-lg border border-slate-200 p-3 dark:border-slate-700" open>
       <summary className="cursor-pointer text-sm font-bold">최근 저장된 월별 금융 원장 · 분석용</summary>
       <p className="mt-2 text-xs text-slate-500">예산 금융비용 {amount(typeof cashflow.monthlyFinancing.budgetFinancialCost === "number" ? cashflow.monthlyFinancing.budgetFinancialCost : null)}원

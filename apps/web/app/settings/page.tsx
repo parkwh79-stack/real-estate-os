@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import {
   apiBase,
+  AuthClientRequestError,
   authHeaders,
   configuredSupabaseAuthIssuer,
   getAiExecutionSelection,
@@ -46,6 +47,7 @@ import {
   type AiExecutionSelection,
 } from "../../lib/auth-client";
 import { localPilotAuthEnabled } from "../../lib/auth-policy";
+import { backendErrorMessage, backendErrorMessageForResponse, parseBackendErrorResponse } from "../../lib/backend-error";
 import { useAuth } from "../../components/auth/auth-context";
 import { AccountProfileEditor } from "../../components/auth/account-profile-editor";
 import { accountDisplayName } from "../../lib/account-profile";
@@ -520,12 +522,16 @@ export default function SettingsPage() {
         }),
       });
       if (!res.ok) {
+        const failure = await parseBackendErrorResponse(res);
+        if (failure.error === "ai_profile_audit_unavailable") {
+          throw new AuthClientRequestError(failure.error, res.status, backendErrorMessage(failure, { action: "AI 설정 저장" }));
+        }
         if (hasNewCredential) {
           throw new Error(
             `AI API Key를 안전 저장소에 연결하지 못했습니다. 입력값은 폐기되었습니다. (HTTP ${res.status})`,
           );
         }
-        throw new Error(await res.text());
+        throw new Error(backendErrorMessage(failure, { action: "AI 설정 저장" }));
       }
       await res.json();
       if (!await loadAiProfile()) return;
@@ -536,7 +542,9 @@ export default function SettingsPage() {
       );
     } catch (err) {
       setError(
-        hasNewCredential
+        err instanceof AuthClientRequestError && err.code === "ai_profile_audit_unavailable"
+          ? err.message
+          : hasNewCredential
           ? "AI API Key를 안전 저장소에 연결하지 못했습니다. 입력값은 폐기되었습니다."
           : err instanceof Error
             ? err.message
@@ -557,7 +565,7 @@ export default function SettingsPage() {
         method: "DELETE",
         headers: authHeaders("web"),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await backendErrorMessageForResponse(res, { action: "AI 설정 삭제" }));
       const body = (await res.json()) as AiProfileResponse;
       setAiProfile(body);
       setProvider(body.fallbackPolicy?.provider ?? body.effectiveAi?.provider ?? "gemini");

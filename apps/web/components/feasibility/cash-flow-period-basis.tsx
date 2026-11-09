@@ -2,6 +2,13 @@ import Link from "next/link";
 import type { CashFlowPeriodBasis } from "../../lib/project-client";
 import type { CashFlowTiming } from "../../lib/cash-flow-timing";
 
+export type SavedCashFlowPeriod = {
+  baseMonth: string | null; lastMonthIndex: number | null; basis?: string; kind?: string;
+  axis?: string; firstMonthIndex?: number | null; lastPeriodIndex?: number | null;
+  rowCount?: number; valid?: boolean;
+};
+export type SavedRunPeriod = { calculationRunId: string; policyMode?: string; period: SavedCashFlowPeriod };
+
 const scheduleLabels: Record<string, string> = {
   land_purchase: "토지 매입", permit_approval: "인허가", construction_start: "착공",
   presale_start: "분양 시작", completion: "준공", loan_maturity: "대출 만기",
@@ -18,20 +25,39 @@ export function cashFlowPeriodLabel(basis: CashFlowPeriodBasis | undefined, inde
 }
 
 /** Show only the basis captured in the selected saved calculation. */
-export function CashFlowPeriodBasisPanel({ basis, runId, projectId }: {
+export function CashFlowPeriodBasisPanel({ basis, runId, projectId, savedRun, calculationRowCount, periodPending = false }: {
   basis?: CashFlowPeriodBasis & { timingAssumptions?: CashFlowTiming; timingReview?: { reason?: string };
     sourcePeriodBasis?: CashFlowPeriodBasis; sourcePeriodMonthBindings?: { sourcePeriodIndex: number; monthIndex: number }[] };
-  runId: string; projectId: string;
+  runId: string; projectId: string; savedRun?: SavedRunPeriod; calculationRowCount?: number; periodPending?: boolean;
 }) {
   const sourceSequence = basis?.kind === "source_sequence";
   const periods = basis?.periods ?? [];
   const interest = basis?.interestCalculation;
   const range = typeof basis?.firstCalculationPeriodIndex === "number" && typeof basis?.lastCalculationPeriodIndex === "number"
     ? `${cashFlowPeriodLabel(basis, basis.firstCalculationPeriodIndex)} ~ ${cashFlowPeriodLabel(basis, basis.lastCalculationPeriodIndex)}` : "미기록";
+  // The comparison API interprets this immutable run's saved schedule. It is
+  // never a fallback to today's project dates or another selected calculation.
+  const savedPeriod = savedRun?.period;
+  const budgetPeriod = !basis && savedRun?.calculationRunId === runId
+    && savedRun.policyMode === "budget_finance_allocation" && savedPeriod?.basis === "monthly" && savedPeriod.valid === true
+    && typeof calculationRowCount === "number" && Number.isSafeInteger(calculationRowCount) && calculationRowCount > 0 && savedPeriod.rowCount === calculationRowCount
+    && savedPeriod.firstMonthIndex === 0 && savedPeriod.lastMonthIndex === calculationRowCount - 1
+    && savedPeriod.axis === "calendar" && typeof savedPeriod.baseMonth === "string"
+    && /^\d{4}-(0[1-9]|1[0-2])$/.test(savedPeriod.baseMonth) && Number(savedPeriod.baseMonth.slice(0, 4)) > 0 ? savedPeriod : null;
   return <section aria-label="저장 계산의 기간·이자 기준" className="mt-4 min-w-0 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-700 dark:bg-slate-950">
     <h3 className="font-bold">저장 계산의 기간·이자 기준</h3>
     <p className="mt-1 break-all text-xs text-slate-500">계산 기록: {runId}</p>
-    {!basis ? <p className="mt-2">이 계산에는 기간 기준이 미기록되어 있습니다. 현재 프로젝트 일정으로 이전 계산의 기준을 추정하지 않습니다.</p> : <>
+    {budgetPeriod ? <>
+      <p className="mt-2 font-bold">저장된 예산 계획 일정</p>
+      <p className="mt-1 text-xs leading-5">이 계산에 저장된 일정과 계산 행의 대응입니다. 현재 프로젝트 일정으로 보완하지 않습니다.</p>
+      <dl className="mt-3 grid gap-2 sm:grid-cols-2">
+        <div><dt className="text-xs text-slate-500">M0 기준월</dt><dd>{budgetPeriod.baseMonth}</dd></div>
+        <div><dt className="text-xs text-slate-500">실제 계산 행</dt><dd>{integer(budgetPeriod.rowCount)}개</dd></div>
+        <div className="sm:col-span-2"><dt className="text-xs text-slate-500">계산 배열 범위</dt><dd>M0 ~ M{integer(budgetPeriod.lastMonthIndex)}</dd></div>
+      </dl>
+      <p className="mt-3 text-xs leading-5">예산 금융비용을 배분한 계산입니다. 실제 월별 이자·원금 상환이나 대출 약정의 이자기간을 확정하지 않습니다. 별도로 검토한 시간·수금 가정과 구분합니다.</p>
+    </> : !basis && periodPending ? <p role="status" className="mt-2">저장된 예산 계획 일정을 확인하는 중입니다.</p>
+      : !basis ? <p className="mt-2">이 계산에는 기간 기준이 미기록되어 있습니다. 현재 프로젝트 일정으로 이전 계산의 기준을 추정하지 않습니다.</p> : <>
       <p className="mt-2 font-bold">{sourceSequence ? "원본 사건·기간 순서 기준" : "달력·월차 기준"}</p>
       {basis.timingAssumptions ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
         <p className="font-bold">사용자 분석용 시간·수금 가정</p>

@@ -156,6 +156,7 @@ export function AccountAccessPanel() {
         <p className="mt-2 text-sm leading-6 text-slate-700">
           <strong>{email}</strong> 주소로 확인 메일을 요청했습니다.
           실제 발송 여부는 이 화면에서 확인할 수 없습니다. 받은편지함과 스팸함을 확인해 주세요.
+          이메일을 확인한 뒤 안내에 따라 작업공간으로 이동해 주세요.
         </p>
         <p className="mt-2 text-xs leading-5 text-slate-700">
           Google·카카오로 이미 가입한 주소는 새 가입 메일이 오지 않을 수 있습니다. 기존에 연결한 계정으로 로그인해 주세요.
@@ -202,7 +203,7 @@ export function AccountAccessPanel() {
             <Consent checked={termsAccepted} onChange={setTermsAccepted} label={`[필수] 서비스 이용약관 (${REALYTICS_TERMS_VERSION})`} />
             <Consent checked={privacyAccepted} onChange={setPrivacyAccepted} label={`[필수] 개인정보 처리방침 (${REALYTICS_PRIVACY_VERSION})`} />
             <p className="text-[11px] text-slate-500">
-              현재 정책 버전과 동의 여부는 가입 BFF가 먼저 검증합니다. 최종 동의는 이메일 인증 후 온보딩 프로필에 정책 버전과 시각으로 다시 기록됩니다.
+              가입하려면 위의 필수 이용약관과 개인정보 처리방침에 동의해 주세요.
             </p>
           </div>
         ) : null}

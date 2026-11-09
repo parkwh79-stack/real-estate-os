@@ -79,6 +79,12 @@ function taskGroups(items: PreflightMaterial[]) {
   return [...groups.values()];
 }
 
+function materialDescription(description: string) {
+  return description === "Run Evidence Graph/source locator enrichment or attach locator-backed evidence."
+    ? "원본 문서의 페이지·표·셀 위치와 연결된 근거를 확인해 주세요."
+    : description;
+}
+
 function approvalSummary(readiness: ApprovalReadiness) {
   if (readiness.state === "loading") return "확인 중";
   if (readiness.state === "unavailable") return "조회 불가";
@@ -410,7 +416,7 @@ export function ChiefDealRoomWorkspace({
                         <ul className="mt-2 space-y-3 text-sm leading-5 text-re-text">
                           {group.items.map((item) => (
                             <li key={item.itemId}>
-                              <p>{item.description}</p>
+                              <p>{materialDescription(item.description)}</p>
                               {item.purpose ? <p className="mt-0.5 text-xs text-re-secondary">사용 목적 · {item.purpose}</p> : null}
                               {item.acceptableSources?.length ? <p className="mt-0.5 text-xs text-re-secondary">예시 자료 · {item.acceptableSources.join(" · ")}</p> : null}
                             </li>
@@ -506,7 +512,7 @@ export function ChiefDealRoomWorkspace({
             <p className="mt-5 rounded-lg bg-re-subtle px-3 py-2 text-sm font-semibold text-re-text">분석 · {stateLabels[selectedPhase.state] ?? "상태 확인 필요"}</p>
             {selectedPhase.related.length ? (
               <ul className="mt-4 list-disc space-y-2 pl-5 text-sm leading-6 text-re-text">
-                {selectedPhase.related.map((item) => <li key={item.itemId}>{item.description}</li>)}
+                {selectedPhase.related.map((item) => <li key={item.itemId}>{materialDescription(item.description)}</li>)}
               </ul>
             ) : (
               <p className="mt-4 text-sm leading-6 text-re-secondary">
