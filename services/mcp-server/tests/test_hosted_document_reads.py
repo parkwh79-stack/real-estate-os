@@ -101,6 +101,61 @@ class HostedDocumentReadsTest(unittest.TestCase):
         self.reply(value)
         self.assertEqual(self.api.list_documents("2")["totals"]["approvedInputCount"], 0)
 
+    def test_document_list_summarizes_latest_run_without_repeating_artifacts_or_source_text(self):
+        value = workspace()
+        marker = "SYNTHETIC_FULL_RAW_ARTIFACT_MUST_NOT_REACH_DOCUMENT_LIST"
+        raw = marker * 10_000
+        run = value["packages"][0]["parsingRun"]
+        run.update({"schemaVersion": "realytics-parsing-run-v2", "projectId": "2",
+                    "profileId": "realytics.source_review_candidates", "parserVersion": "parser-1.1.0",
+                    "executionStatus": "completed_with_warnings", "approvalStatus": "not_requested",
+                    "requestedAt": "2026-11-09T00:00:00Z", "completedAt": "2026-11-09T00:00:01Z",
+                    "attemptNumber": 1, "errorCodes": ["PARTIAL_EXTRACTION"],
+                    "orchestrationArtifact": {"sourceText": raw}, "structuralChunks": [{"text": raw}],
+                    "metadata": {"orchestrationArtifact": {"structuralChunks": [{"text": raw}]},
+                                 "structuralChunks": [{"text": raw}], "unrelated": raw,
+                                 "diagnosticCodes": ["FACT_BASIS_REQUIRED"], "failureCode": "PARTIAL_EXTRACTION"}})
+        self.reply(value)
+        result = self.api.list_documents("2")
+        summary = result["documents"][0]["latestParsingRun"]
+        self.assertEqual(summary, {key: run[key] for key in (
+            "schemaVersion", "parsingRunId", "projectId", "documentVersionId", "profileId", "profileVersion",
+            "parserVersion", "executionStatus", "approvalStatus", "requestedAt", "completedAt", "attemptNumber", "errorCodes")}
+                         | {"metadata": {"diagnosticCodes": ["FACT_BASIS_REQUIRED"], "failureCode": "PARTIAL_EXTRACTION"}})
+        encoded = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn(marker, encoded)
+        self.assertNotIn("orchestrationArtifact", encoded)
+        self.assertNotIn("structuralChunks", encoded)
+        self.assertLess(len(encoded.encode()), 8 * 1024)
+        self.assertEqual(result["totals"], {"candidateCount": 31, "unreviewedCount": 31, "approvedInputCount": 0})
+        self.assertEqual(result["documents"][0]["candidateCount"], 31)
+        self.assertIsNone(result["documents"][1]["latestParsingRun"])
+        self.assertEqual(run["metadata"]["orchestrationArtifact"]["structuralChunks"][0]["text"], raw)
+        # A list summary never replaces or filters the separate candidate read.
+        detailed = self.api.list_candidates("2", archive_id=ARCHIVE)
+        self.assertEqual(detailed["totalCount"], 31)
+        self.assertEqual(detailed["items"][0]["metadata"]["sourceFinancialContext"], "current_bridge_snapshot")
+        self.assertEqual(detailed["items"][0]["evidence"][0]["cellReference"], "B4")
+
+    def test_latest_run_metadata_projection_cannot_hide_nested_or_unbounded_raw_values(self):
+        value = workspace(count=1)
+        marker = "SYNTHETIC_RAW_MUST_STAY_PRIVATE"
+        run = value["packages"][0]["parsingRun"]
+        run.update({"parserVersion": {"text": marker}, "modelVersion": marker * 300,
+                    "attemptNumber": {"text": marker}, "errorCodes": [{"text": marker}, "VALID_ERROR"] * 200,
+                    "metadata": {"diagnosticCodes": [{"text": marker}, "VALID_DIAGNOSTIC", marker * 100],
+                                 "warningCodes": {"text": marker}, "failureCode": {"text": marker}}})
+        self.reply(value)
+        result = self.api.list_documents("2")
+        summary = result["documents"][0]["latestParsingRun"]
+        self.assertNotIn(marker, json.dumps(result))
+        self.assertNotIn("parserVersion", summary)
+        self.assertNotIn("modelVersion", summary)
+        self.assertNotIn("attemptNumber", summary)
+        self.assertLessEqual(len(summary["errorCodes"]), 100)
+        self.assertEqual(summary["metadata"], {"diagnosticCodes": ["VALID_DIAGNOSTIC"]})
+        self.assertEqual(result["totals"]["candidateCount"], 1)
+
     def test_candidate_filter_does_not_return_unrelated_document_values(self):
         self.reply(workspace())
         result = self.api.list_candidates("2", archive_id=OTHER_ARCHIVE)

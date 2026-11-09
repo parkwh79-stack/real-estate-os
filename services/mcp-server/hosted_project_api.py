@@ -86,6 +86,43 @@ def _records(value) -> list[dict]:
     return value
 
 
+def _parsing_run_summary(run: dict | None) -> dict | None:
+    """Keep list metadata small; artifacts and source text have separate reads."""
+    if run is None:
+        return None
+    keys = (
+        "schemaVersion", "parsingRunId", "projectId", "documentVersionId",
+        "executionStatus", "approvalStatus", "parserVersion", "ontologyVersion",
+        "promptVersion", "modelVersion", "profileId", "profileVersion",
+        "planHash", "inputHash", "parentParsingRunId", "requestedAt", "createdAt", "updatedAt",
+        "startedAt", "completedAt",
+    )
+    summary = {key: value for key in keys if key in run
+               and ((value := run[key]) is None
+                    or isinstance(value, str) and len(value) <= 256
+                    and all(character.isprintable() for character in value))}
+    if type(run.get("attemptNumber")) is int and 1 <= run["attemptNumber"] <= 1_000_000:
+        summary["attemptNumber"] = run["attemptNumber"]
+
+    def codes(value):
+        return [code for code in value[:100]
+                if isinstance(code, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}", code)] if isinstance(value, list) else []
+
+    if isinstance(run.get("errorCodes"), list):
+        summary["errorCodes"] = codes(run["errorCodes"])
+    metadata = run.get("metadata")
+    if isinstance(metadata, dict):
+        diagnostics = {key: codes(metadata[key]) for key in
+                       ("diagnosticCodes", "blockingDiagnosticCodes", "warningCodes", "errorCodes", "failureCodes")
+                       if isinstance(metadata.get(key), list)}
+        for key in ("diagnosticCode", "errorCode", "failureCode"):
+            value = metadata.get(key)
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}", value):
+                diagnostics[key] = value
+        summary["metadata"] = diagnostics
+    return summary
+
+
 class HostedProjectApi:
     def __init__(self, origin: str, access_token: str | None = None, *,
                  credential_provider: Callable[..., str] | None = None) -> None:
@@ -262,7 +299,7 @@ class HostedProjectApi:
                 "fileName": document.get("originalFileName") or document.get("fileName"),
                 "contentType": document.get("contentType"), "sizeBytes": document.get("sizeBytes") or document.get("fileSizeBytes"),
                 "documentVersionIds": sorted({str(item["documentVersion"].get("documentVersionId")) for item in packages}),
-                "latestParsingRun": latest_run, "candidateCount": len(matching) if association_known else None,
+                "latestParsingRun": _parsing_run_summary(latest_run), "candidateCount": len(matching) if association_known else None,
                 "unreviewedCount": sum(item["effectiveReviewStatus"] in {"pending", "in_review"} for item in matching) if association_known else None,
                 "approvedInputCount": sum(item["snapshotApprovalStatus"] == "approved" for item in matching) if association_known else None})
         return {"schemaVersion": "realytics-cli-documents-v1", **_READ_POLICY,
