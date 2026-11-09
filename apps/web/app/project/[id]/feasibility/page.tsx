@@ -36,6 +36,8 @@ import { cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flo
 import { CashFlowPeriodChart } from "../../../../components/feasibility/cash-flow-period-chart";
 import { PfFollowupStatus } from "../../../../components/feasibility/pf-followup-status";
 import { readPfFollowupExecution } from "../../../../lib/pf-followup-status";
+import { cashFlowRecalculationInput, type CashFlowRecalculationBasis } from "../../../../lib/cash-flow-recalculation";
+import { CashFlowRecalculationBasisSelector } from "../../../../components/feasibility/cash-flow-recalculation-basis";
 import {
   displayText,
   fetchWorkspaceContext,
@@ -183,6 +185,7 @@ export default function FeasibilityPage() {
   const [decisionRun, setDecisionRun] = useState<DecisionRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [recalculationBasis, setRecalculationBasis] = useState<CashFlowRecalculationBasis>("project");
   const [calculationNotice, setCalculationNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recalculation, setRecalculation] = useState<{ projectId: string; runId: string }>();
@@ -242,7 +245,7 @@ export default function FeasibilityPage() {
         {
           method: "POST",
           headers: { ...authHeaders("web"), "Content-Type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify(await cashFlowRecalculationInput(projectId, recalculationBasis)),
         },
       );
       if (!response.ok) throw new Error(await responseError(response));
@@ -404,6 +407,7 @@ export default function FeasibilityPage() {
         </div>
       </header>
 
+      <CashFlowRecalculationBasisSelector value={recalculationBasis} onChange={setRecalculationBasis} disabled={loading || running} />
       {error ? (
         <div className="flex items-start gap-2 rounded-re-control border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />

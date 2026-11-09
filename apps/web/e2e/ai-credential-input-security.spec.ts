@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { serverIssuedBackendRequestHeaders } from "../lib/backend-request-headers";
+import { backendErrorMessage } from "../lib/backend-error";
 
 interface CredentialCapture {
   provider?: string;
@@ -273,4 +275,67 @@ test("an AI profile outage is visible and an explicit reload recovers the config
   await expect(page.getByRole("textbox", { name: "모델명", exact: true })).toHaveValue("gpt-4.1-mini");
   await expect(page.getByTestId("ai-api-key-input")).toHaveValue("");
   expect(credentialWrites).toBe(0);
+});
+
+test("personal execution is an explicit tab choice and a profile outage cannot silently reset it", async ({ page }) => {
+  let unavailable = false;
+  let writes = 0;
+  const selections: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/auth/ai-profile")) {
+      selections.push(request.headers()["x-ai-selection-source"] ?? "missing");
+    }
+  });
+  await mockAuthenticatedSettings(page, async () => {
+    writes += 1;
+    return { status: 200, body: {} };
+  }, () => unavailable ? { status: 503, body: { detail: { error: "ai_profile_authority_unavailable" } } }
+    : { status: 200, body: { ...configuredSystemAi, profile: { provider: "groq", model: "personal-fixture", status: "active", allowSystemFallback: false } } });
+
+  await page.goto("/settings");
+  const execution = page.getByRole("combobox", { name: "이 브라우저의 AI 실행", exact: true });
+  await expect(execution).toHaveValue("system");
+  await expect(page.getByRole("combobox", { name: "AI Provider", exact: true })).toHaveValue("groq");
+  await execution.selectOption("user_ai_profile");
+  await page.getByRole("button", { name: "다시 조회", exact: true }).click();
+  await expect.poll(() => selections.at(-1)).toBe("user_ai_profile");
+  await page.reload();
+  await expect(execution).toHaveValue("user_ai_profile");
+  unavailable = true;
+  await page.getByRole("button", { name: "다시 조회", exact: true }).click();
+  await expect(page.getByText("AI 설정을 불러오지 못했습니다. 다시 조회해 주세요. 기존 설정은 변경되지 않았습니다.", { exact: true })).toBeVisible();
+  await expect(execution).toHaveValue("user_ai_profile");
+  await execution.selectOption("system");
+  await page.getByRole("button", { name: "다시 조회", exact: true }).click();
+  await expect.poll(() => selections.at(-1)).toBe("system");
+  await page.evaluate(() => sessionStorage.setItem("realytics.ai.session.selection.other-user.other-tenant", "user_ai_profile"));
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("realytics.ai.session.selection.other-user.other-tenant"))).toBeNull();
+  unavailable = false;
+  await page.getByRole("button", { name: "다시 조회", exact: true }).click();
+  await execution.selectOption("user_ai_profile");
+  await page.getByTestId("settings-logout").click();
+  await expect.poll(() => page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("realytics.ai.session.selection.")))).toEqual([]);
+  expect(writes).toBe(0);
+});
+
+test("execution choice survives BFF sanitization while identity aliases remain stripped", () => {
+  const headers = serverIssuedBackendRequestHeaders({
+    "X-AI-Selection-Source": "user_ai_profile",
+    "X-REALYTICS-USER-ID": "untrusted-actor",
+    "X-REALYTICS-TENANT-ID": "untrusted-tenant",
+    Authorization: "untrusted-token",
+  }, "fixture-correlation");
+  expect(headers.get("X-AI-Selection-Source")).toBe("user_ai_profile");
+  expect(headers.get("Authorization")).toBeNull();
+  expect(headers.get("X-REALYTICS-USER-ID")).toBeNull();
+  expect(headers.get("X-REALYTICS-TENANT-ID")).toBeNull();
+});
+
+test("personal AI authority failure is distinct from a project database outage", () => {
+  const message = backendErrorMessage({ status: 503, error: "ai_profile_authority_unavailable",
+    requiredPermission: null, role: null, reason: null, action: null, message: null }, { action: "분석" });
+  expect(message).toContain("개인 AI 설정을 읽지 못해 실행하지 않았습니다");
+  expect(message).toContain("시스템 AI로 바꾸지 않았습니다");
+  expect(message).not.toContain("프로젝트 데이터베이스");
 });

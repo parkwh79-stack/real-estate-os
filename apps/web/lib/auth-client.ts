@@ -383,7 +383,32 @@ export type TenantInvitationIssueInput = TenantInvitationIssueBase & (
 
 const LEGACY_STORAGE_KEY = "realytics.auth.session.v1";
 const TRANSIENT_AI_SECRET_PREFIX = "realytics.ai.session.";
+const AI_EXECUTION_SELECTION_PREFIX = `${TRANSIENT_AI_SECRET_PREFIX}selection.`;
+export type AiExecutionSelection = "system" | "user_ai_profile";
 let inMemoryIdentity: StoredAuthSession | null = null;
+
+function aiExecutionSelectionKey(): string | null {
+  const user = inMemoryIdentity?.user;
+  return user?.userId && user.tenantId
+    ? `${AI_EXECUTION_SELECTION_PREFIX}${encodeURIComponent(JSON.stringify([user.userId, user.tenantId]))}`
+    : null;
+}
+
+/** Non-secret execution intent, scoped to the current account and browser tab. */
+export function getAiExecutionSelection(): AiExecutionSelection {
+  if (typeof window === "undefined") return "system";
+  const key = aiExecutionSelectionKey();
+  const value = key ? window.sessionStorage.getItem(key) : null;
+  if (value === "user_ai_profile") return value;
+  if (value === null || value === "system") return "system";
+  throw new Error("저장된 AI 실행 선택을 확인하지 못했습니다. 설정에서 실행 방식을 다시 선택해 주세요.");
+}
+
+export function setAiExecutionSelection(value: AiExecutionSelection): void {
+  const key = aiExecutionSelectionKey();
+  if (!key || typeof window === "undefined") throw new Error("로그인한 계정과 작업공간을 확인해 주세요.");
+  window.sessionStorage.setItem(key, value);
+}
 
 /**
  * Compatibility accessor for client components that need a display actor ID.
@@ -397,7 +422,18 @@ export function setStoredAuthSession(
   value: StoredAuthSession,
   options: { notify?: boolean } = {},
 ) {
+  if (inMemoryIdentity && (inMemoryIdentity.user.userId !== value.user.userId
+    || inMemoryIdentity.user.tenantId !== value.user.tenantId)) {
+    clearTransientAiSecrets();
+  }
   inMemoryIdentity = value;
+  if (typeof window !== "undefined") {
+    const currentKey = aiExecutionSelectionKey();
+    for (let index = window.sessionStorage.length - 1; index >= 0; index -= 1) {
+      const key = window.sessionStorage.key(index);
+      if (key?.startsWith(AI_EXECUTION_SELECTION_PREFIX) && key !== currentKey) window.sessionStorage.removeItem(key);
+    }
+  }
   if (typeof window !== "undefined" && options.notify !== false) {
     window.dispatchEvent(new CustomEvent("realytics-auth-session-changed"));
   }
@@ -441,7 +477,7 @@ export function clearTransientAiSecrets() {
  */
 export function authHeaders(fallbackUserId = "web"): Record<string, string> {
   void fallbackUserId;
-  return { "X-REALYTICS-BFF": "same-origin" };
+  return { "X-REALYTICS-BFF": "same-origin", "X-AI-Selection-Source": getAiExecutionSelection() };
 }
 
 export async function signInWithSupabasePassword(input: {

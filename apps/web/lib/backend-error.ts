@@ -81,6 +81,15 @@ export function backendErrorMessage(
   error: StructuredBackendError,
   { action }: BackendErrorMessageOptions,
 ): string {
+  if (error.error === "ai_profile_authority_unavailable") {
+    return "개인 AI 설정을 읽지 못해 실행하지 않았습니다. 시스템 AI로 바꾸지 않았습니다. 계정의 AI 설정을 다시 조회해 주세요.";
+  }
+  if (error.error === "ai_profile_not_configured") {
+    return "저장한 개인 AI 설정이 없습니다. 계정 설정에서 개인 설정을 저장하거나 이 브라우저의 실행 방식을 직접 선택해 주세요.";
+  }
+  if (error.error === "ai_profile_selection_conflict") {
+    return "요청한 AI와 저장한 개인 설정이 일치하지 않습니다. 계정 설정의 제공자와 실행 방식을 확인해 주세요.";
+  }
   if (error.error === "intake_transfer_result_uncertain") {
     return "자료가 반영되었을 수 있으나 완료 기록을 확인하지 못했습니다. 프로젝트 자료와 검토 결과를 먼저 확인해 주세요. 같은 자료를 자동으로 다시 적용하지 않았습니다.";
   }

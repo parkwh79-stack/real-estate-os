@@ -11,6 +11,8 @@ import { CashFlowPeriodBasisPanel, cashFlowPeriodLabel } from "../../../../compo
 import { CashFlowPeriodChart } from "../../../../components/feasibility/cash-flow-period-chart";
 import { PfFollowupStatus } from "../../../../components/feasibility/pf-followup-status";
 import { readPfFollowupExecution } from "../../../../lib/pf-followup-status";
+import { cashFlowRecalculationInput, type CashFlowRecalculationBasis } from "../../../../lib/cash-flow-recalculation";
+import { CashFlowRecalculationBasisSelector } from "../../../../components/feasibility/cash-flow-recalculation-basis";
 
 const FEAS_METHOD_LABEL: Record<string, string> = {
   feasibility_workbook_v2: "사업수지 워크북(정본)",
@@ -54,6 +56,7 @@ export default function ProjectCashflowPage() {
   const [followupExecution, setFollowupExecution] = useState<ReturnType<typeof readPfFollowupExecution>>();
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [recalculationBasis, setRecalculationBasis] = useState<CashFlowRecalculationBasis>("project");
   const [calculationNotice, setCalculationNotice] = useState<string | null>(null);
   const [buildingFeas, setBuildingFeas] = useState(false);
   const [feasInfo, setFeasInfo] = useState<{ method?: string; needsReview?: boolean; missing?: string[]; hasRevenueAndCost?: boolean; applied?: boolean } | null>(null);
@@ -86,7 +89,7 @@ export default function ProjectCashflowPage() {
       const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/cash-flow/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders("web") },
-        body: JSON.stringify({}),
+        body: JSON.stringify(await cashFlowRecalculationInput(projectId, recalculationBasis)),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -106,7 +109,7 @@ export default function ProjectCashflowPage() {
     } finally {
       setRunning(false);
     }
-  }, [load, projectId]);
+  }, [load, projectId, recalculationBasis]);
 
   const buildFeasibilityInput = useCallback(async () => {
     setBuildingFeas(true);
@@ -164,6 +167,7 @@ export default function ProjectCashflowPage() {
         </div>
       </header>
 
+      <CashFlowRecalculationBasisSelector value={recalculationBasis} onChange={setRecalculationBasis} disabled={loading || running || buildingFeas} />
       {calculationNotice ? <p role="status" className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">{calculationNotice}</p> : null}
       {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div> : null}
       {feasInfo ? (

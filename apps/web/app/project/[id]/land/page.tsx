@@ -164,8 +164,9 @@ function formatCount(value: unknown, unit = "건") {
 }
 
 function formatSqm(value: unknown) {
-  const n = Number(value ?? 0);
-  return Number.isFinite(n) && n > 0 ? `${n.toLocaleString("ko-KR", { maximumFractionDigits: 1 })}㎡` : "미확인";
+  if (value === null || value === undefined || value === "") return "미확인";
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? `${n.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}㎡` : "미확인";
 }
 
 function formatKrw(value: unknown) {

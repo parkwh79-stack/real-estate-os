@@ -6,6 +6,11 @@ from typing import Any, Dict
 from agents.ai_connection import PROVIDER_ALIASES, resolve_ai_context, safe_ai_context
 from core.secret_vault import resolve_user_credential
 from storage import decrypt_user_ai_api_key, get_user_ai_profile
+from db.repositories.user_ai_profile_repository import UserAIProfileUnavailable
+
+
+class UserAIProfileNotConfigured(ValueError):
+    """An explicit personal execution has no active saved profile."""
 
 
 def system_ai_fallback_policy() -> Dict[str, Any]:
@@ -51,6 +56,7 @@ def build_user_ai_context(
     host: str = "api",
     override: Dict[str, Any] | None = None,
     use_legacy_profile: bool = True,
+    require_profile: bool = False,
 ) -> Dict[str, Any]:
     """Resolve the AI brain for a logged-in user.
 
@@ -67,8 +73,10 @@ def build_user_ai_context(
         raise ValueError("Inline AI credentials are forbidden; use /auth/ai-credentials")
     profile = get_user_ai_profile(str(user_id), include_secret=True, tenant_id=tenant_id) if user_id and use_legacy_profile else None
     active_profile = profile if profile and profile.get("status") == "active" else None
+    if require_profile and active_profile is None:
+        raise UserAIProfileNotConfigured("개인 AI 설정을 먼저 저장하고 다시 조회해 주세요.")
     fallback_disabled = active_profile is not None and active_profile.get("allowSystemFallback") is False
-    if override.get("provider") and not fallback_disabled:
+    if override.get("provider") and not fallback_disabled and not require_profile:
         return _preserve_routing_controls(resolve_ai_context(
             {
                 **override,
@@ -88,18 +96,23 @@ def build_user_ai_context(
             # A session-bound reference must never fall through to a legacy
             # persisted key when the user/tenant/session boundary does not
             # match or the reference has expired.
-            api_key = resolve_user_credential(
-                credential_ref,
-                user_id=str(user_id),
-                tenant_id=tenant_id,
-                session_id=session_id,
-            )
+            try:
+                api_key = resolve_user_credential(
+                    credential_ref,
+                    user_id=str(user_id),
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                )
+            except Exception:
+                # A failed secret authority is not an absent/expired key and
+                # does not grant permission to run with a system credential.
+                raise UserAIProfileUnavailable("Personal AI credential authority is unavailable") from None
         else:
             api_key = decrypt_user_ai_api_key(str(user_id), tenant_id=tenant_id)
         if api_key or fallback_disabled:
             provider = profile.get("provider") or system_ai_fallback_policy()["provider"]
             if override.get("provider") and PROVIDER_ALIASES.get(str(override["provider"]).strip().lower(), str(override["provider"]).strip().lower()) != PROVIDER_ALIASES.get(str(provider).strip().lower(), str(provider).strip().lower()):
-                raise ValueError("시스템 대체가 꺼진 개인 AI 프로필의 공급자를 요청에서 변경할 수 없습니다.")
+                raise ValueError("저장한 개인 AI 프로필의 공급자를 요청에서 변경할 수 없습니다.")
             context = resolve_ai_context(
                 {
                     "provider": provider,

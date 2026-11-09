@@ -466,3 +466,38 @@ for (const detail of ["대출 금액이 미입력되었습니다.", { error: "in
     await expect(page.getByRole("button", { name: "Cash Flow 재계산", exact: true })).toBeEnabled();
   });
 }
+
+for (const surface of ["feasibility", "cashflow"]) {
+  test(`${surface} explicitly recalculates the saved working-input budget`, async ({ page }) => {
+    await fixture(page);
+    if (surface === "cashflow") await page.goto("/project/r2-1/cashflow");
+    let submitted: unknown = null;
+    await page.route("**/feasibility-workbook/review", (route) => route.fulfill({ json: {
+      reviewHash: "a".repeat(64), terms: { schedule: {} }, values: {},
+    } }));
+    await page.route("**/cash-flow/run", async (route) => {
+      submitted = route.request().postDataJSON();
+      await route.fulfill({ json: { ...result(false), calculationRunId: "working-budget-run" } });
+    });
+    await page.getByLabel("Cash Flow 재계산 기준", { exact: true }).selectOption("working");
+    await page.getByRole("button", { name: surface === "feasibility" ? "Cash Flow 재계산" : "Cash Flow 재실행", exact: true }).click();
+    await expect.poll(() => submitted).toEqual({ workingInputReview: { expectedReviewHash: "a".repeat(64) } });
+    await expect(page.getByRole("status").filter({ hasText: "Cash Flow 계산을 저장했습니다" })).toBeVisible();
+    await expect(page.getByLabel("Cash Flow 재계산 기준", { exact: true })).toHaveValue("working");
+  });
+
+  test(`${surface} never posts a budget when saved input freshness cannot be read`, async ({ page }) => {
+    await fixture(page);
+    if (surface === "cashflow") await page.goto("/project/r2-1/cashflow");
+    let posts = 0;
+    await page.route("**/feasibility-workbook/review", (route) => route.fulfill({ status: 503, json: { detail: "unavailable" } }));
+    await page.route("**/cash-flow/run", async (route) => { posts += 1; await route.fulfill({ json: {} }); });
+    await page.getByLabel("Cash Flow 재계산 기준", { exact: true }).selectOption("working");
+    const run = page.getByRole("button", { name: surface === "feasibility" ? "Cash Flow 재계산" : "Cash Flow 재실행", exact: true });
+    await run.click();
+    await expect(page.getByText("저장된 검토 입력을 확인하지 못했습니다.", { exact: false })).toBeVisible();
+    await expect(run).toBeEnabled();
+    await expect(page.getByLabel("Cash Flow 재계산 기준", { exact: true })).toHaveValue("working");
+    expect(posts).toBe(0);
+  });
+}

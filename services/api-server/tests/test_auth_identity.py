@@ -1041,7 +1041,7 @@ def test_bearer_byok_fails_closed_without_signed_session_id(tmp_path, monkeypatc
     assert response.json()["detail"]["error"] == "credential_session_binding_required"
 
 
-def test_expired_byok_reference_is_cleared_from_profile(tmp_path, monkeypatch):
+def test_expired_byok_get_only_projects_unavailable_key_until_explicit_post(tmp_path, monkeypatch):
     monkeypatch.setenv("REALYTICS_STORAGE_BACKEND", "sqlite")
     monkeypatch.setenv("REALYTICS_SQLITE_FILE", str(tmp_path / "expired-byok.sqlite3"))
     monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
@@ -1069,6 +1069,9 @@ def test_expired_byok_reference_is_cleared_from_profile(tmp_path, monkeypatch):
         json={"provider": "gemini", "apiKey": "short-lived-secret"},
     ).status_code == 200
 
+    from storage import get_user_ai_profile
+    before = get_user_ai_profile("expired-user", tenant_id="expired-tenant", include_secret=True)
+
     monkeypatch.setattr(
         secret_vault,
         "_utc_now",
@@ -1079,10 +1082,17 @@ def test_expired_byok_reference_is_cleared_from_profile(tmp_path, monkeypatch):
     assert profile.status_code == 200
     assert profile.json()["profile"]["apiKeyConfigured"] is False
     assert profile.json()["profile"]["credentialRefConfigured"] is False
+    assert profile.json()["profile"]["credentialStatus"] == "expired"
+    assert get_user_ai_profile("expired-user", tenant_id="expired-tenant", include_secret=True) == before
+    assert secret_vault.credential_access_status(before["credentialRef"], user_id="expired-user", tenant_id="expired-tenant", session_id=session_id) == "expired"
     assert (
         profile.json()["effectiveAi"]["selectionSource"]
         == "user_ai_profile_without_key_system_fallback"
     )
+    cleared = client.post("/auth/ai-profile", headers=headers, json={"clearApiKey": True})
+    assert cleared.status_code == 200
+    assert get_user_ai_profile("expired-user", tenant_id="expired-tenant", include_secret=True)["credentialRef"] is None
+    assert secret_vault.credential_access_status(before["credentialRef"], user_id="expired-user", tenant_id="expired-tenant", session_id=session_id) == "missing"
 
 
 def _make_hs256_token(claims: dict, secret: str) -> str:

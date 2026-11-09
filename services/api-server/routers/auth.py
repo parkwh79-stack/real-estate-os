@@ -959,7 +959,7 @@ def get_ai_profile(request: Request):
         raise HTTPException(status_code=401, detail="Login required")
     user = context["user"]
     credential_session = credential_session_binding_from_request(request, context)
-    profile = _cleanup_stale_ai_credential_profile(
+    profile = _read_ai_credential_profile(
         user=user,
         credential_session=credential_session,
     )
@@ -978,42 +978,29 @@ def get_ai_profile(request: Request):
     }
 
 
-def _cleanup_stale_ai_credential_profile(
+def _read_ai_credential_profile(
     *,
     user: Dict[str, Any],
     credential_session: Dict[str, str] | None,
 ) -> Dict[str, Any] | None:
+    """Project current-session key availability without changing profile/vault state."""
     current_profile = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId"))
-    if not current_profile or not current_profile.get("credentialRef"):
-        return get_user_ai_profile(user["userId"], include_secret=False, tenant_id=user.get("tenantId"))
-    if credential_session is None:
-        return get_user_ai_profile(user["userId"], include_secret=False, tenant_id=user.get("tenantId"))
-    access_status = credential_access_status(
-        current_profile.get("credentialRef"),
-        user_id=user["userId"],
-        tenant_id=user.get("tenantId"),
-        session_id=credential_session["sessionId"],
-    )
-    if access_status not in {"missing", "expired"}:
-        return get_user_ai_profile(user["userId"], include_secret=False, tenant_id=user.get("tenantId"))
-    profile = upsert_user_ai_profile(
-        {
-            "userId": user["userId"],
-            "tenantId": user.get("tenantId"),
-            "clearApiKey": True,
-        }
-    )
-    record_user_activity_log(
-        {
-            "eventType": "ai_credential_stale_reference_cleared",
-            "userId": user["userId"],
-            "metadata": {
-                "tenantId": user.get("tenantId"),
-                "reason": access_status,
-                "secretPersistedInProfile": False,
-            },
-        }
-    )
+    profile = get_user_ai_profile(user["userId"], include_secret=False, tenant_id=user.get("tenantId"))
+    if not profile or not current_profile or not current_profile.get("credentialRef"):
+        return profile
+    try:
+        access_status = credential_access_status(
+            current_profile.get("credentialRef"),
+            user_id=user["userId"],
+            tenant_id=user.get("tenantId"),
+            session_id=(credential_session or {}).get("sessionId"),
+        ) if credential_session else "session_required"
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": "ai_profile_authority_unavailable",
+                            "message": "개인 AI 키 저장소를 확인할 수 없습니다. 설정은 변경하지 않았습니다."}) from None
+    profile = {**profile, "credentialStatus": access_status}
+    if access_status != "active":
+        profile.update(apiKeyConfigured=False, credentialRefConfigured=False, apiKeyMasked=None)
     return profile
 
 
@@ -1129,6 +1116,17 @@ def save_ai_profile(request: Request, payload: Dict[str, Any]):
         )
     user = context["user"]
     credential_session = credential_session_binding_from_request(request, context)
+    cleared_reference = None
+    if payload.get("clearApiKey") is True:
+        current = get_user_ai_profile(user["userId"], include_secret=True, tenant_id=user.get("tenantId")) or {}
+        reference = current.get("credentialRef")
+        if reference:
+            if credential_session is None:
+                raise HTTPException(status_code=400, detail={"error": "credential_session_binding_required"})
+            if credential_access_status(reference, user_id=user["userId"], tenant_id=user.get("tenantId"),
+                                        session_id=credential_session["sessionId"]) == "forbidden":
+                raise HTTPException(status_code=409, detail={"error": "credential_session_mismatch"})
+            cleared_reference = reference
     profile = upsert_user_ai_profile(
         {
             **payload,
@@ -1136,6 +1134,9 @@ def save_ai_profile(request: Request, payload: Dict[str, Any]):
             "tenantId": user.get("tenantId"),
         }
     )
+    if cleared_reference:
+        revoke_credential(cleared_reference, user_id=user["userId"], tenant_id=user.get("tenantId"),
+                          session_id=credential_session["sessionId"])
     record_user_activity_log(
         {
             "eventType": "ai_profile_updated",

@@ -2,13 +2,16 @@
 
 import { FINANCING_PRIORITIES, SCHEDULE_FIELDS, type FieldReview, type FinancingDraft,
   type ReviewSource, type TermsDraft, type WorkbookFinancingReview } from "../../lib/feasibility-review";
+import type { CashFlowTimingSource } from "../../lib/cash-flow-timing";
+import { CashFlowTimingReview } from "./cash-flow-timing-review";
 
 const control = "rounded-md border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-900";
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
 
-export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbookFinancing, onChange, onShowSource }: {
+export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbookFinancing, cashFlowTimingSource, onChange, onShowSource }: {
   draft: TermsDraft; disabled: boolean; selectedSource?: ReviewSource;
   workbookFinancing?: WorkbookFinancingReview | null;
+  cashFlowTimingSource?: CashFlowTimingSource | null;
   onChange: (draft: TermsDraft) => void; onShowSource: (review: FieldReview) => void;
 }) {
   const editReview = (group: "schedule" | "financing", patch: Partial<FieldReview>) => onChange({
@@ -39,6 +42,11 @@ export function FeasibilityTermsReview({ draft, disabled, selectedSource, workbo
     </div>;
   };
   return <div className="mt-5 space-y-4">
+    {cashFlowTimingSource ? <CashFlowTimingReview draft={draft.cashFlowTiming} source={cashFlowTimingSource} disabled={disabled}
+      dirty={draft.cashFlowTimingDirty} reason={draft.reviews.cashFlowTiming.reason}
+      onChange={(cashFlowTiming) => onChange({ ...draft, cashFlowTiming, cashFlowTimingDirty: true })}
+      onReasonChange={(reason) => onChange({ ...draft, cashFlowTimingDirty: true,
+        reviews: { ...draft.reviews, cashFlowTiming: { origin: "user_assumption", reason, sourceCell: "" } } })} /> : null}
     <fieldset id="cash-flow-schedule-review" disabled={disabled} className="min-w-0 scroll-mt-24 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
       <legend className="px-1 font-bold">사업기간{draft.scheduleDirty ? " · 저장 전" : ""}</legend>
       <p className="mb-3 text-xs text-slate-500">계획일을 YYYY-MM-DD로 입력하세요. 미입력 항목은 비워 두며, 입력을 지우면 미입력으로 저장합니다.</p>

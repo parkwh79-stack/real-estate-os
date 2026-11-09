@@ -9,6 +9,7 @@ import { eokToWon, wonToEok, termsDraft, termsHaveChanges, reviewedTermsPayload,
 import { fetchWorkbookCellPreview, type WorkbookCellPreview } from "../../lib/document-review-workspace";
 import { FeasibilityTermsReview } from "./feasibility-terms-review";
 import { WorkbookFinancialReviewPanel } from "./workbook-financial-review";
+import type { CashFlowTimingSource } from "../../lib/cash-flow-timing";
 
 const FIELDS = [
   ["total_revenue", "총매출"], ["total_cost", "총사업비"], ["land_cost", "토지비"],
@@ -25,6 +26,7 @@ type ReviewState = {
   termReviews?: Partial<TermsDraft["reviews"]>;
   workbookFinancingReview?: WorkbookFinancingReview | null;
   workbookFinancialReview?: WorkbookFinancialReview | null;
+  cashFlowTimingSource?: CashFlowTimingSource | null;
 };
 const control = "rounded-md border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-900";
 const button = "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold disabled:opacity-40 dark:border-slate-700";
@@ -55,6 +57,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
   const [terms, setTerms] = useState<TermsDraft>(() => termsDraft());
   const [workbookFinancing, setWorkbookFinancing] = useState<WorkbookFinancingReview | null>(null);
   const [workbookFinancial, setWorkbookFinancial] = useState<WorkbookFinancialReview | null>(null);
+  const [cashFlowTimingSource, setCashFlowTimingSource] = useState<CashFlowTimingSource | null>(null);
   const [reviewHash, setReviewHash] = useState("");
   const [documents, setDocuments] = useState<Source[]>([]);
   const [archiveId, setArchiveId] = useState("");
@@ -72,6 +75,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
     setTerms(termsDraft(state.terms, state.termReviews));
     setWorkbookFinancing(state.workbookFinancingReview ?? null);
     setWorkbookFinancial(state.workbookFinancialReview ?? null);
+    setCashFlowTimingSource(state.cashFlowTimingSource ?? null);
     setReviewHash(state.reviewHash);
     if (state.sourceDocuments) setDocuments(state.sourceDocuments);
   }, []);
@@ -80,7 +84,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
     let active = true;
     activeEndpointRef.current = endpoint;
     setBusy(true); setReviewHash(""); setRows([]); setTerms(termsDraft()); setArchiveId("");
-    setPreview(null); setSourceChoices([]); setError(null); setNotice(null); setWorkbookFinancing(null); setWorkbookFinancial(null);
+    setPreview(null); setSourceChoices([]); setError(null); setNotice(null); setWorkbookFinancing(null); setWorkbookFinancial(null); setCashFlowTimingSource(null);
     void fetch(`${endpoint}/review`, { cache: "no-store", headers: authHeaders("web") })
       .then(readResponse<ReviewState>)
       .then((state) => { if (active) restore(state); })
@@ -173,7 +177,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
         if (row.key !== "development_profit" && values[row.key]! < 0) throw new Error(`${row.label}: 음수를 입력할 수 없습니다.`);
         reviews[row.key] = { origin: row.origin, reason: row.reason.trim(), sourceCell: row.sourceCell.trim() };
       }
-      const termPayload = reviewedTermsPayload(terms, documents.find((item) => item.archiveId === archiveId));
+      const termPayload = reviewedTermsPayload(terms, documents.find((item) => item.archiveId === archiveId), cashFlowTimingSource);
       if (!changed.length && !termsHaveChanges(terms)) throw new Error("수정한 항목이 없습니다.");
       const result = await readResponse<{ reviewState: ReviewState }>(await fetch(`${endpoint}/apply-input`, {
         method: "POST", headers: { ...authHeaders("web"), "Content-Type": "application/json" },
@@ -239,7 +243,7 @@ export function FeasibilityExtractReview({ projectId, onApplied }: { projectId: 
           <input aria-label={`${row.label} 검토 이유`} value={row.reason} onChange={(event) => edit(row.key, { reason: event.target.value })} placeholder="수정 이유 또는 가정의 근거" className={`${control} mt-2 w-full`} />
         </fieldset>)}
       </div>
-      <FeasibilityTermsReview draft={terms} disabled={busy} workbookFinancing={workbookFinancing} selectedSource={documents.find((item) => item.archiveId === archiveId)}
+      <FeasibilityTermsReview draft={terms} disabled={busy} workbookFinancing={workbookFinancing} cashFlowTimingSource={cashFlowTimingSource} selectedSource={documents.find((item) => item.archiveId === archiveId)}
         onChange={(next) => { setTerms(next); setNotice(null); }} onShowSource={(review) => void showSource(review)} />
       {sourceChoices.length ? <div aria-label="합계 원본 셀 선택" className="mt-4 rounded-lg border border-indigo-200 p-3 dark:border-indigo-800">
         <p className="text-sm font-bold">합계를 구성하는 원본 셀을 선택하세요.</p><div className="mt-2 flex flex-wrap gap-2">{sourceChoices.map((source) => <button key={source.sourceCell} type="button" className={button} disabled={busy}

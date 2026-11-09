@@ -23,6 +23,7 @@ import {
   apiBase,
   authHeaders,
   configuredSupabaseAuthIssuer,
+  getAiExecutionSelection,
   createLocalPilotSession,
   enrollSupabaseTotp,
   issueTenantInvitation,
@@ -32,6 +33,7 @@ import {
   reauthenticateSupabaseTotp,
   revokeTenantInvitation,
   signOutSupabaseSession,
+  setAiExecutionSelection,
   startSupabaseIdentityLink,
   unenrollSupabaseMfa,
   unlinkSupabaseIdentity,
@@ -41,6 +43,7 @@ import {
   type TenantInvitation,
   type TenantInvitationRole,
   type TotpEnrollment,
+  type AiExecutionSelection,
 } from "../../lib/auth-client";
 import { localPilotAuthEnabled } from "../../lib/auth-policy";
 import { useAuth } from "../../components/auth/auth-context";
@@ -90,6 +93,7 @@ interface AiProfileResponse {
     apiKeyMasked?: string;
     apiKeyConfigured?: boolean;
     allowSystemFallback?: boolean;
+    credentialStatus?: string;
     updatedAt?: string;
   } | null;
   effectiveAi?: {
@@ -122,6 +126,7 @@ export default function SettingsPage() {
   const [apiKeyLength, setApiKeyLength] = useState(0);
   const [allowSystemFallback, setAllowSystemFallback] = useState(true);
   const [aiProfile, setAiProfile] = useState<AiProfileResponse | null>(null);
+  const [aiExecutionSelection, setExecutionSelection] = useState<AiExecutionSelection>("system");
   const [authReadiness, setAuthReadiness] = useState<SupabaseAuthReadiness | null>(null);
   const [securityProfile, setSecurityProfile] = useState<SupabaseSecurityProfile | null>(null);
   const [totpEnrollment, setTotpEnrollment] = useState<TotpEnrollment | null>(null);
@@ -143,6 +148,14 @@ export default function SettingsPage() {
   const [securityLoading, setSecurityLoading] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      setExecutionSelection(getAiExecutionSelection());
+    } catch {
+      setError("이 브라우저의 AI 실행 선택을 읽지 못했습니다. 브라우저 저장소 설정을 확인해 주세요.");
+    }
+  }, [user?.userId, user?.tenantId]);
 
   const selectedProvider = useMemo(
     () => providerOptions.find((item) => item.value === provider),
@@ -224,7 +237,7 @@ export default function SettingsPage() {
       setError(res.status === 401
         ? "로그인 후 AI 모델 설정을 조회할 수 있습니다."
         : "AI 설정을 불러오지 못했습니다. 다시 조회해 주세요. 기존 설정은 변경되지 않았습니다.");
-      return;
+      return false;
     }
     const body = (await res.json()) as AiProfileResponse;
     setAiProfile(body);
@@ -235,6 +248,7 @@ export default function SettingsPage() {
     if (typeof body.profile?.allowSystemFallback === "boolean") {
       setAllowSystemFallback(body.profile.allowSystemFallback);
     }
+    return true;
   }, [clearApiKeyInput]);
 
   const loadAuthSecurity = useCallback(async () => {
@@ -483,8 +497,8 @@ export default function SettingsPage() {
     }
   };
 
-  const saveAiProfile = async () => {
-    const submittedApiKey = apiKeyInputRef.current?.value.trim() ?? "";
+  const saveAiProfile = async (clearApiKey = false) => {
+    const submittedApiKey = clearApiKey ? "" : apiKeyInputRef.current?.value.trim() ?? "";
     const hasNewCredential = Boolean(submittedApiKey);
     clearApiKeyInput();
     setLoading(true);
@@ -500,6 +514,7 @@ export default function SettingsPage() {
           provider,
           model: model.trim() || selectedProvider?.defaultModel || "gemini-2.5-flash",
           ...(hasNewCredential ? { apiKey: submittedApiKey, expiresOnLogout: true } : {}),
+          ...(clearApiKey ? { clearApiKey: true } : {}),
           status: "active",
           allowSystemFallback,
         }),
@@ -513,7 +528,7 @@ export default function SettingsPage() {
         throw new Error(await res.text());
       }
       await res.json();
-      await loadAiProfile();
+      if (!await loadAiProfile()) return;
       setNotice(
         hasNewCredential
           ? "AI 모델과 세션용 API Key를 연결했습니다. 원문은 프로필 DB에 저장되지 않으며 로그아웃 시 폐기됩니다."
@@ -557,6 +572,23 @@ export default function SettingsPage() {
     }
   };
 
+  const chooseAiExecution = (value: AiExecutionSelection) => {
+    clearMessages();
+    if (value === "user_ai_profile" && !aiProfile?.profile) {
+      setError("개인 AI 설정을 먼저 저장하고 다시 조회해 주세요. 실행 방식은 변경하지 않았습니다.");
+      return;
+    }
+    try {
+      setAiExecutionSelection(value);
+      setExecutionSelection(value);
+      setNotice(value === "user_ai_profile"
+        ? "이 브라우저의 AI 실행에 저장한 개인 설정을 요청합니다. 개인 설정을 읽지 못하면 시스템 AI로 바꾸지 않습니다."
+        : "이 브라우저의 AI 실행에 시스템 기본 AI를 선택했습니다. 저장한 개인 설정은 변경되지 않았습니다.");
+    } catch {
+      setError("이 브라우저의 AI 실행 방식을 저장하지 못했습니다. 실행 방식은 변경하지 않았습니다.");
+    }
+  };
+
   const effective = aiProfile?.effectiveAi;
 
   return (
@@ -567,7 +599,7 @@ export default function SettingsPage() {
           로그인과 AI 두뇌 설정
         </h1>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
-          사용자가 로그인하면 본인의 LLM API Key와 모델을 우선 사용합니다. 개인 API가 없고 대체 사용을 허용하면 시스템에 설정된 AI를 사용합니다.
+          개인 AI 설정을 저장한 뒤 이 브라우저의 실행 방식을 선택해 주세요. 개인 AI를 선택한 경우에만 저장한 모델과 키를 요청하며, 개인 키가 없고 대체 사용을 허용하면 시스템 AI를 사용합니다.
           모델 호출이 불가능하면 규칙 기반으로 지원되는 검토를 진행합니다. API Key는 코드·GitHub·로그에 기록하지 않으며,
           로그아웃 시 브라우저에 남아 있는 임시 AI 키 저장소는 자동 삭제됩니다.
         </p>
@@ -1102,6 +1134,17 @@ export default function SettingsPage() {
 
       <section className="grid gap-4 xl:grid-cols-[1fr_0.85fr]">
         <Panel title="사용자 LLM API 설정" icon={<KeyRound className="h-5 w-5 text-blue-600" />}>
+          <label className="mb-4 block text-sm font-semibold">
+            이 브라우저의 AI 실행
+            <select aria-label="이 브라우저의 AI 실행" value={aiExecutionSelection}
+              disabled={loading || !user}
+              onChange={(event) => chooseAiExecution(event.target.value as AiExecutionSelection)}
+              className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+              <option value="system">시스템 기본 AI</option>
+              <option value="user_ai_profile" disabled={!aiProfile?.profile}>저장한 개인 AI 설정</option>
+            </select>
+          </label>
+          <p className="mb-4 text-xs leading-5 text-slate-500">이 선택은 현재 계정·작업공간의 이 브라우저 탭에 적용됩니다. 개인 설정 저장과는 별개이며 로그아웃이나 계정 전환 시 지워집니다. 계산엔진의 재무 계산에는 영향을 주지 않습니다.</p>
           <div className="grid gap-3 md:grid-cols-2">
             <label className="block">
               <span className="text-xs font-semibold text-slate-500">AI Provider</span>
@@ -1192,6 +1235,12 @@ export default function SettingsPage() {
               <Save className="h-4 w-4" />
               AI 설정 저장
             </button>
+            {aiProfile?.profile?.credentialStatus === "expired" || aiProfile?.profile?.credentialStatus === "missing" ? (
+              <button type="button" onClick={() => void saveAiProfile(true)} disabled={loading || !user}
+                className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-300 px-4 text-sm font-bold disabled:opacity-50">
+                만료된 키 연결 해제
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => void loadAiProfile()}
@@ -1214,6 +1263,8 @@ export default function SettingsPage() {
 
         <Panel title="현재 적용 AI 두뇌" icon={<Sparkles className="h-5 w-5 text-violet-600" />}>
           <div className="space-y-3">
+            <InfoRow label="이 브라우저 실행" value={aiExecutionSelection === "user_ai_profile" ? "개인 AI 설정으로 실행" : "시스템 기본 AI로 실행"} />
+            <p className="text-xs leading-5 text-slate-500">아래 정보는 저장한 개인 설정의 조회 결과입니다. 실제 AI 실행은 위에서 선택한 방식을 따릅니다. 개인 설정 조회 실패는 시스템 설정으로 대체하지 않습니다.</p>
             <InfoRow label="선택 소스" value={sourceLabel(effective?.selectionSource)} />
             <InfoRow label="Provider" value={effective?.provider ?? "-"} />
             <InfoRow label="Runtime" value={effective?.runtimeProvider ?? "-"} />
@@ -1221,7 +1272,7 @@ export default function SettingsPage() {
             <InfoRow label="직접 모델 호출" value={effective?.directModelCall ? "가능" : "대기 또는 fallback"} />
             <InfoRow label="필요한 API Key" value={effective?.requiresApiKey ?? "없음"} />
             <div className="rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-600 dark:bg-slate-950 dark:text-slate-300">
-              Agent는 이 두뇌를 문서분류, 필드 추출, 가정충돌 설명, 리스크 반박, 보고서 문장 작성에 사용합니다.
+              AI 실행을 요청하는 Agent는 선택한 방식으로 문서분류, 필드 추출, 가정충돌 설명, 리스크 반박, 보고서 문장 작성을 지원합니다.
               사업수지, Cash Flow, LTV/LTC, Waterfall, Exit 분양률 계산은 계산엔진이 수행합니다.
             </div>
           </div>
@@ -1234,6 +1285,7 @@ export default function SettingsPage() {
 function sourceLabel(value?: string) {
   if (value === "user_ai_profile") return "개인 API 프로필";
   if (value === "user_ai_profile_without_key_system_fallback") return "개인 프로필 + 시스템 fallback";
+  if (value === "user_ai_profile_fallback_disabled") return "개인 키 필요 · 시스템 대체 금지";
   if (value === "system_free_fallback") return "시스템 기본 AI";
   return value ?? "-";
 }

@@ -1,3 +1,5 @@
+import { timingDraft, timingPayload, type CashFlowTiming, type CashFlowTimingDraft, type CashFlowTimingSource } from "./cash-flow-timing";
+
 /** Keep all eight decimal places of 억원: one won must survive a save/reopen. */
 export function wonToEok(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) return "";
@@ -41,7 +43,7 @@ export type FinancingTerm = {
   amount: number | null; interest_rate: number | null; fee_rate: number | null;
   term_months: number | null; repayment_source: string | null;
 };
-export type ReviewTerms = { schedule: Record<string, string | null>; financing: FinancingTerm[] };
+export type ReviewTerms = { schedule: Record<string, string | null>; financing: FinancingTerm[]; cashFlowTiming?: CashFlowTiming | null };
 export type WorkbookFinancingReview = {
   sourceWorkbook: string; sourceDocument?: ReviewSource;
   terms: { trancheId: string; name: string; principalReconciled: boolean;
@@ -113,7 +115,8 @@ export type FinancingDraft = {
 };
 export type TermsDraft = {
   schedule: Record<string, string>; financing: FinancingDraft[];
-  reviews: Record<"schedule" | "financing", FieldReview>;
+  cashFlowTiming: CashFlowTimingDraft; cashFlowTimingDirty: boolean;
+  reviews: Record<"schedule" | "financing" | "cashFlowTiming", FieldReview>;
   changedSchedule: string[]; scheduleDirty: boolean; financingDirty: boolean;
 };
 
@@ -145,7 +148,7 @@ function storedMonthText(value: unknown): string {
 }
 
 export function termsDraft(terms?: ReviewTerms, reviews?: Partial<TermsDraft["reviews"]>): TermsDraft {
-  const review = (key: "schedule" | "financing"): FieldReview => ({
+  const review = (key: "schedule" | "financing" | "cashFlowTiming"): FieldReview => ({
     origin: reviews?.[key]?.origin ?? "user_assumption", reason: reviews?.[key]?.reason ?? "",
     sourceCell: reviews?.[key]?.sourceCell ?? "", sourceDocument: reviews?.[key]?.sourceDocument,
   });
@@ -157,12 +160,13 @@ export function termsDraft(terms?: ReviewTerms, reviews?: Partial<TermsDraft["re
       term_months: storedMonthText(row.term_months), repayment_source: row.repayment_source === null || row.repayment_source === undefined
         ? "" : typeof row.repayment_source === "string" ? row.repayment_source : storedValueIssue(row.repayment_source),
     })),
-    reviews: { schedule: review("schedule"), financing: review("financing") }, changedSchedule: [], scheduleDirty: false, financingDirty: false,
+    cashFlowTiming: timingDraft(terms?.cashFlowTiming), cashFlowTimingDirty: false,
+    reviews: { schedule: review("schedule"), financing: review("financing"), cashFlowTiming: review("cashFlowTiming") }, changedSchedule: [], scheduleDirty: false, financingDirty: false,
   };
 }
 
 export function termsHaveChanges(draft: TermsDraft): boolean {
-  return draft.scheduleDirty || draft.financingDirty;
+  return draft.scheduleDirty || draft.financingDirty || draft.cashFlowTimingDirty;
 }
 
 function rateToDecimal(value: string): number | null {
@@ -174,7 +178,7 @@ function rateToDecimal(value: string): number | null {
 }
 
 /** Build only changed groups; validation completes before the single save request. */
-export function reviewedTermsPayload(draft: TermsDraft, selectedSource?: ReviewSource) {
+export function reviewedTermsPayload(draft: TermsDraft, selectedSource?: ReviewSource, timingSource?: CashFlowTimingSource | null) {
   const terms: Partial<ReviewTerms> = {};
   const termReviews: Partial<TermsDraft["reviews"]> = {};
   const termSourceDocuments: Partial<Record<"schedule" | "financing", ReviewSource>> = {};
@@ -225,6 +229,12 @@ export function reviewedTermsPayload(draft: TermsDraft, selectedSource?: ReviewS
         interest_rate: rateToDecimal(row.interest_rate), fee_rate: rateToDecimal(row.fee_rate),
         term_months: monthText ? Number(monthText) : null, repayment_source: row.repayment_source.trim() || null };
     });
+  }
+  if (draft.cashFlowTimingDirty) {
+    const reason = draft.reviews.cashFlowTiming.reason.trim();
+    if (!reason) throw new Error("시간·수금 가정 이유를 입력하세요.");
+    terms.cashFlowTiming = timingPayload(draft.cashFlowTiming, timingSource);
+    termReviews.cashFlowTiming = { origin: "user_assumption", reason, sourceCell: "" };
   }
   return Object.keys(terms).length ? { terms, termReviews, termSourceDocuments } : {};
 }

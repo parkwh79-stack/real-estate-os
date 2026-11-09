@@ -227,7 +227,8 @@ from use_cases.parser_v2_records import (
 )
 from use_cases.parser_v2_runtime import build_parser_v2_runtime_dependencies
 from use_cases.term_annotation import annotate_terms_use_case
-from use_cases.user_ai_profile import build_user_ai_context, safe_user_ai_context_summary
+from use_cases.user_ai_profile import UserAIProfileNotConfigured, build_user_ai_context, safe_user_ai_context_summary
+from db.repositories.user_ai_profile_repository import UserAIProfileUnavailable
 from use_cases.covenant_monitoring import (
     monitor_covenants_use_case,
     set_monitoring_thresholds_use_case,
@@ -694,17 +695,38 @@ def ai_context_from_request(
         )
     if explicit_provider:
         override["provider"] = explicit_provider
+    # A client may select personal execution, but never its identity or session.
+    # Without that explicit choice hosted requests keep the existing system AI.
+    selection_source = override.get("selection_source", override.get("selectionSource")) or request.headers.get("x-ai-selection-source")
+    personal_profile = selection_source == "user_ai_profile"
     user_id = user.get("userId") or explicit_user_id or "anonymous"
     tenant_id = user.get("tenantId") or session.get("tenantId")
     credential_session = credential_session_binding_from_request(request, context)
-    return build_user_ai_context(
-        user_id=user_id,
-        tenant_id=tenant_id,
-        session_id=(credential_session or {}).get("sessionId"),
-        host="api",
-        override=override,
-        use_legacy_profile=storage_backend() not in {"postgres", "postgresql"},
-    )
+    if personal_profile:
+        if context.get("authenticated") is not True or not user.get("userId") or not user.get("tenantId"):
+            raise HTTPException(status_code=401, detail={"error": "authentication_required"})
+        if credential_session is None:
+            raise HTTPException(status_code=400, detail={"error": "credential_session_binding_required"})
+        user_id, tenant_id = credential_session["userId"], credential_session["tenantId"]
+    try:
+        return build_user_ai_context(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            session_id=(credential_session or {}).get("sessionId"),
+            host="api",
+            override=override,
+            use_legacy_profile=personal_profile or (selection_source != "system" and storage_backend() not in {"postgres", "postgresql"}),
+            require_profile=personal_profile,
+        )
+    except UserAIProfileNotConfigured:
+        raise HTTPException(status_code=409, detail={"error": "ai_profile_not_configured"}) from None
+    except UserAIProfileUnavailable:
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_profile_authority_unavailable",
+            "message": "개인 AI 설정 저장소를 확인할 수 없습니다. 시스템 AI로 바꾸지 않았습니다.",
+        }) from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"error": "ai_profile_selection_conflict"}) from None
 
 def stamp_project_identity(project_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
     """Attach persisted user identity to new project records for user-specific dashboards."""
@@ -735,6 +757,9 @@ _SERVER_MANAGED_PROJECT_AUTHORITY_FIELDS = frozenset(
         "sourceDocuments",
         "canonicalFeasibilityStudyV2",
         "feasibility_input_sources",
+        "cash_flow_timing",
+        "parserApprovedInputBindings",
+        "parserInputApplication",
         "canonical_feasibility_study_v2",
         "feasibilityStudyV2",
         "feasibility_study_v2",
@@ -2540,7 +2565,8 @@ def smart_intake_triage(project_id: str, request: Request, input_data: Dict[str,
     # Ordinary hosted intake must be usable without a compatibility BYOK
     # profile or an external model. Explicit provider selection retains its
     # existing validation and authorization path.
-    deterministic_only = storage_backend() in {"postgres", "postgresql"} and not override
+    deterministic_only = (storage_backend() in {"postgres", "postgresql"} and not override
+                          and request.headers.get("x-ai-selection-source") != "user_ai_profile")
     ai_context = None
     if not deterministic_only:
         ai_context = {
@@ -2891,7 +2917,7 @@ def apply_project_feasibility_input(project_id: str, request: Request, input_dat
     if "terms" in input_data and not isinstance(input_data["terms"], dict):
         raise HTTPException(status_code=400, detail="사업기간·대출 조건 항목을 확인하세요.")
     submitted_term_sources = input_data.get("termSourceDocuments", {})
-    if not isinstance(submitted_term_sources, dict) or submitted_term_sources.keys() - {"schedule", "financing"}:
+    if not isinstance(submitted_term_sources, dict) or submitted_term_sources.keys() - {"schedule", "financing", "cashFlowTiming"}:
         raise HTTPException(status_code=400, detail="사업기간·대출 조건 원본 문서를 확인하세요.")
     term_source_documents = {}
     for group, reference in submitted_term_sources.items():

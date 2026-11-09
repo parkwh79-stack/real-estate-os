@@ -1,8 +1,9 @@
 """Evidence-first Parser V2 HTTP boundary.
 
-The router is intentionally a sidecar to the legacy project JSON model.  It
-can register parsing candidates and explicitly approved snapshots, but it never
-projects parser output into a project or invokes a financial calculation.
+Parsing, review and snapshot creation remain sidecars: they do not change
+project inputs or invoke financial calculations. A separate explicit application
+action can copy three approved identity/site fields into existing project keys,
+with current-source validation, project-write permission and transactional CAS.
 Source bytes are accepted only after an ``archiveId`` has been resolved through
 the project-scoped immutable upload archive.
 """
@@ -37,6 +38,11 @@ from parsing_platform.default_modules import (
 )
 from parsing_platform.source_review_candidates import PROFILE_ID as SOURCE_REVIEW_PROFILE_ID, PROFILE_VERSION as SOURCE_REVIEW_PROFILE_VERSION, source_review_profile
 from parsing_platform.canonical_fields import canonical_field_key
+from db.repositories.postgres_project_repository import ProjectVersionConflict
+from use_cases.parser_v2_input_application import (
+    ParserInputApplicationUnavailable, apply_parser_approved_inputs,
+    build_parser_input_application_preview,
+)
 from parsing_platform.domain_standards import domain_standard_catalog
 from parsing_platform.document_taxonomy import (
     DOCUMENT_TAXONOMY_VERSION,
@@ -234,6 +240,14 @@ class ApprovedInputSnapshotInput(ParsingContract):
         return self
 
 
+class ApprovedInputApplicationInput(ParsingContract):
+    application_id: str = Field(..., min_length=1, max_length=120)
+    field_keys: list[Literal["project.name", "land.address", "land.area_sqm"]] = Field(..., min_length=1, max_length=3)
+    expected_snapshot_hash: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    expected_state_version: int = Field(..., ge=1)
+    expected_preview_hash: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+
 def build_project_parser_v2_router(
     *,
     project_lookup: ProjectLookup,
@@ -246,6 +260,7 @@ def build_project_parser_v2_router(
     profile_list_fn: ProfileList | None = None,
     calculation_run_list_fn: CalculationRunList = list_calculation_run_records,
     review_pilot_enabled: bool | None = None,
+    approved_input_applier: Callable[..., dict[str, Any]] | None = None,
 ) -> APIRouter:
     """Build a Parser V2 router with replaceable persistence seams for tests/DBs."""
 
@@ -405,9 +420,12 @@ def build_project_parser_v2_router(
                 ImmutableRecordConflict,
                 ParserV2ApprovalError,
                 ParserV2ReferenceError,
+                ProjectVersionConflict,
             ),
         ):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if isinstance(exc, ParserInputApplicationUnavailable):
+            raise HTTPException(status_code=503, detail={"error": "parser_input_application_unavailable"}) from exc
         if isinstance(exc, LookupError):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if isinstance(exc, (ParserV2RecordError, ParsingOrchestrationError, ValueError)):
@@ -1287,6 +1305,40 @@ def build_project_parser_v2_router(
         return public_snapshot.model_dump(
             mode="json", by_alias=True, exclude_none=True
         )
+
+    @router.get("/projects/{project_id}/parsing-v2/approved-snapshots/{snapshot_id}/input-preview")
+    def preview_approved_input_application(project_id: str, snapshot_id: str, request: Request):
+        project, _, tenant_id, _ = authorize_project(request, project_id, "project:read")
+        try:
+            return build_parser_input_application_preview(
+                store=make_store(), tenant_id=tenant_id, project_id=project_id,
+                snapshot_id=snapshot_id, project=project,
+            )
+        except Exception as exc:
+            translate_domain_error(exc)
+
+    @router.post("/projects/{project_id}/parsing-v2/approved-snapshots/{snapshot_id}/apply-input")
+    def apply_approved_input_application(project_id: str, snapshot_id: str, request: Request,
+                                         input_data: ApprovedInputApplicationInput):
+        _, authz, tenant_id, actor_id = authorize_project(request, project_id, "assumption:override")
+        require_review_pilot(authz)
+        # Reviewer approval is not project-edit authority. Preserve the existing
+        # target write boundary rather than widening the reviewer role.
+        authorize_request(request, "project:write")
+        try:
+            result = (approved_input_applier or apply_parser_approved_inputs)(
+                tenant_id=tenant_id, project_id=project_id, snapshot_id=snapshot_id, actor_id=actor_id,
+                application_id=input_data.application_id, field_keys=input_data.field_keys,
+                expected_snapshot_hash=input_data.expected_snapshot_hash,
+                expected_state_version=input_data.expected_state_version,
+                expected_preview_hash=input_data.expected_preview_hash,
+            )
+        except Exception as exc:
+            translate_domain_error(exc)
+        audit_recorder(request, event_type="parser_v2_approved_inputs_applied", project_id=project_id,
+                       metadata={"applicationId": input_data.application_id, "snapshotId": snapshot_id,
+                                 "fieldKeys": input_data.field_keys, "authorization": authz.get("authorization")})
+        return result
 
     return router
 

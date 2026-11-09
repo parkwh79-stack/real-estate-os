@@ -127,9 +127,8 @@ def resolve_user_credential(
         return value if isinstance(value, str) and value else None
     if reference.startswith("session-secret://"):
         with _LOCK:
-            _prune_expired_locked(_utc_now())
             record = _SESSION_SECRETS.get(reference)
-            if not record or not _record_matches_boundary(
+            if not record or _record_is_expired(record, _utc_now()) or not _record_matches_boundary(
                 record,
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -155,7 +154,7 @@ def credential_access_status(
     tenant_id: str | None,
     session_id: str | None,
 ) -> str:
-    """Return active/missing/expired/forbidden without exposing a secret."""
+    """Inspect access without exposing or deleting a stored secret."""
 
     if not credential_ref:
         return "missing"
@@ -177,9 +176,6 @@ def credential_access_status(
             record = _SESSION_SECRETS.get(reference)
             if not record:
                 return "missing"
-            if _record_is_expired(record, _utc_now()):
-                _SESSION_SECRETS.pop(reference, None)
-                return "expired"
             if not _record_matches_boundary(
                 record,
                 user_id=user_id,
@@ -188,14 +184,13 @@ def credential_access_status(
                 require_all=True,
             ):
                 return "forbidden"
+            if _record_is_expired(record, _utc_now()):
+                return "expired"
             return "active"
     if reference.startswith("aws-sm://"):
         record = _read_aws_secret_record(reference)
         if record is None:
             return "missing"
-        if _record_is_expired(record, _utc_now()):
-            _delete_aws_secret(reference)
-            return "expired"
         if not _record_matches_boundary(
             record,
             user_id=user_id,
@@ -204,6 +199,8 @@ def credential_access_status(
             require_all=True,
         ):
             return "forbidden"
+        if _record_is_expired(record, _utc_now()):
+            return "expired"
         return "active"
     return "missing"
 
@@ -335,7 +332,6 @@ def _resolve_aws_secret(
     if record is None:
         return None
     if _record_is_expired(record, _utc_now()):
-        _delete_aws_secret(reference)
         return None
     if not _record_matches_boundary(
         record,

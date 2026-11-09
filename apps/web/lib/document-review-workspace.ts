@@ -406,6 +406,12 @@ export type CanonicalSelectionRecord = JsonRecord & {
   approvalStatus?: string;
   validityStatus?: string;
   selectionVersion?: number;
+  fieldKey?: string;
+  canonicalField?: string;
+  entityId?: string;
+  normalizedValue?: unknown;
+  unit?: string;
+  supersedesSelectionId?: string;
   selectedAt?: string;
   createdAt?: string;
 };
@@ -819,6 +825,115 @@ export async function resolveParserV2Conflict(input: {
     throw new Error(await responseError(response, "Parser V2 SourceConflict를 해결하지 못했습니다."));
   }
   return (await response.json()) as SourceConflictRecord;
+}
+
+export type ParserInputApplicationPreview = {
+  schemaVersion: "realytics-parser-input-application-v1";
+  projectId: string;
+  snapshotId: string;
+  snapshotHash: string;
+  expectedStateVersion: number;
+  previewHash: string;
+  items: Array<{
+    fieldKey: string;
+    targetPath: string;
+    currentValue: unknown;
+    approvedValue: unknown;
+    unit?: string;
+    selectionId: string;
+    candidateId: string;
+    documentVersionId: string;
+    sourceHash: string;
+    sourceLocator: SourceLocatorRecord;
+    changed: boolean;
+  }>;
+  lastApplication?: { applicationId: string; snapshotId: string; fieldKeys: string[] } | null;
+  limitations: string[];
+};
+
+async function parserInputPost<T>(projectId: string, path: string, body: JsonRecord): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/parsing-v2/${path}`, {
+      method: "POST", headers: { ...authHeaders("web-reviewer"), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new ParserReviewSaveError("입력 선택 저장 결과를 확인하지 못했습니다. 최신 기록을 다시 확인해 주세요.", 0, true);
+  }
+  if (!response.ok) {
+    let gate = "";
+    try { const payload = asRecord(await response.json()); gate = String(asRecord(payload.detail).error ?? payload.detail ?? ""); } catch { /* fixed public message */ }
+    const separation = gate.includes("four-eyes control") || gate.includes("maker-checker separation");
+    const message = separation ? "검토한 사람과 승인본을 승인하는 사람은 달라야 합니다. 별도 승인 담당자가 확인해 주세요."
+      : response.status === 403 && gate.includes("mfa_required")
+      ? "승인 입력을 저장하려면 다단계 인증을 완료해 주세요."
+      : response.status === 401 ? "다시 로그인한 뒤 승인 입력을 확인해 주세요."
+        : response.status === 403 ? "현재 계정에 승인 입력을 저장할 권한이 없습니다."
+          : response.status === 409 ? "입력·검토·승인 기록이 변경되었습니다. 최신 기록에서 값을 다시 비교해 주세요."
+            : response.status === 503 ? "이 환경에서는 승인 입력 저장을 사용할 수 없습니다. 분석용 입력은 자료 입력 화면에서 계속 검토할 수 있습니다."
+              : response.status >= 500 ? "승인 입력 저장 결과를 확인하지 못했습니다. 최신 기록을 다시 확인해 주세요."
+                : "선택한 값·단위·근거와 승인 상태를 확인해 주세요.";
+    throw new ParserReviewSaveError(message, response.status, (response.status === 409 && !separation) || response.status >= 500);
+  }
+  try { return await response.json() as T; } catch {
+    throw new ParserReviewSaveError("승인 입력 저장 응답을 확인하지 못했습니다. 최신 기록을 다시 확인해 주세요.", response.status, true);
+  }
+}
+
+export async function selectParserV2CanonicalInput(projectId: string, input: {
+  selectionId: string; candidateId: string; reviewDecisionId: string; expectedDecisionSequence: number;
+  selectionVersion: number; supersedesSelectionId?: string;
+}): Promise<CanonicalSelectionRecord> {
+  const result = await parserInputPost<CanonicalSelectionRecord>(projectId, "canonical-selections", input);
+  if (!result || typeof result !== "object" || result.selectionId !== input.selectionId || result.candidateId !== input.candidateId
+    || result.reviewDecisionId !== input.reviewDecisionId || result.selectionVersion !== input.selectionVersion
+    || result.approvalStatus !== "approved" || result.validityStatus !== "active") {
+    throw new ParserReviewSaveError("선택 저장 응답의 항목이 일치하지 않습니다. 최신 기록을 다시 확인해 주세요.", 201, true);
+  }
+  return result;
+}
+
+export async function approveParserV2InputSnapshot(projectId: string, input: {
+  snapshotId: string; selectionIds: string[]; expectedSelectionVersions: Record<string, number>;
+  purpose: string; supersedesSnapshotId?: string;
+}): Promise<ApprovedInputSnapshotRecord> {
+  const result = await parserInputPost<ApprovedInputSnapshotRecord>(projectId, "approved-snapshots", input);
+  if (!result || typeof result !== "object" || result.snapshotId !== input.snapshotId || result.approvalStatus !== "approved"
+    || result.validityStatus !== "active" || result.purpose !== input.purpose || !Array.isArray(result.selectionIds)
+    || result.selectionIds.length !== input.selectionIds.length
+    || input.selectionIds.some((id) => !result.selectionIds?.includes(id))) {
+    throw new ParserReviewSaveError("승인본 저장 응답의 선택값이 일치하지 않습니다. 최신 기록을 다시 확인해 주세요.", 201, true);
+  }
+  return result;
+}
+
+export async function fetchParserInputApplicationPreview(projectId: string, snapshotId: string): Promise<ParserInputApplicationPreview> {
+  const result = await fetchJson<ParserInputApplicationPreview>(
+    `${apiBase}/projects/${encodeURIComponent(projectId)}/parsing-v2/approved-snapshots/${encodeURIComponent(snapshotId)}/input-preview`,
+    "승인 입력과 현재 프로젝트 값을 비교하지 못했습니다.",
+  );
+  if (!result || typeof result !== "object" || result.schemaVersion !== "realytics-parser-input-application-v1" || result.projectId !== projectId
+    || result.snapshotId !== snapshotId || !/^[a-f0-9]{64}$/.test(result.snapshotHash)
+    || !/^[a-f0-9]{64}$/.test(result.previewHash) || !Number.isInteger(result.expectedStateVersion) || result.expectedStateVersion < 1
+    || !Array.isArray(result.items) || !Array.isArray(result.limitations)) {
+    throw new Error("승인 입력 비교의 버전·무결성 정보를 확인하지 못했습니다.");
+  }
+  return result;
+}
+
+export async function applyParserV2ApprovedInputs(projectId: string, snapshotId: string, input: {
+  applicationId: string; fieldKeys: string[]; expectedSnapshotHash: string; expectedStateVersion: number; expectedPreviewHash: string;
+}): Promise<{ applicationId: string; status: string; appliedFieldKeys: string[] }> {
+  const result = await parserInputPost<{ applicationId: string; status: string; appliedFieldKeys: string[] }>(
+    projectId, `approved-snapshots/${encodeURIComponent(snapshotId)}/apply-input`, input,
+  );
+  if (!result || typeof result !== "object" || result.applicationId !== input.applicationId || !["applied", "already_applied"].includes(result.status)
+    || !Array.isArray(result.appliedFieldKeys) || result.appliedFieldKeys.length !== input.fieldKeys.length
+    || input.fieldKeys.some((key) => !result.appliedFieldKeys.includes(key))) {
+    throw new ParserReviewSaveError("프로젝트 반영 응답을 확인하지 못했습니다. 현재 입력을 다시 조회해 주세요.", 200, true);
+  }
+  return result;
 }
 
 export function safeSourceUrl(value: unknown): string | null {

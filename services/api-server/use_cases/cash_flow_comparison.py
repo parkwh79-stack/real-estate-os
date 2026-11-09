@@ -25,6 +25,7 @@ _EXECUTION_KEYS = frozenset({
     "sourceMetadata", "sourceLocator", "sourceLocators", "provenance", "inputDigest",
     "inputEvidenceIds", "evidenceIds", "assumptionIds", "artifactRef",
     "reviewedMonthlyFinancingReview",
+    "workingInputReview", "timingReview",
 })
 
 
@@ -193,7 +194,8 @@ def input_review_rows(snapshot: dict) -> list[dict]:
         return []
     labels = {"total_revenue": "총매출", "total_cost": "총사업비", "land_cost": "토지비",
               "construction_cost": "공사비", "finance_cost": "금융비용", "other_cost": "기타 비용",
-              "pf_amount": "PF 금액", "development_profit": "사업이익", "schedule": "사업 일정", "financing": "대출 조건"}
+              "pf_amount": "PF 금액", "development_profit": "사업이익", "schedule": "사업 일정", "financing": "대출 조건",
+              "cashFlowTiming": "사건·월차·분양수금 가정"}
     rows = []
     for group in ("fieldReviews", "termReviews"):
         entries = review.get(group)
@@ -322,7 +324,7 @@ def _metrics(run: dict) -> dict:
     reconciliation = (result.get("monthlyFinancing") or {}).get("reconciliation") or {}
     values = {key: _number(summary.get(key)) for key in (
         "totalRevenue", "totalProjectCost", "developmentProfit", "financialCost", "requiredPfLimit",
-        "totalPfDraw", "endingCash", "outstandingDebt",
+        "totalPfDraw", "totalPrincipalRepaid", "endingCash", "outstandingDebt",
     )}
     derived = []
     if values["developmentProfit"] is None and values["totalRevenue"] is not None and values["totalProjectCost"] is not None:
@@ -409,7 +411,7 @@ def compare_cash_flow_runs(baseline: dict, changed: dict, *, saved_selection: di
     left, right = _metrics(baseline), _metrics(changed)
     labels = {"totalRevenue": "총매출", "totalProjectCost": "총사업비", "developmentProfit": "개발이익",
               "financialCost": "금융비용", "requiredPfLimit": "최대 부족자금", "totalPfDraw": "총 대출 인출",
-              "endingCash": "기말 현금", "outstandingDebt": "잔여 대출"}
+              "totalPrincipalRepaid": "총 원금상환", "endingCash": "기말 현금", "outstandingDebt": "잔여 대출"}
     if all(captured):
         labels.update(totalRevenue="영업 현금수입", totalProjectCost="영업 현금지출",
                       developmentProfit="영업 현금수지 차액")

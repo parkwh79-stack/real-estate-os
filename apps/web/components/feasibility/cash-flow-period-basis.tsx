@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { CashFlowPeriodBasis } from "../../lib/project-client";
+import type { CashFlowTiming } from "../../lib/cash-flow-timing";
 
 const scheduleLabels: Record<string, string> = {
   land_purchase: "토지 매입", permit_approval: "인허가", construction_start: "착공",
@@ -18,7 +19,9 @@ export function cashFlowPeriodLabel(basis: CashFlowPeriodBasis | undefined, inde
 
 /** Show only the basis captured in the selected saved calculation. */
 export function CashFlowPeriodBasisPanel({ basis, runId, projectId }: {
-  basis?: CashFlowPeriodBasis; runId: string; projectId: string;
+  basis?: CashFlowPeriodBasis & { timingAssumptions?: CashFlowTiming; timingReview?: { reason?: string };
+    sourcePeriodBasis?: CashFlowPeriodBasis; sourcePeriodMonthBindings?: { sourcePeriodIndex: number; monthIndex: number }[] };
+  runId: string; projectId: string;
 }) {
   const sourceSequence = basis?.kind === "source_sequence";
   const periods = basis?.periods ?? [];
@@ -30,6 +33,17 @@ export function CashFlowPeriodBasisPanel({ basis, runId, projectId }: {
     <p className="mt-1 break-all text-xs text-slate-500">계산 기록: {runId}</p>
     {!basis ? <p className="mt-2">이 계산에는 기간 기준이 미기록되어 있습니다. 현재 프로젝트 일정으로 이전 계산의 기준을 추정하지 않습니다.</p> : <>
       <p className="mt-2 font-bold">{sourceSequence ? "원본 사건·기간 순서 기준" : "달력·월차 기준"}</p>
+      {basis.timingAssumptions ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+        <p className="font-bold">사용자 분석용 시간·수금 가정</p>
+        <p>M0 기준일 {basis.timingAssumptions.baseDate ?? "미확인"} · 원본 첫 월 → M{integer(basis.timingAssumptions.firstMonthlyMonthIndex)}</p>
+        <p>{basis.timingReview?.reason || "검토 이유 미기록"}</p>
+        <p>이 계산에 저장된 가정입니다. 실제 사건 날짜·대출 약정·승인된 사실을 확정하지 않습니다.</p>
+        {basis.sourcePeriodMonthBindings?.length ? <details className="mt-2"><summary className="cursor-pointer font-bold">원본 순서와 가정한 계산 월차</summary>
+          <div className="mt-2 max-h-64 overflow-auto"><table className="w-full min-w-64 text-left"><thead><tr><th>원본 기간</th><th>계산 월차</th></tr></thead><tbody>
+            {basis.sourcePeriodMonthBindings.map((row) => <tr key={row.sourcePeriodIndex}><td>{cashFlowPeriodLabel(basis.sourcePeriodBasis, row.sourcePeriodIndex)}</td><td>M{integer(row.monthIndex)}</td></tr>)}
+          </tbody></table></div>
+        </details> : null}
+      </div> : null}
       <p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-400">{sourceSequence
         ? "원본 순번은 배열의 위치입니다. 사전 사건을 포함하므로 M0부터의 실제 개월 수나 달력 날짜로 해석하지 않습니다."
         : "저장된 일정의 달력·월차 관계를 사용하는 계산입니다. 원본 순서와 이자 발생 기록은 아래 저장 기준으로 확인하세요."}</p>

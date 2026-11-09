@@ -270,6 +270,7 @@ class FeasibilityReviewConflict(ValueError):
 
 
 def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
+    from use_cases.cash_flow_timing import timing_source
     inputs = project.get("feasibility_input") or {}
     expected = project.get("expected_results") or {}
     values = {key: inputs.get(key) for key in FEASIBILITY_INPUT_KEYS}
@@ -328,6 +329,7 @@ def feasibility_review_state(project: Dict[str, Any]) -> Dict[str, Any]:
             "analysisOnly": True, "reportEligible": False,
         }
     return {**state, "reviewHash": review_hash, "analysisOnly": True, "reportEligible": False,
+            "cashFlowTimingSource": timing_source(project),
             "workbookFinancingReview": workbook_review,
             "workbookFinancialReview": financial_review,
             "canonicalStudyPresent": bool(project.get("canonicalFeasibilityStudyV2") or project.get("feasibilityStudyV2"))}
@@ -399,6 +401,8 @@ def apply_feasibility_input_use_case(
         document = (term_source_documents or {}).get(group) or source_document
         if not isinstance(origin, str) or origin not in {"user_assumption", "document_correction"}:
             raise ValueError(f"{group}: 입력 구분을 확인하세요.")
+        if group == "cashFlowTiming" and origin != "user_assumption":
+            raise ValueError("시간·수금 연결은 분석용 사용자 가정으로만 저장할 수 있습니다.")
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
             raise ValueError(f"{group}: 수정 또는 가정의 이유를 입력하세요(4000자 이하).")
         if source_cell is not None and (not isinstance(source_cell, str) or len(source_cell) > 1000):

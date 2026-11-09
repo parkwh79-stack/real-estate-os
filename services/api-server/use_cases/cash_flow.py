@@ -11,6 +11,7 @@ from use_cases.approved_workbook_authority import (
 from use_cases.development_feasibility import analyze_development_feasibility_use_case
 from use_cases.feasibility_workbook_llm import FeasibilityReviewConflict, feasibility_review_state
 from core.reviewed_monthly_financing import reject_unsupported_monthly_financing_options, validate_monthly_financing_policy
+from use_cases.cash_flow_timing import apply_timing_to_monthly_request
 
 
 CASH_FLOW_REQUEST_TYPE = "cash_flow_run_request_v1"
@@ -40,6 +41,10 @@ def build_cash_flow_request_use_case(
 
 
 def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any]) -> Dict[str, Any]:
+    if "workingInputReview" in input_data:
+        if set(input_data) != {"workingInputReview"}:
+            raise ValueError("저장 검토 입력의 예산 계산과 다른 입력 변경을 한 요청에 섞을 수 없습니다.")
+        return _working_input_request(project_data, input_data["workingInputReview"])
     if "reviewedMonthlyFinancing" in input_data:
         if set(input_data) != {"reviewedMonthlyFinancing"}:
             raise ValueError("월별 검토 계산과 다른 입력 변경을 한 요청에 섞을 수 없습니다.")
@@ -137,6 +142,45 @@ def _capture_working_input_review(request: Dict[str, Any], project_data: Dict[st
     }
 
 
+def _working_input_request(project_data: Dict[str, Any], review: Any) -> Dict[str, Any]:
+    """Explicit budget scenario from saved working inputs, never an original replay."""
+    if not isinstance(review, dict) or set(review) != {"expectedReviewHash"}:
+        raise ValueError("저장 검토 입력의 최신 상태를 확인한 뒤 예산 계산을 실행하세요.")
+    expected = review["expectedReviewHash"]
+    state = feasibility_review_state(project_data)
+    if not isinstance(expected, str) or not expected or expected != state["reviewHash"]:
+        raise FeasibilityReviewConflict("저장된 입력이 변경되었습니다. 최신 값을 다시 불러온 뒤 계산하세요.")
+    analysis = analyze_development_feasibility_use_case(project_data)
+    draft = analysis.get("cashFlowRunRequestDraft")
+    if not isinstance(draft, dict):
+        raise ValueError("예산 계산에 필요한 매출·사업비·자금조달 금액을 확인하세요.")
+    missing = (analysis.get("pfReadiness") or {}).get("missingFields") or []
+    if missing:
+        raise ValueError("자금조달 금액을 확인한 뒤 예산 계산을 실행하세요: " + ", ".join(missing))
+    request = _external_candidate_request(project_data, draft)
+    if "monthlyFinancing" in request or "capturedWorkbookCashFlow" in request:
+        raise ValueError("저장 검토 입력의 예산 계산에 원본 현금흐름이나 월별 약정 계산을 섞을 수 없습니다.")
+    request["workingInputReview"] = {"reviewHash": expected, "basis": "saved_working_input_budget"}
+    request["sourceMetadata"].update({"analysisOnly": True, "reportEligible": False,
+                                      "sourceType": "saved_working_input_budget"})
+    # The review form stores the aggregate PF amount separately from tranche
+    # terms. Use that explicit review only as a budget limit when no detailed
+    # financing exists; it cannot create a loan agreement or monthly policy.
+    aggregate_review = state["fieldReviews"].get("pf_amount")
+    aggregate_amount = state["values"].get("pf_amount")
+    if not project_data.get("pf_structure") and isinstance(aggregate_review, dict):
+        if (isinstance(aggregate_amount, bool) or not isinstance(aggregate_amount, (int, float))
+                or aggregate_amount < 0 or aggregate_amount != int(aggregate_amount)):
+            raise ValueError("검토한 PF 총액의 원 단위 금액을 확인하세요.")
+        request["sourcesAndUses"].setdefault("funding", {})["pfLoan"] = int(aggregate_amount)
+        request["sourceMetadata"]["aggregateFundingReview"] = {
+            "scope": "analysis_limit_not_loan_agreement", "valueWon": int(aggregate_amount),
+            "reviewHash": expected, "review": deepcopy(aggregate_review),
+        }
+    _capture_working_input_review(request, project_data)
+    return request
+
+
 def _reviewed_monthly_request(project_data: Dict[str, Any], review: Any) -> Dict[str, Any]:
     """Build an explicit working-input scenario without changing an approved study."""
     if not isinstance(review, dict) or set(review) != {"policy", "reason", "expectedReviewHash"}:
@@ -165,6 +209,7 @@ def _reviewed_monthly_request(project_data: Dict[str, Any], review: Any) -> Dict
     request["reviewedMonthlyFinancingReview"] = {"reason": reason.strip(), "reviewHash": expected}
     request["sourceMetadata"].update({"analysisOnly": True, "reportEligible": False,
                                       "sourceType": "reviewed_working_input_scenario"})
+    request = apply_timing_to_monthly_request(project_data, request)
     _capture_working_input_review(request, project_data)
     return request
 

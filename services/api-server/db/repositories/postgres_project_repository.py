@@ -49,6 +49,11 @@ _SERVER_TOP_LEVEL_KEYS = frozenset(
         "state_version",
     }
 )
+# These server-authored envelopes identify one exact source/application. A new
+# envelope replaces the old one; recursive merge would invent mixed locators
+# (for example, a PDF page carrying an earlier Excel cell). HTTP write boundaries
+# reject client-supplied values for these reserved keys.
+_REPLACED_SOURCE_ENVELOPES = frozenset({"parserApprovedInputBindings", "parserInputApplication"})
 
 _ACTIVE_PROJECT_PREDICATE = """
     payload_json #>> '{_meta,deletedAt}' IS NULL
@@ -207,6 +212,10 @@ class PostgresProjectRepository:
 
             patch = self._untrusted_patch(project_data)
             merged = deep_merge(current, patch)
+            for key in _REPLACED_SOURCE_ENVELOPES.intersection(patch):
+                if not isinstance(patch[key], Mapping):
+                    raise ValueError(f"{key} must be a complete source envelope")
+                merged[key] = deepcopy(dict(patch[key]))
             record = self._normalize_update(
                 normalized_project_id,
                 merged,

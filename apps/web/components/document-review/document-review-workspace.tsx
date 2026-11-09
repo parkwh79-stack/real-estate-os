@@ -67,6 +67,7 @@ import { ProjectWorkspaceLink } from "../layout/project-workspace-link";
 import { PdfPageReadingPanel } from "./pdf-page-reading-panel";
 import { ArchiveExtractionAction } from "./archive-extraction-action";
 import { WorkbookOriginalPreview } from "./workbook-original-preview";
+import { ApprovedInputSelectionPanel } from "./approved-input-selection-panel";
 import { DashboardAtmosphere } from "../dashboard/dashboard-atmosphere";
 import heroStyles from "../orchestration/chief-deal-room-workspace.module.css";
 
@@ -598,6 +599,7 @@ export function DocumentReviewWorkspace({
   const [issuesOnly, setIssuesOnly] = useState(false);
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState(false);
   const reviewWriteInFlight = useRef<string | null>(null);
   const [reviewDataFresh, setReviewDataFresh] = useState(false);
   const [reviewRefreshRequired, setReviewRefreshRequired] = useState<"saved" | "missing" | "uncertain" | null>(null);
@@ -1064,10 +1066,13 @@ export function DocumentReviewWorkspace({
             reviewReason={reviewReason}
             onReviewReasonChange={changeReviewReason}
             reviewBusy={reviewBusy}
-            reviewDisabled={loading || !reviewDataFresh || Boolean(reviewRefreshRequired) || data.projectId !== projectId}
+            reviewDisabled={approvalBusy || loading || !reviewDataFresh || Boolean(reviewRefreshRequired) || data.projectId !== projectId}
             onSaveReview={saveReview}
             snapshotDiffs={data?.snapshotDiffs ?? []}
             auditItems={auditItems}
+            approvedInputPanel={<ApprovedInputSelectionPanel key={projectId} projectId={projectId} data={data}
+              candidate={selectedFact?.candidate} disabled={reviewBusy || Boolean(conflictBusyId) || loading || !reviewDataFresh || Boolean(reviewRefreshRequired)}
+              onRefresh={load} onBusyChange={setApprovalBusy} />}
           />
         </div>
       ) : null}
@@ -1498,6 +1503,7 @@ function Inspector({
   onSaveReview,
   snapshotDiffs,
   auditItems,
+  approvedInputPanel,
 }: {
   activeTab: InspectorTab;
   onTabChange: (tab: InspectorTab) => void;
@@ -1529,6 +1535,7 @@ function Inspector({
   onSaveReview: (action: "approve" | "reject" | "request_revision") => Promise<void>;
   snapshotDiffs: ApprovedSnapshotDiff[];
   auditItems: AuditItem[];
+  approvedInputPanel: ReactNode;
 }) {
   return (
     <aside className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950" aria-label="문서 검토 Inspector">
@@ -1601,7 +1608,7 @@ function Inspector({
             error={glossaryError}
           />
         ) : null}
-        {activeTab === "review" ? (
+        {activeTab === "review" ? <>
           <ReviewPanel
             fact={selectedFact}
             locator={selectedLocator}
@@ -1611,7 +1618,8 @@ function Inspector({
             disabled={reviewDisabled}
             onSave={onSaveReview}
           />
-        ) : null}
+          {approvedInputPanel}
+        </> : null}
         {activeTab === "changes" ? <SnapshotChangesPanel diffs={snapshotDiffs} /> : null}
         {activeTab === "audit" ? <AuditPanel items={auditItems} selectedFact={selectedFact} /> : null}
       </div>

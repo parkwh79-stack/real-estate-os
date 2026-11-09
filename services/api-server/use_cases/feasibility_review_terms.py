@@ -7,11 +7,13 @@ import math
 import re
 from typing import Any
 
+from use_cases.cash_flow_timing import validate_timing, validate_timing_source
+
 SCHEDULE_KEYS = (
     "land_purchase", "permit_approval", "construction_start", "presale_start",
     "completion", "loan_maturity",
 )
-TERM_GROUPS = {"schedule", "financing"}
+TERM_GROUPS = {"schedule", "financing", "cashFlowTiming"}
 PRIORITIES = {"senior", "mezzanine", "junior", "equity", "bridge", "other"}
 FINANCING_KEYS = {
     "tranche_id", "name", "priority", "amount", "interest_rate", "fee_rate",
@@ -76,7 +78,8 @@ def reviewed_terms(project: dict) -> dict:
             "term_months": _first(row, "term_months", "maturityMonths"),
             "repayment_source": _first(row, "repayment_source", "repaymentSource"),
         })
-    return {"schedule": schedule, "financing": financing}
+    return {"schedule": schedule, "financing": financing,
+            "cashFlowTiming": deepcopy(project.get("cash_flow_timing"))}
 
 
 def _number(value: Any, key: str, *, integer: bool, low: float, high: float):
@@ -93,6 +96,8 @@ def validate_terms(terms: Any) -> dict:
     if not isinstance(terms, dict) or terms.keys() - TERM_GROUPS:
         raise ValueError("사업기간·대출 조건 항목을 확인하세요.")
     result = {}
+    if "cashFlowTiming" in terms:
+        result["cashFlowTiming"] = validate_timing(terms["cashFlowTiming"])
     if "schedule" in terms:
         schedule = terms["schedule"]
         if not isinstance(schedule, dict) or schedule.keys() - set(SCHEDULE_KEYS):
@@ -142,6 +147,9 @@ def validate_terms(terms: Any) -> dict:
 def patch_terms(project: dict, terms: dict) -> dict:
     """Patch working inputs while preserving unknown rows, attributes and provenance."""
     patch = {}
+    if "cashFlowTiming" in terms:
+        validate_timing_source(project, terms["cashFlowTiming"])
+        patch["cash_flow_timing"] = deepcopy(terms["cashFlowTiming"])
     if "schedule" in terms:
         changes = terms["schedule"]
         raw = deepcopy(project.get("schedule"))

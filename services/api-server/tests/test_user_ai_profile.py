@@ -114,7 +114,7 @@ def test_session_secret_requires_exact_user_tenant_and_session(monkeypatch):
     assert revoke_credential(reference) is True
 
 
-def test_session_secret_expires_and_is_pruned_fail_closed(monkeypatch):
+def test_expired_session_secret_reads_fail_closed_without_deleting(monkeypatch):
     monkeypatch.setenv("REALYTICS_SECRET_BACKEND", "session_memory")
     monkeypatch.setenv("REALYTICS_AI_CREDENTIAL_TTL_SECONDS", "60")
     now = datetime(2026, 7, 28, 1, 0, tzinfo=timezone.utc)
@@ -150,7 +150,8 @@ def test_session_secret_expires_and_is_pruned_fail_closed(monkeypatch):
         user_id="u-expiry",
         tenant_id="tenant-expiry",
         session_id="provider-session-expiry",
-    ) == "missing"
+    ) == "expired"
+    assert revoke_credential(reference) is True
 
 
 @pytest.mark.parametrize("ttl", ["0", "86401", "not-an-integer"])
@@ -281,8 +282,9 @@ def test_aws_secret_envelope_enforces_session_boundary_and_expiry(monkeypatch):
         tenant_id="tenant-aws",
         session_id="provider-session-aws",
     ) is None
-    assert client.values == {}
-    assert len(client.deleted) == 1
+    assert len(client.values) == 1 and client.deleted == []
+    assert revoke_credential(credential["credentialRef"]) is True
+    assert client.values == {} and len(client.deleted) == 1
 
 
 def test_user_ai_context_uses_system_fallback_when_profile_has_no_key(tmp_path, monkeypatch):

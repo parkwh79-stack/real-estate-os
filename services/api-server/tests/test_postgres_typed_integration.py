@@ -87,3 +87,53 @@ def test_materialized_risk_preserves_exact_record_review_in_isolated_postgres(mo
     finally:
         conn.rollback()
         conn.close()
+
+
+@pytest.mark.parametrize("mode", ["read_only", "edit"])
+def test_proposed_user_ai_grants_and_rls_in_rollback_only_isolated_schema(mode):
+    """Exercise the review SQL as a non-owner; no live runtime grants are used."""
+    from db.user_ai_profile_privileges import render_user_ai_profile_access_review_sql
+    from psycopg.errors import InsufficientPrivilege
+
+    suffix = uuid4().hex
+    schema, role = f"ai_review_{suffix}", f"ai_runtime_{suffix}"
+    conn = postgres.connect(TEST_DSN)
+    try:
+        conn.execute(f'CREATE SCHEMA "{schema}"')
+        conn.execute(f'CREATE ROLE "{role}" NOLOGIN NOINHERIT NOBYPASSRLS')
+        conn.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"')
+        conn.execute(f'CREATE TABLE "{schema}".user_ai_profiles (user_id text PRIMARY KEY, tenant_id text NOT NULL, model text)')
+        conn.execute(f'ALTER TABLE "{schema}".user_ai_profiles ENABLE ROW LEVEL SECURITY')
+        conn.execute(f'ALTER TABLE "{schema}".user_ai_profiles FORCE ROW LEVEL SECURITY')
+        conn.execute(f'CREATE POLICY tenant_scope ON "{schema}".user_ai_profiles FOR ALL TO "{role}" '
+                     "USING (tenant_id = NULLIF(current_setting('realytics.tenant_id', true), '')) "
+                     "WITH CHECK (tenant_id = NULLIF(current_setting('realytics.tenant_id', true), ''))")
+        conn.execute(f'INSERT INTO "{schema}".user_ai_profiles VALUES (%s,%s,%s),(%s,%s,%s),(%s,%s,%s)',
+                     ("user-a", "tenant-a", "model-a", "user-b", "tenant-a", "model-b", "user-c", "tenant-b", "model-c"))
+        conn.execute(render_user_ai_profile_access_review_sql(mode=mode, role_name=role, schema_name=schema))
+        conn.execute(f'SET LOCAL ROLE "{role}"')
+        table = f'"{schema}".user_ai_profiles'
+        for tenant, user, expected in (("tenant-a", "user-a", "model-a"), ("tenant-a", "user-b", "model-b"),
+                                       ("tenant-b", "user-c", "model-c"), ("tenant-b", "user-a", None), ("tenant-a", "", None)):
+            conn.execute("SELECT set_config('realytics.tenant_id', %s, true), set_config('realytics.user_id', %s, true)", (tenant, user))
+            rows = conn.execute(f'SELECT model FROM {table}').fetchall()
+            assert rows == ([(expected,)] if expected else [])
+        conn.execute("SELECT set_config('realytics.tenant_id', 'tenant-a', true), set_config('realytics.user_id', 'user-a', true)")
+        for sql in (f"INSERT INTO {table} VALUES ('user-d','tenant-a','intruder')", f"INSERT INTO {table} VALUES ('user-x','tenant-b','intruder')",
+                    f"UPDATE {table} SET model='intruder' WHERE user_id='user-b'", f"DELETE FROM {table} WHERE user_id='user-b'",
+                    f"UPDATE {table} SET model='intruder' WHERE user_id='user-c'", f"DELETE FROM {table} WHERE user_id='user-c'"):
+            with conn.transaction():
+                if mode == "read_only" or sql.startswith("INSERT"):
+                    with pytest.raises(InsufficientPrivilege):
+                        with conn.transaction():
+                            conn.execute(sql)
+                else:
+                    assert conn.execute(sql).rowcount == 0
+        if mode == "edit":
+            assert conn.execute(f"UPDATE {table} SET model='updated' WHERE user_id='user-a'").rowcount == 1
+            assert conn.execute(f"DELETE FROM {table} WHERE user_id='user-a'").rowcount == 1
+            conn.execute(f"INSERT INTO {table} VALUES ('user-a','tenant-a','recreated')")
+            assert conn.execute(f"SELECT model FROM {table}").fetchone() == ("recreated",)
+    finally:
+        conn.rollback()
+        conn.close()
