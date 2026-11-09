@@ -1,11 +1,46 @@
 # Live Auth Smoke Runbook
 
-Updated: 2026-09-28
+Updated: 2026-11-09
 
 Status: Google PKCE, normalized membership, and TOTP AAL2 verified; Kakao PKCE
 and normalized membership verified; a second independent AAL2 checker,
 hardened PostgreSQL API runtime, cross-device revocation proof, and dedicated
 maker-checker rehearsal remain
+
+## 확인메일 미도착 진단 (2026-11-09)
+
+기존 Google 전용 계정의 이메일 확인 상태를 읽기 전용으로 확인했다. 이 계정으로
+이메일 가입을 다시 신청하면 Supabase는 계정 존재 여부를 숨긴 응답을 반환하고
+새 확인메일을 보내지 않는다. 이는 [공식 identity linking FAQ](https://supabase.com/docs/guides/auth/auth-identity-linking)의
+동작과 일치하며, 재가입을 새 메일 수신 시험으로 사용하면 안 된다. 계정별 이메일이나
+연결 제공자를 공개 가입 응답에 추가하지 않는다.
+
+운영 프로젝트의 Authentication > Emails > SMTP Settings에서 Custom SMTP가
+꺼져 있음을 확인했다. 공개 Auth settings의 이메일 활성화만으로 SMTP 준비나 배달을
+판정하지 않는다. [기본 SMTP 제한](https://supabase.com/docs/guides/auth/auth-smtp)에
+따라 일반 신규 사용자 발송에는 별도 SMTP 연결과 실제 수신 검증이 필요하다.
+
+확인대기 UI는 중립 색상으로 **확인 메일 요청을 접수했습니다**와 실제 발송 미확인을
+표시한다. 모든 가입 요청에 같은 소셜 기존가입 안내와 **기존 계정으로 로그인**을
+제공한다. 로그인 복귀 시 이메일은 유지하고 비밀번호는 지운다. 가입/재발송 API의
+202 응답, 개인정보 보호, 확인메일 필수 정책, 재발송 제한은 그대로 유지한다.
+
+사용자는 기존 Gmail을 발신자로 쓰는 소규모 시험을 선택했다. 준비값은 발신명
+`REALYTICS`, 호스트 `smtp.gmail.com`, 포트 `465`(SSL/TLS), 사용자명/발신주소는
+사용자가 선택한 Gmail이다. [Google SMTP 문서](https://developers.google.com/workspace/gmail/imap/imap-smtp)와
+[앱 비밀번호 안내](https://support.google.com/accounts/answer/185833)를 따른다.
+발신 비밀값은 코드, 환경 예시, GitHub, 로그, 채팅에 기록하지 않고 Supabase의 전용
+Password 칸에 사용자가 직접 입력한다. 앱 비밀번호 생성과 계정 인증은 사용자가
+직접 진행했다. 사용자 승인 후 SMTP를 저장하고 새로고침하여 활성화·발신명·호스트·
+포트가 유지되고 저장 버튼이 비활성인 상태를 확인했다. 저장된 비밀번호는 읽지
+않았다. Gmail은 개인 메일용 제공자라는 관리
+화면 경고가 있어 소규모 시험으로만 취급한다.
+
+완료 조건은 SMTP 설정 저장/재조회, 미가입 전용 수신함으로 가입 요청 1회,
+실제 메일 수신, 동일 브라우저 확인 링크의 canonical origin/PKCE 복귀, 재로그인이다.
+현재 메일 배달이나 신규 가입 완료를 주장하지 않는다. DB 구조/권한, 기존 계정과
+멤버십은 변경하지 않았다. PC/모바일 인증 회귀 80건, API 인증 경계 34건, 웹 타입
+검사/린트가 통과했다. 실제 수신·확인 링크 검증은 아직 남아 있다.
 
 ## Local live-session verification (2026-09-28)
 
@@ -318,6 +353,10 @@ operator's primary account.
    is contacted.
 2. Confirm the UI enters the privacy-preserving confirmation state. It must not
    say that the account was created or that delivery definitely succeeded.
+   HTTP 202 means the application processed a privacy-preserving request; it is
+   not provider acceptance or inbox-delivery evidence. Existing OAuth addresses
+   may receive no new signup email. The generic existing-account action must
+   restore enabled email/social login options without revealing account state.
 3. Wait for the displayed cooldown, select **확인 메일 다시 보내기**, and
    confirm one additional signup confirmation message arrives. The callback
    must return to the canonical Web origin and then `/onboarding` through the

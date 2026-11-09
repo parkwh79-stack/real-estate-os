@@ -132,6 +132,8 @@ test("signup sends versioned consent and offers privacy-safe confirmation resend
   await page.getByRole("button", { name: "이메일 가입 신청" }).click();
 
   await expect(page.getByTestId("email-confirmation-state")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "확인 메일 요청을 접수했습니다" })).toBeVisible();
+  await expect(page.getByTestId("email-confirmation-state")).toContainText("실제 발송 여부는 이 화면에서 확인할 수 없습니다");
   expect(signupPayload).toMatchObject({
     termsAccepted: true,
     privacyAccepted: true,
@@ -144,7 +146,45 @@ test("signup sends versioned consent and offers privacy-safe confirmation resend
   await expect.poll(() => resendPayload).toMatchObject({
     email: "signup@example.com",
   });
-  await expect(page.getByRole("status")).toContainText("가입 요청이라면 메일이 발송");
+  await expect(page.getByRole("status")).toContainText("확인 메일 재요청을 접수했습니다");
+  await expect(page.getByRole("status")).toContainText("실제 발송 여부는 이 화면에서 확인할 수 없습니다");
+});
+
+test("confirmation requests guide existing social accounts back to every enabled login method", async ({ page }) => {
+  await page.route("**/api/backend/auth/me", (route) => route.fulfill({ status: 401, json: { error: "unauthenticated" } }));
+  await page.route("**/api/auth/supabase/readiness", (route) => route.fulfill({ json: {
+    providerUsable: { google: true, kakao: true, naver: false },
+  } }));
+  let signupRequests = 0;
+  await page.route("**/api/auth/supabase/password", async (route) => {
+    signupRequests += 1;
+    await route.fulfill({ status: 202, json: {
+      authenticated: false,
+      requiresEmailConfirmation: true,
+      accessState: "onboarding_required",
+      next: "/onboarding",
+    } });
+  });
+
+  await page.goto("/login?mode=signup");
+  await page.getByLabel("표시명").fill("가입 검증자");
+  await page.getByLabel("이메일").fill("existing-social@example.com");
+  await page.locator('input[name="password"]').fill("A-valid-signup-password-7!");
+  await page.getByLabel("비밀번호 확인").fill("A-valid-signup-password-7!");
+  await page.getByLabel(/서비스 이용약관/).check();
+  await page.getByLabel(/개인정보 처리방침/).check();
+  await page.getByRole("button", { name: "이메일 가입 신청" }).click();
+
+  await expect(page.getByTestId("email-confirmation-state")).toContainText("Google·카카오로 이미 가입한 주소는 새 가입 메일이 오지 않을 수 있습니다");
+  await page.getByRole("button", { name: "기존 계정으로 로그인", exact: true }).click();
+
+  await expect(page.getByRole("tab", { name: "로그인", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("이메일")).toHaveValue("existing-social@example.com");
+  await expect(page.getByLabel("비밀번호", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("button", { name: "이메일로 로그인", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Google 계정으로 로그인", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "카카오로 계속하기", exact: true })).toBeEnabled();
+  expect(signupRequests).toBe(1);
 });
 
 test("password recovery keeps account and delivery state undisclosed", async ({ page }) => {

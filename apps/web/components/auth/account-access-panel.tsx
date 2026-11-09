@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
-import { AlertCircle, CheckCircle2, LoaderCircle } from "lucide-react";
+import { AlertCircle, Info, LoaderCircle } from "lucide-react";
 import { OAuthLoginPanel } from "./oauth-login-panel";
 import {
   AuthClientRequestError,
@@ -133,7 +133,7 @@ export function AccountAccessPanel() {
     setNotice(null);
     try {
       await resendSupabaseSignupConfirmation(email);
-      setNotice("확인 가능한 가입 요청이라면 메일이 발송됩니다. 스팸함도 확인해 주세요.");
+      setNotice("확인 메일 재요청을 접수했습니다. 실제 발송 여부는 이 화면에서 확인할 수 없습니다. 받은편지함과 스팸함을 확인해 주세요.");
       setResendCooldown(60);
     } catch (caught) {
       if (
@@ -150,24 +150,27 @@ export function AccountAccessPanel() {
 
   if (mode === "confirmation") {
     return (
-      <div data-testid="email-confirmation-state" className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950">
-        <CheckCircle2 className="h-6 w-6 text-emerald-600" />
-        <h3 className="mt-3 text-lg font-black">이메일을 확인해 주세요</h3>
-        <p className="mt-2 text-sm leading-6 text-emerald-800">
-          <strong>{email}</strong>이 가입 가능한 주소라면 확인 링크가 발송됩니다.
-          링크를 확인하면 로그인 계정에 맞는 작업공간으로 안내합니다.
+      <div data-testid="email-confirmation-state" className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-slate-950">
+        <Info aria-hidden="true" className="h-6 w-6 text-slate-600" />
+        <h3 className="mt-3 text-lg font-black">확인 메일 요청을 접수했습니다</h3>
+        <p className="mt-2 text-sm leading-6 text-slate-700">
+          <strong>{email}</strong> 주소로 확인 메일을 요청했습니다.
+          실제 발송 여부는 이 화면에서 확인할 수 없습니다. 받은편지함과 스팸함을 확인해 주세요.
         </p>
-        <p className="mt-2 text-xs leading-5 text-emerald-800">
-          이미 가입한 주소라도 계정 존재 여부 보호를 위해 같은 화면이 표시됩니다. 로그인 또는 비밀번호 찾기를 이용해 주세요.
+        <p className="mt-2 text-xs leading-5 text-slate-700">
+          Google·카카오로 이미 가입한 주소는 새 가입 메일이 오지 않을 수 있습니다. 기존에 연결한 계정으로 로그인해 주세요.
+        </p>
+        <p className="mt-2 text-xs leading-5 text-slate-600">
+          계정 존재 여부 보호를 위해 가입 여부와 관계없이 같은 화면이 표시됩니다.
         </p>
         {error ? <p role="alert" className="mt-4 flex gap-2 rounded-xl border border-rose-200 bg-white p-3 text-xs leading-5 text-rose-800"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{error}</p> : null}
-        {notice ? <p role="status" className="mt-4 rounded-xl border border-emerald-200 bg-white p-3 text-xs leading-5 text-emerald-800">{notice}</p> : null}
+        {notice ? <p role="status" className="mt-4 rounded-xl border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-700">{notice}</p> : null}
         <div className="mt-4 flex flex-wrap gap-3">
-          <button type="button" onClick={() => void resendConfirmation()} disabled={busy || resendCooldown > 0} className="rounded-lg border border-emerald-300 bg-white px-3 py-2 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-60">
-            {busy ? "요청 중" : resendCooldown > 0 ? `다시 보내기 (${resendCooldown}초)` : "확인 메일 다시 보내기"}
+          <button type="button" onClick={() => changeMode("login")} className="rounded-lg bg-[#07172d] px-3 py-2 text-sm font-bold text-white hover:bg-[#0d2748]">
+            기존 계정으로 로그인
           </button>
-          <button type="button" onClick={() => changeMode("login")} className="px-2 py-2 text-sm font-bold underline underline-offset-4">
-            로그인으로 돌아가기
+          <button type="button" onClick={() => void resendConfirmation()} disabled={busy || resendCooldown > 0} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-60">
+            {busy ? "요청 중" : resendCooldown > 0 ? `다시 보내기 (${resendCooldown}초)` : "확인 메일 다시 보내기"}
           </button>
         </div>
       </div>
