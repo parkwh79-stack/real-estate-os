@@ -32,6 +32,8 @@ import {
 } from "../../../../lib/financial-decision-package";
 import { fetchCashFlowDependentRuns, fetchLatestCashflow, type CashflowResult } from "../../../../lib/project-client";
 import { CashFlowReviewWorkspace } from "../../../../components/feasibility/cash-flow-review-workspace";
+import { ModelReviewWorkspace } from "../../../../components/feasibility/model-review-workspace";
+import { WorkbookReconciliation } from "../../../../components/feasibility/workbook-reconciliation";
 import { cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flow-period-basis";
 import { CashFlowPeriodChart } from "../../../../components/feasibility/cash-flow-period-chart";
 import { PfFollowupStatus } from "../../../../components/feasibility/pf-followup-status";
@@ -359,6 +361,9 @@ export default function FeasibilityPage() {
     decisionBinding.status === "bound" ? latestDecisionApprovalStatus : "unknown";
   const rows = useMemo(() => cashflow?.monthly.slice(0, 18) ?? [], [cashflow]);
   const riskFlags = cashflow?.riskFlags ?? [];
+  const peakOperatingShortfall = cashflow?.summary.peakOperatingShortfall ?? 0;
+  const firstOperatingShortfall = cashflow?.summary.firstOperatingShortfallPeriodIndex;
+  const closingUnfunded = cashflow?.summary.endingUnfundedOperatingObligations;
   const metricProps = {
     currency: "KRW",
     scenario: "base",
@@ -431,6 +436,22 @@ export default function FeasibilityPage() {
       <CashFlowReviewWorkspace key={projectId} projectId={projectId} cashflow={cashflow}
         recalculatedRunId={recalculation?.projectId === projectId ? recalculation.runId : undefined}
         disabled={loading || running} onCalculated={onMonthlyCalculated} onBusyChange={setRunning} />
+
+      {cashflow && peakOperatingShortfall > 0 && (
+        <section aria-label="운영 가용현금 부족" className="rounded-xl border border-amber-300 bg-re-surface p-4 text-sm">
+          <h2 className="font-bold">운영 가용현금 부족</h2>
+          <p className="mt-1">최대 {peakOperatingShortfall.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}원
+            {typeof firstOperatingShortfall === "number" && Number.isInteger(firstOperatingShortfall)
+              && ` · 최초 ${cashflow.monthly[firstOperatingShortfall]?.period
+                ?? cashFlowPeriodLabel(cashflow.periodBasis, firstOperatingShortfall)}`}
+            {typeof closingUnfunded === "number" && Number.isFinite(closingUnfunded) &&
+              ` · 기말 미충당 ${closingUnfunded.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}원`}
+          </p>
+          <p className="mt-1 text-re-secondary">계획 수납·비용과 조달을 반영한 결과입니다. 가용자금 산정에서 상환용 제한현금을 제외했습니다.</p>
+        </section>
+      )}
+      <WorkbookReconciliation key={`workbook-${projectId}`} projectId={projectId} />
+      <ModelReviewWorkspace key={`model-${projectId}`} projectId={projectId} />
 
       {loading ? (
         <div className="flex min-h-[260px] items-center justify-center rounded-re-panel border border-re-border bg-re-surface text-sm font-bold text-re-secondary">

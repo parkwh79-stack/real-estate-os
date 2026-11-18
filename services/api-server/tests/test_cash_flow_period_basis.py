@@ -88,9 +88,36 @@ def test_source_sequence_preserves_budget_money_and_all_input_periods_without_in
     assert result["periodBasis"]["interestCalculation"]["status"] == "not_calculated"
     assert result["periodBasis"]["interestCalculation"]["chargedPeriodCount"] == 0
     assert "interestCalculation" not in result
-    assert result["engineVersion"] == "cash_flow_engine-v2"
+    assert result["engineVersion"] == "cash_flow_engine-v3"
     assert result["scheduleProvenance"]["reportEligible"] is False
     assert result["dataStatus"] == "partial"
+
+
+def test_restricted_receipts_do_not_cover_operating_shortfall():
+    request = {
+        "schedule": {"construction_start": 0, "completion": 2},
+        "sourcesAndUses": {"revenue": {"totalSalesRevenue": 400},
+                           "cost": {"totalProjectCost": 200, "constructionCost": 200}},
+        "costSchedule": {"rows": [{"monthIndex": 0, "constructionCost": 100},
+                                  {"monthIndex": 1, "constructionCost": 100}]},
+        "productMix": [{"totalSalesRevenue": 400, "collectionSteps": [
+            {"stage": "contract", "monthlyCollectionAmounts": [300, 0, 100]},
+        ]}],
+        "pfStructure": [{"tranche": "A", "amount": 100}],
+        "collectionAllocationRules": {"rules": [
+            {"phase": "before_completion", "allSalesProceedsToRepayment": 1},
+            {"phase": "after_completion", "allSalesProceedsToRepayment": 0},
+        ]},
+    }
+    result = run_cash_flow_engine(request)
+    summary = result["summary"]
+    assert summary["status"] == "operating_cash_shortfall"
+    assert summary["firstOperatingShortfallPeriodIndex"] == 1
+    assert summary["peakOperatingShortfall"] == 100
+    assert summary["endingUnfundedOperatingObligations"] == 0
+    assert summary["endingCash"] == 300
+    assert result["monthlyCashFlow"][2]["operatingLiquidity"]["openingUnfundedObligations"] == 100
+    assert any(flag["code"] == "OPERATING_CASH_SHORTFALL" for flag in result["riskFlags"])
 
 
 def test_unconfirmed_source_events_reject_monthly_interest_before_any_financial_formula(monkeypatch):

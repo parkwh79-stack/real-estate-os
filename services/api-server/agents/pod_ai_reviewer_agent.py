@@ -726,6 +726,12 @@ def _feasibility_cashflow_findings(
             "사업 기간 중 PF 한도가 전액 소진됩니다(미인출 한도 0). 추가 비용 초과나 회수 지연 시 완충 여력이 없습니다.",
             recommended_action="공사비 초과·분양 지연 민감도에서 예비비/추가 조달 여력을 확인하고 미인출 한도 확보 방안을 검토하세요.",
         ))
+    if status == "operating_cash_shortfall" or has(("OPERATING_CASH_SHORTFALL",)):
+        findings.append(_finding(
+            "risk_note", "blocking",
+            "상환용 제한현금을 제외하면 운영 의무를 충당할 수 없는 기간이 있습니다.",
+            recommended_action="최초 부족 기간의 수납·인출·비용 일정과 별도 투입 가능한 자금을 확인하세요.",
+        ))
     if cashflow_error or not cashflow:
         findings.append(_finding(
             "missing_evidence", "high",

@@ -64,6 +64,8 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
     pre_pf_net_cashflows = []
     total_pf_draw = 0.0
     cumulative_sales_collection = 0.0
+    first_operating_shortfall_period = None
+    peak_operating_shortfall = 0.0
     total_revenue = _total_revenue(request)
     budget_financial_cost = sum(row.get("financialCost", 0.0) for row in cost_schedule)
     completion_month = schedule_month_indices(request.get("schedule")).get("completion", months) if financing else months
@@ -106,6 +108,11 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
         principal_repayment = financing_month["principalRepayment"] if financing_month is not None else 0.0
         ending_repayment_reserve = beginning_repayment_reserve + sales_allocation["repaymentReserve"] - principal_repayment
         ending_cash = ending_operating_cash + ending_repayment_reserve
+        opening_unpaid = max(0.0, -beginning_operating_cash)
+        closing_unpaid = max(0.0, -ending_operating_cash)
+        if closing_unpaid > 1e-6 and first_operating_shortfall_period is None:
+            first_operating_shortfall_period = month_index
+        peak_operating_shortfall = max(peak_operating_shortfall, closing_unpaid)
         rows.append({
             "monthIndex": month_index,
             "period": period,
@@ -130,6 +137,11 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
                 "endingRepaymentReserve": ending_repayment_reserve,
             },
             "netCashFlowBeforePfDraw": pre_pf_net,
+            "operatingLiquidity": {
+                "availableCashAtClose": max(0.0, ending_operating_cash),
+                "openingUnfundedObligations": opening_unpaid,
+                "closingUnfundedObligations": closing_unpaid,
+            },
             "pfDrawRequired": required_draw,
             "netCashFlow": cash_in_before_pf + pf_draw_total - cash_out - principal_repayment,
             "beginningCash": beginning_operating_cash + beginning_repayment_reserve,
@@ -191,11 +203,22 @@ def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
         "endingOperatingCash": beginning_operating_cash,
         "endingRepaymentReserve": beginning_repayment_reserve,
         "endingCash": beginning_operating_cash + beginning_repayment_reserve,
+        "endingAvailableOperatingCash": max(0.0, beginning_operating_cash),
+        "endingUnfundedOperatingObligations": max(0.0, -beginning_operating_cash),
+        "peakOperatingShortfall": peak_operating_shortfall,
+        "firstOperatingShortfallPeriodIndex": first_operating_shortfall_period,
         "status": "funding_gap_covered" if abs(max_minus) <= pf_limit else "pf_limit_shortfall",
     }
+    if first_operating_shortfall_period is not None:
+        if summary["status"] == "funding_gap_covered":
+            summary["status"] = "operating_cash_shortfall"
+        risk_flags.append({
+            "code": "OPERATING_CASH_SHORTFALL", "severity": "critical",
+            "message": "상환용 제한현금을 제외한 가용자금으로 충당하지 못하는 운영 의무가 있습니다.",
+        })
     result = {
         "analysisType": "realytics_cash_flow_engine_v1",
-        "engineVersion": "cash_flow_engine-v2",
+        "engineVersion": "cash_flow_engine-v3",
         "status": "completed",
         "dataStatus": "complete" if not request.get("mappingDiagnostics", {}).get("warnings") and schedule_provenance["reportEligible"] else "partial",
         "summary": summary,

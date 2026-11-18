@@ -3259,6 +3259,58 @@ def calculate_feasibility(project_id: str, input_data: Dict[str, Any]):
     return {**result, "calculationRunId": run["calculationRunId"]}
 
 
+@router.get("/{project_id}/feasibility-input/workbook-reconciliation")
+def get_workbook_input_reconciliation(project_id: str, request: Request):
+    from use_cases.workbook_input_reconciliation import reconcile_workbook_inputs
+
+    authorize_request(request, "project:read")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    return reconcile_workbook_inputs(project)
+
+
+@router.post("/{project_id}/feasibility/model-review")
+def run_feasibility_model_review(project_id: str, request: Request, payload: Dict[str, Any]):
+    authorize_request(request, "project:analyze")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+
+    model = payload.get("model")
+    assumptions = payload.get("assumptions")
+    reason = payload.get("reason")
+    if (set(payload) != {"model", "assumptions", "reason"} or not isinstance(assumptions, dict)
+            or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 1000):
+        raise HTTPException(status_code=422, detail="검토 방식, 입력 자료와 가정의 근거를 확인하세요.")
+    if model == "dated_financing":
+        from core.dated_financing import run_dated_financing
+        engine = run_dated_financing
+    elif model == "rental_exit":
+        from core.rental_exit import run_rental_exit
+        engine = run_rental_exit
+    else:
+        raise HTTPException(status_code=422, detail="지원하는 검토 방식을 선택하세요.")
+
+    try:
+        # Five full snapshots are reopened together on the review screen.
+        input_size = len(json.dumps(assumptions, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        if input_size > 256 * 1024:
+            raise HTTPException(status_code=413, detail="검토 입력 용량이 256 KiB를 초과합니다.")
+        calculation = engine(assumptions)
+        snapshot = {"assumptions": assumptions, "reason": reason.strip(), "source": "analyst_model_review",
+                    "engineVersion": calculation.get("engineVersion", f"{model}-v1")}
+        digest = financial_input_hash(snapshot)
+        result = {**calculation, "analysisOnly": True, "reportEligible": False}
+        result_size = len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        if input_size + result_size > 600 * 1024:
+            raise HTTPException(status_code=413, detail="저장할 검토안이 너무 큽니다. 기간이나 거래 건수를 줄여 주세요.")
+    except (ValueError, RecursionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    run = _persist_calculation_run(project_id, engine_key=model, result=result,
+                                  input_data={**snapshot, "financialInputHash": digest},
+                                  effective_input_captured=True)
+    return {**result, "calculationRunId": run["calculationRunId"], "financialInputHash": digest}
+
+
 @router.get("/{project_id}/calculation-runs")
 def list_project_calculation_runs(
     project_id: str,

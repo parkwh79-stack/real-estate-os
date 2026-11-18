@@ -7,6 +7,24 @@ Agent Name: Cash Flow Engine / Cash Flow Agent
 
 ## 1. Purpose
 
+### 2026-11-18 사업수지 분석 경로
+
+- 월별 엔진은 상환용 제한현금을 제외한 운영계정의 최초 부족 기간, 최대 부족액,
+  기말 미충당 의무를 기록한다. 총현금·Max Minus·PF 한도와 운영 부족액은 별도 지표다.
+  미충당 의무는 모델의 지급 계획에서 발생한 부족분이며 실제 미지급 거래 증빙과 구분한다.
+- 상봉 일반분양 Excel 대사 API는 프로젝트의 원본 연결과 검토 입력을 확인한다.
+  입력 셀의 마지막 저장값, 현재 검토 금액과 차이, 같은 예산 정책으로 재계산한 지표를
+  제공한다. 보관 원본 재확인에서 8개 지표가 일치했고, 기존 검토안의 3개 변경도 검출했다.
+  185개 원본 순서와 53개 예산 계산 행의 날짜 대응은 별도 검토 범위다.
+- `POST /projects/{id}/feasibility/model-review`의 `dated_financing`은 명시 입력을
+  사용해 ACT/365F, ACT/360 이자, 인출 조건·한도, 만기 의무와 상환 부족액을 검토한다.
+  기간 내 단리와 비회전 약정을 지원한다. 만기 이후 추가 이자·상환은 별도 검토한다.
+- 같은 API의 `rental_exit`은 입력된 기간별 임대 운영, 제한 보증금, LTV·DSCR·Debt Yield·약정한도,
+  만기일 차환, 매각 정산, 투자자별 원금 순위 및 잔여현금 비율을 계산한다.
+  임대차별 자동 수납 스케줄, 고급 투자자 배분, 법정 세액 자동 적용은 후속 범위다.
+- 두 모형은 프로젝트 분석 권한을 사용하고 명시 저장 시 기존 `CalculationRun`에
+  입력·사유·결과·버전을 기록한다. 승인 권한과 보고서 적격 상태는 기존 업무 흐름에서 관리한다.
+
 The Cash Flow Engine is the central numerical engine connecting REALYTICS feasibility intelligence with PLATFORM9 PF review intelligence.
 
 It is not just a monthly cash-flow calculator. It should connect:
