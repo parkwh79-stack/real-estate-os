@@ -32,6 +32,7 @@ from use_cases.cash_flow import build_cash_flow_request_use_case
 from use_cases.covenant_eod import _resolve_asset_type
 from use_cases.development_feasibility import development_feasibility_input_basis
 from use_cases.product_planning import compare_product_planning_use_case
+from use_cases.statutory_cost_review import build_statutory_cost_review
 
 
 # These are calculation/review outputs, not source evidence.  In particular the
@@ -46,7 +47,7 @@ _DERIVED_KEYS = {
     "cashFlowRunResult", "cashFlowRunRequest", "cashFlowReadiness", "cashFlowBasisReview",
     "returnMetrics", "stressTest", "creditEnhancement", "cashSweep",
     "cashSweepReadiness", "developabilityScore", "publicPolicyReview",
-    "costScheduleReview", "riskAssessment", "riskRegister",
+    "costScheduleReview", "statutoryCostReview", "riskAssessment", "riskRegister",
     "creditReviewDecision", "scenariosEvaluation", "scenarioEngineReadiness",
     "dataQualityReview", "reconciliationGate", "consensusResolution",
     "assumptionProposals", "dealOptimization", "restructuringPlan",
@@ -374,6 +375,9 @@ def recompute_consensus_cycle(
             result["legalIntelligence"] = deepcopy(intelligence)
             result["lawReferences"] = deepcopy(intelligence.get("references") or [])
             result["citationVerification"] = deepcopy(intelligence.get("citationVerification"))
+        result["statutoryCostLawReferences"] = deepcopy(resolution.get("statutoryCostLawReferences") or [])
+        result["statutoryCostAsOfDate"] = resolution.get("statutoryCostAsOfDate")
+        result["statutoryCostLookupStatus"] = deepcopy(resolution.get("statutoryCostLookupStatus") or {})
         result.update({"analysisOnly": True, "reportEligible": False, "humanReviewStatus": "pending"})
         return result
 
@@ -474,6 +478,12 @@ def recompute_consensus_cycle(
         handoff("ProductPlanningAgent", "DataQualityAgent", "productPlanning")
     handoff("MarketEvidenceAgent", "MarketabilityAgent", "marketEvidenceReview")
     handoff("MarketabilityAgent", "DataQualityAgent", "marketabilityAnalysis")
+
+    artifacts["statutoryCostReview"] = build_statutory_cost_review(
+        source, legal_review=legal, market_review=market_evidence, cost_review=cost,
+    )
+    handoff("LegalReviewAgent", "DevelopmentFeasibilityAgent", "legalPermitReview")
+    handoff("MarketEvidenceAgent", "DevelopmentFeasibilityAgent", "marketEvidenceReview")
 
     pf = call("PFStructuringAgent", "pfStructure", "pf_credit",
               {"feasibility_input": source.get("feasibility_input"), "pf_structure": source.get("pf_structure")},
@@ -623,7 +633,7 @@ def recompute_consensus_cycle(
     pod_artifacts = {
         "land_legal": ["landAgentReview", "legalPermitReview"],
         "market_product": ["marketEvidenceReview", "marketabilityAnalysis", "marketProductDepth", "productPlanningReadiness"] + (["productPlanning"] if "productPlanning" in artifacts else []),
-        "cost_schedule": ["costScheduleReview"],
+        "cost_schedule": ["costScheduleReview", "statutoryCostReview"],
         "feasibility_cashflow": ["developerFeasibility", "feasibility", "cashFlowReadiness", "cashFlowBasisReview", "returnMetrics"],
         "pf_credit": ["pfStructure", "scenarioEngineReadiness", "stressTest", "creditEnhancement", "cashSweepReadiness", "riskRegister", "creditReviewDecision", "covenantEod", "covenantEodReadiness", "restructuringPlan", "dealOptimization"],
         "public_policy": ["developabilityScore", "publicPolicyReview"],

@@ -9,7 +9,7 @@ def first_project_id(client: TestClient) -> str:
     return client.get("/projects/").json()[0]["project"]["id"]
 
 
-def test_cashflow_export_package_returns_latest_fixed_engine_runs():
+def test_cashflow_export_package_returns_latest_fixed_engine_runs(monkeypatch):
     client = TestClient(app)
     client.post(
         "/auth/tenants",
@@ -45,7 +45,9 @@ def test_cashflow_export_package_returns_latest_fixed_engine_runs():
             "calculationRunId": "cashflow-export-old",
             "engineKey": "cash_flow_engine",
             "createdAt": "2026-01-01T00:00:00+00:00",
-            "resultSnapshot": {"version": "old"},
+            "financialInputHash": "b" * 64,
+            "inputEvidenceIds": ["old-evidence"],
+            "resultSnapshot": {"version": "old", "reportEligible": True},
         },
     )
     upsert_calculation_run_record(
@@ -63,6 +65,7 @@ def test_cashflow_export_package_returns_latest_fixed_engine_runs():
             "calculationRunId": "waterfall-export-wrong-newer",
             "engineKey": "waterfall",
             "createdAt": "2026-03-02T00:00:00+00:00",
+            "financialInputHash": "c" * 64,
             "inputSnapshot": {"parentCalculationRunId": "cashflow-export-old"},
             "resultSnapshot": {"rows": []},
         },
@@ -155,6 +158,46 @@ def test_cashflow_export_package_returns_latest_fixed_engine_runs():
         matching_events[0]["metadata"]["artifactVerification"]
         == "client_generated_metadata_attested"
     )
+
+    package_url = f"/projects/{project_id}/cashflow-export-package"
+    old_anchor = {"anchorCalculationRunId": "cashflow-export-old"}
+    missing_old_lineage = client.get(package_url, headers=headers, params=old_anchor)
+    assert missing_old_lineage.status_code == 409
+    assert missing_old_lineage.json()["detail"]["anchorCalculationRunId"] == "cashflow-export-old"
+    assert missing_old_lineage.json()["detail"]["ineligibleEngineKeys"] == [
+        "waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"
+    ]
+    for engine_key in ("waterfall", "tranche_recovery", "unsold_ltv", "discount_stress"):
+        upsert_calculation_run_record(
+            project_id,
+            {
+                "calculationRunId": f"{engine_key}-export-old",
+                "engineKey": engine_key,
+                "createdAt": "2026-01-02T00:00:00+00:00",
+                "financialInputHash": "b" * 64,
+                "inputSnapshot": {"parentCalculationRunId": "cashflow-export-old"},
+                "resultSnapshot": {"rows": []},
+            },
+        )
+    historical = client.get(package_url, headers=headers, params=old_anchor)
+    assert historical.status_code == 200
+    historical_package = historical.json()
+    assert historical_package["anchorCalculationRunId"] == "cashflow-export-old"
+    assert historical_package["runs"]["waterfall"]["calculationRunId"] == "waterfall-export-old"
+    assert historical_package["runs"]["cash_flow_engine"]["resultSnapshot"]["version"] == "old"
+    assert historical_package["reportEligible"] is False
+
+    monkeypatch.setattr(
+        "use_cases.approval_readiness_gate.build_deal_state_approval_readiness",
+        lambda *args, **kwargs: {"pass": True},
+    )
+    stale_approved = client.get(package_url, headers=headers, params={**old_anchor, "purpose": "approved"})
+    assert stale_approved.status_code == 409
+    assert stale_approved.json()["detail"]["failureCodes"] == ["cashflow_selected_run_not_current"]
+    assert client.get(package_url, headers=headers, params={"anchorCalculationRunId": "  "}).status_code == 422
+    unknown = client.get(package_url, headers=headers, params={"anchorCalculationRunId": "unknown"})
+    assert unknown.status_code == 409
+    assert unknown.json()["detail"]["reason"] == "anchor_missing"
 
     client.delete(f"/projects/{project_id}", headers=headers)
 

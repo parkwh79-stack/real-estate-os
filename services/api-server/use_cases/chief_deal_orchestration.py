@@ -31,6 +31,7 @@ from schemas.orchestration import (
 from use_cases.cash_flow import build_cash_flow_request_use_case
 from use_cases.covenant_eod import evaluate_covenant_eod_use_case
 from use_cases.developability_score import score_developability_use_case
+from use_cases.statutory_cost_review import STATUTORY_COST_REVIEW_VERSION, build_statutory_cost_review
 from use_cases.development_feasibility import analyze_development_feasibility_use_case, development_feasibility_input_basis
 from use_cases.product_planning import compare_product_planning_use_case
 from use_cases.land_ledger_import import enrich_land_ledger_use_case
@@ -1457,8 +1458,9 @@ def _execute_pod_artifact(
                 "landLedger": project_data.get("landLedger"),
                 "legalContext": project_data.get("legalContext"),
                 "sourceDocuments": project_data.get("source_documents"),
+                "statutoryCostReviewVersion": STATUTORY_COST_REVIEW_VERSION,
             },
-            executor=lambda: run_legal_pod_use_case(project_id, project_data, options),
+            executor=lambda: run_legal_pod_use_case(project_id, project_data, {**options, "statutoryCostResearch": True}),
             output_schema_name="LegalPodResult",
         )
         legal_review = legal_pod_result.get("legalReview") if isinstance(legal_pod_result, dict) else None
@@ -1637,6 +1639,9 @@ def _execute_pod_artifact(
             "dataQualityMissingFields": data_quality.get("missingFields") or [],
             "engineReadiness": feasibility.get("downstreamEngineReadiness") or feasibility.get("engineReadiness") or {},
         }
+        artifact["statutoryCostReview"] = build_statutory_cost_review(
+            project_data, legal_review=project_data.get("legalPermitReview"), cost_review=artifact,
+        )
         return finalize(artifact)
 
     if pod_key == "feasibility_cashflow":
@@ -1694,6 +1699,12 @@ def _execute_pod_artifact(
         if isinstance(artifact.get("cashFlowRunResult"), dict):
             project_data["cashFlowRunResult"] = artifact["cashFlowRunResult"]
         _apply_feasibility_summary_to_project(project_data, feasibility)
+        artifact["statutoryCostReview"] = build_statutory_cost_review(
+            project_data,
+            legal_review=project_data.get("legalPermitReview"),
+            market_review=project_data.get("marketEvidenceReview"),
+            cost_review=project_data.get("costSchedule"),
+        )
         return finalize(artifact)
 
     if pod_key == "pf_credit":

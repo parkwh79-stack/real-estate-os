@@ -13,6 +13,12 @@ from core.cash_flow_periods import (
 )
 
 MAX_CASH_FLOW_HORIZON_MONTHS = 600
+COST_SCHEDULE_BUCKET_ALIASES = {
+    "landCost": ("landCost", "land_cost"),
+    "constructionCost": ("constructionCost", "directConstructionCost", "construction_cost"),
+    "financialCost": ("financialCost", "financeCost", "financial_cost"),
+    "otherCost": ("otherCost", "indirectCost", "other_cost"),
+}
 
 
 def run_cash_flow_engine(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -529,6 +535,11 @@ def _collection_template(collection: str, months: int) -> List[Dict[str, Any]]:
     return [{"label": "balance", "month": months, "rate": 1.0}]
 
 
+def cash_flow_cost_schedule_for_review(request: Dict[str, Any]) -> Tuple[List[Dict[str, float]], Dict[str, Any]]:
+    """Return the same monthly cost basis used by the cash flow engine."""
+    return _cost_schedule(request, _project_month_count(request))
+
+
 def _cost_schedule(request: Dict[str, Any], months: int) -> Tuple[List[Dict[str, float]], Dict[str, Any]]:
     costs = request.get("sourcesAndUses", {}).get("cost", {})
     explicit = request.get("costSchedule") or request.get("cost_schedule") or {}
@@ -590,12 +601,6 @@ def _explicit_cost_schedule(rows: List[Dict[str, Any]], months: int) -> List[Dic
         {"landCost": 0.0, "constructionCost": 0.0, "financialCost": 0.0, "otherCost": 0.0}
         for _ in range(months + 1)
     ]
-    aliases = {
-        "landCost": ("landCost", "land_cost"),
-        "constructionCost": ("constructionCost", "directConstructionCost", "construction_cost"),
-        "financialCost": ("financialCost", "financeCost", "financial_cost"),
-        "otherCost": ("otherCost", "indirectCost", "other_cost"),
-    }
     for fallback_index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
@@ -605,7 +610,7 @@ def _explicit_cost_schedule(rows: List[Dict[str, Any]], months: int) -> List[Dic
             continue
         if month_index < 0 or month_index > months:
             continue
-        for target, source_keys in aliases.items():
+        for target, source_keys in COST_SCHEDULE_BUCKET_ALIASES.items():
             for source_key in source_keys:
                 if source_key in row:
                     try:

@@ -24,7 +24,12 @@ def evaluate_cashflow_export_policy(
     lineage_bound = bool(isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest)) and all(
         row.get("financialInputHash") == digest for row in runs.values()
     )
-    eligible = gate.get("pass") is True and result.get("reportEligible") is True and evidence_bound and lineage_bound
+    input_snapshot = anchor.get("inputSnapshot")
+    statutory_review_only = isinstance(input_snapshot, dict) and input_snapshot.get("statutoryCostSelection") is not None
+    eligible = (
+        gate.get("pass") is True and result.get("reportEligible") is True
+        and evidence_bound and lineage_bound and not statutory_review_only
+    )
     return {"exportPurpose": "approved", "downloadEligible": eligible, "reportEligible": eligible,
             "approvalStatus": "ready" if eligible else "not_ready",
             "notice": "승인 보고서용 계산자료" if eligible else "최신 근거·계산·승인 Gate 검증이 필요합니다.",
@@ -33,4 +38,5 @@ def evaluate_cashflow_export_policy(
                 ("cashflow_report_eligibility_required", result.get("reportEligible") is True),
                 ("cashflow_input_evidence_required", evidence_bound),
                 ("financial_input_lineage_required", lineage_bound),
+                ("cashflow_statutory_cost_review_only", not statutory_review_only),
             ) if not passed]}

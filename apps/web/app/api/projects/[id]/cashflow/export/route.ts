@@ -51,9 +51,15 @@ type CashflowExportPackage = {
   calculationRunIds: Record<(typeof CASHFLOW_EXPORT_ENGINE_KEYS)[number], string>;
 };
 
-async function loadExportPackage(projectId: string, purpose: "draft" | "approved"): Promise<CashflowExportPackage> {
+async function loadExportPackage(
+  projectId: string,
+  purpose: "draft" | "approved",
+  anchorCalculationRunId: string | null,
+): Promise<CashflowExportPackage> {
+  const query = new URLSearchParams({ purpose });
+  if (anchorCalculationRunId !== null) query.set("anchorCalculationRunId", anchorCalculationRunId);
   const response = await fetchAuthenticatedBackend(
-    `/projects/${encodeURIComponent(projectId)}/cashflow-export-package?purpose=${purpose}`,
+    `/projects/${encodeURIComponent(projectId)}/cashflow-export-package?${query}`,
   );
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as {
@@ -119,10 +125,13 @@ async function loadExportPackage(projectId: string, purpose: "draft" | "approved
   }
   const typedRuns = runs as CashflowExportPackage["runs"];
   if (
-    typedRuns.cash_flow_engine.calculationRunId
-    !== body.anchorCalculationRunId
+    typedRuns.cash_flow_engine.calculationRunId !== body.anchorCalculationRunId
+    || (anchorCalculationRunId !== null && body.anchorCalculationRunId !== anchorCalculationRunId)
   ) {
     throw new BackendExportError(502, "invalid_export_package_lineage");
+  }
+  if (purpose === "approved" && typedRuns.cash_flow_engine.inputSnapshot?.statutoryCostSelection != null) {
+    throw new BackendExportError(502, "invalid_export_package");
   }
   const calculationRunIds = Object.fromEntries(
     CASHFLOW_EXPORT_ENGINE_KEYS.map((engineKey) => [
@@ -210,13 +219,20 @@ function exportErrorResponse(error: unknown): NextResponse {
   );
 }
 
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  let exportPackage: CashflowExportPackage;
-  const purpose = new URL(_request.url).searchParams.get("purpose") ?? "draft";
+  const query = new URL(request.url).searchParams;
+  const purpose = query.get("purpose") ?? "draft";
   if (purpose !== "draft" && purpose !== "approved") return exportErrorResponse(new BackendExportError(400, "invalid_export_purpose"));
+  const rawAnchorId = query.get("anchorCalculationRunId");
+  const anchorCalculationRunId = rawAnchorId?.trim() ?? null;
+  if (rawAnchorId !== null && (!anchorCalculationRunId || rawAnchorId.length > 200)) {
+    return exportErrorResponse(new BackendExportError(400, "invalid_export_anchor"));
+  }
+
+  let exportPackage: CashflowExportPackage;
   try {
-    exportPackage = await loadExportPackage(id, purpose);
+    exportPackage = await loadExportPackage(id, purpose, anchorCalculationRunId);
   } catch (error) {
     return exportErrorResponse(error);
   }
@@ -228,7 +244,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   workbook.calcProperties.fullCalcOnLoad = true;
 
   const summary = workbook.addWorksheet("00_계산근거");
-  addTitle(summary, "REALYTICS 프로젝트별 Cash Flow 계산서", `프로젝트 ${id}의 최신 원장 CalculationRun을 기준으로 생성`);
+  addTitle(summary, "REALYTICS 프로젝트별 Cash Flow 계산서", `프로젝트 ${id}의 저장된 CalculationRun을 기준으로 생성`);
   summary.addRow(["항목", "값", "근거"]);
   setHeader(summary.getRow(3));
   summary.addRows([
@@ -245,7 +261,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   summary.getColumn(2).alignment = { wrapText: true };
 
   const cashSheet = workbook.addWorksheet("01_월별현금흐름");
-  addTitle(cashSheet, "월별 Cash Flow", "입력값은 최신 CalculationRun 결과, 순현금흐름과 누적현금흐름은 Excel 수식으로 재계산");
+  addTitle(cashSheet, "월별 Cash Flow", "입력값은 선택된 CalculationRun 결과, 순현금흐름과 누적현금흐름은 Excel 수식으로 재계산");
   cashSheet.addRow(["기간", "Cash-In", "Cash-Out", "Net CF", "누적 CF", "Max Minus 여부"]);
   setHeader(cashSheet.getRow(3));
   const monthly = Array.isArray(cash.monthlyCashFlow) ? cash.monthlyCashFlow : [];
@@ -287,6 +303,39 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   stress.addRow(["할인율", "Exit 분양률", "선순위 회수율"]);
   setHeader(stress.getRow(3));
   for (const [key, metric] of Object.entries((runs.discount_stress?.resultSnapshot?.metrics ?? {}) as AnyRecord)) if (key.endsWith(".exitSaleRate")) stress.addRow([key.replace(".exitSaleRate", "").replace("discount", "") + "%", `${money(metric.value) * 100}%`, `${money((runs.discount_stress?.resultSnapshot?.metrics ?? {})[key.replace("exitSaleRate", "seniorRecoveryRatio")]?.value) * 100}%`]);
+
+  const statutoryCosts = input.statutoryCostSelection;
+  if (purpose === "draft" && Array.isArray(statutoryCosts?.items) && statutoryCosts.items.length > 0) {
+    const costs = workbook.addWorksheet("06_법정비용");
+    addTitle(costs, "법정 비용 검토", "저장된 계산 입력에서 비용 반영 근거를 표시합니다.");
+    costs.addRow(["항목", "금액(원)", "금액 기준", "반영 방식", "납부 시점", "판단 이유", "원본 문서", "원본 위치"]);
+    setHeader(costs.getRow(3));
+    const amountKinds: Record<string, string> = { estimate: "추정", notified: "고지", paid: "납부 확인" };
+    const inclusionKinds: Record<string, string> = { included: "기존 비용에 포함", additional: "비용 추가", not_applicable: "비적용" };
+    for (const item of statutoryCosts.items) {
+      const source = item.sourceLocator;
+      costs.addRow([
+        item.label ?? item.key,
+        Number.isSafeInteger(item.amountKrw) ? item.amountKrw : null,
+        item.amountKind == null ? null : amountKinds[item.amountKind] ?? "미확인",
+        inclusionKinds[item.inclusion] ?? "미확인",
+        Number.isSafeInteger(item.paymentMonthIndex) ? `M${item.paymentMonthIndex}` : null,
+        item.reason ?? null,
+        [source?.fileName, source?.archiveId].filter(Boolean).join(" · ") || null,
+        source?.location ?? null,
+      ]);
+    }
+    costs.addRows([
+      ["별도 추가 합계", statutoryCosts.additionalCostKrw ?? null],
+      ["기준 계산 ID", statutoryCosts.baseCalculationRunId ?? null],
+      ["기준 입력 SHA-256", statutoryCosts.baseFinancialInputHash ?? null],
+    ]);
+    costs.getColumn(2).numFmt = "#,##0";
+    for (const column of [6, 7, 8]) {
+      costs.getColumn(column).width = 32;
+      costs.getColumn(column).alignment = { vertical: "top", wrapText: true };
+    }
+  }
 
   for (const sheet of workbook.worksheets) {
     if (purpose === "draft") sheet.getCell("A1").value = `검토용 초안 — ${sheet.getCell("A1").value}`;

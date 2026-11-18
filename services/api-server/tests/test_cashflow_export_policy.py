@@ -29,3 +29,19 @@ def test_approved_export_rejects_missing_or_mixed_input_hashes():
     anchor['financialInputHash'] = 'a' * 64
     result = evaluate_cashflow_export_policy({'cash_flow_engine': anchor, 'waterfall': {'financialInputHash': 'b' * 64}}, 'approved', lambda: {'pass': True})
     assert result['failureCodes'] == ['financial_input_lineage_required']
+
+
+def test_statutory_cost_review_stays_draft_even_if_other_approval_gates_pass():
+    anchor = {
+        "financialInputHash": "a" * 64,
+        "inputEvidenceIds": ["e1"],
+        "inputSnapshot": {"statutoryCostSelection": {"analysisOnly": True}},
+        "resultSnapshot": {"reportEligible": True},
+    }
+    runs = {"cash_flow_engine": anchor}
+    draft = evaluate_cashflow_export_policy(runs, "draft", lambda: {"pass": True})
+    assert draft["downloadEligible"] is True
+    assert draft["reportEligible"] is False
+    approved = evaluate_cashflow_export_policy(runs, "approved", lambda: {"pass": True})
+    assert approved["downloadEligible"] is False
+    assert approved["failureCodes"] == ["cashflow_statutory_cost_review_only"]

@@ -254,8 +254,24 @@ def _monthly_cost_schedule(study: FeasibilityStudyV2) -> Dict[str, Any]:
     }
 
 
+_STATUTORY_COST_NAMES = {
+    "school_site_charge": ("학교용지부담금", "학교용지분담금"),
+    "building_artwork": ("건축물미술작품", "미술작품설치", "예술장식품비"),
+}
+
+
+def statutory_cost_key_from_label(value: str) -> str | None:
+    compact_label = "".join(value.split())
+    return next((key for key, aliases in _STATUTORY_COST_NAMES.items()
+                 if any(alias in compact_label for alias in aliases)), None)
+
+
 def _cost_bucket(value: Any) -> str:
     text = str(value or "").strip().casefold()
+    # Named statutory charges take precedence over positional workbook hints.
+    if statutory_cost_key_from_label(text):
+        return "otherCost"
+
     row_number = _legacy_row_number(text)
     if row_number is not None:
         if 58 <= row_number <= 62:

@@ -282,3 +282,47 @@ def test_legacy_debt_repayment_and_equity_recovery_are_not_project_costs():
         "row_93_대출금상환(Tr.A)",
         "row_111_시행사투자자금회수",
     }
+
+
+@pytest.mark.parametrize("charge_label", [
+    "학교용지부담금",
+    "학교용지분담금",
+    "row_185_학교 용지 부담금",
+    "row_64_학교 용지 분담금",
+    "row_64_예술장식품비",
+    "row_58_건축물 미술작품 설치비",
+])
+def test_statutory_charge_uses_other_cost_and_preserves_source_reconciliation(charge_label):
+    locator = {"sheetName": "MonthlyCF", "cell": "M58:M185"}
+    original_outflows = {"학교용지 매입비": 300, charge_label: 25, "row_58_순공사비": 100}
+    request = build_cash_flow_run_request_from_feasibility_study({
+        "project_name": "학교용지 비용 분류",
+        "cost_items": [
+            {"key": "land_cost", "label": "학교용지 매입비", "category": "land", "amount": 300},
+            {"key": "statutory_cost", "label": charge_label, "category": "tax_and_dues", "amount": 25},
+            {"key": "construction_cost", "label": "순공사비", "category": "construction", "amount": 100},
+        ],
+        "monthly_cash_flow": [{
+            "month_index": 0,
+            "period": "M0",
+            "cash_out": original_outflows,
+            "source_locator": locator,
+        }],
+        "metrics": {"total_cost": 425},
+        "raw_import": {"canonicalStatus": "approved"},
+    })
+
+    row = request["costSchedule"]["rows"][0]
+    assert row["landCost"] == 300
+    assert row["constructionCost"] == 100
+    assert row["otherCost"] == 25
+    assert row["sourceBreakdown"] == original_outflows
+    assert row["sourceLocator"] == locator
+    assert sum(row[key] for key in ("landCost", "constructionCost", "financialCost", "otherCost")) == 425
+    assert request["sourcesAndUses"]["cost"]["totalProjectCost"] == 425
+
+    result = run_cash_flow_engine(request)
+    assert result["monthlyCashFlow"][0]["cashOut"]["landCost"] == 300
+    assert result["monthlyCashFlow"][0]["cashOut"]["otherCost"] == 25
+    assert result["scheduleProvenance"]["costSchedule"]["sourceLocator"] == locator
+    assert result["scheduleProvenance"]["costSchedule"]["warnings"] == []

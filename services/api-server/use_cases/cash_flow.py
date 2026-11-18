@@ -52,6 +52,8 @@ def _cash_flow_request(project_data: Dict[str, Any], input_data: Dict[str, Any])
     direct_request = _direct_cash_flow_request(input_data)
     approved_request = _approved_canonical_cash_flow_request(project_data)
     if direct_request is not None:
+        if "statutoryCostSelection" in direct_request:
+            raise ValueError("선택한 법정 비용은 기준 실행을 사용해 법정 비용 검토에서 다시 계산하세요.")
         # A replay equal to the server's approved mapping cannot introduce
         # caller authority. Every differing direct request remains a candidate.
         if approved_request is not None and direct_request == approved_request:
@@ -262,6 +264,9 @@ def _external_candidate_request(
     # A complete caller-supplied scenario cannot forge the server's review
     # history. Working-input paths attach verified stored records afterwards.
     source_metadata.pop("inputReview", None)
+    # Only the project-scoped statutory review route may attach adoption records.
+    candidate.pop("statutoryCostSelection", None)
+    source_metadata.pop("statutoryCostSelection", None)
 
     for key in (
         "source_metadata",

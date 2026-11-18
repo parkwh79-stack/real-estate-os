@@ -104,6 +104,7 @@ class OrchestrationAgent:
                 project_data,
                 caller_context=supplied_law_context if isinstance(supplied_law_context, dict) else None,
                 preview=True,
+                include_statutory_costs=True,
             )
             market_reference_input = deepcopy(project_data)
             self._maybe_inject_live_market_comparables(run, project_data, market_reference_input)

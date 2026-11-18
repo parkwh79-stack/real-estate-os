@@ -770,6 +770,7 @@ def run_legal_pod_use_case(
         caller_context=supplied_law_context if isinstance(supplied_law_context, dict) else None,
         **({} if persist else {"preview": True}),
         **({"parcel_jurisdictions": parcel_jurisdictions} if parcel_jurisdictions else {}),
+        **({"include_statutory_costs": True} if options.get("statutoryCostResearch") else {}),
     )
     # Caller-provided context and MCP search hits stay discovery candidates.
     law_context = legal_resolution["lawContext"]
@@ -793,6 +794,10 @@ def run_legal_pod_use_case(
     review["citationVerification"] = legal_intelligence.get(
         "citationVerification"
     )
+    if options.get("statutoryCostResearch"):
+        review["statutoryCostLawReferences"] = legal_resolution.get("statutoryCostLawReferences") or []
+        review["statutoryCostAsOfDate"] = legal_resolution.get("statutoryCostAsOfDate")
+        review["statutoryCostLookupStatus"] = legal_resolution.get("statutoryCostLookupStatus")
     lifecycle_assessment = _legal_lifecycle_assessment(review_data, review, law_context)
     previous_law_records = [
         record for record in list_deal_state_records(str(project_id))

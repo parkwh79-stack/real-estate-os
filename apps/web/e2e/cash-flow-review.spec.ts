@@ -400,11 +400,17 @@ for (const firstRowMaximum of [true, false]) {
     await expect(metric.getByText(label, { exact: true })).toBeVisible();
     await page.getByRole("link", { name: "저장된 현금흐름 전체 보기", exact: true }).click();
     await expect(page.getByText(`${label} 발생`, { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "수식 Excel 다운로드", exact: true })).toHaveAttribute(
+      "href", "/api/projects/r2-1/cashflow/export?anchorCalculationRunId=base-run",
+    );
     const mainTable = page.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Cash-In", exact: true }) });
     await expect(mainTable.locator("tbody tr").nth(index)).toHaveClass(/bg-rose-50/);
     await expect(mainTable.locator("tbody tr").nth(index === 0 ? 1 : 0)).not.toHaveClass(/bg-rose-50/);
     await page.goto("/cashflow-detail?projectId=r2-1", { waitUntil: "domcontentloaded" });
     await expect(page.getByText(`${label} 시점`, { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "프로젝트 Cash Flow Excel", exact: true })).toHaveAttribute(
+      "href", "/api/projects/r2-1/cashflow/export?anchorCalculationRunId=base-run",
+    );
     const legacyTable = page.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "현금유입", exact: true }) });
     await expect(legacyTable.locator("tbody tr").nth(index)).toHaveClass(/bg-rose-50/);
     await expect(legacyTable.locator("tbody tr").nth(index === 0 ? 1 : 0)).not.toHaveClass(/bg-rose-50/);

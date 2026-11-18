@@ -51,7 +51,8 @@ function formatPercent(value: number): string {
 export default function ProjectCashflowPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
-  const [cashflow, setCashflow] = useState<CashflowResult | null>(null);
+  const [loadedCashflow, setLoadedCashflow] = useState<{ projectId: string; result: CashflowResult | null }>();
+  const cashflow = loadedCashflow?.projectId === projectId ? loadedCashflow.result : null;
   const [savedPeriodRun, setSavedPeriodRun] = useState<SavedRunPeriod>();
   const [periodPending, setPeriodPending] = useState(false);
   const loadGeneration = useRef(0);
@@ -78,7 +79,7 @@ export default function ProjectCashflowPage() {
       // must not hide the primary persisted Cash Flow calculation.
       const cashflowResult = await fetchLatestCashflow(projectId);
       if (!current()) return;
-      setCashflow(cashflowResult);
+      setLoadedCashflow({ projectId, result: cashflowResult });
       setFollowupRegistry({ runs: {}, unavailable: [] });
       setLoading(false);
       if (cashflowResult && !cashflowResult.periodBasis && !cashflowResult.monthlyFinancing
@@ -166,6 +167,9 @@ export default function ProjectCashflowPage() {
   const rows = useMemo(() => cashflow?.monthly ?? [], [cashflow]);
   const summary = cashflow?.summary ?? {};
   const runId = cashflow?.runId ?? "-";
+  const exportHref = cashflow?.artifactType === "calculation_run" && cashflow.runId && !loading && !running && !buildingFeas
+    ? `/api/projects/${encodeURIComponent(projectId)}/cashflow/export?anchorCalculationRunId=${encodeURIComponent(cashflow.runId)}`
+    : undefined;
   const monthlyReview = cashflow?.monthlyFinancing != null || cashflow?.inputSnapshot?.monthlyFinancing != null;
   const sourceSequence = cashflow?.periodBasis?.kind === "source_sequence";
   const inputScheduleEvidence = cashflow?.inputSnapshot
@@ -191,7 +195,7 @@ export default function ProjectCashflowPage() {
           <button type="button" onClick={() => void load()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 disabled:opacity-40"><RefreshCw className="h-4 w-4" />새로고침</button>
           <button type="button" onClick={() => void buildFeasibilityInput()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-3 text-sm font-black text-indigo-700 disabled:opacity-40"><Calculator className="h-4 w-4" />{buildingFeas ? "사업수지 구성 중…" : "AI 사업수지 구성"}</button>
           <button type="button" onClick={() => void recalculateCashFlow()} disabled={loading || running || buildingFeas} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white disabled:opacity-40">{running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}{running ? "계산 중" : "Cash Flow 재실행"}</button>
-          <a href={`/api/projects/${encodeURIComponent(projectId)}/cashflow/export`} download className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-sm font-black text-indigo-700"><Download className="h-4 w-4" />수식 Excel 다운로드</a>
+          <a href={exportHref} download aria-disabled={!exportHref} className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-sm font-black text-indigo-700 aria-disabled:opacity-50"><Download className="h-4 w-4" />수식 Excel 다운로드</a>
         </div>
       </header>
 

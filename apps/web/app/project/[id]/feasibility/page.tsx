@@ -30,10 +30,11 @@ import {
   resolveFinancialDecisionBinding,
   type FinancialDecisionBinding,
 } from "../../../../lib/financial-decision-package";
-import { fetchCashFlowDependentRuns, fetchLatestCashflow, type CashflowResult } from "../../../../lib/project-client";
+import { fetchCashFlowDependentRuns, fetchLatestCashflow, fetchSavedCashflow, type CashflowResult } from "../../../../lib/project-client";
 import { CashFlowReviewWorkspace } from "../../../../components/feasibility/cash-flow-review-workspace";
 import { ModelReviewWorkspace } from "../../../../components/feasibility/model-review-workspace";
 import { WorkbookReconciliation } from "../../../../components/feasibility/workbook-reconciliation";
+import { StatutoryCostWorkspace } from "../../../../components/feasibility/statutory-cost-workspace";
 import { cashFlowPeriodLabel } from "../../../../components/feasibility/cash-flow-period-basis";
 import { CashFlowPeriodChart } from "../../../../components/feasibility/cash-flow-period-chart";
 import { PfFollowupStatus } from "../../../../components/feasibility/pf-followup-status";
@@ -196,12 +197,12 @@ export default function FeasibilityPage() {
     projectId: string; cashflow: CashflowResult; data: Awaited<ReturnType<typeof fetchCashFlowDependentRuns>>;
   }>();
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (calculationRunId?: string) => {
     setLoading(true);
     setError(null);
     const [contextResult, cashflowResult, runResult] = await Promise.allSettled([
       fetchWorkspaceContext(projectId, "feasibility"),
-      fetchLatestCashflow(projectId),
+      calculationRunId ? fetchSavedCashflow(projectId, calculationRunId) : fetchLatestCashflow(projectId),
       fetchLatestDecisionRun(projectId),
     ]);
 
@@ -450,6 +451,11 @@ export default function FeasibilityPage() {
           <p className="mt-1 text-re-secondary">계획 수납·비용과 조달을 반영한 결과입니다. 가용자금 산정에서 상환용 제한현금을 제외했습니다.</p>
         </section>
       )}
+      <StatutoryCostWorkspace key={"statutory-" + projectId} projectId={projectId} cashflow={cashflow} onSaved={async (result) => {
+        setRecalculation({ projectId, runId: result.calculationRunId });
+        setFollowupExecution(readPfFollowupExecution(result));
+        await load(result.calculationRunId);
+      }} />
       <WorkbookReconciliation key={`workbook-${projectId}`} projectId={projectId} />
       <ModelReviewWorkspace key={`model-${projectId}`} projectId={projectId} />
 

@@ -1,9 +1,16 @@
+from fastapi import Path as ApiPath
 from fastapi import APIRouter, HTTPException, File, UploadFile, Header, Request, Response, Query
 from fastapi.encoders import jsonable_encoder
 from starlette.datastructures import Headers
 from starlette.concurrency import run_in_threadpool
 from typing import Dict, Any
 from db.repositories.request_project_repository import current_project_scope
+from use_cases.statutory_cost_selection import (
+    StatutoryCostBasisConflict,
+    StatutoryCostSelection,
+    review_statutory_cost_cash_flow,
+    reviewable_statutory_basis,
+)
 from use_cases.cash_flow_dependencies import dependent_inputs, financial_input_hash
 from use_cases.intake_transfers import IntakeTransferStore, processing_succeeded
 from core.cash_flow_periods import require_stress_calendar_period
@@ -3358,6 +3365,107 @@ def list_project_calculation_runs(
     }
 
 
+def _scoped_calculation_run(project_id: str, request: Request, calculation_run_id: str):
+    try:
+        if storage_backend() in {"postgres", "postgresql"}:
+            tenant_id = tenant_id_from_request(request)
+            if not tenant_id:
+                raise HTTPException(status_code=401, detail={"error": "tenant_required"})
+            return PostgresCalculationRunRepository(tenant_id=str(tenant_id)).get_run(project_id, calculation_run_id)
+        return next(
+            (run for run in list_calculation_run_records(project_id, limit=500)
+             if run.get("calculationRunId") == calculation_run_id),
+            None,
+        )
+    except CalculationRunRepositoryError as exc:
+        raise HTTPException(status_code=503, detail={"error": "calculation_run_authority_unavailable"}) from exc
+
+
+@router.get("/{project_id}/calculation-runs/{calculation_run_id}")
+def get_project_calculation_run(
+    project_id: str, request: Request, response: Response, calculation_run_id: str = ApiPath(min_length=1, max_length=200),
+):
+    authorize_request(request, "project:read")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    record = _scoped_calculation_run(project_id, request, calculation_run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="이 프로젝트에서 계산을 찾을 수 없습니다.")
+    response.headers["Cache-Control"] = "private, no-store"
+    return record
+
+
+@router.get("/{project_id}/statutory-cost-review")
+def get_project_statutory_cost_review(project_id: str, request: Request, response: Response):
+    from use_cases.statutory_cost_review import build_statutory_cost_review
+
+    authorize_request(request, "project:read")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    study = build_statutory_cost_review(
+        project, legal_review=project.get("legalPermitReview"),
+        market_review=project.get("marketEvidenceReview"), cost_review=project.get("costSchedule"),
+    )
+    runs = list_project_calculation_runs(project_id, request, engine_key="cash_flow_engine", limit=30)["records"]
+    documents = project_source_document_read_repository(project_id, project).list(project_id)
+    documents_by_archive = {}
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        archive_id = document.get("archiveId") or document.get("originalFileHash")
+        if isinstance(archive_id, str) and len(archive_id) == 64:
+            documents_by_archive[archive_id] = {
+                "archiveId": archive_id,
+                "fileName": document.get("originalFileName") or "보관 원본",
+            }
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        **study,
+        "documents": list(documents_by_archive.values()),
+        "basisRuns": [{
+            "calculationRunId": run["calculationRunId"],
+            "financialInputHash": run["financialInputHash"],
+            "createdAt": run.get("createdAt"),
+            "totalProjectCost": run["inputSnapshot"]["sourcesAndUses"]["cost"].get("totalProjectCost"),
+            "lastMonthIndex": len((run.get("resultSnapshot") or {}).get("monthlyCashFlow") or []) - 1,
+        } for run in runs if reviewable_statutory_basis(run)],
+    }
+
+
+@router.post("/{project_id}/statutory-cost-review/calculate")
+def calculate_project_statutory_cost_review(project_id: str, request: Request, selection: StatutoryCostSelection):
+    authorize_request(request, "project:analyze")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    baseline = _scoped_calculation_run(project_id, request, selection.baseCalculationRunId)
+    if not baseline:
+        raise HTTPException(status_code=404, detail="이 프로젝트에서 기준 현금흐름 계산을 찾을 수 없습니다.")
+
+    document_repository = project_source_document_read_repository(project_id, project)
+    archive_repository = upload_archive_repository()
+    source_documents = {}
+    for archive_id in {item.archiveId for item in selection.items}:
+        document = document_repository.find_by_archive_id(project_id, archive_id)
+        binding = archive_repository.resolve_view_metadata(project_id, document) if document else None
+        if not binding or binding.get("archiveId") != archive_id:
+            raise HTTPException(status_code=422, detail="현재 프로젝트의 원본 보관 상태와 근거 문서를 확인하세요.")
+        source_documents[archive_id] = {
+            "archiveId": archive_id, "fileName": document.get("originalFileName") or "보관 원본",
+        }
+    try:
+        request_data = review_statutory_cost_cash_flow(project, baseline, selection, source_documents)
+        if request_data.get("monthlyFinancing") is not None:
+            authorize_request(request, "assumption:override")
+            enforce_project_tenant_scope(request, project)
+        result = execute_cash_flow_request_use_case(request_data)
+    except StatutoryCostBasisConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    result.update(analysisOnly=True, reportEligible=False, dataStatus="partial")
+    return _save_project_cash_flow(project_id, request, request_data, result)
+
+
 def _cashflow_export_selection(
     project_id: str,
     request: Request,
@@ -3445,18 +3553,28 @@ def _cashflow_export_policy(project_id: str, request: Request, runs: Dict[str, A
         runs, purpose,
         lambda: build_deal_state_approval_readiness(project_id, tenant_id=tenant_id_from_request(request)),
     )
+    if purpose == "approved" and policy["downloadEligible"]:
+        latest = _cashflow_export_selection(project_id, request).get("anchor") or {}
+        if latest.get("calculationRunId") != runs["cash_flow_engine"].get("calculationRunId"):
+            policy = {**policy, "downloadEligible": False, "reportEligible": False,
+                      "failureCodes": ["cashflow_selected_run_not_current"]}
     if not policy["downloadEligible"]:
         raise HTTPException(status_code=409, detail={"error": "cashflow_approved_export_not_ready", **policy})
     return policy
 
 
 @router.get("/{project_id}/cashflow-export-package")
-def get_project_cashflow_export_package(project_id: str, request: Request, purpose: str = Query("draft", pattern="^(draft|approved)$")):
+def get_project_cashflow_export_package(
+    project_id: str,
+    request: Request,
+    purpose: str = Query("draft", pattern="^(draft|approved)$"),
+    anchor_calculation_run_id: str | None = Query(None, alias="anchorCalculationRunId", min_length=1, max_length=200, pattern=r"\S"),
+):
     project = authoritative_project(project_id, request)
     authorization = authorize_request(request, "report:export")
     enforce_project_tenant_scope(request, project)
     actor_id = verified_actor_id(authorization)
-    selection = _cashflow_export_selection(project_id, request)
+    selection = _cashflow_export_selection(project_id, request, anchor_calculation_run_id=anchor_calculation_run_id)
     anchor, runs_by_engine = _require_complete_cashflow_export_lineage(selection)
     policy = _cashflow_export_policy(project_id, request, runs_by_engine, purpose)
     record_sensitive_project_event(
@@ -3999,6 +4117,11 @@ def run_project_cash_flow(project_id: str, request: Request, input_data: Dict[st
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _save_project_cash_flow(project_id, request, request_data, result)
+
+
+def _save_project_cash_flow(project_id: str, request: Request, request_data: Dict[str, Any],
+                            result: Dict[str, Any]) -> Dict[str, Any]:
     digest = financial_input_hash(request_data)
     run = _persist_calculation_run(project_id, engine_key="cash_flow_engine", result=result,
                                   input_data={**request_data, "financialInputHash": digest}, effective_input_captured=True)

@@ -3,6 +3,7 @@ from copy import deepcopy
 from hashlib import sha256
 import json
 
+from agents.cash_flow_engine import COST_SCHEDULE_BUCKET_ALIASES
 from core.cash_flow_periods import is_source_sequence, require_stress_calendar_period
 
 
@@ -79,10 +80,16 @@ def scale_cash_flow_request(base: dict, *, revenue: float, construction: float, 
         for row in [product, *(product.get("collectionSteps") or [])]:
             if isinstance(row.get("monthlyCollectionAmounts"), list):
                 row["monthlyCollectionAmounts"] = [float(value or 0) * revenue_factor for value in row["monthlyCollectionAmounts"]]
-    for row in (request.get("costSchedule") or {}).get("rows") or []:
-        for key, multiplier in (("constructionCost", construction_factor), ("financialCost", finance_factor)):
-            if key in row:
-                row[key] = float(row[key] or 0) * multiplier
+    schedule = request.get("costSchedule") or request.get("cost_schedule") or {}
+    rows = schedule.get("rows") if isinstance(schedule, dict) else schedule
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        for bucket, multiplier in (("constructionCost", construction_factor), ("financialCost", finance_factor)):
+            for key in COST_SCHEDULE_BUCKET_ALIASES[bucket]:
+                if key in row:
+                    row[key] = float(row[key] or 0) * multiplier
+                    break
     # Stress projections never inherit a human approval for their changed values.
     from use_cases.cash_flow import _downgrade_untrusted_approval_claims
     _downgrade_untrusted_approval_claims(request)

@@ -56,6 +56,9 @@ export default function CashFlowDetailPage() {
 
   const s = cf?.summary ?? {};
   const sourceSequence = cf?.periodBasis?.kind === "source_sequence";
+  const exportHref = selectedId && cf?.artifactType === "calculation_run" && cf.runId && !loading
+    ? `/api/projects/${encodeURIComponent(selectedId)}/cashflow/export?anchorCalculationRunId=${encodeURIComponent(cf.runId)}`
+    : undefined;
 
   return (
     <div className="space-y-6 pb-8">
@@ -74,10 +77,10 @@ export default function CashFlowDetailPage() {
             <ProjectPicker value={selectedId} onChange={(id) => void load(id)} label="심사 프로젝트" />
           </div>
           <a
-            href={selectedId ? `/api/projects/${encodeURIComponent(selectedId)}/cashflow/export` : undefined}
-            aria-disabled={!selectedId || loading || !cf}
-            onClick={(event) => { if (!selectedId || loading || !cf) event.preventDefault(); }}
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+            href={exportHref}
+            download
+            aria-disabled={!exportHref}
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-800 hover:bg-slate-50 aria-disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
           >
             <Download className="h-4 w-4" />
             프로젝트 Cash Flow Excel

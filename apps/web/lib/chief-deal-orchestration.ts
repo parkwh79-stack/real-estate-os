@@ -1,5 +1,6 @@
 "use client";
 
+import type { StatutoryCostItem } from "../components/feasibility/statutory-cost-workspace";
 import type { PodKey } from "../components/orchestration/chief-deal-room-map";
 
 export type ChiefPreflightMaterial = {
@@ -35,6 +36,7 @@ export type ChiefPreflightResult = {
     status: "checked" | "partial" | "needs_material";
     executionStatus: "completed" | "needs_material" | "failed" | "pending";
     agentExecutions?: ChiefPreflightAgent[];
+    statutoryCostReview?: { items: StatutoryCostItem[] };
     checks: Array<{ key: string; label: string; status: "available" | "missing" | "needs_review" }>;
   }>;
   materialRequests: ChiefPreflightMaterial[];

@@ -30,8 +30,10 @@ from use_cases.legal_pod import run_legal_pod_use_case
 from use_cases.marketability_review import analyze_marketability_use_case
 from use_cases.pf_structure import build_pf_structure_input, execute_pf_structure_input
 from use_cases.pod_execution_coordinator import PodExecutionCoordinator
+from use_cases.statutory_cost_review import build_statutory_cost_review
 
-RUNNER_VERSION = "realytics-chief-preflight-review-v3"
+
+RUNNER_VERSION = "realytics-chief-preflight-review-v4"
 
 # These are consumed source inputs, not previous generated domain projections.
 _INPUT_KEYS = {
@@ -41,10 +43,12 @@ _INPUT_KEYS = {
     "market_product": ("project", "market", "marketEvidence", "market_evidence", "documentMarketEvidence",
                        "document_market_evidence", "documentParsedMarketFacts", "product_mix", "productMix",
                        "land", "landLedger", "regulation", "architectural_plan", "source_documents", "parsedFacts"),
-    "cost_schedule": ("project", "land", "regulation", "architectural_plan", "feasibility_input", "costs",
+    "cost_schedule": ("project", "land", "landLedger", "land_ledger", "land_acquisition", "regulation",
+                      "architectural_plan", "feasibility_input", "costs",
                       "cost_assumptions", "sales_assumptions", "schedule", "project_schedule", "source_documents",
-                      "feasibilityStudyV2", "canonicalFeasibilityStudyV2", "logistics", "version"),
-    "feasibility_cashflow": ("project", "land", "regulation", "architectural_plan", "feasibility_input",
+                      "feasibilityStudyV2", "canonicalFeasibilityStudyV2", "feasibilityStudyV2Draft", "logistics", "version"),
+    "feasibility_cashflow": ("project", "land", "landLedger", "land_ledger", "land_acquisition", "regulation",
+                             "architectural_plan", "feasibility_input",
                             "cost_assumptions", "sales_assumptions", "schedule", "project_schedule", "cashflow_input",
                             "sales_schedule", "salesCollectionSchedule", "product_mix", "productMix", "pf_structure",
                             "feasibilityStudyV2", "canonicalFeasibilityStudyV2", "logistics", "version", "_meta",
@@ -56,10 +60,12 @@ _INPUT_KEYS = {
                       "legalContext", "publicContribution", "public_contribution", "policy", "source_documents"),
 }
 # Every parcel source participates in the same revision/consumption boundary.
-for _pod in ("land_legal", "market_product", "public_policy"):
+for _pod in ("land_legal", "market_product", "public_policy", "cost_schedule", "feasibility_cashflow"):
     _INPUT_KEYS[_pod] += ("landLedgerSources",)
 for _pod in ("cost_schedule", "pf_credit"):
     _INPUT_KEYS[_pod] += ("_meta",)
+for _pod in ("cost_schedule", "feasibility_cashflow"):
+    _INPUT_KEYS[_pod] += ("id",)
 _INPUT_KEYS["feasibility_cashflow"] += ("source_documents",)
 _BOOKKEEPING = {
     "createdAt", "updatedAt", "generatedAt", "timestamp", "reviewId", "legalReviewId", "permitReviewId",
@@ -85,7 +91,8 @@ def _source_projection(project_data: dict[str, Any]) -> dict[str, Any]:
     metadata = project_data.get("_meta")
     if isinstance(metadata, dict):
         relevant = {key: deepcopy(metadata[key]) for key in
-                    ("parsing_source", "feasibilityFieldReviews", "feasibilityTermReviews") if key in metadata}
+                    ("parsing_source", "feasibilityFieldReviews", "feasibilityTermReviews",
+                     "latestFeasibilityWorkbookCandidateId", "feasibilityWorkbookCandidates") if key in metadata}
         if relevant:
             source["_meta"] = relevant
     project = source.get("project")
@@ -152,7 +159,7 @@ def _execute_agents(
     if pod_key == "land_legal":
         if allow_public_lookups:
             legal = call("LegalReviewAgent", "legalPod", lambda: run_legal_pod_use_case(
-                project_id, deepcopy(source), {"autoEnrichLand": False}, persist=False,
+                project_id, deepcopy(source), {"autoEnrichLand": False, "statutoryCostResearch": True}, persist=False,
             ))
             if isinstance(legal, dict):
                 result["legalPermitReview"] = legal.get("legalReview")
@@ -194,6 +201,13 @@ def _execute_agents(
                                          "dataQualityMissingFields": result["dataQualityMissingFields"]}
             else:
                 patch["developerFeasibility"] = feasibility
+        review = build_statutory_cost_review(
+            source,
+            legal_review=source.get("legalPermitReview"),
+            market_review=source.get("marketEvidenceReview"),
+            cost_review=result if pod_key == "cost_schedule" else source.get("costSchedule"),
+        )
+        result["statutoryCostReview"] = review
         if pod_key == "feasibility_cashflow":
             def cash_flow():
                 values = source.get("feasibility_input") or {}
@@ -608,7 +622,7 @@ def run_chief_preflight_review(
         pod["executionStatus"] = "pending" if pod["podKey"] in pending else record.get("status", "pending")
         pod["agentExecutions"] = record.get("agentExecutions") or []
         pod["reviewFindings"] = record.get("findings") or []
-        for field in ("unsupportedTasks", "supportScope"):
+        for field in ("unsupportedTasks", "supportScope", "statutoryCostReview"):
             if record.get("result", {}).get(field):
                 pod[field] = record["result"][field]
     failures = [lookup for lookup in (public_state or {}).get("lookups") or []

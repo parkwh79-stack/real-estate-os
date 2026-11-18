@@ -656,6 +656,31 @@ function cashflowFromResult(
   };
 }
 
+function cashflowFromCalculationRun(run: RunListItem): CashflowResult | null {
+  return cashflowFromResult(run.resultSnapshot, "pf_review_orchestration", {
+    runId: String(run.calculationRunId ?? run.run_id ?? ""),
+    completedAt: String(run.updatedAt ?? run.completed_at ?? run.createdAt ?? run.started_at ?? ""),
+    artifactKey: String((run.sourceLocator as Record<string, unknown> | undefined)?.artifactKey ?? ""),
+    artifactType: "calculation_run",
+    inputSnapshot: run.inputSnapshot,
+  });
+}
+
+export async function fetchSavedCashflow(projectId: string, calculationRunId: string): Promise<CashflowResult> {
+  const response = await fetch(apiBase + "/projects/" + encodeURIComponent(projectId)
+    + "/calculation-runs/" + encodeURIComponent(calculationRunId), {
+    cache: "no-store", headers: authHeaders("web"),
+  });
+  if (!response.ok) throw new Error("저장한 현금흐름을 다시 열지 못했습니다.");
+  const record = await response.json();
+  if (record.calculationRunId !== calculationRunId || record.engineKey !== "cash_flow_engine") {
+    throw new Error("요청한 현금흐름 실행과 응답이 일치하지 않습니다.");
+  }
+  const cashflow = cashflowFromCalculationRun(record);
+  if (!cashflow) throw new Error("저장한 실행에 현금흐름 결과가 없습니다.");
+  return cashflow;
+}
+
 /**
  * Fetch the latest stored cash-flow-engine output.
  *
@@ -678,16 +703,8 @@ export async function fetchLatestCashflow(projectId: string): Promise<CashflowRe
     if (runRes.ok) {
       const runBody = await runRes.json();
       const runs: RunListItem[] = Array.isArray(runBody.records) ? runBody.records : [];
-      const latest = runs[0];
-      const snapshot = latest?.resultSnapshot;
-      if (snapshot) {
-        const parsed = cashflowFromResult(snapshot, "pf_review_orchestration", {
-          runId: String(latest.calculationRunId ?? latest.run_id ?? ""),
-          completedAt: String(latest.updatedAt ?? latest.completed_at ?? latest.createdAt ?? latest.started_at ?? ""),
-          artifactKey: String((latest.sourceLocator as Record<string, unknown> | undefined)?.artifactKey ?? ""),
-          artifactType: "calculation_run",
-          inputSnapshot: latest.inputSnapshot,
-        });
+      if (runs[0]) {
+        const parsed = cashflowFromCalculationRun(runs[0]);
         if (parsed) return parsed;
       }
     }

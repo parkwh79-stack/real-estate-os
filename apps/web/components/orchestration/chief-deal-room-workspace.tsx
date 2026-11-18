@@ -1,5 +1,6 @@
 "use client";
 
+import { StatutoryCostEvidence } from "../feasibility/statutory-cost-workspace";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   ArrowRight, Building2, CheckCircle2, ChevronDown, ClipboardList, FileCheck2,
@@ -129,6 +130,7 @@ export function ChiefDealRoomWorkspace({
   const currentReview = reviewState?.scope === scope ? reviewState.value : null;
   const preflight = currentReview?.result && currentReview.result.inputRevision === revision ? currentReview.result : null;
   const preflightError = currentReview?.error === true;
+  const statutoryCosts = preflight?.pods.find((pod) => pod.podKey === "cost_schedule")?.statutoryCostReview?.items;
 
   const startPreflight = useCallback(async (retryFailed = false) => {
     if (preflightRequest.current || !scope || !track || !revision || !canAnalyze || !planReady) return;
@@ -381,6 +383,11 @@ export function ChiefDealRoomWorkspace({
                 );
               })}
             </ul>
+            {statutoryCosts?.length ? <div className="mt-4 space-y-3">
+              <h3 className="text-sm font-bold text-re-text">법정 비용 검토 근거</h3>
+              <StatutoryCostEvidence items={statutoryCosts} />
+              <ProjectWorkspaceLink projectId={projectId} path="feasibility" className="text-sm font-medium text-blue-700 underline">사업성에서 비용 검토</ProjectWorkspaceLink>
+            </div> : null}
             {preflight.publicLookups.length ? <ul className="mt-3 space-y-1 text-xs text-re-secondary">
               {preflight.publicLookups.map((lookup) => <li key={lookup.key}>
                 {lookup.label}{lookup.requestedCount ? ` · ${lookup.checkedCount ?? 0}/${lookup.requestedCount}필지` : ""} · {lookup.message}

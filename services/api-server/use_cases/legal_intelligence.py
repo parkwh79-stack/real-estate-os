@@ -655,6 +655,7 @@ def resolve_project_legal_context(
     max_queries: int | None = None,
     preview: bool = False,
     parcel_jurisdictions: tuple[str, ...] = (),
+    include_statutory_costs: bool = False,
 ) -> dict[str, Any]:
     """Resolve project law sources, with a read-only runtime for previews."""
 
@@ -893,10 +894,43 @@ def resolve_project_legal_context(
         "citationVerification": legal_intelligence["citationVerification"],
         "queryPlan": unique_queries,
     })
-    return {
-        "lawContext": law_context,
-        "legalIntelligence": legal_intelligence,
-    }
+    resolution = {"lawContext": law_context, "legalIntelligence": legal_intelligence}
+    if include_statutory_costs:
+        from use_cases.statutory_cost_review import statutory_cost_query_plan
+
+        # These public statute titles contain no project data. Their discovery
+        # does not change the legal/permit approval claims or their coverage.
+        cost_references = []
+        lookup_statuses = {}
+        for item in statutory_cost_query_plan():
+            try:
+                lookup = runtime.search(
+                    query=item["query"],
+                    resource_kinds=(LegalResourceKind.STATUTE, LegalResourceKind.PROVISION),
+                    as_of=basis_date,
+                    limit=4,
+                    data_classification=DataClassification.PUBLIC,
+                )
+            except (RuntimeError, OSError):
+                lookup_statuses[item["query"]] = "unavailable"
+                continue
+            exact_title_refs = [
+                _legacy_reference(hit)
+                for hit in (*lookup.authoritative_hits, *lookup.candidate_hits)
+                if hit.title == item["query"]
+            ]
+            cost_references.extend(exact_title_refs)
+            providers_responded = any(
+                trace.status in {ProviderStatus.SUCCESS, ProviderStatus.PARTIAL, ProviderStatus.NO_MATCH}
+                for trace in lookup.provider_trace
+            )
+            lookup_statuses[item["query"]] = (
+                "reference_found" if exact_title_refs else "no_match" if providers_responded else "unavailable"
+            )
+        resolution["statutoryCostLawReferences"] = cost_references
+        resolution["statutoryCostAsOfDate"] = basis_date.isoformat()
+        resolution["statutoryCostLookupStatus"] = lookup_statuses
+    return resolution
 
 
 def serialize_legal_search_response(

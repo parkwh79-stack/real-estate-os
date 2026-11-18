@@ -54,6 +54,25 @@ def test_stress_preserves_source_timing_and_never_mutates_base():
         scale_cash_flow_request(base, revenue=100, construction=50, finance=20)
 
 
+@pytest.mark.parametrize("schedule_key, wrap_rows", [("costSchedule", False), ("cost_schedule", True)])
+def test_stress_preserves_statutory_costs_for_supported_schedule_shapes(schedule_key, wrap_rows):
+    base = request_data()
+    base.pop("costSchedule")
+    base["sourcesAndUses"]["cost"].update(otherCost=4, totalProjectCost=84)
+    rows = [
+        {"month_index": 0, "land_cost": 20},
+        {"month_index": 1, "construction_cost": 50, "financeCost": 10},
+        {"month_index": 2, "other_cost": 4, "sourceLocator": {"cell": "K5"}},
+    ]
+    base[schedule_key] = {"rows": rows} if wrap_rows else rows
+    changed = scale_cash_flow_request(base, revenue=200, construction=100, finance=20)
+    cost_rows = run_cash_flow_engine(changed)["monthlyCashFlow"]
+    assert cost_rows[1]["cashOut"]["constructionCost"] == 100
+    assert cost_rows[1]["cashOut"]["financialCost"] == 20
+    assert cost_rows[2]["cashOut"]["otherCost"] == 4
+    assert rows[1]["construction_cost"] == 50
+
+
 def test_matching_parent_with_wrong_input_hash_is_ineligible():
     rows = [
         {'calculationRunId': 'a', 'engineKey': 'cash_flow_engine', 'financialInputHash': 'one'},
