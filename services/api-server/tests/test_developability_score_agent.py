@@ -45,5 +45,54 @@ def test_missing_dimensions_listed_and_renormalized():
 def test_no_data_grade():
     result = DevelopabilityScoreAgent().score({})
     # landReadiness is always available (0 signals) -> still produces a score
-    assert result["grade"] in {"A", "B", "C", "D", "E", "no_data"}
+    assert result["grade"] in {"A", "B", "C", "D", "E", "no_data", "not_assessable"}
     assert result["dimensions"]["landReadiness"]["available"] is True
+
+
+def test_legal_far_breach_is_ineligible_and_never_scores_high():
+    result = DevelopabilityScoreAgent().score({
+        "regulation": {"appliedFar": 200, "legalFar": 100, "zoning": "일반주거지역"},
+    })
+    regulation = result["dimensions"]["regulation"]
+    assert regulation["available"] is True
+    assert regulation["score"] == 0
+    assert regulation["eligibility"] == "ineligible"
+    assert regulation["blockingConstraintIds"] == ["LEGAL_FAR_EXCEEDED"]
+    assert result["overallScore"] == 0
+    assert result["businessReadinessStatus"] == "blocked"
+    assert result["reportGrade"] is False
+
+
+def test_applied_far_without_legal_limit_is_not_assessable():
+    result = DevelopabilityScoreAgent().score({"regulation": {"applied_far": 300, "zoning": "상업지역"}})
+    regulation = result["dimensions"]["regulation"]
+    assert regulation["available"] is False
+    assert regulation["eligibility"] == "not_assessable"
+    assert result["grade"] == "not_assessable"
+    assert result["overallScore"] == 0
+
+
+def test_parcel_weighted_far_prevents_stale_top_level_high_score():
+    result = DevelopabilityScoreAgent().score({
+        "land": {"area_sqm": 3000},
+        "regulation": {"applied_far": 400, "legal_far": 500, "zoning": "mixed"},
+        "landLedger": {"parcels": [
+            {
+                "pnu": "1111010100100010000",
+                "areaSqm": 1000,
+                "landUsePlanning": {"legalFar": 200},
+            },
+            {
+                "pnu": "1111010100100020000",
+                "areaSqm": 2000,
+                "landUsePlanning": {"legalFar": 300},
+            },
+        ]},
+    })
+
+    regulation = result["dimensions"]["regulation"]
+    assert result["buildableEnvelope"]["effectiveLegalFar"] < 300
+    assert regulation["eligibility"] == "ineligible"
+    assert regulation["score"] == 0
+    assert result["overallScore"] == 0
+    assert result["businessReadinessStatus"] == "blocked"

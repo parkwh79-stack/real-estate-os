@@ -18,8 +18,8 @@ def test_revenue_from_product_mix_with_comparable_and_rental_factor():
     items = {i["type"]: i for i in r["productRevenue"] if i.get("revenue")}
     # 일반분양 uses the comparable directly; 임대 uses comparable × 0.7 (전환 가정)
     assert items["전용129㎡ (일반분양)"]["pricePerPy"] == 22_831_415
-    assert items["전용84㎡ (공공지원민간임대)"]["pricePerPy"] == round(22_831_415 * 0.7)
-    expected_revenue = 22_831_415 * 48 * 369 + round(22_831_415 * 0.7) * 34 * 390
+    assert items["전용84㎡ (공공지원민간임대)"]["pricePerPy"] == 15_981_991  # Excel ROUND: .5 away from zero
+    expected_revenue = 22_831_415 * 48 * 369 + 15_981_991 * 34 * 390
     assert r["feasibilityInput"]["total_revenue"] == expected_revenue
     assert r["feasibilityInput"]["land_cost"] == 1_466_000 * 66971
     assert r["feasibilityInput"]["construction_cost"] == 211969 * 3_000_000
@@ -45,3 +45,51 @@ def test_parsed_price_preferred_over_estimate():
     item = next(i for i in r["productRevenue"] if i.get("revenue"))
     assert item["pricePerPy"] == 15_000_000  # parsed price wins over comparable
     assert item["priceSource"] == "parsed"
+
+
+def test_multi_parcel_far_uses_weighted_capacity_not_max_far():
+    pd = {
+        "land": {"area_sqm": 3000},
+        "landLedger": {"parcels": [
+            {
+                "pnu": "1111010100100010000",
+                "areaSqm": 1000,
+                "landUsePlanning": {"legalFar": 200, "landUseZones": ["제2종일반주거지역"]},
+            },
+            {
+                "pnu": "1111010100100020000",
+                "areaSqm": 2000,
+                "landUsePlanning": {"legalFar": 300, "landUseZones": ["제3종일반주거지역"]},
+            },
+        ]},
+        "regulatoryConstraintSnapshot": {
+            "snapshotId": "reg-1",
+            "approvalStatus": "approved",
+            "aggregationApproved": True,
+        },
+    }
+
+    result = build_feasibility_from_program(pd)
+
+    assert result["grossFloorAreaSqm"] == 8000
+    assert result["grossFloorAreaSqm"] != 9000
+    assert result["buildableEnvelope"]["reportGrade"] is False
+    assert result["scenarioEligibility"]["eligibility"] == "conditional"
+    assert "REGULATORY_BINDING_APPROVAL_REPOSITORY_VERIFICATION" in result["buildableEnvelope"]["warningCodes"]
+
+
+def test_missing_parcel_far_does_not_create_aggregate_gfa():
+    pd = {
+        "land": {"area_sqm": 3000},
+        "landLedger": {"parcels": [
+            {"pnu": "1111010100100010000", "areaSqm": 1000, "landUsePlanning": {"legalFar": 200}},
+            {"pnu": "1111010100100020000", "areaSqm": 2000, "landUsePlanning": {}},
+        ]},
+    }
+
+    result = build_feasibility_from_program(pd)
+
+    assert result["grossFloorAreaSqm"] is None
+    assert "construction_cost" not in result["feasibilityInput"]
+    assert result["buildableEnvelope"]["eligibility"] == "not_assessable"
+    assert "PARCEL_LEGAL_FAR_MISSING" in result["buildableEnvelope"]["blockingCodes"]

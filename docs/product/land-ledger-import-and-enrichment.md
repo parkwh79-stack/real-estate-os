@@ -1,8 +1,120 @@
 # Land Ledger Import, Validation, and Enrichment
 
-Updated: 2026-05-20
+Updated: 2026-11-05
 
-## Sample Reviewed
+## 필지와 인허가 검토
+
+- 토지조서의 필지와 PNU로 필지별 토지이용계획 근거를 연결한다. 미확정 지번은 원본을 보존하고 재확인 대상으로 남긴다. 대표 PNU를 다른 필지에 복제하지 않는다.
+- 토지 화면과 Chief 법무 패널의 인허가 미리보기는 응답을 화면 메모리에서만 표시한다. 미리보기 실행 중 법무 검토, 공공 조회 결과, 법률 운영 기록을 새로 저장하지 않는다. 새로고침하면 미리보기가 사라진다.
+- 토지 화면에서 인허가 경로, 높이 요약, 필요한 필지를 선택해 별도로 저장할 수 있다. 서버는 조회 결과를 다시 검증하고 선택된 요약과 근거 위치만 프로젝트에 기록한다. 요약의 프로젝트당 저장 한도는 32 KiB다. 근거가 바뀌면 저장을 중단한다. 예비 검토 요약은 정식 심사·보고서 근거와 분리한다.
+- 주택의 사업계획승인 대상 여부, 오피스텔의 건축허가·신고와 허용 용도, 복합용도의 적용 경로와 예외를 구분한다. 예정일, 발급 문서, 문서의 필지·조건 검토를 별도로 표시한다.
+- 법률 검색의 조례 후보와 필지별 지구단위계획 적용 자료를 구분한다. 조례와 결정 고시·도면, 가로구역·일조 등 필지에 적용되는 근거가 대조되기 전에는 최고 허용 높이를 미확인으로 표시한다. 계획 높이와 높이 상한 후보는 예비 검토에만 사용한다.
+- 사업 범위, 용도 또는 자료가 바뀌면 토지·인허가 검토를 다시 실행한다. 토지조서 원본과 기존 정식 심사 이력은 각각의 보존 정책을 따른다.
+
+### 전체 필지 확인과 미리보기 이어가기
+
+서버는 프로젝트에 등록된 토지조서의 필지를 문서·시트·행 근거와 함께
+취합한다. 같은 지번·법정동의 중복은 합치고 충돌하는 PNU는 재확인 대상으로 남긴다.
+일반 PDF의 대표 주소 추출 후보는 토지조서에 등록된 필지와 분리한다.
+공공 응답의 PNU가 요청과 정확히 같은 행만 필지 근거에 연결한다.
+
+`POST /projects/{id}/legal-pod/preview`는 한 번에 최대 5필지를 검토한다.
+`parcelBatch`의 전체 필지 수, 다음 위치와 필지 개정값으로 계속 검토할 수 있다.
+`parcelIndexes`를 지정하면 아직 확인되지 않은 필지만 다시 조회한다.
+원본 필지 목록이 바뀐 경우 이전 개정값으로 조회를 이어가지 않는다.
+토지 화면에는 확정·복수 후보·미조회·실패와 조회 가능한 지도를 구분한다.
+관할과 확인된 용도지역별로 조례 출처와 적용 가능한 인허가 경로 후보를 표시한다.
+
+웹 미리보기는 버튼 한 번으로 다음 필지 묶음을 이어서 조회한다. 중지하면 이 화면에서 남은 묶음을 재개할 수 있다. 개별 묶음에서 고른 요약은
+`/legal-pod/preview-summary`로 별도 저장한다. 서버는 필지 개정값·선택 대상·
+미리보기 해시를 다시 검증한다. 미저장 미리보기는 지도에 새 경계를 영구 등록하지 않는다.
+
+같은 운영 API를 로컬 MCP 도구 `preview_hosted_land_legal`,
+`save_hosted_land_legal_summary`, `list_hosted_land_legal_summaries`로 실행할 수 있다.
+CLI는 저장소에서 `python services/mcp-server/land_cli.py --help`로 확인한다.
+`REALYTICS_API_ORIGIN`에는 HTTPS 서버 주소를, `REALYTICS_ACCESS_TOKEN`에는
+현재 사용자 토큰을 실행 환경에 제공한다. 운영 API가 프로젝트 권한과 선택 저장을 검증한다.
+
+
+미리보기에서 새로 확인한 PNU는 '미리보기 지도'에서 해당 필지의 공식 경계를
+확인할 수 있다. 서버는 프로젝트의 현재 필지 개정값, 해당 행과 PNU 일치 여부를
+다시 확인한다. 결과는 이 화면에서만 열며 저장된 지도와 원장은 변경하지 않는다.
+경계를 확인할 수 없으면 해당 필지의 경계 조회 상태를 표시한다.
+
+## Current contract and source comparison
+
+`POST /projects/{project_id}/land-ledger/analyze` archives the original and saves
+the parsed ledger on the existing project. Reopen it through
+`GET /projects/{project_id}/workspace/context?page=land`. No new table is required.
+
+- Parser `land-ledger-agent-v1.3` reads explicit XLS/XLSX merged ranges. A merged
+  contract amount spanning multiple parcels is stored once in `contractGroups`.
+  Members retain `contractGroupId` and the original anchor in `source.rawCells`;
+  their parcel amounts remain null. Blank cells without a merge do not create a group.
+- Group-level owner amounts reconcile to the shared contract amount. Shares in
+  those rows are source context, not verified legal ownership of each parcel.
+  Unallocated groups remain under review, including after enrichment.
+- Missing individual contract amounts produce `individual_contract_amount_missing`
+  and `importConsistency.incompleteChecks`. Actual numerical mismatches remain in
+  `failedChecks`, even if another contract has missing details. Missing is not zero.
+- The Bonri workbook importer stores the D19 purchase budget and D26 inclusive
+  budget in `raw_import.landCostBreakdown`, with cells and source names. These are
+  not extra additive cost items. E22 is retained as `raw_import.designFar`; it no
+  longer populates `site.legal_far`. Previously saved studies are not overwritten.
+- The Land screen compares persisted ledger contracts, purchase budget, inclusive
+  budget, ancillary difference and purchase-minus-contract difference. It displays
+  source cells, missing detail, candidate/error status and required legacy reimport.
+  This comparison grants no approval and does not change calculation inputs.
+- `PUT /projects/{project_id}/land-cost-review` accepts `comment` (1–5,000 chars)
+  and `expectedComparisonHash`. It requires `project:review`, tenant scope and a
+  server-verified actor. Changed source basis returns 409; blank notes return 400.
+  The existing project JSON retains the note, source comparison snapshot and history.
+  Generic project writes cannot forge `landCostReview`. On source changes, the old
+  note remains visible as a previous-source note and is not reused automatically.
+  Failed saves preserve the typed note. Cross-user atomic CAS remains a limit of
+  the existing project JSON update path; this change does not claim to solve it.
+
+Actual-source check: 9 parcels / 22 owner records; one I7:I12 contract group of
+KRW 12,500,000,000; three missing individual amounts; no false total mismatch.
+Contracts KRW 41,374,000,000 versus purchase budget KRW 42,000,000,000 differ by
+KRW 626,000,000. Inclusive budget is KRW 46,032,000,000, with ancillary difference
+KRW 4,032,000,000. The cause of the budget difference, legal ownership and original
+37 formula errors remain unresolved. All eight source file hashes were preserved.
+
+Payment correction (2026-10-14): only the explicitly labelled `depositPaid`
+column counts as recorded paid money. Unpaid deposits, interim payments and
+balances remain scheduled amounts, regardless of due date. A missing individual
+contract amount, unallocated joint contract or incomplete payment record cannot
+establish full payment; inconsistent/negative amounts require review. All owners
+must individually qualify, and their contract sum must reconcile, before the
+parcel can be labelled fully paid in the ledger. This is not bank-transfer or
+legal ownership verification.
+
+Each parcel now carries `paymentReviewVersion`, source sheet/rows, known paid and
+scheduled subtotals and missing-cell counts. All-blank amounts stay null; explicit
+zero stays zero. Legacy raw column totals remain reconciliation subtotals, not a
+missing-data assertion. Modern layouts do not guess unlabelled payment columns.
+The pilot adapter uses these same fields instead of counting scheduled interim
+payments as deposits or treating absent balance aliases as paid in full.
+
+The Land screen shows the two subtotals and gaps after save/reopen. Older saved
+ledgers request reimport and do not display their old paid-status claims. The
+former payment-string-derived acquisition percentage is replaced by a clearly
+labelled registry-owner-match parcel percentage. The legacy API acquisition ratio
+still describes contract coverage, not payment or ownership transfer.
+
+Actual Bonri source: J28 recorded paid KRW 462,400,000; K28 unpaid deposit
+KRW 3,675,000,000; L28 scheduled interim KRW 400,000,000; M28 scheduled balance
+KRW 36,836,600,000. Three parcels have positive paid entries; none qualifies as
+recorded fully paid. Thirteen owner rows have blank paid entries. Source SHA256
+remains `d55a3793149bb0d7878762b5be44484b722570043d994c825c6b3b3b60c31be8`.
+The source remains unchanged, and existing saved/approved projects were not rewritten.
+
+Verification results are recorded in the [current roadmap](realytics-os-next-work-roadmap.md).
+The sections below retain the earlier parser audit and expansion ideas as history;
+their proposed routes and P0 list do not supersede this current contract.
+
+## Earlier sample review (v1.1)
 
 File:
 
@@ -340,3 +452,9 @@ P1:
 - Always preserve original imported file identity and parser version.
 - Always mask sensitive account numbers in user-facing responses, logs, and exports.
 - Flag public land, shared ownership, trust registration, seizure, mortgage, provisional registration, easement, or unresolved encumbrance as legal review issues.
+
+## PNU 직접 입력으로 임시 토지조서 검토 (2026-11-05)
+
+토지 화면에서 중복을 제거한 19자리 PNU를 한 번에 최대 5개 입력한다. 기존 미리보기·선택 저장·지도 API가 같은 입력을 재검증한다. 공식 응답의 PNU와 명시된 지번을 대조하며, 불일치·미조회 필지를 성공 행으로 승격하지 않는다. 공공 자료로 확인한 주소·지번을 임시 토지조서와 Legal Pod 인허가 미리보기에 전달한다. 계약금액·소유권은 별도 근거가 필요하다.
+
+직접 입력 결과는 화면 메모리에 유지한다. 사용자가 선택한 항목만 현재 원본과 미리보기 해시를 재검증해 요약으로 저장한다. 업로드 토지조서에 자동 합치지 않으며, 새로고침 뒤에는 보관한 요약과 원장을 구분해 다시 연다.

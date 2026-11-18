@@ -25,7 +25,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from db.postgres import connect as pg_connect, postgres_configured
 
-_DEFAULT_CACHE_FILE = Path(__file__).resolve().parents[1] / "data" / "runtime" / "parcel_geometry_cache.sqlite3"
+from core.runtime_paths import runtime_data_dir
+
+_DEFAULT_CACHE_FILE = runtime_data_dir() / "parcel_geometry_cache.sqlite3"
 
 _LOCAL_DDL = (
     "CREATE TABLE IF NOT EXISTS parcel_geometry_cache ("

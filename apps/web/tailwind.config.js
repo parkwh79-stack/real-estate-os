@@ -10,7 +10,45 @@ export default {
     "../../packages/ui/src/**/*.{js,ts,jsx,tsx,mdx}"
   ],
   theme: {
-    extend: {},
+    extend: {
+      colors: {
+        re: {
+          canvas: "var(--re-bg-canvas)",
+          surface: "var(--re-bg-surface)",
+          subtle: "var(--re-bg-subtle)",
+          border: "var(--re-border-default)",
+          "border-strong": "var(--re-border-strong)",
+          text: "var(--re-text-primary)",
+          secondary: "var(--re-text-secondary)",
+          muted: "var(--re-text-muted)",
+          brand: "var(--re-brand-700)",
+          action: "var(--re-action-600)",
+          "action-hover": "var(--re-action-hover)",
+          "on-action": "var(--re-on-action)",
+          info: "var(--re-info-600)",
+          success: "var(--re-success-600)",
+          warning: "var(--re-warning-600)",
+          danger: "var(--re-danger-600)",
+          neutral: "var(--re-neutral-600)",
+        },
+      },
+      borderRadius: {
+        "re-control": "var(--re-radius-control)",
+        "re-panel": "var(--re-radius-panel)",
+      },
+      boxShadow: {
+        "re-panel": "var(--re-shadow-panel)",
+      },
+      fontFamily: {
+        sans: [
+          "Pretendard Variable",
+          "Noto Sans KR",
+          "Inter",
+          "system-ui",
+          "sans-serif",
+        ],
+      },
+    },
   },
   plugins: [],
 }

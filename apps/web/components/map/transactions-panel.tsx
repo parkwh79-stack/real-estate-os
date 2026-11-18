@@ -1,10 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, TrendingUp } from "lucide-react";
-import { authHeaders } from "../../lib/auth-client";
-
-const apiBase = "http://127.0.0.1:8000";
+import { apiBase, authHeaders } from "../../lib/auth-client";
 
 export type TxRecord = {
   address?: string;
@@ -48,9 +46,8 @@ const ASSET_TYPES = [
   { value: "commercial", label: "상업·업무" },
 ];
 
-function eok(won?: number): string {
-  if (!won) return "—";
-  return `${(won / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`;
+function manWon(won?: number): string {
+  return typeof won === "number" ? `${Math.round(won / 10_000).toLocaleString("ko-KR")}만원` : "—";
 }
 function manPerPy(won?: number): string {
   if (!won) return "—";
@@ -58,8 +55,8 @@ function manPerPy(won?: number): string {
 }
 
 function defaultDealYm(): string {
-  const d = new Date();
-  d.setMonth(d.getMonth() - 1); // last full month
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
@@ -81,53 +78,84 @@ export function TransactionsPanel({
   const [manualLawd, setManualLawd] = useState("");
   const [assetType, setAssetType] = useState("apartment");
   const [dealKind, setDealKind] = useState<"trade" | "rent">("trade");
-  const [dealYm, setDealYm] = useState(defaultDealYm());
-  const [data, setData] = useState<TxResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [dealYm, setDealYm] = useState(defaultDealYm);
+  const [result, setResult] = useState<{ query: string; data?: TxResponse; error?: string }>();
+  const [pendingQuery, setPendingQuery] = useState<string>();
+  const request = useRef<AbortController | null>(null);
 
   const onRecordsRef = useRef(onRecords);
   onRecordsRef.current = onRecords;
   const onComplexesRef = useRef(onComplexes);
   onComplexesRef.current = onComplexes;
 
-  const effectiveLawd = useMemo(() => lawdCd || manualLawd.trim(), [lawdCd, manualLawd]);
+  const effectiveLawd = lawdCd || manualLawd.trim();
+  const params = new URLSearchParams({ lawd_cd: effectiveLawd, deal_ym: dealYm, asset_type: assetType, deal_kind: dealKind });
+  if (geocode) {
+    params.set("geocode", "true");
+    params.set("geocode_limit", "30");
+  }
+  if (aggregate) params.set("aggregate", "true");
+  const query = params.toString();
+  const validQuery = /^\d{5}$/.test(effectiveLawd) && /^\d{4}(0[1-9]|1[0-2])$/.test(dealYm);
+  const loading = pendingQuery === query;
+  const activeResult = result?.query === query ? result : undefined;
 
   const load = useCallback(async () => {
-    if (!effectiveLawd) {
-      setError("법정동코드(5자리)가 필요합니다.");
+    if (!validQuery) {
+      setResult({ query, error: "법정동코드 5자리와 조회월 6자리(YYYYMM)를 입력하세요." });
       return;
     }
-    setLoading(true);
-    setError(null);
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setPendingQuery(query);
+    setResult(undefined);
+    onRecordsRef.current?.([]);
+    onComplexesRef.current?.([]);
     try {
-      const params: Record<string, string> = { lawd_cd: effectiveLawd, deal_ym: dealYm, asset_type: assetType, deal_kind: dealKind };
-      if (geocode) {
-        params.geocode = "true";
-        params.geocode_limit = "30";
-      }
-      if (aggregate) params.aggregate = "true";
-      const res = await fetch(`${apiBase}/api/market/transactions?${new URLSearchParams(params)}`, { cache: "no-store", headers: authHeaders("web") });
+      const res = await fetch(`${apiBase}/api/market/transactions?${query}`, {
+        cache: "no-store",
+        headers: authHeaders("web"),
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]),
+      });
       if (!res.ok) throw new Error(`실거래가 조회 실패 (${res.status})`);
       const json = (await res.json()) as TxResponse;
-      setData(json);
+      if (controller.signal.aborted) return;
+      if (json.diagnostic?.status === "skipped") throw new Error("실거래가 조회 서비스가 아직 연결되지 않았습니다.");
+      if (json.diagnostic?.status !== "ok" && json.diagnostic?.status !== "empty") {
+        throw new Error("국토교통부 실거래가를 불러오지 못했습니다. 잠시 후 다시 조회해 주세요.");
+      }
+      if (!Array.isArray(json.records)) throw new Error("실거래가 조회 응답을 확인하지 못했습니다.");
+      setResult({ query, data: json });
       onRecordsRef.current?.(json.records ?? []);
       onComplexesRef.current?.(json.complexes ?? []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "실거래가를 불러오지 못했습니다.");
+      if (!controller.signal.aborted) {
+        setResult({ query, error: err instanceof Error && err.name === "Error" ? err.message : "실거래가를 불러오지 못했습니다. 잠시 후 다시 조회해 주세요." });
+      }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setPendingQuery(undefined);
     }
-  }, [effectiveLawd, dealYm, assetType, dealKind, geocode, aggregate]);
+  }, [query, validQuery]);
+
+  useEffect(() => () => { request.current?.abort(); }, [query]);
+
+  function clearResult() {
+    request.current?.abort();
+    setResult(undefined);
+    setPendingQuery(undefined);
+    onRecordsRef.current?.([]);
+    onComplexesRef.current?.([]);
+  }
 
   useEffect(() => {
-    if (effectiveLawd) void load();
+    if (lawdCd) void load();
+    // A parcel context loads its initial result. Changes to query filters require 조회.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveLawd]);
+  }, [lawdCd]);
 
-  const records = data?.records ?? [];
-  const summary = data?.summary;
-  const diag = data?.diagnostic;
+  const records = activeResult?.data?.records ?? [];
+  const summary = activeResult?.data?.summary;
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -147,7 +175,9 @@ export function TransactionsPanel({
             법정동코드
             <input
               value={manualLawd}
-              onChange={(e) => setManualLawd(e.target.value)}
+              onChange={(e) => { clearResult(); setManualLawd(e.target.value); }}
+              inputMode="numeric"
+              maxLength={5}
               placeholder="예: 11650"
               className="ml-2 w-24 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
             />
@@ -157,25 +187,28 @@ export function TransactionsPanel({
             법정동 {lawdCd}
           </span>
         )}
-        <select value={assetType} onChange={(e) => setAssetType(e.target.value)} className="rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900">
+        <select aria-label="자산 유형" value={assetType} onChange={(e) => { clearResult(); setAssetType(e.target.value); }} className="rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900">
           {ASSET_TYPES.map((a) => (
             <option key={a.value} value={a.value}>{a.label}</option>
           ))}
         </select>
-        <select value={dealKind} onChange={(e) => setDealKind(e.target.value as "trade" | "rent")} className="rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900">
+        <select aria-label="거래 유형" value={dealKind} onChange={(e) => { clearResult(); setDealKind(e.target.value as "trade" | "rent"); }} className="rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900">
           <option value="trade">매매</option>
           <option value="rent">전월세</option>
         </select>
         <input
           value={dealYm}
-          onChange={(e) => setDealYm(e.target.value)}
+          onChange={(e) => { clearResult(); setDealYm(e.target.value); }}
+          aria-label="조회월 (YYYYMM)"
+          inputMode="numeric"
+          maxLength={6}
           placeholder="YYYYMM"
           className="w-24 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
         />
         <button
           type="button"
           onClick={() => void load()}
-          disabled={loading || !effectiveLawd}
+          disabled={loading || !validQuery}
           className="inline-flex h-8 items-center gap-1 rounded-lg bg-slate-900 px-3 text-xs font-bold text-white disabled:opacity-40 dark:bg-white dark:text-slate-950"
         >
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
@@ -183,33 +216,22 @@ export function TransactionsPanel({
         </button>
       </div>
 
-      {error ? <p className="mt-3 text-sm font-bold text-rose-600 dark:text-rose-300">{error}</p> : null}
+      {activeResult?.error ? <p role="alert" className="mt-3 text-sm font-bold text-rose-600 dark:text-rose-300">{activeResult.error}</p> : null}
 
-      {summary ? (
-        <div className="mt-3 flex flex-wrap gap-4 text-sm">
+      {activeResult?.data ? (
+        <div role="status" className="mt-3 flex flex-wrap gap-4 text-sm">
           <span className="font-semibold text-slate-600 dark:text-slate-300">
-            거래 <strong className="text-slate-950 dark:text-white">{summary.totalCount ?? 0}</strong>건
-            (매매 {summary.tradeCount ?? 0} · 전월세 {summary.rentCount ?? 0})
+            이번 조회 거래 <strong className="text-slate-950 dark:text-white">{records.length}</strong>건
           </span>
-          {summary.avgPricePerPy ? (
+          {summary?.avgPricePerPy ? (
             <span className="font-semibold text-sky-700 dark:text-sky-300">평균 평단가 {manPerPy(summary.avgPricePerPy)}</span>
           ) : null}
         </div>
       ) : null}
 
-      {diag && diag.status !== "ok" && !records.length ? (
-        <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-          {diag.status === "skipped"
-            ? "data.go.kr 실거래가 키(DATA_GO_KR_API_KEY)를 설정하면 실제 거래내역이 표시됩니다."
-            : diag.status === "forbidden"
-              ? `${diag.message} (다른 자산유형/거래는 매매부터 시도해 보세요.)`
-              : diag.message ?? "표시할 거래가 없습니다."}
-        </p>
-      ) : null}
-
       {records.length ? (
-        <div className="mt-3 max-h-80 overflow-y-auto">
-          <table className="w-full text-sm">
+        <div className="mt-3 max-h-80 overflow-auto">
+          <table className="w-full min-w-[24rem] text-sm">
             <thead className="sticky top-0 bg-slate-50 text-left text-xs font-bold text-slate-500 dark:bg-slate-950/60">
               <tr>
                 <th className="px-2 py-1.5">주소</th>
@@ -222,17 +244,17 @@ export function TransactionsPanel({
               {records.map((r, i) => (
                 <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-950/40">
                   <td className="px-2 py-1.5 text-slate-900 dark:text-white">{r.address ?? "—"}</td>
-                  <td className="px-2 py-1.5 text-slate-600 dark:text-slate-300">{r.areaSqm ? `${r.areaSqm}㎡` : "—"}</td>
+                  <td className="px-2 py-1.5 text-slate-600 dark:text-slate-300">{typeof r.areaSqm === "number" ? `${Math.round(r.areaSqm)}㎡` : "—"}</td>
                   <td className="px-2 py-1.5 text-slate-500">{r.transactionDate ?? "—"}</td>
                   <td className="px-2 py-1.5 text-right text-slate-900 dark:text-white">
                     {dealKind === "trade" ? (
                       <span>
-                        {eok(r.totalPrice)} <span className="text-xs text-slate-400">{manPerPy(r.pricePerPy)}</span>
+                        {manWon(r.totalPrice)} <span className="text-xs text-slate-400">{manPerPy(r.pricePerPy)}</span>
                       </span>
                     ) : (
                       <span>
-                        {eok(r.depositKRW)}
-                        {r.monthlyRentKRW ? <span className="text-xs text-slate-400"> / {Math.round(r.monthlyRentKRW / 10_000)}만</span> : null}
+                        {manWon(r.depositKRW)}
+                        <span className="text-xs text-slate-400"> / {manWon(r.monthlyRentKRW)}</span>
                       </span>
                     )}
                   </td>

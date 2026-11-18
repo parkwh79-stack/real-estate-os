@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional
+
+from core.financial_input_validation import FinancialInputError
 
 COVENANT_MONITORING_SCHEMA_VERSION = "realytics-covenant-monitoring-v1"
 
@@ -44,14 +47,27 @@ class CovenantMonitoringAgent:
         thresholds: Optional[Dict[str, Any]] = None,
         stress_test: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        for key, value in (thresholds or {}).items():
+            if key in DEFAULT_THRESHOLDS and isinstance(value, (int, float)) and not _is_num(value):
+                raise FinancialInputError(f"Covenant threshold {key} must be a finite number.")
         merged = {**DEFAULT_THRESHOLDS, **{k: float(v) for k, v in (thresholds or {}).items() if _is_num(v)}}
         checks: List[Dict[str, Any]] = []
         alerts: List[Dict[str, Any]] = []
 
         not_applicable: List[str] = []
+        invalid_metrics: List[str] = []
         for key, label, kind, action in _COVENANTS:
             value = metrics.get(key)
             if not _is_num(value):
+                if isinstance(value, (int, float)):
+                    invalid_metrics.append(key)
+                    alerts.append({
+                        "code": f"COVENANT_{key.upper()}_INVALID_INPUT",
+                        "severity": "caution",
+                        "covenant": label,
+                        "message": f"{label} 입력이 유효한 유한 수가 아니므로 평가할 수 없습니다.",
+                        "recommendedAction": "원본 지표를 확인하고 유효한 값으로 다시 계산",
+                    })
                 continue
             value = float(value)
             # DSCR / ICR-type ratios are only meaningful for income-producing
@@ -77,7 +93,7 @@ class CovenantMonitoringAgent:
                     "code": f"COVENANT_{key.upper()}_{status.upper()}",
                     "severity": "critical" if status == "breach" else "caution",
                     "covenant": label,
-                    "message": f"{label} {value:.2%} (기준 {self._fmt(threshold, kind)}) — {'위반' if status=='breach' else '근접'}",
+                    "message": f"{label} {self._metric_value(value, key)} (기준 {self._fmt(threshold, kind, key)}) — {'위반' if status=='breach' else '근접'}",
                     "recommendedAction": action,
                 })
 
@@ -102,6 +118,7 @@ class CovenantMonitoringAgent:
             "checks": checks,
             "alerts": alerts,
             "notApplicable": not_applicable,
+            "invalidMetrics": invalid_metrics,
             "summary": {
                 "checkedCount": len(checks),
                 "breachCount": sum(1 for c in checks if c["status"] == "breach"),
@@ -129,9 +146,13 @@ class CovenantMonitoringAgent:
         return "ok", headroom
 
     @staticmethod
-    def _fmt(threshold: float, kind: str) -> str:
+    def _metric_value(value: float, key: str) -> str:
+        return f"{value:.2f}x" if key == "dscr" else f"{value:.2%}"
+
+    @staticmethod
+    def _fmt(threshold: float, kind: str, key: str = "") -> str:
         arrow = "≥" if kind == "floor" else "≤"
-        return f"{arrow}{threshold:.2f}" if threshold >= 1 else f"{arrow}{threshold:.0%}"
+        return arrow + CovenantMonitoringAgent._metric_value(threshold, key)
 
     @staticmethod
     def _overall(checks: List[Dict[str, Any]], alerts: List[Dict[str, Any]]) -> str:
@@ -143,4 +164,4 @@ class CovenantMonitoringAgent:
 
 
 def _is_num(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)

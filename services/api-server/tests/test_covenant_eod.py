@@ -21,6 +21,7 @@ def _project_body():
         "feasibility_input": {
             "total_revenue": 100000000000,
             "total_cost": 85000000000,
+            "land_cost": 30000000000,
             "construction_cost": 50000000000,
             "finance_cost": 5000000000,
         },

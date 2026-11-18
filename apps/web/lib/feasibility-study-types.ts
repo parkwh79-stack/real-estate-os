@@ -41,6 +41,28 @@ export type FormulaBinding = {
   locked_in_template: boolean;
 };
 
+export type FeasibilityInputReferences = {
+  approved_input_snapshot_id?: string;
+  approved_input_snapshot_hash?: string;
+  source_snapshot_id?: string;
+  site_parcel_snapshot_id?: string;
+  parcel_set_hash?: string;
+  regulatory_constraint_snapshot_id?: string;
+  buildable_envelope_id?: string;
+  constraint_as_of_date?: string;
+  formula_versions: Record<string, string>;
+};
+
+export type FormulaTraceRecord = {
+  formula_id: string;
+  formula_version: string;
+  output_path: string;
+  input_paths: string[];
+  intermediate_values: Record<string, number | string | boolean | null>;
+  rounding_policy?: string;
+  source_locator?: Record<string, unknown>;
+};
+
 export type FeasibilityValue = {
   key: string;
   label: string;
@@ -102,7 +124,7 @@ export type LineItem = {
 export type FinancingTranche = {
   tranche_id: string;
   name: string;
-  priority: "senior" | "middle" | "junior" | "equity" | "bridge" | "other";
+  priority: "senior" | "mezzanine" | "junior" | "equity" | "bridge" | "other";
   amount?: number;
   interest_rate?: number;
   fee_rate?: number;
@@ -129,6 +151,34 @@ export type ScenarioAssumption = {
   interest_rate_addition: number;
   sales_rate?: number;
   delay_months: number;
+  scenario_class: "current_rights" | "approved_permit" | "conditional_incentive" | "speculative_rezoning";
+  constraint_snapshot_id?: string;
+  program_candidate_id?: string;
+  approval_decision_id?: string;
+  eligibility?: "eligible" | "conditional" | "ineligible" | "not_assessable";
+  blocking_constraint_ids: string[];
+  condition_ids: string[];
+  report_grade: boolean;
+};
+
+export type MonthlyCashFlowRow = {
+  month_index: number;
+  period: string;
+  cash_in: Record<string, number>;
+  cash_out: Record<string, number>;
+  pf_draw: Record<string, number>;
+  loan_repayment: Record<string, number>;
+  equity_contribution: Record<string, number>;
+  equity_recovery: Record<string, number>;
+  other_financing_inflow: Record<string, number>;
+  other_financing_outflow: Record<string, number>;
+  operating_account_inflow?: number;
+  operating_account_outflow?: number;
+  repayment_reserve_inflow?: number;
+  repayment_reserve_outflow?: number;
+  net_cash_flow?: number;
+  cumulative_cash_flow?: number;
+  source_locator?: Record<string, unknown>;
 };
 
 export type WorkbookSheetSpec = {
@@ -177,6 +227,8 @@ export type FeasibilityStudyV2 = {
   project_name?: string;
   asset_type: AssetType;
   currency: "KRW";
+  calculation_date?: string;
+  input_references: FeasibilityInputReferences;
   site: SiteInputs;
   program: ProgramInputs;
   product_mix: ProductMixRow[];
@@ -185,6 +237,8 @@ export type FeasibilityStudyV2 = {
   financing: FinancingTranche[];
   schedule: ScheduleMilestone[];
   scenarios: ScenarioAssumption[];
+  formula_traces: FormulaTraceRecord[];
+  monthly_cash_flow: MonthlyCashFlowRow[];
   workbook: WorkbookMapping;
   metrics?: FeasibilityMetrics;
   raw_import: Record<string, unknown>;

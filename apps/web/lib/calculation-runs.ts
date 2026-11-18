@@ -28,6 +28,8 @@ export type CalculationRun = {
   inputEvidenceIds?: string[];
   assumptionIds?: string[];
   inputDigest?: Record<string, unknown>;
+  inputSnapshot?: Record<string, unknown> | null;
+  resultSnapshot?: Record<string, unknown> | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -46,6 +48,8 @@ export const ENGINE_LABELS: Record<string, string> = {
   cashflow: "현금흐름",
   cash_flow_engine: "현금흐름 엔진",
   pf_metrics: "PF 지표",
+  ltv_ltc_dscr: "LTV·LTC·DSCR",
+  exit_sale_rate: "Exit 분양률",
   return_metrics: "수익성 지표",
   waterfall: "Waterfall",
   unsold_ltv: "미분양 LTV",
@@ -60,7 +64,7 @@ export function engineLabel(engineKey: string): string {
 
 export async function fetchCalculationRuns(
   projectId: string,
-  options: { engineKey?: string; limit?: number; actor?: string } = {},
+  options: { engineKey?: string; limit?: number; actor?: string; signal?: AbortSignal } = {},
 ): Promise<CalculationRun[]> {
   const params = new URLSearchParams();
   if (options.engineKey) params.set("engine_key", options.engineKey);
@@ -68,10 +72,15 @@ export async function fetchCalculationRuns(
   const res = await fetch(`${apiBase}/projects/${projectId}/calculation-runs?${params}`, {
     cache: "no-store",
     headers: authHeaders(options.actor ?? "web-auditor"),
+    signal: options.signal,
   });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) throw new Error("계산 이력을 조회할 권한이 없습니다. 로그인 상태와 프로젝트 접근 권한을 확인해 주세요.");
+    throw new Error("계산 이력을 불러오지 못했습니다. 잠시 후 새로고침해 주세요.");
+  }
   const body = (await res.json()) as CalculationRunList;
-  const records = body.records ?? [];
+  if (!Array.isArray(body.records)) throw new Error("계산 이력 응답을 확인하지 못했습니다. 다시 불러와 주세요.");
+  const records = body.records;
   // Newest first — the registry does not guarantee order.
   return [...records].sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
 }

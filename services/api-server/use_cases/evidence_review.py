@@ -65,5 +65,5 @@ def review_market_evidence_use_case(
     record["reviewComment"] = review_entry["reviewComment"]
     record.setdefault("reviewHistory", []).append(review_entry)
     if isinstance(record_or_repository, MarketEvidenceRepository):
-        record_or_repository.save()
+        record_or_repository.save(project_id, record)
     return record

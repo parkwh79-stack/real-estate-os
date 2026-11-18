@@ -5,9 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AlertCircle, CheckCircle2, Loader2, MessageCircle } from "lucide-react";
 import {
-  resolveCurrentIdentity,
-  setStoredAuthSession,
-  type StoredAuthSession,
+  exchangeOauthSession,
 } from "../../../../lib/auth-client";
 
 function safeRedirectPath(value: string | null) {
@@ -35,6 +33,7 @@ function KakaoSessionConnector() {
   const [message, setMessage] = useState("소셜 로그인 세션을 REALYTICS에 연결하는 중입니다.");
 
   useEffect(() => {
+    window.history.replaceState(null, "", window.location.pathname);
     let active = true;
     async function connect() {
       if (!sessionId) {
@@ -43,19 +42,8 @@ function KakaoSessionConnector() {
         return;
       }
       try {
-        const identity = await resolveCurrentIdentity(sessionId);
+        await exchangeOauthSession(sessionId);
         if (!active) return;
-        if (!identity.authenticated || !identity.user || !identity.session) {
-          setStatus("error");
-          setMessage("REALYTICS 세션 확인에 실패했습니다. 다시 로그인해 주세요.");
-          return;
-        }
-        const stored: StoredAuthSession = {
-          user: identity.user,
-          session: identity.session,
-          permissions: identity.permissions ?? [],
-        };
-        setStoredAuthSession(stored);
         setStatus("success");
         setMessage("소셜 로그인 세션이 성공적으로 연결되었습니다. REALYTICS OS 런처로 이동합니다.");
         window.setTimeout(() => {

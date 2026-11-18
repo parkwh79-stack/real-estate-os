@@ -85,6 +85,23 @@ def test_geocode_failure_is_honest_fetch_failed():
     assert project["land"].get("pnu") is None
 
 
+def test_conflicting_public_parcel_never_overwrites_existing_pnu():
+    project = {"land": {"address": "합성 주소", "pnu": "1111010100100010000"}}
+    log = auto_supplement_pod_inputs("1", project, resolver=_fake_resolver_resolved, connector_factory=_EmptyConnector)
+    assert log[0]["status"] == "needs_user_material"
+    assert project["land"]["pnu"] == "1111010100100010000"
+    assert "officialLandPricePerSqm" not in project["land"]
+
+
+def test_failed_public_lookup_keeps_partial_analysis_available():
+    def unavailable(_):
+        raise ConnectionError("unavailable")
+    project = {"land": {"address": "합성 주소"}}
+    log = auto_supplement_pod_inputs("1", project, resolver=unavailable, connector_factory=_EmptyConnector)
+    assert log[0]["status"] == "fetch_failed"
+    assert "pnu" not in project["land"]
+
+
 def test_empty_market_rows_reported_not_invented():
     project = {"land": {"address": "경기도 용인시 기흥구 상갈동 13"}}
 

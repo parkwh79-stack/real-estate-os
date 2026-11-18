@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { GitBranch, Loader2, Upload } from "lucide-react";
-import { authHeaders } from "../../lib/auth-client";
+import { apiBase, authHeaders } from "../../lib/auth-client";
 
 type UploadMode = "parse" | "run";
 
@@ -30,7 +30,7 @@ export default function FileUpload({ projectId }: { projectId: string }) {
     const endpoint = mode === "run" ? "upload-and-run" : "upload";
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000/projects/${projectId}/${endpoint}`, {
+      const res = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}/${endpoint}`, {
         method: "POST",
         headers: authHeaders("web"),
         body: formData,

@@ -17,6 +17,7 @@ from agent_platform.contracts import (
 )
 from agent_platform.operational import OperationalRepository
 from agent_platform.registry import BrainRegistry
+from core.secret_redaction import collect_secret_values, redact_secret_text
 
 
 class _RouteOnlyBrain:
@@ -111,6 +112,10 @@ def record_brain_provider_result(
         ProviderHealthStatus.UNAVAILABLE if failures >= 3 else ProviderHealthStatus.DEGRADED
     )
     now = datetime.now(timezone.utc)
+    safe_error = redact_secret_text(
+        error or "Unknown provider failure",
+        secrets=collect_secret_values(context),
+    )
     record = BrainProviderHealth(
         health_id=health_id,
         tenant_id=tenant_id,
@@ -121,7 +126,7 @@ def record_brain_provider_result(
         consecutive_failures=failures,
         latency_ms=latency_ms,
         failure_code=None if success else "BRAIN_CALL_FAILED",
-        failure_message=None if success else (error or "Unknown provider failure")[:1000],
+        failure_message=None if success else safe_error[:1000],
         checked_at=now,
         next_check_at=None if success else now + timedelta(seconds=min(300, 2 ** min(failures, 8))),
         metadata={"source": "AIConnection", "credentialsPersisted": False},

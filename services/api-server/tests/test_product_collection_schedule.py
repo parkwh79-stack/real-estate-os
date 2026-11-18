@@ -64,6 +64,7 @@ def test_aggregate_asset_schedule_is_distributed_across_existing_product_types()
             {"key": "apt-b", "asset_type": "apartment", "product_name": "B", "unit_count": 75},
         ],
         "metrics": {"total_revenue": 1000, "total_cost": 600},
+        "cost_items": [{"key": "cost", "label": "Cost", "category": "construction", "amount": 600}],
         "raw_import": {
             "productMonthlySalesRateScenarios": [{
                 "products": [{

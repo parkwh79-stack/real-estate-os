@@ -14,6 +14,7 @@ if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
 from agents.orchestration_agent import OrchestrationAgent  # noqa: E402
+from core.calculations import normalize_tranche_priority  # noqa: E402
 from scripts.run_pilot_fixture import summarize_run  # noqa: E402
 
 
@@ -148,7 +149,11 @@ def _apply_cure(
 def _reduce_pf_structure(payload: Dict[str, Any], amount: float) -> None:
     remaining = amount
     tranches = payload.get("pf_structure") or payload.get("pfStructure") or []
-    for tranche in sorted(tranches, key=lambda item: item.get("priority", 999), reverse=True):
+    for tranche in sorted(
+        tranches,
+        key=lambda item: normalize_tranche_priority(item.get("priority")),
+        reverse=True,
+    ):
         current = float(tranche.get("amount") or 0.0)
         reduction = min(current, remaining)
         tranche["originalAmountBeforeCure"] = current

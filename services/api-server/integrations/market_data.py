@@ -217,7 +217,36 @@ class MolitRtmsConnector:
             return [], _diag(self.source, "error", f"실거래가 요청 실패: HTTP {exc.code}", httpStatus=exc.code)
         except Exception as exc:  # network/timeout — degrade
             return [], _diag(self.source, "error", f"실거래가 요청 실패: {type(exc).__name__}")
-        records = parse_rtms_items(body, asset_type=asset_type, deal_kind=deal_kind, lawd_cd=lawd_cd)
+        # RTMS can return HTTP 200 for gateway/authentication errors. Only a
+        # successful response envelope may establish that there are no trades.
+        # Current RTMS uses 000; retain the public gateway's legacy 00 success.
+        try:
+            root = ET.fromstring(body)
+        except (ET.ParseError, TypeError):
+            return [], _diag(self.source, "error", "실거래가 응답 형식을 확인하지 못했습니다.", errorCode="RTMS_INVALID_XML")
+        result_code = _text(root.find("./header/resultCode"))
+        gateway_code = _text(root.find(".//returnReasonCode"))
+        if gateway_code or root.tag == "OpenAPI_ServiceResponse" or (result_code and result_code not in {"00", "000"}):
+            code = gateway_code or result_code or ""
+            # Never echo resultMsg/errMsg, response bodies, URLs, or arbitrary
+            # upstream code strings: they can contain the service key.
+            safe_code = code if code.isascii() and code.isdigit() and 1 <= len(code) <= 3 else None
+            extra = {"errorCode": "RTMS_PROVIDER_ERROR"}
+            if safe_code is not None:
+                extra["providerCode"] = safe_code
+            return [], _diag(
+                self.source, "forbidden" if safe_code in {"20", "30", "31"} else "error",
+                "실거래가 제공기관에서 요청을 처리하지 못했습니다. 이용 권한과 연결 상태를 확인해 주세요.",
+                **extra,
+            )
+        if root.tag != "response" or result_code not in {"00", "000"} or root.find("./body") is None:
+            return [], _diag(self.source, "error", "실거래가 정상 응답을 확인하지 못했습니다.", errorCode="RTMS_INVALID_RESPONSE")
+        try:
+            records = parse_rtms_items(body, asset_type=asset_type, deal_kind=deal_kind, lawd_cd=lawd_cd)
+        except (ValueError, TypeError, OverflowError):
+            return [], _diag(self.source, "error", "실거래가 항목을 읽지 못했습니다.", errorCode="RTMS_INVALID_RECORDS")
+        if not records and (root.find("./body/items/item") is not None or _text(root.find("./body/totalCount")) != "0"):
+            return [], _diag(self.source, "error", "실거래가 조회 결과의 거래 수를 확인하지 못했습니다.", errorCode="RTMS_UNVERIFIED_EMPTY")
         return records, _diag(self.source, "ok" if records else "empty", f"{len(records)}건", count=len(records))
 
 
@@ -302,10 +331,17 @@ def lawd_cd_from_pnu(pnu: Optional[str]) -> Optional[str]:
     return digits[:5] if len(digits) >= 5 else None
 
 
+def molit_display_connector(environ: Optional[Dict[str, str]] = None) -> MolitRtmsConnector:
+    # A display credential must never enable the Agent evidence ingestion path.
+    env = _env(environ)
+    display_key = (env.get("REALYTICS_MOLIT_DISPLAY_API_KEY") or "").strip()
+    return MolitRtmsConnector({"DATA_GO_KR_API_KEY": display_key}) if display_key else MolitRtmsConnector(environ)
+
+
 def market_data_status(environ: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Secret-safe readiness for the market data providers (no keys echoed)."""
     return {
-        "molitRtms": {"configured": MolitRtmsConnector(environ).configured(), "source": "data.go.kr 실거래가"},
+        "molitRtms": {"configured": molit_display_connector(environ).configured(), "source": "data.go.kr 실거래가"},
         "valuemap": {"configured": ValuemapConnector(environ).configured(), "source": "밸류맵 제휴 API"},
         "supportedAssetTypes": sorted({asset for asset, _ in RTMS_ENDPOINTS}),
     }

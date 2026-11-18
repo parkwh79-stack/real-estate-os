@@ -1,0 +1,958 @@
+-- REALYTICS Parser V2 normalized PostgreSQL foundation.
+--
+-- Runtime persistence remains the backend-neutral deal_state_records projection
+-- until the Parser V2 repositories are promoted. These tables are the normalized
+-- PostgreSQL target for immutable document/fact provenance and human approval.
+-- Source binaries and unredacted document text remain in Object Storage, not here.
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_project_tenant
+    ON projects(project_id, tenant_id);
+
+-- ---------------------------------------------------------------------------
+-- Immutable source-document versions
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parser_document_versions (
+    document_version_id             TEXT PRIMARY KEY,
+    tenant_id                       TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id                      TEXT NOT NULL,
+    document_id                     TEXT NOT NULL,
+    archive_id                      TEXT NOT NULL,
+    object_version                  TEXT NOT NULL,
+    sha256                          TEXT NOT NULL,
+    file_name                       TEXT NOT NULL,
+    media_type                      TEXT NOT NULL,
+    size_bytes                      BIGINT NOT NULL,
+    version_number                  INTEGER NOT NULL,
+    source_authority                TEXT NOT NULL DEFAULT 'unknown',
+    schema_version                  TEXT NOT NULL,
+    supersedes_document_version_id  TEXT,
+    ingested_by                     TEXT NOT NULL,
+    ingested_at                     TIMESTAMPTZ NOT NULL,
+    payload_json                    JSONB NOT NULL,
+    UNIQUE (document_version_id, tenant_id, project_id),
+    UNIQUE (document_version_id, tenant_id, project_id, document_id),
+    UNIQUE (tenant_id, project_id, document_id, version_number),
+    UNIQUE (tenant_id, project_id, archive_id, object_version),
+    CONSTRAINT fk_parser_document_project_scope
+        FOREIGN KEY (project_id, tenant_id)
+        REFERENCES projects(project_id, tenant_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_document_supersedes_scope
+        FOREIGN KEY (supersedes_document_version_id, tenant_id, project_id, document_id)
+        REFERENCES parser_document_versions(document_version_id, tenant_id, project_id, document_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_document_sha256
+        CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_document_size
+        CHECK (size_bytes >= 0),
+    CONSTRAINT ck_parser_document_version
+        CHECK (version_number >= 1),
+    CONSTRAINT ck_parser_document_not_self_superseding
+        CHECK (supersedes_document_version_id IS NULL OR supersedes_document_version_id <> document_version_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_document_versions_project
+    ON parser_document_versions(tenant_id, project_id, ingested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_document_versions_logical_document
+    ON parser_document_versions(tenant_id, project_id, document_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_document_versions_hash
+    ON parser_document_versions(tenant_id, sha256);
+CREATE INDEX IF NOT EXISTS idx_parser_document_versions_lineage
+    ON parser_document_versions(supersedes_document_version_id)
+    WHERE supersedes_document_version_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Immutable, project-scoped orchestration profiles. A run pins both the
+-- profile version and the exact execution-plan hash so a historical parse can
+-- be reproduced after modules or defaults evolve.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parser_project_profiles (
+    tenant_id             TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id            TEXT NOT NULL,
+    profile_id            TEXT NOT NULL,
+    profile_version       TEXT NOT NULL,
+    configuration_status  TEXT NOT NULL DEFAULT 'active',
+    profile_hash          TEXT NOT NULL,
+    plan_hash             TEXT NOT NULL,
+    configured_by         TEXT NOT NULL,
+    configured_at         TIMESTAMPTZ NOT NULL,
+    payload_json          JSONB NOT NULL,
+    PRIMARY KEY (tenant_id, project_id, profile_id, profile_version),
+    UNIQUE (tenant_id, project_id, profile_id, profile_version, plan_hash),
+    UNIQUE (tenant_id, project_id, profile_hash),
+    CONSTRAINT fk_parser_profile_project_scope
+        FOREIGN KEY (project_id, tenant_id)
+        REFERENCES projects(project_id, tenant_id) ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_profile_identity
+        CHECK (btrim(profile_id) <> '' AND btrim(profile_version) <> ''),
+    CONSTRAINT ck_parser_profile_status
+        CHECK (configuration_status IN ('active', 'superseded', 'retired')),
+    CONSTRAINT ck_parser_profile_hash
+        CHECK (profile_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_profile_plan_hash
+        CHECK (plan_hash ~ '^[0-9a-f]{64}$')
+);
+-- Application invariant: persist even a built-in/default intake profile within
+-- the tenant/project boundary before creating a run; no implicit global profile
+-- may be referenced by parser_runs.
+COMMENT ON TABLE parser_project_profiles IS
+    'Application invariant: persist the built-in/default intake profile for its tenant/project before creating parser_runs; parser_runs never reference an implicit global profile.';
+CREATE INDEX IF NOT EXISTS idx_parser_project_profiles_project
+    ON parser_project_profiles(tenant_id, project_id, configured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_project_profiles_plan
+    ON parser_project_profiles(tenant_id, project_id, plan_hash);
+
+-- ---------------------------------------------------------------------------
+-- Immutable run identity. Execution and approval are independent states, and
+-- every transition is appended to parser_run_events.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parser_runs (
+    parsing_run_id        TEXT PRIMARY KEY,
+    tenant_id             TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id            TEXT NOT NULL,
+    document_version_id   TEXT NOT NULL,
+    execution_status      TEXT NOT NULL DEFAULT 'pending',
+    approval_status       TEXT NOT NULL DEFAULT 'not_requested',
+    parser_version        TEXT NOT NULL,
+    ontology_version      TEXT NOT NULL,
+    prompt_version        TEXT NOT NULL,
+    model_version         TEXT NOT NULL,
+    profile_id            TEXT NOT NULL,
+    profile_version       TEXT NOT NULL,
+    plan_hash             TEXT NOT NULL,
+    requested_modules     TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    idempotency_key       TEXT NOT NULL,
+    input_hash            TEXT NOT NULL,
+    parent_parsing_run_id TEXT,
+    attempt_number        INTEGER NOT NULL DEFAULT 1,
+    requested_at          TIMESTAMPTZ NOT NULL,
+    payload_json          JSONB NOT NULL,
+    UNIQUE (parsing_run_id, tenant_id, project_id),
+    UNIQUE (parsing_run_id, document_version_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, idempotency_key),
+    CONSTRAINT fk_parser_run_project_scope
+        FOREIGN KEY (project_id, tenant_id)
+        REFERENCES projects(project_id, tenant_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_run_document_scope
+        FOREIGN KEY (document_version_id, tenant_id, project_id)
+        REFERENCES parser_document_versions(document_version_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_run_profile_scope
+        FOREIGN KEY (tenant_id, project_id, profile_id, profile_version, plan_hash)
+        REFERENCES parser_project_profiles(tenant_id, project_id, profile_id, profile_version, plan_hash)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_run_parent_scope
+        FOREIGN KEY (parent_parsing_run_id, tenant_id, project_id)
+        REFERENCES parser_runs(parsing_run_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_run_execution_status
+        CHECK (execution_status = 'pending'),
+    CONSTRAINT ck_parser_run_approval_status
+        CHECK (approval_status = 'not_requested'),
+    CONSTRAINT ck_parser_run_input_hash
+        CHECK (input_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_run_plan_hash
+        CHECK (plan_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_run_requested_modules
+        CHECK (array_position(requested_modules, NULL) IS NULL),
+    CONSTRAINT ck_parser_run_attempt
+        CHECK (attempt_number >= 1),
+    CONSTRAINT ck_parser_run_not_self_parent
+        CHECK (parent_parsing_run_id IS NULL OR parent_parsing_run_id <> parsing_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_runs_document
+    ON parser_runs(tenant_id, project_id, document_version_id, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_runs_profile
+    ON parser_runs(tenant_id, project_id, profile_id, profile_version, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_runs_plan_hash
+    ON parser_runs(tenant_id, project_id, plan_hash);
+
+CREATE TABLE IF NOT EXISTS parser_run_events (
+    run_event_id        TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id          TEXT NOT NULL,
+    parsing_run_id      TEXT NOT NULL,
+    sequence_number     INTEGER NOT NULL,
+    from_execution_status TEXT NOT NULL,
+    execution_status    TEXT NOT NULL,
+    approval_status     TEXT NOT NULL DEFAULT 'not_requested',
+    output_hash         TEXT,
+    started_at          TIMESTAMPTZ,
+    completed_at        TIMESTAMPTZ,
+    occurred_at         TIMESTAMPTZ NOT NULL,
+    actor_id            TEXT NOT NULL,
+    event_hash          TEXT NOT NULL,
+    payload_json        JSONB NOT NULL,
+    UNIQUE (run_event_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, parsing_run_id, sequence_number),
+    UNIQUE (tenant_id, project_id, parsing_run_id, event_hash),
+    CONSTRAINT fk_parser_run_event_run_scope
+        FOREIGN KEY (parsing_run_id, tenant_id, project_id)
+        REFERENCES parser_runs(parsing_run_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_run_event_from_status
+        CHECK (from_execution_status IN ('pending', 'running', 'completed', 'completed_with_warnings', 'failed', 'cancelled')),
+    CONSTRAINT ck_parser_run_event_status
+        CHECK (execution_status IN ('running', 'completed', 'completed_with_warnings', 'failed', 'cancelled')),
+    CONSTRAINT ck_parser_run_event_approval
+        CHECK (approval_status IN ('not_requested', 'pending', 'approved', 'rejected', 'superseded')),
+    CONSTRAINT ck_parser_run_event_sequence
+        CHECK (sequence_number >= 1),
+    CONSTRAINT ck_parser_run_event_output_hash
+        CHECK (output_hash IS NULL OR output_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_run_event_hash
+        CHECK (event_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_run_event_timestamps
+        CHECK (completed_at IS NULL OR (started_at IS NOT NULL AND completed_at >= started_at))
+);
+CREATE INDEX IF NOT EXISTS idx_parser_run_events_run
+    ON parser_run_events(tenant_id, project_id, parsing_run_id, sequence_number DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_run_events_execution
+    ON parser_run_events(tenant_id, execution_status, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_run_events_approval
+    ON parser_run_events(tenant_id, project_id, approval_status, occurred_at DESC);
+
+-- A successful run's candidate/conflict review package is frozen exactly once
+-- before human review starts. The hash binds the complete immutable package;
+-- late candidates require a new parsing run rather than replacing this seal.
+CREATE TABLE IF NOT EXISTS parser_candidate_set_seals (
+    seal_id            TEXT PRIMARY KEY,
+    tenant_id          TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id         TEXT NOT NULL,
+    parsing_run_id     TEXT NOT NULL,
+    candidate_set_hash TEXT NOT NULL,
+    candidate_count    INTEGER NOT NULL,
+    conflict_count     INTEGER NOT NULL DEFAULT 0,
+    sealed_by          TEXT NOT NULL,
+    sealed_at          TIMESTAMPTZ NOT NULL,
+    payload_json       JSONB NOT NULL,
+    UNIQUE (seal_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, parsing_run_id),
+    CONSTRAINT fk_parser_candidate_set_seal_run_scope
+        FOREIGN KEY (parsing_run_id, tenant_id, project_id)
+        REFERENCES parser_runs(parsing_run_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_candidate_set_seal_hash
+        CHECK (candidate_set_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_candidate_set_seal_counts
+        CHECK (candidate_count >= 1 AND conflict_count >= 0),
+    CONSTRAINT ck_parser_candidate_set_seal_actor
+        CHECK (btrim(sealed_by) <> '')
+);
+CREATE INDEX IF NOT EXISTS idx_parser_candidate_set_seals_project
+    ON parser_candidate_set_seals(tenant_id, project_id, sealed_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Immutable fact candidates. Later review never overwrites the emitted fact.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parsed_fact_candidates (
+    candidate_id             TEXT PRIMARY KEY,
+    tenant_id                TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id               TEXT NOT NULL,
+    parsing_run_id           TEXT NOT NULL,
+    document_version_id      TEXT NOT NULL,
+    field_key                TEXT NOT NULL,
+    entity_id                TEXT,
+    raw_value                JSONB,
+    normalized_value         JSONB,
+    unit                     TEXT,
+    origin_type              TEXT NOT NULL,
+    presence_status          TEXT NOT NULL DEFAULT 'present',
+    review_status            TEXT NOT NULL DEFAULT 'pending',
+    approval_status          TEXT NOT NULL DEFAULT 'not_requested',
+    conflict_status          TEXT NOT NULL DEFAULT 'none',
+    confidence               NUMERIC(6,5),
+    source_authority         TEXT NOT NULL DEFAULT 'unknown',
+    effective_date           DATE,
+    as_of_date               DATE,
+    parser_version           TEXT NOT NULL,
+    ontology_version         TEXT NOT NULL,
+    prompt_version           TEXT NOT NULL,
+    model_version            TEXT NOT NULL,
+    field_registry_version   TEXT NOT NULL,
+    validation_status        TEXT NOT NULL DEFAULT 'passed',
+    validation_codes         TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    validation_finding_count INTEGER NOT NULL DEFAULT 0,
+    formula_id               TEXT,
+    formula_version          TEXT,
+    calculation_run_id       TEXT,
+    calculation_engine_version TEXT,
+    calculation_output_path  TEXT,
+    calculation_output_hash  TEXT,
+    input_snapshot_hash      TEXT,
+    supersedes_candidate_id  TEXT,
+    candidate_hash           TEXT NOT NULL,
+    created_at               TIMESTAMPTZ NOT NULL,
+    payload_json             JSONB NOT NULL,
+    UNIQUE (candidate_id, tenant_id, project_id),
+    UNIQUE (candidate_id, parsing_run_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, parsing_run_id, candidate_hash),
+    CONSTRAINT fk_parser_candidate_run_scope
+        FOREIGN KEY (parsing_run_id, document_version_id, tenant_id, project_id)
+        REFERENCES parser_runs(parsing_run_id, document_version_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_candidate_calculation
+        FOREIGN KEY (project_id, calculation_run_id)
+        REFERENCES calculation_runs(project_id, calculation_run_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_candidate_supersedes_scope
+        FOREIGN KEY (supersedes_candidate_id, tenant_id, project_id)
+        REFERENCES parsed_fact_candidates(candidate_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_candidate_origin
+        CHECK (origin_type IN ('extracted', 'derived', 'inferred', 'overridden')),
+    CONSTRAINT ck_parser_candidate_presence
+        CHECK (presence_status IN ('present', 'missing', 'not_disclosed', 'not_applicable', 'pending')),
+    CONSTRAINT ck_parser_candidate_review
+        CHECK (review_status IN ('not_required', 'pending', 'in_review', 'approved', 'rejected', 'needs_revision')),
+    CONSTRAINT ck_parser_candidate_approval
+        CHECK (approval_status IN ('not_requested', 'pending', 'approved', 'rejected', 'superseded')),
+    CONSTRAINT ck_parser_candidate_not_authoritative
+        CHECK (approval_status <> 'approved'),
+    CONSTRAINT ck_parser_candidate_conflict
+        CHECK (conflict_status IN ('none', 'open', 'resolved', 'waived')),
+    CONSTRAINT ck_parser_candidate_confidence
+        CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+    CONSTRAINT ck_parser_candidate_validation_status
+        CHECK (validation_status IN ('passed', 'passed_with_findings', 'blocked')),
+    CONSTRAINT ck_parser_candidate_field_registry
+        CHECK (btrim(field_registry_version) <> ''),
+    CONSTRAINT ck_parser_candidate_validation_codes
+        CHECK (array_position(validation_codes, NULL) IS NULL),
+    CONSTRAINT ck_parser_candidate_validation_count
+        CHECK (
+            validation_finding_count >= 0
+            AND (
+                validation_status <> 'blocked'
+                OR (validation_finding_count > 0 AND cardinality(validation_codes) > 0)
+            )
+        ),
+    CONSTRAINT ck_parser_candidate_presence_value
+        CHECK (presence_status = 'present' OR normalized_value IS NULL),
+    CONSTRAINT ck_parser_candidate_derivation
+        CHECK (
+            (
+                origin_type = 'derived'
+                AND formula_id IS NOT NULL
+                AND formula_version IS NOT NULL
+                AND calculation_run_id IS NOT NULL
+                AND calculation_engine_version IS NOT NULL
+                AND btrim(calculation_engine_version) <> ''
+                AND calculation_output_path IS NOT NULL
+                AND btrim(calculation_output_path) <> ''
+                AND calculation_output_hash IS NOT NULL
+                AND input_snapshot_hash IS NOT NULL
+            )
+            OR
+            (
+                origin_type <> 'derived'
+                AND formula_id IS NULL
+                AND formula_version IS NULL
+                AND calculation_run_id IS NULL
+                AND calculation_engine_version IS NULL
+                AND calculation_output_path IS NULL
+                AND calculation_output_hash IS NULL
+                AND input_snapshot_hash IS NULL
+            )
+        ),
+    CONSTRAINT ck_parser_candidate_output_hash
+        CHECK (calculation_output_hash IS NULL OR calculation_output_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_candidate_input_snapshot_hash
+        CHECK (input_snapshot_hash IS NULL OR input_snapshot_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_candidate_hash
+        CHECK (candidate_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_candidate_not_self_superseding
+        CHECK (supersedes_candidate_id IS NULL OR supersedes_candidate_id <> candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parsed_fact_candidates_run
+    ON parsed_fact_candidates(tenant_id, project_id, parsing_run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_parsed_fact_candidates_field
+    ON parsed_fact_candidates(tenant_id, project_id, field_key, entity_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parsed_fact_candidates_review_queue
+    ON parsed_fact_candidates(tenant_id, project_id, review_status, conflict_status, validation_status, created_at)
+    WHERE review_status IN ('pending', 'in_review', 'needs_revision')
+       OR conflict_status = 'open'
+       OR validation_status = 'blocked';
+CREATE INDEX IF NOT EXISTS idx_parsed_fact_candidates_validation
+    ON parsed_fact_candidates(tenant_id, project_id, field_registry_version, validation_status, created_at DESC)
+    WHERE validation_status <> 'passed';
+CREATE INDEX IF NOT EXISTS idx_parsed_fact_candidates_calculation
+    ON parsed_fact_candidates(tenant_id, project_id, calculation_run_id, calculation_engine_version, created_at DESC)
+    WHERE origin_type = 'derived';
+CREATE INDEX IF NOT EXISTS idx_parsed_fact_candidates_payload_gin
+    ON parsed_fact_candidates USING GIN(payload_json);
+
+-- Derived candidates preserve an explicit, project-scoped input-fact graph.
+CREATE TABLE IF NOT EXISTS parser_candidate_inputs (
+    tenant_id          TEXT NOT NULL,
+    project_id         TEXT NOT NULL,
+    candidate_id       TEXT NOT NULL,
+    input_candidate_id TEXT NOT NULL,
+    input_order        INTEGER NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (candidate_id, input_candidate_id),
+    CONSTRAINT fk_parser_candidate_input_output_scope
+        FOREIGN KEY (candidate_id, tenant_id, project_id)
+        REFERENCES parsed_fact_candidates(candidate_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_candidate_input_source_scope
+        FOREIGN KEY (input_candidate_id, tenant_id, project_id)
+        REFERENCES parsed_fact_candidates(candidate_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_candidate_input_order
+        CHECK (input_order >= 0),
+    CONSTRAINT ck_parser_candidate_input_not_self
+        CHECK (candidate_id <> input_candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_candidate_inputs_source
+    ON parser_candidate_inputs(tenant_id, project_id, input_candidate_id);
+
+-- Validation findings are first-class queryable rows rather than opaque prompt
+-- output. Candidate-scoped findings use a composite FK that also proves the
+-- candidate belongs to the declared parsing run and tenant/project boundary.
+-- The observed finding payload is immutable; lifecycle changes are separate
+-- append-only parser_validation_finding_events.
+CREATE TABLE IF NOT EXISTS parser_validation_findings (
+    finding_id             TEXT PRIMARY KEY,
+    tenant_id              TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id             TEXT NOT NULL,
+    parsing_run_id         TEXT NOT NULL,
+    candidate_id           TEXT,
+    field_registry_version TEXT NOT NULL,
+    code                   TEXT NOT NULL,
+    severity               TEXT NOT NULL,
+    message                TEXT NOT NULL,
+    blocking               BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at             TIMESTAMPTZ NOT NULL,
+    finding_hash           TEXT NOT NULL,
+    payload_json           JSONB NOT NULL,
+    UNIQUE (finding_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, parsing_run_id, finding_hash),
+    CONSTRAINT fk_parser_validation_finding_run_scope
+        FOREIGN KEY (parsing_run_id, tenant_id, project_id)
+        REFERENCES parser_runs(parsing_run_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_validation_finding_candidate_scope
+        FOREIGN KEY (candidate_id, parsing_run_id, tenant_id, project_id)
+        REFERENCES parsed_fact_candidates(candidate_id, parsing_run_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_validation_finding_registry
+        CHECK (btrim(field_registry_version) <> ''),
+    CONSTRAINT ck_parser_validation_finding_code
+        CHECK (code ~ '^[A-Z][A-Z0-9_]*$'),
+    CONSTRAINT ck_parser_validation_finding_severity
+        CHECK (severity IN ('info', 'warning', 'error', 'critical')),
+    CONSTRAINT ck_parser_validation_finding_message
+        CHECK (btrim(message) <> ''),
+    CONSTRAINT ck_parser_validation_finding_hash
+        CHECK (finding_hash ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS idx_parser_validation_findings_queue
+    ON parser_validation_findings(tenant_id, project_id, blocking DESC, severity, created_at);
+CREATE INDEX IF NOT EXISTS idx_parser_validation_findings_candidate
+    ON parser_validation_findings(tenant_id, project_id, candidate_id, created_at DESC)
+    WHERE candidate_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_parser_validation_findings_code
+    ON parser_validation_findings(tenant_id, project_id, field_registry_version, code, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS parser_validation_finding_events (
+    finding_event_id TEXT PRIMARY KEY,
+    tenant_id        TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id       TEXT NOT NULL,
+    finding_id       TEXT NOT NULL,
+    sequence_number  INTEGER NOT NULL,
+    event_type       TEXT NOT NULL,
+    actor_id         TEXT NOT NULL,
+    occurred_at      TIMESTAMPTZ NOT NULL,
+    resolution_note  TEXT NOT NULL,
+    event_hash       TEXT NOT NULL,
+    payload_json     JSONB NOT NULL,
+    UNIQUE (finding_event_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, finding_id, sequence_number),
+    UNIQUE (tenant_id, project_id, finding_id, event_hash),
+    CONSTRAINT fk_parser_validation_finding_event_scope
+        FOREIGN KEY (finding_id, tenant_id, project_id)
+        REFERENCES parser_validation_findings(finding_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_validation_finding_event_type
+        CHECK (event_type IN ('resolved', 'reopened', 'waived')),
+    CONSTRAINT ck_parser_validation_finding_event_sequence
+        CHECK (sequence_number >= 1),
+    CONSTRAINT ck_parser_validation_finding_event_actor
+        CHECK (btrim(actor_id) <> ''),
+    CONSTRAINT ck_parser_validation_finding_event_note
+        CHECK (btrim(resolution_note) <> ''),
+    CONSTRAINT ck_parser_validation_finding_event_hash
+        CHECK (event_hash ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS idx_parser_validation_finding_events_finding
+    ON parser_validation_finding_events(tenant_id, project_id, finding_id, sequence_number DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_validation_finding_events_type
+    ON parser_validation_finding_events(tenant_id, project_id, event_type, occurred_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Append-only human review decisions
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parser_review_decisions (
+    review_decision_id          TEXT PRIMARY KEY,
+    tenant_id                   TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id                  TEXT NOT NULL,
+    candidate_id                TEXT NOT NULL,
+    decision_sequence           INTEGER NOT NULL DEFAULT 1,
+    action                      TEXT NOT NULL,
+    resulting_review_status     TEXT NOT NULL,
+    resulting_approval_status   TEXT NOT NULL,
+    reviewer_id                 TEXT NOT NULL,
+    decided_at                  TIMESTAMPTZ NOT NULL,
+    reason                      TEXT NOT NULL,
+    decision_hash               TEXT NOT NULL,
+    payload_json                JSONB NOT NULL,
+    UNIQUE (review_decision_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, candidate_id, decision_sequence),
+    UNIQUE (tenant_id, project_id, candidate_id, decision_hash),
+    CONSTRAINT fk_parser_review_candidate_scope
+        FOREIGN KEY (candidate_id, tenant_id, project_id)
+        REFERENCES parsed_fact_candidates(candidate_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_review_action
+        CHECK (action IN ('approve', 'reject', 'request_revision')),
+    CONSTRAINT ck_parser_review_status
+        CHECK (resulting_review_status IN ('approved', 'rejected', 'needs_revision')),
+    CONSTRAINT ck_parser_review_approval
+        CHECK (resulting_approval_status IN ('approved', 'rejected', 'pending')),
+    CONSTRAINT ck_parser_review_result
+        CHECK (
+            (action = 'approve' AND resulting_review_status = 'approved' AND resulting_approval_status = 'approved')
+            OR (action = 'reject' AND resulting_review_status = 'rejected' AND resulting_approval_status = 'rejected')
+            OR (action = 'request_revision' AND resulting_review_status = 'needs_revision' AND resulting_approval_status = 'pending')
+        ),
+    CONSTRAINT ck_parser_review_sequence
+        CHECK (decision_sequence >= 1),
+    CONSTRAINT ck_parser_review_hash
+        CHECK (decision_hash ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS idx_parser_review_decisions_candidate
+    ON parser_review_decisions(tenant_id, project_id, candidate_id, decision_sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_review_decisions_reviewer
+    ON parser_review_decisions(tenant_id, reviewer_id, decided_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Source conflicts and their relational candidate/decision membership
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parser_source_conflicts (
+    conflict_id                    TEXT PRIMARY KEY,
+    tenant_id                     TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id                    TEXT NOT NULL,
+    -- Optional run that detected the conflict. The conflicting claims may
+    -- originate from multiple runs/documents through parser_conflict_candidates.
+    parsing_run_id                TEXT,
+    field_key                    TEXT NOT NULL,
+    entity_id                    TEXT,
+    conflict_type                TEXT NOT NULL,
+    conflict_status              TEXT NOT NULL DEFAULT 'open',
+    candidate_count              INTEGER NOT NULL,
+    conflict_hash                TEXT NOT NULL,
+    detected_at                  TIMESTAMPTZ NOT NULL,
+    resolution_review_decision_id TEXT,
+    resolved_at                  TIMESTAMPTZ,
+    supersedes_conflict_id       TEXT,
+    payload_json                 JSONB NOT NULL,
+    UNIQUE (conflict_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, conflict_hash),
+    CONSTRAINT fk_parser_conflict_run_scope
+        FOREIGN KEY (parsing_run_id, tenant_id, project_id)
+        REFERENCES parser_runs(parsing_run_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_conflict_resolution_scope
+        FOREIGN KEY (resolution_review_decision_id, tenant_id, project_id)
+        REFERENCES parser_review_decisions(review_decision_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_conflict_supersedes_scope
+        FOREIGN KEY (supersedes_conflict_id, tenant_id, project_id)
+        REFERENCES parser_source_conflicts(conflict_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_conflict_status
+        CHECK (conflict_status IN ('open', 'resolved', 'waived')),
+    CONSTRAINT ck_parser_conflict_candidates
+        CHECK (candidate_count >= 2),
+    CONSTRAINT ck_parser_conflict_hash
+        CHECK (conflict_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_conflict_resolution
+        CHECK (
+            conflict_status = 'open'
+            AND resolution_review_decision_id IS NULL
+            AND resolved_at IS NULL
+        ),
+    CONSTRAINT ck_parser_conflict_not_self_superseding
+        CHECK (supersedes_conflict_id IS NULL OR supersedes_conflict_id <> conflict_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_source_conflicts_open
+    ON parser_source_conflicts(tenant_id, project_id, detected_at)
+    WHERE conflict_status = 'open';
+CREATE INDEX IF NOT EXISTS idx_parser_source_conflicts_field
+    ON parser_source_conflicts(tenant_id, project_id, field_key, entity_id, detected_at DESC);
+
+-- Conflict closure is an explicit event. The original conflicting claims remain
+-- immutable, and the effective status is materialized from the latest event.
+CREATE TABLE IF NOT EXISTS parser_source_conflict_events (
+    conflict_event_id  TEXT PRIMARY KEY,
+    tenant_id          TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id         TEXT NOT NULL,
+    conflict_id        TEXT NOT NULL,
+    sequence_number    INTEGER NOT NULL,
+    conflict_status    TEXT NOT NULL,
+    review_decision_id TEXT NOT NULL,
+    actor_id           TEXT NOT NULL,
+    resolved_at        TIMESTAMPTZ NOT NULL,
+    event_hash         TEXT NOT NULL,
+    payload_json       JSONB NOT NULL,
+    UNIQUE (conflict_event_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, conflict_id, sequence_number),
+    UNIQUE (tenant_id, project_id, conflict_id, event_hash),
+    CONSTRAINT fk_parser_conflict_event_conflict_scope
+        FOREIGN KEY (conflict_id, tenant_id, project_id)
+        REFERENCES parser_source_conflicts(conflict_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_conflict_event_review_scope
+        FOREIGN KEY (review_decision_id, tenant_id, project_id)
+        REFERENCES parser_review_decisions(review_decision_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_conflict_event_status
+        CHECK (conflict_status IN ('resolved', 'waived')),
+    CONSTRAINT ck_parser_conflict_event_sequence
+        CHECK (sequence_number >= 1),
+    CONSTRAINT ck_parser_conflict_event_hash
+        CHECK (event_hash ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS idx_parser_source_conflict_events_conflict
+    ON parser_source_conflict_events(tenant_id, project_id, conflict_id, sequence_number DESC);
+
+CREATE TABLE IF NOT EXISTS parser_conflict_candidates (
+    tenant_id    TEXT NOT NULL,
+    project_id   TEXT NOT NULL,
+    conflict_id  TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    ordinal      INTEGER NOT NULL DEFAULT 0,
+    created_at   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (conflict_id, candidate_id),
+    UNIQUE (conflict_id, ordinal),
+    CONSTRAINT fk_parser_conflict_member_conflict_scope
+        FOREIGN KEY (conflict_id, tenant_id, project_id)
+        REFERENCES parser_source_conflicts(conflict_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_conflict_member_candidate_scope
+        FOREIGN KEY (candidate_id, tenant_id, project_id)
+        REFERENCES parsed_fact_candidates(candidate_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_conflict_member_ordinal
+        CHECK (ordinal >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_conflict_candidates_candidate
+    ON parser_conflict_candidates(tenant_id, project_id, candidate_id);
+
+CREATE TABLE IF NOT EXISTS parser_review_decision_conflicts (
+    tenant_id          TEXT NOT NULL,
+    project_id         TEXT NOT NULL,
+    review_decision_id TEXT NOT NULL,
+    conflict_id        TEXT NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (review_decision_id, conflict_id),
+    CONSTRAINT fk_parser_review_conflict_decision_scope
+        FOREIGN KEY (review_decision_id, tenant_id, project_id)
+        REFERENCES parser_review_decisions(review_decision_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_review_conflict_conflict_scope
+        FOREIGN KEY (conflict_id, tenant_id, project_id)
+        REFERENCES parser_source_conflicts(conflict_id, tenant_id, project_id)
+        ON DELETE RESTRICT
+);
+
+-- ---------------------------------------------------------------------------
+-- Versioned canonical selections and immutable approved input snapshots
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parser_canonical_selections (
+    selection_id                   TEXT PRIMARY KEY,
+    tenant_id                     TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id                    TEXT NOT NULL,
+    field_key                    TEXT NOT NULL,
+    entity_id                    TEXT,
+    candidate_id                 TEXT NOT NULL,
+    review_decision_id           TEXT,
+    approval_status              TEXT NOT NULL DEFAULT 'pending',
+    conflict_status              TEXT NOT NULL DEFAULT 'none',
+    normalized_value             JSONB,
+    unit                         TEXT,
+    field_registry_version       TEXT NOT NULL,
+    selection_version            INTEGER NOT NULL DEFAULT 1,
+    selection_hash               TEXT NOT NULL,
+    selected_by                  TEXT NOT NULL,
+    selected_at                  TIMESTAMPTZ NOT NULL,
+    effective_date               DATE,
+    as_of_date                   DATE,
+    supersedes_selection_id      TEXT,
+    payload_json                 JSONB NOT NULL,
+    UNIQUE (selection_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, selection_hash),
+    CONSTRAINT fk_parser_selection_candidate_scope
+        FOREIGN KEY (candidate_id, tenant_id, project_id)
+        REFERENCES parsed_fact_candidates(candidate_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_selection_review_scope
+        FOREIGN KEY (review_decision_id, tenant_id, project_id)
+        REFERENCES parser_review_decisions(review_decision_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_selection_supersedes_scope
+        FOREIGN KEY (supersedes_selection_id, tenant_id, project_id)
+        REFERENCES parser_canonical_selections(selection_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_selection_approval
+        CHECK (approval_status IN ('pending', 'approved', 'rejected', 'superseded')),
+    CONSTRAINT ck_parser_selection_conflict
+        CHECK (conflict_status IN ('none', 'open', 'resolved', 'waived')),
+    CONSTRAINT ck_parser_selection_version
+        CHECK (selection_version >= 1),
+    CONSTRAINT ck_parser_selection_registry
+        CHECK (btrim(field_registry_version) <> ''),
+    CONSTRAINT ck_parser_selection_hash
+        CHECK (selection_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_selection_approved
+        CHECK (approval_status <> 'approved' OR (review_decision_id IS NOT NULL AND conflict_status <> 'open')),
+    CONSTRAINT ck_parser_selection_not_self_superseding
+        CHECK (supersedes_selection_id IS NULL OR supersedes_selection_id <> selection_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_parser_canonical_selection_version
+    ON parser_canonical_selections(tenant_id, project_id, field_key, COALESCE(entity_id, ''), selection_version);
+CREATE INDEX IF NOT EXISTS idx_parser_canonical_selections_candidate
+    ON parser_canonical_selections(tenant_id, project_id, candidate_id, selected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_canonical_selections_current
+    ON parser_canonical_selections(tenant_id, project_id, field_key, entity_id, selection_version DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_canonical_selections_registry
+    ON parser_canonical_selections(tenant_id, project_id, field_registry_version, selected_at DESC);
+
+CREATE TABLE IF NOT EXISTS parser_approved_snapshots (
+    snapshot_id            TEXT PRIMARY KEY,
+    tenant_id              TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id             TEXT NOT NULL,
+    purpose                TEXT NOT NULL,
+    snapshot_version       INTEGER NOT NULL,
+    approval_status        TEXT NOT NULL DEFAULT 'approved',
+    input_schema_version   TEXT NOT NULL,
+    ontology_version       TEXT NOT NULL,
+    field_registry_version TEXT NOT NULL,
+    snapshot_hash          TEXT NOT NULL,
+    selection_count        INTEGER NOT NULL,
+    source_run_count       INTEGER NOT NULL,
+    approved_by            TEXT NOT NULL,
+    approved_at            TIMESTAMPTZ NOT NULL,
+    supersedes_snapshot_id TEXT,
+    payload_json           JSONB NOT NULL,
+    UNIQUE (snapshot_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, purpose, snapshot_version),
+    UNIQUE (tenant_id, project_id, snapshot_hash),
+    CONSTRAINT fk_parser_snapshot_project_scope
+        FOREIGN KEY (project_id, tenant_id)
+        REFERENCES projects(project_id, tenant_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_snapshot_supersedes_scope
+        FOREIGN KEY (supersedes_snapshot_id, tenant_id, project_id)
+        REFERENCES parser_approved_snapshots(snapshot_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_snapshot_approval
+        CHECK (approval_status = 'approved'),
+    CONSTRAINT ck_parser_snapshot_version
+        CHECK (snapshot_version >= 1),
+    CONSTRAINT ck_parser_snapshot_registry
+        CHECK (btrim(field_registry_version) <> ''),
+    CONSTRAINT ck_parser_snapshot_counts
+        CHECK (selection_count >= 1 AND source_run_count >= 1),
+    CONSTRAINT ck_parser_snapshot_hash
+        CHECK (snapshot_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_snapshot_not_self_superseding
+        CHECK (supersedes_snapshot_id IS NULL OR supersedes_snapshot_id <> snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_approved_snapshots_project
+    ON parser_approved_snapshots(tenant_id, project_id, purpose, snapshot_version DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_approved_snapshots_approved
+    ON parser_approved_snapshots(tenant_id, approved_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_approved_snapshots_registry
+    ON parser_approved_snapshots(tenant_id, project_id, field_registry_version, approved_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_approved_snapshots_payload_gin
+    ON parser_approved_snapshots USING GIN(payload_json);
+
+CREATE TABLE IF NOT EXISTS parser_snapshot_selections (
+    tenant_id    TEXT NOT NULL,
+    project_id   TEXT NOT NULL,
+    snapshot_id  TEXT NOT NULL,
+    selection_id TEXT NOT NULL,
+    ordinal      INTEGER NOT NULL DEFAULT 0,
+    created_at   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (snapshot_id, selection_id),
+    UNIQUE (snapshot_id, ordinal),
+    CONSTRAINT fk_parser_snapshot_selection_snapshot_scope
+        FOREIGN KEY (snapshot_id, tenant_id, project_id)
+        REFERENCES parser_approved_snapshots(snapshot_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_snapshot_selection_selection_scope
+        FOREIGN KEY (selection_id, tenant_id, project_id)
+        REFERENCES parser_canonical_selections(selection_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_snapshot_selection_ordinal
+        CHECK (ordinal >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_snapshot_selections_selection
+    ON parser_snapshot_selections(tenant_id, project_id, selection_id);
+
+CREATE TABLE IF NOT EXISTS parser_snapshot_source_runs (
+    tenant_id      TEXT NOT NULL,
+    project_id     TEXT NOT NULL,
+    snapshot_id    TEXT NOT NULL,
+    parsing_run_id TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (snapshot_id, parsing_run_id),
+    CONSTRAINT fk_parser_snapshot_run_snapshot_scope
+        FOREIGN KEY (snapshot_id, tenant_id, project_id)
+        REFERENCES parser_approved_snapshots(snapshot_id, tenant_id, project_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_parser_snapshot_run_run_scope
+        FOREIGN KEY (parsing_run_id, tenant_id, project_id)
+        REFERENCES parser_runs(parsing_run_id, tenant_id, project_id)
+        ON DELETE RESTRICT
+);
+
+-- Append-only invalidation ledger for immutable records. A replacement ID is
+-- optional because a reviewer may withdraw an approval before a replacement is
+-- available. Polymorphic target IDs are validated by the repository transaction.
+CREATE TABLE IF NOT EXISTS parser_validity_events (
+    validity_event_id    TEXT PRIMARY KEY,
+    tenant_id            TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE RESTRICT,
+    project_id           TEXT NOT NULL,
+    aggregate_type       TEXT NOT NULL,
+    aggregate_id         TEXT NOT NULL,
+    event_type           TEXT NOT NULL,
+    replacement_id       TEXT,
+    actor_id             TEXT NOT NULL,
+    reason               TEXT NOT NULL,
+    occurred_at          TIMESTAMPTZ NOT NULL,
+    event_hash           TEXT NOT NULL,
+    payload_json         JSONB NOT NULL,
+    UNIQUE (validity_event_id, tenant_id, project_id),
+    UNIQUE (tenant_id, project_id, aggregate_type, aggregate_id, event_hash),
+    CONSTRAINT fk_parser_validity_event_project_scope
+        FOREIGN KEY (project_id, tenant_id)
+        REFERENCES projects(project_id, tenant_id) ON DELETE RESTRICT,
+    CONSTRAINT ck_parser_validity_event_aggregate
+        CHECK (aggregate_type IN ('document_version', 'parsed_fact_candidate', 'source_conflict', 'canonical_selection', 'approved_snapshot')),
+    CONSTRAINT ck_parser_validity_event_type
+        CHECK (event_type IN ('invalidated', 'superseded', 'withdrawn')),
+    CONSTRAINT ck_parser_validity_event_hash
+        CHECK (event_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_parser_validity_event_replacement
+        CHECK (replacement_id IS NULL OR replacement_id <> aggregate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parser_validity_events_aggregate
+    ON parser_validity_events(tenant_id, project_id, aggregate_type, aggregate_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_parser_validity_events_project
+    ON parser_validity_events(tenant_id, project_id, occurred_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Append-only enforcement. Supersede or invalidate by inserting a new decision,
+-- version, selection, or snapshot; never mutate the historical row in place.
+-- Octal semicolons keep this migration compatible with db/postgres.py's simple
+-- statement loader while PostgreSQL receives a normal PL/pgSQL function body.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION parser_reject_append_only_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS E'BEGIN\n    RAISE EXCEPTION ''% is append-only: % requires a superseding event or row'', TG_TABLE_NAME, TG_OP USING ERRCODE = ''55000''\073\n    RETURN OLD\073\nEND\073';
+
+DROP TRIGGER IF EXISTS trg_parser_project_profiles_append_only ON parser_project_profiles;
+CREATE TRIGGER trg_parser_project_profiles_append_only
+    BEFORE UPDATE OR DELETE ON parser_project_profiles
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_document_versions_append_only ON parser_document_versions;
+CREATE TRIGGER trg_parser_document_versions_append_only
+    BEFORE UPDATE OR DELETE ON parser_document_versions
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_runs_append_only ON parser_runs;
+CREATE TRIGGER trg_parser_runs_append_only
+    BEFORE UPDATE OR DELETE ON parser_runs
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_run_events_append_only ON parser_run_events;
+CREATE TRIGGER trg_parser_run_events_append_only
+    BEFORE UPDATE OR DELETE ON parser_run_events
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_candidate_set_seals_append_only ON parser_candidate_set_seals;
+CREATE TRIGGER trg_parser_candidate_set_seals_append_only
+    BEFORE UPDATE OR DELETE ON parser_candidate_set_seals
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parsed_fact_candidates_append_only ON parsed_fact_candidates;
+CREATE TRIGGER trg_parsed_fact_candidates_append_only
+    BEFORE UPDATE OR DELETE ON parsed_fact_candidates
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_candidate_inputs_append_only ON parser_candidate_inputs;
+CREATE TRIGGER trg_parser_candidate_inputs_append_only
+    BEFORE UPDATE OR DELETE ON parser_candidate_inputs
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_validation_findings_append_only ON parser_validation_findings;
+CREATE TRIGGER trg_parser_validation_findings_append_only
+    BEFORE UPDATE OR DELETE ON parser_validation_findings
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_validation_finding_events_append_only ON parser_validation_finding_events;
+CREATE TRIGGER trg_parser_validation_finding_events_append_only
+    BEFORE UPDATE OR DELETE ON parser_validation_finding_events
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_review_decisions_append_only ON parser_review_decisions;
+CREATE TRIGGER trg_parser_review_decisions_append_only
+    BEFORE UPDATE OR DELETE ON parser_review_decisions
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_conflict_candidates_append_only ON parser_conflict_candidates;
+CREATE TRIGGER trg_parser_conflict_candidates_append_only
+    BEFORE UPDATE OR DELETE ON parser_conflict_candidates
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_review_conflicts_append_only ON parser_review_decision_conflicts;
+CREATE TRIGGER trg_parser_review_conflicts_append_only
+    BEFORE UPDATE OR DELETE ON parser_review_decision_conflicts
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_source_conflicts_append_only ON parser_source_conflicts;
+CREATE TRIGGER trg_parser_source_conflicts_append_only
+    BEFORE UPDATE OR DELETE ON parser_source_conflicts
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_source_conflict_events_append_only ON parser_source_conflict_events;
+CREATE TRIGGER trg_parser_source_conflict_events_append_only
+    BEFORE UPDATE OR DELETE ON parser_source_conflict_events
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_canonical_selections_append_only ON parser_canonical_selections;
+CREATE TRIGGER trg_parser_canonical_selections_append_only
+    BEFORE UPDATE OR DELETE ON parser_canonical_selections
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_approved_snapshots_append_only ON parser_approved_snapshots;
+CREATE TRIGGER trg_parser_approved_snapshots_append_only
+    BEFORE UPDATE OR DELETE ON parser_approved_snapshots
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_snapshot_selections_append_only ON parser_snapshot_selections;
+CREATE TRIGGER trg_parser_snapshot_selections_append_only
+    BEFORE UPDATE OR DELETE ON parser_snapshot_selections
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_snapshot_runs_append_only ON parser_snapshot_source_runs;
+CREATE TRIGGER trg_parser_snapshot_runs_append_only
+    BEFORE UPDATE OR DELETE ON parser_snapshot_source_runs
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();
+
+DROP TRIGGER IF EXISTS trg_parser_validity_events_append_only ON parser_validity_events;
+CREATE TRIGGER trg_parser_validity_events_append_only
+    BEFORE UPDATE OR DELETE ON parser_validity_events
+    FOR EACH ROW EXECUTE FUNCTION parser_reject_append_only_mutation();

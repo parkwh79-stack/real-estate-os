@@ -7,7 +7,7 @@ records) but ``feasibility_input`` is empty, the cash flow shows all zeros.
 
 This use case pulls those values into a ``feasibility_input`` draft, in priority:
   1. existing non-zero feasibility_input (kept)
-  2. canonical feasibilityStudyV2.metrics (workbook import)     — high confidence
+  2. approved canonicalFeasibilityStudyV2.metrics               — high confidence
   3. parsed_fact records (feasibility_input.*)                   — parsed document
   4. deterministic derivation from product planning + market price + land 공시지가
      + construction benchmark                                    — needs review
@@ -20,6 +20,10 @@ values stay missing (listed in ``missing``) — never fabricated to a made-up nu
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+
+from use_cases.approved_workbook_authority import (
+    has_authoritative_workbook_snapshot_binding,
+)
 
 FEASIBILITY_INPUT_BUILDER_SCHEMA = "realytics-feasibility-input-draft-v1"
 
@@ -155,7 +159,7 @@ def build_feasibility_input_draft(
     options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     existing = project_data.get("feasibility_input") or {}
-    v2 = project_data.get("feasibilityStudyV2") or {}
+    v2 = _approved_feasibility_study(project_data)
     v2_metrics = (v2.get("metrics") or {}) if isinstance(v2, dict) else {}
 
     fields: Dict[str, Any] = {}
@@ -168,7 +172,7 @@ def build_feasibility_input_draft(
         fields[field] = num
         sources[field] = {"source": source, "confidence": confidence, "needsReview": needs_review}
 
-    # 1) canonical feasibilityStudyV2 metrics (approved 사업수지 workbook) = AUTHORITATIVE.
+    # 1) Explicitly approved canonical FeasibilityStudyV2 metrics = AUTHORITATIVE.
     #    This must win over any existing feasibility_input, because the latter can hold
     #    stale auto_supplement placeholders (e.g. 751 had fake 750/600억 shadowing the
     #    real 8,540/7,794억 approved workbook). The approved workbook IS the 사업수지.
@@ -176,8 +180,14 @@ def build_feasibility_input_draft(
         _set(field, v2_metrics.get(field), "feasibility_workbook_v2", 0.92)
 
     # 2) existing feasibility_input for any field the workbook does not cover
+    previous_sources = project_data.get("feasibility_input_sources") or {}
     for field in FIELDS:
-        _set(field, existing.get(field), "feasibility_input", 0.8)
+        previous = previous_sources.get(field) or {}
+        if previous and _num(previous.get("value")) == _num(existing.get(field)):
+            _set(field, existing.get(field), str(previous.get("source") or "feasibility_input"),
+                 float(previous.get("confidence") or 0.6), needs_review=previous.get("needsReview") is not False)
+        else:
+            _set(field, existing.get(field), "feasibility_input", 0.6, needs_review=True)
 
     # 3) parsed_fact records for feasibility fields. Distinguish REAL parsed document
     #    values from auto_supplement benchmark PROXIES (factOrigin=auto_supplement) —
@@ -248,7 +258,23 @@ def build_feasibility_input_draft(
         "programBreakdown": program_breakdown,
         "hasRevenueAndCost": bool(fields.get("total_revenue") and fields.get("total_cost")),
         "note": (
-            "파싱된 사업수지(feasibilityStudyV2/parsed_fact)를 우선 사용하고, 없으면 토지·규제·상품기획·"
+            "승인된 사업수지(canonicalFeasibilityStudyV2)와 parsed_fact를 우선 사용하고, 없으면 토지·규제·상품기획·"
             "시장가·공시지가로 결정론 추정합니다. 추정값은 needsReview로 표기되며 승인 전 검토가 필요합니다."
         ),
     }
+
+
+def _approved_feasibility_study(project_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only an explicitly approved workbook study.
+
+    ``feasibilityStudyV2`` is retained as a legacy mirror after approval, but a
+    candidate draft with the same shape must never become authoritative merely
+    because it exists in project JSON.
+    """
+    for key in ("canonicalFeasibilityStudyV2", "feasibilityStudyV2"):
+        study = project_data.get(key)
+        if not isinstance(study, dict):
+            continue
+        if has_authoritative_workbook_snapshot_binding(study):
+            return study
+    return {}

@@ -19,6 +19,10 @@ type PlanRow = {
   incomeValue?: number | null;
   assumptionBasis?: string;
   notes?: string[];
+  scenarioEligibility?: {
+    eligibility?: "eligible" | "conditional" | "ineligible" | "not_assessable";
+    reportGrade?: boolean;
+  };
 };
 
 type PlanResult = {
@@ -29,6 +33,8 @@ type PlanResult = {
   pricedCount?: number;
   rows: PlanRow[];
   topByValue?: { assetTypeLabel?: string; value?: number; valueKind?: string } | null;
+  exploratoryTopByValue?: { assetTypeLabel?: string; value?: number; valueKind?: string } | null;
+  recommendationStatus?: "report_grade" | "exploratory" | "blocked";
   dataQualityNotes?: string[];
   notes?: string;
 };
@@ -84,9 +90,17 @@ export function ProductPlanningPanel({ projectId }: { projectId: string }) {
           <Building2 className="h-5 w-5 text-indigo-600" />
           <h2 className="text-lg font-black text-slate-950 dark:text-white">자산유형별 상품기획</h2>
         </div>
-        {result?.topByValue?.assetTypeLabel ? (
+        {result?.recommendationStatus === "report_grade" && result.topByValue?.assetTypeLabel ? (
           <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
             최고 산출가치: {result.topByValue.assetTypeLabel}
+          </span>
+        ) : result?.recommendationStatus === "exploratory" && result.exploratoryTopByValue?.assetTypeLabel ? (
+          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-black text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+            탐색 후보(승인 전): {result.exploratoryTopByValue.assetTypeLabel}
+          </span>
+        ) : result?.recommendationStatus === "blocked" ? (
+          <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-black text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+            법률·규제 검토 필요
           </span>
         ) : null}
       </div>

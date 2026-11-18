@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from agent_platform.pf_review_runtime import run_pf_review_with_durable_runtime
+from db.repositories.runtime_record_repository import WorkerLeaseLost
 
 
 JOB_SCHEMA_VERSION = "realytics-async-job-v2"
@@ -223,16 +224,34 @@ def submit_pf_review_job(
 
 
 def process_next_pf_review_job(
-    orchestration_repository: Any,
+    orchestration_repository: Any | None,
     *,
     worker_id: str,
     store: Optional[JobStore] = None,
+    repository_factory: Callable[[Dict[str, Any]], Any] | None = None,
 ) -> Dict[str, Any] | None:
     store = store or _STORE
     job = store.claim(worker_id=worker_id)
     if job is None:
         return None
-    return _execute_job(job, orchestration_repository, store, already_claimed=True)
+    try:
+        repository = (
+            repository_factory(job)
+            if repository_factory is not None
+            else orchestration_repository
+        )
+        if repository is None:
+            raise RuntimeError("PF review worker repository is not configured")
+    except Exception as exc:
+        return store.update(
+            job["jobId"],
+            status="failed",
+            completedAt=_now(),
+            leaseOwner=None,
+            leaseExpiresAt=None,
+            error=f"repository_configuration_failed:{exc.__class__.__name__}",
+        )
+    return _execute_job(job, repository, store, already_claimed=True)
 
 
 def cancel_pf_review_job(job_id: str, *, reason: str, store: Optional[JobStore] = None) -> Dict[str, Any] | None:
@@ -295,14 +314,40 @@ def recover_interrupted_jobs(
 
 
 class PFReviewJobWorker:
-    def __init__(self, repository_factory: Callable[[], Any], *, worker_id: str | None = None) -> None:
+    def __init__(
+        self,
+        repository_factory: Callable[[Dict[str, Any]], Any],
+        *,
+        worker_id: str | None = None,
+        store: Optional[JobStore] = None,
+        tenant_id: str | None = None,
+    ) -> None:
         self.repository_factory = repository_factory
         self.worker_id = worker_id or f"pf-review-worker:{uuid4()}"
+        self.store = store
+        self.tenant_id = tenant_id
 
     def run_once(self) -> Dict[str, Any] | None:
+        from storage import storage_backend
+        if storage_backend() == "postgres" and (self.store is None or self.store._persistent):
+            if not self.tenant_id:
+                raise RuntimeError("A configured tenant_id is required for the PostgreSQL PF worker")
+            from db.postgres_runtime_pool import pf_worker_tenant_transaction
+            from db.repositories.postgres_project_repository import PostgresProjectRepository
+            from db.repositories.request_project_repository import project_request_scope
+            with project_request_scope(
+                lambda: PostgresProjectRepository(tenant_id=self.tenant_id, transaction_factory=pf_worker_tenant_transaction),
+                transaction_factory=pf_worker_tenant_transaction, worker_id=self.worker_id,
+            ):
+                return self._run_scoped_once()
+        return self._run_scoped_once()
+
+    def _run_scoped_once(self) -> Dict[str, Any] | None:
         return process_next_pf_review_job(
-            self.repository_factory(),
+            None,
             worker_id=self.worker_id,
+            store=self.store,
+            repository_factory=self.repository_factory,
         )
 
     def run_forever(self, *, poll_seconds: float = 1.0) -> None:
@@ -361,6 +406,8 @@ def _execute_job(
             result=_result_summary(output),
             error=None,
         ) or job
+    except WorkerLeaseLost:
+        return {"jobId": job_id, "status": "lease_lost"}
     except Exception as exc:
         current = store.get(job_id) or job
         exhausted = int(current.get("attemptCount") or 0) >= int(current.get("maxAttempts") or 3)
@@ -370,7 +417,7 @@ def _execute_job(
             completedAt=_now() if exhausted else None,
             leaseOwner=None,
             leaseExpiresAt=None,
-            error=f"{exc.__class__.__name__}: {exc}",
+            error=f"job_execution_failed:{exc.__class__.__name__}",
         ) or current
 
 

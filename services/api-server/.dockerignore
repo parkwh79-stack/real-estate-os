@@ -1,0 +1,30 @@
+# Build only tracked application inputs. Runtime secrets are injected by the
+# deployment platform and must never become image layers.
+.git
+.github
+.gitignore
+.env
+.env.*
+**/.env
+**/.env.*
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.pytest*/
+**/.coverage*
+**/htmlcov/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.runtime/
+data/runtime/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+*.p12
+credentials*
+secrets*
+tests/
+docker-compose.yml

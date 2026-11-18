@@ -38,6 +38,8 @@ from agent_platform.runtime import (
 )
 from agent_platform.tools import ToolExecutor, build_default_tool_registry
 from agents.ai_connection import safe_ai_context
+from agent_platform.domain_result_status import domain_result_status
+from agent_platform.domain_runtime_scope import domain_tenant_id
 
 
 def run_domain_agent_callable_with_contract(
@@ -125,7 +127,7 @@ def run_domain_agent_callable_with_contract(
     safe_context = safe_ai_context(options.get("ai_context") or options.get("aiContext") or {})
     actor = ActorContext(
         user_id=str(safe_context.get("user_id") or options.get("userId") or "anonymous"),
-        tenant_id=str(safe_context.get("tenant_id") or options.get("tenantId") or "default"),
+        tenant_id=domain_tenant_id(options, safe_context),
         roles=[str(item) for item in options.get("actorRoles") or []],
     )
     classification = _classification(options.get("dataClassification") or "confidential")
@@ -217,32 +219,27 @@ def _result_mapper(raw: Any, request, context, manifest) -> AgentResult:
         output = dict(raw)
     else:
         output = {"__wrappedScalarResult__": True, "value": raw}
+    status = domain_result_status(output, empty=raw is None or output == {})
     locators = _collect_locators(output)
     evidence_ids = sorted(_collect_values(output, {"evidenceId", "evidence_id"}))
     explicit_count = sum(1 for locator in locators if locator.is_explicit)
     quality = QualityMetrics(
-        schema_valid=True,
+        schema_valid=raw is not None and bool(output),
         evidence_coverage=min(1.0, explicit_count / max(1, len(evidence_ids))),
         consistency_score=1.0,
         completeness_score=1.0 if output else 0.0,
-        deterministic_checks_passed=True,
+        deterministic_checks_passed=status not in {AgentRunStatus.FAILED, AgentRunStatus.BLOCKED, AgentRunStatus.CANCELLED},
     )
-    status_text = str(output.get("status") or output.get("reviewStatus") or "completed").lower()
-    needs_review = status_text in {
-        "blocked",
-        "blocking_issue",
-        "needs_review",
-        "needs_human_review",
-        "partial",
-        "warning",
-        "caution",
+    needs_review = status in {
+        AgentRunStatus.BLOCKED, AgentRunStatus.WAITING_FOR_HUMAN,
+        AgentRunStatus.COMPLETED_WITH_REVIEW,
     }
     return AgentResult(
         run_id=context.run_id,
         request_id=request.request_id,
         agent_id=manifest.agent_id,
         agent_version=manifest.version,
-        status=AgentRunStatus.COMPLETED_WITH_REVIEW if needs_review else AgentRunStatus.COMPLETED,
+        status=status,
         output_schema_name=manifest.output_schema_name,
         output_schema_version=manifest.output_schema_version,
         output=output,

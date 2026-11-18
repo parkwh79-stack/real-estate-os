@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 from typing import Dict, List, Optional
 
+from core.financial_input_validation import FinancialInputError, require_finite_numbers
 from schemas.cash_sweep import (
     CashSweepMonthRow,
     CashSweepRequest,
@@ -23,6 +24,12 @@ class CashSweepAgent:
     analysis_type = "cash_sweep_v1"
 
     def simulate(self, request: CashSweepRequest) -> CashSweepResult:
+        require_finite_numbers(request.model_dump(), "cashSweep")
+        if any(tranche.amount < 0 for tranche in request.tranches):
+            raise FinancialInputError("Cash sweep principal amounts must be non-negative.")
+        names = [tranche.tranche for tranche in request.tranches]
+        if len(names) != len(set(names)) or any(not name.strip() for name in names):
+            raise FinancialInputError("Cash sweep tranche names must be non-empty and unique.")
         ppy = max(1, request.periodsPerYear)
         sweep_ratio = max(0.0, min(1.0, request.sweepRatio))
         sorted_tranches = sorted(request.tranches, key=lambda t: t.priority)
@@ -123,7 +130,9 @@ class CashSweepAgent:
         parts: List[str] = []
         if senior is not None:
             month = full_repaid_month.get(senior)
-            if month:
+            if month == 0:
+                parts.append(f"최우선순위 '{senior}' 원금은 시작 시점에 이미 0입니다.")
+            elif month is not None:
                 parts.append(f"Cash Sweep으로 최우선순위 '{senior}' 원금은 {month}개월 차에 전액 상환됩니다.")
             else:
                 parts.append(f"최우선순위 '{senior}' 원금은 분석 기간 내 전액 상환되지 않습니다.")

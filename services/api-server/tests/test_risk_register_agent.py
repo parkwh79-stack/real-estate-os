@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from agents.risk_register_agent import RiskRegisterAgent
 from use_cases.orchestration_approval import review_risk_register_row_use_case, unresolved_risk_reviews
 
@@ -163,3 +165,85 @@ def test_risk_register_row_review_preserves_audit_history_and_refreshes_readines
     assert reviewed["artifacts"]["creditReviewDecision"]["keyRisks"][0]["reviewStatus"] == "waived"
     assert reviewed["artifacts"]["approvalReadinessGate"]["summary"]["unresolvedRiskReviewCount"] == 0
     assert unresolved_risk_reviews(reviewed) == []
+
+
+def test_risk_register_uses_selected_top_cash_flow_instead_of_nested_legacy():
+    artifacts = {
+        "cashFlowRunResult": {
+            "riskFlags": [{"code": "SELECTED_CASH_FLOW_RISK", "severity": "high"}],
+            "summary": {"maxMinus": -200, "requiredPfLimit": 175},
+        },
+        "developerFeasibility": {
+            "cashFlowRunResult": {
+                "riskFlags": [{"code": "STALE_LEGACY_RISK", "severity": "critical"}],
+                "summary": {"maxMinus": -150, "requiredPfLimit": 175},
+            },
+        },
+        "scenariosEvaluation": {"riskFlags": []},
+    }
+    original = deepcopy(artifacts)
+
+    result = RiskRegisterAgent().build({}, artifacts)
+    risks = {risk["code"]: risk for risk in result["risks"]}
+
+    assert set(risks) == {"SELECTED_CASH_FLOW_RISK", "MAX_MINUS_GT_REQUIRED_PF_LIMIT"}
+    assert all(risk["sourceArtifact"] == "cashFlowRunResult" for risk in risks.values())
+    assert all(
+        locator["source"] == "cashFlowRunResult" and locator["path"] == "cashFlowRunResult"
+        for risk in risks.values() for locator in risk["sourceLocators"]
+    )
+    assert result["dataLimitations"] == []
+    assert artifacts == original
+
+
+def test_risk_register_does_not_require_nested_cash_flow_when_top_result_exists():
+    result = RiskRegisterAgent().build({}, {
+        "cashFlowRunResult": {"riskFlags": [], "summary": {"maxMinus": 0, "requiredPfLimit": 175}},
+        "scenariosEvaluation": {"riskFlags": []},
+    })
+
+    assert result["status"] == "clear"
+    assert result["risks"] == []
+    assert result["dataLimitations"] == []
+
+
+def test_risk_register_preserves_nested_cash_flow_fallback_and_locator():
+    artifacts = {
+        "developerFeasibility": {
+            "cashFlowRunResult": {
+                "riskFlags": [{"code": "LEGACY_CASH_FLOW_RISK", "severity": "high"}],
+                "summary": {"maxMinus": -200, "requiredPfLimit": 175},
+            },
+        },
+        "scenariosEvaluation": {"riskFlags": []},
+    }
+    original = deepcopy(artifacts)
+
+    result = RiskRegisterAgent().build({}, artifacts)
+
+    assert {risk["code"] for risk in result["risks"]} == {
+        "LEGACY_CASH_FLOW_RISK", "MAX_MINUS_GT_REQUIRED_PF_LIMIT",
+    }
+    assert all(risk["sourceArtifact"] == "developerFeasibility.cashFlowRunResult" for risk in result["risks"])
+    assert all(
+        locator["path"] == "developerFeasibility.cashFlowRunResult"
+        for risk in result["risks"] for locator in risk["sourceLocators"]
+    )
+    assert result["dataLimitations"] == []
+    assert artifacts == original
+
+
+def test_risk_register_empty_selected_cash_flow_does_not_resurrect_legacy_result():
+    result = RiskRegisterAgent().build({}, {
+        "cashFlowRunResult": {},
+        "developerFeasibility": {
+            "cashFlowRunResult": {"riskFlags": [{"code": "STALE_LEGACY_RISK", "severity": "critical"}]},
+        },
+        "scenariosEvaluation": {"riskFlags": []},
+    })
+
+    assert result["risks"] == []
+    assert result["status"] == "needs_review"
+    assert result["dataLimitations"] == [
+        "Cash Flow Engine output is missing; Max Minus and drawdown risks may be incomplete.",
+    ]

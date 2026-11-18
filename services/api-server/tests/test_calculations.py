@@ -12,6 +12,7 @@ from core.calculations import (
     calculate_sales_value_ltv, calculate_appraisal_ltv, calculate_unsold_value_ltv,
     calculate_senior_ltv, calculate_total_ltv, calculate_ltv_bundle,
     calculate_xnpv, calculate_xirr, calculate_tranche_xirr,
+    normalize_tranche_priority,
 )
 from core.risk_assessment import build_basic_risk_matrix
 
@@ -190,6 +191,27 @@ def test_tranche_priority_labels_are_normalized_for_pf_metrics_and_waterfall():
     assert metrics["metrics"]["senior_ltv"]["value"] == 0.5
     assert metrics["tranches"][0]["priority_rank"] == 1
     assert metrics["tranches"][1]["priority_rank"] == 2
+
+
+@pytest.mark.parametrize(
+    ("raw_priority", "expected"),
+    [
+        ("senior", 1),
+        ("mezzanine", 2),
+        ("junior", 3),
+        ("선순위", 1),
+        ("중순위", 2),
+        ("후순위", 3),
+        ("2", 2),
+        (3, 3),
+    ],
+)
+def test_normalize_tranche_priority_contract(raw_priority, expected):
+    assert normalize_tranche_priority(raw_priority) == expected
+
+
+def test_normalize_tranche_priority_uses_explicit_fallback_for_unknown_label():
+    assert normalize_tranche_priority("unmapped-rank", fallback=7) == 7
 
 def test_calculate_unsold_ltv():
     assert calculate_unsold_ltv(500, 100, 10, 100) == 0.5 # 500 / 1000

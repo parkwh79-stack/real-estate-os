@@ -8,25 +8,27 @@ from use_cases.chief_deal_orchestration import (
 
 
 def _full_project(pid: str) -> dict:
+    """MOCK-DATA: explicit revenue, cost allocation and dates for event tests."""
     return {
         "project": {"id": pid, "name": "Cascade test PF"},
         "source_documents": [
             {"documentType": "business_plan", "originalFileName": "b.pdf", "archiveId": "a1"}
         ],
         "land": {"pnu": "1111010100100010000", "officialLandPricePerSqm": 1_000_000},
-        "landEvidence": [
-            {"evidenceType": "official_land_price", "pnu": "1111010100100010000"}
-        ],
+        "landEvidence": {
+            "officialLandPriceEvidence": {"evidenceType": "official_land_price", "pnu": "1111010100100010000"},
+        },
         "regulation": {"far": 300},
         "legal": {"permitStatus": "pending"},
         "market": {"manualComparables": [{"name": "A"}]},
-        "product_mix": [{"type": "apartment", "units": 100}],
+        "product_mix": [{"type": "apartment", "units": 100, "totalRevenue": 1000}],
         "feasibility_input": {
             "total_revenue": 1_000,
             "total_cost": 800,
             "construction_cost": 300,
+            "land_cost": 500,
         },
-        "schedule": {"completionMonth": 36},
+        "schedule": {"construction_start": "2026-01", "completion": "2029-01"},
         "pf_structure": [{"tranche": "Senior", "amount": 500}],
     }
 

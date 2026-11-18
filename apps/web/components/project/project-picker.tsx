@@ -3,13 +3,16 @@
 import { useEffect, useState } from "react";
 import { Briefcase, Loader2 } from "lucide-react";
 import { fetchProjectOptions, type ProjectOption } from "../../lib/project-client";
+import { projectIdFromLocation } from "../../lib/project-navigation";
 
 const STORAGE_KEY = "realytics.selected.project.v1";
 
 /** Remembered selection so the chosen project persists across the demo→real pages. */
 export function getStoredSelectedProjectId(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(STORAGE_KEY);
+  const contextual = projectIdFromLocation(window.location.pathname, window.location.search);
+  if (contextual) return contextual;
+  try { return window.localStorage.getItem(STORAGE_KEY); } catch { return null; }
 }
 
 /**
@@ -51,7 +54,16 @@ export function ProjectPicker({
 
   const select = (id: string) => {
     if (!id) return;
-    if (typeof window !== "undefined") window.localStorage.setItem(STORAGE_KEY, id);
+    if (typeof window !== "undefined") {
+      try { window.localStorage.setItem(STORAGE_KEY, id); } catch { /* storage may be disabled */ }
+      // Global analysis pages carry the selected project in their URL as well.
+      if (!window.location.pathname.startsWith("/project/")) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("projectId", id);
+        window.history.replaceState(null, "", url);
+      }
+      window.dispatchEvent(new Event("realytics-project-changed"));
+    }
     onChange(id);
   };
 

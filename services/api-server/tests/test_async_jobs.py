@@ -3,11 +3,13 @@ from uuid import uuid4
 
 from use_cases.async_jobs import (
     JobStore,
+    PFReviewJobWorker,
     TERMINAL_STATUSES,
     cancel_pf_review_job,
     process_next_pf_review_job,
     submit_pf_review_job,
 )
+from agent_platform.pf_review_runtime import _idempotency_key
 
 
 PROJECT = {
@@ -15,6 +17,13 @@ PROJECT = {
     "feasibility_input": {"total_revenue": 2800, "total_cost": 2050, "land_cost": 640, "construction_cost": 850},
     "pf_structure": [{"tranche": "Senior", "amount": 1200, "priority": 1, "interest_rate": 0.058}],
 }
+
+
+def test_pf_review_idempotency_key_changes_with_agent_version():
+    first = _idempotency_key("project-1", PROJECT, {}, agent_version="1.0.0")
+    upgraded = _idempotency_key("project-1", PROJECT, {}, agent_version="1.0.1")
+
+    assert first != upgraded
 
 
 class _RepoStub:
@@ -69,7 +78,8 @@ def test_submit_records_failure():
         _BoomRepo(), project_id, failing_project, {}, background=False, store=store,
     )
     assert job["status"] == "failed"
-    assert "boom" in job["error"]
+    assert job["error"] == "job_execution_failed:AgentExecutionFailed"
+    assert "boom" not in job["error"]
 
 
 def test_submit_background_eventually_completes():
@@ -141,6 +151,66 @@ def test_external_worker_mode_queues_then_claims(monkeypatch):
     assert completed is not None
     assert completed["status"] == "completed"
     assert completed["agentRunId"]
+
+
+def test_pf_worker_builds_repository_after_claim_from_persisted_tenant(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ASYNC_JOB_MODE", "external_worker")
+    store = JobStore()
+    project_id = f"tenant-worker-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+    queued = submit_pf_review_job(
+        _RepoStub(),
+        project_id,
+        project,
+        {"tenantId": "tenant-a"},
+        background=True,
+        store=store,
+    )
+    observed = {}
+
+    def repository_factory(job):
+        observed["tenantId"] = job["tenantId"]
+        observed["jobId"] = job["jobId"]
+        return _RepoStub()
+
+    completed = PFReviewJobWorker(
+        repository_factory,
+        worker_id="worker:tenant-a",
+        store=store,
+    ).run_once()
+
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert observed == {"tenantId": "tenant-a", "jobId": queued["jobId"]}
+
+
+def test_pf_worker_repository_factory_failure_is_secret_safe_and_terminal(monkeypatch):
+    monkeypatch.setenv("REALYTICS_ASYNC_JOB_MODE", "external_worker")
+    store = JobStore()
+    project_id = f"tenant-worker-failure-{uuid4()}"
+    project = {**PROJECT, "project": {**PROJECT["project"], "id": project_id}}
+    submit_pf_review_job(
+        _RepoStub(),
+        project_id,
+        project,
+        {"tenantId": "tenant-a"},
+        background=True,
+        store=store,
+    )
+
+    def failing_factory(_job):
+        raise RuntimeError("postgresql://user:secret@database.invalid/postgres")
+
+    failed = PFReviewJobWorker(
+        failing_factory,
+        worker_id="worker:tenant-a",
+        store=store,
+    ).run_once()
+
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["error"] == "repository_configuration_failed:RuntimeError"
+    assert "secret" not in failed["error"]
 
 
 def test_cancel_queued_job_is_terminal():

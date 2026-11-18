@@ -1,10 +1,26 @@
-# Identity Provider Integration
+# Identity Provider Integration — Legacy Compatibility Reference
 
-Updated: 2026-06-12
+Updated: 2026-07-22
 
-REALYTICS now supports a production-oriented identity path alongside the local pilot session flow.
+> **LEGACY / DO NOT USE AS THE PRODUCTION SETUP GUIDE**
+>
+> This document preserves the earlier HS256/local-session migration baseline.
+> The production contract is now
+> `docs/product/identity-tenant-access-contract.md` with the component boundary
+> in `docs/architecture/architecture-boundary.md`. Production uses Supabase Auth
+> Google/Kakao, Next.js HttpOnly cookie/BFF handling, FastAPI JWKS verification,
+> and live PostgreSQL `principals`/`tenant_memberships`. JWT tenant/role claims,
+> raw identity headers, unsigned tokens, and local sessions are not production
+> authorization sources.
+
+The following sections describe the compatibility path that preceded the
+current Supabase Auth boundary. They remain only for local migration history and
+tests that explicitly opt into legacy behavior.
 
 ## Current Capability
+
+Historical snapshot as of 2026-06-12; do not use this table as current
+production readiness.
 
 | Area | Status |
 |---|---|

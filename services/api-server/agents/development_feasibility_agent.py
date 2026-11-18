@@ -1,7 +1,10 @@
+import math
 from typing import Any, Dict, List
 
 from agents.cash_flow_engine import run_cash_flow_engine
 from agents.cash_flow_mapper import build_cash_flow_run_request_from_feasibility_study
+from core.financial_input_validation import FinancialInputError, require_finite_numbers
+from core.schedule import schedule_month_indices
 from core.calculations import (
     calculate_development_profit,
     calculate_exit_sale_rate,
@@ -20,8 +23,10 @@ from core.logistics import (
     calculate_spec_adequacy_score,
     calculate_tenant_stability_score,
 )
-from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION
+from schemas.feasibility_study import FEASIBILITY_STUDY_SCHEMA_VERSION, FEASIBILITY_WORKBOOK_VERSION, ScheduleMilestone
 
+
+DEVELOPMENT_FEASIBILITY_AGENT_VERSION = "2.2.0"
 
 ASSET_CALCULATION_PROFILES = {
     "apartment": {
@@ -77,6 +82,7 @@ ASSET_CALCULATION_PROFILES = {
 
 class DevelopmentFeasibilityAgent:
     def analyze(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
+        require_finite_numbers(project_data, "developmentFeasibility")
         land = project_data.get("land", {})
         regulation = project_data.get("regulation", {})
         feasibility = project_data.get("feasibility_input", {})
@@ -109,11 +115,54 @@ class DevelopmentFeasibilityAgent:
             asset_profile_summary,
             logistics_analysis,
         )
-        cash_flow_request_draft = build_cash_flow_run_request_from_feasibility_study(feasibility_v2_draft)
-        cash_flow_run_result = run_cash_flow_engine(cash_flow_request_draft)
+        cash_flow_request_draft = (
+            None
+            if pf["missingFields"]
+            else build_cash_flow_run_request_from_feasibility_study(feasibility_v2_draft)
+        )
+        cash_flow_run_result = None
+        cash_flow_issue = None
+        try:
+            if pf["missingFields"]:
+                raise FinancialInputError(
+                    "대출 금액이 미입력된 금융 조건을 확인해 주세요.",
+                    code="financing_amount_missing",
+                )
+            cash_flow_run_result = run_cash_flow_engine(cash_flow_request_draft)
+        except FinancialInputError as exc:
+            if exc.code not in {"cash_flow_cost_total_mismatch", "financing_amount_missing"}:
+                raise
+            if exc.code == "financing_amount_missing":
+                cash_flow_issue = {
+                    "code": exc.code,
+                    "severity": "blocking",
+                    "message": "대출 금액이 미입력되어 현금흐름 계산을 보류했습니다.",
+                    "requiredEvidence": "대출 조건별 금액 및 산출 근거",
+                    "sourcePaths": pf["missingFields"],
+                }
+            else:
+                cash_flow_issue = {
+                    "code": exc.code,
+                    "severity": "blocking",
+                    "message": "총사업비와 월별 비용 합계가 일치하지 않아 현금흐름 계산을 보류했습니다.",
+                    "requiredEvidence": "항목별·월별 비용 배분 근거 및 총사업비 대사",
+                    "sourcePaths": ["sourcesAndUses.cost.totalProjectCost", "costSchedule.rows"],
+                }
+                missing_field = "cash_flow.monthly_cost_allocation"
+                quality["missingFields"].append(missing_field)
+                engine_readiness["blockingFields"].append(missing_field)
+            quality["warnings"].append(cash_flow_issue["message"])
+            quality["blockingIssues"] = [cash_flow_issue]
+            quality["status"] = "needs_review"
+            quality["confidence"] = max(0.2, 1 - len(quality["missingFields"]) * 0.15)
+            pf["isPfReviewReady"] = False
+            for key in ("canRunCashFlow", "canRunPfScenarios", "canRunUnsoldLtvMatrix"):
+                engine_readiness[key] = False
 
         return {
+            **({"status": "completed_with_review", "dataStatus": "partial"} if cash_flow_issue else {}),
             "analysisType": "developer_and_pf_feasibility",
+            "engineVersion": DEVELOPMENT_FEASIBILITY_AGENT_VERSION,
             "agentRole": "development_feasibility_orchestrator",
             "summary": self._summary(returns, pf, quality),
             "architecturalProgram": program,
@@ -235,7 +284,15 @@ class DevelopmentFeasibilityAgent:
         costs: Dict[str, Any],
         pf_structure: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        total_pf = sum(t.get("amount", 0) for t in pf_structure)
+        missing_fields = self._missing_pf_amount_fields(pf_structure)
+        financing = self._financing_v2(pf_structure)
+        debt = [row for row in financing if row["priority"] != "equity"]
+        equity = [row for row in financing if row["priority"] == "equity"]
+        bridge = [row for row in debt if row["priority"] == "bridge"]
+        pf_loans = [row for row in debt if row["priority"] != "bridge"]
+        def known_total(rows: List[Dict[str, Any]]) -> float | None:
+            return None if any(row.get("amount") in (None, "") for row in rows) else sum(row.get("amount", 0) for row in rows)
+        total_pf = known_total(debt)
         total_revenue = revenue["totalRevenue"]
         total_cost = costs["totalCost"]
         recommended_by_revenue = total_revenue * 0.65
@@ -243,22 +300,35 @@ class DevelopmentFeasibilityAgent:
         recommended_pf_limit = min(recommended_by_revenue, recommended_by_cost) if total_revenue and total_cost else 0
         return {
             "totalPfAmount": total_pf,
-            "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue),
-            "ltvByRevenue": calculate_sales_value_ltv(total_pf, total_revenue),
+            "pfLoanAmount": known_total(pf_loans),
+            "bridgeLoanAmount": known_total(bridge),
+            "committedEquityAmount": known_total(equity),
+            "totalPfAmountBasis": "debt_including_bridge_excluding_equity",
+            "salesValueLtv": calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None else None,
+            "ltvByRevenue": calculate_sales_value_ltv(total_pf, total_revenue) if total_pf is not None else None,
             "ltvByRevenueBasis": "gross_sales_value",
-            "ltcByCost": calculate_ltc(total_pf, total_cost),
-            "equityRatio": max(0, total_cost - total_pf) / total_cost if total_cost else 0,
+            "ltcByCost": calculate_ltc(total_pf, total_cost) if total_pf is not None else None,
+            "equityRatio": (max(0, total_cost - total_pf) / total_cost if total_cost else 0) if total_pf is not None else None,
             "landCostRatio": costs["costRatio"]["land"],
             "constructionCostRatio": costs["costRatio"]["construction"],
             "financialCostRatio": costs["costRatio"]["finance"],
             "developerProfitMargin": (total_revenue - total_cost) / total_revenue if total_revenue else 0,
-            "exitSaleRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue),
-            "estimatedExitSalesRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue),
-            "requiredEquity": max(0, total_cost - total_pf),
+            "exitSaleRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue) if total_pf is not None else None,
+            "estimatedExitSalesRate": calculate_exit_sale_rate(total_pf, costs["financeCost"], total_revenue) if total_pf is not None else None,
+            "requiredEquity": max(0, total_cost - total_pf) if total_pf is not None else None,
             "recommendedPfLimit": recommended_pf_limit,
-            "headroomToRecommendedLimit": recommended_pf_limit - total_pf,
-            "status": "ready" if total_pf <= recommended_pf_limit or not recommended_pf_limit else "leverage_review_required",
+            "headroomToRecommendedLimit": recommended_pf_limit - total_pf if total_pf is not None else None,
+            "status": "needs_input" if missing_fields else "ready" if total_pf <= recommended_pf_limit or not recommended_pf_limit else "leverage_review_required",
+            "missingFields": missing_fields,
         }
+
+    @staticmethod
+    def _missing_pf_amount_fields(pf_structure: List[Dict[str, Any]]) -> List[str]:
+        return [
+            f"pf_structure.{tranche.get('tranche_id') or tranche.get('tranche') or tranche.get('name') or index}.amount"
+            for index, tranche in enumerate(pf_structure)
+            if tranche.get("amount") in (None, "")
+        ]
 
     def _sensitivity(self, revenue: Dict[str, Any], costs: Dict[str, Any]) -> List[Dict[str, Any]]:
         scenarios = [
@@ -302,6 +372,7 @@ class DevelopmentFeasibilityAgent:
             missing.append("feasibility_input.total_cost or cost breakdown")
         if not project_data.get("pf_structure"):
             missing.append("pf_structure")
+        missing.extend(self._missing_pf_amount_fields(project_data.get("pf_structure", [])))
         return {
             "missingFields": missing,
             "confidence": max(0.2, 1 - len(missing) * 0.15),
@@ -319,10 +390,11 @@ class DevelopmentFeasibilityAgent:
     ) -> Dict[str, Any]:
         has_revenue = revenue["totalRevenue"] > 0
         has_cost = costs["totalCost"] > 0
-        has_pf = bool(pf_structure)
+        missing_pf_amounts = self._missing_pf_amount_fields(pf_structure)
+        has_pf = any(row["priority"] != "equity" for row in self._financing_v2(pf_structure)) and not missing_pf_amounts
         has_schedule = bool(
             project_data.get("cashflow_input")
-            or project_data.get("schedule")
+            or self._schedule_v2(project_data.get("schedule"))
             or project_data.get("sales_schedule")
             or project_data.get("salesCollectionSchedule")
         )
@@ -351,7 +423,7 @@ class DevelopmentFeasibilityAgent:
                 "CashFlowEngine",
                 "CalculationScenarioEngine",
             ],
-            "canRunCashFlow": has_revenue and has_cost and has_schedule,
+            "canRunCashFlow": has_revenue and has_cost and has_schedule and not missing_pf_amounts,
             "canRunPfScenarios": has_pf and has_revenue,
             "canRunUnsoldLtvMatrix": has_pf and has_revenue and has_sales_or_product_mix,
             "requiresCashFlowScenario": has_revenue and has_cost,
@@ -374,7 +446,11 @@ class DevelopmentFeasibilityAgent:
             "canonicalSchema": FEASIBILITY_STUDY_SCHEMA_VERSION,
             "workbookContract": FEASIBILITY_WORKBOOK_VERSION,
             "sourceSchemaPath": "services/api-server/schemas/feasibility_study.py",
-            "mapperStatus": "cash_flow_request_draft_available",
+            "mapperStatus": (
+                "financing_amount_required"
+                if self._missing_pf_amount_fields(draft.get("financing", []))
+                else "cash_flow_request_draft_available"
+            ),
             "requiredMappers": [
                 "DevelopmentFeasibilityAgent output -> FeasibilityStudyV2 draft",
                 "FeasibilityStudyV2 -> CashFlowRunRequest",
@@ -485,90 +561,127 @@ class DevelopmentFeasibilityAgent:
                 "reason": "Project is not classified as a logistics asset.",
             }
 
-        pf_amount = sum(float(item.get("amount") or 0) for item in pf_structure)
-        leasable_area_py = float(project.get("leasable_area_py") or project_data.get("logistics", {}).get("leasable_area_py") or 0)
-        rent_per_py = float(project.get("rent_per_py") or project_data.get("logistics", {}).get("rent_per_py") or 0)
-        operating_expenses = float(project.get("operating_expenses") or project_data.get("logistics", {}).get("operating_expenses") or 0)
-        cap_rate = float(project.get("cap_rate") or project_data.get("logistics", {}).get("cap_rate") or 0)
-        noi = float(project.get("noi") or calculate_logistics_noi(leasable_area_py, rent_per_py, operating_expenses))
-        exit_value = calculate_exit_value(noi, cap_rate)
-        forward_sale_price = float(project.get("forward_sale_price") or project_data.get("logistics", {}).get("forward_sale_price") or 0)
-        appraisal_value = float(project.get("appraisal_value") or project_data.get("logistics", {}).get("appraisal_value") or 0)
-        tenant_score = calculate_tenant_stability_score(
-            str(project.get("tenant_credit_rating") or ""),
-            int(project.get("lease_term_months") or 0),
-        )
-        location_score = calculate_location_score(
-            float(project.get("distance_to_ic_km") or 999),
-            float(project.get("distance_to_port_km") or 999),
-        )
-        spec_score = calculate_spec_adequacy_score(
-            float(project.get("clear_height") or 0),
-            float(project.get("floor_load") or 0),
-            bool(project.get("ramp_available")),
-        )
-        score = round((tenant_score * 0.4) + (location_score * 0.3) + (spec_score * 0.3), 2)
-        forward_sale_ltv = calculate_forward_sale_ltv(pf_amount, forward_sale_price)
-        appraisal_ltv = calculate_appraisal_ltv(pf_amount, appraisal_value) if appraisal_value else None
-        risk_flags = []
-        if forward_sale_price <= 0:
-            risk_flags.append("FORWARD_SALE_PRICE_MISSING")
-        elif forward_sale_ltv > 0.80:
-            risk_flags.append("FORWARD_SALE_LTV_HIGH")
-        if cap_rate <= 0:
-            risk_flags.append("CAP_RATE_MISSING")
-        if tenant_score < 70:
-            risk_flags.append("TENANT_STABILITY_WEAK")
-        if spec_score < 70:
-            risk_flags.append("LOGISTICS_SPEC_WEAK")
+        logistics = project_data.get("logistics") or {}
+        input_sources = {}
+        input_issues = []
 
+        def raw(key):
+            # An explicit zero/false/null in project must not revive an older
+            # alternate value. Only an absent key falls back to logistics.
+            source = "project" if key in project else "logistics"
+            input_sources[key] = f"{source}.{key}"
+            return project.get(key) if source == "project" else logistics.get(key)
+
+        def number(key, *, signed=False, positive=False, integer=False):
+            value = raw(key)
+            if value is None or value == "":
+                input_issues.append({"field": key, "reason": "missing"})
+                return None
+            try:
+                result = float(value)
+            except (TypeError, ValueError):
+                result = float("nan")
+            if (isinstance(value, bool) or not math.isfinite(result)
+                    or (not signed and result < 0) or (positive and result <= 0)
+                    or (integer and not result.is_integer())):
+                input_issues.append({"field": key, "reason": "invalid"})
+                return None
+            return int(result) if integer else result
+
+        def boolean(key):
+            value = raw(key)
+            if value is None:
+                return None
+            if not isinstance(value, bool):
+                input_issues.append({"field": key, "reason": "invalid"})
+                return None
+            return value
+
+        financing = self._financing_v2(pf_structure)
+        debt_amounts = [item.get("amount") for item in financing if item["priority"] != "equity"]
+        pf_amount = sum(float(value) for value in debt_amounts) if financing and all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+            for value in debt_amounts
+        ) else None
+        if pf_amount is None:
+            input_issues.append({"field": "pf_structure.amount", "reason": "missing_or_invalid"})
+        leasable_area_py = number("leasable_area_py")
+        rent_per_py = number("rent_per_py")
+        operating_expenses = number("operating_expenses")
+        cap_rate = number("cap_rate", positive=True)
+        supplied_noi = raw("noi")
+        noi = number("noi", signed=True) if supplied_noi is not None and supplied_noi != "" else None
+        noi_basis = "supplied_analysis_input" if noi is not None else "unavailable"
+        # Invalid supplied NOI is not silently replaced by a calculation.
+        if supplied_noi in (None, "") and all(value is not None for value in (leasable_area_py, rent_per_py, operating_expenses)):
+            noi = calculate_logistics_noi(leasable_area_py, rent_per_py, operating_expenses)
+            noi_basis = "calculated_from_lease_inputs"
+        exit_value = calculate_exit_value(noi, cap_rate) if noi is not None and cap_rate is not None else None
+        forward_sale_price = number("forward_sale_price", positive=True)
+        appraisal_value = number("appraisal_value", positive=True)
+        rating = raw("tenant_credit_rating")
+        rating = rating.strip() if isinstance(rating, str) and rating.strip() else None
+        if rating is None:
+            input_issues.append({"field": "tenant_credit_rating", "reason": "missing"})
+        lease_term = number("lease_term_months", positive=True, integer=True)
+        distance_ic = number("distance_to_ic_km")
+        distance_port = number("distance_to_port_km")
+        clear_height = number("clear_height", positive=True)
+        floor_load = number("floor_load", positive=True)
+        ramp = boolean("ramp_available")
+        if ramp is None and not any(issue["field"] == "ramp_available" for issue in input_issues):
+            input_issues.append({"field": "ramp_available", "reason": "missing"})
+        tenant_score = calculate_tenant_stability_score(rating, lease_term) if rating is not None and lease_term is not None else None
+        location_score = calculate_location_score(distance_ic, distance_port) if distance_ic is not None and distance_port is not None else None
+        spec_score = calculate_spec_adequacy_score(clear_height, floor_load, ramp) if all(value is not None for value in (clear_height, floor_load, ramp)) else None
+        score = round(tenant_score * 0.4 + location_score * 0.3 + spec_score * 0.3, 2) if all(
+            value is not None for value in (tenant_score, location_score, spec_score)
+        ) else None
+        forward_sale_ltv = calculate_forward_sale_ltv(pf_amount, forward_sale_price) if pf_amount is not None and forward_sale_price is not None else None
+        appraisal_ltv = calculate_appraisal_ltv(pf_amount, appraisal_value) if pf_amount is not None and appraisal_value is not None else None
+        risk_flags = []
+        if forward_sale_price is None:
+            risk_flags.append("FORWARD_SALE_PRICE_MISSING")
+        elif forward_sale_ltv is not None and forward_sale_ltv > 0.80:
+            risk_flags.append("FORWARD_SALE_LTV_HIGH")
+        if cap_rate is None:
+            risk_flags.append("CAP_RATE_MISSING")
+        if tenant_score is not None and tenant_score < 70:
+            risk_flags.append("TENANT_STABILITY_WEAK")
+        if spec_score is not None and spec_score < 70:
+            risk_flags.append("LOGISTICS_SPEC_WEAK")
+        metrics = {"annualNoi": noi, "capRateExitValue": exit_value, "forwardSaleLtv": forward_sale_ltv,
+                   "appraisalLtv": appraisal_ltv, "tenantScore": tenant_score, "locationScore": location_score,
+                   "specScore": spec_score, "score": score}
         return {
             "applicable": True,
             "schemaVersion": "realytics-logistics-analysis-v1",
+            "calculationPolicy": "logistics-available-inputs-v2",
+            "status": "partial" if any(value is None for value in metrics.values()) else "calculated",
+            "unavailableMetrics": [key for key, value in metrics.items() if value is None],
+            "inputIssues": input_issues,
+            "inputSources": input_sources,
+            "evidenceScope": "analysis_inputs_not_document_verification",
+            "scoreBasis": "existing_rule_based_indicator_not_credit_approval",
             "revenueMode": "lease_forward_sale_refinancing",
-            "tenant": {
-                "name": project.get("tenant_name"),
-                "creditRating": project.get("tenant_credit_rating"),
-                "leaseTermMonths": project.get("lease_term_months"),
-                "stabilityScore": tenant_score,
-            },
-            "lease": {
-                "leasableAreaPy": leasable_area_py,
-                "rentPerPy": rent_per_py,
-                "annualNoi": noi,
-                "operatingExpenses": operating_expenses,
-            },
-            "exit": {
-                "capRate": cap_rate,
-                "capRateExitValue": exit_value,
-                "forwardSalePrice": forward_sale_price,
-                "forwardBuyer": project.get("forward_buyer"),
-                "forwardSaleLtv": forward_sale_ltv,
-                "appraisalValue": appraisal_value or None,
-                "appraisalLtv": appraisal_ltv,
-            },
-            "location": {
-                "distanceToIcKm": project.get("distance_to_ic_km"),
-                "distanceToPortKm": project.get("distance_to_port_km"),
-                "score": location_score,
-            },
-            "spec": {
-                "clearHeight": project.get("clear_height"),
-                "floorLoad": project.get("floor_load"),
-                "dockCount": project.get("dock_count"),
-                "rampAvailable": bool(project.get("ramp_available")),
-                "coldChainSpec": bool(project.get("cold_chain_spec")),
-                "score": spec_score,
-            },
+            "tenant": {"name": raw("tenant_name"), "creditRating": rating,
+                       "leaseTermMonths": lease_term, "stabilityScore": tenant_score},
+            "lease": {"leasableAreaPy": leasable_area_py, "rentPerPy": rent_per_py,
+                      "annualNoi": noi, "noiBasis": noi_basis, "operatingExpenses": operating_expenses},
+            "exit": {"capRate": cap_rate, "capRateExitValue": exit_value,
+                     "forwardSalePrice": forward_sale_price, "forwardBuyer": raw("forward_buyer"),
+                     "pfAmount": pf_amount, "forwardSaleLtv": forward_sale_ltv,
+                     "appraisalValue": appraisal_value, "appraisalLtv": appraisal_ltv},
+            "location": {"distanceToIcKm": distance_ic, "distanceToPortKm": distance_port, "score": location_score},
+            "spec": {"clearHeight": clear_height, "floorLoad": floor_load,
+                     "dockCount": raw("dock_count"), "rampAvailable": ramp,
+                     "coldChainSpec": boolean("cold_chain_spec"), "score": spec_score},
             "score": score,
             "riskFlags": risk_flags,
-            "riskItems": assess_logistics_risks(project),
-            "formulas": {
-                "NOI": "leasable_area_py * rent_per_py * 12 - operating_expenses",
-                "CapRateExitValue": "NOI / cap_rate",
-                "ForwardSaleLTV": "pf_amount / forward_sale_price",
-                "AppraisalLTV": "pf_amount / appraisal_value",
-            },
+            "riskItems": assess_logistics_risks({"tenant_credit_rating": rating, "pre_sale_contract_status": raw("pre_sale_contract_status")}),
+            "formulas": {"NOI": "leasable_area_py * rent_per_py * 12 - operating_expenses",
+                         "CapRateExitValue": "NOI / cap_rate", "ForwardSaleLTV": "pf_amount / forward_sale_price",
+                         "AppraisalLTV": "pf_amount / appraisal_value"},
         }
 
     def _product_mix_v2(self, project_data: Dict[str, Any], revenue: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -622,14 +735,27 @@ class DevelopmentFeasibilityAgent:
                 "name": tranche.get("name") or tranche.get("tranche") or f"Tranche {index}",
                 "priority": self._priority_label(tranche, index),
                 "amount": tranche.get("amount"),
-                "interest_rate": tranche.get("interest_rate") or tranche.get("interestRate"),
-                "fee_rate": tranche.get("fee_rate") or tranche.get("feeRate"),
-                "term_months": tranche.get("term_months") or tranche.get("maturityMonths"),
-                "repayment_source": tranche.get("repayment_source") or "sales_proceeds",
+                "interest_rate": (
+                    tranche.get("interest_rate")
+                    if tranche.get("interest_rate") is not None
+                    else tranche.get("interestRate")
+                ),
+                "fee_rate": (
+                    tranche.get("fee_rate")
+                    if tranche.get("fee_rate") is not None
+                    else tranche.get("feeRate")
+                ),
+                "term_months": (
+                    tranche.get("term_months")
+                    if tranche.get("term_months") is not None
+                    else tranche.get("maturityMonths")
+                ),
+                "repayment_source": tranche.get("repayment_source"),
             })
         return rows
 
     def _schedule_v2(self, schedule: Any) -> List[Dict[str, Any]]:
+        month_indices = schedule_month_indices(schedule)
         labels = {
             "land_purchase": "Land purchase",
             "permit_approval": "Permit approval",
@@ -638,33 +764,50 @@ class DevelopmentFeasibilityAgent:
             "completion": "Completion",
             "loan_maturity": "Loan maturity",
         }
-        # Legacy shape: a dict of {key: date}.
         if isinstance(schedule, dict):
-            return [
-                {"key": key, "label": labels.get(key, key), "planned_date": self._schedule_date_value(value)}
-                for key, value in schedule.items()
-                if value
+            entries = [(str(key), value) for key, value in schedule.items()]
+        elif isinstance(schedule, list):
+            entries = [
+                (next((item.get(field) for field in ("key", "type", "event", "eventKey", "event_key", "name") if item.get(field)), None), item)
+                for item in schedule if isinstance(item, dict)
             ]
-        # Canonical FeasibilityStudyV2 shape: a list of {key, label, planned_date, ...}.
-        if isinstance(schedule, list):
-            rows: List[Dict[str, Any]] = []
-            for item in schedule:
-                if not isinstance(item, dict):
-                    continue
-                key = item.get("key") or item.get("name")
-                planned = item.get("planned_date") or item.get("plannedDate")
-                if planned is None and item.get("value") is not None:
-                    planned = self._schedule_date_value(item.get("value"))
-                if key and planned:
-                    rows.append({"key": key, "label": item.get("label") or labels.get(key, key), "planned_date": planned})
-            return rows
-        return []
+        else:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for key, value in entries:
+            item = value if isinstance(value, dict) else {}
+            planned = self._schedule_date_value(value)
+            explicit_month = next((item[alias] for alias in ("month_index", "monthIndex") if alias in item), None)
+            if not key or (not planned and explicit_month is None):
+                continue
+            row = {"key": key, "label": item.get("label") or labels.get(key, key), "planned_date": planned}
+            for field in ("actual_date", "excel", "provenance"):
+                if field in item:
+                    row[field] = item[field]
+            if explicit_month is not None:
+                row["month_index"] = month_indices[key]
+            try:
+                ScheduleMilestone.model_validate(row)
+            except ValueError as exc:
+                raise FinancialInputError(
+                    f"{key}: 일정 및 원본 출처 형식을 확인해 주세요.", code="invalid_schedule",
+                ) from exc
+            rows.append(row)
+        return rows
 
     @staticmethod
-    def _schedule_date_value(value: Any) -> str:
+    def _schedule_date_value(value: Any) -> str | None:
+        if isinstance(value, dict):
+            # A cleared canonical date must not resurrect a stale legacy alias.
+            for key in ("planned_date", "plannedDate", "value"):
+                if key in value:
+                    return DevelopmentFeasibilityAgent._schedule_date_value(value[key])
+            return None
+        if value is None or isinstance(value, bool):
+            return None
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return f"M{int(value)}"
-        return str(value)
+        return value if isinstance(value, str) else None
 
     def _scenarios_v2(self, sensitivity: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows = []
@@ -715,15 +858,18 @@ class DevelopmentFeasibilityAgent:
         return "other"
 
     def _priority_label(self, tranche: Dict[str, Any], index: int) -> str:
+        explicit_priority = str(tranche.get("priority") or "").lower()
+        if explicit_priority in {"senior", "mezzanine", "junior", "equity", "bridge", "other"}:
+            return explicit_priority
         value = str(tranche.get("priority") or tranche.get("name") or tranche.get("tranche") or "").lower()
         tranche_name = str(tranche.get("name") or tranche.get("tranche") or "").lower()
         if value in {"1", "senior"} or "senior" in tranche_name or "tr.a" in tranche_name or "tranche a" in tranche_name:
             return "senior"
         if value in {"2", "middle", "mezzanine"} or "mezz" in tranche_name or "middle" in tranche_name or "tr.b" in tranche_name or "tranche b" in tranche_name:
-            return "middle"
+            return "mezzanine"
         if value in {"3", "junior"} or "junior" in tranche_name or "tr.c" in tranche_name or "tranche c" in tranche_name:
             return "junior"
-        return "other" if index > 3 else ["senior", "middle", "junior"][index - 1]
+        return "other" if index > 3 else ["senior", "mezzanine", "junior"][index - 1]
 
     def _py_to_sqm_or_none(self, value: Any) -> float | None:
         if value in (None, ""):

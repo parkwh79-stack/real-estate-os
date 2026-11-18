@@ -142,4 +142,4 @@ def test_legacy_bonri_profile_exposes_sample_cell_locators():
     assert context["templateId"] == LEGACY_BONRI_PROFILE_ID
     assert context["fieldLocators"]["revenue.total"]["sheet"] == "사업수지"
     assert context["fieldLocators"]["revenue.total"]["cell"] == "D11"
-    assert context["fieldLocators"]["cashflow.monthly_sales_rates"]["range"] == "J8:CH10"
+    assert context["fieldLocators"]["cashflow.monthly_sales_rates"]["range"] == "J8:BQ10"

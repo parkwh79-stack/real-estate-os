@@ -12,6 +12,7 @@ PROJECT = {
         "land_cost": 640,
         "construction_cost": 850,
         "finance_cost": 120,
+        "other_cost": 440,
         "net_operating_income": 180,
     },
     "product_mix": [{"type": "apartment", "units": 200, "avg_unit_price": 10, "total_revenue": 2000}],
@@ -28,7 +29,7 @@ PROJECT = {
 def test_run_exposes_new_engine_artifacts():
     run = OrchestrationAgent().run_pf_review("exp1", dict(PROJECT))
     for key in ("returnMetrics", "stressTest", "creditEnhancement"):
-        assert key in run["artifacts"], f"missing artifact {key}"
+        assert key in run["artifacts"], f"missing artifact {key}; run errors: {run.get('errors')}"
     assert run["artifacts"]["stressTest"]["scenarioCount"] == 4
     step_keys = {step["key"] for step in run["steps"]}
     assert {"return_metrics", "stress_test", "credit_enhancement_review", "cash_sweep_simulation"} <= step_keys

@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+import io
+import json
+from copy import deepcopy
+
+import pytest
+
 from fastapi.testclient import TestClient
 
-from integrations.vworld import vworld_configured, vworld_status
+from integrations.vworld import fetch_parcel_geometry_by_pnu, vworld_configured, vworld_status
 from main import app
-from use_cases.map_intelligence import build_project_map_intelligence, resolve_and_attach_geometry
+from use_cases.map_intelligence import build_project_map_intelligence, project_map_parcels, resolve_and_attach_geometry
+
+
+_BOUNDARY = {
+    "type": "Polygon",
+    "coordinates": [[[128.55, 35.85], [128.56, 35.85], [128.56, 35.86], [128.55, 35.86], [128.55, 35.85]]],
+}
 
 
 def _project_with_parcels(geometry=None):
     parcel = {
         "pnu": "2729011700101230004",
-        "addressFragment": "본리동 1230-4",
-        "lotNumber": "1230-4",
+        "addressFragment": "본리동 123-4",
+        "lotNumber": "123-4",
         "landCategory": "대",
         "areaSqm": 521.0,
         "areaPy": 157.6,
@@ -44,14 +56,11 @@ def test_unlocated_parcel_is_valid_feature_with_null_geometry():
 
 
 def test_polygon_geometry_makes_layer_available_and_centers():
-    geometry = {
-        "type": "Polygon",
-        "coordinates": [[[128.55, 35.85], [128.56, 35.85], [128.56, 35.86], [128.55, 35.86], [128.55, 35.85]]],
-    }
-    result = build_project_map_intelligence(_project_with_parcels(geometry=geometry))
+    result = build_project_map_intelligence(_project_with_parcels(geometry=_BOUNDARY))
     feature = result["parcelGeoJson"]["features"][0]
     assert feature["geometry"]["type"] == "Polygon"
     assert result["summary"]["hasGeometry"] is True
+    assert result["summary"]["boundaryParcelCount"] == 1
     assert result["center"]["lng"] == 128.555
     layers = {layer["id"]: layer for layer in result["layers"]}
     assert layers["parcel_boundary"]["status"] == "available"
@@ -64,7 +73,11 @@ def test_point_centroid_is_accepted():
     result = build_project_map_intelligence(parcel_project)
     feature = result["parcelGeoJson"]["features"][0]
     assert feature["geometry"] == {"type": "Point", "coordinates": [128.6, 35.9]}
+    assert feature["properties"]["geometryStatus"] == "point"
     assert result["center"] == {"lng": 128.6, "lat": 35.9}
+    assert result["summary"]["boundaryParcelCount"] == 0
+    assert result["summary"]["pointParcelCount"] == 1
+    assert result["layers"][0]["status"] == "needs_geometry"
 
 
 def test_land_acquisition_list_is_a_parcel_source():
@@ -108,48 +121,89 @@ def test_map_endpoint_404_for_unknown_project():
 
 def test_resolve_and_attach_geometry_fills_missing_only():
     project = _project_with_parcels()
-    poly = {"type": "Polygon", "coordinates": [[[128.5, 35.8], [128.6, 35.8], [128.6, 35.9], [128.5, 35.8]]]}
+    parcels = project_map_parcels(project)
     calls = []
 
     def resolver(pnu):
         calls.append(pnu)
-        return poly
+        return _BOUNDARY
 
-    resolved = resolve_and_attach_geometry(project, resolver, limit=30)
+    resolved = resolve_and_attach_geometry(parcels, resolver, limit=30)
     assert resolved == 1
     assert calls == ["2729011700101230004"]
-    result = build_project_map_intelligence(project)
+    result = build_project_map_intelligence(project, parcels=parcels)
     assert result["summary"]["hasGeometry"] is True
-    assert resolve_and_attach_geometry(project, resolver, limit=30) == 0
+    assert resolve_and_attach_geometry(parcels, resolver, limit=30) == 0
 
 
 def test_resolve_skips_when_resolver_returns_none():
     project = _project_with_parcels()
-    resolved = resolve_and_attach_geometry(project, lambda pnu: None, limit=30)
+    parcels = project_map_parcels(project)
+    resolved = resolve_and_attach_geometry(parcels, lambda pnu: None, limit=30)
     assert resolved == 0
-    assert build_project_map_intelligence(project)["summary"]["hasGeometry"] is False
+    assert build_project_map_intelligence(project, parcels=parcels)["summary"]["hasGeometry"] is False
+
+
+def test_boundary_lookup_upgrades_point_and_leaves_saved_parcel_unchanged():
+    point = {"type": "Point", "coordinates": [128.6, 35.9]}
+    project = _project_with_parcels(geometry=point)
+    parcels = project_map_parcels(project)
+    assert resolve_and_attach_geometry(parcels, lambda pnu: point) == 0
+    assert parcels[0]["geometry"] == point
+    assert resolve_and_attach_geometry(parcels, lambda pnu: _BOUNDARY) == 1
+    feature = build_project_map_intelligence(project, parcels=parcels)["parcelGeoJson"]["features"][0]
+    assert feature["geometry"] == _BOUNDARY
+    assert feature["properties"]["geometryStatus"] == "boundary"
+    assert project["land_ledger"]["parcels"][0]["geometry"] == point
+
+
+def test_canonical_map_merges_parcel_sources_and_resolves_only_a_valid_focused_pnu():
+    first_pnu = "2729011700101230004"
+    focus_pnu = "2729011700101230005"
+    wrong_pnu = "2729011700101230007"
+    project = {
+        "land": {"address": "대구 달서구 본리동 123-4"},
+        "landLedger": {"parcels": [{"lotNumber": "123-4"}, {"lotNumber": "123-6", "pnu": wrong_pnu}]},
+        "land_acquisition": [{"lotNumber": "123-4", "PNU": first_pnu}, {"lotNumber": "123-5", "pnu": focus_pnu}],
+    }
+    calls = []
+
+    def resolver(pnu):
+        calls.append(pnu)
+        return _BOUNDARY
+
+    parcels = project_map_parcels(project)
+    assert resolve_and_attach_geometry(parcels, resolver, limit=1, focus_pnu=focus_pnu) == 1
+    assert resolve_and_attach_geometry(parcels, resolver, limit=3, focus_pnu=focus_pnu) == 0
+    assert resolve_and_attach_geometry(parcels, resolver, limit=3, focus_pnu=wrong_pnu) == 0
+    assert calls == [focus_pnu]
+    assert resolve_and_attach_geometry(parcels, resolver, limit=3) == 1
+    assert calls == [focus_pnu, first_pnu]
+    features = build_project_map_intelligence(project, parcels=parcels)["parcelGeoJson"]["features"]
+    assert [feature["properties"]["pnu"] for feature in features] == [first_pnu, None, focus_pnu]
+    assert [feature["properties"]["geometryStatus"] for feature in features] == ["boundary", "unlocated", "boundary"]
 
 
 def test_resolve_limit_can_cover_large_multi_parcel_map():
     project = {
         "land_ledger": {
             "parcels": [
-                {"pnu": f"414631030010001{index:04d}", "addressFragment": f"상갈동 {index}", "lotNumber": str(index)}
-                for index in range(112)
+                {"pnu": f"41463103001{index:04d}0000", "addressFragment": f"상갈동 {index}", "lotNumber": str(index)}
+                for index in range(1, 113)
             ]
         }
     }
     calls = []
-    geometry = {"type": "Point", "coordinates": [127.1, 37.2]}
 
     def resolver(pnu):
         calls.append(pnu)
-        return geometry
+        return _BOUNDARY
 
-    assert resolve_and_attach_geometry(project, resolver, limit=150) == 112
+    parcels = project_map_parcels(project)
+    assert resolve_and_attach_geometry(parcels, resolver, limit=150) == 112
     assert len(calls) == 112
-    result = build_project_map_intelligence(project)
-    assert result["summary"]["locatedParcelCount"] == 112
+    result = build_project_map_intelligence(project, parcels=parcels)
+    assert result["summary"]["boundaryParcelCount"] == 112
 
 
 def test_vworld_status_is_secret_safe():
@@ -157,3 +211,77 @@ def test_vworld_status_is_secret_safe():
     assert status["configured"] is True
     assert "SECRET-KEY-VALUE" not in str(status)
     assert vworld_configured({}) is False
+
+
+def test_vworld_geometry_requires_matching_pnu_and_polygon(monkeypatch):
+    pnu = "2729011700101230004"
+    features = [
+        {"properties": {"pnu": "2729011700101230005"}, "geometry": _BOUNDARY},
+        {"geometry": _BOUNDARY},
+        {"properties": {"pnu": pnu}, "geometry": {"type": "Point", "coordinates": [128.6, 35.9]}},
+    ]
+
+    def respond(url, timeout):
+        payload = {"response": {"status": "OK", "result": {"featureCollection": {"features": features}}}}
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr("integrations.vworld.urllib.request.urlopen", respond)
+    environ = {"VWORLD_API_KEY": "test-only-key"}
+    geometry, diagnosis = fetch_parcel_geometry_by_pnu(pnu, environ=environ)
+    assert geometry is None
+    assert diagnosis["status"] == "not_found"
+
+    features.append({"properties": {"pnu": pnu}, "geometry": _BOUNDARY})
+    geometry, diagnosis = fetch_parcel_geometry_by_pnu(pnu, environ=environ)
+    assert geometry == _BOUNDARY
+    assert diagnosis["status"] == "resolved"
+
+
+@pytest.mark.parametrize("coordinates", [
+    [[]],
+    [[[128.5, 35.8], [128.6, 35.8], [128.6, 35.9]]],
+    [[[128.5, 35.8], [128.6, 35.8], [128.7, 35.8], [128.5, 35.8]]],
+    [[[958113, 1953471], [958114, 1953471], [958114, 1953472], [958113, 1953471]]],
+    [[[float("nan"), 35.8], [128.6, 35.8], [128.6, 35.9], [float("nan"), 35.8]]],
+    [[[128.5, float("inf")], [128.6, 35.8], [128.6, 35.9], [128.5, float("inf")]]],
+])
+def test_invalid_boundaries_are_unlocated_and_remain_eligible_for_retry(coordinates):
+    project = _project_with_parcels({"type": "Polygon", "coordinates": coordinates})
+    result = build_project_map_intelligence(project)
+    assert result["summary"]["boundaryParcelCount"] == 0
+    assert result["summary"]["hasGeometry"] is False
+    assert result["center"] is None
+    parcels = project_map_parcels(project)
+    assert resolve_and_attach_geometry(parcels, lambda _: _BOUNDARY) == 1
+    assert build_project_map_intelligence(project, parcels=parcels)["summary"]["boundaryParcelCount"] == 1
+    # The invalid original remains untouched; this GET enriches response rows only.
+    assert project["land_ledger"]["parcels"][0]["geometry"]["coordinates"] is coordinates
+
+
+def test_three_dimensional_positions_keep_original_height_but_center_on_longitude_latitude():
+    geometry = deepcopy(_BOUNDARY)
+    geometry["coordinates"] = [[[lng, lat, 23] for lng, lat in ring] for ring in geometry["coordinates"]]
+    result = build_project_map_intelligence(_project_with_parcels(geometry))
+    assert result["summary"]["boundaryParcelCount"] == 1
+    assert result["center"] == pytest.approx({"lng": 128.555, "lat": 35.855})
+    assert result["parcelGeoJson"]["features"][0]["geometry"] == geometry
+
+
+def test_multipolygon_requires_all_boundaries_to_be_valid():
+    valid = {"type": "MultiPolygon", "coordinates": [deepcopy(_BOUNDARY["coordinates"])]}
+    assert build_project_map_intelligence(_project_with_parcels(valid))["summary"]["boundaryParcelCount"] == 1
+    valid["coordinates"].append([[]])
+    assert build_project_map_intelligence(_project_with_parcels(valid))["summary"]["boundaryParcelCount"] == 0
+
+
+@pytest.mark.parametrize("centroid", [[float("nan"), 35], [127, 95000], [True, 35], [10**400, 35]])
+def test_invalid_reference_centroids_never_become_a_map_center(centroid):
+    project = _project_with_parcels()
+    project["land_ledger"]["parcels"][0]["centroid"] = centroid
+    assert build_project_map_intelligence(project)["center"] is None
+
+
+def test_point_height_too_large_for_numeric_coordinates_is_unlocated():
+    result = build_project_map_intelligence(_project_with_parcels({"type": "Point", "coordinates": [127, 35, 10**400]}))
+    assert result["center"] is None
+    assert result["summary"]["locatedParcelCount"] == 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional
 
 from schemas.credit_policy import CreditPolicyProfile, resolve_credit_policy
@@ -18,6 +19,23 @@ class CreditReviewAgent:
         artifacts: Dict[str, Any],
         policy: Optional[CreditPolicyProfile] = None,
     ) -> Dict[str, Any]:
+        input_issues: List[str] = []
+
+        def finite_artifact(value: Any, path: str) -> Any:
+            if isinstance(value, float) and not math.isfinite(value):
+                input_issues.append(f"Invalid non-finite financial evidence: {path}.")
+                return None
+            if isinstance(value, dict):
+                return {key: finite_artifact(item, f"{path}.{key}") for key, item in value.items()}
+            if isinstance(value, list):
+                return [finite_artifact(item, f"{path}[{index}]") for index, item in enumerate(value)]
+            return value
+
+        # Work on a copy: invalid upstream numbers remain unresolved, never zero.
+        artifacts = finite_artifact(artifacts, "artifacts")
+        for key in ("riskRegister", "legalPermitReview", "dataQualityReview", "reconciliationGate"):
+            if not isinstance(artifacts.get(key), dict) or not artifacts[key].get("status"):
+                input_issues.append(f"Required credit review gate is missing: {key}.")
         policy = policy or resolve_credit_policy(project_data)
         risk_register = artifacts.get("riskRegister") or {}
         risk_summary = risk_register.get("summary") or {}
@@ -45,7 +63,10 @@ class CreditReviewAgent:
             policy=policy,
             credit_enhancement=credit_enhancement,
         )
+        if input_issues and decision != "reject_recommended":
+            decision = "rework_required"
         approval_conditions = self._approval_conditions(risk_register, legal, data_quality, reconciliation)
+        approval_conditions = input_issues + approval_conditions
         if signals["seniorBreakKeys"]:
             approval_conditions.append(
                 "스트레스 시 Senior 원금 손실 가능 — 추가 신용보강·담보 확보 또는 PF 축소·Equity 확충 필요."
@@ -62,7 +83,7 @@ class CreditReviewAgent:
         approval_conditions = self._dedupe(approval_conditions)[:13]
         key_risks = self._key_risks(top_risks)
         mitigants = self._mitigants(risk_register, project_data)
-        required_follow_ups = self._required_follow_ups(decision, risk_register, legal, data_quality, reconciliation)
+        required_follow_ups = input_issues + self._required_follow_ups(decision, risk_register, legal, data_quality, reconciliation)
         return {
             "schemaVersion": CREDIT_REVIEW_SCHEMA_VERSION,
             "analysisType": "credit_review_decision",
@@ -104,7 +125,7 @@ class CreditReviewAgent:
                 "stressWorstCaseKey": signals["worstCaseKey"],
                 "stressSeniorBreakScenarios": sorted(signals["seniorBreakKeys"]),
             },
-            "decisionReasons": self._decision_reasons(
+            "decisionReasons": input_issues + self._decision_reasons(
                 decision,
                 risk_register,
                 legal,
@@ -123,10 +144,10 @@ class CreditReviewAgent:
             "reportParagraphs": self._report_paragraphs(decision, key_risks, approval_conditions, mitigants),
             "humanReview": {
                 "required": decision != "approve",
-                "reason": self._human_review_reason(decision, risk_summary, legal, data_quality),
+                "reason": " ".join(input_issues) if input_issues else self._human_review_reason(decision, risk_summary, legal, data_quality),
                 "suggestedReviewerRole": "credit_officer",
             },
-            "dataLimitations": self._data_limitations(risk_register, data_quality, marketability),
+            "dataLimitations": input_issues + self._data_limitations(risk_register, data_quality, marketability),
         }
 
     def _return_stress_signals(self, return_metrics: Dict[str, Any], stress_test: Dict[str, Any]) -> Dict[str, Any]:
