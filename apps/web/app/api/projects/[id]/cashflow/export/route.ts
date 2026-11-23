@@ -3,6 +3,8 @@ import ExcelJS from "exceljs";
 import { createHash } from "node:crypto";
 import { fetchAuthenticatedBackend } from "../../../../../../lib/authenticated-backend-fetch";
 import { SCHOOL_EDITION_LABELS, SCHOOL_EVENT_LABELS, type SchoolSiteLawBasis } from "../../../../../../lib/school-site-law-basis";
+import { STATUTORY_AMOUNT_KIND, STATUTORY_COST_INCLUSION, type SavedStatutoryCostSelection,
+  type StatutoryAmountKind } from "../../../../../../lib/statutory-cost-review";
 import { trancheAmounts, amountInEok } from "../../../../../../lib/tranche-display";
 
 export const runtime = "nodejs";
@@ -305,7 +307,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   setHeader(stress.getRow(3));
   for (const [key, metric] of Object.entries((runs.discount_stress?.resultSnapshot?.metrics ?? {}) as AnyRecord)) if (key.endsWith(".exitSaleRate")) stress.addRow([key.replace(".exitSaleRate", "").replace("discount", "") + "%", `${money(metric.value) * 100}%`, `${money((runs.discount_stress?.resultSnapshot?.metrics ?? {})[key.replace("exitSaleRate", "seniorRecoveryRatio")]?.value) * 100}%`]);
 
-  const statutoryCosts = input.statutoryCostSelection;
+  const statutoryCosts = input.statutoryCostSelection as SavedStatutoryCostSelection | undefined;
   if (purpose === "draft" && Array.isArray(statutoryCosts?.items) && statutoryCosts.items.length > 0) {
     const costs = workbook.addWorksheet("06_법정비용");
     addTitle(costs, "법정 비용 검토", "저장된 계산 입력에서 비용 반영 근거를 표시합니다.");
@@ -331,7 +333,31 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       ["기준 계산 ID", statutoryCosts.baseCalculationRunId ?? null],
       ["기준 입력 SHA-256", statutoryCosts.baseFinancialInputHash ?? null],
     ]);
-    const school = statutoryCosts.items.find((item: AnyRecord) => item.key === "school_site_charge");
+    if (statutoryCosts.previousReviewCalculationRunId || statutoryCosts.items.some((item) => item.amountRecords)) {
+      if (statutoryCosts.previousReviewCalculationRunId) {
+        costs.addRow(["직전 검토 계산 ID", statutoryCosts.previousReviewCalculationRunId]);
+      }
+      setHeader(costs.addRow(["비용 항목", "금액(원)", "금액 구분", "반영 방식", "납부 시점", "실제 납부일", "원본 문서", "원본 위치"]));
+      for (const item of statutoryCosts.items) {
+        const before = item.previousAdoption;
+        if (before) {
+          costs.addRow([item.label, before.amountKrw, before.amountKind ? "직전 · " + STATUTORY_AMOUNT_KIND[before.amountKind] : "직전",
+            STATUTORY_COST_INCLUSION[before.inclusion], before.paymentMonthIndex == null ? null : "M" + before.paymentMonthIndex,
+            null, before.sourceLocator.fileName + " · " + before.sourceLocator.archiveId, before.sourceLocator.location]);
+          if (before.amountKrw != null && item.amountKrw != null) {
+            costs.addRow([item.label, item.amountKrw - before.amountKrw, "채택액 차이"]);
+          }
+        }
+        for (const [kind, label] of Object.entries(STATUTORY_AMOUNT_KIND)) {
+          const record = item.amountRecords?.[kind as StatutoryAmountKind];
+          if (!record) continue;
+          costs.addRow([item.label, record.amountKrw, label, "대사 근거",
+            record.paymentMonthIndex == null ? null : "M" + record.paymentMonthIndex, record.paidOn ?? null,
+            record.sourceLocator.fileName + " · " + record.sourceLocator.archiveId, record.sourceLocator.location]);
+        }
+      }
+    }
+    const school = statutoryCosts.items.find((item) => item.key === "school_site_charge");
     const lawBasis = school?.legalBasis as SchoolSiteLawBasis | undefined;
     if (lawBasis?.schemaVersion === "realytics-school-site-law-basis-v1") {
       const { event, edition, publicReference } = lawBasis;

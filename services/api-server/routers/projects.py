@@ -3397,7 +3397,8 @@ def get_project_calculation_run(
 
 
 @router.get("/{project_id}/statutory-cost-review")
-def get_project_statutory_cost_review(project_id: str, request: Request, response: Response):
+def get_project_statutory_cost_review(project_id: str, request: Request, response: Response,
+                                      base_run_id: str | None = Query(default=None, min_length=1, max_length=200)):
     from use_cases.statutory_cost_review import build_statutory_cost_review
 
     authorize_request(request, "project:read")
@@ -3408,6 +3409,10 @@ def get_project_statutory_cost_review(project_id: str, request: Request, respons
         market_review=project.get("marketEvidenceReview"), cost_review=project.get("costSchedule"),
     )
     runs = list_project_calculation_runs(project_id, request, engine_key="cash_flow_engine", limit=30)["records"]
+    if base_run_id and all(run["calculationRunId"] != base_run_id for run in runs):
+        exact_basis = _scoped_calculation_run(project_id, request, base_run_id)
+        if exact_basis and reviewable_statutory_basis(exact_basis):
+            runs = [*runs, exact_basis]
     documents = project_source_document_read_repository(project_id, project).list(project_id)
     documents_by_archive = {}
     for document in documents:
@@ -3470,12 +3475,19 @@ def calculate_project_statutory_cost_review(project_id: str, request: Request, s
     if not baseline:
         raise HTTPException(status_code=404, detail="이 프로젝트에서 기준 현금흐름 계산을 찾을 수 없습니다.")
 
+    previous_run = None
+    if selection.previousReviewCalculationRunId:
+        previous_run = _scoped_calculation_run(project_id, request, selection.previousReviewCalculationRunId)
+        if not previous_run:
+            raise HTTPException(status_code=404, detail="이 프로젝트에서 직전 법정 비용 검토안을 찾을 수 없습니다.")
+
     archive_ids = {item.archiveId for item in selection.items}
+    archive_ids.update(item.paymentEvidence.archiveId for item in selection.items if item.paymentEvidence)
     if selection.schoolSiteEvent and selection.schoolSiteEvent.archiveId:
         archive_ids.add(selection.schoolSiteEvent.archiveId)
     source_documents = _statutory_cost_sources(project_id, project, archive_ids)
     try:
-        request_data = review_statutory_cost_cash_flow(project, baseline, selection, source_documents)
+        request_data = review_statutory_cost_cash_flow(project, baseline, selection, source_documents, previous_run)
         if request_data.get("monthlyFinancing") is not None:
             authorize_request(request, "assumption:override")
             enforce_project_tenant_scope(request, project)

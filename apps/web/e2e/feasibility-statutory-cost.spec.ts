@@ -7,6 +7,7 @@ async function verifyStatutoryCostWorkflow(page: Page, publicOnly: boolean) {
   const projectId = "statutory-demo";
   const baseRunId = "saved-cost-basis";
   const savedRunId = "statutory-review-run";
+  const revisedRunId = "statutory-reconciled-run";
   const financialInputHash = "a".repeat(64);
   const document = { archiveId: "b".repeat(64), fileName: "학교용지부담금 고지서.pdf" };
   const businessEvent = { status: "actual", kind: "sale_notice_approval", eventDate: "2025-07-31",
@@ -38,6 +39,12 @@ async function verifyStatutoryCostWorkflow(page: Page, publicOnly: boolean) {
   };
   const baseRun = { calculationRunId: baseRunId, engineKey: "cash_flow_engine", resultSnapshot };
   const anotherRun = { ...baseRun, calculationRunId: "latest-other-run" };
+  const savedItem = {
+    ...reviewedCost,
+    label: "학교용지부담금",
+    legalBasis: lawBasis,
+    sourceLocator: { ...document, location: reviewedCost.location },
+  };
   const savedRun = {
     calculationRunId: savedRunId,
     engineKey: "cash_flow_engine",
@@ -47,14 +54,26 @@ async function verifyStatutoryCostWorkflow(page: Page, publicOnly: boolean) {
         schemaVersion: "realytics-statutory-cost-selection-v1",
         baseCalculationRunId: baseRunId,
         additionalCostKrw: reviewedCost.amountKrw,
-        items: [{
-          ...reviewedCost,
-          label: "학교용지부담금",
-          legalBasis: lawBasis,
-          sourceLocator: { ...document, location: reviewedCost.location },
-        }],
+        items: [savedItem],
       },
     },
+  };
+  const partialReceipt = { archiveId: document.archiveId, location: "납부 증빙 3쪽", paidOn: "2025-08-16", amountKrw: 7_000_000 };
+  const revisedCost = { ...reviewedCost, amountKrw: 30_000_000, paymentMonthIndex: 1 };
+  const revisedRun = {
+    ...savedRun,
+    calculationRunId: revisedRunId,
+    inputSnapshot: { statutoryCostSelection: {
+      ...savedRun.inputSnapshot.statutoryCostSelection,
+      previousReviewCalculationRunId: savedRunId,
+      additionalCostKrw: revisedCost.amountKrw,
+      items: [{ ...savedItem, ...revisedCost, previousAdoption: savedItem,
+        amountRecords: {
+          notified: { amountKrw: revisedCost.amountKrw, paymentMonthIndex: 1, sourceLocator: savedItem.sourceLocator },
+          paid: { amountKrw: partialReceipt.amountKrw, paidOn: partialReceipt.paidOn, paymentMonthIndex: null,
+            sourceLocator: { ...document, location: partialReceipt.location } },
+        } }],
+    } },
   };
   const submissions: unknown[] = [];
   let exactReopens = 0;
@@ -71,12 +90,14 @@ async function verifyStatutoryCostWorkflow(page: Page, publicOnly: boolean) {
       };
     } else if (url.pathname.endsWith("/workspace/context")) {
       body = { projectId, projectMemory: { projectName: "법정 비용 검증" }, pageData: {} };
+    } else if (url.pathname.endsWith("/calculation-runs/" + revisedRunId)) {
+      body = revisedRun;
     } else if (url.pathname.endsWith("/calculation-runs/" + savedRunId)) {
       exactReopens += 1;
       body = savedRun;
     } else if (url.pathname.endsWith("/calculation-runs")) {
       body = { records: url.searchParams.get("engine_key") === "cash_flow_engine"
-        ? [...(listShowsSavedRun ? [savedRun] : []), anotherRun, baseRun]
+        ? [...(submissions.length > 1 ? [revisedRun] : []), ...(listShowsSavedRun ? [savedRun] : []), anotherRun, baseRun]
         : [] };
     } else if (url.pathname.endsWith("/statutory-cost-review")) {
       body = {
@@ -115,7 +136,7 @@ async function verifyStatutoryCostWorkflow(page: Page, publicOnly: boolean) {
       body = lawBasis;
     } else if (url.pathname.endsWith("/statutory-cost-review/calculate")) {
       submissions.push(route.request().postDataJSON());
-      body = { calculationRunId: savedRunId };
+      body = { calculationRunId: submissions.length === 1 ? savedRunId : revisedRunId };
     }
     await route.fulfill({ json: body });
   });
@@ -175,9 +196,32 @@ async function verifyStatutoryCostWorkflow(page: Page, publicOnly: boolean) {
     await expect(page.getByText(/판본 test-edition/).first()).toBeVisible();
   }
 
+  if (!publicOnly) {
+    await page.getByLabel("학교용지부담금 금액(원)").fill(String(revisedCost.amountKrw));
+    await page.getByLabel(/납부 월차/).fill(String(revisedCost.paymentMonthIndex));
+    await page.getByRole("checkbox", { name: "학교용지부담금 실납부 증빙 기록" }).check();
+    await page.getByLabel("영수증 금액(원)").fill(String(partialReceipt.amountKrw));
+    await page.getByLabel("실제 납부일", { exact: true }).fill(partialReceipt.paidOn);
+    await page.getByLabel("납부 증빙 문서").selectOption(partialReceipt.archiveId);
+    await page.getByLabel("납부 증빙 위치").fill(partialReceipt.location);
+    await page.getByRole("button", { name: "법정 비용 반영·계산 저장" }).click();
+    await expect(page.getByText(/채택액 차이 \+5,000,000원/)).toBeVisible();
+    expect(submissions[1]).toEqual({
+      baseCalculationRunId: baseRunId, expectedFinancialInputHash: financialInputHash,
+      previousReviewCalculationRunId: savedRunId,
+      schoolSiteEvent: { ...businessEvent, expectedBasisHash: lawBasis.basisHash },
+      items: [{ ...revisedCost, archiveId: document.archiveId, paymentEvidence: partialReceipt }],
+    });
+    await expect(page.getByText(/실납부액 · 7,000,000원 · 실제 납부일 2025-08-16/)).toBeVisible();
+    await page.getByRole("button", { name: /^직전 검토안 열기/ }).click();
+    await expect(page.getByText("이 실행의 법정 비용 · 추가 25,000,000원")).toBeVisible();
+    await page.getByRole("button", { name: "최신 검토안 열기" }).click();
+    await expect(page.getByText("이 실행의 법정 비용 · 추가 30,000,000원")).toBeVisible();
+  }
+
   await page.goto(`/project/${projectId}/cashflow`);
   await expect(page.getByRole("link", { name: "수식 Excel 다운로드" })).toHaveAttribute(
-    "href", `/api/projects/${projectId}/cashflow/export?anchorCalculationRunId=${savedRunId}`,
+    "href", `/api/projects/${projectId}/cashflow/export?anchorCalculationRunId=${publicOnly ? savedRunId : revisedRunId}`,
   );
 }
 

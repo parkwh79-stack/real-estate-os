@@ -451,7 +451,8 @@ export default function FeasibilityPage() {
           <p className="mt-1 text-re-secondary">계획 수납·비용과 조달을 반영한 결과입니다. 가용자금 산정에서 상환용 제한현금을 제외했습니다.</p>
         </section>
       )}
-      <StatutoryCostWorkspace key={"statutory-" + projectId} projectId={projectId} cashflow={cashflow} onSaved={async (result) => {
+      <StatutoryCostWorkspace key={"statutory-" + projectId} projectId={projectId} cashflow={cashflow} loading={loading}
+        onOpenRun={load} onSaved={async (result) => {
         setRecalculation({ projectId, runId: result.calculationRunId });
         setFollowupExecution(readPfFollowupExecution(result));
         await load(result.calculationRunId);

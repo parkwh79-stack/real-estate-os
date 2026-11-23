@@ -5,20 +5,19 @@ import Link from "next/link";
 import { apiBase, authHeaders } from "../../lib/auth-client";
 import { SCHOOL_EDITION_LABELS, SCHOOL_EVENT_LABELS, type SchoolEventKind, type SchoolSiteLawBasis } from "../../lib/school-site-law-basis";
 import type { CashflowResult } from "../../lib/project-client";
+import {
+  STATUTORY_AMOUNT_KIND, STATUTORY_COST_INCLUSION, type SavedStatutoryCostItem, type SavedStatutoryCostSelection,
+  type StatutoryAmountKind, type StatutoryCostInclusion,
+} from "../../lib/statutory-cost-review";
 
 type Evidence = { label: string; sourceType: string; status: string; value?: number | string; locator?: Record<string, unknown> };
 export type StatutoryCostItem = { key: string; label: string; status: string; amountKrw: number | null; legalLookupStatus?: string; missingInputs: string[]; evidence: Evidence[] };
 type Basis = { calculationRunId: string; financialInputHash: string; createdAt: string; totalProjectCost: number; lastMonthIndex: number };
 type Review = { items: StatutoryCostItem[]; basisRuns: Basis[]; documents: { archiveId: string; fileName: string }[];
   workbookSubtotal?: { amountKrw: number | null; label: string } | null };
-type Choice = { amount: string; amountKind: "estimate" | "notified" | "paid"; inclusion: "included" | "additional" | "not_applicable";
-  archiveId: string; location: string; reason: string; month: string };
-type SavedItem = Omit<Choice, "amount" | "amountKind" | "archiveId" | "location" | "month"> & {
-  key: string; label: string; amountKrw: number | null; amountKind: Choice["amountKind"] | null; paymentMonthIndex: number | null;
-  legalBasis?: SchoolSiteLawBasis;
-  sourceLocator: { archiveId: string; fileName: string; location: string };
-};
-type SavedSelection = { schemaVersion: string; baseCalculationRunId: string; items: SavedItem[]; additionalCostKrw: number };
+type PaymentDraft = { amount: string; date: string; archiveId: string; location: string };
+type Choice = { amount: string; amountKind: StatutoryAmountKind; inclusion: StatutoryCostInclusion;
+  archiveId: string; location: string; reason: string; month: string; payment?: PaymentDraft };
 type SchoolEvent = { status: "unknown" | "actual" | "assumed"; kind: SchoolEventKind | "";
   eventDate: string; archiveId: string; location: string };
 const EMPTY_SCHOOL_EVENT: SchoolEvent = { status: "unknown", kind: "", eventDate: "", archiveId: "", location: "" };
@@ -30,16 +29,53 @@ const LEGAL_LOOKUP: Record<string, string> = {
   no_match: "조회 결과에서 해당 법령을 확인하지 못했습니다.",
   reference_found: "공식 법령 출처를 확인했습니다.",
 };
-const AMOUNT_KIND = { estimate: "검토 추정액", notified: "고지액", paid: "실납부액" };
+const EMPTY_PAYMENT: PaymentDraft = { amount: "", date: "", archiveId: "", location: "" };
 
 function won(value: number): string {
   return value.toLocaleString("ko-KR", { maximumFractionDigits: 0 }) + "원";
 }
 
-function savedSelection(cashflow: CashflowResult | null): SavedSelection | undefined {
-  const selection = cashflow?.inputSnapshot?.statutoryCostSelection as SavedSelection | undefined;
+function savedSelection(cashflow: CashflowResult | null): SavedStatutoryCostSelection | undefined {
+  const selection = cashflow?.inputSnapshot?.statutoryCostSelection as SavedStatutoryCostSelection | undefined;
   return selection?.schemaVersion === "realytics-statutory-cost-selection-v1" && Array.isArray(selection.items)
     ? selection : undefined;
+}
+
+function adoptionLabel(item: SavedStatutoryCostItem | NonNullable<SavedStatutoryCostItem["previousAdoption"]>) {
+  const month = item.paymentMonthIndex == null ? "" : "M" + item.paymentMonthIndex;
+  return [
+    item.amountKind ? STATUTORY_AMOUNT_KIND[item.amountKind] : "",
+    item.amountKrw == null ? "" : won(item.amountKrw),
+    STATUTORY_COST_INCLUSION[item.inclusion],
+    month,
+  ].filter(Boolean).join(" · ");
+}
+
+function SavedCostAmounts({ item, projectId }: { item: SavedStatutoryCostItem; projectId: string }) {
+  const before = item.previousAdoption;
+  const beforeLabel = before && adoptionLabel(before);
+  const currentLabel = adoptionLabel(item);
+  const delta = before?.amountKrw != null && item.amountKrw != null ? item.amountKrw - before.amountKrw : null;
+  return <>
+    {beforeLabel && beforeLabel !== currentLabel ? <p className="mt-1">
+      직전 반영 <strong>{beforeLabel}</strong> → 이번 반영 <strong>{currentLabel}</strong>
+      {delta ? " · 채택액 차이 " + (delta > 0 ? "+" : "−") + won(Math.abs(delta)) : ""}
+    </p> : null}
+    {item.amountRecords ? <ul className="mt-1 space-y-1">
+      {Object.entries(STATUTORY_AMOUNT_KIND).map(([key, label]) => {
+        const record = item.amountRecords?.[key as StatutoryAmountKind];
+        if (!record) return null;
+        const { sourceLocator } = record;
+        const href = "/project/" + encodeURIComponent(projectId) + "/documents/review?archiveId=" + encodeURIComponent(sourceLocator.archiveId);
+        return <li key={key} className="break-words">
+          {label} · {won(record.amountKrw)}
+          {record.paidOn ? " · 실제 납부일 " + record.paidOn : ""}
+          {record.paymentMonthIndex == null ? "" : " · 검토 M" + record.paymentMonthIndex}
+          {" · "}<Link className="underline" href={href}>{sourceLocator.fileName}</Link>{" "}{sourceLocator.location}
+        </li>;
+      })}
+    </ul> : null}
+  </>;
 }
 
 function officialUrl(locator?: Record<string, unknown>): string | undefined {
@@ -111,8 +147,9 @@ async function bodyOrError(response: Response, fallback: string) {
   return body;
 }
 
-export function StatutoryCostWorkspace({ projectId, cashflow, onSaved }: {
-  projectId: string; cashflow: CashflowResult | null; onSaved: (result: RunReceipt) => Promise<void>;
+export function StatutoryCostWorkspace({ projectId, cashflow, loading, onOpenRun, onSaved }: {
+  projectId: string; cashflow: CashflowResult | null; loading: boolean; onOpenRun: (runId?: string) => Promise<void>;
+  onSaved: (result: RunReceipt) => Promise<void>;
 }) {
   const [opened, setOpened] = useState(false);
   const [review, setReview] = useState<Review>();
@@ -120,16 +157,19 @@ export function StatutoryCostWorkspace({ projectId, cashflow, onSaved }: {
   const [requestVersion, setRequestVersion] = useState(0);
   const baseUrl = apiBase + "/projects/" + encodeURIComponent(projectId) + "/statutory-cost-review";
   const saved = savedSelection(cashflow);
+  const baseRunId = saved?.baseCalculationRunId;
+  const [openedPrior, setOpenedPrior] = useState(false);
 
   useEffect(() => {
     if (!opened) return;
     const controller = new AbortController();
-    void fetch(baseUrl, { headers: authHeaders("web"), cache: "no-store", signal: controller.signal })
+    const url = baseRunId ? baseUrl + "?base_run_id=" + encodeURIComponent(baseRunId) : baseUrl;
+    void fetch(url, { headers: authHeaders("web"), cache: "no-store", signal: controller.signal })
       .then((response) => bodyOrError(response, "법정 비용 검토 자료를 불러오지 못했습니다."))
       .then((body) => { if (!controller.signal.aborted) setReview(body); })
       .catch((caught: unknown) => { if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "조회에 실패했습니다."); });
     return () => controller.abort();
-  }, [baseUrl, opened, requestVersion]);
+  }, [baseRunId, baseUrl, opened, requestVersion]);
 
   return (
     <details className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm" onToggle={(event) => {
@@ -142,12 +182,18 @@ export function StatutoryCostWorkspace({ projectId, cashflow, onSaved }: {
         <p className="text-sm text-slate-600">공식 근거와 기존 사업비를 확인한 뒤 채택할 금액을 선택하세요.</p>
         {saved ? <div className="rounded-lg bg-indigo-50 p-4 text-sm text-indigo-950">
           <p className="font-bold">이 실행의 법정 비용 · 추가 {won(saved.additionalCostKrw)}</p>
+          {saved.previousReviewCalculationRunId ? <button type="button" className="mt-1 text-xs underline disabled:opacity-50" disabled={loading}
+            onClick={() => { setOpenedPrior(true); void onOpenRun(saved.previousReviewCalculationRunId); }}>
+            직전 검토안 열기 · {saved.previousReviewCalculationRunId.slice(-8)}
+          </button> : null}
+          {openedPrior ? <button type="button" className="ml-2 text-xs underline disabled:opacity-50" disabled={loading}
+            onClick={() => { setOpenedPrior(false); void onOpenRun(); }}>최신 검토안 열기</button> : null}
           <ul className="mt-2 space-y-1">{saved.items.map((item) => <li key={item.key}>
-            {item.label} · {item.inclusion === "not_applicable" ? "비적용 검토" : [
-              item.amountKrw === null ? "금액 미확인" : won(item.amountKrw),
-              item.amountKind ? AMOUNT_KIND[item.amountKind] : "",
-              item.inclusion === "included" ? "기존 사업비 포함" : "M" + item.paymentMonthIndex + " 추가",
-            ].filter(Boolean).join(" · ")} · {item.sourceLocator.fileName} {item.sourceLocator.location}
+            <p>{item.label} · {item.amountKind && item.amountKrw !== null
+              ? [won(item.amountKrw), STATUTORY_AMOUNT_KIND[item.amountKind],
+                item.inclusion === "additional" ? "M" + item.paymentMonthIndex + " 추가" : STATUTORY_COST_INCLUSION[item.inclusion]].join(" · ")
+              : STATUTORY_COST_INCLUSION[item.inclusion]} · {item.sourceLocator.fileName} {item.sourceLocator.location}</p>
+            <SavedCostAmounts item={item} projectId={projectId} />
             {item.legalBasis ? <SchoolLawBasisSummary basis={item.legalBasis} /> : null}
           </li>)}</ul>
         </div> : null}
@@ -161,7 +207,7 @@ export function StatutoryCostWorkspace({ projectId, cashflow, onSaved }: {
           <StatutoryCostEvidence items={review.items} />
           <Link className="text-sm font-medium text-blue-700 underline" href={"/project/" + encodeURIComponent(projectId) + "/chief-orchestration"}>AI 딜룸에서 근거 사전 검토</Link>
           <CostSelectionForm key={cashflow?.runId ?? "no-run"} review={review} runId={cashflow?.runId} saved={saved}
-            endpoint={baseUrl} onSaved={onSaved} />
+            endpoint={baseUrl} onSaved={async (result) => { setOpenedPrior(false); await onSaved(result); }} />
         </> : null}
       </div>
     </details>
@@ -169,7 +215,7 @@ export function StatutoryCostWorkspace({ projectId, cashflow, onSaved }: {
 }
 
 function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
-  review: Review; runId?: string; saved?: SavedSelection; endpoint: string; onSaved: (result: RunReceipt) => Promise<void>;
+  review: Review; runId?: string; saved?: SavedStatutoryCostSelection; endpoint: string; onSaved: (result: RunReceipt) => Promise<void>;
 }) {
   const [basisId, setBasisId] = useState(saved?.baseCalculationRunId ?? runId ?? "");
   const [choices, setChoices] = useState<Record<string, Choice>>(() => Object.fromEntries((saved?.items ?? []).map((item) => (
@@ -231,6 +277,9 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
     }
   }
 
+  const previousReviewId = saved && basis?.calculationRunId === saved.baseCalculationRunId
+    && saved.items.some((item) => choices[item.key]) ? runId : undefined;
+
   const waitingForSchoolBasis = !!choices.school_site_charge && schoolEvent.status !== "unknown" && !schoolBasis;
 
   async function calculate(event: FormEvent<HTMLFormElement>) {
@@ -245,6 +294,7 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
         body: JSON.stringify({
           baseCalculationRunId: basis.calculationRunId,
           expectedFinancialInputHash: basis.financialInputHash,
+          ...(previousReviewId ? { previousReviewCalculationRunId: previousReviewId } : {}),
           ...(choices.school_site_charge && schoolEvent.status !== "unknown" ? {
             schoolSiteEvent: { ...schoolEventPayload(), expectedBasisHash: schoolBasis?.basisHash },
           } : {}),
@@ -253,6 +303,12 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
             amountKind: choice.inclusion === "not_applicable" ? null : choice.amountKind, inclusion: choice.inclusion,
             archiveId: choice.archiveId, location: choice.location, reason: choice.reason,
             paymentMonthIndex: choice.inclusion === "additional" ? Number(choice.month) : null,
+            ...(choice.payment && choice.inclusion !== "not_applicable" && choice.amountKind !== "paid" ? {
+              paymentEvidence: {
+                amountKrw: Number(choice.payment.amount), paidOn: choice.payment.date,
+                archiveId: choice.payment.archiveId, location: choice.payment.location,
+              },
+            } : {}),
           })),
         }),
       });
@@ -282,6 +338,7 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
           </option>)}
         </select>
       </label>
+      {previousReviewId ? <p className="text-sm text-slate-600">현재 검토안의 금액 근거를 이어서 기록합니다.</p> : null}
       {review.basisRuns.length === 0 ? <p className="text-sm text-slate-600">실효 입력이 저장된 월별 현금흐름을 먼저 계산하세요. 원본 행 순서를 보존하는 실행은 기준으로 선택할 수 없습니다.</p> : null}
       {review.documents.length === 0 ? <p className="text-sm text-slate-600">산출 근거, 고지서 또는 납부 증빙을 이 프로젝트에 먼저 보관하세요.</p> : null}
       {basis && review.documents.length > 0 ? review.items.map((item) => {
@@ -306,6 +363,27 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
             </select></label>
             <label>문서 위치<input className={FIELD} placeholder="예: 고지서 2쪽 또는 사업수지!D52" required maxLength={200} value={choice.location} onChange={(event) => change(item.key, { location: event.target.value })} /></label>
             <label className="md:col-span-2">포함 여부를 확인한 근거<input className={FIELD} required maxLength={600} value={choice.reason} onChange={(event) => change(item.key, { reason: event.target.value })} /></label>
+          </div> : null}
+
+          {choice && choice.inclusion !== "not_applicable" && choice.amountKind !== "paid" ? <div className="mt-3 border-t border-slate-200 pt-3 text-sm">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={!!choice.payment} onChange={(event) => change(item.key, { payment: event.target.checked ? EMPTY_PAYMENT : undefined })} />
+              {item.label} 실납부 증빙 기록
+            </label>
+            {choice.payment ? <div className="mt-2 grid gap-3 md:grid-cols-2">
+              <p className="md:col-span-2 text-xs text-slate-600">영수증 한 건의 금액과 날짜를 보관합니다. 계산에는 위에서 채택한 금액을 씁니다.</p>
+              <label>영수증 금액(원)<input className={FIELD} type="number" min="1" max="1000000000000000" step="1" required
+                value={choice.payment.amount} onChange={(event) => change(item.key, { payment: { ...choice.payment!, amount: event.target.value } })} /></label>
+              <label>실제 납부일<input className={FIELD} type="date" required value={choice.payment.date}
+                onChange={(event) => change(item.key, { payment: { ...choice.payment!, date: event.target.value } })} /></label>
+              <label>납부 증빙 문서<select className={FIELD} required value={choice.payment.archiveId}
+                onChange={(event) => change(item.key, { payment: { ...choice.payment!, archiveId: event.target.value } })}>
+                <option value="">보관 원본 선택</option>
+                {review.documents.map((document) => <option key={document.archiveId} value={document.archiveId}>{document.fileName}</option>)}
+              </select></label>
+              <label>납부 증빙 위치<input className={FIELD} type="text" required maxLength={200} value={choice.payment.location}
+                onChange={(event) => change(item.key, { payment: { ...choice.payment!, location: event.target.value } })} /></label>
+            </div> : null}
           </div> : null}
 
           {item.key === "school_site_charge" && choice ? <div className="mt-4 border-t border-slate-200 pt-3">

@@ -233,6 +233,8 @@ def test_same_school_cost_can_change_amount_and_month_without_compounding(statut
     payload["items"][0].update(amountKind="estimate", paymentMonthIndex=1)
     estimated = client.post(endpoint, json=payload)
     assert estimated.status_code == 200, estimated.text
+    original_run_id = estimated.json()["calculationRunId"]
+    payload["previousReviewCalculationRunId"] = original_run_id
     payload["items"][0].update(amountKind="notified", amountKrw=FEE + 5_000, paymentMonthIndex=2)
     notified = client.post(endpoint, json=payload)
     assert notified.status_code == 200, notified.text
@@ -242,3 +244,63 @@ def test_same_school_cost_can_change_amount_and_month_without_compounding(statut
     assert next(row["delta"] for row in compare["metrics"] if row["key"] == "totalProjectCost") == pytest.approx(5_000)
     assert estimated.json()["monthlyCashFlow"][1]["cashOut"]["otherCost"] == pytest.approx(
         notified.json()["monthlyCashFlow"][1]["cashOut"]["otherCost"] + FEE)
+    next_selection = indexed[notified.json()["calculationRunId"]]["inputSnapshot"]["statutoryCostSelection"]
+    assert next_selection["previousReviewCalculationRunId"] == original_run_id
+    item = next_selection["items"][0]
+    assert item["previousAdoption"]["paymentMonthIndex"] == 1
+    assert item["amountRecords"]["estimate"]["amountKrw"] == FEE
+    assert item["amountRecords"]["notified"]["amountKrw"] == FEE + 5_000
+    assert item["amountRecords"]["notified"]["paymentMonthIndex"] == 2
+
+    authority = _authority
+    receipt = "c" * 64
+    authority.row["source_documents"].append({"archiveId": receipt, "originalFileName": "일부납부.pdf"})
+    payload["previousReviewCalculationRunId"] = notified.json()["calculationRunId"]
+    payload["items"][0]["paymentEvidence"] = {
+        "archiveId": receipt, "location": "영수증 1쪽", "paidOn": "2025-01-02", "amountKrw": 8_000,
+    }
+    with_receipt = client.post(endpoint, json=payload)
+    assert with_receipt.status_code == 200, with_receipt.text
+    assert with_receipt.json()["summary"] == notified.json()["summary"]
+    assert with_receipt.json()["monthlyCashFlow"] == notified.json()["monthlyCashFlow"]
+    reloaded = client.get("/projects/p/calculation-runs/" + with_receipt.json()["calculationRunId"]).json()
+    saved = reloaded["inputSnapshot"]["statutoryCostSelection"]["items"][0]
+    assert saved["amountKind"] == "notified" and saved["amountKrw"] == FEE + 5_000
+    assert saved["amountRecords"]["paid"] == {
+        "amountKrw": 8_000, "paymentMonthIndex": None, "paidOn": "2025-01-02",
+        "sourceLocator": {"archiveId": receipt, "fileName": "일부납부.pdf", "location": "영수증 1쪽"},
+    }
+    assert receipt in reloaded["inputSnapshot"]["inputEvidenceIds"]
+    assert "paid" not in item["amountRecords"]
+
+
+@pytest.mark.parametrize(("case", "expected"), [
+    ("other_project_review", 404), ("base_is_not_review", 409), ("mismatched_root", 409),
+    ("unbound_receipt", 422), ("future_receipt", 422), ("conflicting_paid", 422),
+])
+def test_reconciliation_rejects_incompatible_history_and_receipts(statutory_api, case, expected):
+    _authority, client, records, base, payload = statutory_api
+    endpoint = "/projects/p/statutory-cost-review/calculate"
+    initial = client.post(endpoint, json=payload)
+    assert initial.status_code == 200
+    previous = initial.json()["calculationRunId"]
+    if case == "other_project_review":
+        next(row for row in records if row["calculationRunId"] == previous)["projectId"] = "other-project"
+    elif case == "base_is_not_review":
+        previous = base["calculationRunId"]
+    elif case == "mismatched_root":
+        row = next(row for row in records if row["calculationRunId"] == previous)
+        row["inputSnapshot"]["statutoryCostSelection"]["baseCalculationRunId"] = "other-base"
+    else:
+        payload["items"][0]["paymentEvidence"] = {
+            "archiveId": ("f" * 64 if case == "unbound_receipt" else ARCHIVE),
+            "location": "1쪽", "paidOn": ("9999-01-01" if case == "future_receipt" else "2025-01-02"),
+            "amountKrw": 1_000,
+        }
+        if case == "conflicting_paid":
+            payload["items"][0]["amountKind"] = "paid"
+    payload["previousReviewCalculationRunId"] = previous
+    count = len(records)
+    response = client.post(endpoint, json=payload)
+    assert response.status_code == expected, response.text
+    assert len(records) == count

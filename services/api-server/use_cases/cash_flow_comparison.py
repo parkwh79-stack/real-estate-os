@@ -284,6 +284,10 @@ def _change_label(path: str) -> str:
     if key.startswith("statutorycostselection"):
         if ".legalbasis" in key:
             return "법정 비용의 검토 사건일·법령 판본"
+        if ".amountrecords" in key:
+            return "법정 비용의 추정·고지·납부 근거"
+        if ".paymentmonthindex" in key:
+            return "법정 비용의 반영 월차"
         return "법정 비용 검토"
     if key.startswith("monthlyfinancing"):
         return "금융비용 계산방식"

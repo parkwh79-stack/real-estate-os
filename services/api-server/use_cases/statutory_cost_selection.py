@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
 from math import isclose, isfinite
 from typing import Annotated, Any, Literal
 
@@ -16,20 +17,43 @@ from use_cases.statutory_cost_review import STATUTORY_COST_CATALOG
 
 StatutoryCostKey = Literal["school_site_charge", "building_artwork"]
 ArchiveId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+RunId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+DocumentLocation = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+AmountKrw = Annotated[int, Field(gt=0, le=1_000_000_000_000_000)]
+AmountKind = Literal["estimate", "notified", "paid"]
 
+
+class StatutoryCostPaymentEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    amountKrw: AmountKrw
+    archiveId: ArchiveId
+    location: DocumentLocation
+    paidOn: Annotated[str, StringConstraints(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")]
+
+    @model_validator(mode="after")
+    def validate_payment_date(self) -> StatutoryCostPaymentEvidence:
+        try:
+            paid_date = date.fromisoformat(self.paidOn)
+        except ValueError as exc:
+            raise ValueError("실제 납부일을 연-월-일로 입력하세요.") from exc
+        if paid_date > datetime.now(timezone(timedelta(hours=9))).date():
+            raise ValueError("실제 납부일은 미래 날짜일 수 없습니다.")
+        return self
 
 
 class StatutoryCostChoice(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     key: StatutoryCostKey
-    amountKrw: int | None = Field(default=None, gt=0, le=1_000_000_000_000_000)
-    amountKind: Literal["estimate", "notified", "paid"] | None = None
+    amountKrw: AmountKrw | None = None
+    amountKind: AmountKind | None = None
     inclusion: Literal["included", "additional", "not_applicable"]
     archiveId: ArchiveId
-    location: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    location: DocumentLocation
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=600)]
     paymentMonthIndex: int | None = Field(default=None, ge=0, le=600)
+    paymentEvidence: StatutoryCostPaymentEvidence | None = None
 
     @model_validator(mode="after")
     def validate_amount_and_timing(self) -> StatutoryCostChoice:
@@ -40,14 +64,17 @@ class StatutoryCostChoice(BaseModel):
             raise ValueError("반영할 비용의 금액과 구분을 확인하세요.")
         if self.inclusion == "additional" and self.paymentMonthIndex is None:
             raise ValueError("추가 비용의 납부 시점(M월)을 지정하세요.")
+        if self.paymentEvidence and (self.amountKind == "paid" or self.inclusion == "not_applicable"):
+            raise ValueError("실납부 증빙은 추정액이나 고지액을 채택할 때 별도로 기록하세요.")
         return self
 
 
 class StatutoryCostSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    baseCalculationRunId: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    baseCalculationRunId: RunId
     expectedFinancialInputHash: ArchiveId
+    previousReviewCalculationRunId: RunId | None = None
     items: list[StatutoryCostChoice] = Field(min_length=1, max_length=len(STATUTORY_COST_CATALOG))
     schoolSiteEvent: SchoolSiteLawSelection | None = None
 
@@ -90,11 +117,76 @@ def reviewable_statutory_basis(record: dict[str, Any]) -> bool:
     return True
 
 
+def _previous_cost_items(previous_run: dict[str, Any] | None, selection: StatutoryCostSelection) -> dict:
+    if not selection.previousReviewCalculationRunId:
+        return {}
+    snapshot = (previous_run or {}).get("inputSnapshot") or {}
+    previous = snapshot.get("statutoryCostSelection") or {}
+    if not (
+        previous_run
+        and previous_run.get("calculationRunId") == selection.previousReviewCalculationRunId
+        and previous_run.get("engineKey") == "cash_flow_engine"
+        and previous_run.get("status") == "completed"
+        and previous.get("schemaVersion") == "realytics-statutory-cost-selection-v1"
+        and previous.get("analysisOnly") is True
+        and previous.get("baseCalculationRunId") == selection.baseCalculationRunId
+        and previous.get("baseFinancialInputHash") == selection.expectedFinancialInputHash
+    ):
+        raise StatutoryCostBasisConflict("같은 기준 현금흐름에서 저장한 직전 법정 비용 검토안을 선택하세요.")
+    items = {item["key"]: item for item in previous["items"]}
+    if not any(choice.key in items for choice in selection.items):
+        raise StatutoryCostBasisConflict("직전 검토안과 이어지는 법정 비용 항목을 선택하세요.")
+    return items
+
+
+def _cost_document_locator(archive_id: str, location: str, documents: dict) -> dict:
+    document = documents.get(archive_id)
+    if not document or document.get("archiveId") != archive_id:
+        raise ValueError("현재 프로젝트에 보관된 근거 문서를 다시 선택하세요.")
+    return {"archiveId": archive_id, "fileName": document["fileName"], "location": location}
+
+
+def _adoption_record(item: dict) -> dict:
+    return {field: item[field] for field in ("amountKind", "amountKrw", "inclusion", "paymentMonthIndex", "sourceLocator")}
+
+
+def _amount_record(item: dict) -> dict:
+    return {field: item[field] for field in ("amountKrw", "paymentMonthIndex", "sourceLocator")}
+
+
+def _reconcile_cost_amounts(item: dict, previous: dict | None, payment: StatutoryCostPaymentEvidence | None,
+                            documents: dict) -> None:
+    amounts = dict((previous or {}).get("amountRecords") or {})
+    previous_kind = previous.get("amountKind") if previous else None
+    if previous_kind is not None and previous_kind not in amounts:
+        amounts[previous_kind] = _amount_record(previous)
+    kind = item["amountKind"]
+    if kind is not None:
+        adopted = _amount_record(item)
+        prior_amount = amounts.get(kind) or {}
+        if (kind == "paid" and prior_amount.get("paidOn") and prior_amount["amountKrw"] == adopted["amountKrw"]
+                and prior_amount["sourceLocator"] == adopted["sourceLocator"]):
+            adopted["paidOn"] = prior_amount["paidOn"]
+        amounts[kind] = adopted
+    if payment:
+        amounts["paid"] = {
+            "amountKrw": payment.amountKrw,
+            "paymentMonthIndex": None,
+            "paidOn": payment.paidOn,
+            "sourceLocator": _cost_document_locator(payment.archiveId, payment.location, documents),
+        }
+    if amounts:
+        item["amountRecords"] = amounts
+    if previous:
+        item["previousAdoption"] = _adoption_record(previous)
+
+
 def review_statutory_cost_cash_flow(
     project: dict[str, Any],
     base_run: dict[str, Any],
     selection: StatutoryCostSelection,
     documents: dict[str, dict[str, Any]],
+    previous_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Adopt selected costs in an isolated analysis tied to a saved cash flow."""
     if (base_run.get("calculationRunId") != selection.baseCalculationRunId
@@ -105,6 +197,7 @@ def review_statutory_cost_cash_flow(
     if stored_hash != selection.expectedFinancialInputHash or financial_input_hash(source) != stored_hash:
         raise StatutoryCostBasisConflict("기준 실행의 입력을 확인할 수 없습니다. 최신 계산에서 다시 선택하세요.")
 
+    previous_items = _previous_cost_items(previous_run, selection)
     request = _external_candidate_request(project, source)
     source_metadata = request["sourceMetadata"]
     source_metadata.update(analysisOnly=True, reportEligible=False, sourceType="statutory_cost_review")
@@ -131,10 +224,7 @@ def review_statutory_cost_cash_flow(
     additions = []
     included_total = 0
     for choice in sorted(selection.items, key=lambda item: item.key):
-        document = documents.get(choice.archiveId)
-        if not document or document.get("archiveId") != choice.archiveId:
-            raise ValueError("현재 프로젝트에 보관된 근거 문서를 다시 선택하세요.")
-        locator = {"archiveId": choice.archiveId, "fileName": document["fileName"], "location": choice.location}
+        locator = _cost_document_locator(choice.archiveId, choice.location, documents)
         month = choice.paymentMonthIndex
         if month is not None and month >= len(schedule):
             raise ValueError(f"{STATUTORY_COST_CATALOG[choice.key]} 납부 시점은 M0~M{len(schedule) - 1} 안에서 선택하세요.")
@@ -147,13 +237,15 @@ def review_statutory_cost_cash_flow(
             })
         elif choice.inclusion == "included":
             included_total += choice.amountKrw
-        items.append({
-            **choice.model_dump(exclude={"archiveId", "location"}),
+        item = {
+            **choice.model_dump(exclude={"archiveId", "location", "paymentEvidence"}),
             "label": STATUTORY_COST_CATALOG[choice.key],
             "sourceLocator": locator,
             "reviewStatus": "analyst_selected",
             "applicability": "not_applicable" if choice.inclusion == "not_applicable" else "applicable",
-        })
+        }
+        _reconcile_cost_amounts(item, previous_items.get(choice.key), choice.paymentEvidence, documents)
+        items.append(item)
     if included_total > other_cost or included_total > sum(row["otherCost"] for row in schedule) + 0.01:
         raise ValueError("이미 포함된 비용의 합계가 기준 계산의 기타 사업비를 초과합니다.")
 
@@ -203,9 +295,12 @@ def review_statutory_cost_cash_flow(
         "additionalCostKrw": additional_cost,
         "analysisOnly": True,
     }
+    if selection.previousReviewCalculationRunId:
+        request["statutoryCostSelection"]["previousReviewCalculationRunId"] = selection.previousReviewCalculationRunId
     request["inputEvidenceIds"] = list(dict.fromkeys([
         *(request.get("inputEvidenceIds") or request.get("evidenceIds") or []),
         *(item.archiveId for item in selection.items),
+        *(item.paymentEvidence.archiveId for item in selection.items if item.paymentEvidence),
         *([school_event.archiveId] if school_event.archiveId else []),
     ]))
     return request
