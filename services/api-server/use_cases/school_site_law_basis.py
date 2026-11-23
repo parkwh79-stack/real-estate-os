@@ -9,13 +9,14 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
 from legal_intelligence.models import DataClassification, LegalResourceKind, SourceAuthority
 from use_cases.cash_flow_dependencies import financial_input_hash
 from use_cases.legal_intelligence import build_legal_intelligence_service
+from use_cases.school_site_public_reference import school_site_public_reference
 from use_cases.statutory_cost_review import official_statutory_url, statutory_cost_query_plan
 
 EvidenceHash = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 Locator = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 SchoolEventKind = Literal[
     "approval_application", "approval", "amended_approval", "construction_start",
-    "sale_approval_application", "sale_notice", "sale", "completion",
+    "sale_approval_application", "sale_notice_approval", "sale_notice", "sale", "completion",
 ]
 _PROVISIONS = re.compile(r"^제5조(?:의2)?(?:$|[①-⑳(제])")
 
@@ -73,7 +74,14 @@ def resolve_school_site_law_basis(event: SchoolSiteEvent, source_locator: dict |
         "edition": None,
     }
     if event.eventDate:
-        basis["editionStatus"], basis["edition"] = _school_law_edition(date.fromisoformat(event.eventDate))
+        as_of = date.fromisoformat(event.eventDate)
+        status, edition = _school_law_edition(as_of)
+        basis.update(editionStatus=status, edition=edition)
+        if status == "edition_not_in_corpus":
+            basis["editionStatus"] = "edition_unconfirmed"
+            reference = school_site_public_reference(as_of)
+            if reference is not None:
+                basis["publicReference"] = reference
     return {**basis, "basisHash": financial_input_hash(basis)}
 
 
@@ -97,7 +105,7 @@ def _school_law_edition(as_of: date) -> tuple[str, dict | None]:
         if len(editions) > 1:
             return "edition_conflict", None
         if not hits:
-            return "edition_unconfirmed", None
+            return "edition_not_in_corpus", None
         official_id, version_id = next(iter(editions))
         resource = service.get_resource(official_id, as_of=as_of, provision_limit=2000)
     except (PostgresError, RuntimeError, OSError):

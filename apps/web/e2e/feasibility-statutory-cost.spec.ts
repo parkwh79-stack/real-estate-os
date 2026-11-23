@@ -1,24 +1,27 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 test.setTimeout(90_000);
 test.use({ actionTimeout: 12_000 });
 
-test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행을 다시 연다", async ({ page }) => {
+async function verifyStatutoryCostWorkflow(page: Page, publicOnly: boolean) {
   const projectId = "statutory-demo";
   const baseRunId = "saved-cost-basis";
   const savedRunId = "statutory-review-run";
   const financialInputHash = "a".repeat(64);
   const document = { archiveId: "b".repeat(64), fileName: "학교용지부담금 고지서.pdf" };
-  const businessEvent = { status: "actual", kind: "approval", eventDate: "2025-07-31",
+  const businessEvent = { status: "actual", kind: "sale_notice_approval", eventDate: "2025-07-31",
     archiveId: document.archiveId, location: "1쪽 사업 승인일" };
   const lawBasis = {
     schemaVersion: "realytics-school-site-law-basis-v1", basisHash: "d".repeat(64),
-    event: { status: "actual", kind: "approval", date: businessEvent.eventDate,
+    event: { status: "actual", kind: "sale_notice_approval", date: businessEvent.eventDate,
       sourceLocator: { ...document, location: businessEvent.location } },
-    editionStatus: "edition_verified", applicability: "unknown",
-    edition: { title: "학교용지 확보 등에 관한 특례법", officialVersionId: "test-edition",
+    editionStatus: publicOnly ? "edition_unconfirmed" : "edition_verified", applicability: "unknown",
+    edition: publicOnly ? null : { title: "학교용지 확보 등에 관한 특례법", officialVersionId: "test-edition",
       effectiveFrom: "2025-01-01", effectiveTo: null, contentHash: "sha256:" + "f".repeat(64),
       url: "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=123", provisions: [] },
+    publicReference: publicOnly ? { officialVersionId: "267343", effectiveFrom: "2025-06-21",
+      url: "https://www.law.go.kr/LSW/lsInfoP.do?efYd=20250621&lsiSeq=267343",
+      amendmentUrl: "https://www.law.go.kr/LSW/lsInfoP.do?efYd=20250621&lsiSeq=267343&viewCls=lsRvsDocInfoR" } : undefined,
   };
   const reviewedCost = {
     key: "school_site_charge",
@@ -134,13 +137,18 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
   await page.getByLabel("문서 위치").fill(reviewedCost.location);
   await page.getByLabel("포함 여부를 확인한 근거").fill(reviewedCost.reason);
   await page.getByLabel("사건일 상태").selectOption("actual");
-  await page.getByLabel("검토 기준 사건").selectOption("approval");
+  await page.getByLabel("검토 기준 사건").selectOption(businessEvent.kind);
   await page.getByLabel("사업 사건일", { exact: true }).fill(businessEvent.eventDate);
   await page.getByLabel("사건 증빙 문서").selectOption(document.archiveId);
   await page.getByLabel("사건 증빙 위치").fill(businessEvent.location);
   await expect(page.getByRole("button", { name: "법정 비용 반영·계산 저장" })).toBeDisabled();
   await page.getByRole("button", { name: "사건일 법령 판본 조회" }).click();
-  await expect(page.getByText(/해당 날짜의 공식 판본 확인/)).toBeVisible();
+  if (lawBasis.publicReference) {
+    await expect(page.getByText(/해당 날짜의 공식 판본 미확인/)).toBeVisible();
+    await expect(page.getByRole("link", { name: "원문 보기", exact: true })).toHaveAttribute("href", lawBasis.publicReference.url);
+  } else {
+    await expect(page.getByText(/해당 날짜의 공식 판본 확인/)).toBeVisible();
+  }
   await page.getByRole("button", { name: "법정 비용 반영·계산 저장" }).click();
 
   await expect(header).toContainText("이 실행에 1건 반영");
@@ -161,10 +169,22 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
   await expect(page.getByRole("combobox", { name: /^근거 문서/ })).toHaveValue(document.archiveId);
   await expect(page.getByLabel(/납부 월차/)).toHaveValue("2");
   await expect(page.getByLabel("사업 사건일", { exact: true })).toHaveValue(businessEvent.eventDate);
-  await expect(page.getByText(/판본 test-edition/).first()).toBeVisible();
+  if (lawBasis.publicReference) {
+    await expect(page.getByRole("link", { name: "개정문·부칙 보기" }).first()).toHaveAttribute("href", lawBasis.publicReference.amendmentUrl);
+  } else {
+    await expect(page.getByText(/판본 test-edition/).first()).toBeVisible();
+  }
 
   await page.goto(`/project/${projectId}/cashflow`);
   await expect(page.getByRole("link", { name: "수식 Excel 다운로드" })).toHaveAttribute(
     "href", `/api/projects/${projectId}/cashflow/export?anchorCalculationRunId=${savedRunId}`,
   );
+}
+
+test("법정 비용을 검증 판본과 월차에 연결해 저장하고 다시 연다", async ({ page }) => {
+  await verifyStatutoryCostWorkflow(page, false);
+});
+
+test("공개 시행본과 부칙을 같은 법정 비용 실행에서 다시 연다", async ({ page }) => {
+  await verifyStatutoryCostWorkflow(page, true);
 });

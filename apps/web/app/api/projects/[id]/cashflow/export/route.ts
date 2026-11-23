@@ -334,7 +334,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const school = statutoryCosts.items.find((item: AnyRecord) => item.key === "school_site_charge");
     const lawBasis = school?.legalBasis as SchoolSiteLawBasis | undefined;
     if (lawBasis?.schemaVersion === "realytics-school-site-law-basis-v1") {
-      const { event, edition } = lawBasis;
+      const { event, edition, publicReference } = lawBasis;
       costs.addRows([
         ["학교용지부담금 사건", event.kind ? SCHOOL_EVENT_LABELS[event.kind] : null, event.date,
           event.status === "assumed" ? "가정" : event.status === "actual" ? "증빙 연결" : "미확인",
@@ -343,6 +343,11 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         ["법령 판본 상태", SCHOOL_EDITION_LABELS[lawBasis.editionStatus], "사업 적용 미확인"],
         ["법령 판본 근거 SHA-256", lawBasis.basisHash],
       ]);
+      if (publicReference) {
+        costs.addRow(["공개 시행본 참고", publicReference.officialVersionId, publicReference.effectiveFrom,
+          null, null, null, "원문", publicReference.url]);
+        costs.addRow(["공개 개정문·부칙", null, null, null, null, null, "개정문", publicReference.amendmentUrl]);
+      }
       if (edition) {
         costs.addRow(["법령 판본 및 시행기간", edition.officialVersionId, edition.effectiveFrom, edition.effectiveTo,
           null, edition.contentHash, edition.title, edition.url]);

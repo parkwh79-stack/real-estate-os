@@ -54,8 +54,10 @@ function officialUrl(locator?: Record<string, unknown>): string | undefined {
 }
 
 function SchoolLawBasisSummary({ basis }: { basis: SchoolSiteLawBasis }) {
-  const { edition, event } = basis;
+  const { edition, event, publicReference } = basis;
   const lawUrl = officialUrl({ url: edition?.url });
+  const publicUrl = officialUrl({ url: publicReference?.url });
+  const amendmentUrl = officialUrl({ url: publicReference?.amendmentUrl });
   return (
     <div className="text-sm text-slate-700">
       <p>{event.kind && event.date ? SCHOOL_EVENT_LABELS[event.kind] + " · " + event.date
@@ -65,6 +67,13 @@ function SchoolLawBasisSummary({ basis }: { basis: SchoolSiteLawBasis }) {
         {lawUrl ? <a className="underline text-blue-700" href={lawUrl} target="_blank" rel="noreferrer">{edition.title}</a> : edition.title}
         {" · 판본 " + edition.officialVersionId + " · 시행 " + edition.effectiveFrom}
         {edition.provisions.length ? " · " + edition.provisions.map((row) => row.path).join(", ") : ""}
+      </p> : null}
+      {publicReference && publicUrl ? <p className="mt-1">
+        공개 시행본 참고 · {publicReference.effectiveFrom} 시행 ·{" "}
+        <a className="underline text-blue-700" href={publicUrl} target="_blank" rel="noreferrer">원문 보기</a>
+        {amendmentUrl ? <>{" · "}
+          <a className="underline text-blue-700" href={amendmentUrl} target="_blank" rel="noreferrer">개정문·부칙 보기</a>
+        </> : null}
       </p> : null}
       <p className="text-xs text-slate-600">사업 적용 여부 미확인 · 적용례와 경과조치를 별도로 검토하세요.</p>
     </div>

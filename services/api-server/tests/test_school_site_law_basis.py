@@ -89,3 +89,24 @@ def test_mixed_editions_remain_unconfirmed(monkeypatch, failure, expected):
     )
     assert result["editionStatus"] == expected
     assert result["edition"] is None
+
+
+def test_public_reference_is_saved_separately_when_the_corpus_has_no_match(monkeypatch):
+    reference = {
+        "officialVersionId": "286359",
+        "effectiveFrom": "2026-12-03",
+        "url": "https://www.law.go.kr/LSW/lsInfoP.do?efYd=20261203&lsiSeq=286359",
+        "amendmentUrl": "https://www.law.go.kr/LSW/lsInfoP.do?efYd=20261203&lsiSeq=286359&viewCls=lsRvsDocInfoR",
+    }
+    empty_corpus = NS(search=lambda **kwargs: NS(authoritative_hits=[]))
+    monkeypatch.setattr(module, "build_legal_intelligence_service", lambda **kwargs: empty_corpus)
+    monkeypatch.setattr(module, "school_site_public_reference", lambda day: reference)
+    event = module.SchoolSiteEvent(status="assumed", kind="sale_notice_approval", eventDate="2026-12-03")
+
+    basis = module.resolve_school_site_law_basis(event)
+    assert basis["publicReference"] == reference
+    assert basis["editionStatus"] == "edition_unconfirmed"
+    assert basis["edition"] is None and basis["applicability"] == "unknown"
+
+    monkeypatch.setattr(module, "school_site_public_reference", lambda day: None)
+    assert basis["basisHash"] != module.resolve_school_site_law_basis(event)["basisHash"]

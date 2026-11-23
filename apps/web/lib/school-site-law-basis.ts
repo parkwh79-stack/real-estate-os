@@ -4,6 +4,7 @@ export const SCHOOL_EVENT_LABELS = {
   amended_approval: "변경승인",
   construction_start: "착공",
   sale_approval_application: "입주자 모집 승인 신청",
+  sale_notice_approval: "분양공고 승인",
   sale_notice: "입주자 모집 공고",
   sale: "분양",
   completion: "준공",
@@ -28,6 +29,7 @@ export type SchoolSiteLawBasis = {
     sourceLocator: { archiveId: string; fileName: string; location: string } | null;
   };
   editionStatus: keyof typeof SCHOOL_EDITION_LABELS;
+  publicReference?: { officialVersionId: string; effectiveFrom: string; url: string; amendmentUrl: string };
   edition: {
     title: string;
     officialVersionId: string;
