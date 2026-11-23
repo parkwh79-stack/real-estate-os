@@ -86,7 +86,7 @@ def test_batch_skips_already_resolved_and_respects_limit():
         {
             "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
             "land_acquisition": [
-                {"addressFragment": "상갈동 13", "lotNumber": "13", "pnu": "existing"},
+                {"addressFragment": "상갈동 13", "lotNumber": "13", "pnu": "4146310300100130000"},
                 {"addressFragment": "상갈동 14-2", "lotNumber": "14-2"},
                 {"addressFragment": "보라동 62", "dong": "보라동", "lotNumber": "62"},
             ],
@@ -287,3 +287,71 @@ def test_different_dong_parcel_not_constructed_with_wrong_dong_code():
     assert "pnu" not in repo.project["land_acquisition"][1]
     # It went to the address resolver (which would swap the 동).
     assert any("보라동" in a for a in address_calls)
+
+
+def test_same_dong_and_lot_in_different_municipalities_are_distinct():
+    other_address = "대구광역시 달서구 본리동 13"
+    repo = _FakeRepo({
+        "land": {"address": "대구광역시 서구 본리동 13"},
+        "land_acquisition": [
+            {"dong": "본리동", "lotNumber": "13"},
+            {"addressFragment": other_address, "dong": "본리동", "lotNumber": "13"},
+        ],
+    })
+    result = resolve_project_parcels_use_case(
+        repo, "1",
+        dong_code_resolver=lambda address: "2717011400",
+        pnu_lookup=lambda pnu: {"status": "resolved", "pnu": pnu},
+        resolver=lambda address: {
+            "status": "resolved",
+            "pnu": "2729011400100130000",
+            "addressFragment": other_address,
+        } if address == other_address else {"status": "not_found"},
+    )
+    assert result["totalParcels"] == 2
+    assert [row["pnu"] for row in result["results"]] == [
+        "2717011400100130000", "2729011400100130000",
+    ]
+
+
+def test_existing_pnu_is_synced_to_legacy_ledger_copy():
+    row = {"dong": "상갈동", "lotNumber": "13"}
+    repo = _FakeRepo({
+        "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+        "land_ledger": {"parcels": [row]},
+        "land_acquisition": [{**row, "resolvedPnu": "4146310300100130000"}],
+    })
+    result = resolve_project_parcels_use_case(repo, "1", resolver=_resolver)
+    assert result["attemptedCount"] == 0
+    assert repo.updates[0]["land_ledger"]["parcels"][0]["pnu"] == "4146310300100130000"
+
+
+def test_constructed_lookup_must_return_exact_pnu():
+    repo = _FakeRepo({
+        "land": {"address": "경기도 용인시 기흥구 상갈동 13"},
+        "landLedger": {"parcels": [{"lotNumber": "13"}]},
+    })
+    result = resolve_project_parcels_use_case(
+        repo, "1", dong_code_resolver=lambda address: "4146310300",
+        pnu_lookup=lambda pnu: {"status": "resolved", "pnu": "4146310300100140000"},
+    )
+    assert result["results"][0]["reason"] == "pnu_lookup_mismatch"
+    assert "pnu" not in repo.project["landLedger"]["parcels"][0]
+
+
+def test_address_prefix_rejects_unbounded_tokens_without_backtracking():
+    assert _address_prefix("서울특별시 종로구 " + "0" * 100000 + "동 1") == ""
+    assert _address_prefix("서울특별시 종로구 " + "0" * 129 + "동 1") == ""
+    assert _address_prefix("서울특별시 종로구 청운동 산1-2번지") == "서울특별시 종로구 청운동"
+    assert _address_prefix("서울특별시 종로구 청운동 1-2") == "서울특별시 종로구 청운동"
+
+
+def test_lot_parsing_preserves_mountain_and_suffix_rules_with_linear_digit_scans():
+    from use_cases.parcel_pnu_resolution import _lot_key
+
+    for value, expected in (
+        ("13", (False, 13, 0)), ("13-2", (False, 13, 2)), ("산	13-2대", (True, 13, 2)),
+        ("13대", (False, 13, 0)), ("산B13-2", (False, 13, 2)), ("13- 2", (False, 13, 0)),
+    ):
+        assert _lot_key(value) == expected
+    assert _lot_key(" " * 100000) is None

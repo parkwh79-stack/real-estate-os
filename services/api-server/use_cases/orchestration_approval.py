@@ -10,6 +10,8 @@ def approve_orchestration_run_use_case(
     run: Dict[str, Any],
     input_data: Dict[str, Any] | None,
     approved_at: str,
+    *,
+    approver_id: str | None = None,
 ) -> Dict[str, Any]:
     """Approve a completed orchestration run."""
     execution_status = run.get("executionStatus") or run.get("status")
@@ -43,6 +45,39 @@ def approve_orchestration_run_use_case(
         )
 
     input_data = input_data or {}
+    actor_id = str(
+        approver_id
+        or input_data.get("approved_by")
+        or input_data.get("approvedBy")
+        or ""
+    ).strip()
+    if not actor_id:
+        raise ValueError("A verified approver identity is required")
+
+    maker_id = str(
+        run.get("user_id")
+        or run.get("requestedBy")
+        or run.get("requested_by")
+        or ""
+    ).strip()
+    if maker_id and maker_id not in {"system", "anonymous"} and maker_id == actor_id:
+        raise ValueError(
+            "Maker-checker violation: the PF review requester cannot approve the same run"
+        )
+
+    approval_readiness = (run.get("artifacts") or {}).get("approvalReadinessGate")
+    if not isinstance(approval_readiness, dict) or approval_readiness.get("pass") is not True:
+        blocker_codes = [
+            str(item.get("code"))
+            for item in ((approval_readiness or {}).get("blockers") or [])
+            if isinstance(item, dict) and item.get("code")
+        ]
+        suffix = f" Blocking gates: {', '.join(blocker_codes[:12])}." if blocker_codes else ""
+        raise ValueError(
+            "Approval Readiness Gate must pass before final PF approval."
+            + suffix
+        )
+
     run["executionStatus"] = execution_status
     run["approvalStatus"] = "approved"
     run.setdefault("reportStatus", "not_started")
@@ -51,8 +86,19 @@ def approve_orchestration_run_use_case(
     run["status"] = execution_status
     run["approval"] = {
         "approved_at": approved_at,
-        "approved_by": input_data.get("approved_by", "system"),
+        "approved_by": actor_id,
         "comment": input_data.get("comment", ""),
+        "approvalReadiness": {
+            "schemaVersion": approval_readiness.get("schemaVersion"),
+            "status": approval_readiness.get("status"),
+            "gateType": approval_readiness.get("gateType"),
+            "blockingIssueCount": (
+                approval_readiness.get("summary") or {}
+            ).get("blockingIssueCount"),
+            "warningCount": (
+                approval_readiness.get("summary") or {}
+            ).get("warningCount"),
+        },
     }
     return run
 
@@ -92,14 +138,41 @@ def approve_orchestration_run_by_id_use_case(
     run_id: str,
     input_data: Dict[str, Any] | None,
     approved_at: str,
+    *,
+    approver_id: str,
 ) -> Dict[str, Any]:
     """Find, approve, and persist an orchestration run through the repository."""
     run = orchestration_repository.get(project_id, run_id)
     if not run:
         raise LookupError("Orchestration run not found")
-    approved = approve_orchestration_run_use_case(run, input_data, approved_at)
+    refresh_approval_readiness_gate(run)
+
+    approved = approve_orchestration_run_use_case(
+        run,
+        input_data,
+        approved_at,
+        approver_id=approver_id,
+    )
     orchestration_repository.save()
     return approved
+
+
+def refresh_approval_readiness_gate(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-evaluate the authoritative gate immediately before a high-risk action."""
+    try:
+        from agents.orchestration_agent import OrchestrationAgent
+
+        gate = OrchestrationAgent()._approval_readiness_gate(run)
+    except Exception as exc:
+        raise ValueError(
+            "Approval Readiness Gate could not be evaluated; final action is fail-closed"
+        ) from exc
+    if not isinstance(gate, dict):
+        raise ValueError(
+            "Approval Readiness Gate returned an invalid result; final action is fail-closed"
+        )
+    run.setdefault("artifacts", {})["approvalReadinessGate"] = gate
+    return gate
 
 
 def review_orchestration_handoff_use_case(
@@ -335,6 +408,6 @@ def _refresh_approval_readiness_gate(run: Dict[str, Any]) -> None:
         )
     except Exception as exc:
         run.setdefault("artifacts", {})["approvalReadinessGateRefreshError"] = {
-            "message": str(exc),
+            "message": "Approval readiness could not be refreshed. Approval remains unavailable.",
             "type": exc.__class__.__name__,
         }

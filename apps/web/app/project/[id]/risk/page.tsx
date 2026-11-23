@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, ArrowLeft, CheckCircle2, Loader2, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
 import { apiBase, authHeaders } from "../../../../lib/auth-client";
 import {
@@ -13,6 +13,7 @@ import {
 } from "../../../../lib/deal-state-records";
 import { displayText, fetchWorkspaceContext, type WorkspacePageContext } from "../../../../lib/workspace-context";
 import { CalculationRunHistoryPanel } from "../../../../components/calculation/calculation-run-history-panel";
+import { RiskSupplementReview } from "../../../../components/risk/risk-supplement-review";
 
 type ReviewStatus = "approved" | "waived" | "needs_revision" | "resolved";
 type RiskFilter = "all" | "open" | "blocking" | "auto_supplement" | "missing_locator";
@@ -82,13 +83,21 @@ export default function RiskReviewPage() {
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewer, setReviewer] = useState("credit_officer");
   const [error, setError] = useState<string | null>(null);
+  const [selectedRisk, setSelectedRisk] = useState<{ projectId: string; record: DealStateRecord } | null>(null);
+  const [supplementBusy, setSupplementBusy] = useState(false);
+  const currentProject = useRef<string | null>(null);
+  const projectEpoch = useRef(0);
+  const loadSequence = useRef(0);
+  const reviewInFlight = useRef(false);
 
   const load = useCallback(async (runAssess = false) => {
+    if (currentProject.current !== projectId) return;
+    const sequence = ++loadSequence.current;
     setLoading(true);
     setError(null);
     try {
       const ctxPromise = fetchWorkspaceContext(projectId, "pf");
-      const risksPromise = fetchDealStateRecords(projectId, { recordType: "risk_issue", limit: 800, latestOnly: true, actor: "risk-reviewer" });
+      const risksPromise = fetchDealStateRecords(projectId, { recordType: "risk_issue", limit: 800, latestOnly: true, actor: "risk-reviewer", throwOnError: true });
       const assessPromise = runAssess
         ? fetch(`${apiBase}/projects/${projectId}/risk/assess`, {
             method: "POST",
@@ -98,21 +107,29 @@ export default function RiskReviewPage() {
           }).then((res) => (res.ok ? res.json() : null))
         : Promise.resolve(null);
       const [ctx, risks, assessed] = await Promise.all([ctxPromise, risksPromise, assessPromise]);
+      if (currentProject.current !== projectId || sequence !== loadSequence.current) return;
       setContext(ctx);
       setRiskRecords(risks);
       setAssessment(assessed as RiskAssessment | null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "리스크 원장을 불러오지 못했습니다.");
+      if (currentProject.current === projectId && sequence === loadSequence.current) setError(err instanceof Error ? err.message : "리스크 원장을 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (currentProject.current === projectId && sequence === loadSequence.current) setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
+    projectEpoch.current += 1;
+    currentProject.current = projectId;
+    setContext(null); setRiskRecords([]); setAssessment(null); setSelectedRisk(null);
+    setSupplementBusy(false); setReviewingId(null); setRunning(false); reviewInFlight.current = false;
     void load(false);
-  }, [load]);
+    return () => { currentProject.current = null; loadSequence.current += 1; };
+  }, [load, projectId]);
 
   async function runPfPod() {
+    if (running || reviewingId || supplementBusy || selectedRisk?.projectId === projectId) return;
+    const epoch = projectEpoch.current;
     setRunning(true);
     setError(null);
     try {
@@ -122,16 +139,18 @@ export default function RiskReviewPage() {
         body: JSON.stringify({ podKey: "pf_credit" }),
       });
       if (!res.ok) throw new Error(`PF-Credit Pod 실행 실패 (${res.status})`);
-      await load(true);
+      if (currentProject.current === projectId && epoch === projectEpoch.current) await load(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "PF-Credit Pod 실행에 실패했습니다.");
+      if (currentProject.current === projectId && epoch === projectEpoch.current) setError(err instanceof Error ? err.message : "PF-Credit Pod 실행에 실패했습니다.");
     } finally {
-      setRunning(false);
+      if (currentProject.current === projectId && epoch === projectEpoch.current) setRunning(false);
     }
   }
 
   async function reviewRisk(record: DealStateRecord, reviewStatus: ReviewStatus) {
-    if (!record.recordId) return;
+    if (!record.recordId || reviewInFlight.current || supplementBusy || running || selectedRisk?.projectId === projectId) return;
+    const epoch = projectEpoch.current;
+    reviewInFlight.current = true;
     setReviewingId(record.recordId);
     setError(null);
     try {
@@ -149,11 +168,11 @@ export default function RiskReviewPage() {
         const body = await res.json().catch(() => null) as { detail?: string } | null;
         throw new Error(body?.detail ?? `Review update failed (${res.status})`);
       }
-      await load(false);
+      if (currentProject.current === projectId && epoch === projectEpoch.current) await load(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "리스크 검토 상태 저장에 실패했습니다.");
+      if (currentProject.current === projectId && epoch === projectEpoch.current) setError(err instanceof Error ? err.message : "리스크 검토 상태 저장에 실패했습니다.");
     } finally {
-      setReviewingId(null);
+      if (currentProject.current === projectId && epoch === projectEpoch.current) { reviewInFlight.current = false; setReviewingId(null); }
     }
   }
 
@@ -183,6 +202,7 @@ export default function RiskReviewPage() {
 
   const projectName = displayText(context?.projectMemory?.projectName, `프로젝트 ${projectId}`);
   const overall = assessment?.overall ?? {};
+  const actionBusy = loading || running || reviewingId !== null || supplementBusy || selectedRisk?.projectId === projectId;
 
   return (
     <div className="space-y-6 pb-8">
@@ -198,7 +218,7 @@ export default function RiskReviewPage() {
               리스크 원장 / Risk Register
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              `deal_state_records`의 risk_issue를 기준으로 승인, waive, 보완요청, resolved 상태를 관리합니다.
+              위험별 근거와 검토 이력을 확인하고, 필요한 보완요청을 남깁니다.
             </p>
           </div>
         </div>
@@ -207,11 +227,11 @@ export default function RiskReviewPage() {
             검토자
             <input value={reviewer} onChange={(event) => setReviewer(event.target.value)} className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white" />
           </label>
-          <button type="button" onClick={() => void load(true)} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+          <button type="button" onClick={() => void load(true)} disabled={actionBusy} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
             <RefreshCw className="h-4 w-4" />
             Risk 재평가
           </button>
-          <button type="button" onClick={() => void runPfPod()} disabled={loading || running} className="inline-flex h-10 items-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-bold text-white disabled:opacity-50">
+          <button type="button" onClick={() => void runPfPod()} disabled={actionBusy} className="inline-flex h-10 items-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-bold text-white disabled:opacity-50">
             {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
             PF-Credit Pod 실행
           </button>
@@ -232,6 +252,13 @@ export default function RiskReviewPage() {
             <Kpi label="AI 보강 검토" value={`${summary.autoSupplement.toLocaleString("ko-KR")}건`} tone={summary.autoSupplement ? "warn" : "good"} />
             <Kpi label="근거 위치 부족" value={`${summary.locatorMissing.toLocaleString("ko-KR")}건`} tone={summary.locatorMissing ? "warn" : "good"} />
           </section>
+
+          {selectedRisk?.projectId === projectId ? <RiskSupplementReview key={`${projectId}/${selectedRisk.record.recordId}`}
+            projectId={projectId} record={selectedRisk.record} onBusyChange={setSupplementBusy} onClose={() => setSelectedRisk(null)}
+            onSaved={(record) => {
+              setRiskRecords(risks.map((risk) => risk.recordId === record.recordId ? record : risk));
+              setSelectedRisk({ projectId, record });
+            }} /> : null}
 
           <Panel title="Deal State 기반 리스크 검토">
             <div className="mb-4 flex flex-wrap gap-2">
@@ -280,10 +307,10 @@ export default function RiskReviewPage() {
                         <td className={`px-3 py-3 font-semibold ${hasSourceLocator(risk) ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}`}>{locatorSummary(risk)}</td>
                         <td className="px-3 py-3">
                           <div className="flex flex-wrap gap-1">
-                            <ActionButton label="승인" disabled={!risk.recordId || reviewingId === risk.recordId} onClick={() => void reviewRisk(risk, "approved")} />
-                            <ActionButton label="Waive" disabled={!risk.recordId || reviewingId === risk.recordId} onClick={() => void reviewRisk(risk, "waived")} />
-                            <ActionButton label="Resolved" disabled={!risk.recordId || reviewingId === risk.recordId} onClick={() => void reviewRisk(risk, "resolved")} />
-                            <ActionButton label="보완요청" danger disabled={!risk.recordId || reviewingId === risk.recordId} onClick={() => void reviewRisk(risk, "needs_revision")} />
+                            <ActionButton label="승인" disabled={!risk.recordId || actionBusy} onClick={() => void reviewRisk(risk, "approved")} />
+                            <ActionButton label="Waive" disabled={!risk.recordId || actionBusy} onClick={() => void reviewRisk(risk, "waived")} />
+                            <ActionButton label="Resolved" disabled={!risk.recordId || actionBusy} onClick={() => void reviewRisk(risk, "resolved")} />
+                            <ActionButton label="보완요청" danger disabled={!risk.recordId || actionBusy} onClick={() => setSelectedRisk({ projectId, record: risk })} />
                           </div>
                         </td>
                       </tr>
@@ -350,7 +377,7 @@ function Loading({ text }: { text: string }) {
 }
 
 function Notice({ children }: { children: ReactNode }) {
-  return <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{children}</div>;
+  return <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{children}</div>;
 }
 
 function Kpi({ label, value, tone }: { label: string; value: string; tone?: "good" | "warn" | "bad" }) {
@@ -359,7 +386,7 @@ function Kpi({ label, value, tone }: { label: string; value: string; tone?: "goo
 }
 
 function Panel({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"><div className="mb-4 flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-slate-700 dark:text-slate-200" /><h2 className="text-lg font-black text-slate-950 dark:text-white">{title}</h2></div>{children}</section>;
+  return <section className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"><div className="mb-4 flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-slate-700 dark:text-slate-200" /><h2 className="text-lg font-black text-slate-950 dark:text-white">{title}</h2></div>{children}</section>;
 }
 
 function Empty({ text }: { text: string }) {

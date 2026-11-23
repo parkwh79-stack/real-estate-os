@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any, Dict, List, Optional
 
 from agents.term_sheet_agent import TermSheetAgent
@@ -18,7 +19,8 @@ IC_MEMO_SCHEMA_VERSION = "realytics-ic-memo-v1"
 
 def _num(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        number = float(value)
+        return number if isfinite(number) else None
     return None
 
 

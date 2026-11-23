@@ -268,6 +268,7 @@ def stress_test_run_payload(dump: Dict[str, Any]) -> Dict[str, Any]:
         "engineKey": "discount_stress",
         "engineVersion": DISCOUNT_STRESS_ENGINE_VERSION,
         "result": {
+            **dump,
             "summary": summary,
             "metrics": _discount_stress_metrics(scenarios),
             "riskFlags": flags,

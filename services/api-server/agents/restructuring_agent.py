@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from agents.scenario_engine_agent import ScenarioEngineAgent
+from core.financial_input_validation import FinancialInputError
 from schemas.scenario import ScenarioSetRequest, ScenarioSetResult, TrancheItem
 
 
@@ -23,7 +24,10 @@ class RestructuringAgent:
     ) -> Dict[str, Any]:
         options = options or {}
         scenario_result = scenario_result or ScenarioEngineAgent().run_scenario_set(request)
-        senior_buffer = float(options.get("seniorBuffer") or options.get("senior_buffer") or DEFAULT_MIN_SENIOR_BUFFER_KRW)
+        if request.scenarioSetId and request.scenarioSetId != scenario_result.scenarioSetId:
+            raise FinancialInputError("Restructuring scenarioSetId does not match its parent request.")
+        senior_buffer_value = options.get("seniorBuffer", options.get("senior_buffer"))
+        senior_buffer = float(DEFAULT_MIN_SENIOR_BUFFER_KRW if senior_buffer_value is None else senior_buffer_value)
         ltv_target = float(options.get("unsoldLtvTarget") or options.get("unsold_ltv_target") or DEFAULT_UNSOLD_LTV_TARGET)
         adopted_cures = options.get("adoptedRestructuringCures") or options.get("adopted_restructuring_cures") or []
         if not adopted_cures:
@@ -81,8 +85,8 @@ class RestructuringAgent:
                 "status": "not_applicable",
                 "message": "Base waterfall scenario sale_70_disc_0 was not generated.",
             }
-        senior_row = next((row for row in base_waterfall.rows if row.priority == 1), None)
         senior_tranche = self._senior_tranche(request)
+        senior_row = next((row for row in base_waterfall.rows if senior_tranche and row.tranche == senior_tranche.tranche), None)
         if not senior_row or not senior_tranche:
             return {
                 "status": "not_applicable",
@@ -123,7 +127,7 @@ class RestructuringAgent:
 
     def _unsold_ltv_fix(self, scenario_result: ScenarioSetResult, ltv_target: float) -> Dict[str, Any]:
         rows = scenario_result.unsoldLtvMatrix.rows
-        breach_rows = [row for row in rows if row.unsoldLtv > ltv_target and row.discountedUnsoldValue > 0]
+        breach_rows = [row for row in rows if row.unsoldLtv > ltv_target and row.discountedUnsoldValue + row.additionalCollateralValue > 0]
         if not breach_rows:
             return {
                 "status": "clear",
@@ -133,9 +137,10 @@ class RestructuringAgent:
             }
         worst = max(breach_rows, key=lambda row: row.unsoldLtv)
         pf_amount = scenario_result.unsoldLtvMatrix.pfAmount
-        supported_pf = worst.discountedUnsoldValue * ltv_target
+        collateral_value = worst.discountedUnsoldValue + worst.additionalCollateralValue
+        supported_pf = collateral_value * ltv_target
         required_pf_reduction = max(0.0, pf_amount - supported_pf)
-        required_additional_collateral = max(0.0, (pf_amount / ltv_target) - worst.discountedUnsoldValue)
+        required_additional_collateral = max(0.0, (pf_amount / ltv_target) - collateral_value)
         return {
             "status": "action_required",
             "targetLtv": ltv_target,
@@ -145,6 +150,8 @@ class RestructuringAgent:
                 "discountRate": worst.discountRate,
                 "unsoldUnits": worst.unsoldUnits,
                 "discountedUnsoldValue": worst.discountedUnsoldValue,
+                "additionalCollateralValue": worst.additionalCollateralValue,
+                "collateralAdjustedValue": collateral_value,
                 "unsoldLtv": worst.unsoldLtv,
             },
             "pfAmount": pf_amount,
@@ -196,7 +203,7 @@ class RestructuringAgent:
         )
         senior_shortfall = 0.0
         if base_waterfall:
-            senior_row = next((row for row in base_waterfall.rows if row.priority == 1), None)
+            senior_row = min(base_waterfall.rows, key=lambda row: row.priority, default=None)
             senior_shortfall = senior_row.shortfall if senior_row else 0.0
         return {
             "scenarioSetId": scenario_result.scenarioSetId,

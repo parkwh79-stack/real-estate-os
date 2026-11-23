@@ -10,14 +10,16 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
-LEGACY_BONRI_PROFILE_ID = "legacy-bonri-mixed-use-pf-feasibility-v2"
+LEGACY_BONRI_PROFILE_ID = "legacy-bonri-mixed-use-pf-feasibility-v5"
 
 LEGACY_BONRI_CELL_MAP: Dict[str, Dict[str, Any]] = {
     "project.name": {"sheet": "입력", "cell": "D2", "kind": "source"},
     "site.address": {"sheet": "입력", "cell": "E5", "kind": "source"},
     "site.land_area_sqm": {"sheet": "입력", "cell": "E8", "kind": "source"},
     "site.effective_land_area_sqm": {"sheet": "입력", "cell": "E10", "kind": "calculated"},
-    "site.legal_far": {"sheet": "입력", "cell": "E22", "kind": "source"},
+    "raw_import.designFar": {"sheet": "입력", "cell": "E22", "kind": "calculated"},
+    "cost.land_purchase_budget": {"sheet": "사업수지", "cell": "D19", "kind": "source", "unit": "KRW_THOUSAND"},
+    "cost.land_inclusive_budget": {"sheet": "사업수지", "cell": "D26", "kind": "calculated", "unit": "KRW_THOUSAND"},
     "program.gross_floor_area_sqm": {"sheet": "입력", "cell": "F19", "kind": "calculated"},
     "revenue.total": {"sheet": "사업수지", "cell": "D11", "kind": "calculated", "unit": "KRW_THOUSAND"},
     "cost.total": {"sheet": "사업수지", "cell": "D72", "kind": "calculated", "unit": "KRW_THOUSAND"},
@@ -29,9 +31,12 @@ LEGACY_BONRI_CELL_MAP: Dict[str, Dict[str, Any]] = {
     "pf.tranche_mezzanine": {"sheet": "2.현금흐름", "cell": "E49", "kind": "source", "unit": "KRW_MILLION"},
     "pf.tranche_junior": {"sheet": "2.현금흐름", "cell": "E50", "kind": "source", "unit": "KRW_MILLION"},
     "pf.equity": {"sheet": "2.현금흐름", "cell": "E55", "kind": "source", "unit": "KRW_MILLION"},
-    "cashflow.monthly_sales_rates": {"sheet": "2.현금흐름", "range": "J8:CH10", "kind": "calculated"},
-    "cashflow.monthly_progress_rates": {"sheet": "2.현금흐름", "range": "J5:CH7", "kind": "calculated"},
-    "cashflow.monthly_cash_flow": {"sheet": "2.현금흐름", "range": "J100:CH158", "kind": "calculated"},
+    "pf.workbook_terms": {"sheet": "입력", "range": "C129:G132", "kind": "source", "unit": "MIXED"},
+    "cashflow.monthly_sales_rates": {"sheet": "2.현금흐름", "range": "J8:BQ10", "kind": "calculated"},
+    "cashflow.monthly_progress_rates": {"sheet": "2.현금흐름", "range": "J5:BQ7", "kind": "calculated"},
+    "cashflow.period_labels": {"sheet": "2.현금흐름", "range": "F4:BQ4", "kind": "source"},
+    "cashflow.monthly_cash_flow": {"sheet": "2.현금흐름", "range": "F35:BQ119", "kind": "calculated", "unit": "KRW_MILLION"},
+    "cashflow.cumulative_cash_flow": {"sheet": "2.현금흐름", "range": "F130:BQ130", "kind": "calculated", "unit": "KRW_MILLION"},
     "cashflow.construction_progress_curve": {"sheet": "공정율", "range": "A1:BQ76", "kind": "source"},
 }
 

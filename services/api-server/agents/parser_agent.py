@@ -1,15 +1,54 @@
-from typing import Any, Dict
+import copy
+import hashlib
+import json
+import re
+from typing import Any, Dict, Mapping, Sequence
 
 import fitz  # PyMuPDF
 
 from agents.ai_connection import AIConnection, resolve_ai_context
 from agents.agent_policy import system_prompt_for
+from core.text_chunking import chunk_text_preserving_context
 
 
 PARSER_AGENT_VERSION = "realytics-parser-v2.4"
+PARSER_EXTRACTION_CHUNK_CHARS = 30_000
+_PAGE_MARKER = re.compile(r"^\s*--- PAGE \d+ ---\s*$")
+_ENTITY_ARRAY_IDENTITY_KEYS: dict[str, tuple[str, ...]] = {
+    "sales_assumptions.product_mix": ("type",),
+    "market.comparables": ("caseId",),
+    "market.rentComparables": ("caseId",),
+    "market.data_sources": ("sourceUrlOrEvidenceId", "sourceName"),
+    "document_market_evidence.productMix": ("type",),
+    "document_market_evidence.comparables": ("caseId",),
+    "document_market_evidence.manualComparables": ("caseId",),
+    "document_market_evidence.transactionComparables": ("caseId",),
+    "document_market_evidence.presaleComparables": ("caseId",),
+    "document_market_evidence.listingComparables": ("caseId",),
+    "document_market_evidence.rentComparables": ("caseId",),
+    "document_market_evidence.data_sources": (
+        "sourceUrlOrEvidenceId",
+        "sourceName",
+    ),
+    "pf_structure": ("tranche",),
+    "data_sources": ("sourceUrlOrEvidenceId", "sourceName"),
+}
 
 
 class ParserAgent:
+    @staticmethod
+    def read_evidence_pages(document, *, page_numbers, tessdata_dir=None, timeout_seconds=20.0) -> dict:
+        """Read source-bound native/OCR text for review without promoting facts.
+
+        The caller resolves an authorized, integrity-checked original. Results
+        retain page locators and are inputs for review and subsequent extraction;
+        this method never calls a paid provider or applies financial values.
+        """
+        from parsing_platform.local_pdf_reading import read_pdf_pages
+
+        return read_pdf_pages(document, page_numbers=page_numbers,
+                              tessdata_dir=tessdata_dir, timeout_seconds=timeout_seconds)
+
     def __init__(self, ai_context: Dict[str, Any] | None = None):
         self.ai_context = resolve_ai_context(ai_context)
         self.ai = AIConnection()
@@ -30,31 +69,69 @@ class ParserAgent:
 
     def extract_project_data(self, text: str, ai_context: Dict[str, Any] | None = None) -> dict:
         """Use the configured AI provider to extract structured project data from raw text."""
-        max_chars = 30000
-        if len(text) > max_chars:
-            text = text[:max_chars]
-
-        prompt = self.build_extraction_prompt(text)
         context = resolve_ai_context(ai_context or self.ai_context)
-        if context["runtime_provider"] == "mcp_host_llm":
-            return self._get_host_llm_extraction_request(text, prompt, context)
-
-        result = self.ai.extract_json(
-            prompt,
-            system=system_prompt_for("parser", base="You are a precise data extraction assistant. Output only JSON."),
-            ai_context=context,
+        chunks = chunk_text_preserving_context(
+            text,
+            max_chars=PARSER_EXTRACTION_CHUNK_CHARS,
+            is_context_line=lambda line: bool(_PAGE_MARKER.match(line)),
         )
-        if result.data is not None:
-            result.data["_meta"] = {
-                **result.data.get("_meta", {}),
-                "parsing_source": "ai",
-                "confidence": 0.75,
-                "ai_connection": result.meta,
-            }
-            return result.data
+        prompts = [self.build_extraction_prompt(chunk) for chunk in chunks]
+        if context["runtime_provider"] == "mcp_host_llm":
+            return self._get_host_llm_extraction_request(
+                chunks,
+                prompts,
+                context,
+                source_text_sha256=_sha256_text(text),
+            )
 
-        print(f"Warning: AI extraction fallback used. {result.error}")
-        return self._get_mock_parsed_data(result.error or "AI extraction unavailable", result.meta)
+        successful: list[tuple[int, Mapping[str, Any], Mapping[str, Any]]] = []
+        failed_chunks: list[dict[str, Any]] = []
+        system = system_prompt_for(
+            "parser",
+            base="You are a precise data extraction assistant. Output only JSON.",
+        )
+        for index, prompt in enumerate(prompts):
+            result = self.ai.extract_json(
+                prompt,
+                system=system,
+                ai_context=context,
+            )
+            if isinstance(result.data, Mapping):
+                successful.append((index, result.data, result.meta or {}))
+            else:
+                failed_chunks.append(
+                    {
+                        "chunkIndex": index,
+                        "error": result.error or "AI extraction unavailable",
+                    }
+                )
+        if successful:
+            merged, conflicts = _merge_chunk_extractions(successful)
+            extraction_empty = not _has_meaningful_value(merged)
+            complete = not failed_chunks and not conflicts and not extraction_empty
+            merged["_meta"] = {
+                **dict(merged.get("_meta") or {}),
+                "parsing_source": "ai" if len(chunks) == 1 else "ai_chunked",
+                "confidence": 0.75 if complete else None,
+                "ai_connection": successful[0][2],
+                "sourceTextSha256": _sha256_text(text),
+                "chunkCount": len(chunks),
+                "completedChunkCount": len(successful),
+                "failedChunks": failed_chunks,
+                "extractionConflicts": conflicts,
+                "extractionEmpty": extraction_empty,
+                "inputCoverage": "complete" if not failed_chunks else "partial",
+                "analysisOnly": not complete,
+                "reportEligible": complete,
+            }
+            return merged
+
+        error = "; ".join(item["error"] for item in failed_chunks)
+        print(f"Warning: AI extraction fallback used. {error}")
+        return self._get_mock_parsed_data(
+            error or "AI extraction unavailable",
+            context,
+        )
 
     def build_extraction_prompt(self, text: str) -> str:
         return """
@@ -321,11 +398,21 @@ class ParserAgent:
 
     def _get_host_llm_extraction_request(
         self,
-        text: str,
-        prompt: str,
+        chunks: Sequence[str],
+        prompts: Sequence[str],
         ai_context: Dict[str, Any],
+        *,
+        source_text_sha256: str,
     ) -> dict:
-        extraction_instructions = prompt.rsplit("Business Plan Text:", 1)[0].strip()
+        extraction_instructions = prompts[0].rsplit("Business Plan Text:", 1)[0].strip()
+        chunk_payloads = [
+            {
+                "chunkIndex": index,
+                "text": chunk,
+                "sha256": _sha256_text(chunk),
+            }
+            for index, chunk in enumerate(chunks)
+        ]
         return {
             "_meta": {
                 "parsing_source": "host_llm_required",
@@ -335,15 +422,21 @@ class ParserAgent:
                     "and is returning instructions for the host LLM to perform the JSON extraction."
                 ),
                 "ai_connection": ai_context,
+                "sourceTextSha256": source_text_sha256,
+                "chunkCount": len(chunk_payloads),
+                "inputCoverage": "complete",
+                "analysisOnly": True,
+                "reportEligible": False,
             },
             "host_llm_extraction": {
                 "instruction": (
-                    "Use your Claude Desktop host LLM reasoning to extract project_data JSON "
-                    "from document_text according to extraction_prompt. After extraction, call "
+                    "Extract each document chunk according to extraction_prompt, reconcile "
+                    "conflicting values explicitly, and produce one project_data JSON. After extraction, call "
                     "orchestrate_pf_review or generate_pf_report with that project_data."
                 ),
                 "expected_output": "project_data_json",
-                "document_text": text,
+                "document_text": chunks[0] if len(chunks) == 1 else None,
+                "document_chunks": chunk_payloads,
                 "extraction_prompt": extraction_instructions,
             },
         }
@@ -369,5 +462,307 @@ class ParserAgent:
             "reason": reason,
             "requiresManualOrLlmExtraction": True,
             "ai_connection": resolved_context,
+            "analysisOnly": True,
+            "reportEligible": False,
           },
         }
+
+
+def _merge_chunk_extractions(
+    chunks: Sequence[tuple[int, Mapping[str, Any], Mapping[str, Any]]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    merged: dict[str, Any] = {}
+    origins: dict[str, list[int]] = {}
+    conflicts: dict[str, dict[str, Any]] = {}
+    for chunk_index, payload, _meta in chunks:
+        for key, value in payload.items():
+            if key == "_meta":
+                continue
+            _merge_value(
+                merged,
+                key,
+                copy.deepcopy(value),
+                path=key,
+                chunk_index=chunk_index,
+                origins=origins,
+                conflicts=conflicts,
+            )
+    return merged, [conflicts[key] for key in sorted(conflicts)]
+
+
+def _merge_value(
+    container: dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    path: str,
+    chunk_index: int,
+    origins: dict[str, list[int]],
+    conflicts: dict[str, dict[str, Any]],
+) -> None:
+    if path in conflicts:
+        _append_conflict_candidate(conflicts[path], value, chunk_index)
+        return
+    if key not in container or _is_empty(container[key]):
+        if isinstance(value, Mapping):
+            nested: dict[str, Any] = {}
+            container[key] = nested
+            _record_path_origin(path, chunk_index, origins)
+            for child_key, child_value in value.items():
+                _merge_value(
+                    nested,
+                    str(child_key),
+                    copy.deepcopy(child_value),
+                    path=f"{path}.{child_key}",
+                    chunk_index=chunk_index,
+                    origins=origins,
+                    conflicts=conflicts,
+                )
+            return
+        if isinstance(value, list) and path in _ENTITY_ARRAY_IDENTITY_KEYS:
+            entity_items: list[Any] = []
+            container[key] = entity_items
+            _record_path_origin(path, chunk_index, origins)
+            _merge_entity_array(
+                entity_items,
+                value,
+                path=path,
+                chunk_index=chunk_index,
+                origins=origins,
+                conflicts=conflicts,
+            )
+            return
+        container[key] = value
+        _record_value_origins(value, path, chunk_index, origins)
+        return
+    if _is_empty(value):
+        return
+    existing = container[key]
+    if existing == value:
+        _record_value_origins(value, path, chunk_index, origins)
+        return
+    if isinstance(existing, dict) and isinstance(value, Mapping):
+        _record_path_origin(path, chunk_index, origins)
+        for child_key, child_value in value.items():
+            _merge_value(
+                existing,
+                str(child_key),
+                copy.deepcopy(child_value),
+                path=f"{path}.{child_key}",
+                chunk_index=chunk_index,
+                origins=origins,
+                conflicts=conflicts,
+            )
+        return
+    if isinstance(existing, list) and isinstance(value, list):
+        _record_path_origin(path, chunk_index, origins)
+        if path in _ENTITY_ARRAY_IDENTITY_KEYS:
+            _merge_entity_array(
+                existing,
+                value,
+                path=path,
+                chunk_index=chunk_index,
+                origins=origins,
+                conflicts=conflicts,
+            )
+        else:
+            _merge_exact_union(existing, value)
+        return
+    conflict = {
+        "fieldPath": path,
+        "status": "open",
+        "candidates": [],
+    }
+    for origin in origins.get(path, [-1]):
+        _append_conflict_candidate(conflict, existing, origin)
+    _append_conflict_candidate(conflict, value, chunk_index)
+    conflicts[path] = conflict
+    container[key] = None
+
+
+def _append_conflict_candidate(
+    conflict: dict[str, Any],
+    value: Any,
+    chunk_index: int,
+) -> None:
+    signature = _stable_json(value)
+    if any(
+        item.get("valueHash") == signature and item.get("chunkIndex") == chunk_index
+        for item in conflict["candidates"]
+    ):
+        return
+    conflict["candidates"].append(
+        {
+            "chunkIndex": chunk_index,
+            "value": copy.deepcopy(value),
+            "valueHash": signature,
+        }
+    )
+
+
+def _record_value_origins(
+    value: Any,
+    path: str,
+    chunk_index: int,
+    origins: dict[str, list[int]],
+) -> None:
+    _record_path_origin(path, chunk_index, origins)
+
+    if isinstance(value, Mapping):
+        for child_key, child_value in value.items():
+            _record_value_origins(
+                child_value,
+                f"{path}.{child_key}",
+                chunk_index,
+                origins,
+            )
+    elif isinstance(value, list) and path in _ENTITY_ARRAY_IDENTITY_KEYS:
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            identity = _entity_identity(path, item)
+            if identity is None:
+                continue
+            _record_value_origins(
+                item,
+                _entity_item_path(path, identity),
+                chunk_index,
+                origins,
+            )
+
+
+def _record_path_origin(
+    path: str,
+    chunk_index: int,
+    origins: dict[str, list[int]],
+) -> None:
+    path_origins = origins.setdefault(path, [])
+    if chunk_index not in path_origins:
+        path_origins.append(chunk_index)
+
+
+def _merge_entity_array(
+    existing: list[Any],
+    incoming: list[Any],
+    *,
+    path: str,
+    chunk_index: int,
+    origins: dict[str, list[int]],
+    conflicts: dict[str, dict[str, Any]],
+) -> None:
+    identity_index: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in existing:
+        if not isinstance(item, dict):
+            continue
+        identity = _entity_identity(path, item)
+        if identity is not None:
+            identity_index[_entity_identity_token(identity)] = item
+
+    unkeyed_signatures = {
+        _stable_json(item)
+        for item in existing
+        if not isinstance(item, Mapping) or _entity_identity(path, item) is None
+    }
+    for item in incoming:
+        if not isinstance(item, Mapping):
+            signature = _stable_json(item)
+            if signature not in unkeyed_signatures:
+                unkeyed_signatures.add(signature)
+                existing.append(copy.deepcopy(item))
+            continue
+        identity = _entity_identity(path, item)
+        if identity is None:
+            signature = _stable_json(item)
+            if signature not in unkeyed_signatures:
+                unkeyed_signatures.add(signature)
+                existing.append(copy.deepcopy(item))
+            continue
+
+        identity_token = _entity_identity_token(identity)
+        existing_item = identity_index.get(identity_token)
+        item_path = _entity_item_path(path, identity)
+        if existing_item is None:
+            copied_item = copy.deepcopy(dict(item))
+            existing.append(copied_item)
+            identity_index[identity_token] = copied_item
+            _record_value_origins(copied_item, item_path, chunk_index, origins)
+            continue
+        for child_key, child_value in item.items():
+            _merge_value(
+                existing_item,
+                str(child_key),
+                copy.deepcopy(child_value),
+                path=f"{item_path}.{child_key}",
+                chunk_index=chunk_index,
+                origins=origins,
+                conflicts=conflicts,
+            )
+
+
+def _merge_exact_union(existing: list[Any], incoming: list[Any]) -> None:
+    seen = {_stable_json(item) for item in existing}
+    for item in incoming:
+        signature = _stable_json(item)
+        if signature not in seen:
+            seen.add(signature)
+            existing.append(copy.deepcopy(item))
+
+
+def _entity_identity(
+    path: str,
+    item: Mapping[str, Any],
+) -> tuple[str, Any] | None:
+    for identity_key in _ENTITY_ARRAY_IDENTITY_KEYS.get(path, ()):
+        identity_value = item.get(identity_key)
+        if _is_empty(identity_value) or isinstance(
+            identity_value,
+            (Mapping, list, tuple, set),
+        ):
+            continue
+        return identity_key, identity_value
+    return None
+
+
+def _entity_identity_token(identity: tuple[str, Any]) -> tuple[str, str]:
+    identity_key, identity_value = identity
+    return identity_key, _stable_json(identity_value)
+
+
+def _entity_item_path(path: str, identity: tuple[str, Any]) -> str:
+    identity_key, identity_value = identity
+    rendered_value = json.dumps(
+        identity_value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"{path}[{identity_key}={rendered_value}]"
+
+
+def _stable_json(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _is_empty(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _has_meaningful_value(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(_has_meaningful_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_meaningful_value(item) for item in value)
+    return not _is_empty(value)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()

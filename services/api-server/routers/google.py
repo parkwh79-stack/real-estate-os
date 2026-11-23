@@ -7,7 +7,12 @@ from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from core.oauth_redirects import safe_relative_path, web_session_url
 
+from core.runtime_profile import (
+    legacy_oauth_sessions_enabled,
+    oauth_mock_callbacks_enabled,
+)
 from integrations.google import (
     build_google_authorize_url,
     build_google_identity_records,
@@ -27,9 +32,7 @@ router = APIRouter(prefix="/integrations/google", tags=["google"])
 
 
 def _safe_relative_redirect_path(value: Any) -> str:
-    path = str(value or "/start")
-    if not path.startswith("/") or path.startswith("//") or "://" in path:
-        return "/start"
+    path = safe_relative_path(value)
     if path in {"/", "/dashboard"}:
         return "/start"
     return path
@@ -56,11 +59,30 @@ def create_google_authorize_url(payload: Dict[str, Any] | None = None):
         prompt=payload.get("prompt") or "consent",
     )
     if not res.get("ready") or not res.get("authorizeUrl"):
+        if not oauth_mock_callbacks_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "google_oauth_not_configured",
+                    "message": "Google OAuth is unavailable and mock callbacks are disabled.",
+                },
+            )
         base_url = os.environ.get("REALYTICS_API_BASE_URL", "http://127.0.0.1:8000")
         res["ready"] = True
         res["mode"] = "pilot_mock"
         res["authorizeUrl"] = f"{base_url}/integrations/google/callback?redirect_path={quote(redirect_path)}"
     else:
+        if not legacy_oauth_sessions_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "legacy_oauth_session_disabled",
+                    "message": (
+                        "API-owned Google OAuth sessions are disabled. "
+                        "Use the configured Supabase/OIDC login flow."
+                    ),
+                },
+            )
         res["mode"] = "oauth"
     return res
 
@@ -96,7 +118,25 @@ def google_oauth_callback(
         )
         raise HTTPException(status_code=401, detail={"error": error, "errorDescription": error_description})
 
-    if google_login_configured() and code:
+    configured = google_login_configured()
+    if configured and code and not legacy_oauth_sessions_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "legacy_oauth_session_disabled",
+                "message": (
+                    "API-owned Google OAuth sessions are disabled. "
+                    "Use the configured Supabase/OIDC login flow."
+                ),
+            },
+        )
+    if configured and not code:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "missing_google_authorization_code"},
+        )
+
+    if configured and code:
         resolved_redirect_path = _safe_relative_redirect_path(unquote(state) if state else redirect_path)
         tokens = exchange_google_authorization_code(code)
         user_info = (
@@ -136,7 +176,21 @@ def google_oauth_callback(
         )
         return _redirect_to_web_session(session, identity["redirectPath"])
 
-    # Pilot mock fallback (no Google credentials configured).
+    if code:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "google_oauth_not_configured"},
+        )
+    if not oauth_mock_callbacks_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "google_oauth_mock_disabled",
+                "message": "Google mock callbacks are disabled outside explicit local/test use.",
+            },
+        )
+
+    # Explicitly enabled local/test pilot mock.
     return _mock_google_callback(_safe_relative_redirect_path(redirect_path))
 
 
@@ -189,8 +243,5 @@ def _mock_google_callback(redirect_path: str):
 
 def _redirect_to_web_session(session: Dict[str, Any], redirect_path: str):
     web_base_url = os.environ.get("REALYTICS_WEB_BASE_URL", "http://localhost:3000")
-    session_url = (
-        f"{web_base_url.rstrip('/')}/auth/kakao/session"  # shared frontend session receiver
-        f"?session_id={quote(session['sessionId'])}&redirect={quote(redirect_path)}"
-    )
+    session_url = web_session_url(web_base_url, session["sessionId"], redirect_path)
     return RedirectResponse(session_url, status_code=303)

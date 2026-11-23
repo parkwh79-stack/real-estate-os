@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from core.authz import authorize_request
-from storage import record_user_activity_log
+from storage import record_user_activity_log, storage_backend
+from db.repositories.glossary_repository import GlossaryAuthorityUnavailable, PostgresGlossaryRepository
+from db.repositories.request_project_repository import current_project_scope
 from use_cases.glossary import (
     canonical_field_map_use_case,
     capture_glossary_candidates_use_case,
@@ -20,7 +22,33 @@ from use_cases.glossary import (
 )
 
 
-router = APIRouter(prefix="/glossary", tags=["glossary"])
+def normalized_glossary_repository() -> PostgresGlossaryRepository | None:
+    if storage_backend() not in {"postgres", "postgresql"}:
+        return None
+    scope = current_project_scope()
+    if scope is None:
+        raise GlossaryAuthorityUnavailable("request_scope")
+    return PostgresGlossaryRepository(tenant_id=scope.tenant_id)
+
+
+def glossary_authority(request: Request):
+    if storage_backend() in {"postgres", "postgresql"} and request.method != "GET":
+        authorize_request(request, "project:write")
+        raise HTTPException(status_code=503, detail={
+            "error": "glossary_write_authority_unavailable",
+            "message": "운영 용어집의 편집·승인은 전용 검토 저장소 연결이 필요합니다.",
+        })
+    try:
+        yield
+    except GlossaryAuthorityUnavailable as exc:
+        raise HTTPException(status_code=503, detail={
+            "error": "glossary_read_authority_unavailable",
+            "authority": exc.authority,
+            "message": "운영 용어집의 저장소 연결과 조회 권한을 확인해 주세요.",
+        }) from exc
+
+
+router = APIRouter(prefix="/glossary", tags=["glossary"], dependencies=[Depends(glossary_authority)])
 
 
 @router.get("/terms")
@@ -37,6 +65,7 @@ def list_glossary_terms(
         category=category,
         canonical_field=canonical_field,
         review_status=review_status,
+        repository=normalized_glossary_repository(),
     )
 
 
@@ -67,7 +96,7 @@ def upsert_glossary_term(request: Request, payload: Dict[str, Any]):
 @router.get("/terms/{term_id}")
 def get_glossary_term(request: Request, term_id: str):
     authorize_request(request, "project:read")
-    term = get_glossary_term_use_case(term_id)
+    term = get_glossary_term_use_case(term_id, repository=normalized_glossary_repository())
     if not term:
         raise HTTPException(status_code=404, detail="glossary term not found")
     return {"schemaVersion": "realytics-glossary-term-get-v1", "term": term}
@@ -80,7 +109,7 @@ def resolve_glossary_term(
     include_pending: bool = Query(False),
 ):
     authorize_request(request, "project:read")
-    return resolve_glossary_term_use_case(term, include_pending=include_pending)
+    return resolve_glossary_term_use_case(term, include_pending=include_pending, repository=normalized_glossary_repository())
 
 
 @router.post("/normalize")
@@ -117,7 +146,7 @@ def normalize_glossary_terms(request: Request, payload: Dict[str, Any]):
 @router.get("/canonical-field-map")
 def get_canonical_field_map(request: Request):
     authorize_request(request, "project:read")
-    return canonical_field_map_use_case()
+    return canonical_field_map_use_case(repository=normalized_glossary_repository())
 
 
 @router.post("/standard-pack/import")
@@ -157,12 +186,16 @@ def list_glossary_candidates(
     limit: int = Query(100, ge=1, le=500),
 ):
     authorize_request(request, "project:read")
+    repository = normalized_glossary_repository()
+    if repository is not None and project_id and current_project_scope().get(project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
     return list_glossary_candidates_use_case(
         query=q,
         status=status,
         project_id=project_id,
         category=category,
         limit=limit,
+        repository=repository,
     )
 
 

@@ -1,6 +1,6 @@
 # Feasibility Study v2 Schema
 
-Updated: 2026-05-13
+Updated: 2026-07-16
 
 ## Goal
 
@@ -23,6 +23,9 @@ Schema constants:
 4. Import should read from stable named ranges and tables, not fragile visual coordinates only.
 5. Every imported field should eventually carry provenance: source file, page or sheet, cell or named range, raw text, and confidence.
 6. Calculated metrics can be produced by Excel first, then mirrored by API calculation later.
+7. A workbook candidate is never a canonical project input before explicit approval.
+8. Parser V2 approved snapshots and parcel/legal snapshots are referenced, not duplicated.
+9. New calculations use integer KRW, Decimal rates/areas, and explicit Excel rounding metadata.
 
 ## Top-Level Shape
 
@@ -33,6 +36,8 @@ Schema constants:
   "project_name": "Sample Mixed-use Project",
   "asset_type": "mixed_use",
   "currency": "KRW",
+  "calculation_date": "optional",
+  "input_references": {},
   "site": {},
   "program": {},
   "product_mix": [],
@@ -41,11 +46,51 @@ Schema constants:
   "financing": [],
   "schedule": [],
   "scenarios": [],
+  "formula_traces": [],
   "workbook": {},
   "metrics": {},
   "raw_import": {}
 }
 ```
+
+## Approved Input and Formula Lineage
+
+`input_references` links a study/run to immutable upstream authority:
+
+- `approved_input_snapshot_id` and `approved_input_snapshot_hash`
+- `source_snapshot_id`
+- `site_parcel_snapshot_id` and `parcel_set_hash`
+- `regulatory_constraint_snapshot_id`
+- `buildable_envelope_id`
+- `constraint_as_of_date`
+- `formula_versions`
+
+`formula_traces` records formula ID/version, output path, input paths,
+intermediate values, rounding policy, and a source locator. It is a calculation
+trace, not a second evidence repository.
+
+Scenario rows additionally support `scenario_class`, constraint/program/
+approval references, `eligibility`, blocking constraints, conditions, and
+`report_grade`. A label such as “Committee Approved” is not approval evidence;
+an approval decision ID and matching snapshot references are required by the
+calling workflow.
+
+## Import Authority Lifecycle
+
+```text
+validate -> candidate draft -> review/conflict resolution -> approve -> canonical
+```
+
+- Candidate storage writes only `feasibilityStudyV2Draft` and candidate audit
+  metadata. A preview may be returned but is non-authoritative.
+- Approval rejects failed/warning validation, blocking formula errors, external
+  workbook links, blank required cells/sheets, failed reconciliations, and open
+  source conflicts.
+- Only `raw_import.canonicalStatus=approved` under
+  `canonicalFeasibilityStudyV2` can feed authoritative feasibility inputs and
+  the direct Cash Flow mapper.
+- `mezzanine` is the canonical middle-priority debt name. `middle` remains an
+  accepted V2 compatibility alias for older imports.
 
 ## Core Sections
 

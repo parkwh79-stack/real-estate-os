@@ -1,0 +1,1391 @@
+-- Freeze the existing API runtime manifest as of 2026-09-15.
+-- Align grants only. LOGIN, passwords, worker provisioning and business data
+-- are deliberately outside this migration. Keep existing migration history.
+DO $runtime_alignment_preflight$
+DECLARE
+    runtime_oid OID;
+BEGIN
+    PERFORM pg_advisory_xact_lock(7731590012);
+    SELECT oid INTO runtime_oid FROM pg_roles WHERE rolname = 'realytics_runtime';
+    IF runtime_oid IS NULL THEN
+        RAISE EXCEPTION 'realytics_runtime must exist before privilege alignment';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE oid = runtime_oid AND
+        (rolsuper OR rolcreatedb OR rolcreaterole OR rolinherit OR rolreplication OR rolbypassrls))
+    THEN RAISE EXCEPTION 'realytics_runtime has unsafe role attributes'; END IF;
+    IF EXISTS (SELECT 1 FROM pg_auth_members WHERE member = runtime_oid)
+    THEN RAISE EXCEPTION 'realytics_runtime must not be a member of another role'; END IF;
+    IF EXISTS (SELECT 1 FROM pg_database WHERE datname = current_database() AND datdba = runtime_oid)
+       OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname IN ('realytics', 'extensions') AND nspowner = runtime_oid)
+       OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname IN ('realytics', 'extensions') AND c.relowner = runtime_oid)
+       OR EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                  WHERE n.nspname IN ('realytics', 'extensions') AND p.proowner = runtime_oid)
+    THEN RAISE EXCEPTION 'realytics_runtime must not own runtime objects'; END IF;
+END;
+$runtime_alignment_preflight$;
+
+REVOKE CREATE ON SCHEMA "realytics" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SCHEMA "realytics" FROM "realytics_runtime";
+GRANT USAGE ON SCHEMA "realytics" TO "realytics_runtime";
+REVOKE CREATE ON SCHEMA "extensions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SCHEMA "extensions" FROM "realytics_runtime";
+GRANT USAGE ON SCHEMA "extensions" TO "realytics_runtime";
+DO $runtime_database_path$
+BEGIN
+    EXECUTE format(
+        'ALTER ROLE realytics_runtime IN DATABASE %I SET search_path TO realytics, extensions, pg_temp',
+        current_database()
+    );
+END;
+$runtime_database_path$;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA "realytics" REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_document_versions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_document_versions" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_document_versions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_project_profiles" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_project_profiles" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_project_profiles" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_runs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_runs" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_runs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_run_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_run_events" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_run_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_candidate_set_seals" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_candidate_set_seals" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_candidate_set_seals" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parsed_fact_candidates" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parsed_fact_candidates" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parsed_fact_candidates" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_candidate_inputs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_candidate_inputs" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_candidate_inputs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_validation_findings" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_validation_findings" FROM "realytics_runtime";
+GRANT INSERT ON TABLE "realytics"."parser_validation_findings" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_validation_finding_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_validation_finding_events" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_review_decisions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_review_decisions" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_review_decisions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_source_conflicts" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_source_conflicts" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_source_conflicts" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_source_conflict_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_source_conflict_events" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_source_conflict_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_conflict_candidates" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_conflict_candidates" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_conflict_candidates" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_review_decision_conflicts" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_review_decision_conflicts" FROM "realytics_runtime";
+GRANT INSERT ON TABLE "realytics"."parser_review_decision_conflicts" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_canonical_selections" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_canonical_selections" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_canonical_selections" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_approved_snapshots" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_approved_snapshots" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_approved_snapshots" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_snapshot_selections" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_snapshot_selections" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_snapshot_selections" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_snapshot_source_runs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_snapshot_source_runs" FROM "realytics_runtime";
+GRANT INSERT ON TABLE "realytics"."parser_snapshot_source_runs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_validity_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."parser_validity_events" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."parser_validity_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."schema_migrations" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."schema_migrations" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."schema_migrations" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."runtime_outbox_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."runtime_outbox_events" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."runtime_outbox_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."calculation_runs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."calculation_runs" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."calculation_runs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."deal_state_records" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."deal_state_records" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."deal_state_records" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."chief_pod_artifacts" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."chief_pod_artifacts" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."chief_pod_artifacts" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."pod_ai_reviews" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."pod_ai_reviews" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."pod_ai_reviews" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."agent_handoffs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."agent_handoffs" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."agent_handoffs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."recalculation_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."recalculation_events" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."recalculation_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."assumption_overrides" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."assumption_overrides" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."assumption_overrides" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."async_jobs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."async_jobs" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."async_jobs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."agent_runs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."agent_runs" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."agent_runs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."agent_run_steps" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."agent_run_steps" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."agent_run_steps" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."brain_usage_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."brain_usage_events" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."brain_usage_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."projects" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."projects" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."projects" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."user_activity_logs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."user_activity_logs" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."user_activity_logs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."principals" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."principals" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_memberships" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_memberships" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_identity_access_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_identity_access_events" FROM "realytics_runtime";
+GRANT INSERT ON TABLE "realytics"."tenant_identity_access_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenants" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenants" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."onboarding_profiles" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."onboarding_profiles" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."onboarding_principal_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."onboarding_principal_events" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."platform_onboarding_operators" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."platform_onboarding_operators" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_access_requests" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_access_requests" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_access_request_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_access_request_events" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."assumption_proposals" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."assumption_proposals" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."assumption_proposals" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."evidence_graphs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."evidence_graphs" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."evidence_graphs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."market_evidence" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."market_evidence" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."market_evidence" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."orchestrations" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."orchestrations" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."orchestrations" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_snapshots" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_snapshots" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."project_snapshots" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."reports" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."reports" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."reports" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."report_publications" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."report_publications" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."report_publications" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."risk_registers" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."risk_registers" FROM "realytics_runtime";
+GRANT SELECT, INSERT, UPDATE ON TABLE "realytics"."risk_registers" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_required_target_contracts" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_required_target_contracts" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_corpus_required_target_contracts" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_coverage_registries" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_coverage_registries" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_corpus_coverage_registries" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_coverage_contracts" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_coverage_contracts" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_corpus_coverage_contracts" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_source_providers" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_source_providers" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_source_providers" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_runs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_runs" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_sync_runs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_run_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_run_events" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_sync_run_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_scope_lease_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_scope_lease_events" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_sync_scope_lease_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_checkpoint_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_sync_checkpoint_events" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_sync_checkpoint_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_scope_completion_attestations" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_corpus_scope_completion_attestations" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_corpus_scope_completion_attestations" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_source_fetches" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_source_fetches" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_source_fetches" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resources" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resources" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_resources" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resource_identity_crosswalks" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resource_identity_crosswalks" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_resource_identity_crosswalks" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resource_versions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resource_versions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_resource_versions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resource_version_lineages" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_resource_version_lineages" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_resource_version_lineages" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provisions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provisions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_provisions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_citations" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_citations" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_citations" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_citation_review_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_citation_review_events" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_relation_assertions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_relation_assertions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_relation_assertions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_relation_review_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_relation_review_events" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_definitions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_definitions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_term_definitions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_provision_links" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_provision_links" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_term_provision_links" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_source_links" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_source_links" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_term_source_links" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_relations" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_term_relations" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_term_relations" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_semantic_artifacts" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_semantic_artifacts" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_semantic_artifacts" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_query_runs" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_query_runs" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."legal_query_runs" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_query_run_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_query_run_events" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."legal_query_run_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_resource_links" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_resource_links" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."project_legal_resource_links" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_findings" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_findings" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."legal_findings" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_evidence_snapshots" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_evidence_snapshots" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."legal_evidence_snapshots" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_evidence_snapshot_items" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_evidence_snapshot_items" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."legal_evidence_snapshot_items" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_review_decisions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_review_decisions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_review_decisions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_approval_delegations" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_approval_delegations" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_approval_delegations" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_required_claim_sets" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_required_claim_sets" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_required_claim_sets" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_required_claims" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_required_claims" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_required_claims" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_matters" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_matters" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."project_legal_matters" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_waivers" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_waivers" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_waivers" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."counsel_opinions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."counsel_opinions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."counsel_opinions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_analysis_versions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_analysis_versions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."legal_analysis_versions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_annotations" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_annotations" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."project_legal_annotations" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_legal_term_aliases" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_legal_term_aliases" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."tenant_legal_term_aliases" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_legal_term_alias_review_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."tenant_legal_term_alias_review_events" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."tenant_legal_term_alias_review_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_review_versions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_review_versions" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."project_legal_review_versions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_permit_review_versions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_permit_review_versions" FROM "realytics_runtime";
+GRANT SELECT, INSERT ON TABLE "realytics"."project_permit_review_versions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_citation_review_versions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_citation_review_versions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."project_legal_citation_review_versions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_citation_review_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_citation_review_events" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."project_legal_citation_review_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_relation_review_versions" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_relation_review_versions" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."project_legal_relation_review_versions" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_relation_review_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."project_legal_relation_review_events" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."project_legal_relation_review_events" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."glossary_terms" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."glossary_terms" FROM "realytics_runtime";
+GRANT SELECT ON TABLE "realytics"."glossary_terms" TO "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_quarantine" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_quarantine" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_dead_letters" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_dead_letters" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_metrics" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_metrics" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_objects" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_objects" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_approval_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_approval_events" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_requests" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_requests" FROM "realytics_runtime";
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_events" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON TABLE "realytics"."legal_provider_replay_events" FROM "realytics_runtime";
+GRANT SELECT ("issuer", "subject", "principal_type", "status", "email", "display_name") ON TABLE "realytics"."principals" TO "realytics_runtime";
+GRANT INSERT ("issuer", "subject", "principal_type", "status", "email", "display_name", "verification_method", "first_verified_at", "last_verified_at", "created_at", "updated_at") ON TABLE "realytics"."principals" TO "realytics_runtime";
+GRANT UPDATE ("email", "display_name", "updated_at") ON TABLE "realytics"."principals" TO "realytics_runtime";
+GRANT SELECT ("tenant_id", "issuer", "subject", "role", "status", "membership_version", "updated_at") ON TABLE "realytics"."tenant_memberships" TO "realytics_runtime";
+GRANT INSERT ("tenant_id", "issuer", "subject", "role", "status", "membership_version", "membership_source", "created_at", "updated_at") ON TABLE "realytics"."tenant_memberships" TO "realytics_runtime";
+GRANT UPDATE ("role", "membership_version", "updated_at") ON TABLE "realytics"."tenant_memberships" TO "realytics_runtime";
+GRANT SELECT ("tenant_id", "name", "status") ON TABLE "realytics"."tenants" TO "realytics_runtime";
+GRANT INSERT ("tenant_id", "name", "status", "created_at", "updated_at", "metadata_json") ON TABLE "realytics"."tenants" TO "realytics_runtime";
+GRANT SELECT ("issuer", "subject", "status", "operator_version") ON TABLE "realytics"."platform_onboarding_operators" TO "realytics_runtime";
+GRANT SELECT ("request_id", "request_type", "requester_issuer", "requester_subject", "requester_email_snapshot", "requester_display_name_snapshot", "profile_version_snapshot", "terms_version_snapshot", "privacy_version_snapshot", "profile_snapshot_hash", "target_tenant_id", "organization_name", "business_registration_number", "requested_role", "request_message", "status", "request_version", "submitted_at", "decision_by_issuer", "decision_by_subject", "decision_at", "decision_reason", "approved_tenant_id", "created_at", "updated_at") ON TABLE "realytics"."tenant_access_requests" TO "realytics_runtime";
+GRANT UPDATE ("status", "request_version", "decision_by_issuer", "decision_by_subject", "decision_at", "decision_reason", "approved_tenant_id", "updated_at") ON TABLE "realytics"."tenant_access_requests" TO "realytics_runtime";
+GRANT INSERT ("event_id", "request_id", "event_type", "request_type", "requester_issuer", "requester_subject", "target_tenant_id", "actor_issuer", "actor_subject", "event_payload", "occurred_at") ON TABLE "realytics"."tenant_access_request_events" TO "realytics_runtime";
+ALTER DEFAULT PRIVILEGES IN SCHEMA "realytics" REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SEQUENCE "realytics"."project_id_sequence" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SEQUENCE "realytics"."project_id_sequence" FROM "realytics_runtime";
+GRANT USAGE ON SEQUENCE "realytics"."project_id_sequence" TO "realytics_runtime";
+GRANT EXECUTE ON FUNCTION "realytics".legal_try_timestamptz(TEXT) TO "realytics_runtime";
+GRANT EXECUTE ON FUNCTION "extensions".digest(bytea, text) TO "realytics_runtime";
+
+-- Identity startup checks both search-path schemas. USAGE exposes no table
+-- data and must never include permission to create executable objects.
+GRANT USAGE ON SCHEMA extensions TO realytics_identity;
+REVOKE CREATE ON SCHEMA extensions FROM realytics_identity;
+
+DO $runtime_alignment_postflight$
+DECLARE
+    permission RECORD;
+    actual BOOLEAN;
+BEGIN
+    FOR permission IN SELECT * FROM (VALUES
+        ('table', 'realytics.parser_document_versions', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_document_versions', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_project_profiles', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_project_profiles', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_runs', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_runs', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_run_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_run_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_candidate_set_seals', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_candidate_set_seals', '', 'INSERT', TRUE),
+        ('table', 'realytics.parsed_fact_candidates', '', 'SELECT', TRUE),
+        ('table', 'realytics.parsed_fact_candidates', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_candidate_inputs', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_candidate_inputs', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_validation_findings', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_review_decisions', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_review_decisions', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_source_conflicts', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_source_conflicts', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_source_conflict_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_source_conflict_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_conflict_candidates', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_conflict_candidates', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_review_decision_conflicts', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_canonical_selections', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_canonical_selections', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_approved_snapshots', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_approved_snapshots', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_snapshot_selections', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_snapshot_selections', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_snapshot_source_runs', '', 'INSERT', TRUE),
+        ('table', 'realytics.parser_validity_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.parser_validity_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.projects', '', 'SELECT', TRUE),
+        ('table', 'realytics.projects', '', 'INSERT', TRUE),
+        ('table', 'realytics.projects', '', 'UPDATE', TRUE),
+        ('table', 'realytics.user_activity_logs', '', 'SELECT', TRUE),
+        ('table', 'realytics.user_activity_logs', '', 'INSERT', TRUE),
+        ('table', 'realytics.schema_migrations', '', 'SELECT', TRUE),
+        ('table', 'realytics.runtime_outbox_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.runtime_outbox_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.runtime_outbox_events', '', 'UPDATE', TRUE),
+        ('table', 'realytics.calculation_runs', '', 'SELECT', TRUE),
+        ('table', 'realytics.calculation_runs', '', 'INSERT', TRUE),
+        ('table', 'realytics.calculation_runs', '', 'UPDATE', TRUE),
+        ('table', 'realytics.deal_state_records', '', 'SELECT', TRUE),
+        ('table', 'realytics.deal_state_records', '', 'INSERT', TRUE),
+        ('table', 'realytics.deal_state_records', '', 'UPDATE', TRUE),
+        ('table', 'realytics.chief_pod_artifacts', '', 'SELECT', TRUE),
+        ('table', 'realytics.chief_pod_artifacts', '', 'INSERT', TRUE),
+        ('table', 'realytics.chief_pod_artifacts', '', 'UPDATE', TRUE),
+        ('table', 'realytics.pod_ai_reviews', '', 'SELECT', TRUE),
+        ('table', 'realytics.pod_ai_reviews', '', 'INSERT', TRUE),
+        ('table', 'realytics.pod_ai_reviews', '', 'UPDATE', TRUE),
+        ('table', 'realytics.agent_handoffs', '', 'SELECT', TRUE),
+        ('table', 'realytics.agent_handoffs', '', 'INSERT', TRUE),
+        ('table', 'realytics.agent_handoffs', '', 'UPDATE', TRUE),
+        ('table', 'realytics.recalculation_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.recalculation_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.recalculation_events', '', 'UPDATE', TRUE),
+        ('table', 'realytics.assumption_overrides', '', 'SELECT', TRUE),
+        ('table', 'realytics.async_jobs', '', 'SELECT', TRUE),
+        ('table', 'realytics.async_jobs', '', 'INSERT', TRUE),
+        ('table', 'realytics.async_jobs', '', 'UPDATE', TRUE),
+        ('table', 'realytics.agent_runs', '', 'SELECT', TRUE),
+        ('table', 'realytics.agent_runs', '', 'INSERT', TRUE),
+        ('table', 'realytics.agent_runs', '', 'UPDATE', TRUE),
+        ('table', 'realytics.agent_run_steps', '', 'SELECT', TRUE),
+        ('table', 'realytics.agent_run_steps', '', 'INSERT', TRUE),
+        ('table', 'realytics.agent_run_steps', '', 'UPDATE', TRUE),
+        ('table', 'realytics.brain_usage_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.brain_usage_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.brain_usage_events', '', 'UPDATE', TRUE),
+        ('table', 'realytics.tenant_identity_access_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.assumption_proposals', '', 'SELECT', TRUE),
+        ('table', 'realytics.assumption_proposals', '', 'INSERT', TRUE),
+        ('table', 'realytics.assumption_proposals', '', 'UPDATE', TRUE),
+        ('table', 'realytics.evidence_graphs', '', 'SELECT', TRUE),
+        ('table', 'realytics.evidence_graphs', '', 'INSERT', TRUE),
+        ('table', 'realytics.evidence_graphs', '', 'UPDATE', TRUE),
+        ('table', 'realytics.market_evidence', '', 'SELECT', TRUE),
+        ('table', 'realytics.market_evidence', '', 'INSERT', TRUE),
+        ('table', 'realytics.market_evidence', '', 'UPDATE', TRUE),
+        ('table', 'realytics.orchestrations', '', 'SELECT', TRUE),
+        ('table', 'realytics.orchestrations', '', 'INSERT', TRUE),
+        ('table', 'realytics.orchestrations', '', 'UPDATE', TRUE),
+        ('table', 'realytics.project_snapshots', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_snapshots', '', 'INSERT', TRUE),
+        ('table', 'realytics.project_snapshots', '', 'UPDATE', TRUE),
+        ('table', 'realytics.reports', '', 'SELECT', TRUE),
+        ('table', 'realytics.reports', '', 'INSERT', TRUE),
+        ('table', 'realytics.reports', '', 'UPDATE', TRUE),
+        ('table', 'realytics.report_publications', '', 'SELECT', TRUE),
+        ('table', 'realytics.report_publications', '', 'INSERT', TRUE),
+        ('table', 'realytics.risk_registers', '', 'SELECT', TRUE),
+        ('table', 'realytics.risk_registers', '', 'INSERT', TRUE),
+        ('table', 'realytics.risk_registers', '', 'UPDATE', TRUE),
+        ('table', 'realytics.legal_corpus_required_target_contracts', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_corpus_coverage_registries', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_corpus_coverage_contracts', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_source_providers', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_sync_runs', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_sync_run_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_sync_scope_lease_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_sync_checkpoint_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_corpus_scope_completion_attestations', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_source_fetches', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_resources', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_resource_identity_crosswalks', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_resource_versions', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_resource_version_lineages', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_provisions', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_citations', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_relation_assertions', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_term_definitions', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_term_provision_links', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_term_source_links', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_term_relations', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_semantic_artifacts', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_query_runs', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_query_runs', '', 'INSERT', TRUE),
+        ('table', 'realytics.legal_query_run_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_query_run_events', '', 'INSERT', TRUE),
+        ('table', 'realytics.project_legal_resource_links', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_resource_links', '', 'INSERT', TRUE),
+        ('table', 'realytics.legal_findings', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_findings', '', 'INSERT', TRUE),
+        ('table', 'realytics.legal_evidence_snapshots', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_evidence_snapshots', '', 'INSERT', TRUE),
+        ('table', 'realytics.legal_evidence_snapshot_items', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_evidence_snapshot_items', '', 'INSERT', TRUE),
+        ('table', 'realytics.legal_review_decisions', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_approval_delegations', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_required_claim_sets', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_required_claims', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_matters', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_waivers', '', 'SELECT', TRUE),
+        ('table', 'realytics.counsel_opinions', '', 'SELECT', TRUE),
+        ('table', 'realytics.legal_analysis_versions', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_annotations', '', 'SELECT', TRUE),
+        ('table', 'realytics.tenant_legal_term_aliases', '', 'SELECT', TRUE),
+        ('table', 'realytics.tenant_legal_term_alias_review_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_review_versions', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_review_versions', '', 'INSERT', TRUE),
+        ('table', 'realytics.project_permit_review_versions', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_permit_review_versions', '', 'INSERT', TRUE),
+        ('table', 'realytics.project_legal_citation_review_versions', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_citation_review_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_relation_review_versions', '', 'SELECT', TRUE),
+        ('table', 'realytics.project_legal_relation_review_events', '', 'SELECT', TRUE),
+        ('table', 'realytics.glossary_terms', '', 'SELECT', TRUE),
+        ('column', 'realytics.principals', 'issuer', 'SELECT', TRUE),
+        ('column', 'realytics.principals', 'subject', 'SELECT', TRUE),
+        ('column', 'realytics.principals', 'principal_type', 'SELECT', TRUE),
+        ('column', 'realytics.principals', 'status', 'SELECT', TRUE),
+        ('column', 'realytics.principals', 'email', 'SELECT', TRUE),
+        ('column', 'realytics.principals', 'display_name', 'SELECT', TRUE),
+        ('column', 'realytics.principals', 'issuer', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'subject', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'principal_type', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'status', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'email', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'display_name', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'verification_method', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'first_verified_at', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'last_verified_at', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'created_at', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'updated_at', 'INSERT', TRUE),
+        ('column', 'realytics.principals', 'email', 'UPDATE', TRUE),
+        ('column', 'realytics.principals', 'display_name', 'UPDATE', TRUE),
+        ('column', 'realytics.principals', 'updated_at', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_memberships', 'tenant_id', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'issuer', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'subject', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'role', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'status', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'membership_version', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'updated_at', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'tenant_id', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'issuer', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'subject', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'role', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'status', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'membership_version', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'membership_source', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'created_at', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'updated_at', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_memberships', 'role', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_memberships', 'membership_version', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_memberships', 'updated_at', 'UPDATE', TRUE),
+        ('column', 'realytics.tenants', 'tenant_id', 'SELECT', TRUE),
+        ('column', 'realytics.tenants', 'name', 'SELECT', TRUE),
+        ('column', 'realytics.tenants', 'status', 'SELECT', TRUE),
+        ('column', 'realytics.tenants', 'tenant_id', 'INSERT', TRUE),
+        ('column', 'realytics.tenants', 'name', 'INSERT', TRUE),
+        ('column', 'realytics.tenants', 'status', 'INSERT', TRUE),
+        ('column', 'realytics.tenants', 'created_at', 'INSERT', TRUE),
+        ('column', 'realytics.tenants', 'updated_at', 'INSERT', TRUE),
+        ('column', 'realytics.tenants', 'metadata_json', 'INSERT', TRUE),
+        ('column', 'realytics.platform_onboarding_operators', 'issuer', 'SELECT', TRUE),
+        ('column', 'realytics.platform_onboarding_operators', 'subject', 'SELECT', TRUE),
+        ('column', 'realytics.platform_onboarding_operators', 'status', 'SELECT', TRUE),
+        ('column', 'realytics.platform_onboarding_operators', 'operator_version', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'request_id', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'request_type', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'requester_issuer', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'requester_subject', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'requester_email_snapshot', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'requester_display_name_snapshot', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'profile_version_snapshot', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'terms_version_snapshot', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'privacy_version_snapshot', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'profile_snapshot_hash', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'target_tenant_id', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'organization_name', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'business_registration_number', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'requested_role', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'request_message', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'status', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'request_version', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'submitted_at', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_by_issuer', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_by_subject', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_at', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_reason', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'approved_tenant_id', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'created_at', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'updated_at', 'SELECT', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'status', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'request_version', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_by_issuer', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_by_subject', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_at', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'decision_reason', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'approved_tenant_id', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_requests', 'updated_at', 'UPDATE', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'event_id', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'request_id', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'event_type', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'request_type', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'requester_issuer', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'requester_subject', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'target_tenant_id', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'actor_issuer', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'actor_subject', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'event_payload', 'INSERT', TRUE),
+        ('column', 'realytics.tenant_access_request_events', 'occurred_at', 'INSERT', TRUE),
+        ('sequence', 'realytics.project_id_sequence', '', 'USAGE', TRUE),
+        ('table', 'realytics.parser_document_versions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_document_versions', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_document_versions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_document_versions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_document_versions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_project_profiles', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_project_profiles', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_project_profiles', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_project_profiles', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_project_profiles', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_runs', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_runs', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_runs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_runs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_runs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_run_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_run_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_run_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_run_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_run_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_candidate_set_seals', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_candidate_set_seals', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_candidate_set_seals', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_candidate_set_seals', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_candidate_set_seals', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parsed_fact_candidates', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parsed_fact_candidates', '', 'DELETE', FALSE),
+        ('table', 'realytics.parsed_fact_candidates', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parsed_fact_candidates', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parsed_fact_candidates', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_candidate_inputs', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_candidate_inputs', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_candidate_inputs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_candidate_inputs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_candidate_inputs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_validation_findings', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_validation_findings', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_validation_findings', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_validation_findings', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_validation_findings', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_validation_finding_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_validation_finding_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_validation_finding_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_validation_finding_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_validation_finding_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_review_decisions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_review_decisions', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_review_decisions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_review_decisions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_review_decisions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_source_conflicts', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_source_conflicts', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_source_conflicts', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_source_conflicts', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_source_conflicts', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_source_conflict_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_source_conflict_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_source_conflict_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_source_conflict_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_source_conflict_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_conflict_candidates', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_conflict_candidates', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_conflict_candidates', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_conflict_candidates', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_conflict_candidates', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_review_decision_conflicts', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_review_decision_conflicts', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_review_decision_conflicts', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_review_decision_conflicts', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_review_decision_conflicts', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_canonical_selections', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_canonical_selections', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_canonical_selections', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_canonical_selections', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_canonical_selections', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_approved_snapshots', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_approved_snapshots', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_approved_snapshots', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_approved_snapshots', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_approved_snapshots', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_snapshot_selections', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_snapshot_selections', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_snapshot_selections', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_snapshot_selections', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_snapshot_selections', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_snapshot_source_runs', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_snapshot_source_runs', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_snapshot_source_runs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_snapshot_source_runs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_snapshot_source_runs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.parser_validity_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.parser_validity_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.parser_validity_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.parser_validity_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.parser_validity_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_corpus_required_target_contracts', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_corpus_required_target_contracts', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_corpus_required_target_contracts', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_corpus_required_target_contracts', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_corpus_required_target_contracts', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_corpus_required_target_contracts', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_registries', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_registries', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_registries', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_registries', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_registries', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_registries', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_contracts', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_contracts', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_contracts', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_contracts', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_contracts', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_corpus_coverage_contracts', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_source_providers', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_source_providers', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_source_providers', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_source_providers', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_source_providers', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_source_providers', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_sync_runs', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_sync_runs', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_sync_runs', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_sync_runs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_sync_runs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_sync_runs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_sync_run_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_sync_run_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_sync_run_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_sync_run_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_sync_run_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_sync_run_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_sync_scope_lease_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_sync_scope_lease_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_sync_scope_lease_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_sync_scope_lease_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_sync_scope_lease_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_sync_scope_lease_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_sync_checkpoint_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_sync_checkpoint_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_sync_checkpoint_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_sync_checkpoint_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_sync_checkpoint_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_sync_checkpoint_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_corpus_scope_completion_attestations', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_corpus_scope_completion_attestations', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_corpus_scope_completion_attestations', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_corpus_scope_completion_attestations', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_corpus_scope_completion_attestations', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_corpus_scope_completion_attestations', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_source_fetches', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_source_fetches', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_source_fetches', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_source_fetches', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_source_fetches', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_source_fetches', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_resources', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_resources', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_resources', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_resources', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_resources', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_resources', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_resource_identity_crosswalks', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_resource_identity_crosswalks', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_resource_identity_crosswalks', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_resource_identity_crosswalks', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_resource_identity_crosswalks', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_resource_identity_crosswalks', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_resource_versions', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_resource_versions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_resource_versions', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_resource_versions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_resource_versions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_resource_versions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_resource_version_lineages', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_resource_version_lineages', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_resource_version_lineages', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_resource_version_lineages', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_resource_version_lineages', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_resource_version_lineages', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provisions', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provisions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provisions', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provisions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provisions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provisions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_citations', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_citations', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_citations', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_citations', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_citations', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_citations', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_citation_review_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_citation_review_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_citation_review_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_citation_review_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_citation_review_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_citation_review_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_relation_assertions', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_relation_assertions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_relation_assertions', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_relation_assertions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_relation_assertions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_relation_assertions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_relation_review_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_relation_review_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_relation_review_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_relation_review_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_relation_review_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_relation_review_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_term_definitions', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_term_definitions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_term_definitions', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_term_definitions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_term_definitions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_term_definitions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_term_provision_links', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_term_provision_links', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_term_provision_links', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_term_provision_links', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_term_provision_links', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_term_provision_links', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_term_source_links', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_term_source_links', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_term_source_links', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_term_source_links', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_term_source_links', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_term_source_links', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_term_relations', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_term_relations', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_term_relations', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_term_relations', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_term_relations', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_term_relations', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_semantic_artifacts', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_semantic_artifacts', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_semantic_artifacts', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_semantic_artifacts', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_semantic_artifacts', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_semantic_artifacts', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_query_runs', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_query_runs', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_query_runs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_query_runs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_query_runs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_query_run_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_query_run_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_query_run_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_query_run_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_query_run_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_resource_links', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_resource_links', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_resource_links', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_resource_links', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_resource_links', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_findings', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_findings', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_findings', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_findings', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_findings', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_evidence_snapshots', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_evidence_snapshots', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_evidence_snapshots', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_evidence_snapshots', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_evidence_snapshots', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_evidence_snapshot_items', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_evidence_snapshot_items', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_evidence_snapshot_items', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_evidence_snapshot_items', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_evidence_snapshot_items', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_review_decisions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_review_decisions', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_review_decisions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_review_decisions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_review_decisions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_approval_delegations', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_approval_delegations', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_approval_delegations', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_approval_delegations', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_approval_delegations', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_required_claim_sets', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_required_claim_sets', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_required_claim_sets', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_required_claim_sets', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_required_claim_sets', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_required_claims', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_required_claims', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_required_claims', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_required_claims', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_required_claims', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_matters', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_matters', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_matters', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_matters', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_matters', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_waivers', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_waivers', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_waivers', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_waivers', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_waivers', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.counsel_opinions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.counsel_opinions', '', 'DELETE', FALSE),
+        ('table', 'realytics.counsel_opinions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.counsel_opinions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.counsel_opinions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_analysis_versions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_analysis_versions', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_analysis_versions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_analysis_versions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_analysis_versions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_annotations', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_annotations', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_annotations', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_annotations', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_annotations', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.tenant_legal_term_aliases', '', 'UPDATE', FALSE),
+        ('table', 'realytics.tenant_legal_term_aliases', '', 'DELETE', FALSE),
+        ('table', 'realytics.tenant_legal_term_aliases', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.tenant_legal_term_aliases', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.tenant_legal_term_aliases', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.tenant_legal_term_alias_review_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.tenant_legal_term_alias_review_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.tenant_legal_term_alias_review_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.tenant_legal_term_alias_review_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.tenant_legal_term_alias_review_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_review_versions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_review_versions', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_review_versions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_review_versions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_review_versions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_permit_review_versions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_permit_review_versions', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_permit_review_versions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_permit_review_versions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_permit_review_versions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_citation_review_versions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_citation_review_versions', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_citation_review_versions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_citation_review_versions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_citation_review_versions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_citation_review_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_citation_review_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_citation_review_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_citation_review_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_citation_review_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_relation_review_versions', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_relation_review_versions', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_relation_review_versions', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_relation_review_versions', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_relation_review_versions', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_legal_relation_review_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.project_legal_relation_review_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_legal_relation_review_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_legal_relation_review_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_legal_relation_review_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.glossary_terms', '', 'INSERT', FALSE),
+        ('table', 'realytics.glossary_terms', '', 'UPDATE', FALSE),
+        ('table', 'realytics.glossary_terms', '', 'DELETE', FALSE),
+        ('table', 'realytics.glossary_terms', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.glossary_terms', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.glossary_terms', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provider_quarantine', '', 'SELECT', FALSE),
+        ('table', 'realytics.legal_provider_quarantine', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provider_quarantine', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provider_quarantine', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provider_quarantine', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provider_quarantine', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provider_quarantine', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provider_dead_letters', '', 'SELECT', FALSE),
+        ('table', 'realytics.legal_provider_dead_letters', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provider_dead_letters', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provider_dead_letters', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provider_dead_letters', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provider_dead_letters', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provider_dead_letters', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provider_metrics', '', 'SELECT', FALSE),
+        ('table', 'realytics.legal_provider_metrics', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provider_metrics', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provider_metrics', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provider_metrics', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provider_metrics', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provider_metrics', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provider_replay_objects', '', 'SELECT', FALSE),
+        ('table', 'realytics.legal_provider_replay_objects', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provider_replay_objects', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_objects', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provider_replay_objects', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_objects', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provider_replay_objects', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provider_replay_approval_events', '', 'SELECT', FALSE),
+        ('table', 'realytics.legal_provider_replay_approval_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provider_replay_approval_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_approval_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provider_replay_approval_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_approval_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provider_replay_approval_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provider_replay_requests', '', 'SELECT', FALSE),
+        ('table', 'realytics.legal_provider_replay_requests', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provider_replay_requests', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_requests', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provider_replay_requests', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_requests', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provider_replay_requests', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.legal_provider_replay_events', '', 'SELECT', FALSE),
+        ('table', 'realytics.legal_provider_replay_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.legal_provider_replay_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.legal_provider_replay_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.legal_provider_replay_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.legal_provider_replay_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.assumption_overrides', '', 'INSERT', FALSE),
+        ('table', 'realytics.assumption_overrides', '', 'UPDATE', FALSE),
+        ('table', 'realytics.assumption_overrides', '', 'DELETE', FALSE),
+        ('table', 'realytics.assumption_overrides', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.assumption_overrides', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.assumption_overrides', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.schema_migrations', '', 'INSERT', FALSE),
+        ('table', 'realytics.schema_migrations', '', 'UPDATE', FALSE),
+        ('table', 'realytics.schema_migrations', '', 'DELETE', FALSE),
+        ('table', 'realytics.schema_migrations', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.schema_migrations', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.schema_migrations', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.runtime_outbox_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.runtime_outbox_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.runtime_outbox_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.runtime_outbox_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.calculation_runs', '', 'DELETE', FALSE),
+        ('table', 'realytics.calculation_runs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.calculation_runs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.calculation_runs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.deal_state_records', '', 'DELETE', FALSE),
+        ('table', 'realytics.deal_state_records', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.deal_state_records', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.deal_state_records', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.chief_pod_artifacts', '', 'DELETE', FALSE),
+        ('table', 'realytics.chief_pod_artifacts', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.chief_pod_artifacts', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.chief_pod_artifacts', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.pod_ai_reviews', '', 'DELETE', FALSE),
+        ('table', 'realytics.pod_ai_reviews', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.pod_ai_reviews', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.pod_ai_reviews', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.agent_handoffs', '', 'DELETE', FALSE),
+        ('table', 'realytics.agent_handoffs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.agent_handoffs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.agent_handoffs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.recalculation_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.recalculation_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.recalculation_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.recalculation_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.async_jobs', '', 'DELETE', FALSE),
+        ('table', 'realytics.async_jobs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.async_jobs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.async_jobs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.agent_runs', '', 'DELETE', FALSE),
+        ('table', 'realytics.agent_runs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.agent_runs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.agent_runs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.agent_run_steps', '', 'DELETE', FALSE),
+        ('table', 'realytics.agent_run_steps', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.agent_run_steps', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.agent_run_steps', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.brain_usage_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.brain_usage_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.brain_usage_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.brain_usage_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.principals', '', 'SELECT', FALSE),
+        ('table', 'realytics.principals', '', 'INSERT', FALSE),
+        ('table', 'realytics.principals', '', 'UPDATE', FALSE),
+        ('table', 'realytics.principals', '', 'DELETE', FALSE),
+        ('table', 'realytics.principals', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.principals', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.principals', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.tenant_memberships', '', 'SELECT', FALSE),
+        ('table', 'realytics.tenant_memberships', '', 'INSERT', FALSE),
+        ('table', 'realytics.tenant_memberships', '', 'UPDATE', FALSE),
+        ('table', 'realytics.tenant_memberships', '', 'DELETE', FALSE),
+        ('table', 'realytics.tenant_memberships', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.tenant_memberships', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.tenant_memberships', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.tenant_identity_access_events', '', 'SELECT', FALSE),
+        ('table', 'realytics.tenant_identity_access_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.tenant_identity_access_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.tenant_identity_access_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.tenant_identity_access_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.tenant_identity_access_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.tenants', '', 'SELECT', FALSE),
+        ('table', 'realytics.tenants', '', 'INSERT', FALSE),
+        ('table', 'realytics.tenants', '', 'UPDATE', FALSE),
+        ('table', 'realytics.tenants', '', 'DELETE', FALSE),
+        ('table', 'realytics.tenants', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.tenants', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.tenants', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.onboarding_profiles', '', 'SELECT', FALSE),
+        ('table', 'realytics.onboarding_profiles', '', 'INSERT', FALSE),
+        ('table', 'realytics.onboarding_profiles', '', 'UPDATE', FALSE),
+        ('table', 'realytics.onboarding_profiles', '', 'DELETE', FALSE),
+        ('table', 'realytics.onboarding_profiles', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.onboarding_profiles', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.onboarding_profiles', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.onboarding_principal_events', '', 'SELECT', FALSE),
+        ('table', 'realytics.onboarding_principal_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.onboarding_principal_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.onboarding_principal_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.onboarding_principal_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.onboarding_principal_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.onboarding_principal_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.platform_onboarding_operators', '', 'SELECT', FALSE),
+        ('table', 'realytics.platform_onboarding_operators', '', 'INSERT', FALSE),
+        ('table', 'realytics.platform_onboarding_operators', '', 'UPDATE', FALSE),
+        ('table', 'realytics.platform_onboarding_operators', '', 'DELETE', FALSE),
+        ('table', 'realytics.platform_onboarding_operators', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.platform_onboarding_operators', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.platform_onboarding_operators', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.tenant_access_requests', '', 'SELECT', FALSE),
+        ('table', 'realytics.tenant_access_requests', '', 'INSERT', FALSE),
+        ('table', 'realytics.tenant_access_requests', '', 'UPDATE', FALSE),
+        ('table', 'realytics.tenant_access_requests', '', 'DELETE', FALSE),
+        ('table', 'realytics.tenant_access_requests', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.tenant_access_requests', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.tenant_access_requests', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.tenant_access_request_events', '', 'SELECT', FALSE),
+        ('table', 'realytics.tenant_access_request_events', '', 'INSERT', FALSE),
+        ('table', 'realytics.tenant_access_request_events', '', 'UPDATE', FALSE),
+        ('table', 'realytics.tenant_access_request_events', '', 'DELETE', FALSE),
+        ('table', 'realytics.tenant_access_request_events', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.tenant_access_request_events', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.tenant_access_request_events', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.assumption_proposals', '', 'DELETE', FALSE),
+        ('table', 'realytics.assumption_proposals', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.assumption_proposals', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.assumption_proposals', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.evidence_graphs', '', 'DELETE', FALSE),
+        ('table', 'realytics.evidence_graphs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.evidence_graphs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.evidence_graphs', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.market_evidence', '', 'DELETE', FALSE),
+        ('table', 'realytics.market_evidence', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.market_evidence', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.market_evidence', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.orchestrations', '', 'DELETE', FALSE),
+        ('table', 'realytics.orchestrations', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.orchestrations', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.orchestrations', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.project_snapshots', '', 'DELETE', FALSE),
+        ('table', 'realytics.project_snapshots', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.project_snapshots', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.project_snapshots', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.reports', '', 'DELETE', FALSE),
+        ('table', 'realytics.reports', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.reports', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.reports', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.report_publications', '', 'UPDATE', FALSE),
+        ('table', 'realytics.report_publications', '', 'DELETE', FALSE),
+        ('table', 'realytics.report_publications', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.report_publications', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.report_publications', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.risk_registers', '', 'DELETE', FALSE),
+        ('table', 'realytics.risk_registers', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.risk_registers', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.risk_registers', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.projects', '', 'DELETE', FALSE),
+        ('table', 'realytics.projects', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.projects', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.projects', '', 'TRIGGER', FALSE),
+        ('table', 'realytics.user_activity_logs', '', 'UPDATE', FALSE),
+        ('table', 'realytics.user_activity_logs', '', 'DELETE', FALSE),
+        ('table', 'realytics.user_activity_logs', '', 'TRUNCATE', FALSE),
+        ('table', 'realytics.user_activity_logs', '', 'REFERENCES', FALSE),
+        ('table', 'realytics.user_activity_logs', '', 'TRIGGER', FALSE),
+        ('column', 'realytics.principals', 'legacy_user_id', 'SELECT', FALSE),
+        ('column', 'realytics.principals', 'verification_method', 'SELECT', FALSE),
+        ('column', 'realytics.principals', 'first_verified_at', 'SELECT', FALSE),
+        ('column', 'realytics.principals', 'last_verified_at', 'SELECT', FALSE),
+        ('column', 'realytics.principals', 'created_at', 'SELECT', FALSE),
+        ('column', 'realytics.principals', 'updated_at', 'SELECT', FALSE),
+        ('column', 'realytics.principals', 'issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'subject', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'principal_type', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'status', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'legacy_user_id', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'verification_method', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'first_verified_at', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'last_verified_at', 'UPDATE', FALSE),
+        ('column', 'realytics.principals', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_memberships', 'membership_source', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_memberships', 'created_at', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_memberships', 'tenant_id', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_memberships', 'issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_memberships', 'subject', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_memberships', 'status', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_memberships', 'membership_source', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_memberships', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenants', 'created_at', 'SELECT', FALSE),
+        ('column', 'realytics.tenants', 'updated_at', 'SELECT', FALSE),
+        ('column', 'realytics.tenants', 'metadata_json', 'SELECT', FALSE),
+        ('column', 'realytics.tenants', 'tenant_id', 'UPDATE', FALSE),
+        ('column', 'realytics.tenants', 'name', 'UPDATE', FALSE),
+        ('column', 'realytics.tenants', 'status', 'UPDATE', FALSE),
+        ('column', 'realytics.tenants', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenants', 'updated_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenants', 'metadata_json', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'issuer', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'subject', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'contact_email', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'display_name', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'phone', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'job_title', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'terms_version', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'privacy_version', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'terms_accepted_at', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'privacy_accepted_at', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'profile_version', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'created_at', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'updated_at', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'issuer', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'subject', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'contact_email', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'display_name', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'phone', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'job_title', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'terms_version', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'privacy_version', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'terms_accepted_at', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'privacy_accepted_at', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'profile_version', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'created_at', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'updated_at', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'subject', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'contact_email', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'display_name', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'phone', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'job_title', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'terms_version', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'privacy_version', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'terms_accepted_at', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'privacy_accepted_at', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'profile_version', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_profiles', 'updated_at', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_id', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'issuer', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'subject', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_type', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_payload', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'occurred_at', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'created_at', 'SELECT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_id', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'issuer', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'subject', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_type', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_payload', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'occurred_at', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'created_at', 'INSERT', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_id', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'subject', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_type', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'event_payload', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'occurred_at', 'UPDATE', FALSE),
+        ('column', 'realytics.onboarding_principal_events', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'created_at', 'SELECT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'updated_at', 'SELECT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'issuer', 'INSERT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'subject', 'INSERT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'status', 'INSERT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'operator_version', 'INSERT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'created_at', 'INSERT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'updated_at', 'INSERT', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'subject', 'UPDATE', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'status', 'UPDATE', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'operator_version', 'UPDATE', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.platform_onboarding_operators', 'updated_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'request_id', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'request_type', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_issuer', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_subject', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_email_snapshot', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_display_name_snapshot', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'profile_version_snapshot', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'terms_version_snapshot', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'privacy_version_snapshot', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'profile_snapshot_hash', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'target_tenant_id', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'organization_name', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'business_registration_number', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requested_role', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'request_message', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'status', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'request_version', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'submitted_at', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'decision_by_issuer', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'decision_by_subject', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'decision_at', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'decision_reason', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'approved_tenant_id', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'created_at', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'updated_at', 'INSERT', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'request_id', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'request_type', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_subject', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_email_snapshot', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requester_display_name_snapshot', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'profile_version_snapshot', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'terms_version_snapshot', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'privacy_version_snapshot', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'profile_snapshot_hash', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'target_tenant_id', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'organization_name', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'business_registration_number', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'requested_role', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'request_message', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'submitted_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_requests', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'event_id', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'request_id', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'event_type', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'request_type', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'requester_issuer', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'requester_subject', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'target_tenant_id', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'actor_issuer', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'actor_subject', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'event_payload', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'occurred_at', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'created_at', 'SELECT', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'event_id', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'request_id', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'event_type', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'request_type', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'requester_issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'requester_subject', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'target_tenant_id', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'actor_issuer', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'actor_subject', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'event_payload', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'occurred_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'created_at', 'UPDATE', FALSE),
+        ('column', 'realytics.tenant_access_request_events', 'created_at', 'INSERT', FALSE),
+        ('sequence', 'realytics.project_id_sequence', '', 'SELECT', FALSE),
+        ('sequence', 'realytics.project_id_sequence', '', 'UPDATE', FALSE),
+        ('function', 'realytics.legal_try_timestamptz(TEXT)', '', 'EXECUTE', TRUE),
+        ('function', 'extensions.digest(bytea, text)', '', 'EXECUTE', TRUE),
+        ('schema', 'realytics', '', 'USAGE', TRUE),
+        ('schema', 'realytics', '', 'CREATE', FALSE),
+        ('schema', 'extensions', '', 'USAGE', TRUE),
+        ('schema', 'extensions', '', 'CREATE', FALSE)
+    ) AS contract(kind, object_name, column_name, privilege_name, expected)
+    LOOP
+        actual := CASE permission.kind
+            WHEN 'table' THEN has_table_privilege('realytics_runtime', permission.object_name, permission.privilege_name)
+            WHEN 'column' THEN has_column_privilege('realytics_runtime', permission.object_name, permission.column_name, permission.privilege_name)
+            WHEN 'sequence' THEN has_sequence_privilege('realytics_runtime', permission.object_name, permission.privilege_name)
+            WHEN 'function' THEN has_function_privilege('realytics_runtime', permission.object_name, permission.privilege_name)
+            WHEN 'schema' THEN has_schema_privilege('realytics_runtime', permission.object_name, permission.privilege_name)
+        END;
+        IF actual IS DISTINCT FROM permission.expected THEN
+            RAISE EXCEPTION 'runtime privilege mismatch: % %.% % expected %',
+                permission.kind, permission.object_name, permission.column_name,
+                permission.privilege_name, permission.expected;
+        END IF;
+    END LOOP;
+    IF NOT has_schema_privilege('realytics_identity', 'extensions', 'USAGE')
+       OR has_schema_privilege('realytics_identity', 'extensions', 'CREATE')
+    THEN RAISE EXCEPTION 'identity extensions schema privilege mismatch'; END IF;
+END;
+$runtime_alignment_postflight$;

@@ -1,6 +1,7 @@
 "use client";
 
 import { apiBase, authHeaders } from "./auth-client";
+import { backendErrorMessage, parseBackendErrorResponse } from "./backend-error";
 
 export type DealStateRecordType =
   | "metric"
@@ -51,6 +52,8 @@ export async function fetchDealStateRecords(
     limit?: number;
     actor?: string;
     latestOnly?: boolean;
+    throwOnError?: boolean;
+    signal?: AbortSignal;
   } = {},
 ): Promise<DealStateRecord[]> {
   const params = new URLSearchParams();
@@ -62,23 +65,44 @@ export async function fetchDealStateRecords(
   const res = await fetch(`${apiBase}/projects/${projectId}/deal-state-records?${suffix}`, {
     cache: "no-store",
     headers: authHeaders(options.actor ?? "web"),
+    signal: options.signal,
   });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (options.throwOnError) throw new Error(backendErrorMessage(await parseBackendErrorResponse(res), { action: "검토 원장 조회" }));
+    return [];
+  }
   const body = (await res.json()) as DealStateRecordList;
+  if (options.throwOnError && !Array.isArray(body.records)) throw new Error("검토 원장 응답을 확인하지 못했습니다. 다시 불러오세요.");
   return body.records ?? [];
 }
 
-export async function fetchDealStateRecordGroups(projectId: string, limit = 500) {
+export async function fetchDealStateRecordGroups(
+  projectId: string,
+  limit = 500,
+  options: { trackFailures?: boolean; signal?: AbortSignal } = {},
+) {
+  const failedTypes: DealStateRecordType[] = [];
+  async function load(recordType: DealStateRecordType) {
+    try {
+      return await fetchDealStateRecords(projectId, {
+        recordType, limit, actor: "web-auditor", signal: options.signal, throwOnError: options.trackFailures,
+      });
+    } catch (error) {
+      if (!options.trackFailures || options.signal?.aborted) throw error;
+      failedTypes.push(recordType);
+      return [];
+    }
+  }
   const [metrics, risks, evidence, assumptions, parsedFacts, parsedFactValidations, autoSupplementAttempts] = await Promise.all([
-    fetchDealStateRecords(projectId, { recordType: "metric", limit, actor: "web-auditor" }),
-    fetchDealStateRecords(projectId, { recordType: "risk_issue", limit, actor: "web-auditor" }),
-    fetchDealStateRecords(projectId, { recordType: "evidence", limit, actor: "web-auditor" }),
-    fetchDealStateRecords(projectId, { recordType: "assumption", limit, actor: "web-auditor" }),
-    fetchDealStateRecords(projectId, { recordType: "parsed_fact", limit, actor: "web-auditor" }),
-    fetchDealStateRecords(projectId, { recordType: "parsed_fact_validation", limit, actor: "web-auditor" }),
-    fetchDealStateRecords(projectId, { recordType: "auto_supplement_attempt", limit, actor: "web-auditor" }),
+    load("metric"),
+    load("risk_issue"),
+    load("evidence"),
+    load("assumption"),
+    load("parsed_fact"),
+    load("parsed_fact_validation"),
+    load("auto_supplement_attempt"),
   ]);
-  return { metrics, risks, evidence, assumptions, parsedFacts, parsedFactValidations, autoSupplementAttempts };
+  return { metrics, risks, evidence, assumptions, parsedFacts, parsedFactValidations, autoSupplementAttempts, failedTypes };
 }
 
 export function hasSourceLocator(record: DealStateRecord) {

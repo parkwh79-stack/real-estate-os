@@ -1,12 +1,21 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, Loader2, Sparkles, UploadCloud } from "lucide-react";
+import { ArrowRight, Loader2, UploadCloud } from "lucide-react";
 import { apiBase, authHeaders } from "../../lib/auth-client";
-import { SmartIntake } from "./smart-intake";
+import { backendErrorMessageForResponse } from "../../lib/backend-error";
+import { SmartIntake, type IntakeWorkStatus } from "./smart-intake";
+import { validateIntakeFiles } from "../../lib/intake-upload-client";
+import { ProjectNameEditor, PROJECT_NAME_MAX_LENGTH } from "../project/project-name-editor";
+import { useAuth } from "../auth/auth-context";
+import { hasPermission, PROJECT_WRITE_PERMISSION, projectWriteRestrictionMessage } from "../../lib/authorization";
 
 type Phase = "idle" | "creating" | "ready" | "error";
+
+export interface DashboardIntakeSession extends IntakeWorkStatus {
+  started: boolean;
+}
 
 function deriveProjectName(files: File[]): string {
   const first = files[0]?.name ?? "";
@@ -14,145 +23,195 @@ function deriveProjectName(files: File[]): string {
   if (base) return base.length > 60 ? base.slice(0, 60) : base;
   const d = new Date();
   const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  return `새 심사 ${stamp}`;
+  return `새 프로젝트 ${stamp}`;
 }
 
 /**
  * Dashboard-first intake: drop any documents at once, we create a draft review
  * project on the fly and hand the files to SmartIntake for AI classification.
  */
-export function DashboardIntake({ onProjectCreated }: { onProjectCreated?: () => void }) {
+export function DashboardIntake({ onProjectCreated, onSessionChange }: {
+  onProjectCreated?: () => void;
+  onSessionChange?: (session: DashboardIntakeSession) => void;
+}) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const nameInputId = useId();
+  const { permissions, user } = useAuth();
+  const canWrite = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
+  const [requestedName, setRequestedName] = useState("");
+  const creatingRef = useRef(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [dragOver, setDragOver] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string>("");
   const [files, setFiles] = useState<File[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [intakeStatus, setIntakeStatus] = useState<IntakeWorkStatus>({ busy: false, pending: true });
+  const busy = phase === "creating" || (phase === "ready" && intakeStatus.busy);
+  const pending = phase === "creating" || (phase === "error" && files.length > 0)
+    || (phase === "ready" && intakeStatus.pending);
+  const started = phase !== "idle";
+
+  useEffect(() => {
+    onSessionChange?.({ started, busy, pending });
+  }, [started, busy, pending, onSessionChange]);
+
+  useEffect(() => {
+    if (!busy && !pending) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [busy, pending]);
 
   const start = useCallback(
     async (picked: File[]) => {
-      if (!picked.length) return;
-      const name = deriveProjectName(picked);
+      if (!picked.length || creatingRef.current) return;
+      if (!canWrite) { setError(projectWriteRestrictionMessage(user?.role)); return; }
+      creatingRef.current = true;
+      const name = requestedName.trim() || deriveProjectName(picked);
       setProjectName(name);
       setPhase("creating");
       setError(null);
       try {
+        validateIntakeFiles(picked);
         // Snapshot bytes immediately. The <input> that produced these File handles
         // is unmounted when we switch to the SmartIntake view; an input-backed File
         // can then read as 0 bytes. Buffer into in-memory Files so later uploads are safe.
         const buffered = await Promise.all(
-          picked.map(async (f) => new File([await f.arrayBuffer()], f.name, { type: f.type })),
+          picked.map(async (f) => new File([await f.arrayBuffer()], f.name, { type: f.type, lastModified: f.lastModified })),
         );
         setFiles(buffered);
+        if (inputRef.current) inputRef.current.value = "";
         const res = await fetch(`${apiBase}/projects/`, {
           method: "POST",
           headers: { ...authHeaders("web"), "Content-Type": "application/json" },
           body: JSON.stringify({ name, status: "draft" }),
         });
-        if (!res.ok) throw new Error(`심사 공간 생성 실패 (${res.status})`);
+        if (!res.ok) {
+          throw new Error(
+            await backendErrorMessageForResponse(res, { action: "프로젝트 생성" }),
+          );
+        }
         const body = (await res.json()) as { id?: string; project?: { id?: string } };
         const id = body.id ?? body.project?.id;
-        if (!id) throw new Error("생성된 심사 ID를 받지 못했습니다.");
+        if (!id) throw new Error("생성된 프로젝트 ID를 받지 못했습니다.");
         setProjectId(String(id));
+        setIntakeStatus({ busy: false, pending: true });
         setPhase("ready");
         onProjectCreated?.();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "심사 공간 생성 중 오류가 발생했습니다.");
+        setError(err instanceof Error ? err.message : "프로젝트 생성 중 오류가 발생했습니다.");
         setPhase("error");
+      } finally {
+        creatingRef.current = false;
+        if (inputRef.current) inputRef.current.value = "";
       }
     },
-    [onProjectCreated],
+    [onProjectCreated, requestedName, canWrite, user?.role],
   );
 
   const reset = useCallback(() => {
+    if (busy || (pending && !window.confirm("처리하지 않은 파일이 남아 있습니다. 이 화면의 파일 선택을 비우고 새 프로젝트를 시작할까요? 이미 저장된 자료는 유지됩니다."))) return;
     setPhase("idle");
     setProjectId(null);
     setProjectName("");
+    setRequestedName("");
     setFiles([]);
     setError(null);
-  }, []);
+    setIntakeStatus({ busy: false, pending: true });
+  }, [busy, pending]);
 
   if (phase === "ready" && projectId) {
     return (
-      <section className="space-y-3">
-        <div className="flex flex-col gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-4 sm:flex-row sm:items-center sm:justify-between dark:border-indigo-900/50 dark:bg-indigo-950/30">
+      <section className="space-y-4" aria-label="새 프로젝트 자료 처리">
+        <div className="flex flex-col gap-3 rounded-re-control bg-re-subtle p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <p className="text-xs font-bold uppercase tracking-wide text-indigo-600 dark:text-indigo-300">새 심사 생성됨</p>
-            <p className="truncate text-sm font-black text-slate-900 dark:text-white">{projectName}</p>
+            <p className="text-xs text-re-secondary">생성된 프로젝트</p>
+            <p className="break-words text-sm font-semibold text-re-text">{projectName}</p>
           </div>
-          <div className="flex shrink-0 gap-2">
+          <div className="flex flex-wrap gap-2">
+            <ProjectNameEditor key={projectId} projectId={projectId} currentName={projectName} onSaved={(name) => { setProjectName(name); onProjectCreated?.(); }} />
             <Link
-              href={`/project/${projectId}/input-package`}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-slate-950 px-3 text-xs font-bold text-white dark:bg-white dark:text-slate-950"
+              href={`/project/${encodeURIComponent(projectId)}/input-package`}
+              aria-disabled={busy}
+              onClick={(event) => {
+                if (busy || (pending && !window.confirm("아직 처리하지 않은 파일이 있습니다. 이동하면 이 화면의 파일 선택은 사라집니다. 이미 저장된 자료를 확인하러 이동할까요?"))) event.preventDefault();
+              }}
+              className={`inline-flex min-h-10 items-center gap-1.5 rounded-re-control border border-re-border bg-re-surface px-3 text-sm font-medium text-re-action ${busy ? "cursor-not-allowed opacity-50" : "hover:bg-re-subtle"}`}
             >
-              심사 상세로 이동 <ArrowRight className="h-3.5 w-3.5" />
+              프로젝트 자료 보기 <ArrowRight className="h-4 w-4" aria-hidden="true" />
             </Link>
             <button
               type="button"
               onClick={reset}
-              className="inline-flex h-9 items-center rounded-lg border border-slate-300 px-3 text-xs font-bold text-slate-700 hover:bg-white dark:border-slate-700 dark:text-slate-200"
+              disabled={busy}
+              className="min-h-10 rounded-re-control px-3 text-sm text-re-secondary hover:bg-re-surface disabled:cursor-not-allowed disabled:opacity-50"
             >
-              다른 심사 시작
+              다른 프로젝트 시작
             </button>
           </div>
         </div>
-        <SmartIntake projectId={projectId} initialFiles={files} onProcessed={onProjectCreated} />
+        <SmartIntake projectId={projectId} initialFiles={files} onProcessed={onProjectCreated} onStatusChange={setIntakeStatus} />
       </section>
     );
   }
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 p-6 shadow-sm dark:border-slate-800 dark:from-slate-900 dark:to-slate-950">
-      <div className="flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-600 text-white">
-          <Sparkles className="h-6 w-6" />
-        </div>
-        <div>
-          <h2 className="text-xl font-black tracking-tight text-slate-950 dark:text-white">자료 한 번에 올리고 심사 시작</h2>
-          <p className="mt-0.5 text-sm text-slate-500">
-            사업계획서·토지조서·사업수지 등 가진 자료를 종류 구분 없이 한꺼번에 올리면, AI가 문서를 자동 분류하고 새 심사를 만들어 드립니다.
-          </p>
-        </div>
+    <section className="space-y-4" aria-label="프로젝트 자료 업로드">
+      <p className="text-sm leading-6 text-re-secondary">사업계획서·토지조서·사업수지 등 보유 자료를 올려 주세요. 자료를 분류한 뒤 처리할 내용을 확인할 수 있습니다.</p>
+
+      <div>
+        <label htmlFor={nameInputId} className="block text-sm font-semibold text-re-text">프로젝트 이름 (선택)</label>
+        <input id={nameInputId} value={requestedName} onChange={(event) => setRequestedName(event.target.value)}
+          maxLength={PROJECT_NAME_MAX_LENGTH} disabled={phase === "creating" || !canWrite}
+          placeholder="비워 두면 첫 번째 파일 이름을 사용합니다"
+          className="mt-2 min-h-11 w-full rounded-re-control border border-re-border bg-re-surface px-3 text-sm text-re-text focus:outline-none focus:ring-2 focus:ring-re-action disabled:opacity-60" />
+        <p className="mt-1 text-xs text-re-secondary">생성 후에도 이름을 바꿀 수 있습니다.</p>
       </div>
 
       <div
         role="button"
         tabIndex={0}
+        aria-label="프로젝트 자료 파일 선택"
         aria-disabled={phase === "creating"}
-        onClick={() => phase !== "creating" && inputRef.current?.click()}
+        onClick={() => !creatingRef.current && inputRef.current?.click()}
         onKeyDown={(e) => {
-          if ((e.key === "Enter" || e.key === " ") && phase !== "creating") inputRef.current?.click();
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            if (!creatingRef.current) inputRef.current?.click();
+          }
         }}
         onDragOver={(e) => {
           e.preventDefault();
-          if (phase !== "creating") setDragOver(true);
+          if (!creatingRef.current) setDragOver(true);
         }}
         onDragLeave={() => setDragOver(false)}
         onDrop={(e) => {
           e.preventDefault();
           setDragOver(false);
-          if (phase !== "creating" && e.dataTransfer.files?.length) void start(Array.from(e.dataTransfer.files));
+          if (e.dataTransfer.files?.length) void start(Array.from(e.dataTransfer.files));
         }}
-        className={`mt-5 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors ${
+        className={`flex min-h-64 flex-col items-center justify-center gap-3 rounded-re-panel border-2 border-dashed px-5 py-10 text-center ${
           phase === "creating"
-            ? "cursor-wait border-indigo-300 bg-indigo-50/60 dark:border-indigo-700 dark:bg-indigo-950/20"
+            ? "cursor-wait border-re-border bg-re-subtle"
             : dragOver
-              ? "border-indigo-400 bg-indigo-50 dark:border-indigo-500 dark:bg-indigo-950/30"
-              : "border-slate-300 hover:border-indigo-300 dark:border-slate-700"
+              ? "border-re-action bg-re-subtle"
+              : "cursor-pointer border-re-border hover:bg-re-subtle"
         }`}
       >
         {phase === "creating" ? (
           <>
-            <Loader2 className="h-9 w-9 animate-spin text-indigo-600" />
-            <p className="text-sm font-bold text-slate-700 dark:text-slate-200">심사 공간을 준비하고 있어요…</p>
-            <p className="text-xs text-slate-400">생성되면 올리신 자료를 AI가 바로 분류합니다.</p>
+            <Loader2 className="h-8 w-8 animate-spin text-re-action" aria-hidden="true" />
+            <p className="text-sm font-medium text-re-text">프로젝트를 준비하고 있습니다…</p>
           </>
         ) : (
           <>
-            <UploadCloud className="h-9 w-9 text-slate-400" />
-            <p className="text-sm font-bold text-slate-700 dark:text-slate-200">파일을 끌어다 놓거나 클릭해서 선택 (여러 개 가능)</p>
-            <p className="text-xs text-slate-400">PDF · XLS/XLSX · DOCX · JSON · CSV</p>
+            <UploadCloud className="h-8 w-8 text-re-secondary" aria-hidden="true" />
+            <p className="text-sm font-medium text-re-text">파일을 끌어다 놓거나 클릭해서 선택하세요.</p>
+            <p className="text-xs text-re-secondary">PDF · XLS/XLSX · DOCX · JSON · CSV · 파일당 최대 64MB · 여러 파일 선택 가능</p>
           </>
         )}
         <input
@@ -167,7 +226,7 @@ export function DashboardIntake({ onProjectCreated }: { onProjectCreated?: () =>
         />
       </div>
 
-      {error ? <p className="mt-3 text-sm font-bold text-rose-600 dark:text-rose-300">{error}</p> : null}
+      {error ? <p className="text-sm text-re-danger" role="alert">{error}</p> : null}
     </section>
   );
 }

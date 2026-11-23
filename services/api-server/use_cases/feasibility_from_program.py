@@ -16,13 +16,32 @@ never invented. Every numeric input is arithmetic, not an LLM output.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from math import isfinite
+from typing import Annotated, Any, Dict, List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+from domains.feasibility.numeric import excel_round_int, to_decimal
+from domains.feasibility.regulatory import (
+    build_preliminary_buildable_envelope, evaluate_program_eligibility,
+    included_parcel_area, is_excluded_parcel, regulatory_parcels,
+)
+from use_cases.parcel_pnu_resolution import parcel_pnu
 
 FEASIBILITY_FROM_PROGRAM_SCHEMA = "realytics-feasibility-from-program-v1"
 
 DEFAULT_CONSTRUCTION_COST_PER_SQM = 3_000_000  # 연면적당 공사비 벤치마크(원/㎡)
 DEFAULT_RENTAL_SALE_FACTOR = 0.7  # 공공지원민간임대 매각/분양전환가 = 분양가 × factor (가정)
 _RENTAL_MARKERS = ("임대", "공공")
+
+
+class DrawingAreaSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    grossFloorAreaSqm: Annotated[float, Field(gt=0, le=1_000_000_000)]
+    archiveId: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    revision: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    location: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 def _num(value: Any) -> Optional[float]:
@@ -32,7 +51,7 @@ def _num(value: Any) -> Optional[float]:
         n = float(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return None
-    return n if n == n and n > 0 else None
+    return n if isfinite(n) and n > 0 else None
 
 
 def _parsed(parsed_facts: Optional[List[Dict[str, Any]]], canonical: str) -> Optional[float]:
@@ -73,52 +92,42 @@ def _comparable_price_per_py(project_data: Dict[str, Any], parsed_facts) -> Opti
     return _parsed(parsed_facts, "marketComparable.pricePerPy")
 
 
-def _regulation_from_parcels(project_data: Dict[str, Any]) -> tuple:
-    """Aggregate parcel VWorld landUsePlanning into a (legalFar, [용도지역]) — the
-    missing bridge from per-parcel land-use attributes to the feasibility engine.
-    Returns (None, zones) when VWorld did not provide a legal FAR (e.g. 계획관리지역
-    원형지) so the pod honestly stays blocked instead of using a fabricated FAR."""
-    ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
-    parcels = ledger.get("parcels") if isinstance(ledger, dict) else None
-    if not isinstance(parcels, list):
-        parcels = project_data.get("land_acquisition") or []
-    fars: List[float] = []
-    zones: List[str] = []
-    for parcel in parcels:
-        if not isinstance(parcel, dict):
-            continue
-        lup = parcel.get("landUsePlanning") or {}
-        if not isinstance(lup, dict):
-            continue
-        far = _num(lup.get("legalFar"))
-        if far:
-            fars.append(far)
-        for zone in lup.get("landUseZones") or []:
-            if zone and zone not in zones:
-                zones.append(str(zone))
-    # Use the max legal FAR across parcels (the governing 용도지역) when available.
-    return (max(fars) if fars else None, zones)
-
-
-def _parcel_land_cost(project_data: Dict[str, Any]) -> tuple:
-    """Sum (공시지가 × 면적) over the 토지조서 parcels. Returns (cost, priced_count, total)."""
-    ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
-    parcels = ledger.get("parcels") if isinstance(ledger, dict) else None
-    if not isinstance(parcels, list) or not parcels:
-        parcels = project_data.get("land_acquisition") or []
-    total = 0
-    priced = 0
-    cost = 0.0
-    for parcel in parcels:
-        if not isinstance(parcel, dict):
-            continue
-        total += 1
-        area = _num(parcel.get("areaSqm") or parcel.get("area_sqm"))
-        price = _num(parcel.get("officialLandPricePerSqm"))
-        if area and price:
-            cost += area * price
-            priced += 1
-    return (round(cost) if cost else None, priced, total)
+def _parcel_land_cost(project_data: Dict[str, Any], envelope: dict) -> dict:
+    rows = []
+    seen = set()
+    duplicate = False
+    for index, parcel in enumerate(regulatory_parcels(project_data), start=1):
+        pnu = parcel_pnu(parcel)
+        excluded = is_excluded_parcel(parcel)
+        area = included_parcel_area(parcel) if not excluded else None
+        price = _num(parcel.get("officialLandPricePerSqm")) if not excluded else None
+        locators = parcel.get("parcelSourceLocators") or []
+        source = next((locator for locator in locators if isinstance(locator, dict)), {})
+        row = {
+            "parcelIndex": index, "pnu": pnu or None, "excluded": excluded,
+            "ledgerAreaSqm": _num(parcel.get("areaSqm") or parcel.get("area_sqm")),
+            "includedAreaSqm": float(area) if area is not None else None,
+            "unitPriceKrw": price, "estimatedCostKrw": excel_round_int(area * to_decimal(price)) if area and price else None,
+            "sourceLocator": {key: source[key] for key in ("archiveId", "sourceDocumentId", "sheetName", "cell", "rowNumber")
+                              if isinstance(source.get(key), (str, int))},
+        }
+        if not excluded and pnu:
+            duplicate = duplicate or pnu in seen
+            seen.add(pnu)
+        rows.append(row)
+    included = [row for row in rows if not row["excluded"]]
+    amounts = [row["estimatedCostKrw"] for row in included if row["estimatedCostKrw"] is not None]
+    area_mismatch = "SITE_AREA_MISMATCH" in envelope["blockingCodes"]
+    complete = (bool(included) and all(row["pnu"] for row in included)
+                and len(amounts) == len(included) and not (duplicate or area_mismatch))
+    return {
+        "kind": "parcel_estimate", "status": "estimated" if complete else "unconfirmed",
+        "amountKrw": sum(amounts) if complete else None,
+        "includedAreaSqm": envelope["siteParcelSnapshot"]["totalIncludedAreaSqm"],
+        "parcelSetHash": envelope["siteParcelSnapshot"]["parcelSetHash"],
+        "unitPriceKrw": None,
+        "parcels": rows,
+    }
 
 
 def _product_mix(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -133,27 +142,30 @@ def build_feasibility_from_program(
     project_data: Dict[str, Any],
     parsed_facts: Optional[List[Dict[str, Any]]] = None,
     options: Optional[Dict[str, Any]] = None,
+    *,
+    drawing: dict | None = None,
 ) -> Dict[str, Any]:
     options = options or {}
     assumptions: List[str] = []
 
     land_area = _num(options.get("land_area_sqm")) or _land_area(project_data, parsed_facts)
-    gfa = _num((project_data.get("architectural_plan") or {}).get("gross_floor_area_sqm"))
-    if not gfa and land_area:  # fall back to 연면적 = 토지면적 × 용적률
-        far = _num(options.get("applied_far")) or _num((project_data.get("regulation") or {}).get("applied_far"))
-        if not far:  # wiring: pull legalFar from parcel VWorld landUsePlanning if VWorld provided it
-            far, zones = _regulation_from_parcels(project_data)
-            if far:
-                assumptions.append(f"용적률 {far:g}% = 필지 용도지역({', '.join(zones[:2])}) 법정 용적률(VWorld) 적용.")
-        if far:
-            gfa = land_area * far / 100
+    parcel_envelope = build_preliminary_buildable_envelope(project_data, declared_land_area_sqm=land_area)
+    parcel_far = (parcel_envelope or {}).get("effectiveLegalFar")
+    plan = project_data.get("architectural_plan") or {}
+    gfa = drawing["grossFloorAreaSqm"] if drawing else _num(plan.get("gross_floor_area_sqm"))
+    applied_far = _num(options.get("applied_far")) or _num((project_data.get("regulation") or {}).get("applied_far"))
+    if land_area and not applied_far and parcel_far:
+        applied_far = parcel_far
+        assumptions.append("필지별 용적률을 합산한 결과는 규모 검토 후보입니다.")
+    if parcel_envelope and parcel_envelope["blockingCodes"]:
+        assumptions.append("필지 규제 용량 산정 전 누락·충돌 자료를 확인하세요.")
     comparable = _num(options.get("sale_price_per_py")) or _comparable_price_per_py(project_data, parsed_facts)
     rental_factor = _num(options.get("rental_sale_factor")) or DEFAULT_RENTAL_SALE_FACTOR
 
     # --- Revenue from product mix ---
     product_mix = _product_mix(project_data)
     items: List[Dict[str, Any]] = []
-    total_revenue = 0.0
+    total_revenue = 0
     for pm in product_mix:
         units = _num(pm.get("units"))
         contract = _num(pm.get("contractAreaPy") or pm.get("contract_area_py"))
@@ -162,21 +174,21 @@ def build_feasibility_from_program(
         price = _num(pm.get("pricePerPy") or pm.get("price_per_py"))
         price_source = "parsed" if price else None
         if not price and comparable:
-            price = round(comparable * (rental_factor if is_rental else 1.0))
+            price = excel_round_int(to_decimal(comparable) * to_decimal(rental_factor if is_rental else 1.0))
             price_source = "rental_conversion_estimate" if is_rental else "market_comparable_estimate"
         if not (units and contract and price):
             items.append({"type": label, "units": int(units) if units else None, "status": "no_price"})
             continue
-        revenue = price * contract * units
+        revenue = excel_round_int(to_decimal(price) * to_decimal(contract) * to_decimal(units))
         total_revenue += revenue
         items.append({
             "type": label,
             "units": int(units),
             "contractAreaPy": contract,
-            "pricePerPy": round(price),
+            "pricePerPy": excel_round_int(price),
             "isRental": is_rental,
             "priceSource": price_source,
-            "revenue": round(revenue),
+            "revenue": revenue,
         })
     if comparable and any(i.get("priceSource", "").endswith("estimate") for i in items):
         assumptions.append(
@@ -186,48 +198,69 @@ def build_feasibility_from_program(
 
     # --- Costs ---
     land_cost = _num(options.get("land_cost"))
-    if not land_cost:
-        # Prefer a per-parcel 공시지가 sum (토지조서) — more accurate than aggregate.
-        parcel_cost, parcel_priced, parcel_total = _parcel_land_cost(project_data)
-        if parcel_cost:
-            land_cost = parcel_cost
-            assumptions.append(
-                f"토지비 = 토지조서 {parcel_priced}/{parcel_total}필지 공시지가×면적 합 {round(parcel_cost/1e8):,}억원(하한 추정) — "
-                "실제 매입가(수용보상가)는 공시지가보다 높음; 미평가 필지 보완 필요."
-            )
-        else:
-            land_price = _official_land_price(project_data, parsed_facts)
-            if land_price and land_area:
-                land_cost = land_price * land_area
-                assumptions.append(
-                    f"토지비 = 공시지가 {round(land_price/10000):,}만원/㎡ × {round(land_area):,}㎡ 추정 — 실제 토지 매입가 확인 필요(통상 공시지가보다 높음)."
-                )
+    land_basis = None
+    if land_cost is None and parcel_envelope:
+        land_basis = _parcel_land_cost(project_data, parcel_envelope)
+        land_cost = land_basis["amountKrw"]
+        assumptions.append("편입 대상으로 기재된 필지의 면적·공시지가를 사용한 토지비 추정입니다."
+                           if land_cost is not None else "편입 필지의 면적·공시지가·중복 여부와 대지면적 합계를 확인하세요.")
+    elif land_cost is None and land_area:
+        land_price = _official_land_price(project_data, parsed_facts)
+        if land_price:
+            land_cost = excel_round_int(to_decimal(land_price) * to_decimal(land_area))
+            land_basis = {"kind": "site_estimate", "status": "estimated", "includedAreaSqm": land_area,
+                          "unitPriceKrw": land_price, "amountKrw": land_cost, "parcelSetHash": None, "parcels": []}
+            assumptions.append("기재 대지면적과 공시지가를 곱한 토지비 추정입니다.")
     construction_cost = _num(options.get("construction_cost"))
-    ccps = _num(options.get("construction_cost_per_sqm")) or DEFAULT_CONSTRUCTION_COST_PER_SQM
-    if not construction_cost and gfa:
-        construction_cost = gfa * ccps
-        assumptions.append(f"공사비 = 연면적 {round(gfa):,}㎡ × {round(ccps/10000):,}만원/㎡ 벤치마크 — 실제 도급단가 확인 필요.")
+    construction_basis = None
+    if construction_cost is None:
+        ccps = _num(options.get("construction_cost_per_sqm")) or DEFAULT_CONSTRUCTION_COST_PER_SQM
+        construction_cost = excel_round_int(to_decimal(gfa) * to_decimal(ccps)) if gfa else None
+        construction_basis = {
+            "kind": "drawing" if drawing else "declared_area", "status": "estimated" if gfa else "unconfirmed",
+            "grossFloorAreaSqm": gfa, "unitPriceKrw": ccps, "amountKrw": construction_cost,
+            "revision": None, "sourceLocator": None,
+        }
+        if drawing:
+            construction_basis.update(revision=drawing["revision"], sourceLocator=drawing["sourceLocator"])
+        assumptions.append("시공 연면적과 ㎡당 단가를 곱한 공사비 추정입니다."
+                           if gfa else "시공 연면적 미확인으로 면적 기반 공사비를 산정하지 않았습니다.")
     finance_cost = _num(options.get("finance_cost")) or 0.0
-    cost_parts = [c for c in (land_cost, construction_cost, finance_cost) if c]
-    total_cost = sum(cost_parts) if cost_parts else None
+    total_cost = land_cost + construction_cost + finance_cost if land_cost and construction_cost else None
 
     feasibility_input: Dict[str, Any] = {}
     if total_revenue > 0:
-        feasibility_input["total_revenue"] = round(total_revenue)
+        feasibility_input["total_revenue"] = excel_round_int(total_revenue)
     if land_cost:
-        feasibility_input["land_cost"] = round(land_cost)
+        feasibility_input["land_cost"] = excel_round_int(land_cost)
     if construction_cost:
-        feasibility_input["construction_cost"] = round(construction_cost)
+        feasibility_input["construction_cost"] = excel_round_int(construction_cost)
     if finance_cost:
-        feasibility_input["finance_cost"] = round(finance_cost)
+        feasibility_input["finance_cost"] = excel_round_int(finance_cost)
     if total_cost:
-        feasibility_input["total_cost"] = round(total_cost)
+        feasibility_input["total_cost"] = excel_round_int(total_cost)
 
     profit = None
     margin = None
     if feasibility_input.get("total_revenue") and feasibility_input.get("total_cost"):
         profit = feasibility_input["total_revenue"] - feasibility_input["total_cost"]
         margin = round(profit / feasibility_input["total_revenue"], 4)
+
+    regulation = project_data.get("regulation") or {}
+    legal_far = parcel_far if parcel_envelope else _num(regulation.get("legal_far") or regulation.get("legalFar"))
+    constraint_snapshot_id = parcel_envelope.get("regulatoryConstraintSnapshotId") if parcel_envelope else None
+    scenario_eligibility = evaluate_program_eligibility(
+        applied_far=applied_far,
+        legal_far=legal_far,
+        constraint_snapshot_id=constraint_snapshot_id,
+        constraint_approved=bool(parcel_envelope and parcel_envelope.get("reportGrade")),
+    )
+    if parcel_envelope and parcel_envelope.get("blockingCodes"):
+        scenario_eligibility["eligibility"] = "not_assessable"
+        scenario_eligibility["reportGrade"] = False
+        scenario_eligibility["blockingConstraintIds"] = sorted(set(
+            scenario_eligibility.get("blockingConstraintIds", []) + parcel_envelope["blockingCodes"]
+        ))
 
     return {
         "schemaVersion": FEASIBILITY_FROM_PROGRAM_SCHEMA,
@@ -236,10 +269,14 @@ def build_feasibility_from_program(
         "assumptions": assumptions,
         "landAreaSqm": land_area,
         "grossFloorAreaSqm": gfa,
+        "programAreaBasis": {key: basis for key, basis in (("land", land_basis), ("construction", construction_basis))
+                             if basis is not None},
+        "buildableEnvelope": parcel_envelope,
+        "scenarioEligibility": scenario_eligibility,
         "comparablePricePerPy": comparable,
         "developmentProfit": profit,
         "profitMargin": margin,
-        "needsReview": bool(assumptions),
+        "needsReview": bool(assumptions) or not scenario_eligibility.get("reportGrade"),
         "hasRevenueAndCost": bool(feasibility_input.get("total_revenue") and feasibility_input.get("total_cost")),
         "note": (
             "파싱된 상품구성·연면적·공시지가·시장 비교가에서 결정론적으로 구성한 사업수지 초안입니다. "

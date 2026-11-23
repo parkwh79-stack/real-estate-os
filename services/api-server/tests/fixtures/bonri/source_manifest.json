@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "realytics-bonri-source-manifest-v1",
+  "sourceFileName": "19.12.11 본리동 주상복합 사업수지 (PF검토용).xlsx",
+  "sha256": "9214afc891530bb369049f9497888d16c4dbeecae69ec1b4c54637d3a61df92f",
+  "workbookInventory": {
+    "sheetCount": 12,
+    "formulaCount": 12050,
+    "arrayFormulaCount": 68,
+    "formulaRefCount": 13,
+    "cachedErrorCounts": {
+      "#REF!": 25,
+      "#DIV/0!": 12
+    },
+    "volatileFormulaCounts": {
+      "OFFSET": 68
+    },
+    "externalWorkbookReferenceCount": 0,
+    "canonicalApprovalStatus": "failed"
+  },
+  "cashFlowContract": {
+    "sheetName": "2.현금흐름",
+    "firstPeriodColumn": "F",
+    "lastPeriodColumn": "BQ",
+    "periodCount": 64,
+    "transactionRange": "F35:BQ119",
+    "currentCashRow": 122,
+    "carryRow": 123,
+    "financingAdjustmentRow": 129,
+    "cumulativeCashRow": 130,
+    "currentCashToleranceKrw": 1,
+    "cumulativeCashToleranceKrw": 1,
+    "terminalCarryReset": {
+      "monthIndex": 50,
+      "period": "47"
+    }
+  },
+  "goldenImport": {
+    "periodCount": 64,
+    "firstPeriod": "토지계약",
+    "lastPeriod": "60",
+    "operatingCashInKrw": 165596965014,
+    "projectCashOutKrw": 151841565315,
+    "pfDrawKrw": 50000000000,
+    "loanRepaymentKrw": 50000000000,
+    "equityContributionKrw": 5000000000,
+    "equityRecoveryKrw": 5000000000,
+    "sourceNetCashFlowKrw": 13755399699,
+    "maxMinusKrw": -7524006548.1015835
+  },
+  "goldenCostMapping": {
+    "staticCostUsesKrw": {
+      "landCost": 46032000000,
+      "directConstructionCost": 72036344512,
+      "financialCost": 16298073468,
+      "otherCost": 17475147334,
+      "totalProjectCost": 151841565314
+    },
+    "monthlyCostScheduleKrw": {
+      "landCost": 46032000000,
+      "constructionCost": 72036344512,
+      "financialCost": 16298073468,
+      "otherCost": 17475147335
+    },
+    "categoryToleranceKrw": 1
+  }
+}

@@ -64,6 +64,8 @@ SCHEMA_CONTRACTS: tuple[SchemaContract, ...] = (
         + (
             CanonicalField("parcels[].rawLotNumber", "Raw lot number", "string", ("land",), ("land_review",), ("지번",)),
             CanonicalField("parcels[].normalizedLotNumber", "Normalized lot number", "string", ("land",), ("land_review",), ("정규화지번",)),
+            CanonicalField("parcels[].pnu", "Parcel Numbering Unit", "string", ("land", "legal", "evidence"), ("land_review", "legal_review"), ("PNU", "필지고유번호")),
+            CanonicalField("parcels[].registeredAreaSqm", "Registered parcel area", "number", ("land", "legal"), ("land_review", "feasibility"), ("공부상면적", "대장면적")),
             CanonicalField("parcels[].officialLandPrice.pricePerSqm", "Official land price per sqm", "number", ("land", "evidence"), ("legal_review", "pf_review"), ("공시지가",)),
             CanonicalField("parcels[].registryEvidence.evidenceId", "Registry evidence ID", "string", ("land", "legal", "evidence"), ("legal_review",), ("등기부", "제한물권증빙")),
         ),

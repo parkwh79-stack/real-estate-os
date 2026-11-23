@@ -9,7 +9,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from docx import Document
 from openpyxl import load_workbook
 
 
@@ -269,10 +268,9 @@ def _extract_land_ledger(path: Path) -> Dict[str, Any]:
 
     land_acquisition = []
     for parcel in analysis.get("parcels", []):
-        paid = sum(_float(owner.get("paidAmount")) or 0 for owner in parcel.get("owners", []))
-        interim = sum(_float(owner.get("interimPayment")) or 0 for owner in parcel.get("owners", []))
-        deposit = sum(_float(owner.get("depositPaid")) or 0 for owner in parcel.get("owners", []))
-        balance = sum(_float(owner.get("balanceDue")) or 0 for owner in parcel.get("owners", []))
+        payments = parcel["paymentSummary"]
+        balances = [owner.get("balancePayment") for owner in parcel.get("owners", [])]
+        balance = sum(balances) if balances and all(value is not None for value in balances) else None
         land_acquisition.append(
             {
                 "parcelId": f"P-{int(parcel.get('sequence') or 0):03d}",
@@ -281,9 +279,11 @@ def _extract_land_ledger(path: Path) -> Dict[str, Any]:
                 "share": 1.0,
                 "area_sqm": parcel.get("areaSqm"),
                 "contractAmount": parcel.get("totalContractAmount"),
-                "depositPaid": deposit + paid + interim,
+                "depositPaid": payments["knownRecordedPaidAmount"] if not payments["recordedPaidMissingCount"] else None,
                 "balanceDue": balance,
-                "paymentStatus": "balance_due" if balance else "fully_paid",
+                "paymentStatus": parcel["paymentStatus"],
+                "paymentSummary": payments,
+                "paymentReviewVersion": parcel["paymentReviewVersion"],
                 "sourceLocators": [
                     _excel_locator(path.name, analysis.get("sheetName") or "190927토지조서(원본)", f"E{parcel.get('source', {}).get('row')}", "land.areaSqm"),
                     _excel_locator(path.name, analysis.get("sheetName") or "190927토지조서(원본)", f"I{parcel.get('source', {}).get('row')}", "land.contractAmount"),
@@ -300,6 +300,8 @@ def _extract_land_ledger(path: Path) -> Dict[str, Any]:
 
 
 def _extract_pf_terms(path: Path) -> Dict[str, Any]:
+    from docx import Document
+
     doc = Document(path)
     table = doc.tables[2]
     row_text_by_label: Dict[str, str] = {}

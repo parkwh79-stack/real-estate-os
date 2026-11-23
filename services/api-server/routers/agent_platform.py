@@ -187,7 +187,7 @@ def execute_tool(tool_request: ToolRequest, request: Request):
     role = str(identity.get("role") or "")
     controlled = tool_request.model_copy(update={
         "user_id": user_id,
-        "actor_roles": sorted(set([*tool_request.actor_roles, role]) - {""}),
+        "actor_roles": [role] if role else [],
     })
     try:
         return tool_executor.execute(controlled).model_dump(by_alias=True, mode="json")
@@ -195,6 +195,13 @@ def execute_tool(tool_request: ToolRequest, request: Request):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        if getattr(exc, "sqlstate", None) != "42501":
+            raise
+        raise HTTPException(status_code=503, detail={
+            "error": "tool_authority_unavailable",
+            "message": "서버의 도구 실행·감사 저장소를 사용할 수 없습니다.",
+        }) from exc
 
 
 @router.get("/learning/candidates")

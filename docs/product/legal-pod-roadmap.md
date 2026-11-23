@@ -8,13 +8,13 @@ The Legal Pod is the legal and permit review capability of the Land-Legal Pod. I
 
 ## Execution
 
-`POST /projects/{project_id}/legal-pod/run` is the independent execution endpoint. It reads the project Shared Deal State, persisted land evidence, parser results, and optional Korean Law MCP `lawContext`.
+`POST /projects/{project_id}/legal-pod/run` is the independent execution endpoint. It reads the project Shared Deal State, persisted land evidence, parser results, and Legal Intelligence results. A supplied `lawContext` is accepted only as an untrusted discovery candidate.
 
 The existing `POST /projects/{project_id}/legal/review` remains a backwards-compatible precheck endpoint. Chief Deal Orchestrator uses the Legal Pod use case when executing `land_legal`.
 
 ## Persisted ledgers
 
-- `legal_reviews`: review status, check results, MCP connection state, parcel review rows, evidence locators, risk issues, and PF handoff.
+- `legal_reviews`: preliminary review status, Legal Intelligence evidence state, compatibility transport state, parcel review rows, evidence locators, risk issues, human review history, and PF handoff.
 - `permit_reviews`: permit check, parser availability, source locators, and missing-document reason.
 - `deal_state_records`: legal risk issues, evidence-backed handoff, and future first-class legal metrics.
 
@@ -36,21 +36,20 @@ The Legal Pod consumes the land ledger and persisted land evidence by PNU. Each 
 
 The output contains `LegalReadinessPatchV1` from `LegalReviewAgent` / `land_legal` to `PF-Credit Pod`. It includes blocking codes, evidence IDs, locators, and whether human review is required. The handoff is also persisted as a `deal_state_records` row.
 
-## Korean Law MCP
+## Legal Intelligence and optional MCP
 
-The review exposes `mcp.status`, `connected`, `citationVerification`, `transport`, per-query diagnostics, and `failureReason`. When no `lawContext` is supplied, the orchestrator attempts the configured Korean Law MCP HTTP bridge and then the official Law.go.kr API fallback. `not_connected` means neither transport returned usable references; it is not evidence that a legal issue does not exist. The recommended query plan remains available for the connector layer.
+The review exposes `legalIntelligence.evidenceStatus`, verified/candidate reference counts, freshness, conflicts, exact locators, hashes, provider trace, and human-review status. The local verified corpus is searched first, the official Law.go.kr API is the authoritative gap-fill path, and MCP is optional. Legacy `mcp` fields remain a non-authoritative compatibility projection. `not_connected` is never evidence that a legal issue does not exist.
 
 ## Approval Readiness
 
-Gate v2 now checks that a Legal Pod review exists, unresolved blocking legal risks are absent, and a permit review is available. A preliminary review may support a conditional decision only after its blocking risks and required evidence are reviewed or explicitly waived with audit history.
+Gate v2 now checks that a Legal Pod review exists, unresolved blocking legal risks are absent, a permit review is available, legal evidence is verified/non-stale/conflict-free, and an authorized human review is complete. A transport connection flag cannot clear any gate.
 
 ## Remaining production work
 
-- Add a production MCP bridge with authenticated tool calls and persist tool request/response locators.
 - Add document, contract, permit, and statute parsers with page/cell-level provenance.
-- Add a dedicated Legal Pod review page with approve/waive/needs-revision workflow.
-- Replace permissive pilot authorization with tenant-aware production RBAC.
-- Add PostgreSQL repository queries after the current compatibility document store is retired.
+- Exercise the normalized corpus/overlay migration, least-privilege role, backup/restore, and RLS checks in a live PostgreSQL environment.
+- Connect the approved object store and scheduled official-source sync worker.
+- Build and approve the retrieval golden corpus and counsel-reviewed thresholds.
 # Legal Pod lifecycle and law-change policy
 
 Legal Pod is a participant in the development lifecycle, not a one-time
@@ -59,7 +58,7 @@ stage and hands blocking conditions to the next Pod.
 
 ## Asset-aware law coverage
 
-The Korean Law transport selects additional search questions from the asset
+The Legal Intelligence query planner selects additional search questions from the asset
 type. Residential and mixed-use projects include the Housing Act, Housing
 Supply rules, Building Act, and sale-advertising rules. Officetel and
 commercial projects include the Building Act and building-sale law. Logistics

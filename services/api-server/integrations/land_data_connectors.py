@@ -6,6 +6,8 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from time import monotonic
+from collections.abc import Callable
 from typing import Any, Dict, List, Optional
 
 from integrations.vworld import fetch_parcel_by_pnu
@@ -38,8 +40,30 @@ class LandDataConnectorRouter:
         base_year: int | str | None = None,
         trend_month: int | str | None = None,
         trend_scope: str | None = None,
+        include_region_trends: bool = True,
         timeout_seconds: float = 8.0,
+        evidence_types: set[str] | None = None,
+        deadline: float | None = None,
     ) -> Dict[str, Any]:
+        supported = {"cadastral", "land_use_planning", "building_use", "land_characteristics",
+                     "official_land_price", "region_land_price_trend"}
+        if evidence_types is not None and not evidence_types <= supported:
+            raise ValueError("Unsupported land evidence type")
+
+        def fetch(kind: str, execute: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+            empty: Dict[str, Any] = {"record": None, "records": [], "diagnostics": []}
+            if evidence_types is not None and kind not in evidence_types:
+                return empty
+            if deadline is not None and monotonic() >= deadline:
+                empty["diagnostics"] = [_diagnostic(
+                    connector=kind, status="deferred", message="Public lookup time budget exhausted.", parcel={},
+                )]
+                return empty
+            return execute()
+
+        def timeout() -> float:
+            return timeout_seconds if deadline is None else max(0.01, min(timeout_seconds, deadline - monotonic()))
+
         diagnostics: List[Dict[str, Any]] = []
         pnu_resolutions: List[Dict[str, Any]] = []
         cadastral_records: List[Dict[str, Any]] = []
@@ -54,14 +78,14 @@ class LandDataConnectorRouter:
              for parcel in parcels if str(parcel.get("pnu") or parcel.get("resolvedPnu") or "").isdigit()),
             None,
         )
-        if region_code:
-            trend = self._fetch_region_land_price_change(
+        if region_code and include_region_trends:
+            trend = fetch("region_land_price_trend", lambda: self._fetch_region_land_price_change(
                 region_code,
                 standard_year=base_year,
                 standard_month=trend_month,
                 scope_div=trend_scope,
-                timeout_seconds=timeout_seconds,
-            )
+                timeout_seconds=timeout(),
+            ))
             region_land_price_trends.extend(trend.get("records", []))
             diagnostics.extend(trend.get("diagnostics", []))
 
@@ -90,49 +114,49 @@ class LandDataConnectorRouter:
                 ))
                 continue
 
-            land_characteristics = self._fetch_land_characteristics_record(
+            land_characteristics = fetch("land_characteristics", lambda: self._fetch_land_characteristics_record(
                 pnu,
                 standard_year=base_year,
                 parcel=parcel,
-                timeout_seconds=timeout_seconds,
-            )
+                timeout_seconds=timeout(),
+            ))
             if land_characteristics.get("record"):
                 land_characteristics_records.append(land_characteristics["record"])
             diagnostics.extend(land_characteristics["diagnostics"])
 
-            cadastral_record = self._fetch_cadastral_record(
+            cadastral_record = fetch("cadastral", lambda: self._fetch_cadastral_record(
                 pnu,
                 parcel=parcel,
-                timeout_seconds=timeout_seconds,
-            )
+                timeout_seconds=timeout(),
+            ))
             if cadastral_record.get("record"):
                 cadastral_records.append(cadastral_record["record"])
             diagnostics.extend(cadastral_record["diagnostics"])
 
-            land_use_record = self._fetch_land_use_planning_record(
+            land_use_record = fetch("land_use_planning", lambda: self._fetch_land_use_planning_record(
                 pnu,
                 parcel=parcel,
                 cadastral_record=cadastral_record.get("record"),
-                timeout_seconds=timeout_seconds,
-            )
+                timeout_seconds=timeout(),
+            ))
             if land_use_record.get("record"):
                 land_use_planning_records.append(land_use_record["record"])
             diagnostics.extend(land_use_record["diagnostics"])
 
-            building_use = self._fetch_building_use_records(
+            building_use = fetch("building_use", lambda: self._fetch_building_use_records(
                 pnu,
                 parcel=parcel,
-                timeout_seconds=timeout_seconds,
-            )
+                timeout_seconds=timeout(),
+            ))
             building_use_records.extend(building_use.get("records", []))
             diagnostics.extend(building_use["diagnostics"])
 
-            official_price_record = self._fetch_official_land_price(
+            official_price_record = fetch("official_land_price", lambda: self._fetch_official_land_price(
                 pnu,
                 base_year=base_year,
                 parcel=parcel,
-                timeout_seconds=timeout_seconds,
-            )
+                timeout_seconds=timeout(),
+            ))
             if official_price_record.get("record"):
                 official_price_records.append(official_price_record["record"])
             diagnostics.extend(official_price_record["diagnostics"])
@@ -179,11 +203,13 @@ class LandDataConnectorRouter:
                     environ=self.environ,
                     timeout=timeout_seconds,
                 )
-                if properties:
+                if properties and _response_matches_pnu(properties, pnu):
                     source_id = f"vworld:{pnu}:LP_PA_CBND_BUBUN"
                     return {
                         "record": {
                             "pnu": pnu,
+                            "sourcePnuVerified": True,
+                            "cadastralAddress": _pick(properties, ["addr", "cadastralAddress"]),
                             "landCategory": _pick(properties, ["landCategory", "lndcgrCodeNm", "landCategoryName"]),
                             "standardLandCategoryCode": _pick(properties, ["standardLandCategoryCode", "lndcgrCode"]),
                             "areaSqm": _to_float(_pick(properties, ["areaSqm", "lndpclAr", "area"])),
@@ -233,12 +259,13 @@ class LandDataConnectorRouter:
             )]}
 
         data = _parse_payload(response.get("body", ""))
-        item = _first_payload_item(data)
+        items = _payload_items(data)
+        item = next((row for row in items if _response_matches_pnu(row, pnu)), None)
         if not item:
             return {"record": None, "diagnostics": [_diagnostic(
                 connector="cadastral",
-                status="no_record",
-                message="Cadastral connector returned no usable record.",
+                status="pnu_unverified" if items else "no_record",
+                message="Cadastral connector returned no row with the requested PNU.",
                 parcel=parcel,
                 url=response.get("url"),
             )]}
@@ -246,6 +273,8 @@ class LandDataConnectorRouter:
         return {
             "record": {
                 "pnu": pnu,
+                "sourcePnuVerified": True,
+                "cadastralAddress": _pick(item, ["addr", "cadastralAddress", "address"]),
                 "landCategory": _pick(item, ["landCategory", "lndcgrCodeNm", "지목", "lndcgrCode"]),
                 "standardLandCategoryCode": _pick(item, ["standardLandCategoryCode", "lndcgrCode", "지목코드"]),
                 "areaSqm": _to_float(_pick(item, ["areaSqm", "lndpclAr", "pblntfPclnd", "면적"])),
@@ -294,12 +323,14 @@ class LandDataConnectorRouter:
 
         if not template:
             vworld_key = _first_env(self.environ, ["REALYTICS_VWORLD_API_KEY", "VWORLD_API_KEY"])
+            lookup_failed = False
             if vworld_key:
                 response = self._fetch_vworld_land_use_attr(
                     pnu,
                     service_key=vworld_key,
                     timeout_seconds=timeout_seconds,
                 )
+                lookup_failed = bool(response.get("error"))
                 if not response.get("error"):
                     items = _payload_items(_parse_payload(response.get("body", "")))
                     record = self._normalize_land_use_record(
@@ -331,6 +362,7 @@ class LandDataConnectorRouter:
                         "legalBcr": None,
                         "districtUnitPlan": None,
                         "coverage": "zoning_only",
+                        "sourcePnuVerified": True,
                         "missingFields": ["legalFar", "legalBcr", "districtUnitPlan"],
                         "sourceName": (cadastral_record or {}).get("sourceName") or "VWorld cadastral properties",
                         "sourceType": "public_api",
@@ -347,7 +379,7 @@ class LandDataConnectorRouter:
                 }
             return {"record": None, "diagnostics": [_diagnostic(
                 connector="land_use_planning",
-                status="no_record" if vworld_key else "skipped_missing_config",
+                status="fetch_failed" if lookup_failed else "no_record" if vworld_key else "skipped_missing_config",
                 message=(
                     "VWorld land-use planning attributes returned no usable designation; "
                     "statutory FAR/BCR were not inferred."
@@ -391,8 +423,8 @@ class LandDataConnectorRouter:
         if not record:
             return {"record": None, "diagnostics": [_diagnostic(
                 connector="land_use_planning",
-                status="no_record",
-                message="Land-use planning connector returned no usable record.",
+                status="pnu_unverified" if items and not any(_response_matches_pnu(row, pnu) for row in items) else "no_record",
+                message="Land-use planning connector returned no usable row with the requested PNU.",
                 parcel=parcel,
                 url=response.get("url"),
             )]}
@@ -442,7 +474,7 @@ class LandDataConnectorRouter:
         source_name: str,
         source_url: str | None,
     ) -> Dict[str, Any] | None:
-        normalized_items = [item for item in items if isinstance(item, dict)]
+        normalized_items = [item for item in items if _response_matches_pnu(item, pnu)]
         if not normalized_items:
             return None
 
@@ -457,9 +489,21 @@ class LandDataConnectorRouter:
             ])
             for item in normalized_items
         )
-        legal_far = next((_to_float(_pick(item, ["legalFar", "legal_far", "statutoryFar", "floorAreaRatio", "far", "용적률"])) for item in normalized_items if _to_float(_pick(item, ["legalFar", "legal_far", "statutoryFar", "floorAreaRatio", "far", "용적률"])) is not None), None)
-        legal_bcr = next((_to_float(_pick(item, ["legalBcr", "legal_bcr", "statutoryBcr", "buildingCoverageRatio", "bcr", "건폐율"])) for item in normalized_items if _to_float(_pick(item, ["legalBcr", "legal_bcr", "statutoryBcr", "buildingCoverageRatio", "bcr", "건폐율"])) is not None), None)
-        district_unit_plan = next((_pick(item, ["districtUnitPlan", "districtUnitPlanName", "districtUnit", "지구단위계획"]) for item in normalized_items if _pick(item, ["districtUnitPlan", "districtUnitPlanName", "districtUnit", "지구단위계획"]) is not None), None)
+        far_values = {
+            number for item in normalized_items
+            if (number := _to_float(_pick(item, ["legalFar", "legal_far", "statutoryFar"]))) is not None
+        }
+        bcr_values = {
+            number for item in normalized_items
+            if (number := _to_float(_pick(item, ["legalBcr", "legal_bcr", "statutoryBcr"]))) is not None
+        }
+        district_plans = _unique_strings(
+            _pick(item, ["districtUnitPlan", "districtUnitPlanName", "districtUnit", "지구단위계획"])
+            for item in normalized_items
+        )
+        legal_far = next(iter(far_values)) if len(far_values) == 1 else None
+        legal_bcr = next(iter(bcr_values)) if len(bcr_values) == 1 else None
+        district_unit_plan = district_plans[0] if len(district_plans) == 1 else None
         if not designations and legal_far is None and legal_bcr is None and district_unit_plan is None:
             return None
 
@@ -475,12 +519,13 @@ class LandDataConnectorRouter:
             "pnu": pnu,
             # A VWorld planning designation can be a restriction such as a
             # river zone, not the statutory use district. Keep it separately.
-            "zoning": explicit_zoning[0] if explicit_zoning else None,
+            "zoning": explicit_zoning[0] if len(explicit_zoning) == 1 else None,
             "landUseZones": designations,
             "legalFar": legal_far,
             "legalBcr": legal_bcr,
             "districtUnitPlan": district_unit_plan,
             "coverage": "complete" if not missing_fields else "partial",
+            "sourcePnuVerified": True,
             "missingFields": missing_fields,
             "landUsePlanItems": [
                 {
@@ -501,6 +546,13 @@ class LandDataConnectorRouter:
             "fetchedAt": _now(),
             "confidence": 0.95,
         }
+
+    def lookup_parcel_address(self, pnu: str, *, timeout_seconds: float) -> Dict[str, Any] | None:
+        """Read address fields from a land-characteristics response with an exact PNU."""
+        result = self._fetch_land_characteristics_record(
+            pnu, standard_year=None, parcel={"pnu": pnu}, timeout_seconds=timeout_seconds,
+        )
+        return result.get("record")
 
     def _fetch_land_characteristics_record(
         self,
@@ -545,13 +597,13 @@ class LandDataConnectorRouter:
             )]}
 
         items = _payload_items(_parse_payload(body))
-        item = items[0] if items else None
+        item = next((row for row in items if _response_matches_pnu(row, pnu)), None)
         record = _normalize_land_characteristics_record(item, pnu, _redact_service_key(url)) if item else None
         return {
             "record": record,
             "diagnostics": [_diagnostic(
                 connector="land_characteristics",
-                status="fetched" if record else "no_record",
+                status="fetched" if record else "pnu_unverified" if items else "no_record",
                 message=(
                     "VWorld land-characteristics attributes returned source-backed parcel characteristics."
                     if record else "VWorld land-characteristics attributes returned no usable record for the PNU."
@@ -677,6 +729,8 @@ class LandDataConnectorRouter:
         items = _payload_items(_parse_payload(body))
         records: List[Dict[str, Any]] = []
         for item in items:
+            if not _response_matches_pnu(item, pnu):
+                continue
             record = _normalize_building_use_record(item, pnu, _redact_service_key(url))
             if record:
                 records.append(record)
@@ -715,12 +769,13 @@ class LandDataConnectorRouter:
                     timeout=timeout_seconds,
                 )
                 price = _to_float(_pick(properties or {}, ["jiga", "pricePerSqm", "officialLandPricePerSqm", "pblntfPclnd"]))
-                if price is not None:
+                if price is not None and _response_matches_pnu(properties or {}, pnu):
                     source_id = f"vworld:{pnu}:LP_PA_CBND_BUBUN:jiga"
                     return {
                         "record": {
                             "pnu": pnu,
                             "pricePerSqm": price,
+                            "sourcePnuVerified": True,
                             "baseYear": _pick(properties or {}, ["baseYear", "stdrYear"]) or base_year,
                             "baseDate": _pick(properties or {}, ["baseDate", "stdrDe", "pblntfDe"]),
                             "sourceName": "VWorld cadastral jiga",
@@ -738,8 +793,10 @@ class LandDataConnectorRouter:
                     }
             return {"record": None, "diagnostics": [_diagnostic(
                 connector="official_land_price",
-                status="skipped_missing_config",
-                message="REALYTICS_OFFICIAL_LAND_PRICE_URL_TEMPLATE is not configured.",
+                status=("fetch_failed" if _diagnostic_result.get("status") == "error"
+                        else "pnu_unverified" if properties and not _response_matches_pnu(properties, pnu)
+                        else "no_record") if api_key else "skipped_missing_config",
+                message="Official land price lookup returned no usable PNU-matched price or has no configured connector.",
                 parcel=parcel,
             )]}
         if "{service_key}" in template and not api_key:
@@ -767,12 +824,13 @@ class LandDataConnectorRouter:
             )]}
 
         data = _parse_payload(response.get("body", ""))
-        item = _first_payload_item(data)
+        items = _payload_items(data)
+        item = next((row for row in items if _response_matches_pnu(row, pnu)), None)
         if not item:
             return {"record": None, "diagnostics": [_diagnostic(
                 connector="official_land_price",
-                status="no_record",
-                message="Official land price connector returned no usable record.",
+                status="pnu_unverified" if items else "no_record",
+                message="Official land price connector returned no row with the requested PNU.",
                 parcel=parcel,
                 url=response.get("url"),
             )]}
@@ -797,6 +855,7 @@ class LandDataConnectorRouter:
             "record": {
                 "pnu": pnu,
                 "pricePerSqm": price,
+                "sourcePnuVerified": True,
                 "baseYear": _pick(item, ["baseYear", "stdrYear", "기준년도"]) or base_year,
                 "baseDate": _pick(item, ["baseDate", "stdrDe", "pblntfDe", "기준일"]),
                 "sourceName": self.environ.get("REALYTICS_OFFICIAL_LAND_PRICE_SOURCE_NAME", "configured_official_land_price_connector"),
@@ -921,30 +980,14 @@ def _xml_to_dict(element: ET.Element) -> Any:
     return grouped
 
 
-def _first_payload_item(data: Any) -> Dict[str, Any] | None:
-    if isinstance(data, list):
-        return next((item for item in data if isinstance(item, dict)), None)
-    if not isinstance(data, dict):
-        return None
-    if isinstance(data.get("properties"), dict):
-        return data["properties"]
-    for key in ["item", "items", "field", "fields", "row", "rows", "data", "result", "response"]:
-        value = data.get(key)
-        if isinstance(value, dict):
-            nested = _first_payload_item(value)
-            if nested:
-                return nested
-        if isinstance(value, list):
-            nested = _first_payload_item(value)
-            if nested:
-                return nested
-    if any(not isinstance(value, (dict, list)) for value in data.values()):
-        return data
-    for value in data.values():
-        nested = _first_payload_item(value)
-        if nested:
-            return nested
-    return None
+def _response_matches_pnu(item: Dict[str, Any], requested_pnu: str) -> bool:
+    """Accept cadastral facts only when the source row identifies the same parcel."""
+    returned_pnus = {
+        str(item[key]).strip()
+        for key in ("pnu", "PNU")
+        if item.get(key) not in (None, "")
+    }
+    return returned_pnus == {str(requested_pnu).strip()}
 
 
 def _payload_items(data: Any) -> List[Dict[str, Any]]:
@@ -988,6 +1031,7 @@ def _normalize_land_characteristics_record(item: Dict[str, Any] | None, pnu: str
         return None
     return {
         "pnu": _pick(item, ["pnu"]) or pnu,
+        "sourcePnuVerified": True,
         "legalDongCode": _pick(item, ["ldCode"]),
         "legalDongName": _pick(item, ["ldCodeNm"]),
         "ledgerTypeCode": _pick(item, ["regstrSeCode"]),

@@ -14,7 +14,7 @@ from scripts.apply_pilot_data_quality_override import (
     _find_source_value,
     _upsert_override,
 )
-from scripts.apply_pilot_financial_cure import _apply_cure
+from scripts.apply_pilot_financial_cure import _apply_cure, _reduce_pf_structure
 from scripts.apply_pilot_review_actions import apply_review_actions, build_review_action_template
 from scripts.build_pilot_legal_evidence_package import (
     EVIDENCE_REQUIREMENTS,
@@ -51,6 +51,21 @@ def test_prepare_pilot_workspace_creates_payload_and_manifest(tmp_path):
     assert manifest["documents"][0]["sha256"]
 
 
+def test_pf_reduction_cure_reduces_junior_before_senior_with_label_priorities():
+    payload = {
+        "pf_structure": [
+            {"name": "Tr.A", "amount": 100, "priority": "senior"},
+            {"name": "Tr.C", "amount": 40, "priority": "junior"},
+            {"name": "Tr.B", "amount": 60, "priority": "mezzanine"},
+        ]
+    }
+
+    _reduce_pf_structure(payload, 70)
+
+    amounts = {item["name"]: item["amount"] for item in payload["pf_structure"]}
+    assert amounts == {"Tr.A": 100, "Tr.B": 30, "Tr.C": 0}
+
+
 def test_pilot_run_summary_contains_key_review_sections():
     fixture_path = Path(__file__).resolve().parents[1] / "data" / "fixtures" / "pilot_project_input_package_template.json"
     payload = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -58,9 +73,10 @@ def test_pilot_run_summary_contains_key_review_sections():
 
     summary = summarize_run(run)
 
-    assert summary["status"] == "completed"
+    assert summary["status"] == "completed_with_warnings"
     assert summary["stepCount"] == 27
-    assert summary["qualityCheck"]["pass"] is True
+    assert summary["qualityCheck"]["pass"] is False
+    assert run["artifacts"]["qualityCheck"]["pdfVisualQA"]["status"] == "baseline_created"
     assert "approvalReadinessGate" in summary
     assert "creditReview" in summary
     assert "riskRegister" in summary
@@ -341,6 +357,19 @@ def test_land_evidence_template_and_attachment_workflow():
     ]
     analysis = LandLedgerAgent().analyze_rows(rows, sheet_name="ledger", source_file="ledger.xls")
     analysis = LandLedgerAgent().enrich_analysis(analysis, {"legalDongCode": "2729011700"})
+    parcel = analysis["parcels"][0]
+    assert not parcel.get("pnu")
+    assert parcel.get("pnuCandidate") == "2729011700100010004"
+    # A generated identifier must be confirmed against a source before the
+    # attachment workflow can associate public-price and registry evidence.
+    analysis = LandLedgerAgent().enrich_analysis(analysis, {"pnuResolutions": [{
+        "pnu": "2729011700100010004",
+        "addressFragment": parcel["addressFragment"],
+        "matchMethod": "pnu_construction",
+        "sourceName": "synthetic cadastral fixture",
+        "sourceUrlOrEvidenceId": "cadastral-fixture:2729011700100010004",
+        "matchConfidence": 1.0,
+    }]})
     payload = {
         "project": {"name": "Evidence workflow test"},
         "landLedger": analysis,

@@ -121,7 +121,7 @@ def build_kakao_authorize_url(
         "client_id": rest_api_key,
         "redirect_uri": resolved_redirect_uri,
         "response_type": "code",
-        "scope": os.environ.get("KAKAO_LOGIN_SCOPE") or "openid profile_nickname account_email",
+        "scope": os.environ.get("KAKAO_LOGIN_SCOPE") or "openid profile_nickname",
         "state": resolved_state,
         "nonce": nonce,
     }

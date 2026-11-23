@@ -83,5 +83,5 @@ Whenever implementation progresses, update at least one of:
 
 - `docs/backlog.md`
 - `docs/product/current-implementation-status.md`
-- `docs/product/service-development-roadmap.md`
+- Current successor: `docs/product/realytics-os-next-work-roadmap.md` (the original service-development roadmap is retained in the documentation archive).
 - this dated audit file or a newer dated audit file

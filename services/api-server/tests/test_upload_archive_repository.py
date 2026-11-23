@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
+from db.repositories.source_document_repository import SourceDocumentRepository
 from db.repositories.upload_archive_repository import UploadArchiveRepository
+from db.malware_scanner import MalwareScanResult
+from db.repositories.upload_archive_repository import UploadRejectedError
 from routers.project_source_documents import build_project_source_documents_router
 from use_cases.source_documents import (
     archive_source_document_use_case,
@@ -27,17 +31,30 @@ class InMemoryObjectStorage:
 
     def __init__(self):
         self.objects = {}
+        self.puts = []
 
-    def put(self, key, content, *, content_type=None):
+    def put(
+        self,
+        key,
+        content,
+        *,
+        content_type=None,
+        metadata=None,
+        retention_until=None,
+        retention_mode=None,
+    ):
         from db.object_storage import sha256_bytes
 
         self.objects[key] = bytes(content)
+        self.puts.append((key, dict(metadata or {})))
         return {
             "backend": self.backend,
             "key": key,
             "size": len(content),
             "sha256": sha256_bytes(content),
             "contentType": content_type,
+            "retentionUntil": retention_until.isoformat() if retention_until else None,
+            "retentionMode": retention_mode,
         }
 
     def get(self, key):
@@ -52,8 +69,27 @@ class InMemoryObjectStorage:
             del self.objects[key]
         return bool(keys)
 
+    def delete(self, key):
+        return self.objects.pop(key, None) is not None
+
     def local_path(self, key):
         return None
+
+
+class _Scanner:
+    def __init__(self, status="clean"):
+        self.status = status
+
+    def scan(self, content, *, filename=None, content_type=None):
+        from datetime import datetime, timezone
+
+        del content, filename, content_type
+        return MalwareScanResult(
+            status=self.status,
+            engine="test-scanner",
+            scanned_at=datetime.now(timezone.utc),
+            signature="EICAR-Test" if self.status == "infected" else None,
+        )
 
 
 def test_upload_archive_repository_archives_and_resolves_download(tmp_path):
@@ -77,6 +113,7 @@ def test_upload_archive_repository_archives_and_resolves_download(tmp_path):
     assert archive_meta["downloadUrl"] == f"/projects/p1/source-documents/{archive_meta['archiveId']}/download"
 
     document = {
+        **archive_meta,
         "archiveId": archive_meta["archiveId"],
         "originalFileName": "business-plan.pdf",
         "contentType": "application/pdf",
@@ -102,6 +139,7 @@ def test_upload_archive_repository_blocks_hash_mismatch(tmp_path):
     )
     archive_meta = repository.archive_upload("p1", b"original", "source.xlsx", "application/vnd.ms-excel")
     document = {
+        **archive_meta,
         "archiveId": archive_meta["archiveId"],
         "originalFileName": "source.xlsx",
         "contentType": "application/vnd.ms-excel",
@@ -124,6 +162,7 @@ def test_upload_archive_repository_streams_verified_remote_object(tmp_path):
     repository = UploadArchiveRepository(
         api_server_root=tmp_path,
         object_storage=object_storage,
+        malware_scanner=_Scanner(),
     )
     archive_meta = repository.archive_upload(
         "p-remote",
@@ -149,6 +188,58 @@ def test_upload_archive_repository_streams_verified_remote_object(tmp_path):
     assert download["content"] == b"remote-business-plan"
     assert download["archiveBackend"] == "s3"
     assert download["archiveIntegrityStatus"] == "verified"
+    assert archive_meta["malwareScanStatus"] == "clean"
+    assert archive_meta["storageLifecycleStatus"] == "active"
+    assert archive_meta["reportEligible"] is True
+    assert "/quarantine/" in object_storage.puts[0][0]
+    assert "/active/" in object_storage.puts[1][0]
+    assert object_storage.puts[0][0] not in object_storage.objects
+
+
+def test_upload_archive_repository_rejects_cross_project_object_key(tmp_path):
+    object_storage = InMemoryObjectStorage()
+    repository = UploadArchiveRepository(
+        api_server_root=tmp_path,
+        object_storage=object_storage,
+        malware_scanner=_Scanner(),
+    )
+    archive_meta = repository.archive_upload(
+        "project-a", b"same-tenant-secret", "plan.pdf", "application/pdf"
+    )
+
+    resolved = repository.resolve_download_metadata(
+        "project-b",
+        {
+            "archiveId": archive_meta["archiveId"],
+            "archiveObjectKey": archive_meta["archiveObjectKey"],
+            "originalFileName": "plan.pdf",
+        },
+    )
+
+    assert resolved is None
+
+
+def test_infected_upload_remains_quarantined_and_is_never_promoted(tmp_path):
+    object_storage = InMemoryObjectStorage()
+    repository = UploadArchiveRepository(
+        api_server_root=tmp_path,
+        object_storage=object_storage,
+        malware_scanner=_Scanner("infected"),
+    )
+
+    with pytest.raises(UploadRejectedError) as error:
+        repository.archive_upload(
+            "project-a",
+            b"EICAR-like-test-bytes",
+            "plan.pdf",
+            "application/pdf",
+            tenant_id="tenant-a",
+        )
+
+    assert error.value.code == "malware_detected"
+    assert len(object_storage.puts) == 1
+    assert "/quarantine/" in object_storage.puts[0][0]
+    assert all("/active/" not in key for key in object_storage.objects)
 
 
 def test_remote_download_uses_utf8_content_disposition_and_audit(tmp_path, monkeypatch):
@@ -157,6 +248,7 @@ def test_remote_download_uses_utf8_content_disposition_and_audit(tmp_path, monke
     archive_repository = UploadArchiveRepository(
         api_server_root=tmp_path,
         object_storage=object_storage,
+        malware_scanner=_Scanner(),
     )
     archive_meta = archive_repository.archive_upload(
         "p-korean",
@@ -169,13 +261,18 @@ def test_remote_download_uses_utf8_content_disposition_and_audit(tmp_path, monke
         "originalFileName": "사업계획서.pdf",
         "contentType": "application/pdf",
     }
-    source_repository = InMemorySourceDocumentRepository(document, project_id="p-korean")
     audit_events = []
     app = FastAPI()
     app.include_router(
         build_project_source_documents_router(
-            project_lookup=lambda project_id: {"id": project_id} if project_id == "p-korean" else None,
-            source_document_repository_factory=lambda: source_repository,
+            project_lookup=lambda project_id, _request: (
+                {"id": project_id, "source_documents": [document]}
+                if project_id == "p-korean"
+                else None
+            ),
+            source_document_repository_factory=lambda project_id, project: (
+                SourceDocumentRepository({project_id: project}, lambda: None)
+            ),
             upload_archive_repository_factory=lambda: archive_repository,
             audit_recorder=lambda *args, **kwargs: audit_events.append(kwargs),
         )

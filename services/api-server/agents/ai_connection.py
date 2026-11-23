@@ -6,12 +6,16 @@ from typing import Any, Dict
 
 from agents.ai_audit import build_ai_brain_used_audit_event, record_ai_brain_used
 from agent_platform.brains.control import record_brain_provider_result, route_ai_connection_candidates
+from core.secret_redaction import (
+    collect_secret_values,
+    redact_secret_text,
+    redact_sensitive_value,
+)
 
 
 CLAUDE_API_ALIASES = {"anthropic", "claude", "claude_api"}
 CLAUDE_DESKTOP_ALIASES = {"claude-desktop", "claude_desktop", "mcp_host", "host_llm"}
 OPENAI_ALIASES = {"openai", "chatgpt", "gpt"}
-SECRET_KEYS = {"api_key", "apikey", "token", "secret", "password"}
 
 # Provider aliases normalised to a canonical provider key.
 PROVIDER_ALIASES = {
@@ -91,15 +95,20 @@ class AIExtractionResult:
 
 
 def safe_ai_context(context: Dict[str, Any] | None) -> Dict[str, Any]:
-    safe: Dict[str, Any] = {}
-    for key, value in (context or {}).items():
-        if any(secret in key.lower() for secret in SECRET_KEYS):
-            safe[key] = "[redacted]"
-        elif isinstance(value, dict):
-            safe[key] = safe_ai_context(value)
-        else:
-            safe[key] = value
-    return safe
+    source = context or {}
+    return redact_sensitive_value(source, secrets=collect_secret_values(source))
+
+
+def _safe_provider_error(
+    error: Any,
+    context: Dict[str, Any] | None,
+    *additional_secrets: Any,
+) -> str:
+    source = context or {}
+    return redact_secret_text(
+        error,
+        secrets=(*collect_secret_values(source), *additional_secrets),
+    )
 
 
 def resolve_ai_context(
@@ -357,9 +366,12 @@ class AIConnection:
             self._audit_extract_json(text, "Embedding retrieval", context, completed, started_at)
             return vector
         except Exception as exc:
-            failed = AIExtractionResult(data=None, meta=safe_ai_context(context), error=str(exc))
+            safe_error = _safe_provider_error(exc, context, api_key)
+            failed = AIExtractionResult(data=None, meta=safe_ai_context(context), error=safe_error)
             self._audit_extract_json(text, "Embedding retrieval", context, failed, started_at)
-            raise RuntimeError(str(exc)) from exc
+            # Do not retain the raw SDK exception as ``__cause__``: traceback
+            # formatters may print it even though the public message is safe.
+            raise RuntimeError(safe_error) from None
 
     def extract_json(
         self,
@@ -461,7 +473,7 @@ class AIConnection:
             prompt=prompt,
             system=system,
             status=status,
-            error=result.error,
+            error=_safe_provider_error(result.error, context) if result.error else None,
             token_usage=(result.meta or {}).get("token_usage"),
             started_at=started_at,
         )
@@ -474,7 +486,7 @@ class AIConnection:
                 context,
                 success=result.data is not None,
                 latency_ms=latency_ms,
-                error=result.error,
+                error=_safe_provider_error(result.error, context) if result.error else None,
             )
         if stored and isinstance(result.meta, dict):
             result.meta["ai_brain_used_event_id"] = stored.get("eventId")
@@ -540,7 +552,11 @@ class AIConnection:
                 },
             )
         except Exception as exc:
-            return AIExtractionResult(data=None, meta=safe_ai_context(context), error=str(exc))
+            return AIExtractionResult(
+                data=None,
+                meta=safe_ai_context(context),
+                error=_safe_provider_error(exc, context, api_key),
+            )
 
     def _extract_with_anthropic(
         self,
@@ -583,7 +599,11 @@ class AIConnection:
                 },
             )
         except Exception as exc:
-            return AIExtractionResult(data=None, meta=safe_ai_context(context), error=str(exc))
+            return AIExtractionResult(
+                data=None,
+                meta=safe_ai_context(context),
+                error=_safe_provider_error(exc, context, api_key),
+            )
 
 
 def _usage_value(usage: Any, *names: str) -> int | None:

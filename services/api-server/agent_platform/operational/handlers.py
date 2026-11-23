@@ -9,6 +9,7 @@ def build_default_outbox_handlers() -> dict[str, Callable[[dict[str, Any]], None
         "agent_run_recovery_required": _request_agent_run_recovery,
         "calculation_run_upserted": _materialize_calculation_run,
         "agent_handoff_upserted": _verify_agent_handoff,
+        "parser.approved_snapshot.created": _verify_parser_approved_snapshot,
     }
 
 
@@ -43,12 +44,19 @@ def _request_agent_run_recovery(payload: dict[str, Any]) -> None:
 
 def _materialize_calculation_run(payload: dict[str, Any]) -> None:
     from storage import materialize_calculation_run_record
+    from db.postgres_runtime_pool import pf_worker_tenant_transaction
 
+    tenant_id = str(payload.get("tenantId") or "")
     project_id = str(payload.get("projectId") or "")
     run_id = str(payload.get("calculationRunId") or "")
-    if not project_id or not run_id:
+    if not tenant_id or not project_id or not run_id:
         raise RuntimeError("OUTBOX_CALCULATION_REFERENCE_MISSING")
-    materialize_calculation_run_record(project_id, run_id)
+    materialize_calculation_run_record(
+        project_id,
+        run_id,
+        tenant_id=tenant_id,
+        transaction_factory=pf_worker_tenant_transaction,
+    )
 
 
 def _verify_agent_handoff(payload: dict[str, Any]) -> None:
@@ -59,3 +67,24 @@ def _verify_agent_handoff(payload: dict[str, Any]) -> None:
     records = list_agent_handoff_records(project_id, limit=1000) if project_id else []
     if not any(str(item.get("handoffId")) == handoff_id for item in records):
         raise RuntimeError("OUTBOX_AGENT_HANDOFF_NOT_FOUND")
+
+
+def _verify_parser_approved_snapshot(payload: dict[str, Any]) -> None:
+    from db.repositories.parser_v2_repository import ParserV2PostgresRepository
+
+    tenant_id = str(payload.get("tenantId") or "")
+    project_id = str(payload.get("projectId") or "")
+    snapshot_id = str(payload.get("snapshotId") or "")
+    selection_ids = [str(item) for item in payload.get("selectionIds") or []]
+    if not tenant_id or not project_id or not snapshot_id or not selection_ids:
+        raise RuntimeError("OUTBOX_PARSER_SNAPSHOT_REFERENCE_MISSING")
+
+    snapshot = ParserV2PostgresRepository().get_approved_snapshot(
+        tenant_id,
+        project_id,
+        snapshot_id,
+    )
+    if snapshot is None:
+        raise RuntimeError("OUTBOX_PARSER_SNAPSHOT_NOT_FOUND")
+    if [str(item) for item in snapshot.get("selectionIds") or []] != selection_ids:
+        raise RuntimeError("OUTBOX_PARSER_SNAPSHOT_SELECTIONS_MISMATCH")

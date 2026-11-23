@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -17,7 +19,7 @@ from integrations.market_data import (
 
 # A minimal RTMS 아파트 매매 XML body (public-API shape).
 _APT_TRADE_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<response><body><items>
+<response><header><resultCode>000</resultCode><resultMsg>OK</resultMsg></header><body><items>
   <item>
     <aptNm>래미안</aptNm><dealAmount>250,000</dealAmount><excluUseAr>84.97</excluUseAr>
     <dealYear>2026</dealYear><dealMonth>3</dealMonth><dealDay>14</dealDay>
@@ -31,7 +33,7 @@ _APT_TRADE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </items></body></response>"""
 
 _APT_RENT_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<response><body><items>
+<response><header><resultCode>000</resultCode><resultMsg>OK</resultMsg></header><body><items>
   <item>
     <aptNm>래미안</aptNm><deposit>70,000</deposit><monthlyRent>0</monthlyRent><excluUseAr>84.97</excluUseAr>
     <dealYear>2026</dealYear><dealMonth>3</dealMonth><dealDay>10</dealDay><umdNm>서초동</umdNm><jibun>1373</jibun>
@@ -177,6 +179,21 @@ def test_market_status_is_secret_safe():
     assert "SECRET-KEY" not in str(status) and "PK" not in str(status)
 
 
+def test_display_credential_does_not_activate_agent_connector():
+    env = {"REALYTICS_MOLIT_DISPLAY_API_KEY": "DISPLAY-ONLY"}
+    assert not MolitRtmsConnector(env).configured()
+    status = market_data_status(env)
+    assert status["molitRtms"]["configured"]
+    assert "DISPLAY-ONLY" not in str(status)
+
+
+def test_display_lookup_requires_project_read_in_strict_mode(monkeypatch):
+    monkeypatch.setenv("REALYTICS_RBAC_MODE", "strict")
+    response = TestClient(app).get("/api/market/transactions?lawd_cd=11650&deal_ym=202603")
+    assert response.status_code == 403
+    assert response.json()["detail"]["requiredPermission"] == "project:read"
+
+
 def test_market_endpoints_smoke():
     client = TestClient(app)
     assert client.get("/api/market/status").status_code == 200
@@ -184,3 +201,96 @@ def test_market_endpoints_smoke():
     res = client.get("/api/market/transactions?lawd_cd=11650&deal_ym=202603")
     assert res.status_code == 200
     assert res.json()["schemaVersion"] == "realytics-market-transactions-v1"
+
+
+@pytest.mark.parametrize("status", ["ok", "empty", "skipped", "forbidden", "error", "unsupported"])
+def test_display_transactions_never_cache_success_or_provider_failures(monkeypatch, status):
+    from routers import market
+
+    records = [{"dealKind": "trade", "pricePerPy": 10_000, "source": "molit_rtms"}] if status == "ok" else []
+    calls = []
+
+    def fetch(_self, **query):
+        calls.append(query)
+        return records, {"source": "molit_rtms", "status": status, "message": status}
+
+    def unexpected_geocode():
+        pytest.fail("Display lookup without geocode must not query geometry providers")
+
+    monkeypatch.setattr(market.MolitRtmsConnector, "fetch", fetch)
+    monkeypatch.setattr(market, "vworld_configured", unexpected_geocode)
+    client = TestClient(app)
+    for _ in range(2):
+        response = client.get("/api/market/transactions?lawd_cd=11650&deal_ym=202603&geocode=false")
+        assert response.status_code == 200
+        assert "no-store" in response.headers["cache-control"]
+        assert response.headers["pragma"] == "no-cache"
+        assert response.headers["expires"] == "0"
+        assert response.json()["records"] == records
+        assert response.json()["diagnostic"]["status"] == status
+    assert len(calls) == 2  # No cross-request reuse of transaction results.
+
+
+def test_display_transactions_route_rejects_writes_without_calling_provider(monkeypatch):
+    from routers import market
+
+    def unexpected_fetch(_self, **_query):
+        pytest.fail("A display-only endpoint must not process write requests")
+
+    monkeypatch.setattr(market.MolitRtmsConnector, "fetch", unexpected_fetch)
+    client = TestClient(app)
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        response = client.request(method, "/api/market/transactions?lawd_cd=11650&deal_ym=202603")
+        assert response.status_code == 405
+        assert response.headers["allow"] == "GET"
+
+
+@pytest.mark.parametrize("success_code", ["000", "00"])
+def test_connector_only_confirms_empty_from_success_envelope_and_zero_count(success_code):
+    xml = f"<response><header><resultCode>{success_code}</resultCode></header><body><items/><totalCount>0</totalCount></body></response>"
+    records, diagnostic = MolitRtmsConnector(
+        environ={"DATA_GO_KR_API_KEY": "SECRET"}, http_get=lambda _url: xml,
+    ).fetch(lawd_cd="11650", deal_ym="202603")
+    assert records == []
+    assert diagnostic["status"] == "empty" and diagnostic["count"] == 0
+
+
+@pytest.mark.parametrize("xml, expected_code", [
+    ("<response>", "RTMS_INVALID_XML"),
+    ("<html><body>SECRET upstream error</body></html>", "RTMS_INVALID_RESPONSE"),
+    ("<response><body><items/><totalCount>0</totalCount></body></response>", "RTMS_INVALID_RESPONSE"),
+    ("<response><header><resultCode>000</resultCode></header></response>", "RTMS_INVALID_RESPONSE"),
+    ("<response><header><resultCode>000</resultCode></header><body><items/></body></response>", "RTMS_UNVERIFIED_EMPTY"),
+    ("<response><header><resultCode>000</resultCode></header><body><items/><totalCount>5</totalCount></body></response>", "RTMS_UNVERIFIED_EMPTY"),
+    ("<response><header><resultCode>000</resultCode></header><body><items><item><dealAmount>SECRET</dealAmount></item></items><totalCount>1</totalCount></body></response>", "RTMS_UNVERIFIED_EMPTY"),
+])
+def test_http_200_invalid_or_unverified_body_is_not_empty(xml, expected_code):
+    records, diagnostic = MolitRtmsConnector(
+        environ={"DATA_GO_KR_API_KEY": "SECRET"}, http_get=lambda _url: xml,
+    ).fetch(lawd_cd="11650", deal_ym="202603")
+    assert records == []
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == expected_code
+    assert "count" not in diagnostic
+    assert "SECRET" not in str(diagnostic)
+
+
+@pytest.mark.parametrize("code, gateway, expected_status", [
+    ("30", True, "forbidden"), ("20", False, "forbidden"),
+    ("22", True, "error"), ("999", False, "error"),
+    ("SECRET", False, "error"),
+])
+def test_http_200_provider_errors_are_redacted_and_never_treated_as_empty(code, gateway, expected_status):
+    if gateway:
+        xml = f"<OpenAPI_ServiceResponse><cmmMsgHeader><errMsg>SECRET</errMsg><returnAuthMsg>https://provider/?serviceKey=SECRET</returnAuthMsg><returnReasonCode>{code}</returnReasonCode></cmmMsgHeader></OpenAPI_ServiceResponse>"
+    else:
+        xml = f"<response><header><resultCode>{code}</resultCode><resultMsg>https://provider/?serviceKey=SECRET</resultMsg></header><body><items/><totalCount>0</totalCount></body></response>"
+    records, diagnostic = MolitRtmsConnector(
+        environ={"DATA_GO_KR_API_KEY": "SECRET"}, http_get=lambda _url: xml,
+    ).fetch(lawd_cd="11650", deal_ym="202603")
+    assert records == []
+    assert diagnostic["status"] == expected_status
+    assert diagnostic["errorCode"] == "RTMS_PROVIDER_ERROR"
+    assert "SECRET" not in str(diagnostic) and "serviceKey" not in str(diagnostic)
+    assert "count" not in diagnostic
+    assert diagnostic.get("providerCode") == (code if code.isdigit() else None)

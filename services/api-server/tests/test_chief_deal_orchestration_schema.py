@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from schemas.orchestration import (
     AgentPodPlan,
     ChiefDealOrchestrationPlan,
@@ -69,3 +72,23 @@ def test_chief_deal_orchestration_plan_contract():
     assert dumped["agentPods"][0]["podKey"] == "land_legal"
     assert dumped["riskCommittee"][0]["reviewerRole"] == "devils_advocate"
     assert dumped["decisionGate"]["decision"] == "HOLD"
+
+
+@pytest.mark.parametrize("revision", ["x" * 64, "a" * 63, "a" * 65, "A" * 64, 123])
+def test_plan_rejects_invalid_preflight_revision(revision):
+    with pytest.raises(ValidationError):
+        ChiefDealOrchestrationPlan(
+            projectId="p", sharedDealStateGraph={"projectId": "p"},
+            preflightInputRevision=revision,
+        )
+
+
+def test_plan_preflight_revision_round_trips_without_accepting_unknown_fields():
+    data = {
+        "projectId": "p", "sharedDealStateGraph": {"projectId": "p"},
+        "preflightInputRevision": "a" * 64,
+    }
+    plan = ChiefDealOrchestrationPlan.model_validate(data)
+    assert plan.model_dump(by_alias=True)["preflightInputRevision"] == data["preflightInputRevision"]
+    with pytest.raises(ValidationError):
+        ChiefDealOrchestrationPlan.model_validate({**data, "unknownPreflightValue": True})

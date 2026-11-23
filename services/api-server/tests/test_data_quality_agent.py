@@ -91,6 +91,25 @@ def test_data_quality_agent_passes_clear_consistent_numbers():
     assert all("termSurfaces" in check for check in result["checks"])
 
 
+def test_data_quality_agent_accepts_canonical_schedule_event_list():
+    result = DataQualityAgent().review(
+        {
+            "project": {"name": "Schedule List"},
+            "schedule": [
+                {"key": "construction_start", "planned_date": "2020-05-01"},
+                {"key": "completion", "planned_date": "2023-10-01"},
+            ],
+        },
+        {},
+    )
+
+    check = next(
+        item for item in result["checks"]
+        if item["key"] == "schedule_sequence_consistency"
+    )
+    assert check["status"] == "clear"
+
+
 def test_data_quality_agent_applies_approved_assumption_override():
     result = DataQualityAgent().review(
         {

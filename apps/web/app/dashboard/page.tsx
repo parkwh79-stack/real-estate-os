@@ -1,338 +1,195 @@
 "use client";
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { FolderOpen, Search } from "lucide-react";
 import { useEffect, useState } from "react";
-import {
-  Activity,
-  AlertTriangle,
-  ArrowRight,
-  BadgeCheck,
-  Briefcase,
-  FileSearch,
-  Landmark,
-  MapPin,
-  ShieldCheck,
-} from "lucide-react";
-import { apiBase, authHeaders } from "../../lib/auth-client";
 import { useAuth } from "../../components/auth/auth-context";
-import { DashboardIntake } from "../../components/intake/dashboard-intake";
+import { WorkInbox, type DashboardDataError } from "../../components/dashboard/work-inbox";
+import { DashboardAtmosphere } from "../../components/dashboard/dashboard-atmosphere";
+import { DashboardMarket } from "../../components/dashboard/dashboard-market";
+import { NewProjectDialog } from "../../components/intake/new-project-dialog";
+import { apiBase, authHeaders } from "../../lib/auth-client";
+import { hasPermission, PROJECT_WRITE_PERMISSION } from "../../lib/authorization";
+import { fetchRecentWorkFeed, projectOptionsFromResponse, type ProjectOption, type RecentWorkItem } from "../../lib/project-client";
 
-const statusStyle: Record<string, string> = {
-  pf_review: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-900",
-  land_review: "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:border-sky-900",
-  approved: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:border-emerald-900",
-  rejected: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-950/30 dark:text-rose-300 dark:border-rose-900",
-};
-
-const statusLabel: Record<string, string> = {
-  pf_review: "PF 검토중",
-  land_review: "토지 검토중",
-  approved: "승인",
-  rejected: "보류",
-};
-
-const typeLabel: Record<string, string> = {
-  mixed_use: "주상복합",
-  logistics: "물류센터",
-  residential: "공동주택",
-  office: "오피스",
-  lodging: "숙박시설",
-  land_feasibility: "토지 사업성",
-};
-
-interface PfTranche {
-  amount?: number;
-}
-
-interface ProjectSummaryResponse {
-  project?: {
-    id?: string | number;
-    name?: string;
-    status?: string;
-    type?: string;
-    review_date?: string;
-  };
-  land?: {
-    address?: string;
-    pnu?: string;
-    area_sqm?: number;
-    official_land_price?: number;
-  };
-  regulation?: {
-    zoning?: string;
-    legal_far?: number;
-    legal_bcr?: number;
-    applied_far?: number;
-    applied_bcr?: number;
-  };
-  landLedger?: {
-    summary?: {
-      totalParcels?: number;
-      missingPnuCount?: number;
-      missingOfficialLandPriceCount?: number;
-    };
-    validation?: {
-      status?: string;
-      issueCount?: number;
-    };
-    pfSummary?: {
-      pnuCoverageRatio?: number;
-      officialLandPriceCoverageRatio?: number;
-      registryEvidenceCoverageRatio?: number;
-      status?: string;
-    };
-    landAcquisitionStatus?: {
-      acquisitionAreaRatio?: number;
-      acquisitionAmountRatio?: number;
-      publicLandDetected?: boolean;
-    };
-  };
-  pf_structure?: PfTranche[];
-}
-
-function fmtEok(val: number) {
-  const eok = val / 100_000_000;
-  return eok >= 10000
-    ? `${(eok / 10000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}조`
-    : `${eok.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}억`;
-}
-
-function pct(value?: number) {
-  if (value === undefined || Number.isNaN(value)) return "미확인";
-  return `${Math.round(value * 100)}%`;
-}
-
-function landReadiness(project: ProjectSummaryResponse) {
-  const pnuReady = Boolean(project.land?.pnu) || project.landLedger?.summary?.missingPnuCount === 0;
-  const regulationReady = Boolean(project.regulation?.zoning);
-  const officialPriceReady = Boolean(project.land?.official_land_price) || project.landLedger?.summary?.missingOfficialLandPriceCount === 0;
-  const registryReady = (project.landLedger?.pfSummary?.registryEvidenceCoverageRatio ?? 0) >= 0.8;
-  const acquisitionReady = (project.landLedger?.landAcquisitionStatus?.acquisitionAreaRatio ?? 0) >= 0.9;
-  const score = [pnuReady, regulationReady, officialPriceReady, registryReady, acquisitionReady].filter(Boolean).length;
-  return { pnuReady, regulationReady, officialPriceReady, registryReady, acquisitionReady, score };
-}
-
-async function loadProjects() {
-  const res = await fetch(`${apiBase}/projects`, {
+async function loadProjects(signal: AbortSignal) {
+  const response = await fetch(`${apiBase}/projects`, {
     cache: "no-store",
     headers: authHeaders("web"),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
   });
-  if (!res.ok) throw new Error(`프로젝트 목록을 불러오지 못했습니다. (${res.status})`);
-  const data = (await res.json()) as ProjectSummaryResponse[];
-  return Array.isArray(data) ? data : [];
+  if (!response.ok) throw new Error(`프로젝트 목록을 불러오지 못했습니다. (${response.status})`);
+  return projectOptionsFromResponse(await response.json());
 }
 
 export default function DashboardPage() {
-  const { status } = useAuth();
-  const [projects, setProjects] = useState<ProjectSummaryResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const { status, user, permissions } = useAuth();
+  if (status !== "authenticated") return null;
+  const canWriteProjects = hasPermission(permissions, PROJECT_WRITE_PERMISSION);
+
+  return <WorkspaceDashboard key={JSON.stringify([user?.tenantId, user?.userId])} canWriteProjects={canWriteProjects} />;
+}
+
+function WorkspaceDashboard({ canWriteProjects }: { canWriteProjects: boolean }) {
+  const [items, setItems] = useState<RecentWorkItem[] | null>(null);
+  const [projects, setProjects] = useState<ProjectOption[] | null>(null);
+  const [errors, setErrors] = useState<DashboardDataError[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [recentLoading, setRecentLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
-    // RequireAuth (in the Shell) handles redirecting unauthenticated users; here we
-    // just wait until the session is confirmed before loading session-scoped data.
-    if (status !== "authenticated") return;
-
-    let cancelled = false;
-    setLoading(true);
-    setLoadError(null);
-    loadProjects()
-      .then((items) => {
-        if (!cancelled) setProjects(items);
+    const controller = new AbortController();
+    setProjectsLoading(true);
+    setRecentLoading(true);
+    setErrors([]);
+    setProjects(null);
+    setItems(null);
+    void loadProjects(controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setProjects(result);
       })
-      .catch((error: unknown) => {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : "프로젝트 목록을 불러오지 못했습니다.");
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setErrors((current) => [...current, { source: "projects", message: "프로젝트 목록을 불러오지 못했습니다. 다시 확인해 주세요." }]);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!controller.signal.aborted) setProjectsLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [status, reloadKey]);
+    void fetchRecentWorkFeed(20, controller.signal)
+      .then(({ items: recentItems, warnings }) => {
+        if (controller.signal.aborted) return;
+        setItems(recentItems);
+        setErrors((current) => [...current, ...warnings.map((message) => ({ source: "recent-work" as const, message }))]);
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setErrors((current) => [...current, { source: "recent-work", message: "최근 작업을 불러오지 못했습니다. 다시 확인해 주세요." }]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setRecentLoading(false);
+      });
+    return () => controller.abort();
+  }, [reloadKey]);
 
-  const total = projects.length;
-  const reviewing = projects.filter((p) => ["pf_review", "land_review"].includes(p.project?.status ?? "")).length;
-  const totalPf = projects.reduce((s, p) => {
-    const pfs = p.pf_structure ?? [];
-    return s + pfs.reduce((a, t) => a + (t.amount ?? 0), 0);
-  }, 0);
-  const landReady = projects.filter((project) => landReadiness(project).score >= 4).length;
-  const missingEvidence = projects.reduce((sum, project) => sum + (project.landLedger?.validation?.issueCount ?? 0), 0);
+  const firstProject = !projectsLoading && !recentLoading && errors.length === 0 && projects?.length === 0 && items?.length === 0;
 
   return (
-    <div className="space-y-6 pb-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-sm font-semibold text-slate-500">REALYTICS x PLATFORM9</p>
-          <h2 className="mt-1 text-3xl font-black tracking-tight text-slate-950 dark:text-white">
-            심사 시작하기
-          </h2>
-          <p className="mt-2 text-sm text-slate-500">
-            자료를 한 번에 올려 새 심사를 시작하거나, 아래에서 진행 중인 심사를 이어가세요.
-          </p>
-        </div>
-        <Link
-          href="/analysis"
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-        >
-          신규 토지 분석 <ArrowRight className="h-4 w-4" />
-        </Link>
-      </div>
-
-      <DashboardIntake onProjectCreated={() => setReloadKey((k) => k + 1)} />
-
-      {loading ? (
-        <div className="rounded-lg border border-slate-200 bg-white p-6 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-sm font-semibold text-slate-900 dark:text-white">사용자 심사 데이터를 불러오는 중입니다.</p>
-          <p className="mt-2 text-sm text-slate-500">로그인 세션 기준으로 DB에 저장된 프로젝트만 조회합니다.</p>
-        </div>
-      ) : (
-      <>
-      <section className="grid gap-4 md:grid-cols-4">
-        <KpiCard icon={<Briefcase className="h-5 w-5 text-sky-600" />} label="전체 프로젝트" value={`${total}건`} sub={`${reviewing}건 검토중`} />
-        <KpiCard icon={<Activity className="h-5 w-5 text-violet-600" />} label="총 PF 검토금액" value={fmtEok(totalPf)} sub="전체 프로젝트 합산" />
-        <KpiCard icon={<Landmark className="h-5 w-5 text-emerald-600" />} label="토지 검토 준비" value={`${landReady}건`} sub="PNU·규제·취득·증빙 기준" />
-        <KpiCard icon={<AlertTriangle className="h-5 w-5 text-amber-600" />} label="토지 보완 이슈" value={`${missingEvidence}개`} sub="공시지가·등기·조서 대사 포함" />
-      </section>
-
-      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <div className="mb-4 flex items-center justify-between gap-3">
+    <div className="mx-auto max-w-7xl space-y-6 pb-8">
+      <div className="re-dashboard-intro">
+        <DashboardAtmosphere />
+        <header className="re-dashboard-glass flex flex-wrap items-center justify-between gap-4 rounded-re-panel px-5 py-5 sm:px-6" data-testid="dashboard-glass-header">
           <div>
-            <h3 className="text-lg font-bold text-slate-950 dark:text-white">Land Agent 분석 항목</h3>
-            <p className="mt-1 text-sm text-slate-500">토지 관련 에이전트가 대시보드에서 보여줄 수 있는 핵심 판단 항목입니다.</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-re-text sm:text-3xl">대시보드</h1>
+            <p className="mt-2 text-sm leading-6 text-re-secondary">
+              {firstProject && canWriteProjects ? "보유한 자료로 첫 프로젝트를 시작하세요." : "진행하던 프로젝트를 이어서 검토하세요."}
+            </p>
           </div>
-        </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <AgentItem icon={<MapPin />} title="PNU·주소 정규화" text="지번, 산번지, 본번/부번, 법정동 기준 매칭 신뢰도를 확인합니다." />
-          <AgentItem icon={<FileSearch />} title="토지조서 검증" text="필지 수, 면적, 매입금액, 지급스케줄의 원본-파싱값 대사를 봅니다." />
-          <AgentItem icon={<BadgeCheck />} title="취득률·국공유지" text="면적/금액 기준 취득률과 국공유지·공유지분 등 예외필지를 표시합니다." />
-          <AgentItem icon={<ShieldCheck />} title="공시지가·등기증빙" text="기준연도, 출처, 등기부 evidence, 제한물권 해소 필요성을 점검합니다." />
-        </div>
-      </section>
+          {canWriteProjects ? (
+            <NewProjectDialog firstProject={firstProject} onProjectCreated={() => setReloadKey((value) => value + 1)} />
+          ) : (
+            <button type="button" disabled data-testid="dashboard-new-deal-disabled"
+              className="min-h-11 rounded-re-control border border-re-border px-4 text-sm text-re-muted disabled:cursor-not-allowed">
+              새 프로젝트 · 조회 전용
+            </button>
+          )}
+        </header>
+      </div>
 
-      {projects.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-slate-300 p-12 text-center dark:border-slate-700">
-          <p className="text-base font-bold text-slate-950 dark:text-white">아직 저장된 심사 프로젝트가 없습니다.</p>
-          <p className="mt-2 text-sm text-slate-500">
-            사업계획서, 토지조서, 사업수지 Excel을 업로드하면 AI가 문서를 자동 분류하고 프로젝트 DB에 저장합니다.
-          </p>
-          {loadError ? <p className="mt-3 text-sm font-semibold text-rose-600">{loadError}</p> : null}
-          <div className="mt-5 flex flex-wrap justify-center gap-3">
-            <Link
-              href="/analysis"
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
-            >
-              새 분석 시작 <ArrowRight className="h-4 w-4" />
-            </Link>
-            <Link
-              href="/settings"
-              className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              사용자 세션 확인
-            </Link>
+      {!canWriteProjects ? (
+        <div data-testid="review-only-notice" role="status" className="rounded-re-control bg-re-subtle px-4 py-3 text-sm text-re-secondary">
+          <p data-testid="dashboard-intake-read-only">현재 계정에서는 기존 프로젝트를 검토할 수 있으며, 새 프로젝트 생성과 자료 업로드는 사용할 수 없습니다.</p>
+        </div>
+      ) : null}
+
+      <div id="projects" className="scroll-mt-24">
+        {firstProject ? (
+          <section aria-labelledby="first-project-title" className="rounded-re-panel border border-re-border bg-re-surface px-6 py-10 sm:px-8">
+            <FolderOpen className="mb-4 h-8 w-8 text-re-action" aria-hidden="true" />
+            <h2 id="first-project-title" className="text-lg font-semibold text-re-text">
+              {canWriteProjects ? "자료를 올리고 검토를 시작하세요" : "아직 표시할 프로젝트가 없습니다"}
+            </h2>
+            <p className="mt-2 max-w-xl text-sm leading-6 text-re-secondary">
+              {canWriteProjects
+                ? "사업계획서·사업수지·토지자료를 한 번에 올릴 수 있습니다. 확인된 자료와 분석 가정을 검토하고 결과를 저장해 이어서 작업하세요."
+                : "접근 가능한 프로젝트가 등록되면 이곳에서 확인할 수 있습니다."}
+            </p>
+          </section>
+        ) : (
+          <WorkInbox items={items} totalProjectCount={projects?.length ?? null}
+            loading={recentLoading} projectListLoading={projectsLoading} errors={errors}
+            onRetry={() => setReloadKey((value) => value + 1)} />
+        )}
+      </div>
+
+      <DashboardMarket />
+
+      <AllProjects projects={projects} loading={projectsLoading} onRetry={() => setReloadKey((value) => value + 1)} />
+    </div>
+  );
+}
+
+function AllProjects({ projects, loading, onRetry }: { projects: ProjectOption[] | null; loading: boolean; onRetry: () => void }) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  useEffect(() => {
+    const openFromHash = () => {
+      const details = document.getElementById("all-projects");
+      if (window.location.hash === "#all-projects" && details instanceof HTMLDetailsElement) details.open = true;
+    };
+    openFromHash();
+    window.addEventListener("hashchange", openFromHash);
+    window.addEventListener("popstate", openFromHash);
+    return () => {
+      window.removeEventListener("hashchange", openFromHash);
+      window.removeEventListener("popstate", openFromHash);
+    };
+  }, []);
+  const matched = (projects ?? []).filter((project) => [project.name, project.address, project.pnu, project.id]
+    .some((value) => value?.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
+  const lastPage = Math.max(0, Math.ceil(matched.length / 12) - 1);
+  const currentPage = Math.min(page, lastPage);
+  return (
+    <details id="all-projects" className="scroll-mt-24 rounded-re-panel border border-re-border bg-re-surface">
+      <summary className="cursor-pointer px-4 py-4 text-sm font-semibold text-re-text">
+        전체 프로젝트 <span className="ml-1 font-normal text-re-secondary">{loading ? "불러오는 중" : projects ? `${projects.length.toLocaleString("ko-KR")}개` : "확인 불가"}</span>
+      </summary>
+      <div className="space-y-4 border-t border-re-border p-4">
+        {loading ? <p role="status" className="text-sm text-re-secondary">프로젝트를 불러오는 중입니다.</p> : projects === null ? (
+          <div role="status" className="text-sm text-re-secondary">
+            <p>프로젝트 목록을 확인할 수 없습니다.</p>
+            <button type="button" onClick={onRetry} className="mt-2 min-h-10 rounded-re-control border border-re-border px-3 font-medium">다시 불러오기</button>
           </div>
-        </div>
-      ) : (
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {projects.map((p) => {
-            const proj = p.project ?? {};
-            const status = proj.status ?? "pf_review";
-            const pfTotal = (p.pf_structure ?? []).reduce((a, t) => a + (t.amount ?? 0), 0);
-            const projectType = proj.type;
-            const projectTypeLabel = projectType ? (typeLabel[projectType] ?? projectType) : "미확인";
-            const readiness = landReadiness(p);
-            return (
-              <Link
-                key={String(proj.id ?? proj.name)}
-                href={`/project/${proj.id}/land`}
-                className="group rounded-lg border border-slate-200 bg-white p-5 shadow-sm transition-all hover:border-slate-300 hover:shadow-md dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-800">
-                      <MapPin className="h-5 w-5 text-slate-600 dark:text-slate-300" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="truncate font-bold text-slate-950 dark:text-white">{proj.name || "Unnamed"}</p>
-                      <p className="mt-0.5 truncate text-xs text-slate-500">{p.land?.address ?? "소재지 미확인"}</p>
-                    </div>
-                  </div>
-                  <span className={`shrink-0 rounded-md border px-2 py-0.5 text-xs font-semibold ${statusStyle[status] ?? statusStyle.pf_review}`}>
-                    {statusLabel[status] ?? status}
-                  </span>
-                </div>
-
-                <div className="mt-4 grid grid-cols-3 gap-2">
-                  <MiniStat label="유형" value={projectTypeLabel} />
-                  <MiniStat label="PF 금액" value={pfTotal > 0 ? fmtEok(pfTotal) : "미확인"} />
-                  <MiniStat label="토지점검" value={`${readiness.score}/5`} />
-                </div>
-
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <LandCheck label="PNU" ok={readiness.pnuReady} />
-                  <LandCheck label="규제" ok={readiness.regulationReady} />
-                  <LandCheck label="취득률" ok={readiness.acquisitionReady} value={pct(p.landLedger?.landAcquisitionStatus?.acquisitionAreaRatio)} />
-                  <LandCheck label="등기증빙" ok={readiness.registryReady} value={pct(p.landLedger?.pfSummary?.registryEvidenceCoverageRatio)} />
-                </div>
-
-                <div className="mt-3 flex items-center gap-1 text-xs font-semibold text-indigo-600 opacity-0 transition-opacity group-hover:opacity-100 dark:text-indigo-400">
-                  토지 분석 상세 보기 <ArrowRight className="h-3 w-3" />
-                </div>
-              </Link>
-            );
-          })}
-        </section>
-      )}
-      </>
-      )}
-    </div>
-  );
-}
-
-function KpiCard({ icon, label, value, sub }: { icon: ReactNode; label: string; value: string; sub: string }) {
-  return (
-    <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-semibold text-slate-500">{label}</p>
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-50 dark:bg-slate-800">{icon}</div>
+        ) : (
+          <>
+            <label className="flex min-h-11 max-w-lg items-center gap-2 rounded-re-control border border-re-border px-3">
+              <Search className="h-4 w-4 shrink-0 text-re-muted" aria-hidden="true" />
+              <span className="sr-only">전체 프로젝트 검색</span>
+              <input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }}
+                placeholder="프로젝트명·주소 검색" className="min-w-0 flex-1 bg-transparent py-2 text-base text-re-text sm:text-sm" />
+            </label>
+            <p className="text-xs text-re-secondary" role="status">현재 접근 가능한 전체 프로젝트 중 {matched.length.toLocaleString("ko-KR")}개</p>
+            <ul className="divide-y divide-re-border">
+              {matched.slice(currentPage * 12, currentPage * 12 + 12).map((project) => (
+                <li key={project.id}>
+                  <Link href={`/project/${encodeURIComponent(project.id)}`} prefetch={false} className="block rounded-re-control px-2 py-3 hover:bg-re-subtle">
+                    <span className="break-words text-sm font-medium text-re-text">{project.name}</span>
+                    {project.address ? <span className="mt-1 block break-words text-xs text-re-secondary">{project.address}</span> : null}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+            {matched.length === 0 ? <p className="text-sm text-re-secondary">{projects.length ? "검색 결과가 없습니다." : "등록된 프로젝트가 없습니다."}</p> : null}
+            {lastPage > 0 ? (
+              <div className="flex items-center justify-end gap-3 text-sm">
+                <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage === 0} className="min-h-10 rounded-re-control border border-re-border px-3 disabled:opacity-40">이전</button>
+                <span>{currentPage + 1} / {lastPage + 1}</span>
+                <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage === lastPage} className="min-h-10 rounded-re-control border border-re-border px-3 disabled:opacity-40">다음</button>
+              </div>
+            ) : null}
+          </>
+        )}
       </div>
-      <p className="mt-4 text-3xl font-black tracking-tight text-slate-950 dark:text-white">{value}</p>
-      <p className="mt-1 text-sm text-slate-500">{sub}</p>
-    </div>
-  );
-}
-
-function AgentItem({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
-  return (
-    <div className="rounded-lg border border-slate-200 p-4 dark:border-slate-800">
-      <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200">{icon}</div>
-        <p className="font-bold text-slate-950 dark:text-white">{title}</p>
-      </div>
-      <p className="mt-3 text-sm leading-6 text-slate-500">{text}</p>
-    </div>
-  );
-}
-
-function MiniStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/70">
-      <p className="text-xs font-semibold text-slate-500">{label}</p>
-      <p className="mt-0.5 text-sm font-bold text-slate-950 dark:text-white">{value}</p>
-    </div>
-  );
-}
-
-function LandCheck({ label, ok, value }: { label: string; ok: boolean; value?: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-800/70">
-      <span className="text-xs font-semibold text-slate-500">{label}</span>
-      <span className={`text-xs font-bold ${ok ? "text-emerald-600 dark:text-emerald-300" : "text-amber-600 dark:text-amber-300"}`}>
-        {value ?? (ok ? "확보" : "보완")}
-      </span>
-    </div>
+    </details>
   );
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from math import isfinite
 from statistics import median
 from typing import Any, Dict, List, Optional
 
@@ -473,18 +474,15 @@ def _to_float(value: Any) -> Optional[float]:
     if value in (None, ""):
         return None
     try:
-        return float(str(value).replace(",", ""))
-    except (TypeError, ValueError):
+        number = float(str(value).replace(",", ""))
+        return number if isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
 def _to_int(value: Any) -> Optional[int]:
-    if value in (None, ""):
-        return None
-    try:
-        return int(float(str(value).replace(",", "")))
-    except (TypeError, ValueError):
-        return None
+    number = _to_float(value)
+    return int(number) if number is not None else None
 
 
 def _source_metadata(
@@ -499,6 +497,8 @@ def _source_metadata(
     base_date = item.get("baseDate") or item.get("base_date") or item.get("transactionDate") or item.get("saleDate") or item.get("leaseDate")
     license_note = item.get("licenseOrUsageNote") or item.get("license_or_usage_note") or item.get("usageNote")
     confidence = _to_float(item.get("confidence"))
+    if confidence is not None and not 0 <= confidence <= 1:
+        confidence = None
     missing = []
     if not source_name:
         missing.append("sourceName")

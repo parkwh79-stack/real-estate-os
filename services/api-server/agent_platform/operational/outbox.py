@@ -30,7 +30,20 @@ class RuntimeOutboxDispatcher:
                 handler = self._handlers.get(event.event_type)
                 if handler is None:
                     raise RuntimeError(f"No outbox handler registered for {event.event_type}")
-                handler(dict(event.payload))
+                payload = dict(event.payload)
+                payload_tenant_id = str(payload.get("tenantId") or "")
+                if payload_tenant_id and payload_tenant_id != event.tenant_id:
+                    raise RuntimeError("OUTBOX_TENANT_SCOPE_MISMATCH")
+                payload["tenantId"] = event.tenant_id
+                if event.project_id:
+                    payload_project_id = str(payload.get("projectId") or "")
+                    if (
+                        payload_project_id
+                        and payload_project_id != event.project_id
+                    ):
+                        raise RuntimeError("OUTBOX_PROJECT_SCOPE_MISMATCH")
+                    payload["projectId"] = event.project_id
+                handler(payload)
                 self._repository.mark_outbox_published(event.event_id, worker_id=worker_id)
                 completed += 1
             except Exception as exc:

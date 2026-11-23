@@ -47,7 +47,7 @@ from agents.pod_ai_reviewer_agent import PodAIReviewerAgent
 POD_AI_REVIEW_AGENT_ID = "pod_ai_reviewer_agent"
 POD_AI_REVIEW_MANIFEST = AgentManifest(
     agent_id=POD_AI_REVIEW_AGENT_ID,
-    version="1.0.0",
+    version="1.1.0",
     display_name="Pod AI Reviewer Agent",
     domain="chief_orchestration",
     role="Evidence-aware review of deterministic Pod artifacts",

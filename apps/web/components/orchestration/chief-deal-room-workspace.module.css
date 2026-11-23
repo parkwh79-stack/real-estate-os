@@ -1,0 +1,136 @@
+.hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: 1.4rem;
+  border: 1px solid #233d61;
+  background: linear-gradient(124deg, #081629 5%, #102a4d 64%, #17356b);
+  box-shadow: 0 16px 32px -18px rgb(6 20 45 / 65%), inset 0 1px 0 rgb(255 255 255 / 12%);
+}
+
+.atmosphere {
+  position: absolute;
+  z-index: 0;
+  inset: -4.5rem -1rem;
+  pointer-events: none;
+}
+
+.atmosphere::before,
+.atmosphere::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.atmosphere::before {
+  background:
+    radial-gradient(ellipse at 82% 35%, rgb(74 126 255 / 48%), transparent 49%),
+    radial-gradient(ellipse at 97% 70%, rgb(38 216 210 / 35%), transparent 43%),
+    radial-gradient(ellipse at 42% 94%, rgb(33 132 195 / 22%), transparent 40%);
+  transform: translate3d(0, var(--dashboard-parallax-y, 0px), 0);
+}
+
+.atmosphere::after {
+  background: repeating-radial-gradient(ellipse at 87% 58%, transparent 0 1.35rem, rgb(151 216 255 / 16%) 1.4rem 1.46rem, transparent 1.52rem 2.05rem);
+  mask-image: linear-gradient(90deg, transparent 14%, #000 76%);
+  transform: translate3d(0, calc(var(--dashboard-parallax-y, 0px) * -0.55), 0);
+}
+
+.glass {
+  padding: 1.05rem 1.15rem;
+  border: 1px solid rgb(219 238 255 / 40%);
+  border-radius: 1.05rem;
+  background: #142b4d;
+  box-shadow: 0 12px 22px rgb(2 10 26 / 30%), inset 0 1px 0 rgb(255 255 255 / 19%);
+}
+
+@supports (backdrop-filter: blur(1px)) {
+  .glass {
+    background: linear-gradient(150deg, rgb(216 236 255 / 23%), rgb(10 31 69 / 53%));
+    backdrop-filter: blur(16px) saturate(128%);
+  }
+}
+
+.panel {
+  min-width: 0;
+  align-self: start;
+  overflow: hidden;
+  border: 1px solid var(--re-border-default);
+  border-radius: 1.05rem;
+  background: var(--re-bg-surface);
+  box-shadow: 0 7px 20px -14px rgb(8 33 63 / 26%);
+}
+
+.accordion {
+  margin-top: 0.35rem;
+}
+
+.accordion summary::-webkit-details-marker {
+  display: none;
+}
+
+.accordion[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.reviewCard {
+  display: flex;
+  width: 100%;
+  min-height: 4.25rem;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.7rem;
+  border: 1px solid var(--re-border-default);
+  border-radius: 0.8rem;
+  background: var(--re-bg-subtle);
+  text-align: left;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.reviewCard:hover {
+  border-color: var(--re-action-600);
+  box-shadow: 0 8px 14px -12px var(--re-action-600);
+}
+
+.reviewStatus {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--re-text-secondary);
+  font-size: 0.75rem;
+}
+
+.reviewCard[data-state="completed"] .reviewStatus { color: var(--re-success-600); }
+.reviewCard[data-state="failed"] .reviewStatus { color: var(--re-danger-600); }
+.reviewCard[data-state="blocked"] .reviewStatus,
+.reviewCard[data-state="needs_recalculation"] .reviewStatus { color: var(--re-warning-600); }
+
+.drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(100%, 29rem);
+  max-width: 100%;
+  height: 100%;
+  max-height: 100%;
+  margin: 0;
+  overflow-y: auto;
+  border: 0;
+  border-left: 1px solid var(--re-border-default);
+  background: var(--re-bg-surface);
+  color: var(--re-text-primary);
+  box-shadow: -1rem 0 3rem rgb(2 10 26 / 22%);
+}
+
+.drawer::backdrop {
+  background: rgb(5 14 29 / 55%);
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .reviewCard:hover { transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atmosphere::before,
+  .atmosphere::after { transform: none; }
+  .reviewCard { transition: none; }
+}

@@ -68,13 +68,57 @@ def test_run_approval_keeps_execution_status_separate():
         "executionStatus": "completed",
         "reportStatus": "quality_pass",
         "handoffs": [],
-        "artifacts": {"riskRegister": {"risks": []}, "assumptionProposals": {"proposals": []}},
+        "artifacts": {
+            "riskRegister": {"risks": []},
+            "assumptionProposals": {"proposals": []},
+            "approvalReadinessGate": {
+                "schemaVersion": "realytics-approval-readiness-gate-v1",
+                "gateType": "approval_readiness",
+                "status": "ready_for_approval",
+                "pass": True,
+                "summary": {"blockingIssueCount": 0, "warningCount": 0},
+            },
+        },
     }
     result = approve_orchestration_run_use_case(run, {"approved_by": "credit"}, "2026-07-14T00:00:00Z")
     assert result["status"] == "completed"
     assert result["executionStatus"] == "completed"
     assert result["approvalStatus"] == "approved"
     assert result["reportStatus"] == "quality_pass"
+
+
+def test_run_approval_is_fail_closed_on_gate_and_maker_checker():
+    base = {
+        "status": "completed",
+        "executionStatus": "completed",
+        "user_id": "maker-1",
+        "handoffs": [],
+        "artifacts": {
+            "riskRegister": {"risks": []},
+            "assumptionProposals": {"proposals": []},
+            "approvalReadinessGate": {
+                "pass": False,
+                "blockers": [{"code": "LEGAL_EVIDENCE_TRUSTED"}],
+            },
+        },
+    }
+    with pytest.raises(ValueError, match="Approval Readiness Gate"):
+        approve_orchestration_run_use_case(
+            base,
+            {"approved_by": "checker-1"},
+            "2026-07-14T00:00:00Z",
+        )
+
+    base["artifacts"]["approvalReadinessGate"] = {
+        "pass": True,
+        "summary": {"blockingIssueCount": 0, "warningCount": 0},
+    }
+    with pytest.raises(ValueError, match="Maker-checker"):
+        approve_orchestration_run_use_case(
+            base,
+            {"approved_by": "maker-1"},
+            "2026-07-14T00:00:00Z",
+        )
 
 
 def test_run_approval_rejects_pending_assumption_proposal():

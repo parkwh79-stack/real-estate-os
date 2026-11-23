@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from agents.orchestration_agent import OrchestrationAgent
 from main import app
+from routers import projects
 from schemas.orchestration import (
     AgentHandoffEnvelope,
     AgentProgress,
@@ -16,12 +17,30 @@ from storage import (
     upsert_calculation_run_record,
     upsert_deal_state_record,
     upsert_orchestration_run,
+    upsert_user,
 )
 
 
 _DISCOUNT_TRIGGER_EXAMPLE = (
     Path(__file__).resolve().parents[1] / "data" / "examples" / "daegu_bondong_mixed_use_pf.json"
 )
+
+
+def orchestration_auth_headers(
+    *,
+    user_id: str = "pytest-orchestrator",
+    tenant_id: str = "pytest-tenant",
+    role: str = "admin",
+) -> dict[str, str]:
+    upsert_user(
+        {
+            "userId": user_id,
+            "tenantId": tenant_id,
+            "role": role,
+            "status": "active",
+        }
+    )
+    return {"x-realytics-user-id": user_id}
 
 
 def project_with_discount_triggers(client: TestClient) -> str:
@@ -38,13 +57,35 @@ def project_with_discount_triggers(client: TestClient) -> str:
     return created.get("id") or created["project"]["id"]
 
 
+def test_stress_request_normalizes_semantic_tranche_priorities():
+    request = OrchestrationAgent()._build_stress_request({
+        "feasibility_input": {"total_revenue": 1_000, "total_cost": 800},
+        "pf_structure": [
+            {"tranche": "Tr.C", "amount": 100, "priority": "junior"},
+            {"tranche": "Tr.A", "amount": 500, "priority": "senior"},
+            {"tranche": "Tr.B", "amount": 200, "priority": "mezzanine"},
+        ],
+    })
+
+    assert [tranche.priority for tranche in request.pfStructure] == [3, 1, 2]
+
+
 def _approval_ready_base_run(project_id: str) -> dict:
     return {
         "project_id": project_id,
         "handoffs": [],
         "artifacts": {
             "qualityCheck": {"pass": True},
-            "legalPermitReview": {"status": "clear"},
+            "legalPermitReview": {
+                "status": "clear",
+                "legalIntelligence": {
+                    "evidenceStatus": "verified",
+                    "verifiedReferenceCount": 1,
+                    "verifiedCitationCount": 1,
+                    "citationCoverageComplete": True,
+                    "claimCoverageComplete": True,
+                },
+            },
             "dataQualityReview": {"status": "clear"},
             "reconciliationGate": {"status": "clear"},
             "riskRegister": {"status": "clear", "risks": []},
@@ -63,6 +104,111 @@ def _approval_ready_base_run(project_id: str) -> dict:
     }
 
 
+def test_approval_readiness_gate_requires_verified_legal_evidence():
+    run = _approval_ready_base_run("legal-evidence-gate-project")
+    run["artifacts"]["legalPermitReview"]["legalIntelligence"] = {
+        "evidenceStatus": "candidate",
+        "verifiedReferenceCount": 0,
+        "verifiedCitationCount": 0,
+        "citationCoverageComplete": False,
+        "claimCoverageComplete": False,
+    }
+
+    blocked = OrchestrationAgent()._approval_readiness_gate(run)
+    blocked_by_code = {item["code"]: item for item in blocked["gates"]}
+
+    assert blocked_by_code["LEGAL_EVIDENCE_TRUSTED"]["pass"] is False
+    assert "LEGAL_EVIDENCE_TRUSTED" in {
+        item["code"] for item in blocked["blockers"]
+    }
+
+    run = _approval_ready_base_run("legal-evidence-gate-project")
+    trusted = OrchestrationAgent()._approval_readiness_gate(run)
+    trusted_by_code = {item["code"]: item for item in trusted["gates"]}
+
+    assert trusted_by_code["LEGAL_EVIDENCE_TRUSTED"]["pass"] is True
+
+
+def test_legacy_orchestration_routes_require_an_authenticated_actor():
+    project_id = "legacy-orchestration-auth-project"
+    projects.PROJECTS_DB[project_id] = {
+        "project": {"id": project_id, "name": "Auth Boundary"},
+        "_meta": {"tenantId": "tenant-auth"},
+    }
+    client = TestClient(app)
+
+    try:
+        pf_response = client.post(
+            f"/projects/{project_id}/orchestrations/pf-review",
+            json={},
+        )
+        workflow_response = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            json={"workflow": "cash_flow"},
+        )
+    finally:
+        projects.PROJECTS_DB.pop(project_id, None)
+
+    assert pf_response.status_code == 401
+    assert pf_response.json()["detail"]["scope"] == "pf_review_orchestration"
+    assert workflow_response.status_code == 401
+    assert (
+        workflow_response.json()["detail"]["scope"]
+        == "orchestration_workflow"
+    )
+
+
+def test_legacy_workflow_enforces_permission_and_tenant_scope(monkeypatch):
+    project_id = "legacy-orchestration-tenant-project"
+    projects.PROJECTS_DB[project_id] = {
+        "project": {"id": project_id, "name": "Tenant Boundary"},
+        "_meta": {"tenantId": "tenant-a"},
+    }
+    client = TestClient(app)
+    viewer_headers = orchestration_auth_headers(
+        user_id="pytest-viewer",
+        tenant_id="tenant-a",
+        role="viewer",
+    )
+
+    try:
+        forbidden = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            headers=viewer_headers,
+            json={"workflow": "cash_flow"},
+        )
+
+        monkeypatch.setenv("REALYTICS_TENANT_ISOLATION_MODE", "strict")
+        mismatch = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            headers=orchestration_auth_headers(
+                user_id="pytest-other-tenant-analyst",
+                tenant_id="tenant-b",
+                role="analyst",
+            ),
+            json={"workflow": "cash_flow"},
+        )
+        scoped = client.post(
+            f"/projects/{project_id}/orchestration/run-workflow",
+            headers=orchestration_auth_headers(
+                user_id="pytest-tenant-analyst",
+                tenant_id="tenant-a",
+                role="analyst",
+            ),
+            json={},
+        )
+    finally:
+        projects.PROJECTS_DB.pop(project_id, None)
+
+    assert forbidden.status_code == 403
+    assert forbidden.json()["detail"]["requiredPermission"] == "project:analyze"
+    assert mismatch.status_code == 403
+    assert mismatch.json()["detail"]["error"] == "tenant_scope_mismatch"
+    # Missing workflow reaches route validation only after auth and tenant checks.
+    assert scoped.status_code == 422
+    assert scoped.json()["detail"] == "Missing 'workflow' selection"
+
+
 def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     # Force the deterministic consensus coordinator so this test verifies the
     # deterministic path regardless of any AI provider key in the dev .env
@@ -73,15 +219,33 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
 
     res = client.post(
         f"/projects/{project_id}/orchestrations/pf-review",
-        json={"options": {"requested_by": "pytest"}},
+        headers=orchestration_auth_headers(),
+        json={
+            "options": {
+                "requested_by": "pytest",
+                "law_context": {
+                    "connected": True,
+                    "references": [
+                        {
+                            "lawId": "caller-only-law",
+                            "lawName": "Caller-only legal assertion",
+                            "url": "https://untrusted.example/legal",
+                            "apiKey": "must-not-persist",
+                        }
+                    ],
+                },
+            }
+        },
     )
 
     assert res.status_code == 200
     run = res.json()
     assert run["workflow"] == PF_REVIEW_WORKFLOW
-    assert run["status"] == "completed"
-    assert run["user_id"] == "pytest"
-    assert run["ai_connection"]["user_id"] == "pytest"
+    assert run["status"] == "completed_with_warnings", run["errors"]
+    # The authenticated principal is authoritative. A caller-supplied
+    # requested_by value must not be able to spoof the orchestration actor.
+    assert run["user_id"] == "pytest-orchestrator"
+    assert run["ai_connection"]["user_id"] == "pytest-orchestrator"
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
     assert len(run["handoffs"]) >= 8
     assert set(run["agentProgress"]) == {key for key, _ in PF_REVIEW_STEPS}
@@ -104,7 +268,8 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     }
     AgentHandoffEnvelope.model_validate(run["handoffs"][0])
     AgentProgress.model_validate(run["agentProgress"]["marketability_analysis"])
-    assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["qualityCheck"]["pass"] is False
+    assert run["artifacts"]["qualityCheck"]["pdfVisualQA"]["status"] == "baseline_created"
     assert run["artifacts"]["qualityCheck"]["gateType"] == "report_completeness"
     assert run["artifacts"]["approvalReadinessGate"]["analysisType"] == "approval_readiness_gate"
     assert run["artifacts"]["approvalReadinessGate"]["gateType"] == "approval_readiness"
@@ -115,7 +280,7 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert run["agentProgress"]["cross_agent_reconciliation"]["status"] == "completed"
     deal_opt = run["artifacts"]["dealOptimization"]
     assert deal_opt["analysisType"] == "deal_optimization"
-    assert deal_opt["verdict"] in {"approvable", "negotiable_conditional", "not_recommended"}
+    assert deal_opt["verdict"] in {"approvable", "negotiable_conditional", "rework_required", "not_recommended"}
     assert "verdictLabel" in deal_opt
     assert run["agentProgress"]["deal_optimization"]["status"] == "completed"
     consensus = run["artifacts"]["consensusResolution"]
@@ -131,15 +296,38 @@ def test_pf_review_orchestration_completes_and_saves_report(monkeypatch):
     assert run["artifacts"]["developerFeasibility"]["analysisType"] == "developer_and_pf_feasibility"
     assert run["artifacts"]["marketabilityAnalysis"]["applicable"] is True
     assert run["artifacts"]["legalPermitReview"]["mcp"]["requested"] is True
+    legal_intelligence = run["artifacts"]["legalPermitReview"][
+        "legalIntelligence"
+    ]
+    assert legal_intelligence["evidenceStatus"] == "unverified"
+    assert legal_intelligence["verifiedReferenceCount"] == 0
+    assert legal_intelligence["candidateReferenceCount"] == 1
+    assert run["artifacts"]["legalPermitReview"]["reportEligible"] is False
+    assert run["artifacts"]["approvalReadinessGate"]["pass"] is False
+    assert "LEGAL_EVIDENCE_TRUSTED" in {
+        gate["code"]
+        for gate in run["artifacts"]["approvalReadinessGate"]["blockers"]
+    }
+    assert "must-not-persist" not in str(
+        legal_intelligence["candidateReferences"]
+    )
     assert run["artifacts"]["riskRegister"]["analysisType"] == "risk_register"
     assert run["agentProgress"]["risk_register_generation"]["status"] == "completed"
     assert run["artifacts"]["creditReviewDecision"]["analysisType"] == "credit_review_decision"
     assert run["agentProgress"]["credit_review_decision"]["status"] == "completed"
     assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
-    assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "completed"
+    assert run["artifacts"]["restructuringPlan"]["status"] == "skipped"
+    assert run["agentProgress"]["scenario_restructuring_plan"]["status"] == "skipped"
     developability = run["artifacts"]["developabilityScore"]
+    saved_scenario = run["artifacts"].get("scenariosEvaluation")
+    if saved_scenario:
+        report_metrics = run["artifacts"]["phase11Report"]["report"]["sections"]["businessFeasibility"]["metrics"]
+        assert report_metrics["unsoldLtvBase"] == saved_scenario["unsoldLtvMatrix"]["summary"]["baseCaseLtv"]
     assert developability["analysisType"] == "developability_score_v1"
-    assert developability["grade"] in {"A", "B", "C", "D", "E"}
+    # This fixture has no server-verified regulatory snapshot. The
+    # developability contract must not invent a report-grade score from
+    # unverified legal inputs, so ``not_assessable`` is the safe result.
+    assert developability["grade"] in {"A", "B", "C", "D", "E", "not_assessable"}
     assert isinstance(developability["overallScore"], (int, float))
     assert run["agentProgress"]["developability_score"]["status"] == "completed"
     assert (
@@ -232,7 +420,6 @@ def test_chief_deal_orchestration_plan_endpoint_returns_ai_deal_room_contract():
         "/projects/",
         json={
             "project": {"name": "Chief Deal Test", "status": "draft"},
-            "source_documents": [{"documentType": "business_plan", "originalFileName": "business.pdf"}],
             "land": {"pnu": "1111010100100010000"},
             "feasibility_input": {"total_revenue": 1000, "total_cost": 800},
         },
@@ -240,6 +427,10 @@ def test_chief_deal_orchestration_plan_endpoint_returns_ai_deal_room_contract():
     )
     assert created.status_code == 200
     project_id = created.json()["project"]["id"]
+    projects.source_document_repository().save_upload_metadata(
+        project_id,
+        {"documentType": "business_plan", "originalFileName": "business.pdf"},
+    )
 
     res = client.post(
         f"/projects/{project_id}/chief-orchestration/plan",
@@ -250,6 +441,14 @@ def test_chief_deal_orchestration_plan_endpoint_returns_ai_deal_room_contract():
     assert res.status_code == 200
     plan = res.json()
     ChiefDealOrchestrationPlan.model_validate(plan)
+    revision = plan["preflightInputRevision"]
+    assert len(revision) == 64 and set(revision) <= set("0123456789abcdef")
+    from use_cases.chief_preflight_review import source_revision
+
+    assert revision == source_revision(
+        projects._hydrated_project_source(project_id, {}),
+        plan["taskGraph"]["workflowTrack"],
+    )
     assert plan["analysisPurpose"] == "pf_credit_review"
     assert len(plan["agentPods"]) == 6
     assert plan["taskGraph"]["nodes"]
@@ -761,9 +960,10 @@ def test_pilot_input_package_template_runs_orchestration():
 
     run = OrchestrationAgent().run_pf_review("pilot-template-test", payload)
 
-    assert run["status"] == "completed"
+    assert run["status"] == "completed_with_warnings", run["errors"]
     assert len(run["steps"]) == len(PF_REVIEW_STEPS)
-    assert run["artifacts"]["qualityCheck"]["pass"] is True
+    assert run["artifacts"]["qualityCheck"]["pass"] is False
+    assert run["artifacts"]["qualityCheck"]["pdfVisualQA"]["status"] == "baseline_created"
     assert run["artifacts"]["approvalReadinessGate"]["analysisType"] == "approval_readiness_gate"
     assert run["artifacts"]["creditReviewDecision"]["decision"] in {
         "approve",
@@ -772,6 +972,12 @@ def test_pilot_input_package_template_runs_orchestration():
         "reject_recommended",
     }
     assert run["artifacts"]["restructuringPlan"]["analysisType"] == "pf_restructuring_plan"
+    assert run["approvalStatus"] in {"not_requested", "pending"}
+    assert run["approvalReadinessStatus"] in {
+        "ready_for_approval",
+        "not_ready_for_approval",
+    }
+    assert run["approvalStatus"] != run["approvalReadinessStatus"]
     assert run["errors"] == []
 
 
@@ -801,6 +1007,7 @@ def test_restructuring_cure_is_attached_to_next_pf_review_run():
 
     run = client.post(
         f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
         json={"options": {"requested_by": "pytest-cure"}},
     ).json()
     adopted = run["artifacts"]["restructuringPlan"]["adoptedCures"]
@@ -819,7 +1026,19 @@ def test_restructuring_cure_is_attached_to_next_pf_review_run():
 def test_pf_review_orchestration_can_be_retrieved_and_approved():
     client = TestClient(app)
     project_id = project_with_discount_triggers(client)
-    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    reviewer_headers = orchestration_auth_headers(
+        user_id="pytest-workflow-reviewer",
+        role="reviewer",
+    )
+    approver_headers = orchestration_auth_headers(
+        user_id="pytest-independent-approver",
+        role="reviewer",
+    )
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
 
     fetched = client.get(f"/projects/{project_id}/orchestrations/{run['run_id']}").json()
     assert fetched["run_id"] == run["run_id"]
@@ -827,9 +1046,10 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
     handoff_id = fetched["handoffs"][0]["handoffId"]
     needs_revision = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff_id}/review",
+        headers=reviewer_headers,
         json={
             "review_status": "needs_revision",
-            "reviewed_by": "credit_officer",
+            "reviewed_by": "spoofed-credit-officer",
             "comment": "Handoff needs workflow QA follow-up",
         },
     ).json()
@@ -839,6 +1059,7 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
 
     blocked_approval = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",
+        headers=approver_headers,
         json={"approved_by": "credit_officer", "comment": "Should be blocked"},
     )
     assert blocked_approval.status_code == 409
@@ -846,25 +1067,27 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
 
     reviewed = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff_id}/review",
+        headers=reviewer_headers,
         json={
             "review_status": "approved",
-            "reviewed_by": "credit_officer",
+            "reviewed_by": "spoofed-credit-officer",
             "comment": "Handoff accepted for workflow QA",
         },
     ).json()
     reviewed_handoff = next(item for item in reviewed["handoffs"] if item["handoffId"] == handoff_id)
     assert reviewed_handoff["reviewStatus"] == "approved"
     assert reviewed_handoff["status"] == "accepted"
-    assert reviewed_handoff["reviewedBy"] == "credit_officer"
+    assert reviewed_handoff["reviewedBy"] == "pytest-workflow-reviewer"
     assert reviewed_handoff["reviewHistory"][-1]["reviewComment"] == "Handoff accepted for workflow QA"
 
     for handoff in reviewed["handoffs"]:
         if handoff["reviewStatus"] in {"pending", "rejected", "needs_revision"}:
             reviewed = client.post(
                 f"/projects/{project_id}/orchestrations/{run['run_id']}/handoffs/{handoff['handoffId']}/review",
+                headers=reviewer_headers,
                 json={
                     "review_status": "approved",
-                    "reviewed_by": "credit_officer",
+                    "reviewed_by": "spoofed-credit-officer",
                     "comment": "Remaining handoff accepted for workflow QA",
                 },
             ).json()
@@ -873,13 +1096,20 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
         if risk.get("requiresHumanReview"):
             reviewed = client.post(
                 f"/projects/{project_id}/orchestrations/{run['run_id']}/risk-register/{risk['riskId']}/review",
+                headers=reviewer_headers,
                 json={
                     "review_status": "waived",
-                    "reviewed_by": "credit_officer",
+                    "reviewed_by": "spoofed-credit-officer",
                     "comment": "Risk accepted for workflow QA.",
                     "waiver_reason": "Test run waiver.",
                 },
             ).json()
+            reviewed_risk = next(
+                item
+                for item in reviewed["artifacts"]["riskRegister"]["risks"]
+                if item["riskId"] == risk["riskId"]
+            )
+            assert reviewed_risk["reviewedBy"] == "pytest-workflow-reviewer"
 
     persisted_after_review = client.get(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/risk-register"
@@ -889,20 +1119,28 @@ def test_pf_review_orchestration_can_be_retrieved_and_approved():
         for risk in persisted_after_review["risks"]
     )
 
-    approved = client.post(
+    final_approval = client.post(
         f"/projects/{project_id}/orchestrations/{run['run_id']}/approve",
+        headers=approver_headers,
         json={"approved_by": "credit_officer", "comment": "Reviewed for workflow QA"},
+    )
+    assert final_approval.status_code == 409
+    assert "Approval Readiness Gate must pass" in final_approval.json()["detail"]
+
+    # Completing every human review does not make synthetic or weakly sourced
+    # evidence authoritative. Final approval must remain fail-closed until the
+    # independently evaluated readiness gate passes.
+    persisted = client.get(
+        f"/projects/{project_id}/orchestrations/{run['run_id']}"
     ).json()
-    assert approved["status"] == "completed"
-    assert approved["executionStatus"] == "completed"
-    assert approved["approvalStatus"] == "approved"
-    assert approved["approval"]["approved_by"] == "credit_officer"
+    assert persisted["executionStatus"] == "completed_with_warnings"
+    assert persisted["approvalStatus"] != "approved"
 
     summaries = client.get(f"/projects/{project_id}/orchestrations").json()
     assert any(
         item["run_id"] == run["run_id"]
-        and item["executionStatus"] == "completed"
-        and item["approvalStatus"] == "approved"
+        and item["executionStatus"] == "completed_with_warnings"
+        and item["approvalStatus"] != "approved"
         for item in summaries
     )
 
@@ -966,7 +1204,7 @@ def test_upload_and_run_creates_orchestration(monkeypatch):
     assert res.status_code == 200
     body = res.json()
     assert body["status"] == "completed"
-    assert body["run"]["status"] == "completed"
+    assert body["run"]["status"] == "completed_with_warnings", body["run"]["errors"]
     assert body["run"]["user_id"] == "upload-test"
     assert body["run"]["artifacts"]["reportRecord"]["run_id"] == body["run"]["run_id"]
     assert body["run"]["artifacts"]["projectSnapshot"]["runId"] == body["run"]["run_id"]
@@ -1038,8 +1276,20 @@ def test_pf_review_persists_market_evidence_records():
     ).json()
     project_id = created["project"]["id"]
 
-    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
-    records = client.get(f"/projects/{project_id}/market-evidence", params={"run_id": run["run_id"]}).json()
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
+    reviewer_headers = orchestration_auth_headers(
+        user_id="pytest-market-reviewer",
+        role="reviewer",
+    )
+    records = client.get(
+        f"/projects/{project_id}/market-evidence",
+        headers=reviewer_headers,
+        params={"run_id": run["run_id"]},
+    ).json()
 
     assert run["artifacts"]["marketEvidenceReview"]["evidenceSummary"]["evidenceRecordCount"] == 2
     assert len(records) == 2
@@ -1047,18 +1297,29 @@ def test_pf_review_persists_market_evidence_records():
     assert all(record["runId"] == run["run_id"] for record in records)
     assert all(record["sourceDocument"]["originalFileHash"] == "hash-market-study" for record in records)
 
-    reviewed = client.post(
+    unauthenticated = client.post(
         f"/projects/{project_id}/market-evidence/review",
         json={
             "record_key": records[0]["recordKey"],
             "review_status": "approved",
-            "reviewed_by": "market_analyst",
+        },
+    )
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["detail"]["scope"] == "review_actor"
+
+    reviewed = client.post(
+        f"/projects/{project_id}/market-evidence/review",
+        headers=reviewer_headers,
+        json={
+            "record_key": records[0]["recordKey"],
+            "review_status": "approved",
+            "reviewed_by": "spoofed-market-analyst",
             "comment": "Comparable evidence accepted.",
         },
     ).json()
 
     assert reviewed["reviewStatus"] == "approved"
-    assert reviewed["reviewedBy"] == "market_analyst"
+    assert reviewed["reviewedBy"] == "pytest-market-reviewer"
     assert reviewed["reviewHistory"][-1]["reviewComment"] == "Comparable evidence accepted."
 
 
@@ -1099,7 +1360,11 @@ def test_approved_assumption_override_is_attached_to_pf_review_run():
     listed = client.get(f"/projects/{project_id}/assumption-overrides").json()
     assert listed["records"][0]["checkKey"] == "sales_revenue_consistency"
 
-    run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
     data_quality = run["artifacts"]["dataQualityReview"]
     sales_check = next(check for check in data_quality["checks"] if check["key"] == "sales_revenue_consistency")
     assert sales_check["status"] == "overridden"
@@ -1117,7 +1382,11 @@ def test_approved_assumption_override_is_attached_to_pf_review_run():
     assert revoke_response.status_code == 200
     assert revoke_response.json()["records"][0]["status"] == "revoked"
 
-    revoked_run = client.post(f"/projects/{project_id}/orchestrations/pf-review", json={}).json()
+    revoked_run = client.post(
+        f"/projects/{project_id}/orchestrations/pf-review",
+        headers=orchestration_auth_headers(),
+        json={},
+    ).json()
     revoked_data_quality = revoked_run["artifacts"]["dataQualityReview"]
     revoked_sales_check = next(check for check in revoked_data_quality["checks"] if check["key"] == "sales_revenue_consistency")
     assert revoked_sales_check["status"] != "overridden"

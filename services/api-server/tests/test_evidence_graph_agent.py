@@ -161,3 +161,72 @@ def test_evidence_graph_agent_links_report_sections_claims_and_evidence():
     assert "source:archive-1" in risk["evidenceGraphLinks"]["sourceDocumentNodeIds"]
     assert any(edge["to"] == "report_section:marketAnalysis" for edge in graph["edges"])
     assert graph["unlinkedReportSections"] == []
+
+
+def test_consensus_candidate_review_cannot_supply_formal_graph_evidence():
+    def surface(label, path):
+        return {
+            "rawText": label,
+            "canonicalField": "project.totalCost",
+            "sourceLocator": {"path": path},
+        }
+
+    run = {
+        "project_id": "p-1",
+        "run_id": "run-1",
+        "artifacts": {
+            "pfStructure": {"ltv": 50, "evidenceId": "baseline-evidence"},
+            # Existing preliminary legal provenance remains visible. Only the
+            # new consensus proposal branch is excluded from the formal graph.
+            "legalPermitReview": {
+                "analysisOnly": True,
+                "reportEligible": False,
+                "evidenceId": "legal-preview-evidence",
+                "termSurface": surface("legal-preview-term", "legal.preview"),
+            },
+            "consensusResolution": {
+                "evidenceId": "consensus-baseline-evidence",
+                "termSurface": surface("baseline-term", "baseline.path"),
+                "candidateReview": {
+                    "analysisOnly": True,
+                    "reportEligible": False,
+                    "approvalStatus": "pending_approval",
+                    "artifacts": {
+                        "pfStructure": {
+                            "ltv": 999,
+                            "evidenceId": "candidate-only-evidence",
+                            "termSurface": surface("candidate-only-term", "candidate.only"),
+                        }
+                    },
+                    "reconciliation": {
+                        "checks": [{"evidenceIds": ["candidate-reconciliation-evidence"]}]
+                    },
+                },
+            },
+        },
+    }
+
+    graph = EvidenceGraphAgent().build({}, run)
+    nodes = {node["id"]: node for node in graph["nodes"]}
+
+    assert nodes["claim:pfStructure:ltv"]["metadata"]["value"] == 50
+    assert "evidence:baseline-evidence" in nodes
+    assert "evidence:consensus-baseline-evidence" in nodes
+    assert "evidence:legal-preview-evidence" in nodes
+    assert {node["label"] for node in graph["nodes"] if node["type"] == "term_surface"} == {
+        "baseline-term", "legal-preview-term",
+    }
+    assert {node["metadata"]["path"] for node in graph["nodes"] if node["type"] == "source_locator"} == {
+        "baseline.path", "legal.preview",
+    }
+    assert "evidence:candidate-only-evidence" not in nodes
+    assert "evidence:candidate-reconciliation-evidence" not in nodes
+    assert graph["summary"]["evidenceCount"] == 3
+    assert graph["summary"]["termSurfaceCount"] == 2
+    assert graph["summary"]["sourceLocatorCount"] == 2
+    assert any(
+        edge["from"] == "evidence:consensus-baseline-evidence"
+        and edge["to"] == "artifact:consensusResolution"
+        and edge["relation"] == "supports"
+        for edge in graph["edges"]
+    )

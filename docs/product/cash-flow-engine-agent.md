@@ -1,11 +1,29 @@
 # Cash Flow Engine / Cash Flow Agent Roadmap
 
-Updated: 2026-05-18  
+Updated: 2026-07-16
 Project: REALYTICS AI LAB  
 Module Code: P1-Calculation-CashFlow-Scenario-Engine  
 Agent Name: Cash Flow Engine / Cash Flow Agent  
 
 ## 1. Purpose
+
+### 2026-11-18 사업수지 분석 경로
+
+- 월별 엔진은 상환용 제한현금을 제외한 운영계정의 최초 부족 기간, 최대 부족액,
+  기말 미충당 의무를 기록한다. 총현금·Max Minus·PF 한도와 운영 부족액은 별도 지표다.
+  미충당 의무는 모델의 지급 계획에서 발생한 부족분이며 실제 미지급 거래 증빙과 구분한다.
+- 상봉 일반분양 Excel 대사 API는 프로젝트의 원본 연결과 검토 입력을 확인한다.
+  입력 셀의 마지막 저장값, 현재 검토 금액과 차이, 같은 예산 정책으로 재계산한 지표를
+  제공한다. 보관 원본 재확인에서 8개 지표가 일치했고, 기존 검토안의 3개 변경도 검출했다.
+  185개 원본 순서와 53개 예산 계산 행의 날짜 대응은 별도 검토 범위다.
+- `POST /projects/{id}/feasibility/model-review`의 `dated_financing`은 명시 입력을
+  사용해 ACT/365F, ACT/360 이자, 인출 조건·한도, 만기 의무와 상환 부족액을 검토한다.
+  기간 내 단리와 비회전 약정을 지원한다. 만기 이후 추가 이자·상환은 별도 검토한다.
+- 같은 API의 `rental_exit`은 입력된 기간별 임대 운영, 제한 보증금, LTV·DSCR·Debt Yield·약정한도,
+  만기일 차환, 매각 정산, 투자자별 원금 순위 및 잔여현금 비율을 계산한다.
+  임대차별 자동 수납 스케줄, 고급 투자자 배분, 법정 세액 자동 적용은 후속 범위다.
+- 두 모형은 프로젝트 분석 권한을 사용하고 명시 저장 시 기존 `CalculationRun`에
+  입력·사유·결과·버전을 기록한다. 승인 권한과 보고서 적격 상태는 기존 업무 흐름에서 관리한다.
 
 The Cash Flow Engine is the central numerical engine connecting REALYTICS feasibility intelligence with PLATFORM9 PF review intelligence.
 
@@ -30,7 +48,45 @@ Business feasibility
 
 The engine should remain deterministic, auditable, and source-metadata aware.
 
-## 1.1 Required Upstream Integration
+## 1.1 Canonical Workbook Boundary (Implemented 2026-07-16)
+
+- The default API path maps an explicitly approved
+  `canonicalFeasibilityStudyV2` directly to `CashFlowRunRequest`; it no longer
+  rebuilds and drops approved monthly rows through the development-analysis
+  draft path.
+- Candidate workbook drafts are not project authority and cannot feed
+  report-grade runs.
+- Workbook approval depends on the actual project-scoped archive object. The
+  approval workflow reads the stored bytes again and requires their recomputed
+  SHA-256 to match the archived source and server validation; project metadata
+  alone cannot attest that an approved source exists.
+- Generic project CRUD rejects server-managed source/archive, canonical
+  feasibility, approval, and regulatory authority fields. Those fields can be
+  written only through their dedicated server workflows.
+- A complete Cash Flow request supplied through `requestType`,
+  `cashFlowRunRequest`, or `cashFlowRunRequestDraft` is deep-copied, rebound to
+  the route project identity, and treated as `candidate`/`unapproved`.
+  Caller-provided `sourceMetadata.approvalStatus`, approval objects, monthly
+  cost-schedule approval, collection-allocation approval, and
+  `reportEligible` flags are not authority. The approved provenance is retained
+  only for the server-generated request mapped from the approved canonical
+  study.
+- Equity remains in `sourcesAndUses.funding.equity` but is excluded from
+  `pfStructure` and PF draw capacity.
+- `mezzanine` is canonical; `middle` is a legacy V2 adapter alias.
+- Bonri legacy cash-flow events are classified by row contract, converted from
+  KRW millions to KRW, and reconciled to the workbook current-period and
+  cumulative cash rows.
+- Missing approved collection/allocation rules still make the aggregate run
+  report-ineligible. A complete tranche interest/fee/repayment ledger remains
+  follow-up work.
+- Downstream Deal Optimization requires a separately verified regulatory
+  approval decision to clear its legal gate; a project/artifact cannot authorize
+  itself with `reportGrade=true` or a self-described passing binding check.
+  Production resolution of that decision from the regulatory approval
+  repository remains follow-up work.
+
+## 1.2 Required Upstream Integration
 
 The Cash Flow Engine must be integrated with the Development Feasibility Agent and the `realytics-feasibility-study-v2` schema.
 
@@ -136,7 +192,7 @@ DevelopmentFeasibilityAgent output
 | `raw_import.productMonthlySalesRateScenarios` | `productMix[*].collectionSteps`, `monthlyCollectionAmounts`, `monthlyCollectionRates`, `cumulativeCollectionRates` | Preserve workbook-derived contract/interim/balance timing and source locator; explicit monthly amounts take precedence over asset defaults |
 | `revenue_items` | `sourcesAndUses.revenue` | Classify sales, lease deposit, forward sale, refinancing, and other revenue |
 | `cost_items` | `sourcesAndUses.cost` and monthly cost schedule | Classify land, construction, indirect, marketing, tax, trust, finance, contingency, and other costs |
-| `financing` | `pfStructure` and `sourcesAndUses.funding` | Map senior/middle/junior/equity/bridge tranches and terms |
+| `financing` | `pfStructure` and `sourcesAndUses.funding` | Map senior/mezzanine/junior/bridge debt and Equity separately; legacy `middle` normalizes to mezzanine |
 | `schedule` | `project.constructionStartDate`, `project.completionDate`, `project.loanMaturityDate`, month index | Used to build monthly rows |
 | `scenarios` | `salesRateScenario` and `CashFlowScenarioSet` | Map base/downside/upside factors and delay assumptions |
 | `metrics` | Cash Flow summary seed | Existing max minus / LTV / exit sale rate can be used as reconciliation checks |
@@ -183,6 +239,10 @@ Current implementation exists at the pure-function level.
 | Sales collection schedule by product | Implemented with workbook-derived explicit schedules first, then asset profile defaults when no product schedule exists |
 | Operating / repayment account allocation | Implemented as baseline 75/25 pre-completion split and post-completion sweep |
 | Cash Flow API workflow | Implemented for `POST /projects/{project_id}/cash-flow/run` |
+| External direct-request authority boundary | Implemented: route-project binding and forced `candidate`/`unapproved` provenance |
+| Parser V2 open-`SourceConflict` check during workbook approval | Not implemented; exact document/candidate-set repository binding remains follow-up |
+| Full monthly tranche opening/draw/interest/fee/repayment/ending replay | Not implemented |
+| Regulatory approval-repository resolution for report-grade legal gate | Not implemented; self-attestation is rejected |
 | Cash Flow Review UI | Not implemented |
 | Report fragment generator | Implemented as baseline text fragments |
 
@@ -275,8 +335,6 @@ The Cash Flow Agent should produce the following output:
       "taxAndDues": 0,
       "financialCost": 0,
       "contingency": 0,
-      "pfRepayment": 0,
-      "equityReturn": 0,
       "developerProfit": 0,
       "otherCost": 0
     },
@@ -291,6 +349,10 @@ The Cash Flow Agent should produce the following output:
   }
 }
 ```
+
+PF principal repayment and Equity recovery are financing/equity transfers, not
+project cost. They remain separate monthly event buckets and must never be
+added to `totalProjectCost` or refinanced as a new cost draw.
 
 ### 6.3 Product Mix
 
@@ -624,9 +686,14 @@ Remaining logistics hardening:
 ### 8.1 Max Minus
 
 ```text
-Max Minus = minimum cumulative cash flow across project period
-Recommended PF limit = abs(Max Minus) + finance cost buffer + contingency + DSRA
+Pre-financing Max Minus = minimum cumulative operating inflow minus project cost
+Recommended PF limit = abs(Pre-financing Max Minus) + approved buffers
 ```
+
+The Bonri workbook's row-130 cumulative cash is retained as a separate legacy
+reconciliation series because it includes financing and sponsor-capital
+events. It must not be silently presented as the engine's pre-financing Max
+Minus.
 
 ### 8.2 Exit Sale Rate
 
@@ -780,7 +847,10 @@ Status:
 - `DevelopmentFeasibilityAgent` now emits `feasibilityStudyV2Draft`, a schema-valid draft for `realytics-feasibility-study-v2`.
 - `agents/cash_flow_mapper.py` now emits asset-aware `cashFlowRunRequestDraft` payloads from `FeasibilityStudyV2`.
 - `agents/cash_flow_engine.py` now consumes `CashFlowRunRequest` and generates sales collection, account allocation, tranche-aware PF draw, monthly cash flow, Max Minus, risk flags, and report fragments.
-- Remaining work is advanced scenario workflow: persistence, best/base/downside/stress/recovery scenario runner, waterfall integration, unsold LTV matrix, and Cash Flow Review UI.
+- Remaining authority/calculation work includes Parser V2 `SourceConflict`
+  repository binding during workbook approval, full tranche-level monthly replay,
+  and production regulatory approval-repository resolution. Advanced scenario
+  orchestration and the Cash Flow Review UI also remain follow-up work.
 
 ### Sprint 2: Pure Calculation Wrappers
 

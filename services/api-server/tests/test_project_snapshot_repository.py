@@ -1,6 +1,8 @@
 from db.repositories.project_snapshot_repository import (
     PROJECT_SNAPSHOT_SCHEMA_VERSION,
     ProjectSnapshotRepository,
+    project_snapshot_content_hash,
+    verify_project_snapshot_hash,
 )
 
 
@@ -59,9 +61,49 @@ def test_project_snapshot_repository_builds_case_comparison_seed():
 
     assert persisted["called"] is True
     assert snapshot["schemaVersion"] == PROJECT_SNAPSHOT_SCHEMA_VERSION
+    assert snapshot["snapshotHash"].startswith("sha256:")
+    assert verify_project_snapshot_hash(snapshot) is True
     assert snapshot["snapshotId"] == "snapshot-run-1"
     assert snapshot["caseComparisonSeed"]["pfAmount"] == 50_000
     assert snapshot["caseComparisonSeed"]["marketabilityGrade"] == "B"
     assert snapshot["report"]["sectionKeys"] == ["cover", "risk"]
     assert repo.get("p-1", "snapshot-run-1") == snapshot
+    assert repo.list_metadata("p-1")[0]["snapshotHash"] == snapshot["snapshotHash"]
     assert repo.list_metadata("p-1")[0]["reconciliationStatus"] == "clear"
+
+
+def test_project_snapshot_hash_excludes_mutable_outcome_but_detects_review_tampering():
+    store = {}
+    repo = ProjectSnapshotRepository(store, lambda: None)
+    snapshot = repo.create_from_run(
+        "p-1",
+        {"project": {"id": "p-1", "name": "Immutable review"}},
+        {
+            "run_id": "run-1",
+            "workflow": "pf-review",
+            "status": "completed",
+            "steps": [],
+            "artifacts": {"qualityCheck": {"pass": True}},
+        },
+    )
+    sealed_hash = snapshot["snapshotHash"]
+
+    updated = repo.upsert_historical_outcome(
+        "p-1",
+        "snapshot-run-1",
+        {
+            "actualSalesRate": 0.88,
+            "repaymentCompleted": True,
+            "eodOccurred": False,
+            "lossOccurred": False,
+        },
+        updated_by="reviewer-1",
+    )
+
+    assert updated is snapshot
+    assert snapshot["snapshotHash"] == sealed_hash
+    assert project_snapshot_content_hash(snapshot) == sealed_hash
+    assert verify_project_snapshot_hash(snapshot) is True
+
+    snapshot["quality"]["pass"] = False
+    assert verify_project_snapshot_hash(snapshot) is False
