@@ -49,6 +49,7 @@ def test_cost_basis_keeps_effective_inputs_and_canonical_source_without_runtime_
     data = {
         "project": {"id": "cost-basis", "type": "apartment"},
         "land": {"area_sqm": 100}, "regulation": {"applied_far": 100},
+        "architectural_plan": {"gross_floor_area_sqm": 120},
         "feasibility_input": {"total_revenue": 1000},
         "cost_assumptions": {"construction_cost_per_sqm": 5},
         "schedule": {"construction_start": "M0", "completion": "M2"},
@@ -67,7 +68,12 @@ def test_cost_basis_keeps_effective_inputs_and_canonical_source_without_runtime_
     assert "costSchedule" not in basis and "chief_orchestration_state" not in basis and "ai_context" not in basis
     assert pod_input_snapshot("cost_schedule", data, options=overrides)["developmentFeasibilityInput"] == basis
     result = analyze_development_feasibility_use_case(basis)
-    assert result["costs"]["constructionCost"] == 600
+    assert result["costs"]["constructionCost"] == 720
+    missing_construction_area = {key: value for key, value in basis.items() if key != "architectural_plan"}
+    unconfirmed = analyze_development_feasibility_use_case(missing_construction_area)
+    assert unconfirmed["architecturalProgram"]["grossFloorAreaSqm"] == 100
+    assert unconfirmed["architecturalProgram"]["constructionAreaSqm"] is None
+    assert unconfirmed["costs"]["constructionCost"] == 0
     assert (data, overrides) == original
     data["canonicalFeasibilityStudyV2"]["raw_import"]["approval"]["approvedInputSnapshotId"] = "changed"
     assert basis["canonicalFeasibilityStudyV2"] == canonical
