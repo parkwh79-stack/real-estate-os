@@ -71,8 +71,9 @@ def test_multi_parcel_far_uses_weighted_capacity_not_max_far():
 
     result = build_feasibility_from_program(pd)
 
-    assert result["grossFloorAreaSqm"] == 8000
-    assert result["grossFloorAreaSqm"] != 9000
+    assert result["grossFloorAreaSqm"] is None
+    assert result["buildableEnvelope"]["farCountedGfaCapacitySqm"] == 8000
+    assert "construction_cost" not in result["feasibilityInput"]
     assert result["buildableEnvelope"]["reportGrade"] is False
     assert result["scenarioEligibility"]["eligibility"] == "conditional"
     assert "REGULATORY_BINDING_APPROVAL_REPOSITORY_VERIFICATION" in result["buildableEnvelope"]["warningCodes"]
@@ -93,3 +94,33 @@ def test_missing_parcel_far_does_not_create_aggregate_gfa():
     assert "construction_cost" not in result["feasibilityInput"]
     assert result["buildableEnvelope"]["eligibility"] == "not_assessable"
     assert "PARCEL_LEGAL_FAR_MISSING" in result["buildableEnvelope"]["blockingCodes"]
+
+
+def test_parcel_cost_uses_same_membership_and_partial_area_as_regulation():
+    project = _project()
+    project["land"]["area_sqm"] = 80
+    project["landLedger"] = {"parcels": [
+        {"pnu": "1111010100100010000", "areaSqm": 100, "includedAreaSqm": 80,
+         "legalFar": 200, "officialLandPricePerSqm": 1_000},
+        {"pnu": "1111010100100020000", "areaSqm": 500, "excludedFromProject": True,
+         "legalFar": 300, "officialLandPricePerSqm": 9_000},
+    ]}
+    result = build_feasibility_from_program(project)
+    assert result["feasibilityInput"]["land_cost"] == 80_000
+    assert result["buildableEnvelope"]["siteParcelSnapshot"]["totalIncludedAreaSqm"] == 80
+    basis = result["programAreaBasis"]["land"]
+    assert basis["parcels"][1]["excluded"] and basis["parcels"][1]["estimatedCostKrw"] is None
+
+    project["landLedger"]["parcels"][0]["includedAreaSqm"] = 0
+    unresolved = build_feasibility_from_program(project)
+    assert "land_cost" not in unresolved["feasibilityInput"]
+    assert "total_cost" not in unresolved["feasibilityInput"]
+    assert unresolved["programAreaBasis"]["land"]["status"] == "unconfirmed"
+
+
+def test_estimate_uses_drawing_not_regulatory_capacity_for_construction():
+    project = _project()
+    drawing = {"grossFloorAreaSqm": 900.5, "revision": "R2", "sourceLocator": {"archiveId": "a" * 64, "location": "A-10"}}
+    result = build_feasibility_from_program(project, options={"construction_cost_per_sqm": 1_000_000}, drawing=drawing)
+    assert result["feasibilityInput"]["construction_cost"] == 900_500_000
+    assert result["programAreaBasis"]["construction"]["sourceLocator"] == drawing["sourceLocator"]

@@ -28,7 +28,7 @@ def build_preliminary_buildable_envelope(
     arithmetic candidate remains report-ineligible until an approved regulatory
     snapshot explicitly approves the multi-parcel aggregation policy.
     """
-    parcels = _parcels(project_data)
+    parcels = regulatory_parcels(project_data)
     if not parcels:
         return None
 
@@ -49,19 +49,14 @@ def build_preliminary_buildable_envelope(
     for index, parcel in enumerate(parcels, start=1):
         if not isinstance(parcel, dict):
             continue
-        if _is_excluded(parcel):
+        if is_excluded_parcel(parcel):
             excluded_count += 1
             continue
         lup = parcel.get("landUsePlanning") or parcel.get("land_use_planning") or {}
         if not isinstance(lup, dict):
             lup = {}
         pnu = str(parcel.get("pnu") or lup.get("pnu") or "").strip()
-        area = _positive_decimal(
-            parcel.get("includedAreaSqm")
-            or parcel.get("included_area_sqm")
-            or parcel.get("areaSqm")
-            or parcel.get("area_sqm")
-        )
+        area = included_parcel_area(parcel)
         legal_far = _positive_decimal(
             lup.get("legalFar")
             or lup.get("legal_far")
@@ -314,7 +309,7 @@ def evaluate_program_eligibility(
     }
 
 
-def _parcels(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def regulatory_parcels(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     ledger = project_data.get("landLedger") or project_data.get("land_ledger") or {}
     parcels = ledger.get("parcels") if isinstance(ledger, dict) else None
     if not isinstance(parcels, list):
@@ -322,13 +317,24 @@ def _parcels(project_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [parcel for parcel in parcels if isinstance(parcel, dict)]
 
 
-def _is_excluded(parcel: Dict[str, Any]) -> bool:
+def is_excluded_parcel(parcel: Dict[str, Any]) -> bool:
     return bool(
         parcel.get("excludedFromProject") is True
         or parcel.get("excluded_from_project") is True
         or parcel.get("includedInProject") is False
         or parcel.get("included_in_project") is False
     )
+
+
+def included_parcel_area(parcel: Dict[str, Any]) -> Optional[Decimal]:
+    full_area = _positive_decimal(parcel.get("areaSqm") or parcel.get("area_sqm"))
+    for key in ("includedAreaSqm", "included_area_sqm"):
+        if parcel.get(key) not in (None, ""):
+            included_area = _positive_decimal(parcel[key])
+            if included_area is not None and full_area is not None and included_area > full_area:
+                return None
+            return included_area
+    return full_area
 
 
 def _positive_decimal(value: Any) -> Optional[Decimal]:
@@ -356,12 +362,7 @@ def _parcel_membership_rows(parcels: List[Dict[str, Any]]) -> List[Dict[str, Any
         lup = parcel.get("landUsePlanning") or parcel.get("land_use_planning") or {}
         if not isinstance(lup, dict):
             lup = {}
-        area = _positive_decimal(
-            parcel.get("includedAreaSqm")
-            or parcel.get("included_area_sqm")
-            or parcel.get("areaSqm")
-            or parcel.get("area_sqm")
-        )
+        area = included_parcel_area(parcel)
         legal_far = _positive_decimal(
             lup.get("legalFar")
             or lup.get("legal_far")
@@ -376,7 +377,7 @@ def _parcel_membership_rows(parcels: List[Dict[str, Any]]) -> List[Dict[str, Any
         )
         rows.append({
             "pnu": str(parcel.get("pnu") or lup.get("pnu") or "").strip() or None,
-            "included": not _is_excluded(parcel),
+            "included": not is_excluded_parcel(parcel),
             "areaSqm": str(area.normalize()) if area is not None else None,
             "legalFar": str(legal_far.normalize()) if legal_far is not None else None,
             "legalBcr": str(legal_bcr.normalize()) if legal_bcr is not None else None,

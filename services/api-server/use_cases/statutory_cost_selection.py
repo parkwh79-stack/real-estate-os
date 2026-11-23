@@ -199,6 +199,8 @@ def review_statutory_cost_cash_flow(
 
     previous_items = _previous_cost_items(previous_run, selection)
     request = _external_candidate_request(project, source)
+    if "programAreaBasis" in source:
+        request["programAreaBasis"] = source["programAreaBasis"]
     source_metadata = request["sourceMetadata"]
     source_metadata.update(analysisOnly=True, reportEligible=False, sourceType="statutory_cost_review")
     costs = request["sourcesAndUses"]["cost"]

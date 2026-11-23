@@ -137,11 +137,34 @@ def _registered_source_cash_flow_request(project_data: Dict[str, Any]) -> Dict[s
 
 def _capture_working_input_review(request: Dict[str, Any], project_data: Dict[str, Any]) -> None:
     state = feasibility_review_state(project_data)
+    _capture_program_area_basis(request, project_data)
     request.setdefault("sourceMetadata", {})["inputReview"] = {
         "scope": "working_input_review_not_approval",
         "fieldReviews": deepcopy(state["fieldReviews"]),
         "termReviews": deepcopy(state["termReviews"]),
     }
+
+
+def _capture_program_area_basis(request: dict, project_data: dict) -> None:
+    sources = project_data.get("feasibility_input_sources") or {}
+    costs = (request.get("sourcesAndUses") or {}).get("cost") or {}
+    basis = {}
+    for field, cost_key, basis_key, area_key in (
+        ("land_cost", "landCost", "land", "includedAreaSqm"),
+        ("construction_cost", "directConstructionCost", "construction", "grossFloorAreaSqm"),
+    ):
+        source = sources.get(field) or {}
+        if source.get("source") != "program_composition" or source.get("value") != costs.get(cost_key):
+            continue
+        if "areaBasis" not in source:
+            raise ValueError("기존 추정 비용의 면적 근거를 확인해야 합니다. 사업수지를 다시 구성하세요.")
+        record = source["areaBasis"]
+        if isinstance(record, dict) and record.get("amountKrw") is not None and record["amountKrw"] == costs[cost_key]:
+            basis[basis_key] = deepcopy(record)
+            if record.get(area_key) is not None:
+                request["project"]["landAreaSqm" if basis_key == "land" else area_key] = record[area_key]
+    if basis:
+        request["programAreaBasis"] = basis
 
 
 def _working_input_request(project_data: Dict[str, Any], review: Any) -> Dict[str, Any]:
@@ -265,6 +288,7 @@ def _external_candidate_request(
     # history. Working-input paths attach verified stored records afterwards.
     source_metadata.pop("inputReview", None)
     # Only the project-scoped statutory review route may attach adoption records.
+    candidate.pop("programAreaBasis", None)
     candidate.pop("statutoryCostSelection", None)
     source_metadata.pop("statutoryCostSelection", None)
 

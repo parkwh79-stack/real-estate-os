@@ -14,10 +14,14 @@ import { readPfFollowupExecution } from "../../../../lib/pf-followup-status";
 import { cashFlowRecalculationInput, type CashFlowRecalculationBasis } from "../../../../lib/cash-flow-recalculation";
 import { CashFlowRecalculationBasisSelector } from "../../../../components/feasibility/cash-flow-recalculation-basis";
 
+import { DrawingAreaForm, ProgramAreaBasisPanel } from "../../../../components/feasibility/program-area-review";
+import type { AreaDrawing, ProgramAreaBasis } from "../../../../lib/program-area-basis";
+
 const FEAS_METHOD_LABEL: Record<string, string> = {
   feasibility_workbook_v2: "사업수지 워크북(정본)",
   parsed_fact: "파싱된 사업수지 후보값",
   derived: "토지·규제·상품기획 기반 추정",
+  program_composition: "필지·도면·상품구성 기반 추정",
   no_source: "근거 없음",
 };
 
@@ -64,7 +68,10 @@ export default function ProjectCashflowPage() {
   const [recalculationBasis, setRecalculationBasis] = useState<CashFlowRecalculationBasis>("project");
   const [calculationNotice, setCalculationNotice] = useState<string | null>(null);
   const [buildingFeas, setBuildingFeas] = useState(false);
-  const [feasInfo, setFeasInfo] = useState<{ method?: string; needsReview?: boolean; missing?: string[]; hasRevenueAndCost?: boolean; applied?: boolean } | null>(null);
+  const [feasInfo, setFeasInfo] = useState<{ method?: string; needsReview?: boolean; missing?: string[];
+    hasRevenueAndCost?: boolean; applied?: boolean; staleProgramCosts?: string[];
+    programBreakdown?: { programAreaBasis?: ProgramAreaBasis };
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -140,19 +147,19 @@ export default function ProjectCashflowPage() {
     }
   }, [load, projectId, recalculationBasis]);
 
-  const buildFeasibilityInput = useCallback(async () => {
+  const buildFeasibilityInput = useCallback(async (drawing?: AreaDrawing) => {
     setBuildingFeas(true);
     setError(null);
     try {
       const res = await fetch(`${apiBase}/projects/${projectId}/feasibility/build-input`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders("web") },
-        body: JSON.stringify({ apply: true }),
+        body: JSON.stringify({ apply: true, ...(drawing ? { drawing } : {}) }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(String(body.detail ?? "사업수지 구성에 실패했습니다."));
       setFeasInfo(body);
-      if (body.hasRevenueAndCost) {
+      if (body.applied && body.hasRevenueAndCost) {
         await recalculateCashFlow(); // feasibility_input이 채워졌으니 Cash Flow를 계산
       } else {
         await load();
@@ -164,6 +171,8 @@ export default function ProjectCashflowPage() {
     }
   }, [projectId, recalculateCashFlow, load]);
 
+  const areaBasis = cashflow?.inputSnapshot?.programAreaBasis as ProgramAreaBasis | undefined;
+  const previewAreaBasis = feasInfo?.programBreakdown?.programAreaBasis;
   const rows = useMemo(() => cashflow?.monthly ?? [], [cashflow]);
   const summary = cashflow?.summary ?? {};
   const runId = cashflow?.runId ?? "-";
@@ -200,11 +209,17 @@ export default function ProjectCashflowPage() {
       </header>
 
       <CashFlowRecalculationBasisSelector value={recalculationBasis} onChange={setRecalculationBasis} disabled={loading || running || buildingFeas} />
+      <DrawingAreaForm key={projectId} projectId={projectId} disabled={loading || running || buildingFeas} onSave={buildFeasibilityInput} />
+      {areaBasis ? <ProgramAreaBasisPanel basis={areaBasis} projectId={projectId} saved /> : null}
+      {previewAreaBasis && (!areaBasis || !feasInfo?.applied || !feasInfo.hasRevenueAndCost)
+        ? <ProgramAreaBasisPanel basis={previewAreaBasis} projectId={projectId} saved={false} /> : null}
       {calculationNotice ? <p role="status" className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">{calculationNotice}</p> : null}
       {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div> : null}
       {feasInfo ? (
         <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs font-semibold text-indigo-800">
-          {feasInfo.hasRevenueAndCost
+          {feasInfo.staleProgramCosts?.length
+            ? "기존 추정 비용을 갱신하려면 편입 필지의 공시지가와 시공 연면적을 보완하세요."
+            : feasInfo.hasRevenueAndCost
             ? `사업수지 구성 완료 — 출처: ${FEAS_METHOD_LABEL[feasInfo.method ?? ""] ?? feasInfo.method}${feasInfo.needsReview ? " · 일부 추정값(검토 필요)" : ""}${feasInfo.missing?.length ? ` · 미확보: ${feasInfo.missing.join(", ")}` : ""}`
             : `총수입·총사업비 근거를 찾지 못했습니다. 사업수지 Excel(또는 사업계획서)을 업로드하거나 상품구성·분양가를 입력하세요. (출처: ${FEAS_METHOD_LABEL[feasInfo.method ?? ""] ?? feasInfo.method})`}
         </div>

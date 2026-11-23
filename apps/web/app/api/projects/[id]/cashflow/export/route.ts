@@ -5,6 +5,7 @@ import { fetchAuthenticatedBackend } from "../../../../../../lib/authenticated-b
 import { SCHOOL_EDITION_LABELS, SCHOOL_EVENT_LABELS, type SchoolSiteLawBasis } from "../../../../../../lib/school-site-law-basis";
 import { STATUTORY_AMOUNT_KIND, STATUTORY_COST_INCLUSION, type SavedStatutoryCostSelection,
   type StatutoryAmountKind } from "../../../../../../lib/statutory-cost-review";
+import type { ProgramAreaBasis } from "../../../../../../lib/program-area-basis";
 import { trancheAmounts, amountInEok } from "../../../../../../lib/tranche-display";
 
 export const runtime = "nodejs";
@@ -387,6 +388,31 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       costs.getColumn(column).width = 32;
       costs.getColumn(column).alignment = { vertical: "top", wrapText: true };
     }
+  }
+
+  const areaBasis = input.programAreaBasis as ProgramAreaBasis | undefined;
+  if (purpose === "draft" && areaBasis) {
+    const area = workbook.addWorksheet("07_면적근거");
+    addTitle(area, "토지·시공 면적 근거", "선택한 저장 계산에 반영한 면적과 출처입니다.");
+    setHeader(area.addRow(["항목", "반영 면적(㎡)", "단가(원/㎡)", "반영액(원)", "근거", "문서", "위치", "참조", "원장 면적(㎡)"]));
+    const { land, construction } = areaBasis;
+    if (land) {
+      area.addRow(["토지비 추정", land.includedAreaSqm, land.unitPriceKrw ?? null, land.amountKrw,
+        "공시지가", null, null, land.parcelSetHash ?? null]);
+      for (const row of land.parcels ?? []) {
+        area.addRow([row.pnu ?? "필지 " + row.parcelIndex, row.includedAreaSqm, row.unitPriceKrw, row.estimatedCostKrw,
+          row.excluded ? "제외" : "원장 편입 후보", row.sourceLocator?.sheetName ?? null,
+          row.sourceLocator?.cell ?? row.sourceLocator?.rowNumber ?? null, row.sourceLocator?.archiveId ?? null,
+          row.ledgerAreaSqm ?? null]);
+      }
+    }
+    if (construction) {
+      area.addRow(["공사비 추정", construction.grossFloorAreaSqm, construction.unitPriceKrw, construction.amountKrw,
+        construction.revision ?? "기존 건축계획 입력", construction.sourceLocator?.fileName ?? null,
+        construction.sourceLocator?.location ?? null, construction.sourceLocator?.archiveId ?? null]);
+    }
+    for (const column of [2, 3, 4, 9]) area.getColumn(column).numFmt = "#,##0";
+    area.getColumn(8).width = 32;
   }
 
   for (const sheet of workbook.worksheets) {

@@ -3438,7 +3438,7 @@ def get_project_statutory_cost_review(project_id: str, request: Request, respons
     }
 
 
-def _statutory_cost_sources(project_id: str, project: dict, archive_ids: set[str]) -> dict[str, dict]:
+def _project_archive_sources(project_id: str, project: dict, archive_ids: set[str]) -> dict[str, dict]:
     document_repository = project_source_document_read_repository(project_id, project)
     archive_repository = upload_archive_repository()
     source_documents = {}
@@ -3460,7 +3460,7 @@ def preview_school_site_law_basis(project_id: str, request: Request, response: R
     enforce_project_tenant_scope(request, project)
     source_locator = None
     if event.archiveId:
-        sources = _statutory_cost_sources(project_id, project, {event.archiveId})
+        sources = _project_archive_sources(project_id, project, {event.archiveId})
         source_locator = {**sources[event.archiveId], "location": event.location}
     response.headers["Cache-Control"] = "private, no-store"
     return resolve_school_site_law_basis(event, source_locator)
@@ -3485,7 +3485,7 @@ def calculate_project_statutory_cost_review(project_id: str, request: Request, s
     archive_ids.update(item.paymentEvidence.archiveId for item in selection.items if item.paymentEvidence)
     if selection.schoolSiteEvent and selection.schoolSiteEvent.archiveId:
         archive_ids.add(selection.schoolSiteEvent.archiveId)
-    source_documents = _statutory_cost_sources(project_id, project, archive_ids)
+    source_documents = _project_archive_sources(project_id, project, archive_ids)
     try:
         request_data = review_statutory_cost_cash_flow(project, baseline, selection, source_documents, previous_run)
         if request_data.get("monthlyFinancing") is not None:
@@ -4056,19 +4056,29 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
     product plan·market price·공시지가 (flagged needsReview). With apply=true it
     persists into feasibility_input so Cash Flow / PF produce real numbers. Never
     fabricates a missing value to a made-up number."""
-    if project_id not in _project_store():
-        raise HTTPException(status_code=404, detail="Project not found")
+    from use_cases.feasibility_from_program import DrawingAreaSelection
+
     authorize_request(request, "project:write")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
     payload = input_data or {}
+    drawing = None
+    if payload.get("drawing") is not None:
+        try:
+            selection = DrawingAreaSelection.model_validate(payload["drawing"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="시공 연면적과 보관 도면, 판본 및 위치를 확인하세요.") from exc
+        document = _project_archive_sources(project_id, project, {selection.archiveId})[selection.archiveId]
+        drawing = {"grossFloorAreaSqm": selection.grossFloorAreaSqm, "revision": selection.revision,
+                   "sourceLocator": {**document, "location": selection.location}}
     try:
         parsed_facts = list_deal_state_records(project_id, record_type="parsed_fact")
     except Exception:
         parsed_facts = []
     options = payload.get("options") if isinstance(payload.get("options"), dict) else None
-    draft = build_feasibility_input_draft(_project_store()[project_id], parsed_facts=parsed_facts, options=options)
+    draft = build_feasibility_input_draft(project, parsed_facts=parsed_facts, options=options, drawing=drawing)
     apply = payload.get("apply", True)
-    if apply and draft.get("feasibilityInput"):
-        project = _project_store()[project_id]
+    if apply and draft.get("feasibilityInput") and not (draft["staleProgramCosts"] or draft["programCostsIncomplete"]):
         feasibility_input = dict(project.get("feasibility_input") or {})
         for key, value in draft["feasibilityInput"].items():
             feasibility_input[key] = value
@@ -4076,7 +4086,7 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
         update_payload: Dict[str, Any] = {
             "feasibility_input": feasibility_input,
             "feasibility_input_sources": {
-                key: {**source, "value": draft["feasibilityInput"].get(key)}
+                key: {"areaBasis": None, **source, "value": draft["feasibilityInput"].get(key)}
                 for key, source in (draft.get("fieldSources") or {}).items()
             },
         }
@@ -4108,7 +4118,16 @@ def build_project_feasibility_input(project_id: str, request: Request, input_dat
                 # manually entered product mix.
                 update_payload["product_mix"] = canonical_mix
                 update_payload["product_mix_source"] = "canonical_feasibility_study_v2"
-        project_repository().update(project_id, update_payload)
+        repository = project_repository(request)
+        try:
+            if storage_backend() in {"postgres", "postgresql"}:
+                updated = repository.update(project_id, update_payload, expected_state_version=(project.get("_meta") or {}).get("stateVersion"))
+            else:
+                updated = repository.update(project_id, update_payload)
+        except ProjectVersionConflict as exc:
+            raise HTTPException(status_code=409, detail="사업 자료가 변경되었습니다. 다시 조회한 뒤 구성하세요.") from exc
+        if not updated:
+            raise HTTPException(status_code=404, detail="현재 프로젝트에서 사업수지 입력을 저장할 수 없습니다.")
         draft["applied"] = True
         record_sensitive_project_event(
             request,

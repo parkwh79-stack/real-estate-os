@@ -116,10 +116,14 @@ def test_canonical_status_without_snapshot_binding_is_not_authoritative():
 
 def test_derives_land_and_construction_from_program_flagged_review():
     pd = {"land": {"area_sqm": 5000, "officialLandPricePerSqm": 1_000_000}, "regulation": {"applied_far": 300}}
+    missing = build_feasibility_input_draft(pd)
+    assert missing["programCostsIncomplete"]
+    assert "total_cost" not in missing["feasibilityInput"]
+    assert "construction_cost" not in missing["feasibilityInput"]
+    pd["architectural_plan"] = {"gross_floor_area_sqm": 17000}
     d = build_feasibility_input_draft(pd)
-    assert d["feasibilityInput"]["land_cost"] == 5_000_000_000  # 공시지가 × 면적
-    # GFA = 토지 5000 × FAR 300/100 = 15000㎡ × 공사비 벤치마크 3,000,000
-    assert d["feasibilityInput"]["construction_cost"] == 15000 * 3_000_000
+    assert d["feasibilityInput"]["land_cost"] == 5_000_000_000
+    assert d["feasibilityInput"]["construction_cost"] == 17000 * 3_000_000
     assert d["fieldSources"]["land_cost"]["needsReview"] is True
     # total_cost = land + construction
     assert d["feasibilityInput"]["total_cost"] == d["feasibilityInput"]["land_cost"] + d["feasibilityInput"]["construction_cost"]

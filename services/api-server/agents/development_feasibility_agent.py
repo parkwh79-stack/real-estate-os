@@ -190,7 +190,8 @@ class DevelopmentFeasibilityAgent:
         land_area = land.get("area_sqm", 0)
         applied_far = regulation.get("applied_far", 0)
         applied_bcr = regulation.get("applied_bcr", 0)
-        gross_floor_area = architectural_plan.get("gross_floor_area_sqm") or (
+        construction_area = architectural_plan.get("gross_floor_area_sqm")
+        gross_floor_area = construction_area or (
             land_area * applied_far / 100 if land_area and applied_far else 0
         )
         building_coverage = architectural_plan.get("building_coverage_sqm") or (
@@ -205,6 +206,7 @@ class DevelopmentFeasibilityAgent:
             "appliedFar": applied_far,
             "appliedBcr": applied_bcr,
             "grossFloorAreaSqm": gross_floor_area,
+            "constructionAreaSqm": construction_area,
             "grossFloorAreaPy": sqm_to_py(gross_floor_area),
             "buildingCoverageSqm": building_coverage,
             "saleableAreaSqm": saleable_area,
@@ -241,11 +243,11 @@ class DevelopmentFeasibilityAgent:
         program: Dict[str, Any],
         cost_assumptions: Dict[str, Any],
     ) -> Dict[str, Any]:
-        gross_floor_area_sqm = program["grossFloorAreaSqm"]
+        construction_area_sqm = program["constructionAreaSqm"]
         construction_cost = feasibility.get("construction_cost", 0)
         cost_per_sqm = cost_assumptions.get("construction_cost_per_sqm")
-        if not construction_cost and cost_per_sqm and gross_floor_area_sqm:
-            construction_cost = cost_per_sqm * gross_floor_area_sqm
+        if not construction_cost and cost_per_sqm and construction_area_sqm:
+            construction_cost = cost_per_sqm * construction_area_sqm
 
         land_cost = feasibility.get("land_cost", 0)
         finance_cost = feasibility.get("finance_cost", 0)
@@ -258,8 +260,8 @@ class DevelopmentFeasibilityAgent:
             "financeCost": finance_cost,
             "otherCost": other_cost,
             "totalCost": total_cost,
-            "constructionCostPerSqm": construction_cost / gross_floor_area_sqm if gross_floor_area_sqm else 0,
-            "constructionCostPerPy": construction_cost / program["grossFloorAreaPy"] if program["grossFloorAreaPy"] else 0,
+            "constructionCostPerSqm": construction_cost / construction_area_sqm if construction_area_sqm else 0,
+            "constructionCostPerPy": construction_cost / sqm_to_py(construction_area_sqm) if construction_area_sqm else 0,
             "costRatio": {
                 "land": land_cost / total_cost if total_cost else 0,
                 "construction": construction_cost / total_cost if total_cost else 0,

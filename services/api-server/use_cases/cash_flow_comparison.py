@@ -281,6 +281,8 @@ def _changes(before: Any, after: Any, path: str = "") -> list[dict]:
 
 def _change_label(path: str) -> str:
     key = path.lower()
+    if key.startswith("programareabasis"):
+        return "토지·시공 면적 근거"
     if key.startswith("statutorycostselection"):
         if ".legalbasis" in key:
             return "법정 비용의 검토 사건일·법령 판본"

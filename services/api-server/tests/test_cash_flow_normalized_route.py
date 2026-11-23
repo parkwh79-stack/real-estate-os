@@ -74,3 +74,65 @@ def test_missing_loan_amount_is_explained_without_saving_a_false_calculation(nor
     assert response.status_code == 400, response.text
     assert "미입력" in response.json()["detail"]
     assert saved == []
+
+
+def test_program_area_drawing_uses_project_archive_and_survives_reopen(normalized_cash_flow, monkeypatch):
+    authority, _events, client, saved = normalized_cash_flow
+    archive = "a" * 64
+    authority.row.update({
+        "land": {"area_sqm": 1000},
+        "architectural_plan": {"gross_floor_area_sqm": 1500},
+        "landLedger": {"parcels": [
+            {"pnu": "1111010100100010000", "areaSqm": 1000, "legalFar": 200, "officialLandPricePerSqm": 100_000},
+            {"pnu": "1111010100100020000", "areaSqm": 100, "legalFar": 200, "officialLandPricePerSqm": 100_000,
+             "excludedFromProject": True},
+        ]},
+        "feasibility_input": {"total_revenue": 3_000_000_000},
+        "source_documents": [{"archiveId": archive, "originalFileName": "건축 도면.pdf"}],
+    })
+    monkeypatch.setattr(projects, "list_deal_state_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(projects.UploadArchiveRepository, "resolve_view_metadata",
+                        lambda _self, _project_id, document: {"archiveId": document["archiveId"]})
+
+    endpoint = "/projects/p/feasibility/build-input"
+    drawing = {"grossFloorAreaSqm": 1800.5, "archiveId": archive, "revision": "R2", "location": "A-10 면적표"}
+    foreign = client.post(endpoint, json={"drawing": {**drawing, "archiveId": "f" * 64}})
+    assert foreign.status_code == 422, foreign.text
+    prior = client.post(endpoint, json={"apply": False, "drawing": drawing, "options": {"construction_cost_per_sqm": 1_000_000}})
+    assert prior.status_code == 200, prior.text
+    preview = prior.json()
+    assert preview["applied"] is False
+    assert authority.row["feasibility_input"] == {"total_revenue": 3_000_000_000}
+
+    applied = client.post(endpoint, json={"apply": True, "drawing": drawing, "options": {"construction_cost_per_sqm": 1_000_000}})
+    assert applied.status_code == 200, applied.text
+    body = applied.json()
+    assert body["applied"]
+    assert body["feasibilityInput"]["land_cost"] == 100_000_000
+    assert body["feasibilityInput"]["construction_cost"] == 1_800_500_000
+
+    run = client.post("/projects/p/cash-flow/run", json={})
+    assert run.status_code == 200, run.text
+    reopened = client.get("/projects/p/calculation-runs?engine_key=cash_flow_engine&limit=1").json()["records"][0]
+    assert reopened["calculationRunId"] == run.json()["calculationRunId"]
+    assert reopened["inputSnapshot"]["project"]["grossFloorAreaSqm"] == 1800.5
+    basis = reopened["inputSnapshot"]["programAreaBasis"]
+    assert basis["land"]["parcels"][1]["excluded"]
+    assert basis["construction"]["revision"] == "R2"
+    assert basis["construction"]["sourceLocator"] == {
+        "archiveId": archive, "fileName": "건축 도면.pdf", "location": "A-10 면적표",
+    }
+    assert saved
+
+    change = client.post(endpoint, json={"drawing": {**drawing, "grossFloorAreaSqm": 1750, "revision": "R3"}})
+    assert change.status_code == 200, change.text
+    assert change.json()["feasibilityInput"]["construction_cost"] == 1_750_000_000
+    rerun = client.post("/projects/p/cash-flow/run", json={})
+    assert rerun.status_code == 200, rerun.text
+    from use_cases.cash_flow_comparison import compare_cash_flow_runs
+    latest, original = client.get("/projects/p/calculation-runs?engine_key=cash_flow_engine&limit=2").json()["records"]
+    comparison = compare_cash_flow_runs(original, latest)
+    assert original["inputSnapshot"]["programAreaBasis"]["construction"]["revision"] == "R2"
+    assert latest["inputSnapshot"]["programAreaBasis"]["construction"]["revision"] == "R3"
+    assert any(row["label"] == "토지·시공 면적 근거" for row in comparison["inputChanges"])
+    assert next(row["delta"] for row in comparison["metrics"] if row["key"] == "totalProjectCost") == -50_500_000
