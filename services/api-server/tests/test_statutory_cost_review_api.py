@@ -85,6 +85,9 @@ def test_cost_review_saves_month_totals_and_reopens_exact_input(statutory_api, i
     item = snapshot["statutoryCostSelection"]["items"][0]
     assert item["sourceLocator"] == {"archiveId": ARCHIVE, "fileName": "부담금 고지서.pdf", "location": "고지서 2쪽"}
     assert item["inclusion"] == inclusion
+    assert item["legalBasis"]["editionStatus"] == "event_unconfirmed"
+    assert item["legalBasis"]["edition"] is None
+    assert item["applicability"] == "unknown"
     assert snapshot.pop("financialInputHash") == financial_input_hash(snapshot) == result["financialInputHash"]
     assert authority.row == existing_project
     assert len(saved) > before
@@ -178,3 +181,64 @@ def test_an_existing_positive_charge_blocks_double_count_but_zero_does_not(statu
     assert stored.status_code == 200, stored.text
     payload.update(baseCalculationRunId=stored.json()["calculationRunId"], expectedFinancialInputHash=stored.json()["financialInputHash"])
     assert client.post("/projects/p/statutory-cost-review/calculate", json=payload).status_code == status
+
+
+def test_school_legal_basis_and_actual_event_source_round_trip(statutory_api, monkeypatch):
+    from use_cases import school_site_law_basis as law
+    from test_school_site_law_basis import LawRuntime
+
+    authority, client, saved, base, payload = statutory_api
+    event_archive = "c" * 64
+    authority.row["source_documents"].append({"archiveId": event_archive, "originalFileName": "사업계획 승인서.pdf"})
+    before_project = deepcopy(authority.row)
+    runtime = LawRuntime()
+    monkeypatch.setattr(law, "build_legal_intelligence_service", lambda **kwargs: runtime)
+    event = {"status": "actual", "kind": "approval", "eventDate": "2025-07-31",
+             "archiveId": event_archive, "location": "1쪽 승인일"}
+    endpoint = "/projects/p/statutory-cost-review/school-site-law-basis"
+    assert client.post(endpoint, headers={"x-test-tenant": "tenant-b"}, json=event).status_code == 404
+    assert client.post(endpoint, json={**event, "archiveId": "d" * 64}).status_code == 422
+    assert not runtime.calls
+
+    preview = client.post(endpoint, json=event)
+    assert preview.status_code == 200, preview.text
+    law_basis = preview.json()
+    assert law_basis["editionStatus"] == "edition_verified"
+    assert law_basis["applicability"] == "unknown"
+    payload["schoolSiteEvent"] = {**event, "expectedBasisHash": law_basis["basisHash"]}
+
+    runtime.mismatched_detail = True
+    before_count = len(saved)
+    assert client.post("/projects/p/statutory-cost-review/calculate", json=payload).status_code == 409
+    assert len(saved) == before_count
+
+    runtime.mismatched_detail = False
+    changed = client.post("/projects/p/statutory-cost-review/calculate", json=payload)
+    assert changed.status_code == 200, changed.text
+    reopened = client.get("/projects/p/calculation-runs/" + changed.json()["calculationRunId"]).json()
+    snapshot = reopened["inputSnapshot"]
+    item = snapshot["statutoryCostSelection"]["items"][0]
+    assert item["legalBasis"] == law_basis
+    assert item["applicability"] == "unknown"
+    assert snapshot.pop("financialInputHash") == financial_input_hash(snapshot)
+    assert ARCHIVE in snapshot["inputEvidenceIds"] and event_archive in snapshot["inputEvidenceIds"]
+    assert changed.json()["summary"]["totalProjectCost"] == pytest.approx(base["summary"]["totalProjectCost"] + FEE)
+    assert authority.row == before_project
+
+
+
+def test_same_school_cost_can_change_amount_and_month_without_compounding(statutory_api):
+    _authority, client, records, base, payload = statutory_api
+    endpoint = "/projects/p/statutory-cost-review/calculate"
+    payload["items"][0].update(amountKind="estimate", paymentMonthIndex=1)
+    estimated = client.post(endpoint, json=payload)
+    assert estimated.status_code == 200, estimated.text
+    payload["items"][0].update(amountKind="notified", amountKrw=FEE + 5_000, paymentMonthIndex=2)
+    notified = client.post(endpoint, json=payload)
+    assert notified.status_code == 200, notified.text
+    assert notified.json()["summary"]["totalProjectCost"] == pytest.approx(base["summary"]["totalProjectCost"] + FEE + 5_000)
+    indexed = {record["calculationRunId"]: record for record in records}
+    compare = compare_cash_flow_runs(indexed[estimated.json()["calculationRunId"]], indexed[notified.json()["calculationRunId"]])
+    assert next(row["delta"] for row in compare["metrics"] if row["key"] == "totalProjectCost") == pytest.approx(5_000)
+    assert estimated.json()["monthlyCashFlow"][1]["cashOut"]["otherCost"] == pytest.approx(
+        notified.json()["monthlyCashFlow"][1]["cashOut"]["otherCost"] + FEE)

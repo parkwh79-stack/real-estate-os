@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { apiBase, authHeaders } from "../../lib/auth-client";
+import { SCHOOL_EDITION_LABELS, SCHOOL_EVENT_LABELS, type SchoolEventKind, type SchoolSiteLawBasis } from "../../lib/school-site-law-basis";
 import type { CashflowResult } from "../../lib/project-client";
 
 type Evidence = { label: string; sourceType: string; status: string; value?: number | string; locator?: Record<string, unknown> };
@@ -14,9 +15,13 @@ type Choice = { amount: string; amountKind: "estimate" | "notified" | "paid"; in
   archiveId: string; location: string; reason: string; month: string };
 type SavedItem = Omit<Choice, "amount" | "amountKind" | "archiveId" | "location" | "month"> & {
   key: string; label: string; amountKrw: number | null; amountKind: Choice["amountKind"] | null; paymentMonthIndex: number | null;
+  legalBasis?: SchoolSiteLawBasis;
   sourceLocator: { archiveId: string; fileName: string; location: string };
 };
 type SavedSelection = { schemaVersion: string; baseCalculationRunId: string; items: SavedItem[]; additionalCostKrw: number };
+type SchoolEvent = { status: "unknown" | "actual" | "assumed"; kind: SchoolEventKind | "";
+  eventDate: string; archiveId: string; location: string };
+const EMPTY_SCHOOL_EVENT: SchoolEvent = { status: "unknown", kind: "", eventDate: "", archiveId: "", location: "" };
 type RunReceipt = { calculationRunId: string };
 const FIELD = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950";
 const EMPTY_CHOICE: Choice = { amount: "", amountKind: "estimate", inclusion: "included", archiveId: "", location: "", reason: "", month: "" };
@@ -46,6 +51,24 @@ function officialUrl(locator?: Record<string, unknown>): string | undefined {
   } catch {
     return;
   }
+}
+
+function SchoolLawBasisSummary({ basis }: { basis: SchoolSiteLawBasis }) {
+  const { edition, event } = basis;
+  const lawUrl = officialUrl({ url: edition?.url });
+  return (
+    <div className="text-sm text-slate-700">
+      <p>{event.kind && event.date ? SCHOOL_EVENT_LABELS[event.kind] + " · " + event.date
+        + (event.status === "assumed" ? " (가정)" : " (증빙 연결)") + " · " : ""}{SCHOOL_EDITION_LABELS[basis.editionStatus]}</p>
+      {event.sourceLocator ? <p>{event.sourceLocator.fileName} · {event.sourceLocator.location}</p> : null}
+      {edition ? <p>
+        {lawUrl ? <a className="underline text-blue-700" href={lawUrl} target="_blank" rel="noreferrer">{edition.title}</a> : edition.title}
+        {" · 판본 " + edition.officialVersionId + " · 시행 " + edition.effectiveFrom}
+        {edition.provisions.length ? " · " + edition.provisions.map((row) => row.path).join(", ") : ""}
+      </p> : null}
+      <p className="text-xs text-slate-600">사업 적용 여부 미확인 · 적용례와 경과조치를 별도로 검토하세요.</p>
+    </div>
+  );
 }
 
 export function StatutoryCostEvidence({ items }: { items: StatutoryCostItem[] }) {
@@ -116,6 +139,7 @@ export function StatutoryCostWorkspace({ projectId, cashflow, onSaved }: {
               item.amountKind ? AMOUNT_KIND[item.amountKind] : "",
               item.inclusion === "included" ? "기존 사업비 포함" : "M" + item.paymentMonthIndex + " 추가",
             ].filter(Boolean).join(" · ")} · {item.sourceLocator.fileName} {item.sourceLocator.location}
+            {item.legalBasis ? <SchoolLawBasisSummary basis={item.legalBasis} /> : null}
           </li>)}</ul>
         </div> : null}
         {error ? <div className="text-sm text-rose-700" role="alert">{error}{" "}
@@ -128,7 +152,7 @@ export function StatutoryCostWorkspace({ projectId, cashflow, onSaved }: {
           <StatutoryCostEvidence items={review.items} />
           <Link className="text-sm font-medium text-blue-700 underline" href={"/project/" + encodeURIComponent(projectId) + "/chief-orchestration"}>AI 딜룸에서 근거 사전 검토</Link>
           <CostSelectionForm key={cashflow?.runId ?? "no-run"} review={review} runId={cashflow?.runId} saved={saved}
-            endpoint={baseUrl + "/calculate"} onSaved={onSaved} />
+            endpoint={baseUrl} onSaved={onSaved} />
         </> : null}
       </div>
     </details>
@@ -144,6 +168,16 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
       archiveId: item.sourceLocator.archiveId, location: item.sourceLocator.location, reason: item.reason, month: String(item.paymentMonthIndex ?? "") }]
   ))));
   const [status, setStatus] = useState<{ kind: "error" | "success"; message: string }>();
+  const savedSchoolBasis = saved?.items.find((item) => item.key === "school_site_charge")?.legalBasis;
+  const [schoolEvent, setSchoolEvent] = useState<SchoolEvent>(() => {
+    const event = savedSchoolBasis?.event;
+    return event ? {
+      status: event.status, kind: event.kind ?? "", eventDate: event.date ?? "",
+      archiveId: event.sourceLocator?.archiveId ?? "", location: event.sourceLocator?.location ?? "",
+    } : EMPTY_SCHOOL_EVENT;
+  });
+  const [schoolBasis, setSchoolBasis] = useState(savedSchoolBasis);
+  const [checkingBasis, setCheckingBasis] = useState(false);
   const [saving, setSaving] = useState(false);
   const basis = review.basisRuns.find((row) => row.calculationRunId === basisId) ?? (basisId === "" && !runId ? review.basisRuns[0] : undefined);
 
@@ -155,18 +189,56 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
     setChoices((rows) => Object.fromEntries(checked ? [...Object.entries(rows), [key, { ...EMPTY_CHOICE }]] : Object.entries(rows).filter(([current]) => current !== key)));
   }
 
+  function changeSchoolEvent(patch: Partial<SchoolEvent>) {
+    setSchoolEvent((current) => ({ ...current, ...patch }));
+    setSchoolBasis(undefined);
+    setStatus(undefined);
+  }
+
+  function schoolEventPayload() {
+    if (schoolEvent.status === "unknown") return { status: schoolEvent.status };
+    return {
+      status: schoolEvent.status, kind: schoolEvent.kind, eventDate: schoolEvent.eventDate,
+      ...(schoolEvent.status === "actual" ? { archiveId: schoolEvent.archiveId, location: schoolEvent.location } : {}),
+    };
+  }
+
+  async function checkSchoolBasis() {
+    setCheckingBasis(true);
+    setSchoolBasis(undefined);
+    setStatus(undefined);
+    try {
+      const response = await fetch(endpoint + "/school-site-law-basis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders("web") },
+        body: JSON.stringify(schoolEventPayload()),
+      });
+      const basis = await bodyOrError(response, "사건일과 증빙 위치를 확인하세요.");
+      setSchoolBasis(basis);
+    } catch (caught) {
+      setStatus({ kind: "error", message: caught instanceof Error ? caught.message : "법령 판본을 조회하지 못했습니다." });
+    } finally {
+      setCheckingBasis(false);
+    }
+  }
+
+  const waitingForSchoolBasis = !!choices.school_site_charge && schoolEvent.status !== "unknown" && !schoolBasis;
+
   async function calculate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!basis || saving) return;
+    if (!basis || saving || checkingBasis || waitingForSchoolBasis) return;
     setSaving(true);
     setStatus(undefined);
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetch(endpoint + "/calculate", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders("web") },
         body: JSON.stringify({
           baseCalculationRunId: basis.calculationRunId,
           expectedFinancialInputHash: basis.financialInputHash,
+          ...(choices.school_site_charge && schoolEvent.status !== "unknown" ? {
+            schoolSiteEvent: { ...schoolEventPayload(), expectedBasisHash: schoolBasis?.basisHash },
+          } : {}),
           items: Object.entries(choices).map(([key, choice]) => ({
             key, amountKrw: choice.inclusion === "not_applicable" ? null : Number(choice.amount),
             amountKind: choice.inclusion === "not_applicable" ? null : choice.amountKind, inclusion: choice.inclusion,
@@ -193,7 +265,8 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
         <select className={FIELD} value={basis?.calculationRunId ?? ""} onChange={(event) => {
           setBasisId(event.target.value);
           setChoices({});
-        }} disabled={saving} required>
+          changeSchoolEvent(EMPTY_SCHOOL_EVENT);
+        }} disabled={saving || checkingBasis} required>
           <option value="">기준 계산 선택</option>
           {review.basisRuns.map((row) => <option key={row.calculationRunId} value={row.calculationRunId}>
             {row.createdAt ? new Date(row.createdAt).toLocaleString("ko-KR") + " · " : ""}{won(row.totalProjectCost)} · {row.calculationRunId.slice(-8)}
@@ -204,7 +277,7 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
       {review.documents.length === 0 ? <p className="text-sm text-slate-600">산출 근거, 고지서 또는 납부 증빙을 이 프로젝트에 먼저 보관하세요.</p> : null}
       {basis && review.documents.length > 0 ? review.items.map((item) => {
         const choice = choices[item.key];
-        return <fieldset key={item.key} disabled={saving} className="rounded-lg border border-slate-200 p-3">
+        return <fieldset key={item.key} disabled={saving || checkingBasis} className="rounded-lg border border-slate-200 p-3">
           <label className="flex items-center gap-2 text-sm font-bold text-slate-900">
             <input type="checkbox" checked={!!choice} onChange={(event) => select(item.key, event.target.checked)} />{item.label} 채택 검토
           </label>
@@ -225,9 +298,39 @@ function CostSelectionForm({ review, runId, saved, endpoint, onSaved }: {
             <label>문서 위치<input className={FIELD} placeholder="예: 고지서 2쪽 또는 사업수지!D52" required maxLength={200} value={choice.location} onChange={(event) => change(item.key, { location: event.target.value })} /></label>
             <label className="md:col-span-2">포함 여부를 확인한 근거<input className={FIELD} required maxLength={600} value={choice.reason} onChange={(event) => change(item.key, { reason: event.target.value })} /></label>
           </div> : null}
+
+          {item.key === "school_site_charge" && choice ? <div className="mt-4 border-t border-slate-200 pt-3">
+            <h4 className="mb-2 text-sm font-bold text-slate-900">사업 사건일과 법령 판본</h4>
+            <div className="grid gap-3 text-sm text-slate-800 md:grid-cols-2 xl:grid-cols-3">
+              <label>사건일 상태<select className={FIELD} value={schoolEvent.status} onChange={(event) => {
+                changeSchoolEvent({ ...EMPTY_SCHOOL_EVENT, status: event.target.value as SchoolEvent["status"] });
+              }}>
+                <option value="unknown">미확인</option><option value="actual">증빙이 있는 실제 사건일</option><option value="assumed">검토 가정일</option>
+              </select></label>
+              {schoolEvent.status !== "unknown" ? <>
+                <label>검토 기준 사건<select className={FIELD} required value={schoolEvent.kind} onChange={(event) => changeSchoolEvent({ kind: event.target.value as SchoolEvent["kind"] })}>
+                  <option value="">사건 선택</option>
+                  {Object.entries(SCHOOL_EVENT_LABELS).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
+                </select></label>
+                <label>사업 사건일<input className={FIELD} type="date" min="1900-01-01" max="9999-12-31" required value={schoolEvent.eventDate} onChange={(event) => changeSchoolEvent({ eventDate: event.target.value })} /></label>
+              </> : null}
+              {schoolEvent.status === "actual" ? <>
+                <label>사건 증빙 문서<select className={FIELD} required value={schoolEvent.archiveId} onChange={(event) => changeSchoolEvent({ archiveId: event.target.value })}>
+                  <option value="">보관 원본 선택</option>
+                  {review.documents.map((document) => <option key={document.archiveId} value={document.archiveId}>{document.fileName}</option>)}
+                </select></label>
+                <label>사건 증빙 위치<input className={FIELD} required maxLength={200} value={schoolEvent.location} onChange={(event) => changeSchoolEvent({ location: event.target.value })} /></label>
+              </> : null}
+            </div>
+            {schoolEvent.status === "unknown" ? <p className="mt-2 text-xs text-slate-600">사건일 미확인으로 기록합니다. 문서 금액은 검토 계산에 채택할 수 있습니다.</p> :
+              <button type="button" className="my-2 rounded border border-slate-300 px-3 py-1.5 text-sm font-semibold disabled:opacity-40"
+                disabled={!schoolEvent.kind || !schoolEvent.eventDate || (schoolEvent.status === "actual" && (!schoolEvent.archiveId || !schoolEvent.location.trim()))}
+                onClick={() => void checkSchoolBasis()}>{checkingBasis ? "조회 중…" : "사건일 법령 판본 조회"}</button>}
+            {schoolBasis ? <SchoolLawBasisSummary basis={schoolBasis} /> : null}
+          </div> : null}
         </fieldset>;
       }) : null}
-      <button type="submit" disabled={saving || !basis || !Object.keys(choices).length} className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-bold text-white disabled:opacity-40">
+      <button type="submit" disabled={saving || checkingBasis || waitingForSchoolBasis || !basis || !Object.keys(choices).length} className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-bold text-white disabled:opacity-40">
         {saving ? "저장 중…" : "법정 비용 반영·계산 저장"}
       </button>
       {status ? <p role={status.kind === "error" ? "alert" : "status"} className={status.kind === "error" ? "text-sm text-rose-700" : "text-sm text-emerald-800"}>{status.message}</p> : null}

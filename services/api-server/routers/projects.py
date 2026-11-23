@@ -5,6 +5,7 @@ from starlette.datastructures import Headers
 from starlette.concurrency import run_in_threadpool
 from typing import Dict, Any
 from db.repositories.request_project_repository import current_project_scope
+from use_cases.school_site_law_basis import SchoolSiteEvent, resolve_school_site_law_basis
 from use_cases.statutory_cost_selection import (
     StatutoryCostBasisConflict,
     StatutoryCostSelection,
@@ -3432,6 +3433,34 @@ def get_project_statutory_cost_review(project_id: str, request: Request, respons
     }
 
 
+def _statutory_cost_sources(project_id: str, project: dict, archive_ids: set[str]) -> dict[str, dict]:
+    document_repository = project_source_document_read_repository(project_id, project)
+    archive_repository = upload_archive_repository()
+    source_documents = {}
+    for archive_id in sorted(archive_ids):
+        document = document_repository.find_by_archive_id(project_id, archive_id)
+        binding = archive_repository.resolve_view_metadata(project_id, document) if document else None
+        if not binding or binding.get("archiveId") != archive_id:
+            raise HTTPException(status_code=422, detail="현재 프로젝트의 원본 보관 상태와 근거 문서를 확인하세요.")
+        source_documents[archive_id] = {
+            "archiveId": archive_id, "fileName": document.get("originalFileName") or "보관 원본",
+        }
+    return source_documents
+
+
+@router.post("/{project_id}/statutory-cost-review/school-site-law-basis")
+def preview_school_site_law_basis(project_id: str, request: Request, response: Response, event: SchoolSiteEvent):
+    authorize_request(request, "project:analyze")
+    project = authoritative_project(project_id, request)
+    enforce_project_tenant_scope(request, project)
+    source_locator = None
+    if event.archiveId:
+        sources = _statutory_cost_sources(project_id, project, {event.archiveId})
+        source_locator = {**sources[event.archiveId], "location": event.location}
+    response.headers["Cache-Control"] = "private, no-store"
+    return resolve_school_site_law_basis(event, source_locator)
+
+
 @router.post("/{project_id}/statutory-cost-review/calculate")
 def calculate_project_statutory_cost_review(project_id: str, request: Request, selection: StatutoryCostSelection):
     authorize_request(request, "project:analyze")
@@ -3441,17 +3470,10 @@ def calculate_project_statutory_cost_review(project_id: str, request: Request, s
     if not baseline:
         raise HTTPException(status_code=404, detail="이 프로젝트에서 기준 현금흐름 계산을 찾을 수 없습니다.")
 
-    document_repository = project_source_document_read_repository(project_id, project)
-    archive_repository = upload_archive_repository()
-    source_documents = {}
-    for archive_id in {item.archiveId for item in selection.items}:
-        document = document_repository.find_by_archive_id(project_id, archive_id)
-        binding = archive_repository.resolve_view_metadata(project_id, document) if document else None
-        if not binding or binding.get("archiveId") != archive_id:
-            raise HTTPException(status_code=422, detail="현재 프로젝트의 원본 보관 상태와 근거 문서를 확인하세요.")
-        source_documents[archive_id] = {
-            "archiveId": archive_id, "fileName": document.get("originalFileName") or "보관 원본",
-        }
+    archive_ids = {item.archiveId for item in selection.items}
+    if selection.schoolSiteEvent and selection.schoolSiteEvent.archiveId:
+        archive_ids.add(selection.schoolSiteEvent.archiveId)
+    source_documents = _statutory_cost_sources(project_id, project, archive_ids)
     try:
         request_data = review_statutory_cost_cash_flow(project, baseline, selection, source_documents)
         if request_data.get("monthlyFinancing") is not None:

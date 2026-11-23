@@ -10,6 +10,7 @@ from agents.cash_flow_mapper import statutory_cost_key_from_label
 from core.cash_flow_periods import require_monthly_financing_period
 from use_cases.cash_flow import CASH_FLOW_REQUEST_TYPE, _external_candidate_request
 from use_cases.cash_flow_dependencies import financial_input_hash
+from use_cases.school_site_law_basis import SchoolSiteEvent, SchoolSiteLawSelection, resolve_school_site_law_basis
 from use_cases.statutory_cost_review import STATUTORY_COST_CATALOG
 
 
@@ -48,11 +49,17 @@ class StatutoryCostSelection(BaseModel):
     baseCalculationRunId: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
     expectedFinancialInputHash: ArchiveId
     items: list[StatutoryCostChoice] = Field(min_length=1, max_length=len(STATUTORY_COST_CATALOG))
+    schoolSiteEvent: SchoolSiteLawSelection | None = None
 
     @model_validator(mode="after")
     def require_distinct_costs(self) -> StatutoryCostSelection:
         if len({choice.key for choice in self.items}) != len(self.items):
             raise ValueError("같은 종류의 비용은 한 번만 선택하세요.")
+        if self.schoolSiteEvent:
+            if not any(choice.key == "school_site_charge" for choice in self.items):
+                raise ValueError("학교용지부담금 선택에만 해당 사건을 연결할 수 있습니다.")
+            if self.schoolSiteEvent.status != "unknown" and not self.schoolSiteEvent.expectedBasisHash:
+                raise ValueError("입력한 사건일의 법령 판본을 먼저 조회하세요.")
         return self
 
 
@@ -150,6 +157,22 @@ def review_statutory_cost_cash_flow(
     if included_total > other_cost or included_total > sum(row["otherCost"] for row in schedule) + 0.01:
         raise ValueError("이미 포함된 비용의 합계가 기준 계산의 기타 사업비를 초과합니다.")
 
+    school_cost = next((item for item in items if item["key"] == "school_site_charge"), None)
+    school_event = selection.schoolSiteEvent or SchoolSiteLawSelection()
+    if school_cost is not None:
+        event_source = None
+        if school_event.archiveId:
+            document = documents.get(school_event.archiveId)
+            if not document or document.get("archiveId") != school_event.archiveId:
+                raise ValueError("현재 프로젝트의 사업 사건 증빙을 확인하세요.")
+            event_source = {**document, "location": school_event.location}
+        law_basis = resolve_school_site_law_basis(SchoolSiteEvent.model_validate(
+            school_event.model_dump(exclude={"expectedBasisHash"}),
+        ), event_source)
+        if school_event.expectedBasisHash and law_basis["basisHash"] != school_event.expectedBasisHash:
+            raise StatutoryCostBasisConflict("법령 판본 또는 사업 사건 근거가 바뀌었습니다. 사건일 판본을 다시 조회하세요.")
+        school_cost.update(legalBasis=law_basis, applicability="unknown")
+
     additional_cost = sum(row["otherCost"] for row in additions)
     if additions:
         # Keep every original month's allocation, including estimated baseline
@@ -183,5 +206,6 @@ def review_statutory_cost_cash_flow(
     request["inputEvidenceIds"] = list(dict.fromkeys([
         *(request.get("inputEvidenceIds") or request.get("evidenceIds") or []),
         *(item.archiveId for item in selection.items),
+        *([school_event.archiveId] if school_event.archiveId else []),
     ]))
     return request

@@ -9,6 +9,17 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
   const savedRunId = "statutory-review-run";
   const financialInputHash = "a".repeat(64);
   const document = { archiveId: "b".repeat(64), fileName: "학교용지부담금 고지서.pdf" };
+  const businessEvent = { status: "actual", kind: "approval", eventDate: "2025-07-31",
+    archiveId: document.archiveId, location: "1쪽 사업 승인일" };
+  const lawBasis = {
+    schemaVersion: "realytics-school-site-law-basis-v1", basisHash: "d".repeat(64),
+    event: { status: "actual", kind: "approval", date: businessEvent.eventDate,
+      sourceLocator: { ...document, location: businessEvent.location } },
+    editionStatus: "edition_verified", applicability: "unknown",
+    edition: { title: "학교용지 확보 등에 관한 특례법", officialVersionId: "test-edition",
+      effectiveFrom: "2025-01-01", effectiveTo: null, contentHash: "sha256:" + "f".repeat(64),
+      url: "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=123", provisions: [] },
+  };
   const reviewedCost = {
     key: "school_site_charge",
     amountKrw: 25_000_000,
@@ -36,6 +47,7 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
         items: [{
           ...reviewedCost,
           label: "학교용지부담금",
+          legalBasis: lawBasis,
           sourceLocator: { ...document, location: reviewedCost.location },
         }],
       },
@@ -95,6 +107,9 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
         }],
         documents: [document],
       };
+    } else if (url.pathname.endsWith("/statutory-cost-review/school-site-law-basis")) {
+      expect(route.request().postDataJSON()).toEqual(businessEvent);
+      body = lawBasis;
     } else if (url.pathname.endsWith("/statutory-cost-review/calculate")) {
       submissions.push(route.request().postDataJSON());
       body = { calculationRunId: savedRunId };
@@ -118,6 +133,14 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
   await page.getByRole("combobox", { name: /^근거 문서/ }).selectOption(document.archiveId);
   await page.getByLabel("문서 위치").fill(reviewedCost.location);
   await page.getByLabel("포함 여부를 확인한 근거").fill(reviewedCost.reason);
+  await page.getByLabel("사건일 상태").selectOption("actual");
+  await page.getByLabel("검토 기준 사건").selectOption("approval");
+  await page.getByLabel("사업 사건일", { exact: true }).fill(businessEvent.eventDate);
+  await page.getByLabel("사건 증빙 문서").selectOption(document.archiveId);
+  await page.getByLabel("사건 증빙 위치").fill(businessEvent.location);
+  await expect(page.getByRole("button", { name: "법정 비용 반영·계산 저장" })).toBeDisabled();
+  await page.getByRole("button", { name: "사건일 법령 판본 조회" }).click();
+  await expect(page.getByText(/해당 날짜의 공식 판본 확인/)).toBeVisible();
   await page.getByRole("button", { name: "법정 비용 반영·계산 저장" }).click();
 
   await expect(header).toContainText("이 실행에 1건 반영");
@@ -125,6 +148,7 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
   expect(submissions).toEqual([{
     baseCalculationRunId: baseRunId,
     expectedFinancialInputHash: financialInputHash,
+    schoolSiteEvent: { ...businessEvent, expectedBasisHash: lawBasis.basisHash },
     items: [{ ...reviewedCost, archiveId: document.archiveId }],
   }]);
 
@@ -136,6 +160,8 @@ test("법정 비용을 근거와 월차에 연결해 저장하고 같은 실행�
   await expect(basis).toHaveValue(baseRunId);
   await expect(page.getByRole("combobox", { name: /^근거 문서/ })).toHaveValue(document.archiveId);
   await expect(page.getByLabel(/납부 월차/)).toHaveValue("2");
+  await expect(page.getByLabel("사업 사건일", { exact: true })).toHaveValue(businessEvent.eventDate);
+  await expect(page.getByText(/판본 test-edition/).first()).toBeVisible();
 
   await page.goto(`/project/${projectId}/cashflow`);
   await expect(page.getByRole("link", { name: "수식 Excel 다운로드" })).toHaveAttribute(

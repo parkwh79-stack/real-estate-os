@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
 import { createHash } from "node:crypto";
 import { fetchAuthenticatedBackend } from "../../../../../../lib/authenticated-backend-fetch";
+import { SCHOOL_EDITION_LABELS, SCHOOL_EVENT_LABELS, type SchoolSiteLawBasis } from "../../../../../../lib/school-site-law-basis";
 import { trancheAmounts, amountInEok } from "../../../../../../lib/tranche-display";
 
 export const runtime = "nodejs";
@@ -330,6 +331,26 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       ["기준 계산 ID", statutoryCosts.baseCalculationRunId ?? null],
       ["기준 입력 SHA-256", statutoryCosts.baseFinancialInputHash ?? null],
     ]);
+    const school = statutoryCosts.items.find((item: AnyRecord) => item.key === "school_site_charge");
+    const lawBasis = school?.legalBasis as SchoolSiteLawBasis | undefined;
+    if (lawBasis?.schemaVersion === "realytics-school-site-law-basis-v1") {
+      const { event, edition } = lawBasis;
+      costs.addRows([
+        ["학교용지부담금 사건", event.kind ? SCHOOL_EVENT_LABELS[event.kind] : null, event.date,
+          event.status === "assumed" ? "가정" : event.status === "actual" ? "증빙 연결" : "미확인",
+          null, null, [event.sourceLocator?.fileName, event.sourceLocator?.archiveId].filter(Boolean).join(" · ") || null,
+          event.sourceLocator?.location ?? null],
+        ["법령 판본 상태", SCHOOL_EDITION_LABELS[lawBasis.editionStatus], "사업 적용 미확인"],
+        ["법령 판본 근거 SHA-256", lawBasis.basisHash],
+      ]);
+      if (edition) {
+        costs.addRow(["법령 판본 및 시행기간", edition.officialVersionId, edition.effectiveFrom, edition.effectiveTo,
+          null, edition.contentHash, edition.title, edition.url]);
+        for (const provision of edition.provisions) {
+          costs.addRow(["조문·부칙 원문", provision.path, null, null, null, provision.contentHash, edition.title, provision.url]);
+        }
+      }
+    }
     costs.getColumn(2).numFmt = "#,##0";
     for (const column of [6, 7, 8]) {
       costs.getColumn(column).width = 32;

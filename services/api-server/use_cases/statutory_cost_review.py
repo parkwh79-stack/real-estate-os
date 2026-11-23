@@ -72,19 +72,29 @@ def _whole_won(value: Any) -> int | None:
     return integer if integer == value else None
 
 
+def official_statutory_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or parsed.netloc.lower() not in _LAW_HOSTS:
+        return None
+    public_query = "&".join(
+        pair for pair in parsed.query.split("&")
+        if pair.partition("=")[0].lower() in {"lsiseq", "lsid", "lsefyd", "efyd", "ancno", "jo", "mst", "id"}
+    )
+    return urlunsplit(("https", parsed.netloc, parsed.path, public_query, ""))
+
+
 def _official_law_evidence(key: str, rows: list[dict], expected_date: str | None) -> list[dict]:
     result = []
     for row in rows:
         if row.get("lawName") != _LAW_TITLES[key] or row.get("sourceAuthority") != "law_go_kr":
             continue
-        url = row.get("url")
-        if not isinstance(url, str):
-            continue
-        try:
-            parsed_url = urlsplit(url)
-        except ValueError:
-            continue
-        if parsed_url.scheme != "https" or parsed_url.netloc.lower() not in _LAW_HOSTS:
+        public_url = official_statutory_url(row.get("url"))
+        if not public_url:
             continue
         citation = _ARTICLE.match(str(row.get("article") or row.get("citation") or "").strip())
         article = re.sub(r"\s+", "", citation.group(1)) if citation else None
@@ -97,12 +107,6 @@ def _official_law_evidence(key: str, rows: list[dict], expected_date: str | None
             and effective is not None and expected_date is not None
             and requested == expected_date and effective <= expected_date
         )
-        # Expose the official page and its edition, without transport query secrets.
-        public_query = "&".join(
-            pair for pair in parsed_url.query.split("&")
-            if pair.partition("=")[0].lower() in {"lsiseq", "lsid", "lsefyd", "efyd", "ancno", "jo", "mst", "id"}
-        )
-        public_url = urlunsplit(("https", parsed_url.netloc, parsed_url.path, public_query, ""))
         evidence = {
             "sourceType": "official_law",
             "label": _LAW_TITLES[key] + (f" {article}" if article in _RELEVANT_ARTICLES[key] else ""),
